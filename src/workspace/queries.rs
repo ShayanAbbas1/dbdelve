@@ -279,6 +279,11 @@ impl Workspace {
         .detach();
         self.custom_limit = Some((target, input));
         self.custom_limit_needs_focus = true;
+        // A tab asking for the keyboard back, as closing the palette does,
+        // would take it after the field and blur it shut.
+        if let Some(profile) = self.profile_mut() {
+            profile.session.editor_needs_focus = false;
+        }
         cx.notify();
     }
 
@@ -971,6 +976,88 @@ impl Workspace {
         // focus would take the window's only dispatch path with it.
         profile.session.editor_needs_focus = true;
         cx.notify();
+    }
+
+    pub(crate) fn next_result(
+        &mut self,
+        _: &NextResult,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.step_result(1, window, cx);
+    }
+
+    pub(crate) fn previous_result(
+        &mut self,
+        _: &PreviousResult,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.step_result(-1, window, cx);
+    }
+
+    /// The switcher's chips from the keyboard, Messages among them, through
+    /// the doors a click on each goes through.
+    fn step_result(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self
+            .profile()
+            .and_then(|profile| profile.session.active_query_tab())
+        else {
+            return;
+        };
+        let id = Tab::Query(tab.id);
+        let in_grid = tab.shown().1.focus_handle(cx).contains_focused(window, cx);
+        match crate::session::stepped(&tab.switcher_chips(), tab.switcher_selected(), step) {
+            Some(Some(index)) => self.show_queued_result(id, index, cx),
+            Some(None) => self.show_messages(id, cx),
+            None => return,
+        }
+        // A chord pressed in the grid it just swapped out would leave the
+        // keyboard on a grid no longer on screen, with no dispatch path.
+        if in_grid && let Some(crate::session::Focus::Grid(grid)) = self.front_grid(cx) {
+            grid.update(cx, |table, cx| {
+                crate::result_grid::take_keyboard(table, window, cx)
+            });
+            if let Some(profile) = self.profile_mut() {
+                profile.session.editor_needs_focus = false;
+            }
+            cx.notify();
+            return;
+        }
+        self.refocus_front();
+    }
+
+    /// The Messages chip, and back off it to the result it stood in for.
+    pub(crate) fn toggle_messages(
+        &mut self,
+        _: &ShowMessages,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self
+            .profile()
+            .and_then(|profile| profile.session.active_query_tab())
+        else {
+            return;
+        };
+        let id = Tab::Query(tab.id);
+        match tab.switcher_selected() {
+            Some(_) => self.show_messages(id, cx),
+            None => {
+                let showing = tab.queue.as_ref().map_or(0, |queue| queue.showing);
+                self.show_queued_result(id, showing, cx);
+            }
+        }
+        self.refocus_front();
+    }
+
+    pub(crate) fn copy_plan_action(
+        &mut self,
+        _: &CopyPlan,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.copy_plan(cx);
     }
 
     /// Abandon the rest of a queue stopped by a failed statement, leaving

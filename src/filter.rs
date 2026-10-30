@@ -301,6 +301,14 @@ pub(crate) struct FilterRow {
     pub(crate) applied: String,
 }
 
+impl FilterRow {
+    /// Whether the bar draws its value box. An absence needs no value, and a
+    /// box that cannot change what runs is a box to read past.
+    pub(crate) fn shows_value(&self) -> bool {
+        self.raw || self.operator.takes_value()
+    }
+}
+
 /// A filter bar, wired to the tab it belongs to. Enter is the apply: a filter
 /// that ran on every keystroke would put a half-typed predicate on the wire.
 ///

@@ -806,6 +806,26 @@ impl Session {
         self.tab_order = placed_last(self.strip_order(), key);
     }
 
+    /// Swap the chip in front with its neighbour, as dropping it one slot
+    /// over would. Whether it moved: the end of the strip is a wall.
+    pub(crate) fn move_active_tab(&mut self, step: isize) -> bool {
+        let order = self.strip_order();
+        let Some(key) = order
+            .iter()
+            .find(|key| self.tab_of(key) == Some(self.active))
+            .cloned()
+        else {
+            return false;
+        };
+        match moved(order, &key, step) {
+            Some(order) => {
+                self.tab_order = order;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Give a chip its new key where it stands, for a buffer whose name is
     /// changing: saving or renaming it is not moving it.
     pub(crate) fn rekey(&mut self, from: &TabKey, to: TabKey) {
@@ -1122,6 +1142,7 @@ pub(crate) enum Focus {
     /// gpui-component 0.8 splits the code editor off from the plain input.
     Field(Entity<InputState>),
     Grid(Entity<TableState<ResultGrid>>),
+    Structure(Entity<TableState<StructureGrid>>),
     /// The window itself, for a surface with nothing in it to type into. Not a
     /// no-op: a keystroke only reaches the workspace along the focused
     /// element's dispatch path, so focusing nothing at all is what makes every
@@ -1208,6 +1229,22 @@ fn placed_last(mut order: Vec<TabKey>, key: TabKey) -> Vec<TabKey> {
     order.retain(|candidate| *candidate != key);
     order.push(key);
     order
+}
+
+fn moved(mut order: Vec<TabKey>, key: &TabKey, step: isize) -> Option<Vec<TabKey>> {
+    let at = order.iter().position(|candidate| candidate == key)?;
+    let to = at.checked_add_signed(step).filter(|to| *to < order.len())?;
+    order.swap(at, to);
+    Some(order)
+}
+
+/// The chip `step` places from `current` among `chips`, wrapping at either
+/// end as cycling tabs does.
+pub(crate) fn stepped<T: PartialEq + Copy>(chips: &[T], current: T, step: isize) -> Option<T> {
+    let at = chips.iter().position(|chip| *chip == current).unwrap_or(0) as isize;
+    chips
+        .get((at + step).rem_euclid(chips.len().max(1) as isize) as usize)
+        .copied()
 }
 
 /// The tab beside `closing` on the left, or on the right when it was the
@@ -1821,6 +1858,42 @@ impl QueryTab {
             (&self.results, &self.query),
             self.ran_from.as_ref().map(|(_, sql)| sql.as_str()),
         )
+    }
+
+    /// What the result switcher's chips select, left to right: a result by
+    /// its index, then `None` for Messages. A statement not yet sent is not
+    /// one, and neither is anything while the switcher is not drawn.
+    pub(crate) fn switcher_chips(&self) -> Vec<Option<usize>> {
+        let mut chips: Vec<Option<usize>> = match &self.queue {
+            Some(queue) => queue
+                .done
+                .iter()
+                .enumerate()
+                .filter(|(_, finished)| !matches!(self.state_of(finished), QueryState::Idle))
+                .map(|(index, _)| Some(index))
+                .chain(queue.awaiting.then_some(Some(queue.done.len())))
+                .collect(),
+            None => vec![Some(0)],
+        };
+        if self.messages().is_empty() {
+            if self.queue.is_none() {
+                return Vec::new();
+            }
+        } else {
+            chips.push(None);
+        }
+        if chips.len() < 2 {
+            return Vec::new();
+        }
+        chips
+    }
+
+    /// The switcher chip selected, in the terms of [`QueryTab::switcher_chips`].
+    pub(crate) fn switcher_selected(&self) -> Option<usize> {
+        match self.messages_shown() {
+            true => None,
+            false => Some(self.queue.as_ref().map_or(0, |queue| queue.showing)),
+        }
     }
 
     /// Whether the pane is showing the run's messages rather than a result.
@@ -3498,6 +3571,39 @@ mod tests {
             strip_order(chips, &order),
             [restored, vec![TabKey::Unsaved(1), TabKey::Object(1)]].concat()
         );
+    }
+
+    #[test]
+    fn a_tab_moves_one_slot_and_stops_at_either_end() {
+        let order = vec![TabKey::Unsaved(0), TabKey::Object(1), TabKey::Unsaved(2)];
+        assert_eq!(
+            moved(order.clone(), &TabKey::Object(1), 1),
+            Some(vec![
+                TabKey::Unsaved(0),
+                TabKey::Unsaved(2),
+                TabKey::Object(1)
+            ])
+        );
+        assert_eq!(
+            moved(order.clone(), &TabKey::Object(1), -1),
+            Some(vec![
+                TabKey::Object(1),
+                TabKey::Unsaved(0),
+                TabKey::Unsaved(2)
+            ])
+        );
+        assert_eq!(moved(order.clone(), &TabKey::Unsaved(0), -1), None);
+        assert_eq!(moved(order, &TabKey::Unsaved(2), 1), None);
+    }
+
+    #[test]
+    fn stepping_through_the_switcher_wraps_at_either_end() {
+        let chips = [Some(0), Some(2), None];
+        assert_eq!(stepped(&chips, Some(0), 1), Some(Some(2)));
+        assert_eq!(stepped(&chips, None, 1), Some(Some(0)));
+        assert_eq!(stepped(&chips, Some(0), -1), Some(None));
+        // A selection the chips no longer offer steps from the first.
+        assert_eq!(stepped(&chips, Some(1), 1), Some(Some(2)));
     }
 
     #[test]

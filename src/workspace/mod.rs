@@ -333,6 +333,9 @@ pub(crate) struct Workspace {
     /// The window's own focus, for the moments when nothing inside it can hold
     /// any. See [`Focus::Window`].
     pub(crate) focus: FocusHandle,
+    /// Around the sidebar's tree, whose own handle the library keeps to
+    /// itself: what tells an `escape` in the tree from one anywhere else.
+    pub(crate) explorer_focus: FocusHandle,
     /// The dialogs' own, so `enter` answers the one in front instead of
     /// editing the buffer or the grid it covers.
     pub(crate) dialog_focus: FocusHandle,
@@ -343,6 +346,8 @@ pub(crate) struct Workspace {
     pub(crate) dialog_choice: std::cell::Cell<usize>,
     /// What held the keyboard when the first dialog went up.
     pub(crate) focus_before_dialog: std::cell::RefCell<Option<FocusHandle>>,
+    /// See [`Workspace::welcome_project_focus`].
+    pub(crate) welcome_project_focus: std::cell::RefCell<Vec<FocusHandle>>,
     pub(crate) newer_release: Option<update::Release>,
 }
 
@@ -473,10 +478,12 @@ impl Workspace {
             theme_before_preview: None,
             opacity_input,
             focus: cx.focus_handle(),
+            explorer_focus: cx.focus_handle(),
             dialog_focus: cx.focus_handle(),
             dialog_in_front: std::cell::Cell::default(),
             dialog_choice: std::cell::Cell::default(),
             focus_before_dialog: std::cell::RefCell::default(),
+            welcome_project_focus: std::cell::RefCell::default(),
             newer_release: None,
         };
 
@@ -1211,13 +1218,12 @@ impl Render for Workspace {
                     .map(|tab| &tab.body)
                 {
                     Some(ObjectBody::Relation { results, .. }) => Focus::Grid(results.clone()),
+                    Some(ObjectBody::Structure { grid, .. }) => Focus::Structure(grid.clone()),
                     // A routine's tab is read: nothing in it takes a
-                    // keystroke; a structure tab's grid takes focus on a click. The window still has to hold focus, or the
+                    // keystroke. The window still has to hold focus, or the
                     // bindings that leave this tab go with it -- as it does
                     // for the last object tab of all, closed.
-                    Some(ObjectBody::Routine(_) | ObjectBody::Structure { .. }) | None => {
-                        Focus::Window
-                    }
+                    Some(ObjectBody::Routine(_)) | None => Focus::Window,
                 },
             };
             profile.session.editor_needs_focus = false;
@@ -1253,6 +1259,7 @@ impl Render for Workspace {
             Some(Focus::Buffer(editor)) => editor.focus_handle(cx).focus(window, cx),
             Some(Focus::Field(input)) => input.focus_handle(cx).focus(window, cx),
             Some(Focus::Grid(grid)) => grid.focus_handle(cx).focus(window, cx),
+            Some(Focus::Structure(grid)) => grid.focus_handle(cx).focus(window, cx),
             Some(Focus::Window) => self.focus.focus(window, cx),
             None => {}
         }
@@ -1345,6 +1352,9 @@ impl Render for Workspace {
                 .on_action(cx.listener(Self::new_project))
                 .on_action(cx.listener(Self::import_from))
                 .on_action(cx.listener(Self::open_settings))
+                .on_action(cx.listener(Self::fuzzy_open))
+                .on_action(cx.listener(Self::command_palette))
+                .on_action(cx.listener(Self::search_everything))
                 .on_action(cx.listener(Self::set_default_row_limit_action))
                 .on_action(cx.listener(Self::custom_row_limit))
                 .on_action(cx.listener(Self::zoom_editor_in))
@@ -2025,6 +2035,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::previous_profile))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
+            .on_action(cx.listener(Self::move_tab_left))
+            .on_action(cx.listener(Self::move_tab_right))
             .on_action(cx.listener(Self::open_connection_form))
             .on_action(cx.listener(Self::new_project))
             .on_action(cx.listener(Self::import_from))
@@ -2037,6 +2049,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::cycle_mode))
             .on_action(cx.listener(Self::switch_connection))
             .on_action(cx.listener(Self::toggle_sidebar))
+            .on_action(cx.listener(Self::focus_sidebar))
             .on_action(cx.listener(Self::open_settings))
             // Unregistered under the import dialog, which stops only the
             // mouse: these act on the tab it covers, out of sight, and their
@@ -2052,6 +2065,11 @@ impl Render for Workspace {
                     .on_action(cx.listener(Self::next_edit))
                     .on_action(cx.listener(Self::previous_edit))
                     .on_action(cx.listener(Self::sort_column))
+                    .on_action(cx.listener(Self::sort_active_column))
+                    .on_action(cx.listener(Self::next_result))
+                    .on_action(cx.listener(Self::previous_result))
+                    .on_action(cx.listener(Self::toggle_messages))
+                    .on_action(cx.listener(Self::copy_plan_action))
                     .on_action(cx.listener(Self::set_row_limit))
                     .on_action(cx.listener(Self::set_query_limit))
                     .on_action(cx.listener(Self::custom_row_limit))
@@ -2073,6 +2091,7 @@ impl Render for Workspace {
                     .on_action(cx.listener(Self::toggle_row_panel))
                     .on_action(cx.listener(Self::toggle_row_edit))
                     .on_action(cx.listener(Self::toggle_structure))
+                    .on_action(cx.listener(Self::toggle_results_focus))
             })
             .size_full()
             // The shell is the frost: titlebar, sidebar and status bar paint
@@ -2198,11 +2217,29 @@ impl Render for Workspace {
 /// `referenced_by`: a row was found in it, or its check failed with this error.
 pub(crate) type ReferenceAnswer = (usize, gpui::SharedString, Result<(), String>);
 
+/// The key a reference lookup was asked about: its profile, its tab, its column and value,
+/// and the references its structure listed, which an answer's indices point
+/// into. An answer or a pick is acted on only while the grid in front still
+/// says the same, so neither can land on another tab, key or refreshed
+/// structure.
+#[derive(Clone, PartialEq)]
+pub(crate) struct ReferenceSource {
+    // Tab ids count from zero in every profile, so the tab alone does not say
+    // which connection was asked.
+    profile: String,
+    tab: u64,
+    column: String,
+    value: String,
+    referenced_by: Vec<crate::db::Reference>,
+}
+
 /// What a reference arrow opened: where it hangs, and the relations that turned
 /// out to hold rows for the key, or whose check failed with the error it gave.
 /// `None` while the lookup is still out.
 pub(crate) struct ReferencePopup {
-    pub(crate) at: gpui::Point<gpui::Pixels>,
+    /// `None` when the keyboard asked, which puts the answer in the palette.
+    pub(crate) at: Option<gpui::Point<gpui::Pixels>>,
+    pub(crate) source: ReferenceSource,
     pub(crate) choices: Option<Vec<ReferenceAnswer>>,
     check: u64,
 }

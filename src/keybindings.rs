@@ -22,22 +22,29 @@ use std::collections::HashMap;
 
 use gpui::{KeyBinding, Keystroke};
 
+use gpui_component::input::ShowCompletions;
+
 use crate::{
     actions::{
         AcceptCompletion, AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseTab,
-        CommandPalette, ConfirmDialog, CopyCell, CopyResults, CopyRow, CycleMode, DeleteRow,
-        DiscardEdits, EditCell, ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen, GoToColumn,
-        ImportConnections, ImportRows, NewConnection, NewProject, NewQuery, NewRow,
-        NextDialogButton, NextEdit, NextPage, NextProfile, NextTab, OpenSettings, PaletteNext,
+        CommandPalette, ConfirmDialog, CopyCell, CopyPlan, CopyResults, CopyRow, CopyRows,
+        CycleMode, DeleteRow, DiscardEdits, EditCell, ExplainQuery, FocusSidebar, FollowForeignKey,
+        FormatQuery, FuzzyOpen, GoToColumn, HideColumn, ImportConnections, ImportRows, MoveTabLeft,
+        MoveTabRight, NewConnection, NewProject, NewQuery, NewRow, NextDialogButton, NextEdit,
+        NextPage, NextProfile, NextResult, NextTab, OpenSettings, OpenSidebarItem, PaletteNext,
         PaletteNextScope, PalettePrevious, PalettePreviousScope, PaletteRowActions,
         PaletteScopeLeft, PaletteScopeRight, PreviousDialogButton, PreviousEdit, PreviousPage,
-        PreviousProfile, PreviousTab, Quit, RefreshConnection, RefreshRelation, ResetEditorZoom,
-        RunQuery, SaveQuery, SearchEverything, SelectDatabase, SelectTheme, SetDefault, SetEmpty,
-        SetNull, ShowEditor, SubmitConnection, SwitchConnection, ToggleComment, ToggleNextJoin,
+        PreviousProfile, PreviousResult, PreviousTab, Quit, RefreshConnection, RefreshRelation,
+        ResetConfirmations, ResetEditorZoom, RunQuery, SaveQuery, SearchEverything, SelectDatabase,
+        SelectTheme, SetDefault, SetEmpty, SetMode, SetNull, ShowAllColumns, ShowEditor,
+        ShowMessages, ShowReferences, SortActiveColumn, SubmitConnection, SwitchConnection,
+        TickDialogBox, ToggleComment, ToggleNextJoin, TogglePinColumn, ToggleResultsFocus,
         ToggleRowEdit, ToggleRowPanel, ToggleSidebar, ToggleStructure, ZoomEditorIn, ZoomEditorOut,
     },
     db::ExplainMode,
+    export::RowsAs,
     import::Source,
+    sql::Mode,
 };
 
 /// One entry in the registry.
@@ -167,16 +174,35 @@ registry! {
     // run there: see `INERT_IN`.
     ("submit_connection", "Connect or Save Connection", Some("ConnectionForm"), ["secondary-enter"], SubmitConnection),
     ("confirm_dialog", "Dialog: Press Selected Button", Some("Dialog"), ["enter"], ConfirmDialog),
+    // Not the buttons': a space typed into a prompt that has just taken the
+    // keyboard must never press Run.
+    ("tick_dialog_box", "Dialog: Tick Selected Box", Some("Dialog"), ["space"], TickDialogBox),
     ("previous_dialog_button", "Dialog: Previous Button", Some("Dialog"), ["left", "shift-tab"], PreviousDialogButton),
     ("next_dialog_button", "Dialog: Next Button", Some("Dialog"), ["right", "tab"], NextDialogButton),
     ("toggle_sidebar", "Toggle Sidebar", None, ["secondary-shift-s"], ToggleSidebar),
     ("toggle_row_panel", "Toggle Row Panel", None, ["secondary-shift-i"], ToggleRowPanel),
     ("toggle_row_edit", "Toggle Row Panel Edit Mode", None, ["secondary-shift-e"], ToggleRowEdit),
     ("toggle_structure", "Toggle Data / Structure", None, ["secondary-shift-d"], ToggleStructure),
+    ("toggle_results_focus", "Toggle Editor / Results Focus", None, ["secondary-k r"], ToggleResultsFocus),
+    ("focus_sidebar", "Focus Sidebar", None, ["secondary-k e"], FocusSidebar),
+    ("open_sidebar_item", "Sidebar: Open Selected", Some("Explorer"), ["enter"], OpenSidebarItem),
     ("quit", "Quit dbdelve", None, ["secondary-q"], Quit),
+    // macOS's own stop chord. Unscoped, so it beats the input's `cmd-.` code
+    // actions, which no editor here offers.
+    ("cancel_query", "Cancel Query", None, ["secondary-."], CancelQuery),
+    ("move_tab_left", "Move Tab Left", None, ["ctrl-shift-pageup"], MoveTabLeft),
+    ("move_tab_right", "Move Tab Right", None, ["ctrl-shift-pagedown"], MoveTabRight),
+    ("show_completions", "Show Completions", Some("Input && mode == editor"), ["ctrl-space"], ShowCompletions),
     // Click or command-palette only today; listed so they can be given a
     // chord for the first time.
-    ("cancel_query", "Cancel Query", None, [], CancelQuery),
+    ("set_mode_read_only", "Access Level: Read-only", None, [], SetMode { mode: Mode::ReadOnly }),
+    ("set_mode_read_write", "Access Level: Read-write", None, [], SetMode { mode: Mode::ReadWrite }),
+    ("set_mode_full", "Access Level: Full", None, [], SetMode { mode: Mode::Full }),
+    ("reset_confirmations", "Reset Silenced Confirmations", None, [], ResetConfirmations),
+    ("next_result", "Next Result", None, [], NextResult),
+    ("previous_result", "Previous Result", None, [], PreviousResult),
+    ("show_messages", "Toggle Messages", None, [], ShowMessages),
+    ("copy_plan", "Copy Plan", None, [], CopyPlan),
     ("next_page", "Next Page", None, [], NextPage),
     ("previous_page", "Previous Page", None, [], PreviousPage),
     ("clear_filter", "Clear Filter", None, [], ClearFilter),
@@ -190,7 +216,17 @@ registry! {
     ("set_default", "Set Cell to Default", Some("DataTable"), [], SetDefault),
     ("copy_row", "Copy Row", Some("DataTable"), [], CopyRow),
     ("copy_results", "Copy Results", Some("DataTable"), [], CopyResults),
+    ("copy_rows_text", "Copy Row as Text", Some("DataTable"), [], CopyRows { kind: RowsAs::Text }),
+    ("copy_rows_csv", "Copy Row as CSV", Some("DataTable"), [], CopyRows { kind: RowsAs::Csv }),
+    ("copy_rows_csv_header", "Copy Row as CSV with Header", Some("DataTable"), [], CopyRows { kind: RowsAs::CsvWithHeader }),
+    ("copy_rows_json", "Copy Row as JSON", Some("DataTable"), [], CopyRows { kind: RowsAs::Json }),
+    ("copy_rows_insert", "Copy Row as INSERT SQL", Some("DataTable"), [], CopyRows { kind: RowsAs::InsertSql }),
+    ("hide_column", "Hide Column", Some("DataTable"), [], HideColumn),
+    ("toggle_pin_column", "Pin or Unpin Column", Some("DataTable"), [], TogglePinColumn),
+    ("show_all_columns", "Show All Columns", Some("DataTable"), [], ShowAllColumns),
+    ("sort_active_column", "Sort by Column", Some("DataTable"), [], SortActiveColumn),
     ("follow_foreign_key", "Follow Foreign Key", None, [], FollowForeignKey),
+    ("show_references", "Show References", Some("DataTable"), [], ShowReferences),
     ("delete_row", "Delete Row", None, [], DeleteRow),
     ("discard_edits", "Discard Edits", None, [], DiscardEdits),
     ("next_edit", "Next Edit", None, [], NextEdit),

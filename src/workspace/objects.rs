@@ -818,12 +818,60 @@ impl Workspace {
     /// the structure says -- that is every relation that *could* -- but which
     /// hold a row for this value, so each candidate is asked for one row and
     /// only the ones that answer are listed, beside any whose check failed.
+    /// Asked from the keyboard, with no arrow to hang a list off, the answer
+    /// is put up in the palette instead.
+    /// The key in the active cell of the relation in front, as a reference
+    /// lookup names it.
+    pub(crate) fn reference_source(&self, cx: &App) -> Option<ReferenceSource> {
+        let profile = self.profile()?;
+        let tab = profile.session.active_object()?;
+        let ObjectBody::Relation {
+            structure: StructureState::Loaded(structure),
+            results,
+            ..
+        } = &tab.body
+        else {
+            return None;
+        };
+        let grid = results.read(cx).delegate();
+        let (_, col) = grid.active()?;
+        Some(ReferenceSource {
+            profile: profile.id.clone(),
+            tab: tab.id,
+            column: grid.columns().get(col)?.name.clone(),
+            value: grid.active_value()?.to_string(),
+            referenced_by: structure.referenced_by.clone(),
+        })
+    }
+
+    /// A relation picked from a lookup's answer, opened only if the grid in
+    /// front is still on the key it was asked about.
+    pub(crate) fn open_listed_reference(
+        &mut self,
+        source: &ReferenceSource,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.reference_source(cx).as_ref() != Some(source) {
+            self.note(
+                "The key these references were listed for is no longer in front.".into(),
+                cx,
+            );
+            return;
+        }
+        self.open_reference(&OpenReference { index }, window, cx);
+    }
+
     pub(crate) fn show_references(
         &mut self,
         _: &ShowReferences,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some(source) = self.reference_source(cx) else {
+            return;
+        };
         let engine = self.engine();
         let Some(profile) = self.profile() else {
             return;
@@ -843,6 +891,7 @@ impl Workspace {
         else {
             return;
         };
+        let at = results.update(cx, |table, _| table.delegate_mut().take_reference_anchor());
         let grid = results.read(cx);
         let grid = grid.delegate();
         let Some((_, col)) = grid.active() else {
@@ -851,7 +900,7 @@ impl Workspace {
         let Some(name) = grid.columns().get(col).map(|column| column.name.clone()) else {
             return;
         };
-        let (Some(value), Some(at)) = (grid.active_value(), grid.reference_anchor()) else {
+        let Some(value) = grid.active_value() else {
             return;
         };
         let candidates: Vec<(usize, gpui::SharedString, Option<String>)> = grid
@@ -882,6 +931,7 @@ impl Workspace {
         let check = self.reference_checks;
         self.reference_popup = Some(ReferencePopup {
             at,
+            source,
             choices: None,
             check,
         });
@@ -907,18 +957,43 @@ impl Workspace {
                     .collect(),
             )
         });
-        cx.spawn(async move |workspace, cx| {
+        cx.spawn_in(window, async move |workspace, cx| {
             let found = task.await;
-            _ = workspace.update(cx, |workspace, cx| {
+            _ = workspace.update_in(cx, |workspace, window, cx| {
                 if workspace.issued_to(&profile_id, generation).is_none() {
                     return;
                 }
-                if let Some(popup) = &mut workspace.reference_popup
-                    && popup.check == check
-                {
-                    popup.choices = Some(found);
+                let current = workspace.reference_source(cx);
+                let Some(popup) = workspace
+                    .reference_popup
+                    .as_mut()
+                    .filter(|popup| popup.check == check)
+                else {
+                    return;
+                };
+                if current.as_ref() != Some(&popup.source) {
+                    workspace.reference_popup = None;
                     cx.notify();
+                    return;
                 }
+                let keyboard = popup.at.is_none();
+                popup.choices = Some(found);
+                cx.notify();
+                if !keyboard {
+                    return;
+                }
+                let listed = workspace
+                    .reference_popup
+                    .as_ref()
+                    .and_then(|popup| popup.choices.as_ref())
+                    .is_some_and(|choices| !choices.is_empty());
+                // Not over a palette put up meanwhile for something else.
+                if listed && workspace.palette.is_none() {
+                    workspace.open_palette(PaletteMode::References, window, cx);
+                } else if !listed {
+                    workspace.note("No rows reference this key.".into(), cx);
+                }
+                workspace.reference_popup = None;
             });
         })
         .detach();

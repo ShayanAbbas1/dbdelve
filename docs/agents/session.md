@@ -71,7 +71,10 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   open, the window is the welcome surface (`Workspace::render_welcome`): New
   project, New connection, each project with an Add connection of its own, and
   a Theme row whose button opens the theme palette, so a first launch can
-  leave the opaque default before connecting anywhere.
+  leave the opaque default before connecting anywhere. ⌘⇧P there opens
+  Commands on the surface's own verbs (`palette::welcome_items`: new
+  connection, data file, project, imports, themes, fonts, Settings), and
+  nothing that needs a connection is listed.
   Importing from DBeaver or TablePlus starts there too, or from the File menu
   and the palette once connections exist, never from over the connection form
   (its root does not answer `ImportConnections`, so nothing typed into it is
@@ -98,6 +101,37 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   instead does not work: that is checked against the last frame, where the
   field that just closed still sat inside the same `track_focus` floor, and a
   window left focused on a dead field has every binding dead.
+- **The keyboard has a route between every surface of a tab.** Toggle
+  Editor / Results Focus (`secondary-k r`) moves it between the buffer and the
+  grid in front (`Workspace::front_grid`: one drawn, with a row in it; a plan
+  or the run's messages have nothing to step through, so it stays put), and
+  `result_grid::take_keyboard` hands the library the ring's row so its arrows
+  step from where the ring is. A structure tab's grid takes focus like a data
+  tab's, its handle held by the loading line until the grid is drawn, and a
+  relation's by the message that stands in for an empty result. Focus
+  Sidebar (`secondary-k e`) puts the keyboard in the explorer's tree, which
+  the library draws with a handle of its own; `Workspace::explorer_focus`
+  wraps it so `escape` and Toggle Sidebar can tell the keyboard is in there.
+- **The e2e harness (`src/workspace/e2e.rs`) has gotchas.** A test never
+  waits on a statement that is still running: a running tab re-arms its clock
+  and streaming timers, the test scheduler fires them at once, and
+  `run_until_parked` (so `simulate_keystrokes` too) never returns. Assert on
+  what a chord resolves to instead, or run to completion first.
+  `simulate_keystrokes` sends key-down only, so a focused button, which clicks
+  on release, needs `press` (down and up). A queue of plain reads runs each on
+  a connection of its own, on threads the scheduler does not own, so a test
+  that runs more than one statement calls `cx.executor().allow_parking()`
+  first. Focus moves that wait for the next frame need `settle`.
+- **A dialog's keyboard is its ring** (`Workspace::dialog_layer`): the layer
+  holds focus, and `left`/`right`/`tab` step a ring across its buttons and
+  then its one other control, the "Don't ask again" box (`enter` or `space`
+  ticks it) or the import question's project (`enter` lists the projects in
+  the palette). `space` never presses a button: a space typed on as a prompt
+  takes the keyboard would otherwise press Run. Import Rows has fields and
+  lists of its own, so it has no ring: Tab moves real focus through it,
+  kept inside the dialog and passing over the preview grid and the SQL,
+  which bind `tab` themselves and would never let it out, and `enter`
+  propagates to whatever control holds focus, so in a field it never imports.
 - **A profile owns a `Session`**, and a session owns two lists of tabs:
   `queries: Vec<QueryTab>` and `objects: Vec<ObjectTab>`. `Tab` is
   `Query(u64) | Object(u64)` and `active: Tab` says which is in front.
