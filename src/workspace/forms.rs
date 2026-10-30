@@ -2134,9 +2134,7 @@ impl Workspace {
             }
             CatalogState::Loaded(..) => None,
         };
-        // Drawn while the catalog is away too, so a connection that is down or
-        // still loading has its saved queries within reach.
-        let tree = (message.is_none() || !profile.session.saved_queries.is_empty()).then(|| {
+        let tree = explorer_drawn(profile).then(|| {
             render_tree(
                 &profile.session.explorer_tree,
                 move |index, entry, _, _, cx| {
@@ -2367,7 +2365,15 @@ impl Workspace {
                     .text_color(color)
                     .child(message)
             }))
-            .children(tree.map(|tree| div().flex_1().min_h_0().child(tree)));
+            .children(tree.map(|tree| {
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .key_context("Explorer")
+                    .track_focus(&self.explorer_focus)
+                    .on_action(cx.listener(Self::open_sidebar_item))
+                    .child(tree)
+            }));
 
         div()
             .size_full()
@@ -2703,4 +2709,12 @@ fn revealed(row: gpui::Div, index: usize, animate: bool) -> AnyElement {
             |row, delta| row.opacity(delta).top(px(-SSH_REVEAL_PX * (1. - delta))),
         )
         .into_any_element()
+}
+
+/// Whether the sidebar draws its tree: with a catalog that lists something,
+/// and while the catalog is away too, so a connection that is down or still
+/// loading has its saved queries within reach.
+pub(super) fn explorer_drawn(profile: &Profile) -> bool {
+    matches!(&profile.catalog, CatalogState::Loaded(catalog, _) if !catalog.schemas.is_empty())
+        || !profile.session.saved_queries.is_empty()
 }

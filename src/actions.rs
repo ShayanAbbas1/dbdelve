@@ -212,6 +212,8 @@ actions!(
         ToggleRowEdit,
         ToggleStructure,
         ToggleResultsFocus,
+        FocusSidebar,
+        OpenSidebarItem,
         AcceptCompletion,
         OpenSettings,
         ResetConfirmations,

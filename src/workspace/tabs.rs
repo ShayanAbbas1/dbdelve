@@ -4,7 +4,7 @@
 //! impl live in as many modules as it has concerns; they moved out whole.
 
 use super::*;
-use crate::actions::ToggleResultsFocus;
+use crate::actions::{FocusSidebar, OpenSidebarItem, ToggleResultsFocus};
 use crate::session::PendingDiscard;
 use crate::tab_drag::{self, Drag, Slot};
 
@@ -15,11 +15,113 @@ impl Workspace {
     pub(crate) fn toggle_sidebar(
         &mut self,
         _: &ToggleSidebar,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.sidebar_hidden = !self.sidebar_hidden;
+        // Put away with the keyboard inside it, the sidebar would take the
+        // window's only dispatch path with it.
+        let held = self.explorer_focus.contains_focused(window, cx)
+            || self.profile().is_some_and(|profile| {
+                profile
+                    .session
+                    .explorer_filter
+                    .focus_handle(cx)
+                    .contains_focused(window, cx)
+            });
+        if self.sidebar_hidden && held {
+            self.refocus_front();
+        }
         cx.notify();
+    }
+
+    /// The sidebar's tree takes the keyboard, the sidebar shown if it was put
+    /// away, on the row of the tab in front -- or the row last selected, or
+    /// the first.
+    pub(crate) fn focus_sidebar(
+        &mut self,
+        _: &FocusSidebar,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Over a modal the stroke is the modal's: taking the keyboard out from
+        // under one would leave it on screen with no way to answer it.
+        if self.palette.is_some() || self.dialog_in_front.get().is_some() || self.form.is_some() {
+            return;
+        }
+        self.sidebar_hidden = false;
+        cx.notify();
+        let Some(profile) = self.profile() else {
+            return;
+        };
+        // A handle no element tracks is a window with no dispatch path.
+        if !super::forms::explorer_drawn(profile) {
+            return;
+        }
+        let session = &profile.session;
+        let front = match session.active_object() {
+            Some(tab) => self.catalog().and_then(|catalog| {
+                let schema = catalog
+                    .schemas
+                    .iter()
+                    .position(|schema| schema.name == tab.schema)?;
+                let relation = catalog.schemas[schema]
+                    .relations
+                    .iter()
+                    .position(|relation| relation.name == tab.name)?;
+                Some(crate::explorer::relation_row(schema, relation))
+            }),
+            None => session
+                .active_query_tab()
+                .and_then(|tab| tab.open_query.as_deref())
+                .map(crate::explorer::query_row),
+        };
+        let tree = session.explorer_tree.clone();
+        tree.update(cx, |tree, cx| {
+            let front = front.map(gpui::SharedString::from).and_then(|id| {
+                tree.reveal_item(&id, gpui::ScrollStrategy::Center, cx);
+                tree.index_of(&id)
+            });
+            let row = front.or(tree.selected_index()).or(tree.entry(0).map(|_| 0));
+            tree.set_selected_index(row, cx);
+            if let Some(row) = row {
+                tree.scroll_to_item(row, gpui::ScrollStrategy::Center);
+            }
+            tree.focus(window, cx);
+        });
+    }
+
+    /// `enter` on the sidebar's selected row: what a click on it does.
+    pub(crate) fn open_sidebar_item(
+        &mut self,
+        _: &OpenSidebarItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(profile) = self.profile() else {
+            return;
+        };
+        let Some((id, folder)) = profile
+            .session
+            .explorer_tree
+            .read(cx)
+            .selected_entry()
+            .map(|entry| (entry.item().id.clone(), entry.is_folder()))
+        else {
+            return;
+        };
+        let leaf = profile.session.explorer_leaves.get(id.as_ref()).copied();
+        if let Some(name) = crate::explorer::saved_query(&id) {
+            self.open_saved_query(name.to_string(), window, cx);
+        } else if let Some(leaf) = leaf {
+            self.open_explorer_target(leaf.target, window, cx);
+        } else if folder {
+            // Folding is the tree's own, behind its `Confirm`.
+            window.dispatch_action(
+                Box::new(gpui_base::actions::Confirm { secondary: false }),
+                cx,
+            );
+        }
     }
 
     pub(crate) fn toggle_row_panel(
@@ -712,6 +814,13 @@ impl Workspace {
         if profile.session.naming {
             profile.session.naming = false;
             profile.session.editor_needs_focus = true;
+            cx.notify();
+            return;
+        }
+        // The tree has nothing to back out of, so `escape` there leaves it for
+        // the surface in front, as leaving any field does.
+        if self.explorer_focus.contains_focused(window, cx) {
+            self.refocus_front();
             cx.notify();
             return;
         }

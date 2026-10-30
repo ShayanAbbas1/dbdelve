@@ -98,6 +98,16 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   instead does not work: that is checked against the last frame, where the
   field that just closed still sat inside the same `track_focus` floor, and a
   window left focused on a dead field has every binding dead.
+- **The keyboard has a route between every surface of a tab.** Toggle
+  Editor / Results Focus (`secondary-k r`) moves it between the buffer and the
+  grid in front (`Workspace::front_grid`: one drawn, with a row in it; a plan
+  or the run's messages have nothing to step through, so it stays put), and
+  `result_grid::take_keyboard` hands the library the ring's row so its arrows
+  step from where the ring is. A structure tab's grid takes focus like a data
+  tab's, its handle held by the loading line until the grid is drawn. Focus
+  Sidebar (`secondary-k e`) puts the keyboard in the explorer's tree, which
+  the library draws with a handle of its own; `Workspace::explorer_focus`
+  wraps it so `escape` and Toggle Sidebar can tell the keyboard is in there.
 - **A profile owns a `Session`**, and a session owns two lists of tabs:
   `queries: Vec<QueryTab>` and `objects: Vec<ObjectTab>`. `Tab` is
   `Query(u64) | Object(u64)` and `active: Tab` says which is in front.

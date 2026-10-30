@@ -332,6 +332,9 @@ pub(crate) struct Workspace {
     /// The window's own focus, for the moments when nothing inside it can hold
     /// any. See [`Focus::Window`].
     pub(crate) focus: FocusHandle,
+    /// Around the sidebar's tree, whose own handle the library keeps to
+    /// itself: what tells an `escape` in the tree from one anywhere else.
+    pub(crate) explorer_focus: FocusHandle,
     /// The dialogs' own, so `enter` answers the one in front instead of
     /// editing the buffer or the grid it covers.
     pub(crate) dialog_focus: FocusHandle,
@@ -472,6 +475,7 @@ impl Workspace {
             theme_before_preview: None,
             opacity_input,
             focus: cx.focus_handle(),
+            explorer_focus: cx.focus_handle(),
             dialog_focus: cx.focus_handle(),
             dialog_in_front: std::cell::Cell::default(),
             dialog_choice: std::cell::Cell::default(),
@@ -1997,6 +2001,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::cycle_mode))
             .on_action(cx.listener(Self::switch_connection))
             .on_action(cx.listener(Self::toggle_sidebar))
+            .on_action(cx.listener(Self::focus_sidebar))
             .on_action(cx.listener(Self::open_settings))
             // Unregistered under the import dialog, which stops only the
             // mouse: these act on the tab it covers, out of sight, and their

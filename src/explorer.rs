@@ -86,6 +86,16 @@ pub fn saved_query(id: &str) -> Option<&str> {
     id.strip_prefix(QUERY_ROW)
 }
 
+/// The row id of a saved query, the inverse of [`saved_query`].
+pub fn query_row(name: &str) -> String {
+    format!("{QUERY_ROW}{name}")
+}
+
+/// The row id of a relation, by its place in the catalog.
+pub fn relation_row(schema_index: usize, relation_index: usize) -> String {
+    format!("relation-{schema_index}-{relation_index}")
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExplorerTarget {
     Relation {
@@ -287,7 +297,7 @@ pub fn queries(names: &[String], filter: &str) -> ExplorerTree {
     let children: Vec<TreeItem> = names
         .iter()
         .filter_map(|name| {
-            let id = format!("{QUERY_ROW}{name}");
+            let id = query_row(name);
             builder
                 .name_matches(&id, name)
                 .then(|| TreeItem::new(id, name.clone()))
@@ -350,7 +360,7 @@ fn relation_item(
     inherited: bool,
 ) -> Option<TreeItem> {
     let relation = &schema.relations[relation_index];
-    let id = format!("relation-{schema_index}-{relation_index}");
+    let id = relation_row(schema_index, relation_index);
     let matched = builder.name_matches(&id, &relation.name) || inherited;
 
     let children: Vec<TreeItem> = partitions

@@ -13,7 +13,7 @@ use super::Workspace;
 use crate::{
     db::Engine,
     keybindings,
-    session::{QueryState, QueryTab},
+    session::{ObjectBody, QueryState, QueryTab},
     store,
     theme::{self, Fonts},
 };
@@ -64,12 +64,23 @@ fn quit(workspace: Entity<Workspace>, cx: &mut VisualTestContext) {
 /// The app launched on one saved SQLite profile, an empty database, with its
 /// query tab in front.
 fn launch_on_sqlite(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext) {
+    launch_on_sqlite_holding(cx, "")
+}
+
+/// `launch_on_sqlite` over a database `schema` has been run against first.
+fn launch_on_sqlite_holding<'a>(
+    cx: &'a mut TestAppContext,
+    schema: &str,
+) -> (Entity<Workspace>, &'a mut VisualTestContext) {
     let directory = store::dbdelve_directory().expect("the test home has a data directory");
     std::fs::create_dir_all(&directory).expect("the data directory must be creatable");
     // An empty file is an empty database. dbdelve opens a SQLite file
     // rather than creating one, so it has to be there first.
     let database = directory.join("e2e.db");
     std::fs::write(&database, b"").expect("the database file must be creatable");
+    rusqlite::Connection::open(&database)
+        .and_then(|connection| connection.execute_batch(schema))
+        .expect("the schema must apply");
     std::fs::write(
         directory.join("profiles.toml"),
         format!(
@@ -142,6 +153,15 @@ fn editor_has_keyboard(workspace: &Entity<Workspace>, cx: &mut VisualTestContext
 fn grid_has_keyboard(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> bool {
     query_tab(workspace, cx, |tab, window, cx| {
         tab.results.focus_handle(cx).is_focused(window)
+    })
+}
+
+fn sidebar_has_keyboard(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> bool {
+    cx.update(|window, cx| {
+        workspace
+            .read(cx)
+            .explorer_focus
+            .contains_focused(window, cx)
     })
 }
 
@@ -296,6 +316,104 @@ fn the_keyboard_moves_between_the_buffer_and_its_rows(cx: &mut TestAppContext) {
         cx.simulate_keystrokes("secondary-k r");
         settle(cx);
         assert!(editor_has_keyboard(&workspace, cx));
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_sidebar_takes_the_keyboard_and_escape_hands_it_back(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        workspace.update(cx, |workspace, _| workspace.sidebar_hidden = true);
+
+        cx.simulate_keystrokes("secondary-k e");
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| assert!(!workspace.sidebar_hidden));
+        assert!(sidebar_has_keyboard(&workspace, cx));
+
+        // On the schema's row, which folds away its Tables and the table.
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        cx.update(|_, cx| {
+            let tree = &workspace.read(cx).profile().unwrap().session.explorer_tree;
+            assert!(
+                tree.read(cx).entry(1).is_none(),
+                "enter left the schema open"
+            );
+        });
+        assert!(sidebar_has_keyboard(&workspace, cx));
+
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+        assert!(editor_has_keyboard(&workspace, cx));
+        cx.simulate_input("x");
+        settle(cx);
+        assert_eq!(buffer(&workspace, cx), "x");
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn enter_opens_a_sidebar_row_and_its_structure_takes_the_keyboard(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            "create table birds (name text); insert into birds values ('wren');",
+        );
+
+        // The schema, its Tables, then the table.
+        cx.simulate_keystrokes("secondary-k e");
+        settle(cx);
+        cx.simulate_keystrokes("down down enter");
+        settle(cx);
+        // Whether the tab in front is the structure, and whether its grid has
+        // the keyboard.
+        let front_grid_has_keyboard = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                let tab = workspace
+                    .read(cx)
+                    .profile()
+                    .and_then(|profile| profile.session.active_object())
+                    .expect("an object tab is in front");
+                assert_eq!(tab.name, "birds");
+                match &tab.body {
+                    ObjectBody::Relation { results, .. } => {
+                        (false, results.focus_handle(cx).is_focused(window))
+                    }
+                    ObjectBody::Structure { grid, .. } => {
+                        (true, grid.focus_handle(cx).is_focused(window))
+                    }
+                    ObjectBody::Routine(_) => panic!("birds is a table"),
+                }
+            })
+        };
+        assert_eq!(
+            front_grid_has_keyboard(cx),
+            (false, true),
+            "enter opened the rows"
+        );
+
+        cx.simulate_keystrokes("secondary-shift-d");
+        settle(cx);
+        assert_eq!(front_grid_has_keyboard(cx), (true, true));
+        cx.simulate_keystrokes("down");
+        settle(cx);
+        cx.update(|_, cx| {
+            let workspace = workspace.read(cx);
+            let Some(ObjectBody::Structure { grid, .. }) = workspace
+                .profile()
+                .and_then(|profile| profile.session.active_object())
+                .map(|tab| &tab.body)
+            else {
+                panic!("the structure tab is in front");
+            };
+            assert!(
+                grid.read(cx).delegate().selection_text().is_some(),
+                "the arrow reached the structure grid"
+            );
+        });
 
         quit(workspace, cx);
     });
