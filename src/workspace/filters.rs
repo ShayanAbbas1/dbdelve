@@ -339,6 +339,11 @@ impl Workspace {
             .map(|filter| filter.value.clone())
         {
             input.focus_handle(cx).focus(window, cx);
+            // The tab's own focus, which closing the palette asked for, would
+            // put the keyboard back on the grid on the next frame.
+            if let Some(profile) = self.profile_mut() {
+                profile.session.editor_needs_focus = false;
+            }
         }
         cx.notify();
     }

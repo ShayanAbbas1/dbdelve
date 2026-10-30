@@ -279,6 +279,11 @@ impl Workspace {
         .detach();
         self.custom_limit = Some((target, input));
         self.custom_limit_needs_focus = true;
+        // A tab asking for the keyboard back, as closing the palette does,
+        // would take it after the field and blur it shut.
+        if let Some(profile) = self.profile_mut() {
+            profile.session.editor_needs_focus = false;
+        }
         cx.notify();
     }
 
