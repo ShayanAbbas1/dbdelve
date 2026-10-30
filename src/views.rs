@@ -2915,27 +2915,32 @@ pub(crate) fn render_hidden_columns(
     })
 }
 
-/// Who orders the view in front, on any grid with columns to click. `None`
-/// where there is nothing to sort.
-pub(crate) fn render_view_sorting(
-    profile: &Profile,
-    cx: &mut Context<Workspace>,
-) -> Option<AnyElement> {
-    let t = *theme(cx);
+/// Whether the view in front is sorted in memory, on any grid with columns to
+/// click. `None` where there is nothing to sort, or no choice in how: the
+/// status bar's Server and Client, and the palette's rows for them.
+pub(crate) fn view_sorts_on_client(profile: &Profile, cx: &App) -> Option<bool> {
     let session = &profile.session;
     // Memory is the only choice there, so there is no choice to show.
     if !profile.config.engine().sorts_on_server() {
         return None;
     }
-    let client = match session.active {
+    match session.active {
         Tab::Object(_) => relation_preview(session).and(session.sorting(session.active)),
         Tab::Query(_) => session
             .active_results()
             .filter(|results| !results.read(cx).delegate().columns().is_empty())
             .and(session.sorting(session.active)),
     }
-    .map(|sorting| sorting.client_keys().is_some());
-    client.map(|client| {
+    .map(|sorting| sorting.client_keys().is_some())
+}
+
+/// Who orders the view in front.
+pub(crate) fn render_view_sorting(
+    profile: &Profile,
+    cx: &mut Context<Workspace>,
+) -> Option<AnyElement> {
+    let t = *theme(cx);
+    view_sorts_on_client(profile, cx).map(|client| {
         div()
             .flex_shrink_0()
             .flex()

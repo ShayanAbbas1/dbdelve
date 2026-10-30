@@ -729,6 +729,7 @@ impl Workspace {
             Command::ShowAllColumns => self.show_all_columns(&ShowAllColumns, window, cx),
             Command::SortActiveColumn => self.sort_active_column(&SortActiveColumn, window, cx),
             Command::CopyRows(kind) => self.copy_rows(&CopyRows { kind }, window, cx),
+            Command::SetViewSorting(client) => self.set_view_sorting(client, window, cx),
             Command::FollowForeignKey => self.follow_foreign_key(&FollowForeignKey, window, cx),
             // The button only adds the bar, and the pointer that pressed it
             // goes on to click into it; the keyboard has to be put there.

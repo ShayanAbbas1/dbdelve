@@ -429,6 +429,8 @@ pub enum Command {
     ShowAllColumns,
     /// A click on the active cell's header.
     SortActiveColumn,
+    /// The status bar's Client (`true`) or Server.
+    SetViewSorting(bool),
     CopyRows(RowsAs),
     FollowForeignKey,
     /// Add a filter bar and put the cursor in it.
@@ -3494,6 +3496,19 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         items.push(bound(
             command(&pin, icon::CHEVRON_LEFT, Command::TogglePinColumn, RESULTS),
             "toggle_pin_column",
+        ));
+    }
+    // The status bar's Server and Client, as the one that is not in force.
+    if let Some(client) = crate::views::view_sorts_on_client(profile, cx) {
+        let label = match client {
+            true => "Sort on the server",
+            false => "Sort on the client",
+        };
+        items.push(command(
+            label,
+            icon::SORTABLE,
+            Command::SetViewSorting(!client),
+            RESULTS,
         ));
     }
     // Not the active cell's: the columns come back whichever cell is ringed.
