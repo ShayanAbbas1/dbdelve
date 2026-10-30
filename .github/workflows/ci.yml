@@ -122,7 +122,7 @@ jobs:
         name: rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'ci/per-os-jobs' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - &dependencies-unoptimized
         name: dependencies unoptimized
         run: mkdir -p ../.cargo && printf '[profile.dev.package."*"]\nopt-level = 0\n' >> ../.cargo/config.toml
