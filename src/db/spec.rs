@@ -7,8 +7,8 @@
 //! existing strategies is one more value here and its driver.
 
 use super::{
-    ColumnDefinition, Fields, RelationKind, Syntax, clickhouse, mongo, mssql, mysql, postgres,
-    redis,
+    ColumnDefinition, Fields, RelationKind, Syntax, clickhouse, duckdb, mongo, mssql, mysql,
+    postgres, redis,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -580,6 +580,10 @@ pub struct Hooks {
     /// A literal for a value bound for a column of `data_type`, or `None` to
     /// fall back to the plain literal.
     pub quote_value: Option<fn(value: &str, data_type: &str) -> Option<String>>,
+    /// A literal for a value the driver itself rendered, written back by an
+    /// `INSERT`, or `None` for what [`Self::quote_value`] and the shared shapes
+    /// make of it.
+    pub fetched_literal: Option<fn(value: &str, data_type: &str) -> Option<String>>,
     /// The whole predicate term naming a row's value in `column` (`None` for a
     /// NULL), for an engine whose rows are named by every value. `None` from the
     /// hook means the value cannot be matched, so the row is not written.
@@ -593,6 +597,7 @@ pub type MatchValue = fn(column: &str, value: Option<&str>, data_type: &str) -> 
 impl Hooks {
     pub const NONE: Self = Self {
         quote_value: None,
+        fetched_literal: None,
         match_value: None,
     };
 }
@@ -699,7 +704,10 @@ pub(crate) const MYSQL: EngineSpec = EngineSpec {
         // No `picks_schema`: the database is the schema.
         ..Abilities::NONE
     },
-    hooks: Hooks::NONE,
+    hooks: Hooks {
+        fetched_literal: Some(mysql::fetched_literal),
+        ..Hooks::NONE
+    },
 };
 
 pub(crate) const MARIADB: EngineSpec = EngineSpec {
@@ -751,7 +759,10 @@ pub(crate) const MARIADB: EngineSpec = EngineSpec {
         switches_database: true,
         ..Abilities::NONE
     },
-    hooks: Hooks::NONE,
+    hooks: Hooks {
+        fetched_literal: Some(mysql::fetched_literal),
+        ..Hooks::NONE
+    },
 };
 
 pub(crate) const SQLITE: EngineSpec = EngineSpec {
@@ -888,7 +899,10 @@ pub(crate) const DUCKDB: EngineSpec = EngineSpec {
         picks_schema: true,
         ..Abilities::NONE
     },
-    hooks: Hooks::NONE,
+    hooks: Hooks {
+        fetched_literal: Some(duckdb::fetched_literal),
+        ..Hooks::NONE
+    },
 };
 
 pub(crate) const SNOWFLAKE: EngineSpec = EngineSpec {
@@ -1014,6 +1028,7 @@ pub(crate) const SQL_SERVER: EngineSpec = EngineSpec {
     },
     hooks: Hooks {
         quote_value: Some(mssql::typed_literal),
+        fetched_literal: None,
         match_value: None,
     },
 };

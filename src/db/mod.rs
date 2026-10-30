@@ -697,6 +697,11 @@ impl Engine {
         }
     }
 
+    /// [`Hooks::fetched_literal`].
+    pub fn fetched_literal(self, value: &str, data_type: &str) -> Option<String> {
+        (self.spec().hooks.fetched_literal?)(value, data_type)
+    }
+
     /// Whether a [`Column::data_type`] names a type whose values are bytes.
     ///
     /// What it is for: a blob is rendered as the engine's own literal — `x'AB'`,

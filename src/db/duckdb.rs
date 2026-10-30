@@ -866,6 +866,12 @@ fn rolled_back(connection: &duckdb::Connection, sql: &str, error: DbError) -> Db
     }
 }
 
+/// Arrow prints a blob as bare hex, which a quoted string would store as the
+/// text of that hex.
+pub(super) fn fetched_literal(value: &str, data_type: &str) -> Option<String> {
+    (data_type == "blob").then(|| format!("unhex({})", Engine::DuckDb.quote_literal(value)))
+}
+
 /// `array` in types Arrow's formatter prints the way DuckDB's shell does,
 /// inside a list, a struct or a map too.
 ///

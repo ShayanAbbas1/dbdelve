@@ -926,6 +926,18 @@ fn render<'a>(
     })
 }
 
+/// `bit`, `vector` and the spatial types come back as bytes too, without being
+/// the blobs an edit refuses, and a literal that quoted their hex would store
+/// its text. An empty `0x` is no literal here: it reads as a column of that name.
+pub(super) fn fetched_literal(value: &str, data_type: &str) -> Option<String> {
+    let bytes = Engine::MySql.is_binary_type(data_type)
+        || matches!(data_type, "bit" | "geometry" | "vector");
+    (bytes && value.starts_with("0x")).then(|| match value {
+        "0x" => "x''".to_string(),
+        hex => hex.to_string(),
+    })
+}
+
 /// The one table every column that came from a table came from.
 ///
 /// A result set spanning two of them is a join, and a row of it is not a row of

@@ -242,8 +242,9 @@ pub fn render_rows_as(
 }
 
 /// One value of an `INSERT … VALUES` row, as `render_rows_as`'s `InsertSql`
-/// writes it: a number bare, a fetched binary value in the engine's own
-/// literal (`0xAB`, `x'AB'`) bare, and everything else through
+/// writes it: what the engine says of a value its driver rendered
+/// ([`Engine::fetched_literal`]), a number bare, a fetched binary value in the
+/// engine's own literal (`0xAB`, `x'AB'`) bare, and everything else through
 /// [`Engine::quote_value`].
 ///
 /// Binary is handled here rather than in `quote_value` because the two have
@@ -255,6 +256,12 @@ pub fn render_rows_as(
 /// shape check alone is enough.
 fn insert_literal(engine: Engine, cell: Option<&str>, column: &Column) -> String {
     let data_type = column.data_type.as_deref();
+    let fetched = cell
+        .zip(data_type)
+        .and_then(|(value, data_type)| engine.fetched_literal(value, data_type));
+    if let Some(literal) = fetched {
+        return literal;
+    }
     match cell {
         None => "NULL".to_string(),
         Some(value)
@@ -268,6 +275,11 @@ fn insert_literal(engine: Engine, cell: Option<&str>, column: &Column) -> String
                 && is_bare_binary_literal(value) =>
         {
             value.to_string()
+        }
+        // Spelled out where the engine can, since the grammar that cuts a file
+        // into statements stops reading at a raw NUL.
+        Some(value) if engine.spec().sql.backslash_escapes => {
+            engine.quote_value(value, data_type).replace('\0', r"\0")
         }
         Some(value) => engine.quote_value(value, data_type),
     }
@@ -639,6 +651,37 @@ mod tests {
         assert_eq!(
             render_rows_as(RowsAs::InsertSql, Engine::Sqlite, Some(&edit), &result),
             "INSERT INTO \"public\".\"notes\" (\"data\") VALUES (x'ABCD');"
+        );
+    }
+
+    #[test]
+    fn a_literal_says_what_the_engines_driver_fetched() {
+        let literal = |engine, value, data_type: &str| {
+            let column = Column {
+                name: "c".into(),
+                data_type: Some(data_type.into()),
+            };
+            insert_literal(engine, Some(value), &column)
+        };
+
+        assert_eq!(literal(Engine::MySql, "0xA5", "bit"), "0xA5");
+        assert_eq!(literal(Engine::MariaDb, "0x0001", "geometry"), "0x0001");
+        assert_eq!(literal(Engine::MySql, "0x", "varbinary"), "x''");
+        assert_eq!(literal(Engine::SqlServer, "0x", "varbinary"), "0x");
+        assert_eq!(literal(Engine::MySql, "0xA5", "varchar"), "'0xA5'");
+        assert_eq!(literal(Engine::DuckDb, "00ff", "blob"), "unhex('00ff')");
+        assert_eq!(literal(Engine::DuckDb, "00ff", "varchar"), "'00ff'");
+    }
+
+    #[test]
+    fn a_nul_is_escaped_where_the_engine_reads_escapes() {
+        let column = Column {
+            name: "c".into(),
+            data_type: Some("char".into()),
+        };
+        assert_eq!(
+            insert_literal(Engine::MySql, Some("a\0b\\0"), &column),
+            r"'a\0b\\0'"
         );
     }
 

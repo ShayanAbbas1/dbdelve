@@ -1062,6 +1062,9 @@ fn rendered(engine: Engine, columns: &[Column], rows: Vec<Row>) -> Vec<Row> {
 }
 
 #[cfg(test)]
+mod round_trip;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::ConnectionConfig;
