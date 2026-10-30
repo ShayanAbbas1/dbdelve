@@ -13,6 +13,7 @@ use super::Workspace;
 use crate::{
     db::Engine,
     keybindings,
+    palette::{Mode as PaletteMode, Scope},
     session::{QueryState, QueryTab},
     store,
     theme::{self, Fonts},
@@ -251,6 +252,146 @@ fn a_prompt_dismissed_from_the_keyboard_hands_it_back_to_the_editor(cx: &mut Tes
             settle(cx);
             assert_eq!(buffer(&workspace, cx), format!("{before}{typed}"));
         }
+
+        quit(workspace, cx);
+    });
+}
+
+/// Runs until the tab's statement has stopped, which a cancel lands on a
+/// thread of its own.
+fn until_stopped(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> QueryState {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        settle(cx);
+        let state = query_tab(workspace, cx, |tab, _, _| tab.query.clone());
+        if !matches!(state, QueryState::Running { .. }) {
+            return state;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the statement was never stopped"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+#[gpui::test]
+fn the_cancel_chord_stops_a_run_from_the_editor_and_from_the_grid(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        cx.simulate_input("select 1");
+        cx.simulate_keystrokes("secondary-enter");
+        until_stopped(&workspace, cx);
+        cx.simulate_keystrokes("secondary-a backspace");
+        // Counts forever: only a cancel ends it.
+        cx.simulate_input(
+            "with recursive n(x) as (select 1 union all select x + 1 from n) select count(*) from n",
+        );
+
+        for in_grid in [false, true] {
+            if in_grid {
+                let results = query_tab(&workspace, cx, |tab, _, _| tab.results.clone());
+                cx.update(|window, cx| results.focus_handle(cx).focus(window, cx));
+                settle(cx);
+            }
+            cx.simulate_keystrokes("secondary-enter");
+            cx.run_until_parked();
+            query_tab(&workspace, cx, |tab, _, _| {
+                assert!(matches!(tab.query, QueryState::Running { .. }));
+            });
+            cx.simulate_keystrokes("secondary-.");
+            let stopped = until_stopped(&workspace, cx);
+            assert!(
+                matches!(stopped, QueryState::Failed(_)),
+                "in grid: {in_grid}"
+            );
+        }
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_move_tab_chords_reorder_the_strip(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let strip = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                let session = &workspace.profile().expect("a profile is open").session;
+                (session.strip_tabs(), session.active)
+            })
+        };
+        cx.simulate_keystrokes("secondary-t");
+        settle(cx);
+        let (before, active) = strip(cx);
+        assert_eq!(before.last(), Some(&active), "a new tab opens at the end");
+
+        cx.simulate_keystrokes("ctrl-shift-pageup");
+        settle(cx);
+        let (after, _) = strip(cx);
+        assert_eq!(after[before.len() - 2], active);
+
+        cx.simulate_keystrokes("ctrl-shift-pagedown");
+        settle(cx);
+        assert_eq!(strip(cx).0, before);
+
+        // The right end is a wall.
+        cx.simulate_keystrokes("ctrl-shift-pagedown");
+        settle(cx);
+        assert_eq!(strip(cx).0, before);
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_command_palette_opens_on_the_welcome_surface(cx: &mut TestAppContext) {
+    // A `PG*` connection from the environment opens in place of the welcome
+    // surface, as CI's live-test job sets.
+    if ["PGHOST", "PGPORT", "PGDATABASE", "PGUSER"]
+        .iter()
+        .any(|name| std::env::var_os(name).is_some())
+    {
+        return;
+    }
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch(cx);
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| assert!(workspace.profile().is_none()));
+
+        cx.simulate_keystrokes("secondary-shift-p");
+        settle(cx);
+        workspace.read_with(cx, |workspace, cx| {
+            let palette = workspace.palette.as_ref().expect("the palette is up");
+            assert!(palette.read(cx).mode() == PaletteMode::Search(Scope::Commands));
+        });
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| assert!(workspace.palette.is_none()));
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn ctrl_space_asks_for_completions_in_the_query_buffer(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let menu_open = |cx: &mut VisualTestContext| {
+            query_tab(&workspace, cx, |tab, _, cx| {
+                tab.editor.read(cx).completion_menu_state().open
+            })
+        };
+        cx.simulate_input("sel");
+        settle(cx);
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+        assert!(!menu_open(cx), "escape left the menu up");
+
+        cx.simulate_keystrokes("ctrl-space");
+        settle(cx);
+        assert!(menu_open(cx));
+        assert_eq!(buffer(&workspace, cx), "sel");
 
         quit(workspace, cx);
     });
