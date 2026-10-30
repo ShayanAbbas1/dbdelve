@@ -28,6 +28,10 @@ use crate::ui::code_lines;
 /// held in memory, without the statement stalling on every pass.
 const HELD_ROWS: usize = 4_096;
 
+/// How many of the rows a statement hands back whole are written between
+/// two looks at Cancel.
+const FINISH_CHUNK: usize = 1_000;
+
 /// How an export that wrote nothing ended.
 #[derive(Debug, PartialEq)]
 enum Ended {
@@ -730,9 +734,15 @@ fn export_every_row(
             path,
             out: Some(out),
             writer: None,
-            rows: &progress.rows,
+            progress,
         };
-        stream(connection, refetch, read_only, sink, progress)
+        let written = stream(connection, refetch, read_only, sink, progress)?;
+        // A Cancel clicked while the last rows were written still means
+        // nothing lands under the user's name.
+        match progress.cancelled.load(Ordering::Relaxed) {
+            true => Err(Ended::Cancelled),
+            false => Ok(written),
+        }
     })
 }
 
@@ -861,7 +871,7 @@ struct Sink<'a> {
     path: &'a Path,
     out: Option<&'a mut BufWriter<File>>,
     writer: Option<Writer<&'a mut BufWriter<File>>>,
-    rows: &'a AtomicUsize,
+    progress: &'a ExportProgress,
 }
 
 impl Sink<'_> {
@@ -891,19 +901,38 @@ impl Sink<'_> {
         }
         let writer = self.writer.as_mut().expect("made above");
         writer.rows(&rows, cell_types).map_err(failed)?;
-        self.rows.fetch_add(rows.len(), Ordering::Relaxed);
+        self.progress.rows.fetch_add(rows.len(), Ordering::Relaxed);
         Ok(())
     }
 
     /// The rows the statement handed back rather than fed, then the end of
     /// the file. The number written, all told.
+    ///
+    /// Written a chunk at a time, Cancel asked between chunks: these can be
+    /// the whole result, and a Cancel that waited for all of it to be written
+    /// would come too late to stop anything.
     fn finish(mut self, result: QueryResult) -> Result<usize, Ended> {
-        if self.writer.is_none() || !result.rows.is_empty() {
-            self.write(&result.columns, result.rows, &result.cell_types)?;
+        if self.writer.is_none() && result.rows.is_empty() {
+            self.write(&result.columns, Vec::new(), &[])?;
+        }
+        let mut rows = result.rows.into_iter();
+        let mut start = 0;
+        loop {
+            let chunk: Vec<Row> = rows.by_ref().take(FINISH_CHUNK).collect();
+            if chunk.is_empty() {
+                break;
+            }
+            if self.progress.cancelled.load(Ordering::Relaxed) {
+                return Err(Ended::Cancelled);
+            }
+            let end = start + chunk.len();
+            let cell_types = result.cell_types.get(start..end).unwrap_or(&[]);
+            self.write(&result.columns, chunk, cell_types)?;
+            start = end;
         }
         let writer = self.writer.take().expect("written above");
         writer.finish().map_err(could_not_write(self.path))?;
-        Ok(self.rows.load(Ordering::Relaxed))
+        Ok(self.progress.rows.load(Ordering::Relaxed))
     }
 }
 
@@ -1034,6 +1063,47 @@ mod tests {
         .unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
         assert_eq!(std::fs::read_to_string(&theirs).unwrap(), "theirs");
+        assert_eq!(staged(&directory), Vec::<PathBuf>::new());
+        _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// As MongoDB and Redis hand theirs over: all at once, once the statement
+    /// is done.
+    #[test]
+    fn rows_handed_back_whole_are_not_written_past_a_cancel() {
+        let directory = scratch("finish");
+        let path = directory.join("rows.csv");
+        let finish = |progress: &ExportProgress| {
+            let result = QueryResult {
+                columns: vec![Column {
+                    name: "n".into(),
+                    data_type: None,
+                }],
+                rows: (0..2_500)
+                    .map(|n| Row::new([Some(n.to_string())]).unwrap())
+                    .collect(),
+                ..QueryResult::default()
+            };
+            write_replacing(&path, |out| {
+                let sink = Sink {
+                    format: Format::Csv,
+                    engine: Engine::MongoDb,
+                    path: &path,
+                    out: Some(out),
+                    writer: None,
+                    progress,
+                };
+                sink.finish(result)
+            })
+        };
+
+        assert_eq!(finish(&ExportProgress::default()), Ok(2_500));
+        let progress = ExportProgress::default();
+        progress.cancelled.store(true, Ordering::Relaxed);
+        assert_eq!(finish(&progress), Err(Ended::Cancelled));
+        assert_eq!(progress.rows.load(Ordering::Relaxed), 0);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.lines().count(), 2_501);
         assert_eq!(staged(&directory), Vec::<PathBuf>::new());
         _ = std::fs::remove_dir_all(&directory);
     }
