@@ -535,6 +535,35 @@ pub fn truncate_sql(engine: Engine, schema: &str, relation: &str) -> String {
     }
 }
 
+/// What a relation's menu copies, in its two groups: the label, and the text,
+/// or `None` for the DDL, which only the server can give. The palette offers
+/// the same rows for the tab in front, so the two cannot disagree on which.
+pub fn relation_copies(
+    engine: Engine,
+    schema: &str,
+    relation: &str,
+    kind: RelationKind,
+) -> [Vec<(&'static str, Option<String>)>; 2] {
+    let mut reads = Vec::new();
+    if engine.copies_ddl() {
+        reads.push(("Copy DDL", None));
+    }
+    if let Some(sql) = select_top_sql(engine, schema, relation) {
+        reads.push(("Copy SELECT (Top 100)", Some(sql)));
+    }
+    let mut writes = Vec::new();
+    if let Some(sql) = drop_sql(engine, schema, relation, kind) {
+        writes.push(("Copy DROP", Some(sql)));
+    }
+    if matches!(kind, RelationKind::Table | RelationKind::PartitionedTable) {
+        writes.push((
+            "Copy TRUNCATE",
+            Some(truncate_sql(engine, schema, relation)),
+        ));
+    }
+    [reads, writes]
+}
+
 /// The command a preview's row opens with, as a result of its own
 /// ([`Engine::opened_column`]), read off the row's cells by column name: a
 /// Redis key's first `rows` entries, by the read its type takes. `None` where

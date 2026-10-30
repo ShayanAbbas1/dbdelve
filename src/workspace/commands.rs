@@ -729,6 +729,21 @@ impl Workspace {
             Command::ShowAllColumns => self.show_all_columns(&ShowAllColumns, window, cx),
             Command::SortActiveColumn => self.sort_active_column(&SortActiveColumn, window, cx),
             Command::CopyRows(kind) => self.copy_rows(&CopyRows { kind }, window, cx),
+            Command::CopyDdl => {
+                let front = self.profile().and_then(|profile| {
+                    let tab = profile.session.active_object()?;
+                    match tab.kind {
+                        ObjectKind::Relation(kind) => {
+                            Some((tab.schema.clone(), tab.name.clone(), kind))
+                        }
+                        ObjectKind::Routine(_) => None,
+                    }
+                });
+                if let Some((schema, relation, kind)) = front {
+                    self.copy_ddl(schema, relation, kind, cx);
+                }
+            }
+            Command::CopyText(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
             Command::SetViewSorting(client) => self.set_view_sorting(client, window, cx),
             Command::FollowForeignKey => self.follow_foreign_key(&FollowForeignKey, window, cx),
             // The button only adds the bar, and the pointer that pressed it

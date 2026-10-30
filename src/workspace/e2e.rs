@@ -895,6 +895,47 @@ fn the_palette_switches_who_sorts_the_view(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn the_palette_copies_what_the_explorer_menu_copies(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        cx.simulate_keystrokes("secondary-k e");
+        settle(cx);
+        cx.simulate_keystrokes("down down enter");
+        settle(cx);
+
+        for (row, copied) in [
+            ("Copy SELECT (Top 100)", "SELECT"),
+            ("Copy DROP", "DROP TABLE"),
+        ] {
+            cx.simulate_keystrokes("secondary-shift-p");
+            settle(cx);
+            cx.simulate_input(row);
+            cx.simulate_keystrokes("enter");
+            settle(cx);
+            let text = cx
+                .read_from_clipboard()
+                .and_then(|item| item.text())
+                .unwrap_or_default();
+            assert!(
+                text.contains(copied) && text.contains("birds"),
+                "{row}: {text}"
+            );
+        }
+        // Copied, never run.
+        let tables = rusqlite::Connection::open(store::dbdelve_directory().unwrap().join("e2e.db"))
+            .and_then(|db| {
+                db.query_row("select count(*) from sqlite_master", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+            })
+            .unwrap();
+        assert_eq!(tables, 1);
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn an_empty_table_opened_from_the_sidebar_keeps_the_keyboard(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");

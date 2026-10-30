@@ -431,6 +431,11 @@ pub enum Command {
     SortActiveColumn,
     /// The status bar's Client (`true`) or Server.
     SetViewSorting(bool),
+    /// The explorer menu's Copy DDL, for the relation in front.
+    CopyDdl,
+    /// The explorer menu's other copies: put this on the clipboard, and
+    /// nothing else.
+    CopyText(String),
     CopyRows(RowsAs),
     FollowForeignKey,
     /// Add a filter bar and put the cursor in it.
@@ -3275,6 +3280,22 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
                     ROWS,
                 ));
             }
+        }
+        // The explorer's menu for this relation, clipboard and all.
+        if let ObjectKind::Relation(kind) = tab.kind {
+            let engine = profile.config.engine();
+            items.extend(
+                crate::explorer::relation_copies(engine, &tab.schema, &tab.name, kind)
+                    .into_iter()
+                    .flatten()
+                    .map(|(label, text)| {
+                        let copies = match text {
+                            Some(text) => Command::CopyText(text),
+                            None => Command::CopyDdl,
+                        };
+                        command(label, icon::COPY, copies, TAB).detail(tab.name.clone())
+                    }),
+            );
         }
         items.push(bound(
             command("Close tab", icon::CLOSE, Command::CloseObject(tab.id), TAB),

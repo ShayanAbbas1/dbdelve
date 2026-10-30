@@ -14,9 +14,7 @@ use super::welcome::{self, Part, Pose};
 use super::*;
 use crate::actions::{ConfirmDialog, NextDialogButton, PreviousDialogButton, TickDialogBox};
 use crate::connection_form::ConnectionTest;
-use crate::explorer::{
-    QUERIES_GROUP, drop_sql, is_schema_row, saved_query, select_top_sql, truncate_sql,
-};
+use crate::explorer::{QUERIES_GROUP, is_schema_row, relation_copies, saved_query};
 use crate::scroller::{SmoothScrollable, smooth_scoped};
 use crate::sql::{Destructive, Stop};
 use crate::ui::{Status, code_lines, raised_card};
@@ -2443,31 +2441,27 @@ impl Workspace {
                         },
                     ));
                 }
-                let menu = menu
-                    .separator()
-                    .when(engine.copies_ddl(), |menu| {
-                        menu.item(PopupMenuItem::new("Copy DDL").on_click(move |_, _, cx| {
-                            let (schema, relation) = ddl_names.clone();
-                            _ = ddl_workspace.update(cx, |workspace, cx| {
-                                workspace.copy_ddl(schema, relation, kind, cx);
-                            });
-                        }))
+                relation_copies(engine, &schema, &relation, kind)
+                    .into_iter()
+                    .fold(menu, |menu, group| {
+                        group
+                            .into_iter()
+                            .fold(menu.separator(), |menu, (label, text)| match text {
+                                Some(text) => menu.item(copy(label, text)),
+                                None => {
+                                    let (workspace, names) =
+                                        (ddl_workspace.clone(), ddl_names.clone());
+                                    menu.item(PopupMenuItem::new(label).on_click(
+                                        move |_, _, cx| {
+                                            let (schema, relation) = names.clone();
+                                            _ = workspace.update(cx, |workspace, cx| {
+                                                workspace.copy_ddl(schema, relation, kind, cx);
+                                            });
+                                        },
+                                    ))
+                                }
+                            })
                     })
-                    .when_some(select_top_sql(engine, &schema, &relation), |menu, sql| {
-                        menu.item(copy("Copy SELECT (Top 100)", sql))
-                    })
-                    .separator()
-                    .when_some(drop_sql(engine, &schema, &relation, kind), |menu, sql| {
-                        menu.item(copy("Copy DROP", sql))
-                    });
-                if matches!(kind, RelationKind::Table | RelationKind::PartitionedTable) {
-                    menu.item(copy(
-                        "Copy TRUNCATE",
-                        truncate_sql(engine, &schema, &relation),
-                    ))
-                } else {
-                    menu
-                }
             })
         });
         let content = div()
