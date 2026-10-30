@@ -823,7 +823,8 @@ impl Workspace {
     /// The key in the active cell of the relation in front, as a reference
     /// lookup names it.
     pub(crate) fn reference_source(&self, cx: &App) -> Option<ReferenceSource> {
-        let tab = self.profile()?.session.active_object()?;
+        let profile = self.profile()?;
+        let tab = profile.session.active_object()?;
         let ObjectBody::Relation {
             structure: StructureState::Loaded(structure),
             results,
@@ -835,6 +836,7 @@ impl Workspace {
         let grid = results.read(cx).delegate();
         let (_, col) = grid.active()?;
         Some(ReferenceSource {
+            profile: profile.id.clone(),
             tab: tab.id,
             column: grid.columns().get(col)?.name.clone(),
             value: grid.active_value()?.to_string(),

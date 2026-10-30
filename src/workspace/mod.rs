@@ -2176,13 +2176,16 @@ impl Render for Workspace {
 /// `referenced_by`: a row was found in it, or its check failed with this error.
 pub(crate) type ReferenceAnswer = (usize, gpui::SharedString, Result<(), String>);
 
-/// The key a reference lookup was asked about: its tab, its column and value,
+/// The key a reference lookup was asked about: its profile, its tab, its column and value,
 /// and the references its structure listed, which an answer's indices point
 /// into. An answer or a pick is acted on only while the grid in front still
 /// says the same, so neither can land on another tab, key or refreshed
 /// structure.
 #[derive(Clone, PartialEq)]
 pub(crate) struct ReferenceSource {
+    // Tab ids count from zero in every profile, so the tab alone does not say
+    // which connection was asked.
+    profile: String,
     tab: u64,
     column: String,
     value: String,

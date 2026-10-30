@@ -912,6 +912,7 @@ fn escape_closes_the_reference_arrows_list(cx: &mut TestAppContext) {
             workspace.reference_popup = Some(super::ReferencePopup {
                 at: Some(gpui::point(gpui::px(10.), gpui::px(10.))),
                 source: super::ReferenceSource {
+                    profile: String::new(),
                     tab: 0,
                     column: String::new(),
                     value: String::new(),
