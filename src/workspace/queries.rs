@@ -1004,8 +1004,11 @@ impl Workspace {
         match crate::session::stepped(&tab.switcher_chips(), tab.switcher_selected(), step) {
             Some(Some(index)) => self.show_queued_result(id, index, cx),
             Some(None) => self.show_messages(id, cx),
-            None => {}
+            None => return,
         }
+        // A chord pressed in the grid it just swapped out would leave the
+        // keyboard on a grid no longer on screen, with no dispatch path.
+        self.refocus_front();
     }
 
     /// The Messages chip, and back off it to the result it stood in for.
@@ -1029,6 +1032,7 @@ impl Workspace {
                 self.show_queued_result(id, showing, cx);
             }
         }
+        self.refocus_front();
     }
 
     pub(crate) fn copy_plan_action(
