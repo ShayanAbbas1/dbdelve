@@ -22,7 +22,7 @@ use icondata_core::IconData;
 /// The gpui-component widgets ask for their own paths — those are Lucide names
 /// too, so they resolve here as well. Add a row when something asks for one;
 /// an unlisted path simply draws nothing.
-const ICONS: [(&str, &IconData); 69] = [
+const ICONS: [(&str, &IconData); 70] = [
     ("icons/git-fork.svg", icondata_lu::LuGitFork),
     ("icons/chevron-down.svg", icondata_lu::LuChevronDown),
     ("icons/chevron-right.svg", icondata_lu::LuChevronRight),
@@ -62,6 +62,7 @@ const ICONS: [(&str, &IconData); 69] = [
     ("icons/play.svg", icondata_lu::LuPlay),
     ("icons/square-pen.svg", icondata_lu::LuSquarePen),
     ("icons/history.svg", icondata_lu::LuHistory),
+    ("icons/refresh-cw.svg", icondata_lu::LuRefreshCw),
     ("icons/panel-left.svg", icondata_lu::LuPanelLeft),
     ("icons/panel-right.svg", icondata_lu::LuPanelRight),
     ("icons/copy.svg", icondata_lu::LuCopy),
@@ -159,6 +160,7 @@ pub mod icon {
     pub const PLAN: &str = "icons/git-fork.svg";
     pub const SCRATCH_QUERY: &str = "icons/square-pen.svg";
     pub const HISTORY: &str = "icons/history.svg";
+    pub const REFRESH: &str = "icons/refresh-cw.svg";
     /// Import Rows: a file column flows into the table column beside it.
     pub const MAPS_TO: &str = "icons/arrow-right.svg";
     pub const FONT: &str = "icons/type.svg";

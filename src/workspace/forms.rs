@@ -6,10 +6,11 @@
 use std::time::Duration;
 
 use gpui::{Animation, AnimationExt, Div, PathPromptOptions, StyledText, ease_out_quint};
-use gpui_component::ActiveTheme;
 use gpui_component::button::Button;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
+use gpui_component::spinner::Spinner;
+use gpui_component::{ActiveTheme, Sizable};
 
 use super::welcome::{self, Part, Pose};
 use super::*;
@@ -2112,6 +2113,35 @@ impl Workspace {
             )
     }
 
+    /// Dispatches what the shortcut does, so the two cannot come apart.
+    fn render_refresh_schema(&self, profile: &Profile, t: Theme) -> Button {
+        if profile.refreshing_schema() {
+            return ui::control("refresh-schema", Tone::Quiet, Control::Inline)
+                .w(px(Control::Inline.height()))
+                .p_0()
+                .loading(true)
+                .child(
+                    Spinner::new()
+                        .with_size(px(layout::chrome(layout::ICON_SIZE)))
+                        .color(Tone::Quiet.ink(t).into()),
+                );
+        }
+        let hint = ui::chord_hint("refresh_connection", &self.settings.custom_keybindings);
+        let tooltip = match hint.is_empty() {
+            true => "Refresh schema".to_string(),
+            false => format!("Refresh schema  {hint}"),
+        };
+        icon_button(
+            "refresh-schema",
+            icon::REFRESH,
+            Tone::Quiet,
+            Control::Inline,
+            t,
+        )
+        .tooltip(tooltip)
+        .on_click(|_, window, cx| window.dispatch_action(Box::new(RefreshConnection), cx))
+    }
+
     pub(crate) fn render_explorer(
         &self,
         profile: &Profile,
@@ -2414,7 +2444,8 @@ impl Workspace {
                                 .min_w_0()
                                 .appearance(false),
                         ),
-                    ),
+                    )
+                    .child(self.render_refresh_schema(profile, t)),
             )
             .child(div().flex_1().min_h_0().child(content))
     }

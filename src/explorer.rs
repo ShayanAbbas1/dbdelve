@@ -191,7 +191,7 @@ pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
         .by_name()
         .into_iter()
         .filter_map(|(schema_index, schema)| {
-            let id = format!("{SCHEMA_ROW}{schema_index}");
+            let id = format!("{SCHEMA_ROW}{}", schema.name);
             let schema_matches = builder.name_matches(&id, &schema.name);
             let mut groups = Vec::new();
 
@@ -221,7 +221,7 @@ pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
                     .collect::<Vec<_>>();
 
                 if !children.is_empty() {
-                    groups.push(category(label, schema_index, children));
+                    groups.push(category(label, &schema.name, children));
                 }
             }
 
@@ -232,7 +232,10 @@ pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
                     .enumerate()
                     .filter(|(_, routine)| routine.kind == kind)
                     .filter_map(|(routine_index, routine)| {
-                        let id = format!("routine-{schema_index}-{routine_index}");
+                        let id = format!(
+                            "routine-{label}-{}\0{}({})",
+                            schema.name, routine.name, routine.identity_arguments
+                        );
                         let name_matches = builder.name_matches(&id, &routine.name);
                         if !(schema_matches || name_matches || builder.signature_matches(routine)) {
                             return None;
@@ -256,7 +259,7 @@ pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
                     .collect::<Vec<_>>();
 
                 if !children.is_empty() {
-                    groups.push(category(label, schema_index, children));
+                    groups.push(category(label, &schema.name, children));
                 }
             }
 
@@ -350,7 +353,7 @@ fn relation_item(
     inherited: bool,
 ) -> Option<TreeItem> {
     let relation = &schema.relations[relation_index];
-    let id = format!("relation-{schema_index}-{relation_index}");
+    let id = format!("relation-{}\0{}", schema.name, relation.name);
     let matched = builder.name_matches(&id, &relation.name) || inherited;
 
     let children: Vec<TreeItem> = partitions
@@ -388,8 +391,8 @@ fn relation_item(
     )
 }
 
-fn category(label: &'static str, schema_index: usize, children: Vec<TreeItem>) -> TreeItem {
-    TreeItem::new(format!("category-{label}-{schema_index}"), label)
+fn category(label: &'static str, schema: &str, children: Vec<TreeItem>) -> TreeItem {
+    TreeItem::new(format!("category-{label}-{schema}"), label)
         .expanded(true)
         .children(children)
 }
@@ -624,6 +627,41 @@ mod tests {
             .unwrap()
             .ends_with(" ORDER BY (SELECT NULL) OFFSET 0 ROWS FETCH NEXT 1 ROWS ONLY")
         );
+    }
+
+    #[test]
+    fn a_row_keeps_its_id_when_the_catalog_around_it_moves() {
+        let before = catalog();
+        let mut after = catalog();
+        after.schemas.insert(
+            0,
+            Schema {
+                name: "aardvark".into(),
+                relations: Vec::new(),
+                routines: Vec::new(),
+            },
+        );
+        after.schemas[2].relations.insert(
+            0,
+            Relation {
+                name: "a_new_table".into(),
+                kind: RelationKind::Table,
+                partition_of: None,
+                size: None,
+                rows: None,
+            },
+        );
+
+        fn ids(items: &[TreeItem], into: &mut HashSet<String>) {
+            for item in items {
+                into.insert(item.id.to_string());
+                ids(&item.children, into);
+            }
+        }
+        let (mut old, mut new) = (HashSet::new(), HashSet::new());
+        ids(&tree(&before, "").items, &mut old);
+        ids(&tree(&after, "").items, &mut new);
+        assert!(old.is_subset(&new), "moved: {:?}", old.difference(&new));
     }
 
     fn catalog() -> Catalog {
@@ -909,8 +947,8 @@ mod tests {
             roots,
             [
                 (QUERIES_GROUP, false),
-                ("schema-0", true),
-                ("schema-1", true)
+                ("schema-analytics", true),
+                ("schema-public", true)
             ]
         );
         let group = &explorer.items[0];
@@ -976,18 +1014,23 @@ mod tests {
         assert_eq!(explorer.items.len(), 1);
         assert_eq!(categories[0].children[0].label, "accounts");
         assert_eq!(
-            marked(&explorer, "relation-1-1", "accounts").as_deref(),
+            marked(&explorer, "relation-public\0accounts", "accounts").as_deref(),
             Some("acct")
         );
         // A routine's row reads `name(args)`, and only the name was matched.
         let label = "account_name(account_id bigint)";
         assert_eq!(categories[2].children[0].label, label);
         assert_eq!(
-            marked(&explorer, "routine-1-1", label).as_deref(),
+            marked(
+                &explorer,
+                "routine-Functions-public\0account_name(account_id bigint)",
+                label
+            )
+            .as_deref(),
             Some("acct")
         );
         assert!(
-            explorer.highlights["routine-1-1"]
+            explorer.highlights["routine-Functions-public\0account_name(account_id bigint)"]
                 .iter()
                 .all(|range| range.end <= "account_name".len())
         );
@@ -1017,12 +1060,16 @@ mod tests {
         let explorer = tree(&catalog(), "analytics");
 
         assert_eq!(
-            marked(&explorer, "schema-0", "analytics").as_deref(),
+            marked(&explorer, "schema-analytics", "analytics").as_deref(),
             Some("analytics")
         );
         // Kept because its schema matched, not because of its name.
-        assert!(explorer.leaves.contains_key("relation-0-0"));
-        assert!(!explorer.highlights.contains_key("relation-0-0"));
+        assert!(explorer.leaves.contains_key("relation-analytics\0events"));
+        assert!(
+            !explorer
+                .highlights
+                .contains_key("relation-analytics\0events")
+        );
 
         assert!(tree(&catalog(), "").highlights.is_empty());
     }
@@ -1032,7 +1079,9 @@ mod tests {
         let explorer = tree(&catalog(), "account_name");
 
         assert_eq!(
-            explorer.leaves.get("routine-1-1"),
+            explorer
+                .leaves
+                .get("routine-Functions-public\0account_name(account_id bigint)"),
             Some(&ExplorerLeaf {
                 target: ExplorerTarget::Routine {
                     schema_index: 1,
@@ -1051,11 +1100,11 @@ mod tests {
 
         // public: relation 0 is a view, relation 1 is a table.
         assert_eq!(
-            kind("relation-1-0"),
+            kind("relation-public\0active_accounts"),
             Some(ObjectKind::Relation(RelationKind::View))
         );
         assert_eq!(
-            kind("relation-1-1"),
+            kind("relation-public\0accounts"),
             Some(ObjectKind::Relation(RelationKind::Table))
         );
     }

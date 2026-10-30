@@ -68,6 +68,10 @@ pub(crate) struct Profile {
     /// it does -- a `SET`, `USE` or temporary table. Cleared on connect.
     pub(crate) session_changed: bool,
     pub(crate) catalog: CatalogState,
+    /// The generation a schema refresh was started on. Compared rather than
+    /// cleared, so a reconnect that drops the refresh's answer takes the
+    /// refresh with it.
+    pub(crate) schema_refresh: Option<u64>,
     /// What the server listed the last time Select Database asked.
     pub(crate) databases: Databases,
     /// Whether the connection opened on another database than the one the
@@ -118,6 +122,10 @@ impl Profile {
             .clone()
             .or_else(|| self.config.database_name())
             .or_else(|| opened.map(str::to_string))
+    }
+
+    pub(crate) fn refreshing_schema(&self) -> bool {
+        self.schema_refresh == Some(self.generation)
     }
 
     pub(crate) fn connection(&self) -> Option<Connection> {
@@ -332,6 +340,7 @@ pub(crate) struct Session {
     /// put the older definition back. A completion that is not the newest
     /// issued for its tab is dropped.
     pub(crate) structure_requests: HashMap<u64, u64>,
+    pub(crate) last_structure_request: u64,
 }
 
 /// A generated statement waiting to be read and run.
@@ -721,6 +730,7 @@ impl Session {
             queue_failure: None,
             stale_edit: None,
             structure_requests: HashMap::new(),
+            last_structure_request: 0,
         }
     }
 
