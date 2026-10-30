@@ -28,7 +28,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Before any build, so a release that cannot go out fails in seconds
       # instead of after every asset has been built.
       - id: version
@@ -63,7 +63,7 @@ jobs:
         runner: [ubuntu-22.04, ubuntu-22.04-arm]
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The same list the README tells a Linux user to install before building
       # from source. If CI needs something more, the README is wrong too.
@@ -81,7 +81,7 @@ jobs:
       # --release`, so this one is the packaging step alone.
       - run: dev/package-appimage.sh
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-${{ matrix.runner }}
           path: |
@@ -94,7 +94,7 @@ jobs:
     # arm64, which is all the cask installs on.
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Ad-hoc, deliberately: a Developer ID is the only identity Gatekeeper
       # would trust, and a signature from an issuer the user does not trust
@@ -117,7 +117,7 @@ jobs:
           hdiutil create -volname "DBDelve $VERSION" -srcfolder target/dmg \
             -size "${SIZE_MB}m" -ov -format UDZO "target/DBDelve-$VERSION.dmg"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: macos
           path: target/DBDelve-*.dmg
@@ -127,14 +127,14 @@ jobs:
     needs: version
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The hosted image already has MSVC, the Windows SDK (GPUI's shaders)
       # and rc.exe (the icon resource). If CI needs something more, the
       # README is wrong too.
       - run: powershell -File dev/package-windows.ps1
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows
           path: target/windows/dbdelve-*.zip
@@ -145,8 +145,8 @@ jobs:
     if: inputs.publish
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -184,13 +184,13 @@ jobs:
     if: needs.version.outputs.prerelease == 'false'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: macos
 
       # TAP_TOKEN is a fine-grained PAT with contents: write on the tap alone.
       # github.token cannot push to another repository.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: ShayanAbbas1/homebrew-dbdelve
           token: ${{ secrets.TAP_TOKEN }}
