@@ -887,11 +887,19 @@ fn references_listed_for_one_key_never_open_from_another(cx: &mut TestAppContext
             workspace.activate_tab(birds, window, cx);
         });
         settle(cx);
+        let checks_before = workspace.read_with(cx, |workspace, _| workspace.reference_checks);
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.show_references(&crate::actions::ShowReferences, window, cx);
             workspace.activate_tab(flocks, window, cx);
         });
         settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(
+                workspace.reference_checks,
+                checks_before + 1,
+                "no lookup started, so nothing stale was tested"
+            );
+        });
         assert!(
             palette_mode(&workspace, cx).is_none(),
             "a stale answer was listed"
