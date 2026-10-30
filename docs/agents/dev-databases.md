@@ -83,10 +83,15 @@ The `live_` tests are `#[ignore]`d and read `PGHOST`, `PGPORT`, `PGDATABASE`,
 `dbdelve_MSSQL_URL`, `dbdelve_REDIS_URL`, `dbdelve_MONGO_URL`, `dbdelve_CLICKHOUSE_URL`, `dbdelve_SQLITE_PATH`, `dbdelve_TURSO_PATH` and `dbdelve_SSH_CONFIG` (the
 lowercase prefix is what they read; the last points `live_ssh_*` at the
 config `dev/ssh/setup.sh` generates, an `ssh -F` rather than a connection
-string); the `tests` job in `ci.yml` has the values
+string); the `linux` job in `ci.yml` has the values
 for the dev databases. It has no Snowflake account, so it skips the Snowflake
-live tests but for the one that needs none; the mock tests stand in for them. CI lints on Linux, macOS and Windows, runs the live tests
-on Linux, and runs the unit tests on Windows too, since the storage tests are
-what exercise the `APPDATA` paths. `compose.yaml` and `dev/**` are in the
+live tests but for the one that needs none; the mock tests stand in for them.
+CI has one job per platform: each lints and runs the unit tests (on Windows the
+storage tests are what exercise the `APPDATA` paths), and Linux alone runs the
+live tests, since macOS runners have no Docker. They run under nextest there,
+which retries a failing `live_` test twice and reports one that then passes as
+flaky rather than as a pass (`.config/nextest.toml`); nothing else is retried.
+The renderers' pixel tests run when a PR changes `vendor/`, and on every push
+to main. `compose.yaml` and `dev/**` are in the
 workflow's own path filters, so a change to a dev container or a seed script
 runs CI too, not only a change under `src/`.

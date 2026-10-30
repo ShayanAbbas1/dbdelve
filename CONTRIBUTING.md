@@ -174,9 +174,9 @@ cargo clippy --all-targets -- -D warnings
 cargo test -- --include-ignored   # needs the databases up, see above
 ```
 
-CI also builds on macOS and Windows, so keep the crate building on all three
-platforms — `cargo build` on the platform you have is usually enough to
-catch anything platform-specific.
+CI also lints and runs the unit tests on macOS and Windows, so keep the crate
+building on all three platforms — `cargo build` on the platform you have is
+usually enough to catch anything platform-specific.
 
 ## Code conventions
 
