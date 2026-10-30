@@ -2035,13 +2035,14 @@ fn row_verb(mode: Mode, item: Option<&Item>, collapsed: &HashSet<String>) -> &'s
 
 /// The palette a mode opens with no connection to open: the theme lists, the
 /// engine list and the font lists, as on the welcome surface, the connection
-/// form and the settings panel, and while there are connections this build
-/// cannot open, the Connections scope that lists them, and the one row that
-/// removes one.
+/// form and the settings panel, the welcome surface's own verbs, and while
+/// there are connections this build cannot open, the Connections scope that
+/// lists them, and the one row that removes one.
 pub fn without_a_connection(mode: Mode, unavailable: bool) -> Option<Mode> {
     match mode {
         Mode::Theme(_) | Mode::ImportTheme(..) | Mode::Engine | Mode::Font(_) => Some(mode),
         Mode::Search(_) if unavailable => Some(Mode::Search(Scope::Connections)),
+        Mode::Search(Scope::Commands | Scope::All) => Some(mode),
         Mode::Confirm(Target::Unavailable(_)) if unavailable => Some(mode),
         _ => None,
     }
@@ -4110,13 +4111,17 @@ mod tests {
     }
 
     #[test]
-    fn with_no_connection_only_unavailable_ones_open_beside_themes_engines_and_fonts() {
+    fn with_no_connection_the_welcome_verbs_and_unavailable_ones_open_beside_themes_engines_and_fonts()
+     {
         let open = |mode, unavailable| without_a_connection(mode, unavailable);
         assert!(open(Mode::Engine, false) == Some(Mode::Engine));
         assert!(open(Mode::Theme(None), false) == Some(Mode::Theme(None)));
         assert!(open(Mode::Font(FontSlot::Grid), false) == Some(Mode::Font(FontSlot::Grid)));
+        for mode in [Mode::Search(Scope::Commands), Mode::Search(Scope::All)] {
+            assert!(open(mode, false) == Some(mode));
+        }
         for mode in [
-            Mode::Search(Scope::Commands),
+            Mode::Search(Scope::Objects),
             Mode::Search(Scope::Connections),
             Mode::Confirm(Target::Unavailable(0)),
         ] {

@@ -71,7 +71,10 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   open, the window is the welcome surface (`Workspace::render_welcome`): New
   project, New connection, each project with an Add connection of its own, and
   a Theme row whose button opens the theme palette, so a first launch can
-  leave the opaque default before connecting anywhere.
+  leave the opaque default before connecting anywhere. ⌘⇧P there opens
+  Commands on the surface's own verbs (`palette::welcome_items`: new
+  connection, data file, project, imports, themes, fonts, Settings), and
+  nothing that needs a connection is listed.
   Importing from DBeaver or TablePlus starts there too, or from the File menu
   and the palette once connections exist, never from over the connection form
   (its root does not answer `ImportConnections`, so nothing typed into it is
