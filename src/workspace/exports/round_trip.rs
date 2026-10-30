@@ -268,6 +268,30 @@ fn assert_awkward_texts_read_as_written(table: &Throwaway, column: usize) {
     }
 }
 
+/// A text around a NUL, in each place one can fall, read as written and run
+/// back from a file that holds no raw NUL to cut a statement short.
+fn assert_nul_in_text_runs_back(table: &Throwaway) {
+    let texts = ["a\0b", "\0leads", "trails\0", "\0", "two\0\0nuls"];
+    let joiner = table.engine.spec().sql.nul_joiner.expect("a joiner");
+    for (index, text) in texts.iter().enumerate() {
+        let literal = text
+            .split('\0')
+            .map(|part| table.engine.quote_literal(part))
+            .collect::<Vec<_>>()
+            .join(joiner);
+        table.run(&format!(
+            "INSERT INTO {{table}} (id, body) VALUES ({index}, {literal})"
+        ));
+    }
+    let read = table.rows();
+    for (row, text) in read.rows.iter().zip(texts) {
+        assert_eq!(row.get(1), Some(text), "{:?}", table.engine);
+    }
+    let (_, file) = table.exported().expect("the export finishes");
+    assert!(!file.contains('\0'), "{:?}: {file:?}", table.engine);
+    assert_runs_back(table, "SELECT id FROM {table} ORDER BY id");
+}
+
 /// A file with nothing to say is an empty one, and it says so as a success.
 fn assert_an_empty_table_exports_an_empty_file(table: &Throwaway) {
     assert_eq!(
@@ -656,6 +680,22 @@ impl Drop for DuckDbFile {
     fn drop(&mut self) {
         _ = std::fs::remove_dir_all(&self.0);
     }
+}
+
+#[test]
+#[ignore = "needs the dev SQL Server"]
+fn live_a_nul_in_text_exported_as_sql_runs_back_on_sql_server() {
+    let table = Throwaway::new(open("dbdelve_MSSQL_URL"), Engine::SqlServer, "dbo", "nul");
+    table.run("CREATE TABLE {table} (id INT PRIMARY KEY, body NVARCHAR(40))");
+    assert_nul_in_text_runs_back(&table);
+}
+
+#[test]
+fn a_nul_in_text_exported_as_sql_runs_back_on_duckdb() {
+    let file = DuckDbFile::new("nul");
+    let table = Throwaway::new(file.open(), Engine::DuckDb, "main", "nul");
+    table.run("CREATE TABLE {table} (id INTEGER PRIMARY KEY, body VARCHAR)");
+    assert_nul_in_text_runs_back(&table);
 }
 
 #[test]

@@ -339,12 +339,19 @@ fn insert_literal(engine: Engine, cell: Option<&str>, column: &Column) -> String
         {
             value.to_string()
         }
-        // Spelled out where the engine can, since the grammar that cuts a file
+        // Spelled out in either arm below, since the grammar that cuts a file
         // into statements stops reading at a raw NUL.
         Some(value) if engine.spec().sql.backslash_escapes => {
             engine.quote_value(value, data_type).replace('\0', r"\0")
         }
-        Some(value) => engine.quote_value(value, data_type),
+        Some(value) => match engine.spec().sql.nul_joiner {
+            Some(joiner) if value.contains('\0') => value
+                .split('\0')
+                .map(|part| engine.quote_value(part, data_type))
+                .collect::<Vec<_>>()
+                .join(joiner),
+            _ => engine.quote_value(value, data_type),
+        },
     }
 }
 

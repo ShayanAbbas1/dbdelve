@@ -1402,6 +1402,59 @@ mod tests {
     }
 
     #[test]
+    fn a_nul_in_a_files_text_runs_back_where_sql_is_sqlites() {
+        for (engine, name) in [(Engine::Sqlite, "sqlite-nul"), (Engine::Turso, "turso-nul")] {
+            let directory = scratch(name);
+            let path = directory.join("rows.db").display().to_string();
+            std::fs::write(&path, b"").unwrap();
+            let connection = Connection::open(match engine {
+                Engine::Turso => ConnectionConfig::Turso {
+                    path,
+                    statement_timeout: 0,
+                },
+                _ => ConnectionConfig::Sqlite {
+                    path,
+                    statement_timeout: 0,
+                },
+            })
+            .unwrap();
+            let cancel = CancelToken::default();
+            let run = |sql: &str| connection.query(sql, &cancel, Fetch::default()).unwrap();
+            run("CREATE TABLE notes (id INTEGER, note TEXT)");
+            run("INSERT INTO notes VALUES (1, 'a' || char(0) || 'b'), (2, char(0))");
+
+            let file = directory.join("notes.sql");
+            let refetch = relation_refetch(engine, "main", "notes", "", &[], &[]).unwrap();
+            let target = InsertTarget {
+                relation: Some(("main".into(), "notes".into())),
+                ..InsertTarget::default()
+            };
+            let written = export_every_row(
+                &connection,
+                &refetch,
+                &target,
+                true,
+                engine,
+                &file,
+                &ExportProgress::default(),
+            );
+            assert_eq!(written, Ok(2), "{engine:?}");
+
+            let exact = "SELECT id, hex(note) FROM notes ORDER BY id";
+            let before = run(exact).rows;
+            assert_eq!(before[0].get(1), Some("610062"), "{engine:?}");
+            let file = std::fs::read_to_string(&file).unwrap();
+            assert!(!file.contains('\0'), "{engine:?}");
+            run("DELETE FROM notes");
+            for statement in file.lines() {
+                run(statement);
+            }
+            assert_eq!(run(exact).rows, before, "{engine:?}");
+            _ = std::fs::remove_dir_all(&directory);
+        }
+    }
+
+    #[test]
     fn a_relation_exported_as_sql_runs_back_into_a_copy_of_it() {
         let directory = scratch("inserts");
         let database = directory.join("rows.db");

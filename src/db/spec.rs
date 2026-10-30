@@ -216,6 +216,9 @@ pub struct SqlSpec {
     /// Whether a backslash inside a quoted identifier escapes the character
     /// after it, so a literal one has to survive as two.
     pub identifier_backslash_escapes: bool,
+    /// What joins the quoted pieces of a text around a NUL, on an engine whose
+    /// text can hold one and whose literal has no escape for it.
+    pub nul_joiner: Option<&'static str>,
     /// String literals are written `N'…'`, because a bare one is converted to
     /// the database's code page first, and a character it lacks arrives as `?`.
     pub national_strings: bool,
@@ -278,6 +281,7 @@ impl SqlSpec {
         identifier_quote: IdentifierQuote::Double,
         backslash_escapes: false,
         identifier_backslash_escapes: false,
+        nul_joiner: None,
         national_strings: false,
         literal_offsets: true,
         boolean_literal: BooleanLiteral::TrueFalse,
@@ -820,6 +824,7 @@ pub(crate) const SQLITE: EngineSpec = EngineSpec {
     type_wrappers: &[],
     hints: Hints::DEFAULT,
     sql: SqlSpec {
+        nul_joiner: Some(" || char(0) || "),
         boolean_literal: BooleanLiteral::OneZero,
         truncate: Truncate::DeleteFrom,
         skip_duplicates: SkipDuplicates::OnConflictDoNothing {
@@ -868,6 +873,7 @@ pub(crate) const TURSO: EngineSpec = EngineSpec {
     type_wrappers: &[],
     hints: Hints::DEFAULT,
     sql: SqlSpec {
+        nul_joiner: Some(" || char(0) || "),
         boolean_literal: BooleanLiteral::OneZero,
         truncate: Truncate::DeleteFrom,
         skip_duplicates: SkipDuplicates::OnConflictDoNothing {
@@ -909,6 +915,7 @@ pub(crate) const DUCKDB: EngineSpec = EngineSpec {
         ..Hints::DEFAULT
     },
     sql: SqlSpec {
+        nul_joiner: Some(" || chr(0) || "),
         skip_duplicates: SkipDuplicates::OnConflictDoNothing {
             needs_unique_key: true,
         },
@@ -1025,6 +1032,7 @@ pub(crate) const SQL_SERVER: EngineSpec = EngineSpec {
     type_wrappers: &[],
     hints: Hints::DEFAULT,
     sql: SqlSpec {
+        nul_joiner: Some(" + NCHAR(0) + "),
         national_strings: true,
         boolean_literal: BooleanLiteral::OneZero,
         params: Params::AtP,
