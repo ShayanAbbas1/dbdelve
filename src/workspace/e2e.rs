@@ -893,3 +893,28 @@ fn the_palette_switches_who_sorts_the_view(cx: &mut TestAppContext) {
         quit(workspace, cx);
     });
 }
+
+#[gpui::test]
+fn an_empty_table_opened_from_the_sidebar_keeps_the_keyboard(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        cx.simulate_keystrokes("secondary-k e");
+        settle(cx);
+        cx.simulate_keystrokes("down down enter");
+        settle(cx);
+        let rows = workspace.read_with(cx, |workspace, cx| {
+            let session = &workspace.profile().unwrap().session;
+            session
+                .active_results()
+                .map(|grid| grid.read(cx).delegate().total_rows())
+        });
+        assert_eq!(rows, Some(0));
+        cx.update(|window, _| assert!(!window.context_stack().is_empty(), "no dispatch path"));
+
+        cx.simulate_keystrokes("secondary-shift-p");
+        settle(cx);
+        assert!(palette_mode(&workspace, cx).is_some());
+
+        quit(workspace, cx);
+    });
+}

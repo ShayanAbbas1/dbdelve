@@ -1613,7 +1613,18 @@ fn render_results(
         .into_any_element();
 
     let content = match message {
-        Some(message) => message,
+        // Holding the grid's handle in its place: a table opened empty was
+        // given the keyboard as it opened, and a handle no element tracks
+        // leaves the window with no dispatch path at all.
+        Some(message) => div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .min_h_0()
+            .min_w_0()
+            .track_focus(&results.focus_handle(cx))
+            .child(message)
+            .into_any_element(),
         None => match loading {
             // A child rather than replacing the grid: it must stay mounted
             // for the focus a fresh tab put on it, `secondary-w` included --
