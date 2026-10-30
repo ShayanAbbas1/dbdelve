@@ -34,7 +34,8 @@ use crate::{
         PreviousProfile, PreviousTab, Quit, RefreshConnection, RefreshRelation, ResetEditorZoom,
         RunQuery, SaveQuery, SearchEverything, SelectDatabase, SelectTheme, SetDefault, SetEmpty,
         SetNull, ShowEditor, SubmitConnection, SwitchConnection, ToggleComment, ToggleNextJoin,
-        ToggleRowEdit, ToggleRowPanel, ToggleSidebar, ToggleStructure, ZoomEditorIn, ZoomEditorOut,
+        ToggleResultsFocus, ToggleRowEdit, ToggleRowPanel, ToggleSidebar, ToggleStructure,
+        ZoomEditorIn, ZoomEditorOut,
     },
     db::ExplainMode,
     import::Source,
@@ -173,6 +174,7 @@ registry! {
     ("toggle_row_panel", "Toggle Row Panel", None, ["secondary-shift-i"], ToggleRowPanel),
     ("toggle_row_edit", "Toggle Row Panel Edit Mode", None, ["secondary-shift-e"], ToggleRowEdit),
     ("toggle_structure", "Toggle Data / Structure", None, ["secondary-shift-d"], ToggleStructure),
+    ("toggle_results_focus", "Toggle Editor / Results Focus", None, ["secondary-k r"], ToggleResultsFocus),
     ("quit", "Quit dbdelve", None, ["secondary-q"], Quit),
     // Click or command-palette only today; listed so they can be given a
     // chord for the first time.

@@ -2388,6 +2388,29 @@ pub(crate) fn reveal_column(
     true
 }
 
+/// Give the grid the keyboard from outside it, the ring where it was or on the
+/// first cell. The library's arrows step from its own selected row, which a
+/// grid reached by a click elsewhere may no longer have, so it is told the
+/// ring's -- without collapsing the rows the user picked out around it.
+pub(crate) fn take_keyboard(
+    table: &mut TableState<ResultGrid>,
+    window: &mut Window,
+    cx: &mut Context<TableState<ResultGrid>>,
+) {
+    table.focus_handle(cx).focus(window, cx);
+    if table.delegate().result.rows.is_empty() || table.selected_row().is_some() {
+        return;
+    }
+    let row = match table.delegate().active {
+        Some((row, _)) => {
+            table.delegate_mut().pointer_row = Some(row);
+            row
+        }
+        None => 0,
+    };
+    table.set_selected_row(row, cx);
+}
+
 /// Scroll the active cell back into view when the grid's width changes under
 /// it. The row panel is what usually changes it: the click that selects a row
 /// opens the panel beside the grid, and any scroll into view that click caused

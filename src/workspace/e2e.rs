@@ -139,6 +139,12 @@ fn editor_has_keyboard(workspace: &Entity<Workspace>, cx: &mut VisualTestContext
     })
 }
 
+fn grid_has_keyboard(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> bool {
+    query_tab(workspace, cx, |tab, window, cx| {
+        tab.results.focus_handle(cx).is_focused(window)
+    })
+}
+
 fn dialog_has_keyboard(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> bool {
     cx.update(|window, cx| workspace.read(cx).dialog_focus.is_focused(window))
 }
@@ -251,6 +257,45 @@ fn a_prompt_dismissed_from_the_keyboard_hands_it_back_to_the_editor(cx: &mut Tes
             settle(cx);
             assert_eq!(buffer(&workspace, cx), format!("{before}{typed}"));
         }
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_keyboard_moves_between_the_buffer_and_its_rows(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        cx.simulate_input("select 1");
+        cx.simulate_keystrokes("secondary-k r");
+        settle(cx);
+        assert!(
+            editor_has_keyboard(&workspace, cx),
+            "with no rows yet, the buffer keeps it"
+        );
+
+        cx.simulate_keystrokes("secondary-enter");
+        settle(cx);
+        cx.simulate_keystrokes("secondary-k r");
+        settle(cx);
+        assert!(grid_has_keyboard(&workspace, cx));
+        query_tab(&workspace, cx, |tab, _, cx| {
+            assert_eq!(tab.results.read(cx).delegate().active(), Some((0, 0)));
+        });
+
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+        assert!(editor_has_keyboard(&workspace, cx));
+        cx.simulate_input("x");
+        settle(cx);
+        assert_eq!(buffer(&workspace, cx), "select 1x");
+
+        cx.simulate_keystrokes("secondary-k r");
+        settle(cx);
+        assert!(grid_has_keyboard(&workspace, cx));
+        cx.simulate_keystrokes("secondary-k r");
+        settle(cx);
+        assert!(editor_has_keyboard(&workspace, cx));
 
         quit(workspace, cx);
     });

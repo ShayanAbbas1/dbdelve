@@ -4,6 +4,7 @@
 //! impl live in as many modules as it has concerns; they moved out whole.
 
 use super::*;
+use crate::actions::ToggleResultsFocus;
 use crate::session::PendingDiscard;
 use crate::tab_drag::{self, Drag, Slot};
 
@@ -714,12 +715,95 @@ impl Workspace {
             cx.notify();
             return;
         }
+        // From the rows back to the statement above them. The grid itself, not
+        // a cell's open input, which is a descendant of it and whose `escape`
+        // cancels the edit.
+        if let Some(session) = self.profile().map(|profile| &profile.session)
+            && let Some(editor) = session.editor(session.active)
+            && session
+                .active_results()
+                .is_some_and(|grid| grid.focus_handle(cx).is_focused(window))
+        {
+            editor.focus_handle(cx).focus(window, cx);
+            cx.notify();
+            return;
+        }
         // Nothing of dbdelve's is stacked over the tab, so the keystroke is not
         // ours. Handing it on is what lets the completion popup close and a
         // grid cell's input cancel its edit; this binding is unscoped and would
         // otherwise win it at every depth. Never a tab switch, on any tab: that
         // is what used to take the `escape` meant for a cell edit.
         cx.propagate();
+    }
+
+    /// Between the buffer and the rows it ran: to whichever the keyboard is
+    /// not in. On an object tab, which has no buffer, to its grid.
+    pub(crate) fn toggle_results_focus(
+        &mut self,
+        _: &ToggleResultsFocus,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.palette.is_some() || self.dialog_in_front.get().is_some() || self.form.is_some() {
+            return;
+        }
+        let Some(session) = self.profile().map(|profile| &profile.session) else {
+            return;
+        };
+        let editor = session.editor(session.active);
+        let in_rows = session
+            .active_results()
+            .is_some_and(|grid| grid.focus_handle(cx).contains_focused(window, cx));
+        let target = match (in_rows, editor) {
+            (true, Some(editor)) => Focus::Buffer(editor),
+            (_, editor) => match (self.front_grid(cx), editor) {
+                (Some(grid), _) => grid,
+                (None, Some(editor)) => Focus::Buffer(editor),
+                (None, None) => return,
+            },
+        };
+        match target {
+            Focus::Grid(grid) => grid.update(cx, |table, cx| {
+                crate::result_grid::take_keyboard(table, window, cx)
+            }),
+            Focus::Structure(grid) => grid.focus_handle(cx).focus(window, cx),
+            Focus::Buffer(editor) => editor.focus_handle(cx).focus(window, cx),
+            Focus::Field(_) | Focus::Window => return,
+        }
+        // A hand-back asked for earlier would take the keyboard straight back.
+        if let Some(profile) = self.profile_mut() {
+            profile.session.editor_needs_focus = false;
+        }
+        cx.notify();
+    }
+
+    /// The grid in front that can take the keyboard: one drawn, with a row for
+    /// the ring to sit on. A plan, the run's messages, or the line standing in
+    /// for rows that never came, has nothing in it to step through.
+    fn front_grid(&self, cx: &App) -> Option<Focus> {
+        let session = &self.profile()?.session;
+        let has_rows = |grid: &Entity<gpui_component::table::TableState<ResultGrid>>| {
+            !grid.read(cx).delegate().result().rows.is_empty()
+        };
+        let Some(tab) = session.active_object() else {
+            let tab = session.active_query_tab()?;
+            let (state, grid) = tab.shown();
+            let drawn = tab.plan_shown().is_none()
+                && !tab.messages_shown()
+                && matches!(
+                    state,
+                    QueryState::Running { .. } | QueryState::Complete { .. }
+                );
+            return (drawn && has_rows(grid)).then(|| Focus::Grid(grid.clone()));
+        };
+        match &tab.body {
+            ObjectBody::Relation { query, results, .. } => {
+                (!matches!(query, QueryState::Failed(_)) && has_rows(results))
+                    .then(|| Focus::Grid(results.clone()))
+            }
+            ObjectBody::Structure { grid, .. } => Some(Focus::Structure(grid.clone())),
+            ObjectBody::Routine(_) => None,
+        }
     }
 
     /// `cmd+w` on whatever surface is in front. Closing never deletes a saved

@@ -211,6 +211,7 @@ actions!(
         ToggleRowPanel,
         ToggleRowEdit,
         ToggleStructure,
+        ToggleResultsFocus,
         AcceptCompletion,
         OpenSettings,
         ResetConfirmations,

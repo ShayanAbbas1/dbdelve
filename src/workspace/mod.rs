@@ -2033,6 +2033,7 @@ impl Render for Workspace {
                     .on_action(cx.listener(Self::toggle_row_panel))
                     .on_action(cx.listener(Self::toggle_row_edit))
                     .on_action(cx.listener(Self::toggle_structure))
+                    .on_action(cx.listener(Self::toggle_results_focus))
             })
             .size_full()
             // The shell is the frost: titlebar, sidebar and status bar paint
