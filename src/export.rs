@@ -13,7 +13,9 @@ use std::{
 
 use serde::Deserialize;
 
-use crate::db::{Column, EditTarget, Engine, MISSING, QueryResult, Row, Syntax};
+use crate::db::{
+    Column, ColumnDefinition, EditTarget, Engine, IdentityInsert, MISSING, QueryResult, Row, Syntax,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
@@ -96,6 +98,27 @@ pub struct InsertTarget {
     /// The result column's real source, positionally -- `None` for a computed
     /// one (`now() AS t`), which has nowhere to write back to.
     pub columns: Option<Vec<Option<String>>>,
+    /// The table's columns its server works out for itself, by their real
+    /// names: left out wherever the result holds them.
+    pub computed: Vec<String>,
+    /// The table's columns its server numbers, by their real names.
+    pub numbered: Vec<String>,
+}
+
+impl InsertTarget {
+    /// This target, knowing what the server fills of the table of `columns`.
+    pub fn knowing(self, engine: Engine, columns: &[ColumnDefinition]) -> Self {
+        let spec = engine.spec();
+        let names = |fills: &dyn Fn(&ColumnDefinition) -> bool| {
+            let filled = columns.iter().filter(|column| fills(column));
+            filled.map(|column| column.name.clone()).collect()
+        };
+        Self {
+            computed: names(&|column| spec.computes(column)),
+            numbered: names(&|column| spec.numbers(column)),
+            ..self
+        }
+    }
 }
 
 impl From<&EditTarget> for InsertTarget {
@@ -103,6 +126,7 @@ impl From<&EditTarget> for InsertTarget {
         Self {
             relation: Some((edit.schema.clone(), edit.table.clone())),
             columns: Some(edit.columns.clone()),
+            ..Self::default()
         }
     }
 }
@@ -113,6 +137,8 @@ struct Inserts {
     opening: String,
     /// The result columns that are written, by position.
     written: Vec<(usize, Column)>,
+    /// The statements a file holds before its first row and after its last.
+    around: Option<(String, String)>,
 }
 
 impl Inserts {
@@ -135,19 +161,35 @@ impl Inserts {
                 Some(sources) => sources[index].as_deref().map(|name| (index, name, column)),
                 None => Some((index, column.name.as_str(), column)),
             })
+            .filter(|(_, name, _)| !target.computed.iter().any(|computed| computed == name))
             .collect();
+        let numbered = written
+            .iter()
+            .any(|(_, name, _)| target.numbered.iter().any(|numbered| numbered == name));
         let names = written
             .iter()
             .map(|(_, name, _)| engine.quote_identifier(name))
             .collect::<Vec<_>>()
             .join(", ");
+        let identity_insert = engine.spec().sql.identity_insert;
+        let overriding = match (numbered, identity_insert) {
+            (true, IdentityInsert::Overriding) => " OVERRIDING SYSTEM VALUE",
+            _ => "",
+        };
+        let around = (numbered && identity_insert == IdentityInsert::SessionSwitch).then(|| {
+            (
+                format!("SET IDENTITY_INSERT {into} ON;\n"),
+                format!("SET IDENTITY_INSERT {into} OFF;\n"),
+            )
+        });
         Self {
             engine,
-            opening: format!("INSERT INTO {into} ({names}) VALUES ("),
+            opening: format!("INSERT INTO {into} ({names}){overriding} VALUES ("),
             written: written
                 .into_iter()
                 .map(|(index, _, column)| (index, column.clone()))
                 .collect(),
+            around,
         }
     }
 
@@ -462,8 +504,12 @@ impl<W: Write> Writer<W> {
             }
             Shape::Inserts(inserts) => {
                 for row in rows {
+                    if let (0, Some((before, _))) = (self.written, &inserts.around) {
+                        out.write_all(before.as_bytes())?;
+                    }
                     out.write_all(inserts.statement(row).as_bytes())?;
                     out.write_all(b"\n")?;
+                    self.written += 1;
                 }
             }
         }
@@ -471,11 +517,16 @@ impl<W: Write> Writer<W> {
     }
 
     pub fn finish(mut self) -> io::Result<W> {
-        if let Shape::Json(_) = self.shape {
-            self.out.write_all(match self.written {
+        match &self.shape {
+            Shape::Json(_) => self.out.write_all(match self.written {
                 0 => b"[]\n",
                 _ => b"\n]\n",
-            })?;
+            })?,
+            Shape::Inserts(Inserts {
+                around: Some((_, after)),
+                ..
+            }) if self.written > 0 => self.out.write_all(after.as_bytes())?,
+            Shape::Delimited(_) | Shape::Inserts(_) => {}
         }
         self.out.flush()?;
         Ok(self.out)
@@ -796,7 +847,7 @@ mod tests {
         };
         let target = InsertTarget {
             relation: Some(("public".into(), "notes".into())),
-            columns: None,
+            ..InsertTarget::default()
         };
         assert_eq!(
             inserts_file(&target, &result),
@@ -813,12 +864,142 @@ mod tests {
             ..QueryResult::default()
         };
         let target = InsertTarget {
-            relation: None,
             columns: Some(vec![Some("only".into())]),
+            ..InsertTarget::default()
         };
         assert_eq!(
             inserts_file(&target, &result),
             "INSERT INTO table_name (\"a\", \"b\") VALUES ('1', '2');\n"
+        );
+    }
+
+    fn file_of(engine: Engine, target: &InsertTarget, rows_written: &[Row]) -> String {
+        let columns = [column("id"), column("note"), column("twice")];
+        let mut writer = FileAs::Inserts
+            .writer(Vec::new(), engine, target, &columns)
+            .unwrap();
+        for row in rows_written {
+            writer.rows(std::slice::from_ref(row), &[]).unwrap();
+        }
+        String::from_utf8(writer.finish().unwrap()).unwrap()
+    }
+
+    fn definition(name: &str, data_type: &str, default: &str) -> ColumnDefinition {
+        ColumnDefinition {
+            name: name.into(),
+            data_type: data_type.into(),
+            nullable: true,
+            default: Some(default.into()),
+        }
+    }
+
+    fn numbered_target(engine: Engine, identity: &str, computed: &str) -> InsertTarget {
+        InsertTarget {
+            relation: Some(("s".into(), "t".into())),
+            ..InsertTarget::default()
+        }
+        .knowing(
+            engine,
+            &[
+                definition("id", "int", identity),
+                definition("note", "text", ""),
+                definition("twice", "int", computed),
+            ],
+        )
+    }
+
+    #[test]
+    fn a_sql_server_file_switches_identity_insert_around_its_rows() {
+        let target = numbered_target(Engine::SqlServer, "IDENTITY(1,1)", "AS ([id]*(2))");
+        let two = rows(vec![
+            vec![Some("3".into()), Some("a".into()), Some("6".into())],
+            vec![Some("5".into()), None, Some("10".into())],
+        ]);
+        assert_eq!(
+            file_of(Engine::SqlServer, &target, &two),
+            "SET IDENTITY_INSERT \"s\".\"t\" ON;\n\
+             INSERT INTO \"s\".\"t\" (\"id\", \"note\") VALUES (N'3', N'a');\n\
+             INSERT INTO \"s\".\"t\" (\"id\", \"note\") VALUES (N'5', NULL);\n\
+             SET IDENTITY_INSERT \"s\".\"t\" OFF;\n"
+        );
+        assert_eq!(file_of(Engine::SqlServer, &target, &[]), "");
+
+        let plain = numbered_target(Engine::SqlServer, "", "");
+        assert!(!file_of(Engine::SqlServer, &plain, &two).contains("IDENTITY_INSERT"));
+    }
+
+    #[test]
+    fn a_rowversion_is_left_out_as_a_computed_column_is() {
+        let target = InsertTarget::default()
+            .knowing(Engine::SqlServer, &[definition("twice", "timestamp", "")]);
+        assert_eq!(target.computed, ["twice"]);
+        assert!(target.numbered.is_empty());
+    }
+
+    #[test]
+    fn postgres_overrides_only_an_identity_it_writes_and_that_refuses_values() {
+        let row = rows(vec![vec![Some("3".into()), None, Some("6".into())]]);
+        let target = numbered_target(
+            Engine::Postgres,
+            "GENERATED ALWAYS AS IDENTITY",
+            "GENERATED ALWAYS AS ((id * 2)) STORED",
+        );
+        assert_eq!(
+            file_of(Engine::Postgres, &target, &row),
+            "INSERT INTO \"s\".\"t\" (\"id\", \"note\") OVERRIDING SYSTEM VALUE \
+             VALUES ('3', NULL);\n"
+        );
+        let by_default = numbered_target(Engine::Postgres, "GENERATED BY DEFAULT AS IDENTITY", "");
+        assert_eq!(
+            file_of(Engine::Postgres, &by_default, &row),
+            "INSERT INTO \"s\".\"t\" (\"id\", \"note\", \"twice\") \
+             VALUES ('3', NULL, '6');\n"
+        );
+        let elsewhere = InsertTarget {
+            columns: Some(vec![None, Some("note".into()), Some("twice".into())]),
+            computed: vec!["twice".into()],
+            numbered: vec!["id".into()],
+            ..target
+        };
+        assert_eq!(
+            file_of(Engine::Postgres, &elsewhere, &row),
+            "INSERT INTO \"s\".\"t\" (\"note\") VALUES (NULL);\n"
+        );
+    }
+
+    #[test]
+    fn an_auto_increment_keeps_its_value_with_nothing_said_and_a_computed_column_goes() {
+        let target = numbered_target(
+            Engine::MySql,
+            "AUTO_INCREMENT",
+            "GENERATED ALWAYS AS (`id` * 2)",
+        );
+        let row = rows(vec![vec![Some("3".into()), None, Some("6".into())]]);
+        assert_eq!(
+            file_of(Engine::MySql, &target, &row),
+            "INSERT INTO `s`.`t` (`id`, `note`) VALUES ('3', NULL);\n"
+        );
+    }
+
+    #[test]
+    fn a_result_is_matched_to_its_table_by_the_source_of_each_column() {
+        let target = InsertTarget {
+            columns: Some(vec![
+                Some("twice".into()),
+                Some("note".into()),
+                Some("id".into()),
+            ]),
+            ..numbered_target(
+                Engine::Postgres,
+                "GENERATED ALWAYS AS IDENTITY",
+                "GENERATED ALWAYS AS ((id * 2)) STORED",
+            )
+        };
+        let row = rows(vec![vec![Some("6".into()), None, Some("3".into())]]);
+        assert_eq!(
+            file_of(Engine::Postgres, &target, &row),
+            "INSERT INTO \"s\".\"t\" (\"note\", \"id\") OVERRIDING SYSTEM VALUE \
+             VALUES (NULL, '3');\n"
         );
     }
 

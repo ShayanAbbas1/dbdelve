@@ -869,8 +869,8 @@ source: src/sql_snapshots.rs
 [duckdb] edits_key_column field => |false|
 [duckdb] edits_key_column id => |false|
 [duckdb] generates (no default) => |false|
-[duckdb] generates GENERATED ALWAYS AS (a + 1) STORED => |false|
-[duckdb] generates GENERATED ALWAYS AS ((a)) => |false|
+[duckdb] generates GENERATED ALWAYS AS (a + 1) STORED => |true|
+[duckdb] generates GENERATED ALWAYS AS ((a)) => |true|
 [duckdb] generates AUTO_INCREMENT => |false|
 [duckdb] generates IDENTITY(1,1) => |false|
 [duckdb] generates AS ([a]+(1)) => |false|

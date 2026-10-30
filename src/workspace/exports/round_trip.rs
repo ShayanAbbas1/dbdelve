@@ -36,6 +36,8 @@ struct Throwaway {
     name: String,
     directory: PathBuf,
     drops: Vec<String>,
+    /// A column the server rewrites with every row, so no read of it compares.
+    restamped: Option<&'static str>,
 }
 
 impl Drop for Throwaway {
@@ -50,8 +52,12 @@ impl Drop for Throwaway {
 }
 
 impl Throwaway {
-    fn new(connection: Connection, engine: Engine, schema: &'static str) -> Self {
-        let name = format!("dbdelve_export_{}_{}", engine.spec().id, std::process::id());
+    fn new(connection: Connection, engine: Engine, schema: &'static str, tag: &str) -> Self {
+        let name = format!(
+            "dbdelve_export_{}_{tag}_{}",
+            engine.spec().id,
+            std::process::id()
+        );
         let directory = std::env::temp_dir().join(&name);
         _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).unwrap();
@@ -62,6 +68,7 @@ impl Throwaway {
             name,
             directory,
             drops: Vec::new(),
+            restamped: None,
         };
         table.drop_after("DROP TABLE IF EXISTS {table}");
         table
@@ -104,19 +111,22 @@ impl Throwaway {
         }
     }
 
+    fn target(&self) -> InsertTarget {
+        InsertTarget {
+            relation: Some((self.schema.into(), self.name.clone())),
+            ..InsertTarget::default()
+        }
+    }
+
     /// The file a sidebar export of the whole table would write.
     fn exported(&self) -> Result<(usize, String), Ended> {
         let path = self.directory.join("rows.sql");
         let refetch = relation_refetch(self.engine, self.schema, &self.name, "", &[], &[])
             .expect("a relation of this name is read in one query");
-        let target = InsertTarget {
-            relation: Some((self.schema.into(), self.name.clone())),
-            columns: None,
-        };
         let written = export_every_row(
             &self.connection,
             &refetch,
-            &target,
+            &self.target(),
             false,
             self.engine,
             &path,
@@ -125,15 +135,32 @@ impl Throwaway {
         Ok((written, std::fs::read_to_string(&path).unwrap()))
     }
 
-    /// Every statement of `file` run, each failure said rather than stopping
-    /// at the first, since one bad value only costs its row.
+    /// The file exporting the rows of a relation tab's grid would write.
+    fn exported_as_shown(&self, result: &QueryResult, target: &InsertTarget) -> String {
+        let path = self.directory.join("shown.sql");
+        let target = knowing_the_table(&self.connection, target, FileAs::Inserts, self.engine);
+        write_shown(result, FileAs::Inserts, &target, self.engine, &path)
+            .expect("the export finishes");
+        std::fs::read_to_string(&path).unwrap()
+    }
+
+    /// `file` run in order on the one session, a unit at a time as a query tab
+    /// would send it, each failure said rather than stopping at the first:
+    /// one bad value only costs its row.
     fn replay(&self, file: &str) -> Vec<String> {
-        let buffer = sql::Buffer::for_engine(self.engine, file);
-        buffer
-            .statements()
-            .iter()
+        sql::queued_statements(self.engine, file, None)
+            .into_iter()
             .filter_map(|range| {
-                let statement = &file[range.clone()];
+                let statement = &file[range];
+                // The gate's parser has no `OVERRIDING`, so a query tab asks
+                // once before running such a file.
+                let verdict = sql::classify(self.engine, statement);
+                assert!(
+                    statement.contains(" OVERRIDING SYSTEM VALUE ")
+                        || !verdict.destructive.contains(&Destructive::Unreadable),
+                    "{:?} cannot read `{statement}`",
+                    self.engine
+                );
                 let ran =
                     self.connection
                         .query(statement, &CancelToken::default(), Fetch::default());
@@ -145,7 +172,7 @@ impl Throwaway {
 }
 
 /// Every cell of `before` against `after`, matched on the first column.
-fn differences(before: &QueryResult, after: &QueryResult) -> Vec<String> {
+fn differences(before: &QueryResult, after: &QueryResult, restamped: Option<&str>) -> Vec<String> {
     let mut differences = Vec::new();
     if after.rows.len() != before.rows.len() {
         differences.push(format!(
@@ -161,7 +188,7 @@ fn differences(before: &QueryResult, after: &QueryResult) -> Vec<String> {
             continue;
         };
         for (index, column) in before.columns.iter().enumerate() {
-            if row.get(index) != back.get(index) {
+            if row.get(index) != back.get(index) && restamped != Some(column.name.as_str()) {
                 differences.push(format!(
                     "row {:?}, {} ({:?}): {:?} came back as {:?}",
                     key(row),
@@ -178,22 +205,50 @@ fn differences(before: &QueryResult, after: &QueryResult) -> Vec<String> {
 
 /// `exact` is a read keyed and ordered by id, for what a cell's text does not
 /// show: a value the grid spells the same either way is caught only by a
-/// column that spells it exactly.
+/// column that spells it exactly. Both ways of exporting are run back.
 fn assert_runs_back(table: &Throwaway, exact: &str) {
     let (before, exact_before) = (table.rows(), table.run(exact));
     let (written, file) = table.exported().expect("the export finishes");
     assert_eq!(written, before.rows.len(), "{:?}", table.engine);
-    table.run("TRUNCATE TABLE {table}");
     let statements = sql::Buffer::for_engine(table.engine, &file)
         .statements()
         .len();
-    assert_eq!(statements, written, "{:?}: {file}", table.engine);
+    let switches = file
+        .lines()
+        .filter(|line| line.starts_with("SET IDENTITY_INSERT"));
+    assert_eq!(
+        statements,
+        written + switches.count(),
+        "{:?}: {file}",
+        table.engine
+    );
+    for file in [file, table.exported_as_shown(&before, &table.target())] {
+        table.run("TRUNCATE TABLE {table}");
+        let mut problems = table.replay(&file);
+        problems.extend(differences(&before, &table.rows(), table.restamped));
+        problems.extend(differences(&exact_before, &table.run(exact), None));
+        assert!(
+            problems.is_empty(),
+            "{:?}:\n{}",
+            table.engine,
+            problems.join("\n")
+        );
+    }
+}
+
+/// A query tab's rows, over renamed columns and in an order of their own:
+/// matched to the table by each one's real source, never by its position.
+fn assert_a_query_runs_back(table: &Throwaway, query: &str) {
+    let before = table.rows();
+    let result = table.run(query);
+    let target = result.edit.as_ref().expect("the query names its table");
+    let file = table.exported_as_shown(&result, &InsertTarget::from(target));
+    table.run("TRUNCATE TABLE {table}");
     let mut problems = table.replay(&file);
-    problems.extend(differences(&before, &table.rows()));
-    problems.extend(differences(&exact_before, &table.run(exact)));
+    problems.extend(differences(&before, &table.rows(), table.restamped));
     assert!(
         problems.is_empty(),
-        "{:?}:\n{}",
+        "{:?}:\n{file}\n{}",
         table.engine,
         problems.join("\n")
     );
@@ -246,7 +301,7 @@ fn postgres() -> Connection {
 #[test]
 #[ignore = "needs the dev Postgres"]
 fn live_a_relation_exported_as_sql_runs_back_on_postgres() {
-    let mut table = Throwaway::new(postgres(), Engine::Postgres, "public");
+    let mut table = Throwaway::new(postgres(), Engine::Postgres, "public", "types");
     // `shape` holds no SRID: the grid's WKT has no way to say one, so a column
     // that does not fix its own, as `spot` and `globe` do, comes back with 0.
     table.drop_after("DROP TYPE IF EXISTS \"{schema}\".\"{name}_mood\"");
@@ -381,7 +436,7 @@ fn mysql_rows(engine: Engine, table: &Throwaway, extra: [&str; 4]) {
 #[ignore = "needs the dev MySQL"]
 fn live_a_relation_exported_as_sql_runs_back_on_mysql() {
     let engine = Engine::MySql;
-    let table = Throwaway::new(open("dbdelve_MYSQL_URL"), engine, "dbdelve_dev");
+    let table = Throwaway::new(open("dbdelve_MYSQL_URL"), engine, "dbdelve_dev", "types");
     table.run(&format!("CREATE TABLE {{table}} ({MYSQL_COLUMNS})"));
     assert_an_empty_table_exports_an_empty_file(&table);
     mysql_rows(engine, &table, ["", "", "", ""]);
@@ -398,7 +453,7 @@ fn live_a_relation_exported_as_sql_runs_back_on_mysql() {
 #[ignore = "needs the dev MariaDB"]
 fn live_a_relation_exported_as_sql_runs_back_on_mariadb() {
     let engine = Engine::MariaDb;
-    let table = Throwaway::new(open("dbdelve_MARIADB_URL"), engine, "dbdelve_dev");
+    let table = Throwaway::new(open("dbdelve_MARIADB_URL"), engine, "dbdelve_dev", "types");
     table.run(&format!(
         "CREATE TABLE {{table}} ({MYSQL_COLUMNS}, ident UUID, v6 INET6, v4 INET4)"
     ));
@@ -432,7 +487,7 @@ fn live_a_relation_exported_as_sql_runs_back_on_sql_server() {
     // `shape` holds no SRID and `variant` only text: the relation's read turns
     // both to text first, so another SRID comes back 0 and any other base type
     // comes back `nvarchar`.
-    let table = Throwaway::new(open("dbdelve_MSSQL_URL"), Engine::SqlServer, "dbo");
+    let table = Throwaway::new(open("dbdelve_MSSQL_URL"), Engine::SqlServer, "dbo", "types");
     table.run(
         "CREATE TABLE {table} (
             id int PRIMARY KEY,
@@ -511,6 +566,7 @@ fn live_a_relation_exported_as_sql_runs_back_on_clickhouse() {
         open("dbdelve_CLICKHOUSE_URL"),
         Engine::ClickHouse,
         "dbdelve_dev",
+        "types",
     );
     table.run(
         "CREATE TABLE {table} (
@@ -575,24 +631,40 @@ fn live_a_relation_exported_as_sql_runs_back_on_clickhouse() {
     );
 }
 
+/// A database file of its own, gone with it.
+struct DuckDbFile(PathBuf);
+
+impl DuckDbFile {
+    fn new(tag: &str) -> Self {
+        let name = format!("dbdelve-export-duckdb-{tag}-{}", std::process::id());
+        let directory = std::env::temp_dir().join(name);
+        _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        Self(directory)
+    }
+
+    fn open(&self) -> Connection {
+        let path = self.0.join("rows.duckdb");
+        drop(::duckdb::Connection::open(&path).unwrap());
+        let path = path.to_string_lossy().into_owned();
+        Connection::open(ConnectionConfig::duckdb(path, 0)).unwrap()
+    }
+}
+
+impl Drop for DuckDbFile {
+    fn drop(&mut self) {
+        _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 #[test]
 fn a_relation_exported_as_sql_runs_back_on_duckdb() {
-    let directory =
-        std::env::temp_dir().join(format!("dbdelve-export-duckdb-{}", std::process::id()));
-    _ = std::fs::remove_dir_all(&directory);
-    std::fs::create_dir_all(&directory).unwrap();
-    let path = directory.join("rows.duckdb");
-    drop(::duckdb::Connection::open(&path).unwrap());
-    let connection = Connection::open(ConnectionConfig::duckdb(
-        path.to_string_lossy().into_owned(),
-        0,
-    ))
-    .unwrap();
+    let file = DuckDbFile::new("types");
     // Nested values are held to what Arrow's text keeps and a cast reads back:
     // it does not quote, so `['a,b']` runs back as two items and `['NULL']` as a
     // NULL, a quote or comma in a struct's text fails the cast, a `BLOB` in a
     // list loses its bytes, and neither a `MAP` nor a `UNION` is read at all.
-    let table = Throwaway::new(connection, Engine::DuckDb, "main");
+    let table = Throwaway::new(file.open(), Engine::DuckDb, "main", "types");
     table.run(
         "CREATE TABLE {table} (
             id INTEGER PRIMARY KEY,
@@ -643,6 +715,176 @@ fn a_relation_exported_as_sql_runs_back_on_duckdb() {
     table.seed_awkward_texts("body");
     assert_awkward_texts_read_as_written(&table, 10);
     assert_runs_back(&table, "SELECT id, hex(bytes) FROM {table} ORDER BY id");
-    drop(table);
-    _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
+#[ignore = "needs the dev Postgres"]
+fn live_server_filled_columns_exported_as_sql_runs_back_on_postgres() {
+    let table = Throwaway::new(postgres(), Engine::Postgres, "public", "filled");
+    table.run(
+        "CREATE TABLE {table} (
+            id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            soft int GENERATED BY DEFAULT AS IDENTITY,
+            tally serial,
+            twice int GENERATED ALWAYS AS (soft * 2) STORED,
+            note text
+        )",
+    );
+    assert_an_empty_table_exports_an_empty_file(&table);
+    table.run(
+        "INSERT INTO {table} (id, soft, tally, note) OVERRIDING SYSTEM VALUE \
+         VALUES (5, 50, 500, 'a'), (7, 70, 700, NULL)",
+    );
+    assert_runs_back(
+        &table,
+        "SELECT id, soft, tally, twice FROM {table} ORDER BY id",
+    );
+    assert_a_query_runs_back(
+        &table,
+        "SELECT note, twice, tally, soft, id AS ident FROM {table} ORDER BY id",
+    );
+}
+
+fn assert_server_filled_columns_run_back_on(table: &Throwaway) {
+    table.run(
+        "CREATE TABLE {table} (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            n INT,
+            twice INT GENERATED ALWAYS AS (n * 2) VIRTUAL,
+            thrice INT GENERATED ALWAYS AS (n * 3) STORED,
+            note VARCHAR(10)
+        )",
+    );
+    assert_an_empty_table_exports_an_empty_file(table);
+    table.run("INSERT INTO {table} (id, n, note) VALUES (5, 1, 'a'), (7, 2, NULL)");
+    assert_runs_back(
+        table,
+        "SELECT id, n, twice, thrice FROM {table} ORDER BY id",
+    );
+}
+
+#[test]
+#[ignore = "needs the dev MySQL"]
+fn live_server_filled_columns_exported_as_sql_runs_back_on_mysql() {
+    let connection = open("dbdelve_MYSQL_URL");
+    let table = Throwaway::new(connection, Engine::MySql, "dbdelve_dev", "filled");
+    assert_server_filled_columns_run_back_on(&table);
+}
+
+#[test]
+#[ignore = "needs the dev MariaDB"]
+fn live_server_filled_columns_exported_as_sql_runs_back_on_mariadb() {
+    let connection = open("dbdelve_MARIADB_URL");
+    let table = Throwaway::new(connection, Engine::MariaDb, "dbdelve_dev", "filled");
+    assert_server_filled_columns_run_back_on(&table);
+}
+
+#[test]
+#[ignore = "needs the dev SQL Server"]
+fn live_server_filled_columns_exported_as_sql_runs_back_on_sql_server() {
+    let connection = open("dbdelve_MSSQL_URL");
+    let mut table = Throwaway::new(connection, Engine::SqlServer, "dbo", "filled");
+    table.restamped = Some("stamp");
+    table.run(
+        "CREATE TABLE {table} (
+            id int IDENTITY(1, 1) PRIMARY KEY,
+            twice AS (id * 2),
+            thrice AS (id * 3) PERSISTED,
+            stamp rowversion,
+            note nvarchar(10)
+        )",
+    );
+    assert_an_empty_table_exports_an_empty_file(&table);
+    // A gap in the ids, which numbering the rows again would close.
+    table.run("INSERT INTO {table} (note) VALUES ('a'), ('b'), (NULL)");
+    table.run("DELETE FROM {table} WHERE id = 2");
+    assert_runs_back(&table, "SELECT id, twice, thrice FROM {table} ORDER BY id");
+    assert_a_query_runs_back(
+        &table,
+        "SELECT note, stamp, thrice, twice, id AS ident FROM {table} ORDER BY id",
+    );
+
+    // The switch holds across statements sent apart on the one session.
+    let before = table.rows();
+    let (_, file) = table.exported().expect("the export finishes");
+    table.run("TRUNCATE TABLE {table}");
+    for range in sql::Buffer::for_engine(table.engine, &file).statements() {
+        table.run(&file[range.clone()]);
+    }
+    assert_eq!(
+        differences(&before, &table.rows(), table.restamped),
+        [""; 0]
+    );
+
+    table.run("INSERT INTO {table} (note) VALUES ('after')");
+    let ids = table.run("SELECT id FROM {table} WHERE note = 'after'");
+    assert_eq!(ids.rows[0].get(0), Some("4"), "the switch was left on");
+}
+
+#[test]
+#[ignore = "needs the dev SQL Server"]
+fn live_no_identity_exported_as_sql_runs_back_without_a_switch_on_sql_server() {
+    let connection = open("dbdelve_MSSQL_URL");
+    let mut table = Throwaway::new(connection, Engine::SqlServer, "dbo", "stamped");
+    table.restamped = Some("stamp");
+    table.run(
+        "CREATE TABLE {table} (
+            id int PRIMARY KEY,
+            twice AS (id * 2),
+            stamp rowversion,
+            note nvarchar(10)
+        )",
+    );
+    table.run("INSERT INTO {table} (id, note) VALUES (5, 'a'), (7, NULL)");
+    let (_, file) = table.exported().expect("the export finishes");
+    assert!(!file.contains("IDENTITY_INSERT"), "{file}");
+    assert_runs_back(&table, "SELECT id, twice FROM {table} ORDER BY id");
+}
+
+#[test]
+#[ignore = "needs the dev ClickHouse"]
+fn live_server_filled_columns_exported_as_sql_runs_back_on_clickhouse() {
+    let table = Throwaway::new(
+        open("dbdelve_CLICKHOUSE_URL"),
+        Engine::ClickHouse,
+        "dbdelve_dev",
+        "filled",
+    );
+    table.run(
+        "CREATE TABLE {table} (
+            id Int32,
+            note Nullable(String),
+            fallback Int32 DEFAULT id,
+            twice Int32 MATERIALIZED id * 2,
+            thrice Int32 ALIAS id * 3,
+            gone String EPHEMERAL
+        ) ENGINE = MergeTree ORDER BY id",
+    );
+    assert_an_empty_table_exports_an_empty_file(&table);
+    table.run("INSERT INTO {table} (id, note) VALUES (5, 'a'), (7, NULL)");
+    assert_runs_back(
+        &table,
+        "SELECT id, fallback, twice, thrice FROM {table} ORDER BY id",
+    );
+}
+
+#[test]
+fn server_filled_columns_exported_as_sql_runs_back_on_duckdb() {
+    let file = DuckDbFile::new("filled");
+    let table = Throwaway::new(file.open(), Engine::DuckDb, "main", "filled");
+    table.run("CREATE SEQUENCE {name}_ids");
+    table.run(
+        "CREATE TABLE {table} (
+            id INTEGER DEFAULT nextval('{name}_ids') PRIMARY KEY,
+            twice INTEGER GENERATED ALWAYS AS (id * 2) VIRTUAL,
+            note VARCHAR
+        )",
+    );
+    assert_an_empty_table_exports_an_empty_file(&table);
+    table.run("INSERT INTO {table} (id, note) VALUES (5, 'a'), (7, NULL)");
+    assert_runs_back(&table, "SELECT id, twice FROM {table} ORDER BY id");
+    assert_a_query_runs_back(
+        &table,
+        "SELECT note, twice, id AS ident FROM {table} ORDER BY id",
+    );
 }

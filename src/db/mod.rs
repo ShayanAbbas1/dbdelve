@@ -47,7 +47,7 @@ pub use spec::{
     ParserDialect, RegexMatch, SelectTop, SkipDuplicates, SqlSpec, StatementSplit, SubstringMatch,
     Truncate, TypedExplain,
 };
-pub use spec::{ReadOnlySession, UnreadableFloor};
+pub use spec::{IdentityInsert, ReadOnlySession, UnreadableFloor};
 
 /// One run's claim on Cancel: [`Connection::query`] runs under it, and
 /// [`Connection::cancel`] stops only what ran under it.

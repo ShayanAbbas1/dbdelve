@@ -149,17 +149,31 @@ impl EngineSpec {
 
     /// [`Engine::generates`](super::Engine::generates).
     pub fn generates(&self, column: &ColumnDefinition) -> bool {
-        let Some(default) = column.default.as_deref() else {
-            return false;
-        };
-        self.sql
-            .generated_defaults
-            .iter()
-            .any(|marker| match *marker {
-                DefaultMarker::Exact(exact) => default == exact,
-                DefaultMarker::Prefix(prefix) => default.starts_with(prefix),
-            })
+        marked(column, self.sql.generated_defaults)
     }
+
+    /// Whether the server numbers `column` itself, where a row written back
+    /// keeps the number it had.
+    pub fn numbers(&self, column: &ColumnDefinition) -> bool {
+        marked(column, self.sql.identity_defaults)
+    }
+
+    /// Whether the server works `column` out from the rest of its row, so
+    /// that a value for it has nowhere to go.
+    pub fn computes(&self, column: &ColumnDefinition) -> bool {
+        let data_type = column.data_type.to_ascii_lowercase();
+        self.sql.computed_types.contains(&data_type.as_str())
+            || (self.generates(column) && !self.numbers(column))
+    }
+}
+
+fn marked(column: &ColumnDefinition, markers: &[DefaultMarker]) -> bool {
+    column.default.as_deref().is_some_and(|default| {
+        markers.iter().any(|marker| match *marker {
+            DefaultMarker::Exact(exact) => default == exact,
+            DefaultMarker::Prefix(prefix) => default.starts_with(prefix),
+        })
+    })
 }
 
 fn unwrap_type_wrapper<'a>(name: &'a str, wrapper: &str) -> Option<&'a str> {
@@ -227,6 +241,13 @@ pub struct SqlSpec {
     /// The markers the structure queries write into a column's default for
     /// one the server fills itself.
     pub generated_defaults: &'static [DefaultMarker],
+    /// Which of `generated_defaults` are an identity's rather than a computed
+    /// column's.
+    pub identity_defaults: &'static [DefaultMarker],
+    /// What an `INSERT` has to say for a value to reach an identity column.
+    pub identity_insert: IdentityInsert,
+    /// Types the server writes itself, with no default to say so.
+    pub computed_types: &'static [&'static str],
     pub statement_split: StatementSplit,
     pub explain_plan: Option<ExplainPrefix>,
     pub explain_analyze: Option<ExplainPrefix>,
@@ -271,6 +292,9 @@ impl SqlSpec {
         implicit_transaction: false,
         skip_duplicates: SkipDuplicates::None,
         generated_defaults: &[],
+        identity_defaults: &[],
+        identity_insert: IdentityInsert::Plain,
+        computed_types: &[],
         statement_split: StatementSplit::Semicolon,
         explain_plan: None,
         explain_analyze: None,
@@ -439,6 +463,15 @@ pub enum SkipDuplicates {
 pub enum DefaultMarker {
     Exact(&'static str),
     Prefix(&'static str),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdentityInsert {
+    Plain,
+    /// `OVERRIDING SYSTEM VALUE`, in the statement.
+    Overriding,
+    /// `SET IDENTITY_INSERT`, on the session, around the statements.
+    SessionSwitch,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -631,6 +664,8 @@ pub(crate) const POSTGRES: EngineSpec = EngineSpec {
             needs_unique_key: false,
         },
         generated_defaults: &[DefaultMarker::Prefix("GENERATED ALWAYS AS ")],
+        identity_defaults: &[DefaultMarker::Exact("GENERATED ALWAYS AS IDENTITY")],
+        identity_insert: IdentityInsert::Overriding,
         explain_plan: Some(ExplainPrefix::Explain),
         explain_analyze: Some(ExplainPrefix::ExplainAnalyze),
         typed_explain: TypedExplain::Postgres,
@@ -682,6 +717,7 @@ pub(crate) const MYSQL: EngineSpec = EngineSpec {
             DefaultMarker::Exact("AUTO_INCREMENT"),
             DefaultMarker::Prefix("GENERATED ALWAYS AS ("),
         ],
+        identity_defaults: &[DefaultMarker::Exact("AUTO_INCREMENT")],
         explain_plan: Some(ExplainPrefix::Explain),
         // Since 8.0.18. Server versions are not detected: an older server
         // refuses the statement and says so, which is the error the user needs
@@ -740,6 +776,7 @@ pub(crate) const MARIADB: EngineSpec = EngineSpec {
             DefaultMarker::Exact("AUTO_INCREMENT"),
             DefaultMarker::Prefix("GENERATED ALWAYS AS ("),
         ],
+        identity_defaults: &[DefaultMarker::Exact("AUTO_INCREMENT")],
         explain_plan: Some(ExplainPrefix::Explain),
         // MariaDB has no `EXPLAIN ANALYZE` and spells the same thing `ANALYZE`
         // with no `EXPLAIN`.
@@ -875,6 +912,7 @@ pub(crate) const DUCKDB: EngineSpec = EngineSpec {
         skip_duplicates: SkipDuplicates::OnConflictDoNothing {
             needs_unique_key: true,
         },
+        generated_defaults: &[DefaultMarker::Prefix("GENERATED ALWAYS AS (")],
         parser_dialect: ParserDialect::DuckDb,
         regex: RegexMatch::RegexpMatches,
         substring: SubstringMatch::InstrCast,
@@ -1002,6 +1040,9 @@ pub(crate) const SQL_SERVER: EngineSpec = EngineSpec {
             DefaultMarker::Prefix("IDENTITY("),
             DefaultMarker::Prefix("AS "),
         ],
+        identity_defaults: &[DefaultMarker::Prefix("IDENTITY(")],
+        identity_insert: IdentityInsert::SessionSwitch,
+        computed_types: &["rowversion", "timestamp"],
         statement_split: StatementSplit::Batches,
         parser_dialect: ParserDialect::MsSql,
         format_dialect: FormatDialect::SqlServer,

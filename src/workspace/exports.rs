@@ -100,34 +100,35 @@ impl Workspace {
         };
         let target = InsertTarget {
             relation: Some((schema, relation.clone())),
-            columns: None,
+            ..InsertTarget::default()
         };
         self.export_every_row(FileAs::Inserts, refetch, relation, target, cx);
     }
 
-    /// What the rows in front of the user write back to: the table of a
-    /// relation tab even where it could not be edited, a view or a keyless
-    /// table, since its `SELECT *` names real columns regardless.
+    /// What the rows in front of the user write back to: on a relation tab its
+    /// table, even where it could not be edited, a view or a keyless table,
+    /// since its `SELECT *` names real columns regardless, and a column read
+    /// as text for the driver has no source to go by.
     fn insert_target(&self, cx: &App) -> InsertTarget {
         let Some(profile) = self.profile() else {
             return InsertTarget::default();
         };
-        let mut target = profile
+        if let Some(tab) = profile.session.active_object()
+            && matches!(tab.body, ObjectBody::Relation { .. })
+        {
+            return InsertTarget {
+                relation: Some((tab.schema.clone(), tab.name.clone())),
+                ..InsertTarget::default()
+            };
+        }
+        profile
             .session
             .active_results()
             .and_then(|results| {
                 let result = results.read(cx).delegate().result();
                 result.edit.as_ref().map(InsertTarget::from)
             })
-            .unwrap_or_default();
-        if let Some(tab) = profile.session.active_object()
-            && matches!(tab.body, ObjectBody::Relation { .. })
-        {
-            target
-                .relation
-                .get_or_insert_with(|| (tab.schema.clone(), tab.name.clone()));
-        }
-        target
+            .unwrap_or_default()
     }
 
     /// A relation tab's page, when it may not be the whole relation: a later
@@ -245,6 +246,7 @@ impl Workspace {
         let id = profile.id.clone();
         let generation = profile.generation;
         let engine = profile.config.engine();
+        let connection = profile.connection();
         let rows = result.rows.len();
         let chosen = choose_path(&stem, format, cx);
 
@@ -253,28 +255,24 @@ impl Workspace {
                 return;
             };
             // Rendering a hundred thousand rows is not work to do on the frame
-            // thread, and the write even less so.
+            // thread, and the write even less so, and a table's columns may
+            // have to be asked for over the network first.
             let written = cx
                 .background_executor()
-                .spawn(async move {
+                .spawn(on_own_thread(move || {
                     // The extension decides the format, not the row that started
                     // this: someone who typed `.json` over the suggested `.csv`
                     // asked for JSON. Which is why the notice says which one it
                     // wrote -- that rename is the one thing they could have got
                     // wrong, and the file name alone does not read it back.
                     let format = FileAs::for_path(&path, engine);
-                    let written = write_replacing(&path, |out| {
-                        let failed = could_not_write(&path);
-                        let mut writer = format
-                            .writer(out, engine, &target, &result.columns)
-                            .map_err(&failed)?;
-                        writer
-                            .rows(&result.rows, &result.cell_types)
-                            .map_err(&failed)?;
-                        writer.finish().map_err(failed).map(drop)
-                    });
+                    let target = match &connection {
+                        Some(connection) => knowing_the_table(connection, &target, format, engine),
+                        None => target,
+                    };
+                    let written = write_shown(&result, format, &target, engine, &path);
                     (path, format, written)
-                })
+                }))
                 .await;
             _ = workspace.update(cx, |workspace, cx| {
                 // The panel is modeless, so the profile can have moved under
@@ -817,6 +815,46 @@ fn staging(path: &Path) -> io::Result<(PathBuf, File)> {
     }
 }
 
+fn write_shown(
+    result: &QueryResult,
+    format: FileAs,
+    target: &InsertTarget,
+    engine: Engine,
+    path: &Path,
+) -> Result<(), Ended> {
+    write_replacing(path, |out| {
+        let failed = could_not_write(path);
+        let mut writer = format
+            .writer(out, engine, target, &result.columns)
+            .map_err(&failed)?;
+        writer
+            .rows(&result.rows, &result.cell_types)
+            .map_err(&failed)?;
+        writer.finish().map_err(failed).map(drop)
+    })
+}
+
+/// `target`, for a file of `INSERT`s into a real table, told what the server
+/// fills of it. On a session of its own, as the user's may be busy. A read that
+/// fails leaves the target as it was, whose file names every column: the
+/// server says so when it is run, and that is no reason to lose the export.
+fn knowing_the_table(
+    connection: &Connection,
+    target: &InsertTarget,
+    format: FileAs,
+    engine: Engine,
+) -> InsertTarget {
+    let structure = target
+        .relation
+        .as_ref()
+        .filter(|_| format == FileAs::Inserts)
+        .and_then(|(schema, table)| connection.apart().ok()?.structure(schema, table).ok());
+    match structure {
+        Some(structure) => target.clone().knowing(engine, &structure.columns),
+        None => target.clone(),
+    }
+}
+
 /// Run `refetch` and write every row it returns to `path`, as they arrive.
 fn export_every_row(
     connection: &Connection,
@@ -827,9 +865,11 @@ fn export_every_row(
     path: &Path,
     progress: &ExportProgress,
 ) -> Result<usize, Ended> {
+    let format = FileAs::for_path(path, engine);
+    let target = &knowing_the_table(connection, target, format, engine);
     write_replacing(path, |out| {
         let sink = Sink {
-            format: FileAs::for_path(path, engine),
+            format,
             engine,
             target,
             path,
@@ -1068,6 +1108,7 @@ mod round_trip;
 mod tests {
     use super::*;
     use crate::db::ConnectionConfig;
+    use crate::export::Format;
 
     fn scratch(name: &str) -> PathBuf {
         let directory =
@@ -1275,6 +1316,31 @@ mod tests {
     }
 
     #[test]
+    fn only_a_file_of_inserts_into_a_table_that_can_be_read_is_told_about_it() {
+        let directory = scratch("knowing");
+        let database = directory.join("rows.db");
+        std::fs::write(&database, b"").unwrap();
+        let connection = Connection::open(ConnectionConfig::Sqlite {
+            path: database.display().to_string(),
+            statement_timeout: 0,
+        })
+        .unwrap();
+        let knows_nothing = |target: &InsertTarget, format| {
+            let known = knowing_the_table(&connection, target, format, Engine::Sqlite);
+            assert_eq!(&known, target);
+        };
+        let gone = InsertTarget {
+            relation: Some(("main".into(), "gone".into())),
+            ..InsertTarget::default()
+        };
+        knows_nothing(&gone, FileAs::Inserts);
+        knows_nothing(&gone, FileAs::Rows(Format::Csv));
+        knows_nothing(&InsertTarget::default(), FileAs::Inserts);
+
+        _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
     fn a_relation_exported_as_sql_runs_back_into_a_copy_of_it() {
         let directory = scratch("inserts");
         let database = directory.join("rows.db");
@@ -1293,7 +1359,7 @@ mod tests {
         let refetch = relation_refetch(Engine::Sqlite, "main", "notes", "", &[], &[]).unwrap();
         let target = InsertTarget {
             relation: Some(("main".into(), "notes".into())),
-            columns: None,
+            ..InsertTarget::default()
         };
         let written = export_every_row(
             &connection,

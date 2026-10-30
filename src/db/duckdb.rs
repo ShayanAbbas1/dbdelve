@@ -390,7 +390,9 @@ impl Connection {
         let columns = self.internal_query(&format!(
             "SELECT column_name, lower(data_type) AS data_type,
                         CASE WHEN is_nullable THEN 'yes' ELSE 'no' END AS nullable,
-                        COALESCE(column_default, '') AS column_default
+                        CASE WHEN is_generated
+                             THEN 'GENERATED ALWAYS AS (' || generation_expression || ')'
+                             ELSE COALESCE(column_default, '') END AS column_default
                  FROM duckdb_columns()
                  WHERE database_name = current_database()
                    AND schema_name = {schema_literal} AND table_name = {relation_literal}
