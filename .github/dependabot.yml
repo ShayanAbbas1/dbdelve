@@ -1,0 +1,13 @@
+version: 2
+# Actions only. Cargo dependencies are pinned exactly on purpose and move only
+# when someone decides to move them.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci

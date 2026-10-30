@@ -1,4 +1,4 @@
-//! Changing rows: inserting, editing, nulling, deleting, paging, sorting and exporting.
+//! Changing rows: inserting, editing, nulling, deleting, paging, sorting and copying.
 //!
 //! These were methods on `Workspace` in main.rs. Rust lets one inherent
 //! impl live in as many modules as it has concerns; they moved out whole.
@@ -1389,7 +1389,7 @@ impl Workspace {
 
     /// Take a confirmation down after a few seconds, the way a refusal is not:
     /// a refusal is still true until the user acts on it, a success is news.
-    fn clear_notice_later(
+    pub(crate) fn clear_notice_later(
         &self,
         id: String,
         generation: u64,
@@ -1419,67 +1419,34 @@ impl Workspace {
     /// short of what the status bar says the tab is showing, so this says how
     /// to get the rest instead.
     fn refuse_capped(&mut self, doing: &str, cx: &mut Context<Self>) -> bool {
-        let streaming = self
-            .profile()
-            .and_then(|profile| profile.session.active_results())
-            .is_some_and(|results| results.read(cx).delegate().streamed_set().is_some());
-        if streaming {
-            self.note(
-                format!(
-                    "Rows are still arriving. Wait for the statement to finish before {doing}."
-                ),
-                cx,
-            );
-            return true;
-        }
-        let stopped = self.profile().and_then(|profile| {
-            let grid = profile.session.active_results()?.read(cx).delegate();
-            Some((grid.result().rows.len(), grid.result().stopped?))
-        });
-        if let Some((showing, stopped)) = stopped {
-            let showing = group_thousands(showing as u64);
-            self.note(
-                match stopped {
-                    db::Stopped::AtLimit => format!(
-                        "This tab is showing the first {showing} rows, the row limit. Raise it \
-                         and run the statement again before {doing}."
-                    ),
-                    db::Stopped::Cancelled => format!(
-                        "This tab is showing the {showing} rows that arrived before the \
-                         statement was cancelled. Run it again before {doing}."
-                    ),
-                },
-                cx,
-            );
-            return true;
-        }
-        let capped = self.profile().and_then(|profile| {
-            let grid = profile.session.active_results()?.read(cx).delegate();
-            let showing = grid.result().rows.len();
-            (showing < grid.total_rows())
-                .then(|| (showing, grid.total_rows(), grid.captured().is_some()))
-        });
-        let Some((showing, total, snapshot)) = capped else {
+        let Some(short) = self.short(cx) else {
             return false;
         };
-        let (showing, total) = (
-            group_thousands(showing as u64),
-            group_thousands(total as u64),
-        );
-        self.note(
-            match snapshot {
-                true => format!(
-                    "This tab is showing {showing} of {total} rows from a snapshot. Refresh it \
-                     before {doing}."
-                ),
-                false => format!(
-                    "This tab is showing {showing} of {total} rows, the row limit. Raise it \
-                     and run the statement again before {doing}."
-                ),
-            },
-            cx,
-        );
+        self.note(short.refusal(doing), cx);
         true
+    }
+
+    /// How the rows in front fall short of the result they came from, if
+    /// they do.
+    pub(crate) fn short(&self, cx: &App) -> Option<Short> {
+        let grid = self
+            .profile()?
+            .session
+            .active_results()?
+            .read(cx)
+            .delegate();
+        let showing = grid.result().rows.len();
+        if grid.streamed_set().is_some() {
+            return Some(Short::Streaming);
+        }
+        if let Some(stopped) = grid.result().stopped {
+            return Some(Short::Stopped(stopped, showing));
+        }
+        (showing < grid.total_rows()).then(|| Short::Capped {
+            showing,
+            total: grid.total_rows(),
+            snapshot: grid.captured().is_some(),
+        })
     }
 
     /// One field of the row panel, taken from the cell's whole value -- its
@@ -1543,103 +1510,6 @@ impl Workspace {
                 .await;
             let _ = workspace.update(cx, |workspace, cx| {
                 workspace.plan_copied = false;
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    /// Write the result set in front of the user to a file they pick.
-    ///
-    /// The rows on screen and only those. A relation tab holds what its
-    /// row-limit chip asked for, and an export that quietly re-fetched the whole
-    /// table behind that chip would make the number on it a lie — the tab has no
-    /// buffer to show a larger statement in, so nothing would be on screen to
-    /// read it off. Pending edits are not written either: this is the result set
-    /// the server returned, and applying them is a separate, visible act.
-    pub(crate) fn export_results(&mut self, format: Format, cx: &mut Context<Self>) {
-        if !self.has_results(cx) || self.refuse_capped("exporting", cx) {
-            return;
-        }
-        let Some(profile) = self.profile() else {
-            return;
-        };
-        let Some(results) = profile.session.active_results() else {
-            return;
-        };
-        // ponytail: the whole result set is copied here, on the frame thread,
-        // before the panel even opens -- a wasted copy if the user cancels. It
-        // is taken now rather than after the await because the panel is
-        // modeless: what the user was looking at when they asked is the only
-        // unambiguous answer to what they asked to export. `ResultGrid` holding
-        // its `QueryResult` behind an `Arc` is the upgrade path if a large
-        // export is ever seen to stutter.
-        let result = results.read(cx).delegate().result().clone();
-        if result.columns.is_empty() {
-            return;
-        }
-
-        // What the tab calls itself, so the file lands named after the thing the
-        // user was looking at rather than after the statement that built it.
-        let stem = match profile.session.active_object() {
-            Some(tab) => tab.name.clone(),
-            None => profile
-                .session
-                .open_query()
-                .map(str::to_string)
-                .unwrap_or_else(|| "results".to_string()),
-        };
-        let id = profile.id.clone();
-        let generation = profile.generation;
-        let rows = result.rows.len();
-        let suggested = format!("{stem}.{}", format.extension());
-        let directory = crate::store::home().unwrap_or_else(|_| PathBuf::from("/"));
-        let chosen = cx.prompt_for_new_path(&directory, Some(&suggested));
-
-        cx.spawn(async move |workspace, cx| {
-            let Ok(Ok(Some(path))) = chosen.await else {
-                return;
-            };
-            // Rendering a hundred thousand rows is not work to do on the frame
-            // thread, and the write even less so.
-            let written = cx
-                .background_executor()
-                .spawn(async move {
-                    // The extension decides the format, not the row that started
-                    // this: someone who typed `.json` over the suggested `.csv`
-                    // asked for JSON. Which is why the notice says which one it
-                    // wrote -- that rename is the one thing they could have got
-                    // wrong, and the file name alone does not read it back.
-                    let format = Format::for_path(&path);
-                    let text = export::render(format, &result);
-                    match std::fs::write(&path, text) {
-                        Ok(()) => Ok((path, format)),
-                        Err(error) => Err(format!("Could not write {}: {error}", path.display())),
-                    }
-                })
-                .await;
-            _ = workspace.update(cx, |workspace, cx| {
-                // The panel is modeless, so the profile can have moved under
-                // this task while it was open. `note` writes to whichever
-                // profile is active now, which would announce an export in a
-                // session that never ran the query behind it.
-                let Some(profile) = workspace.issued_to(&id, generation) else {
-                    return;
-                };
-                match written {
-                    Ok((path, format)) => {
-                        let message = format!(
-                            "Exported {} {} as {} to {}.",
-                            group_thousands(rows as u64),
-                            if rows == 1 { "row" } else { "rows" },
-                            format.extension().to_uppercase(),
-                            path.display()
-                        );
-                        profile.session.notice = Some(message.clone());
-                        workspace.clear_notice_later(id, generation, message, cx);
-                    }
-                    Err(error) => profile.session.notice = Some(error),
-                }
                 cx.notify();
             });
         })
@@ -1898,6 +1768,95 @@ fn typed_page(typed: &str) -> Option<usize> {
     match typed.parse::<usize>() {
         Ok(page) if page > 0 => Some(page - 1),
         _ => None,
+    }
+}
+
+/// Why the rows a grid holds are not every row of its result.
+pub(crate) enum Short {
+    /// Rows are still arriving.
+    Streaming,
+    /// The statement was stopped at the row limit or by a cancel, with this
+    /// many rows in.
+    Stopped(db::Stopped, usize),
+    /// The row limit or a snapshot kept `showing` of `total`.
+    Capped {
+        showing: usize,
+        total: usize,
+        snapshot: bool,
+    },
+    /// A relation tab's page, starting `offset` rows in.
+    Page { showing: usize, offset: usize },
+}
+
+impl Short {
+    /// The rows on screen, while none are still arriving.
+    pub(crate) fn showing(&self) -> Option<usize> {
+        match self {
+            Short::Streaming => None,
+            Short::Stopped(_, showing)
+            | Short::Capped { showing, .. }
+            | Short::Page { showing, .. } => Some(*showing),
+        }
+    }
+
+    /// What the tab is showing, as one sentence.
+    pub(crate) fn situation(&self) -> String {
+        let count = |rows: usize| group_thousands(rows as u64);
+        match *self {
+            Short::Streaming => "Rows are still arriving.".to_string(),
+            Short::Stopped(db::Stopped::AtLimit, showing) | Short::Page { showing, offset: 0 } => {
+                format!(
+                    "This tab is showing the first {} rows, the row limit.",
+                    count(showing)
+                )
+            }
+            Short::Stopped(db::Stopped::Cancelled, showing) => format!(
+                "This tab is showing the {} rows that arrived before the statement was cancelled.",
+                count(showing)
+            ),
+            Short::Capped {
+                showing,
+                total,
+                snapshot: true,
+            } => format!(
+                "This tab is showing {} of {} rows from a snapshot.",
+                count(showing),
+                count(total)
+            ),
+            Short::Capped {
+                showing,
+                total,
+                snapshot: false,
+            } => format!(
+                "This tab is showing {} of {} rows, the row limit.",
+                count(showing),
+                count(total)
+            ),
+            Short::Page { showing, offset } => format!(
+                "This tab is showing a page of {} rows, from row {}.",
+                count(showing),
+                count(offset + 1)
+            ),
+        }
+    }
+
+    /// [`Short::situation`], and what to do about it before `doing`.
+    pub(crate) fn refusal(&self, doing: &str) -> String {
+        let remedy = match self {
+            Short::Streaming => {
+                return format!(
+                    "Rows are still arriving. Wait for the statement to finish before {doing}."
+                );
+            }
+            Short::Stopped(db::Stopped::Cancelled, _) => "Run it again",
+            Short::Capped { snapshot: true, .. } => "Refresh it",
+            Short::Stopped(db::Stopped::AtLimit, _)
+            | Short::Capped {
+                snapshot: false, ..
+            }
+            | Short::Page { .. } => "Raise it and run the statement again",
+        };
+        format!("{} {remedy} before {doing}.", self.situation())
     }
 }
 

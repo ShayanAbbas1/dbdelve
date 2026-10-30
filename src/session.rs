@@ -312,6 +312,11 @@ pub(crate) struct Session {
     pub(crate) import_rows: Option<ImportDialog>,
     /// The statement the mode check stopped, held until the user answers.
     pub(crate) pending_run: Option<PendingRun>,
+    /// An export asked for over rows that are not the whole result, held
+    /// until the user says which rows it writes.
+    pub(crate) pending_export: Option<PendingExport>,
+    /// The export of every row this connection is running, at most one.
+    pub(crate) exporting: Option<Exporting>,
     /// The query tab whose queue stopped on a failed statement, held until
     /// the user says whether the rest of it still runs. Nothing after the
     /// failure is sent from here without an explicit Continue.
@@ -533,6 +538,42 @@ pub(crate) struct PendingRun {
     pub(crate) commit_cell: bool,
 }
 
+/// Export over a grid holding less than its result, waiting on the dialog
+/// that asks whether to write the rows shown or fetch every row again.
+pub(crate) struct PendingExport {
+    pub(crate) format: crate::export::Format,
+    /// The tab it was asked over.
+    pub(crate) tab: Tab,
+    pub(crate) showing: usize,
+    /// What the tab is showing, in the dialog's words.
+    pub(crate) situation: String,
+    /// What Export All Rows runs, or why it is not offered.
+    pub(crate) every_row: Result<Refetch, &'static str>,
+}
+
+/// The statement an export of every row runs: a query tab's as the user
+/// typed it, or a relation tab's regenerated without its limit.
+#[derive(Clone)]
+pub(crate) struct Refetch {
+    pub(crate) sql: String,
+    pub(crate) generated: bool,
+}
+
+/// An export of every row, running on a connection of its own.
+pub(crate) struct Exporting {
+    /// The file's name, for the status bar.
+    pub(crate) file: String,
+    pub(crate) started: std::time::Instant,
+    pub(crate) progress: Arc<ExportProgress>,
+}
+
+/// What the export's writer and the status bar share.
+#[derive(Default)]
+pub(crate) struct ExportProgress {
+    pub(crate) rows: std::sync::atomic::AtomicUsize,
+    pub(crate) cancelled: std::sync::atomic::AtomicBool,
+}
+
 /// The `confirmed` slug that silences [`StaleEdit`]'s prompt.
 pub(crate) const STALE_ROWS: &str = "stale-rows";
 
@@ -675,6 +716,8 @@ impl Session {
             insert_form: None,
             import_rows: None,
             pending_run: None,
+            pending_export: None,
+            exporting: None,
             queue_failure: None,
             stale_edit: None,
             structure_requests: HashMap::new(),
@@ -1052,6 +1095,7 @@ impl Session {
         // A stopped statement must not survive a tab or profile switch and get
         // confirmed against a connection it was never aimed at.
         self.pending_run = None;
+        self.pending_export = None;
         self.stale_edit = None;
     }
 }
@@ -2363,7 +2407,8 @@ pub(crate) fn show_snapshot(
 ///
 /// `rows` is the result's own size, which can be larger than the rows the grid
 /// holds: a snapshot is capped. `row_readout` is what says so, and
-/// `export_results` refuses rather than writing a short file.
+/// `export_results` asks which rows to write rather than writing a short file
+/// unasked.
 pub(crate) fn restored_state(grid: &store::StoredGrid) -> QueryState {
     QueryState::Complete {
         rows: grid.total_rows,

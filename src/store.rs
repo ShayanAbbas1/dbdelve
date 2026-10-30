@@ -2258,14 +2258,20 @@ id = 0
 
     /// `HOME` is process-wide and the tests run in threads, so the ones that
     /// touch the disk take turns and each gets its own directory to be the
-    /// whole of dbdelve's storage for the length of the test. Windows reads
+    /// whole of dbdelve's storage for the length of the test. The directory
+    /// names the process too: nextest runs every test in a process of its own,
+    /// where the counter always starts at one. Windows reads
     /// `APPDATA` instead, so that is pointed at the same temporary root.
     pub(crate) fn with_home<T>(body: impl FnOnce() -> T) -> T {
         static LOCK: std::sync::Mutex<u32> = std::sync::Mutex::new(0);
 
         let mut counter = LOCK.lock().unwrap_or_else(|error| error.into_inner());
         *counter += 1;
-        let home = std::env::temp_dir().join(format!("dbdelve-store-test-{}", *counter));
+        let home = std::env::temp_dir().join(format!(
+            "dbdelve-store-test-{}-{}",
+            std::process::id(),
+            *counter
+        ));
         let _ = fs::remove_dir_all(&home);
         fs::create_dir_all(&home).expect("the test home must be creatable");
 

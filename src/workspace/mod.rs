@@ -8,6 +8,7 @@ mod commands;
 #[cfg(test)]
 mod e2e;
 mod editing;
+mod exports;
 mod files;
 mod filters;
 mod forms;
@@ -1512,6 +1513,43 @@ impl Render for Workspace {
                     }
                 }
             });
+        // Read off the writer's counter, on the half-second tick its start set
+        // going: the rows go to the file, never through anything that redraws.
+        let export_status =
+            profile.session.exporting.as_ref().map(|exporting| {
+                let cancelling = exporting
+                    .progress
+                    .cancelled
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let rows = exporting
+                    .progress
+                    .rows
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let workspace = cx.entity().downgrade();
+                div()
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(layout::SPACE_SM))
+                    .child(div().whitespace_nowrap().text_color(t.text_faint).child(
+                        match cancelling {
+                            true => format!("Cancelling the export to {}…", exporting.file),
+                            false => format!(
+                                "Exporting to {}… {} {}",
+                                exporting.file,
+                                group_thousands(rows as u64),
+                                if rows == 1 { "row" } else { "rows" }
+                            ),
+                        },
+                    ))
+                    .children((!cancelling).then(|| {
+                        button("cancel-export", "Cancel", Tone::Quiet, Control::Compact, t)
+                            .on_click(move |_, _, cx| {
+                                _ = workspace
+                                    .update(cx, |workspace, cx| workspace.cancel_export(cx));
+                            })
+                    }))
+            });
         let query_status = match profile.session.active_query() {
             Some(QueryState::Complete {
                 rows,
@@ -1641,6 +1679,7 @@ impl Render for Workspace {
         let bar_has_content = inline_status.is_some()
             || left_stats.is_some()
             || count_control.is_some()
+            || export_status.is_some()
             || notice.is_some()
             || paging.is_some()
             || view_sorting.is_some()
@@ -1682,6 +1721,7 @@ impl Render for Workspace {
                                 .child(stats)
                         }))
                         .children(count_control)
+                        .children(export_status)
                         .children(notice.map(|notice| {
                             div()
                                 .min_w_0()
@@ -2159,6 +2199,7 @@ impl Render for Workspace {
                     ("import-rows", self.render_import_rows(window, cx)),
                     ("delete", self.render_delete_confirmation(cx)),
                     ("discard", self.render_discard_confirmation(cx)),
+                    ("pending-export", self.render_pending_export(cx)),
                     ("pending-run", self.render_pending_run(cx)),
                     ("queue-failure", self.render_queue_failure(cx)),
                     ("stale-edit", self.render_stale_edit(cx)),

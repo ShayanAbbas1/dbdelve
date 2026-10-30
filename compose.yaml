@@ -58,7 +58,9 @@ services:
       retries: 30
 
   mssql:
-    image: mcr.microsoft.com/mssql/server:2022-latest
+    # A cumulative update, not 2022-latest, so a new one reaches the live tests
+    # through a commit rather than on whichever day the image is pulled.
+    image: mcr.microsoft.com/mssql/server:2022-CU27-GDR1-ubuntu-22.04
     platform: linux/amd64
     environment:
       ACCEPT_EULA: "Y"
