@@ -2154,13 +2154,13 @@ impl Workspace {
     }
 
     /// Rename and delete, revealed by hovering a row grouped as
-    /// `project-row-{index}`, and held in view while the keyboard is in the
-    /// row or the delete is armed.
+    /// `project-row-{index}`, and held in view while the keyboard is on one
+    /// of them or the delete is armed.
     pub(super) fn project_actions(
         &self,
         index: usize,
         name: &str,
-        focused: bool,
+        window: &Window,
         t: Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
@@ -2169,7 +2169,10 @@ impl Workspace {
         let rename_name = name.to_string();
         let delete_name = name.to_string();
         let pending = self.pending_project_deletion.as_deref() == Some(name);
+        let held = self.welcome_project_focus(index, cx);
+        let focused = held.contains_focused(window, cx);
         div()
+            .track_focus(&held)
             .flex()
             .items_center()
             .gap(px(layout::SPACE_XS))

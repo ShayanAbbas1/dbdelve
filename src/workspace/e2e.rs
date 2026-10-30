@@ -1067,27 +1067,30 @@ fn tab_onto_a_welcome_project_shows_its_rename_and_delete(cx: &mut TestAppContex
         .unwrap();
         let (workspace, cx) = launch(cx);
         settle(cx);
-        let row_has_keyboard = |cx: &mut VisualTestContext| {
+        let buttons_have_keyboard = |cx: &mut VisualTestContext| {
             cx.update(|window, cx| {
-                let row = workspace.read(cx).welcome_project_focus.borrow()[0].clone();
-                row.contains_focused(window, cx)
+                let buttons = workspace.read(cx).welcome_project_focus.borrow()[0].clone();
+                buttons.contains_focused(window, cx)
             })
         };
-        assert!(!row_has_keyboard(cx));
+        assert!(!buttons_have_keyboard(cx));
 
         let mut reached = false;
         for _ in 0..30 {
             cx.simulate_keystrokes("tab");
             settle(cx);
-            if row_has_keyboard(cx) {
+            if buttons_have_keyboard(cx) {
                 reached = true;
                 break;
             }
         }
         assert!(reached, "Tab never reached the project's buttons");
         cx.update(|window, cx| {
-            let row = workspace.read(cx).welcome_project_focus.borrow()[0].clone();
-            assert!(!row.is_focused(window), "the row itself is no tab stop");
+            let buttons = workspace.read(cx).welcome_project_focus.borrow()[0].clone();
+            assert!(
+                !buttons.is_focused(window),
+                "Rename or Delete has it, not their holder"
+            );
         });
 
         quit(workspace, cx);
