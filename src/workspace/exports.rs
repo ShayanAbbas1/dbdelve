@@ -2,7 +2,8 @@
 //! the whole result and the user asks for it, every row of it fetched again.
 
 use std::{
-    fs::File,
+    ffi::OsString,
+    fs::{File, OpenOptions},
     io::{self, BufWriter},
     path::Path,
     sync::{
@@ -658,7 +659,7 @@ fn could_not_write(path: &Path) -> impl Fn(io::Error) -> Ended + '_ {
     move |error| Ended::Failed(format!("Could not write {}: {error}", path.display()))
 }
 
-/// Write a file through a sibling `.partial`, renamed onto `path` only once
+/// Write a file through a hidden sibling, renamed onto `path` only once
 /// `write` has written it whole. A failed or cancelled export never leaves a
 /// truncated file under the name the user chose, nor clobbers a file already
 /// there until its replacement is complete.
@@ -666,11 +667,9 @@ fn write_replacing<T>(
     path: &Path,
     write: impl FnOnce(&mut BufWriter<File>) -> Result<T, Ended>,
 ) -> Result<T, Ended> {
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".partial");
-    let partial = path.with_file_name(name);
     let failed = could_not_write(path);
-    let mut out = BufWriter::new(File::create(&partial).map_err(&failed)?);
+    let (partial, file) = staging(path).map_err(&failed)?;
+    let mut out = BufWriter::new(file);
     let written = write(&mut out).and_then(|value| {
         // Closed before the rename, which Windows refuses over an open file.
         out.into_inner()
@@ -682,6 +681,32 @@ fn write_replacing<T>(
         _ = std::fs::remove_file(&partial);
     }
     written
+}
+
+/// A new file beside `path` that nothing else writes: named apart per export,
+/// and created only if no file has that name, so two exports to one path
+/// never share an inode, and a `.partial` of anyone else's is never truncated.
+fn staging(path: &Path) -> io::Result<(PathBuf, File)> {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    loop {
+        let mut name = OsString::from(".");
+        name.push(path.file_name().unwrap_or_default());
+        name.push(format!(
+            ".{}-{}.partial",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let candidate = path.with_file_name(name);
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => return Ok((candidate, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// Run `refetch` and write every row it returns to `path`, as they arrive.
@@ -898,10 +923,16 @@ mod tests {
         directory
     }
 
-    fn partial(path: &Path) -> PathBuf {
-        let mut name = path.file_name().unwrap().to_os_string();
-        name.push(".partial");
-        path.with_file_name(name)
+    /// The staging files `write_replacing` left in `directory`.
+    fn staged(directory: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                let name = path.file_name().unwrap().to_string_lossy();
+                name.starts_with('.') && name.ends_with(".partial")
+            })
+            .collect()
     }
 
     fn query(sql: &str) -> Refetch {
@@ -966,6 +997,8 @@ mod tests {
         let directory = scratch("replace");
         let path = directory.join("out.csv");
         std::fs::write(&path, "kept").unwrap();
+        let theirs = directory.join("out.csv.partial");
+        std::fs::write(&theirs, "theirs").unwrap();
 
         let failed = write_replacing(&path, |out| {
             io::Write::write_all(out, b"half").unwrap();
@@ -973,14 +1006,22 @@ mod tests {
         });
         assert_eq!(failed, Err(Ended::Cancelled));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "kept");
-        assert!(!partial(&path).exists());
+        assert_eq!(staged(&directory), Vec::<PathBuf>::new());
 
-        write_replacing(&path, |out| {
-            io::Write::write_all(out, b"whole").map_err(could_not_write(&path))
+        // One export still writing while another to the same path completes.
+        write_replacing(&path, |first| {
+            io::Write::write_all(first, b"first").unwrap();
+            write_replacing(&path, |second| {
+                io::Write::write_all(second, b"second").map_err(could_not_write(&path))
+            })
+            .unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+            Ok(())
         })
         .unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "whole");
-        assert!(!partial(&path).exists());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
+        assert_eq!(std::fs::read_to_string(&theirs).unwrap(), "theirs");
+        assert_eq!(staged(&directory), Vec::<PathBuf>::new());
         _ = std::fs::remove_dir_all(&directory);
     }
 
@@ -1017,7 +1058,6 @@ mod tests {
         assert_eq!(text.lines().count(), rows + 1);
         assert!(text.starts_with("x,label\n1,row 1\n"));
         assert!(text.ends_with(&format!("{rows},row {rows}\n")));
-        assert!(!partial(&path).exists());
 
         let path = directory.join("cancelled.json");
         let progress = ExportProgress::default();
@@ -1032,7 +1072,7 @@ mod tests {
         );
         assert_eq!(written, Err(Ended::Cancelled));
         assert!(!path.exists());
-        assert!(!partial(&path).exists());
+        assert_eq!(staged(&directory), Vec::<PathBuf>::new());
         _ = std::fs::remove_dir_all(&directory);
     }
 }
