@@ -944,6 +944,12 @@ impl Sink<'_> {
 /// was known rendered by it, as `render_aside` does for the grid, so the file
 /// shows what the grid would. A chunk taken before the types arrived stays as
 /// it came: only the Postgres describe can be late, and only past its patience.
+///
+/// ponytail: the grid restyles such rows once the types come; a file cannot,
+/// so a describe that answers past the feed's patience leaves the batches
+/// written before it untyped, their geometry as raw EWKB. Holding the first
+/// batch on the export's path until the describe answers or the statement
+/// ends is the upgrade path, if a late describe is ever seen on an export.
 fn rendered(engine: Engine, columns: &[Column], rows: Vec<Row>) -> Vec<Row> {
     let mut chunk = QueryResult {
         columns: columns.to_vec(),
