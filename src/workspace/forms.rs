@@ -833,6 +833,13 @@ impl Workspace {
                     .is_some_and(|stale| stale.resume.is_some());
                 if editing { 3 } else { 2 }
             }
+            Some("pending-export") => {
+                let all = self
+                    .profile()
+                    .and_then(|profile| profile.session.pending_export.as_ref())
+                    .is_some_and(|pending| pending.every_row.is_ok());
+                if all { 3 } else { 2 }
+            }
             Some("import-rows") | None => 0,
             Some(_) => 2,
         }
@@ -871,6 +878,9 @@ impl Workspace {
         let running = session.is_some_and(|session| {
             matches!(session.active_query(), Some(QueryState::Running { .. }))
         });
+        let every_row = session
+            .and_then(|session| session.pending_export.as_ref())
+            .is_some_and(|pending| pending.every_row.is_ok());
         match (dialog, choice) {
             ("import-choice", 0) => self.confirm_import(window, cx),
             ("import-choice", _) => {
@@ -883,6 +893,9 @@ impl Workspace {
             ("stale-edit", _) => _ = self.cancel_stale_edit(cx),
             ("queue-failure", 0) => self.continue_queue(cx),
             ("queue-failure", _) => self.stop_queue(cx),
+            ("pending-export", 0) => self.answer_pending_export(every_row, cx),
+            ("pending-export", 1) if every_row => self.answer_pending_export(false, cx),
+            ("pending-export", _) => _ = self.cancel_pending_export(cx),
             ("pending-run", 0) => self.approve_pending_run(cx),
             ("pending-run", _) => self.cancel_pending_run(cx),
             ("discard", 0) => self.confirm_discard_close(window, cx),

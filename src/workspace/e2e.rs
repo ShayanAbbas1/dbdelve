@@ -255,3 +255,72 @@ fn a_prompt_dismissed_from_the_keyboard_hands_it_back_to_the_editor(cx: &mut Tes
         quit(workspace, cx);
     });
 }
+
+#[gpui::test]
+fn the_export_question_takes_the_keyboard_and_hands_it_back_when_dismissed(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        // Past the default row limit, so the tab holds the first rows only.
+        cx.simulate_input(
+            "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n WHERE x < 5000) \
+             SELECT x FROM n",
+        );
+        cx.simulate_keystrokes("secondary-enter");
+        settle(cx);
+        query_tab(&workspace, cx, |tab, _, _| {
+            assert!(
+                matches!(tab.query, QueryState::Complete { .. }),
+                "the query never completed"
+            );
+        });
+
+        for (dismiss, typed) in [("escape", " "), ("tab tab enter", "x")] {
+            workspace.update(cx, |workspace, cx| {
+                workspace.export_results(crate::export::Format::Csv, cx);
+            });
+            settle(cx);
+            workspace.read_with(cx, |workspace, _| {
+                assert_eq!(workspace.dialog_in_front.get(), Some("pending-export"));
+            });
+            assert!(dialog_has_keyboard(&workspace, cx));
+            assert_eq!(
+                ringed_button(&workspace, cx),
+                0,
+                "the ring starts on Export All Rows"
+            );
+            for (keystroke, ringed) in [
+                ("left", 1),
+                ("left", 2),
+                ("left", 0),
+                ("right", 2),
+                ("right", 1),
+                ("right", 0),
+            ] {
+                cx.simulate_keystrokes(keystroke);
+                settle(cx);
+                assert_eq!(ringed_button(&workspace, cx), ringed, "after {keystroke}");
+            }
+
+            let before = buffer(&workspace, cx);
+            cx.simulate_keystrokes(dismiss);
+            settle(cx);
+            workspace.read_with(cx, |workspace, _| {
+                assert_eq!(
+                    workspace.dialog_in_front.get(),
+                    None,
+                    "{dismiss} left it up"
+                );
+                let session = &workspace.profile().unwrap().session;
+                assert!(session.exporting.is_none(), "{dismiss} started an export");
+            });
+            assert!(editor_has_keyboard(&workspace, cx), "after {dismiss}");
+            cx.simulate_input(typed);
+            settle(cx);
+            assert_eq!(buffer(&workspace, cx), format!("{before}{typed}"));
+        }
+
+        quit(workspace, cx);
+    });
+}

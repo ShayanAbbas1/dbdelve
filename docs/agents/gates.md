@@ -27,6 +27,21 @@ sends `SET ROWCOUNT limit+1` as a batch of its own ahead of it and always
 Anything else is drained. Either way the limit is visible in the UI, and a capped
 result says how many rows the statement returned, or that it was stopped.
 
+**Export fetches past the limit only on an explicit ask.** Export writes the rows a grid holds when they are its whole
+result. When they are not (stopped at the limit or by a cancel, capped by a
+snapshot, or one page of a relation), a dialog asks first, and Export All
+Rows runs the statement again: a query tab's verbatim with no limit, a
+relation tab's regenerated with neither limit nor offset and put through
+`sql::is_generated_select` and `sql::paged` as its page was. It is offered
+only where running it again changes nothing and reads what this session
+would (`exports::refetch_refusal`): a lone `sql::plain_read` the gate lets
+through as the mode stands, with nothing held in turn (`Profile::in_turn`),
+because it runs on a connection of its own (`query_alongside`, or `apart`
+with the Read-only hold), so the profile's stays free and Cancel stops only
+it. Anything unsure is refused with its reason, leaving the rows shown. Rows
+go from the feed to a sibling `.partial` file renamed onto the chosen path
+only once whole, so a cancel or a failure leaves whatever was there.
+
 DBDelve _does_ write SQL when the user asks it to, and only then, always
 where the user can read it:
 
