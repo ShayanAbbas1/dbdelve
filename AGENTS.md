@@ -219,10 +219,7 @@ runs, which split off the timing tests and the vendored renderer's tests.
 
 `src/workspace/e2e.rs` launches the app headless and drives it through the
 real keymap and focus path, so a change to keyboard or focus behaviour adds a
-test there. A test there never waits on a statement that is still running: a
-running tab re-arms its clock and streaming timers, the test scheduler fires
-them at once, and `run_until_parked` (so `simulate_keystrokes` too) never
-returns.
+test there. Its gotchas are in `docs/agents/session.md`.
 
 ## Platforms
 

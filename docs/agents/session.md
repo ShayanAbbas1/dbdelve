@@ -112,6 +112,16 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   Sidebar (`secondary-k e`) puts the keyboard in the explorer's tree, which
   the library draws with a handle of its own; `Workspace::explorer_focus`
   wraps it so `escape` and Toggle Sidebar can tell the keyboard is in there.
+- **The e2e harness (`src/workspace/e2e.rs`) has gotchas.** A test never
+  waits on a statement that is still running: a running tab re-arms its clock
+  and streaming timers, the test scheduler fires them at once, and
+  `run_until_parked` (so `simulate_keystrokes` too) never returns. Assert on
+  what a chord resolves to instead, or run to completion first.
+  `simulate_keystrokes` sends key-down only, so a focused button, which clicks
+  on release, needs `press` (down and up). A queue of plain reads runs each on
+  a connection of its own, on threads the scheduler does not own, so a test
+  that runs more than one statement calls `cx.executor().allow_parking()`
+  first. Focus moves that wait for the next frame need `settle`.
 - **A dialog's keyboard is its ring** (`Workspace::dialog_layer`): the layer
   holds focus, and `left`/`right`/`tab` step a ring across its buttons and
   then its one other control, the "Don't ask again" box (`enter` or `space`
