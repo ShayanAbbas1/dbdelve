@@ -327,6 +327,8 @@ pub enum Command {
     /// the file is written as is read back off the path the user confirmed, so
     /// these two rows are one code path — see `export::Format::for_path`.
     ExportResults(Format),
+    /// Stop the export of every row this connection is running.
+    CancelExport,
     CopyRow,
     CopyResults(Format),
     SwitchProfile(usize),
@@ -2899,6 +2901,16 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         items.push(bound(
             command("Close tab", icon::CLOSE, Command::CloseObject(tab.id), TAB),
             "close_tab",
+        ));
+    }
+
+    // Wherever the user is standing: the export runs apart from every tab.
+    if session.exporting.is_some() {
+        items.push(command(
+            "Cancel export",
+            icon::CLOSE,
+            Command::CancelExport,
+            RESULTS,
         ));
     }
 

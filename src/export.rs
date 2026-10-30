@@ -5,7 +5,11 @@
 //! than guessing again — a `.json` and a `.csv` button are two menu items, not
 //! two code paths.
 
-use std::{collections::HashSet, path::Path};
+use std::{
+    collections::HashSet,
+    io::{self, Write},
+    path::Path,
+};
 
 use serde::Deserialize;
 
@@ -105,7 +109,7 @@ pub fn render_rows_as(
             let header = render_delimited(',', &result.columns, &[]);
             render_delimited(',', &result.columns, &result.rows)[header.len()..].to_string()
         }
-        RowsAs::Json => render_json(&result.columns, &result.rows, &result.cell_types),
+        RowsAs::Json => render(Format::Json, result),
         RowsAs::InsertSql => {
             let target = edit.map_or_else(
                 || "table_name".to_string(),
@@ -210,45 +214,22 @@ pub fn render_rows(
     rows: &[Row],
     cell_types: &[Vec<&str>],
 ) -> String {
-    match format {
-        Format::Csv => render_delimited(',', columns, rows),
-        Format::Tsv => render_delimited('\t', columns, rows),
-        Format::Json => render_json(columns, rows, cell_types),
-    }
+    rendered(Writer::new(Vec::new(), format, columns), rows, cell_types)
 }
 
 pub(crate) fn render_delimited(delimiter: char, columns: &[Column], rows: &[Row]) -> String {
-    let mut out = String::new();
-    let separator = delimiter.to_string();
+    let writer = Writer::with_shape(Vec::new(), Shape::Delimited(delimiter), columns);
+    rendered(writer, rows, &[])
+}
 
-    let header = columns
-        .iter()
-        .map(|column| csv_field(delimiter, &column.name))
-        .collect::<Vec<_>>()
-        .join(&separator);
-    out.push_str(&header);
-    out.push('\n');
-
-    for row in rows {
-        let record = row
-            .iter()
-            .map(|cell| match cell {
-                // Postgres's own COPY CSV convention: NULL is nothing at all,
-                // an empty string is a quoted empty field. It is the only way
-                // the format can tell the two apart on the way back in, so an
-                // empty string is forced into quotes even though the general
-                // quoting rule below would otherwise leave it bare.
-                None => String::new(),
-                Some("") => "\"\"".to_string(),
-                Some(value) => csv_field(delimiter, value),
-            })
-            .collect::<Vec<_>>()
-            .join(&separator);
-        out.push_str(&record);
-        out.push('\n');
-    }
-
-    out
+fn rendered(writer: io::Result<Writer<Vec<u8>>>, rows: &[Row], cell_types: &[Vec<&str>]) -> String {
+    let written = writer
+        .and_then(|mut writer| {
+            writer.rows(rows, cell_types)?;
+            writer.finish()
+        })
+        .expect("writing to memory never fails");
+    String::from_utf8(written).expect("every piece written is a str")
 }
 
 pub(crate) fn csv_field(delimiter: char, value: &str) -> String {
@@ -259,36 +240,159 @@ pub(crate) fn csv_field(delimiter: char, value: &str) -> String {
     }
 }
 
-/// Key order follows column order, which `serde_json::Map` only preserves under
-/// its `preserve_order` feature — something else in the graph turns that on, and
-/// we do not declare it. `json_key_order_matches_column_order` is what makes
-/// losing it a test failure rather than a silently re-sorted export.
+/// A file written as its rows come: the header when it is made, each batch of
+/// rows as it is handed over, and whatever closes the format at `finish`.
+/// [`render`] is this over a `Vec`, so the file an export streams to disk and
+/// the text a copy puts on the clipboard are one spelling.
 ///
-/// A document's missing field is left out of its object rather than written as
-/// the `null` it does not hold.
-fn render_json(columns: &[Column], rows: &[Row], cell_types: &[Vec<&str>]) -> String {
-    let keys = json_keys(columns);
+/// JSON is spelled out by hand in `serde_json`'s pretty layout, one value at a
+/// time, rather than built as a `Value` and printed whole: that would hold
+/// every row twice over before the first byte left, and it puts each object's
+/// keys out in column order with no map between to re-sort them.
+/// `the_json_writer_matches_serde_jsons_own_pretty_print` is what holds the
+/// two spellings together.
+pub struct Writer<W: Write> {
+    out: W,
+    shape: Shape,
+    written: usize,
+}
 
-    let rows = rows
-        .iter()
-        .enumerate()
-        .map(|(row_ix, row)| {
-            let types = cell_types.get(row_ix);
-            let mut object = serde_json::Map::new();
-            for (col_ix, (key, cell)) in keys.iter().zip(row.iter()).enumerate() {
-                if types.and_then(|types| types.get(col_ix)) == Some(&MISSING) {
-                    continue;
+enum Shape {
+    Delimited(char),
+    /// Each column's key, already spelled as a JSON string.
+    Json(Vec<String>),
+}
+
+impl Shape {
+    fn json(columns: &[Column]) -> Self {
+        Shape::Json(
+            json_keys(columns)
+                .iter()
+                .map(|key| serde_json::to_string(key).expect("a string always serializes"))
+                .collect(),
+        )
+    }
+}
+
+impl<W: Write> Writer<W> {
+    pub fn new(out: W, format: Format, columns: &[Column]) -> io::Result<Self> {
+        let shape = match format {
+            Format::Csv => Shape::Delimited(','),
+            Format::Tsv => Shape::Delimited('\t'),
+            Format::Json => Shape::json(columns),
+        };
+        Self::with_shape(out, shape, columns)
+    }
+
+    fn with_shape(mut out: W, shape: Shape, columns: &[Column]) -> io::Result<Self> {
+        if let Shape::Delimited(delimiter) = shape {
+            for (index, column) in columns.iter().enumerate() {
+                if index > 0 {
+                    write_char(&mut out, delimiter)?;
                 }
-                object.insert(key.clone(), serde_json::Value::from(cell));
+                write_field(&mut out, delimiter, &column.name)?;
             }
-            serde_json::Value::Object(object)
+            out.write_all(b"\n")?;
+        }
+        Ok(Self {
+            out,
+            shape,
+            written: 0,
         })
-        .collect::<Vec<_>>();
+    }
 
-    let mut text = serde_json::to_string_pretty(&rows)
-        .expect("string keys and values never fail to serialize");
-    text.push('\n');
-    text
+    /// `cell_types` is [`QueryResult::cell_types`] for these rows, and empty
+    /// where every column is typed whole.
+    pub fn rows(&mut self, rows: &[Row], cell_types: &[Vec<&str>]) -> io::Result<()> {
+        let out = &mut self.out;
+        match &self.shape {
+            Shape::Delimited(delimiter) => {
+                for row in rows {
+                    for (index, cell) in row.iter().enumerate() {
+                        if index > 0 {
+                            write_char(out, *delimiter)?;
+                        }
+                        match cell {
+                            // Postgres's own COPY CSV convention: NULL is
+                            // nothing at all, an empty string is a quoted empty
+                            // field. It is the only way the format can tell the
+                            // two apart on the way back in, so an empty string
+                            // is forced into quotes even though the general
+                            // quoting rule would otherwise leave it bare.
+                            None => {}
+                            Some("") => out.write_all(b"\"\"")?,
+                            Some(value) => write_field(out, *delimiter, value)?,
+                        }
+                    }
+                    out.write_all(b"\n")?;
+                }
+            }
+            // A document's missing field is left out of its object rather
+            // than written as the `null` it does not hold.
+            Shape::Json(keys) => {
+                for (row_ix, row) in rows.iter().enumerate() {
+                    out.write_all(match self.written {
+                        0 => b"[\n  ",
+                        _ => b",\n  ",
+                    })?;
+                    let types = cell_types.get(row_ix);
+                    let mut fields = 0;
+                    for (col_ix, (key, cell)) in keys.iter().zip(row.iter()).enumerate() {
+                        if types.and_then(|types| types.get(col_ix)) == Some(&MISSING) {
+                            continue;
+                        }
+                        out.write_all(match fields {
+                            0 => b"{\n    ",
+                            _ => b",\n    ",
+                        })?;
+                        out.write_all(key.as_bytes())?;
+                        out.write_all(b": ")?;
+                        match cell {
+                            None => out.write_all(b"null")?,
+                            Some(value) => serde_json::to_writer(&mut *out, value)?,
+                        }
+                        fields += 1;
+                    }
+                    out.write_all(match fields {
+                        0 => b"{}",
+                        _ => b"\n  }",
+                    })?;
+                    self.written += 1;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn finish(mut self) -> io::Result<W> {
+        if let Shape::Json(_) = self.shape {
+            self.out.write_all(match self.written {
+                0 => b"[]\n",
+                _ => b"\n]\n",
+            })?;
+        }
+        self.out.flush()?;
+        Ok(self.out)
+    }
+}
+
+fn write_char(out: &mut impl Write, value: char) -> io::Result<()> {
+    out.write_all(value.encode_utf8(&mut [0; 4]).as_bytes())
+}
+
+/// [`csv_field`], written out rather than built.
+fn write_field(out: &mut impl Write, delimiter: char, value: &str) -> io::Result<()> {
+    if !value.contains(['"', delimiter, '\n', '\r']) {
+        return out.write_all(value.as_bytes());
+    }
+    out.write_all(b"\"")?;
+    for (index, part) in value.split('"').enumerate() {
+        if index > 0 {
+            out.write_all(b"\"\"")?;
+        }
+        out.write_all(part.as_bytes())?;
+    }
+    out.write_all(b"\"")
 }
 
 /// One JSON key per column, in column order. `SELECT * FROM a JOIN b` routinely
@@ -614,6 +718,105 @@ mod tests {
         let a = text.find("\"a\"").unwrap();
         let m = text.find("\"m\"").unwrap();
         assert!(z < a && a < m);
+    }
+
+    /// What JSON export wrote when it built a `Value` and pretty-printed it
+    /// whole, kept as the reference the streamed spelling has to match.
+    fn pretty_printed(columns: &[Column], rows: &[Row], cell_types: &[Vec<&str>]) -> String {
+        let keys = json_keys(columns);
+        let rows = rows
+            .iter()
+            .enumerate()
+            .map(|(row_ix, row)| {
+                let types = cell_types.get(row_ix);
+                let mut object = serde_json::Map::new();
+                for (col_ix, (key, cell)) in keys.iter().zip(row.iter()).enumerate() {
+                    if types.and_then(|types| types.get(col_ix)) == Some(&MISSING) {
+                        continue;
+                    }
+                    object.insert(key.clone(), serde_json::Value::from(cell));
+                }
+                serde_json::Value::Object(object)
+            })
+            .collect::<Vec<_>>();
+        serde_json::to_string_pretty(&rows).unwrap() + "\n"
+    }
+
+    #[test]
+    fn the_json_writer_matches_serde_jsons_own_pretty_print() {
+        let cases = vec![
+            (Vec::new(), Vec::new(), Vec::new()),
+            (vec![column("a")], Vec::new(), Vec::new()),
+            (Vec::new(), rows(vec![vec![], vec![]]), Vec::new()),
+            (
+                vec![
+                    column("id"),
+                    column("id"),
+                    column("id_2"),
+                    column("q\"uote"),
+                ],
+                rows(vec![
+                    vec![
+                        Some("1".into()),
+                        None,
+                        Some("tab\tline\nend\u{1}".into()),
+                        Some("\\ \"é\" 🙂 </script>".into()),
+                    ],
+                    vec![Some(String::new()), Some("2".into()), None, None],
+                ]),
+                Vec::new(),
+            ),
+            (
+                vec![column("email"), column("phone")],
+                rows(vec![
+                    vec![None, None],
+                    vec![Some("a@b".into()), None],
+                    vec![None, Some("5".into())],
+                ]),
+                vec![
+                    vec![MISSING, MISSING],
+                    vec!["string", "null"],
+                    vec![MISSING, "int"],
+                ],
+            ),
+        ];
+        for (columns, rows, cell_types) in cases {
+            let expected = pretty_printed(&columns, &rows, &cell_types);
+            assert_eq!(
+                render_rows(Format::Json, &columns, &rows, &cell_types),
+                expected
+            );
+            // Handed over one row at a time, as an export streams them.
+            let mut writer = Writer::new(Vec::new(), Format::Json, &columns).unwrap();
+            for (row_ix, row) in rows.iter().enumerate() {
+                writer
+                    .rows(
+                        std::slice::from_ref(row),
+                        cell_types.get(row_ix..=row_ix).unwrap_or_default(),
+                    )
+                    .unwrap();
+            }
+            assert_eq!(
+                String::from_utf8(writer.finish().unwrap()).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn csv_written_in_batches_is_the_csv_rendered_at_once() {
+        let columns = vec![column("a,b"), column("c")];
+        let rows = rows(vec![
+            vec![Some("x\"y".into()), None],
+            vec![Some(String::new()), Some("line\r\nbreak".into())],
+        ]);
+        let mut writer = Writer::new(Vec::new(), Format::Csv, &columns).unwrap();
+        writer.rows(&rows[..1], &[]).unwrap();
+        writer.rows(&rows[1..], &[]).unwrap();
+        assert_eq!(
+            String::from_utf8(writer.finish().unwrap()).unwrap(),
+            "\"a,b\",c\n\"x\"\"y\",\n\"\",\"line\r\nbreak\"\n"
+        );
     }
 
     #[test]
