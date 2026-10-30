@@ -754,8 +754,8 @@ impl Workspace {
             }
             Command::ToggleNextJoin => self.toggle_next_join(&ToggleNextJoin, window, cx),
             Command::ShowReferences => self.show_references(&ShowReferences, window, cx),
-            Command::OpenReference(index) => {
-                self.open_reference(&OpenReference { index }, window, cx)
+            Command::OpenReference(source, index) => {
+                self.open_listed_reference(&source, index, window, cx)
             }
             Command::SetImportProject(project) => {
                 self.set_import_project(project);

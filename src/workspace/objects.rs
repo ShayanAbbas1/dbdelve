@@ -820,12 +820,56 @@ impl Workspace {
     /// only the ones that answer are listed, beside any whose check failed.
     /// Asked from the keyboard, with no arrow to hang a list off, the answer
     /// is put up in the palette instead.
+    /// The key in the active cell of the relation in front, as a reference
+    /// lookup names it.
+    pub(crate) fn reference_source(&self, cx: &App) -> Option<ReferenceSource> {
+        let tab = self.profile()?.session.active_object()?;
+        let ObjectBody::Relation {
+            structure: StructureState::Loaded(structure),
+            results,
+            ..
+        } = &tab.body
+        else {
+            return None;
+        };
+        let grid = results.read(cx).delegate();
+        let (_, col) = grid.active()?;
+        Some(ReferenceSource {
+            tab: tab.id,
+            column: grid.columns().get(col)?.name.clone(),
+            value: grid.active_value()?.to_string(),
+            referenced_by: structure.referenced_by.clone(),
+        })
+    }
+
+    /// A relation picked from a lookup's answer, opened only if the grid in
+    /// front is still on the key it was asked about.
+    pub(crate) fn open_listed_reference(
+        &mut self,
+        source: &ReferenceSource,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.reference_source(cx).as_ref() != Some(source) {
+            self.note(
+                "The key these references were listed for is no longer in front.".into(),
+                cx,
+            );
+            return;
+        }
+        self.open_reference(&OpenReference { index }, window, cx);
+    }
+
     pub(crate) fn show_references(
         &mut self,
         _: &ShowReferences,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some(source) = self.reference_source(cx) else {
+            return;
+        };
         let engine = self.engine();
         let Some(profile) = self.profile() else {
             return;
@@ -885,6 +929,7 @@ impl Workspace {
         let check = self.reference_checks;
         self.reference_popup = Some(ReferencePopup {
             at,
+            source,
             choices: None,
             check,
         });
@@ -916,6 +961,7 @@ impl Workspace {
                 if workspace.issued_to(&profile_id, generation).is_none() {
                     return;
                 }
+                let current = workspace.reference_source(cx);
                 let Some(popup) = workspace
                     .reference_popup
                     .as_mut()
@@ -923,6 +969,11 @@ impl Workspace {
                 else {
                     return;
                 };
+                if current.as_ref() != Some(&popup.source) {
+                    workspace.reference_popup = None;
+                    cx.notify();
+                    return;
+                }
                 let keyboard = popup.at.is_none();
                 popup.choices = Some(found);
                 cx.notify();

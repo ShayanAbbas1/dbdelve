@@ -66,7 +66,7 @@ use crate::{
         keycap_parts, keycaps, kind_color, object_icon, one_line, raised_card, row_icon_tinted,
         search_field, status_dot,
     },
-    workspace::opacity_for,
+    workspace::{ReferenceSource, opacity_for},
 };
 
 /// How many rows each group shows under All, which is for reaching across
@@ -444,8 +444,8 @@ pub enum Command {
     /// Put the palette back up over the relations that reference the key in
     /// the active cell, once they have been asked whether they hold a row.
     ShowReferences,
-    /// By index into the structure's `referenced_by`.
-    OpenReference(usize),
+    /// By index into the `referenced_by` of the key it was listed for.
+    OpenReference(Box<ReferenceSource>, usize),
     /// `None` is No project.
     SetImportProject(Option<String>),
     /// Put the palette back up over the row limits.
@@ -2416,21 +2416,17 @@ pub(crate) fn picked_import_row(workspace: &Workspace) -> Option<usize> {
 /// failed is listed too, saying so, as the arrow's list shows it; opening it
 /// runs the same filtered read.
 fn reference_items(workspace: &Workspace) -> Vec<Item> {
-    let Some(choices) = workspace
-        .reference_popup
-        .as_ref()
-        .and_then(|popup| popup.choices.as_ref())
-    else {
+    let Some(popup) = workspace.reference_popup.as_ref() else {
         return Vec::new();
     };
-    choices
+    let source = Box::new(popup.source.clone());
+    popup
+        .choices
         .iter()
+        .flatten()
         .map(|(index, label, answer)| {
-            let item = Item::new(
-                label.to_string(),
-                icon::TABLE,
-                Command::OpenReference(*index),
-            );
+            let command = Command::OpenReference(source.clone(), *index);
+            let item = Item::new(label.to_string(), icon::TABLE, command);
             match answer {
                 Ok(()) => item,
                 Err(message) => item.hint(format!("Could not check: {message}")).muted(),

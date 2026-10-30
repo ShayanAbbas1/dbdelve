@@ -780,42 +780,125 @@ fn the_ring_reaches_dont_ask_again_and_enter_or_space_ticks_it(cx: &mut TestAppC
     });
 }
 
+/// Birds and the sightings that reference them, with the keyboard on the
+/// first bird's key.
+fn launch_on_a_referenced_key(
+    cx: &mut TestAppContext,
+) -> (Entity<Workspace>, &mut VisualTestContext) {
+    let (workspace, cx) = launch_on_sqlite_holding(
+        cx,
+        "create table birds (id integer primary key, name text);
+         create table sightings (id integer primary key, bird integer references birds(id));
+         insert into birds values (1, 'wren');
+         insert into sightings values (1, 1);",
+    );
+    cx.simulate_keystrokes("secondary-k e");
+    settle(cx);
+    cx.simulate_keystrokes("down down enter");
+    settle(cx);
+    assert_eq!(front_object(&workspace, cx).as_deref(), Some("birds"));
+    cx.simulate_keystrokes("down");
+    settle(cx);
+    (workspace, cx)
+}
+
+fn front_object(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Option<String> {
+    workspace.read_with(cx, |workspace, _| {
+        let session = &workspace.profile().unwrap().session;
+        session.active_object().map(|tab| tab.name.clone())
+    })
+}
+
+fn ask_for_references(cx: &mut VisualTestContext) {
+    cx.simulate_keystrokes("secondary-shift-p");
+    settle(cx);
+    cx.simulate_input("Show references");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+}
+
 #[gpui::test]
 fn show_references_lists_the_referencing_tables_in_the_palette(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
-        let (workspace, cx) = launch_on_sqlite_holding(
-            cx,
-            "create table birds (id integer primary key, name text);
-             create table sightings (id integer primary key, bird integer references birds(id));
-             insert into birds values (1, 'wren');
-             insert into sightings values (1, 1);",
-        );
-        cx.simulate_keystrokes("secondary-k e");
-        settle(cx);
-        cx.simulate_keystrokes("down down enter");
-        settle(cx);
-        let front = |cx: &mut VisualTestContext| {
-            workspace.read_with(cx, |workspace, _| {
-                let session = &workspace.profile().unwrap().session;
-                session.active_object().map(|tab| tab.name.clone())
-            })
-        };
-        assert_eq!(front(cx).as_deref(), Some("birds"));
-        // Onto the first row's key.
-        cx.simulate_keystrokes("down");
-        settle(cx);
-
-        cx.simulate_keystrokes("secondary-shift-p");
-        settle(cx);
-        cx.simulate_input("Show references");
-        cx.simulate_keystrokes("enter");
-        settle(cx);
+        let (workspace, cx) = launch_on_a_referenced_key(cx);
+        ask_for_references(cx);
         assert!(palette_mode(&workspace, cx) == Some(PaletteMode::References));
 
         cx.simulate_keystrokes("enter");
         settle(cx);
         assert!(palette_mode(&workspace, cx).is_none());
-        assert_eq!(front(cx).as_deref(), Some("sightings"));
+        assert_eq!(front_object(&workspace, cx).as_deref(), Some("sightings"));
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn references_listed_for_one_key_never_open_from_another(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            "create table birds (id integer primary key, name text);
+             create table flocks (id integer primary key);
+             create table members (id integer primary key, flock integer references flocks(id));
+             create table sightings (id integer primary key, bird integer references birds(id));
+             insert into birds values (1, 'wren');
+             insert into flocks values (1);
+             insert into members values (1, 1);
+             insert into sightings values (1, 1);",
+        );
+        let active = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                workspace.profile().unwrap().session.active
+            })
+        };
+        // Flocks' key under the keyboard, then birds'.
+        cx.simulate_keystrokes("secondary-k e");
+        settle(cx);
+        cx.simulate_keystrokes("down down down enter");
+        settle(cx);
+        assert_eq!(front_object(&workspace, cx).as_deref(), Some("flocks"));
+        cx.simulate_keystrokes("down");
+        settle(cx);
+        let flocks = active(cx);
+        cx.simulate_keystrokes("secondary-k e");
+        settle(cx);
+        cx.simulate_keystrokes("up enter");
+        settle(cx);
+        assert_eq!(front_object(&workspace, cx).as_deref(), Some("birds"));
+        cx.simulate_keystrokes("down");
+        settle(cx);
+        let birds = active(cx);
+
+        // Picked once flocks is in front again: its own reference sits at the
+        // same index, and opening it would read members with flocks' key.
+        ask_for_references(cx);
+        assert!(palette_mode(&workspace, cx) == Some(PaletteMode::References));
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.activate_tab(flocks, window, cx);
+        });
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        assert_eq!(active(cx), flocks);
+        assert_eq!(front_object(&workspace, cx).as_deref(), Some("flocks"));
+
+        // Answered once flocks is in front again.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.activate_tab(birds, window, cx);
+        });
+        settle(cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.show_references(&crate::actions::ShowReferences, window, cx);
+            workspace.activate_tab(flocks, window, cx);
+        });
+        settle(cx);
+        assert!(
+            palette_mode(&workspace, cx).is_none(),
+            "a stale answer was listed"
+        );
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.reference_popup.is_none())
+        });
 
         quit(workspace, cx);
     });
@@ -828,6 +911,12 @@ fn escape_closes_the_reference_arrows_list(cx: &mut TestAppContext) {
         workspace.update(cx, |workspace, cx| {
             workspace.reference_popup = Some(super::ReferencePopup {
                 at: Some(gpui::point(gpui::px(10.), gpui::px(10.))),
+                source: super::ReferenceSource {
+                    tab: 0,
+                    column: String::new(),
+                    value: String::new(),
+                    referenced_by: Vec::new(),
+                },
                 choices: Some(Vec::new()),
                 check: 0,
             });

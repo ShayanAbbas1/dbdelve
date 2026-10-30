@@ -1183,8 +1183,9 @@ impl Workspace {
                         .hover(|row| row.bg(t.element_hover))
                         .child(label.clone())
                         .on_click(cx.listener(move |workspace, _, window, cx| {
-                            workspace.reference_popup = None;
-                            workspace.open_reference(&OpenReference { index }, window, cx);
+                            if let Some(popup) = workspace.reference_popup.take() {
+                                workspace.open_listed_reference(&popup.source, index, window, cx);
+                            }
                         }))
                         .into_any_element()
                 })

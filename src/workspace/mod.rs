@@ -2176,12 +2176,26 @@ impl Render for Workspace {
 /// `referenced_by`: a row was found in it, or its check failed with this error.
 pub(crate) type ReferenceAnswer = (usize, gpui::SharedString, Result<(), String>);
 
+/// The key a reference lookup was asked about: its tab, its column and value,
+/// and the references its structure listed, which an answer's indices point
+/// into. An answer or a pick is acted on only while the grid in front still
+/// says the same, so neither can land on another tab, key or refreshed
+/// structure.
+#[derive(Clone, PartialEq)]
+pub(crate) struct ReferenceSource {
+    tab: u64,
+    column: String,
+    value: String,
+    referenced_by: Vec<crate::db::Reference>,
+}
+
 /// What a reference arrow opened: where it hangs, and the relations that turned
 /// out to hold rows for the key, or whose check failed with the error it gave.
 /// `None` while the lookup is still out.
 pub(crate) struct ReferencePopup {
     /// `None` when the keyboard asked, which puts the answer in the palette.
     pub(crate) at: Option<gpui::Point<gpui::Pixels>>,
+    pub(crate) source: ReferenceSource,
     pub(crate) choices: Option<Vec<ReferenceAnswer>>,
     check: u64,
 }
