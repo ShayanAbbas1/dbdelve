@@ -242,7 +242,8 @@ fn assert_a_query_runs_back(table: &Throwaway, query: &str) {
     let before = table.rows();
     let result = table.run(query);
     let target = result.edit.as_ref().expect("the query names its table");
-    let file = table.exported_as_shown(&result, &InsertTarget::from(target));
+    let target = InsertTarget::read_from(target, &result.columns);
+    let file = table.exported_as_shown(&result, &target);
     table.run("TRUNCATE TABLE {table}");
     let mut problems = table.replay(&file);
     problems.extend(differences(&before, &table.rows(), table.restamped));
@@ -819,6 +820,64 @@ fn live_server_filled_columns_exported_as_sql_runs_back_on_sql_server() {
     table.run("INSERT INTO {table} (note) VALUES ('after')");
     let ids = table.run("SELECT id FROM {table} WHERE note = 'after'");
     assert_eq!(ids.rows[0].get(0), Some("4"), "the switch was left on");
+}
+
+#[test]
+#[ignore = "needs the dev SQL Server"]
+fn live_an_identity_outside_the_key_exported_as_sql_runs_back_on_sql_server() {
+    let connection = open("dbdelve_MSSQL_URL");
+    let table = Throwaway::new(connection, Engine::SqlServer, "dbo", "unkeyed");
+    table.run(
+        "CREATE TABLE {table} (id int PRIMARY KEY, seq int IDENTITY(1, 1), note nvarchar(10))",
+    );
+    // A gap in `seq`, which numbering the rows again would close.
+    table.run("INSERT INTO {table} (id, note) VALUES (1, 'a'), (2, 'b'), (3, NULL)");
+    table.run("DELETE FROM {table} WHERE id = 2");
+    assert_a_query_runs_back(&table, "SELECT id, seq, note FROM {table} ORDER BY id");
+}
+
+#[test]
+#[ignore = "needs the dev SQL Server"]
+fn live_a_cancel_stops_an_export_waiting_on_a_schema_lock() {
+    let connection = open("dbdelve_MSSQL_URL");
+    let table = Throwaway::new(connection, Engine::SqlServer, "dbo", "locked");
+    table.run("CREATE TABLE {table} (id int PRIMARY KEY)");
+    let holder = table.connection.apart().unwrap();
+    let hold = move |sql: &str| {
+        holder
+            .query(sql, &CancelToken::default(), Fetch::default())
+            .unwrap();
+    };
+    hold("BEGIN TRANSACTION");
+    hold(&table.named("ALTER TABLE {table} ADD held int NULL"));
+    // Let go regardless, so that an export that waits fails here and doesn't hang.
+    let lock_held = Duration::from_secs(3);
+    let released = std::thread::spawn(move || {
+        std::thread::sleep(lock_held);
+        hold("ROLLBACK");
+    });
+
+    let progress = Arc::new(ExportProgress::default());
+    let cancel = progress.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        cancel.cancelled.store(true, Ordering::Relaxed);
+    });
+    let refetch = relation_refetch(Engine::SqlServer, "dbo", &table.name, "", &[], &[]).unwrap();
+    let started = Instant::now();
+    let ended = export_every_row(
+        &table.connection,
+        &refetch,
+        &table.target(),
+        false,
+        Engine::SqlServer,
+        &table.directory.join("rows.sql"),
+        &progress,
+    );
+    let took = started.elapsed();
+    released.join().unwrap();
+    assert_eq!(ended, Err(Ended::Cancelled));
+    assert!(took < lock_held, "{took:?}");
 }
 
 #[test]

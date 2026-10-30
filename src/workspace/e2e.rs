@@ -1178,6 +1178,87 @@ fn a_clicked_box_leaves_the_ring_in_charge_of_the_keyboard(cx: &mut TestAppConte
     });
 }
 
+/// A session moved on behind the modeless save panel still gets its rows, under
+/// every column they hold, rather than what its connection now says of a table
+/// of that name.
+#[gpui::test]
+fn a_session_changed_behind_the_save_panel_is_not_asked_about_the_table(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let directory = store::dbdelve_directory().expect("the test home has a data directory");
+        std::fs::create_dir_all(&directory).expect("the data directory must be creatable");
+        let database = directory.join("e2e.duckdb");
+        ::duckdb::Connection::open(&database)
+            .and_then(|connection| {
+                connection.execute_batch(
+                    "CREATE TABLE t (id INTEGER PRIMARY KEY, \
+                     twice INTEGER GENERATED ALWAYS AS (id * 2) VIRTUAL); \
+                     INSERT INTO t (id) VALUES (1);",
+                )
+            })
+            .expect("the schema must apply");
+        std::fs::write(
+            directory.join("profiles.toml"),
+            format!(
+                "active = \"e2e\"\n\
+                 [settings]\n\
+                 check_for_updates = false\n\
+                 [[profiles]]\n\
+                 id = \"e2e\"\n\
+                 name = \"E2E\"\n\
+                 host = \"\"\n\
+                 database = \"\"\n\
+                 user = \"\"\n\
+                 engine = \"duckdb\"\n\
+                 path = {:?}\n",
+                database.display().to_string()
+            ),
+        )
+        .expect("profiles.toml must be writable");
+        let (workspace, cx) = launch(cx);
+        cx.executor().allow_parking();
+        workspace.update(cx, |workspace, cx| {
+            let index = workspace
+                .profiles
+                .iter()
+                .position(|profile| profile.config.engine() == Engine::DuckDb)
+                .expect("the saved DuckDB profile is restored");
+            workspace.activate(index, cx);
+        });
+        cx.run_until_parked();
+        cx.simulate_input("SELECT * FROM t");
+        cx.simulate_keystrokes("secondary-enter");
+        settle(cx);
+
+        let mut export = |changed: bool, name: &str| {
+            let path = directory.join(name);
+            workspace.update(cx, |workspace, cx| {
+                workspace.export_results(crate::export::FileAs::Inserts, cx);
+            });
+            settle(cx);
+            if changed {
+                workspace.update(cx, |workspace, _| {
+                    workspace.profile_mut().unwrap().generation += 1;
+                });
+            }
+            let chosen = path.clone();
+            cx.simulate_new_path_selection(|_| Some(chosen));
+            for _ in 0..500 {
+                settle(cx);
+                if path.exists() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            std::fs::read_to_string(&path).expect("the file is written")
+        };
+
+        assert!(!export(false, "same.sql").contains("twice"));
+        assert!(export(true, "changed.sql").contains("twice"));
+
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn the_export_question_takes_the_keyboard_and_hands_it_back_when_dismissed(
     cx: &mut TestAppContext,

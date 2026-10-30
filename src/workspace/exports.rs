@@ -9,6 +9,7 @@ use std::{
     sync::{
         OnceLock,
         atomic::{AtomicUsize, Ordering},
+        mpsc,
     },
     time::{Duration, Instant},
 };
@@ -126,7 +127,8 @@ impl Workspace {
             .active_results()
             .and_then(|results| {
                 let result = results.read(cx).delegate().result();
-                result.edit.as_ref().map(InsertTarget::from)
+                let edit = result.edit.as_ref()?;
+                Some(InsertTarget::read_from(edit, &result.columns))
             })
             .unwrap_or_default()
     }
@@ -254,6 +256,16 @@ impl Workspace {
             let Some(path) = chosen.await else {
                 return;
             };
+            // The panel is modeless, and a DuckDB connection follows a database
+            // switch in place: what it says now of a table of this name could
+            // be another's, and these rows are written either way.
+            let connection = workspace
+                .update(cx, |workspace, _| {
+                    workspace.issued_to(&id, generation).is_some()
+                })
+                .unwrap_or(false)
+                .then_some(connection)
+                .flatten();
             // Rendering a hundred thousand rows is not work to do on the frame
             // thread, and the write even less so, and a table's columns may
             // have to be asked for over the network first.
@@ -855,6 +867,25 @@ fn knowing_the_table(
     }
 }
 
+/// What `work` comes to, on a thread of its own so that a Cancel need not wait
+/// for it: a read behind a schema lock waits as long as the lock does. `None`
+/// when the thread died. One given up on ends with its connection.
+fn unless_cancelled<T: Send + 'static>(
+    progress: &ExportProgress,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<Option<T>, Ended> {
+    let (answered, answer) = mpsc::channel();
+    std::thread::spawn(move || _ = answered.send(work()));
+    while !progress.cancelled.load(Ordering::Relaxed) {
+        match answer.recv_timeout(Duration::from_millis(15)) {
+            Ok(value) => return Ok(Some(value)),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(None),
+        }
+    }
+    Err(Ended::Cancelled)
+}
+
 /// Run `refetch` and write every row it returns to `path`, as they arrive.
 fn export_every_row(
     connection: &Connection,
@@ -866,7 +897,11 @@ fn export_every_row(
     progress: &ExportProgress,
 ) -> Result<usize, Ended> {
     let format = FileAs::for_path(path, engine);
-    let target = &knowing_the_table(connection, target, format, engine);
+    let (asking, asked) = (connection.clone(), target.clone());
+    let known = unless_cancelled(progress, move || {
+        knowing_the_table(&asking, &asked, format, engine)
+    })?;
+    let target = known.as_ref().unwrap_or(target);
     write_replacing(path, |out| {
         let sink = Sink {
             format,
@@ -1313,6 +1348,23 @@ mod tests {
         assert!(!path.exists());
         assert_eq!(staged(&directory), Vec::<PathBuf>::new());
         _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_cancel_does_not_wait_for_what_is_being_asked() {
+        let progress = Arc::new(ExportProgress::default());
+        let (release, held) = mpsc::channel::<()>();
+        let cancel = progress.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            cancel.cancelled.store(true, Ordering::Relaxed);
+        });
+        let waited = unless_cancelled(&progress, move || _ = held.recv());
+        assert_eq!(waited, Err(Ended::Cancelled));
+        drop(release);
+
+        let quiet = ExportProgress::default();
+        assert_eq!(unless_cancelled(&quiet, || 7), Ok(Some(7)));
     }
 
     #[test]

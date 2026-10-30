@@ -95,9 +95,10 @@ impl FileAs {
 pub struct InsertTarget {
     /// Schema and table.
     pub relation: Option<(String, String)>,
-    /// The result column's real source, positionally -- `None` for a computed
-    /// one (`now() AS t`), which has nowhere to write back to.
-    pub columns: Option<Vec<Option<String>>>,
+    /// Each column of the result this was read from, by its own name, and its
+    /// real source -- `None` for a computed one (`now() AS t`), which has
+    /// nowhere to write back to.
+    pub columns: Option<Vec<(String, Option<String>)>>,
     /// The table's columns its server works out for itself, by their real
     /// names: left out wherever the result holds them.
     pub computed: Vec<String>,
@@ -106,6 +107,16 @@ pub struct InsertTarget {
 }
 
 impl InsertTarget {
+    /// Where the `columns` of a result read from `edit` write back to.
+    pub fn read_from(edit: &EditTarget, columns: &[Column]) -> Self {
+        let names = columns.iter().map(|column| column.name.clone());
+        Self {
+            relation: Some((edit.schema.clone(), edit.table.clone())),
+            columns: Some(names.zip(edit.columns.iter().cloned()).collect()),
+            ..Self::default()
+        }
+    }
+
     /// This target, knowing what the server fills of the table of `columns`.
     pub fn knowing(self, engine: Engine, columns: &[ColumnDefinition]) -> Self {
         let spec = engine.spec();
@@ -117,16 +128,6 @@ impl InsertTarget {
             computed: names(&|column| spec.computes(column)),
             numbered: names(&|column| spec.numbers(column)),
             ..self
-        }
-    }
-}
-
-impl From<&EditTarget> for InsertTarget {
-    fn from(edit: &EditTarget) -> Self {
-        Self {
-            relation: Some((edit.schema.clone(), edit.table.clone())),
-            columns: Some(edit.columns.clone()),
-            ..Self::default()
         }
     }
 }
@@ -150,15 +151,33 @@ impl Inserts {
         // A statement fetched again may have come back a different shape from
         // the result its target was read from, and a source named for the
         // wrong column would write values under it.
-        let sources = target
-            .columns
-            .as_ref()
-            .filter(|sources| sources.len() == columns.len());
+        let sources = target.columns.as_ref().filter(|sources| {
+            sources.len() == columns.len()
+                && sources
+                    .iter()
+                    .zip(columns)
+                    .all(|((name, _), column)| *name == column.name)
+        });
+        // SQL Server clears the source of a column no `UPDATE` can set, and an
+        // identity is one, so it goes by the name the result gave it. On the
+        // others no source means no column of the table.
+        let identity_named = |column: &Column| {
+            target
+                .numbered
+                .iter()
+                .find(|numbered| numbered.eq_ignore_ascii_case(&column.name))
+                .filter(|_| engine.spec().sql.identity_insert == IdentityInsert::SessionSwitch)
+                .map(String::as_str)
+        };
         let written: Vec<(usize, &str, &Column)> = columns
             .iter()
             .enumerate()
             .filter_map(|(index, column)| match sources {
-                Some(sources) => sources[index].as_deref().map(|name| (index, name, column)),
+                Some(sources) => sources[index]
+                    .1
+                    .as_deref()
+                    .or_else(|| identity_named(column))
+                    .map(|name| (index, name, column)),
                 None => Some((index, column.name.as_str(), column)),
             })
             .filter(|(_, name, _)| !target.computed.iter().any(|computed| computed == name))
@@ -271,7 +290,9 @@ pub fn render_rows_as(
         }
         RowsAs::Json => render(Format::Json, result),
         RowsAs::InsertSql => {
-            let target = edit.map(InsertTarget::from).unwrap_or_default();
+            let target = edit
+                .map(|edit| InsertTarget::read_from(edit, &result.columns))
+                .unwrap_or_default();
             let inserts = Inserts::new(engine, &target, &result.columns);
             result
                 .rows
@@ -864,7 +885,7 @@ mod tests {
             ..QueryResult::default()
         };
         let target = InsertTarget {
-            columns: Some(vec![Some("only".into())]),
+            columns: Some(vec![("only".into(), Some("only".into()))]),
             ..InsertTarget::default()
         };
         assert_eq!(
@@ -891,6 +912,13 @@ mod tests {
             nullable: true,
             default: Some(default.into()),
         }
+    }
+
+    fn sources(pairs: &[(&str, Option<&str>)]) -> Vec<(String, Option<String>)> {
+        pairs
+            .iter()
+            .map(|(name, source)| (name.to_string(), source.map(str::to_string)))
+            .collect()
     }
 
     fn numbered_target(engine: Engine, identity: &str, computed: &str) -> InsertTarget {
@@ -956,7 +984,11 @@ mod tests {
              VALUES ('3', NULL, '6');\n"
         );
         let elsewhere = InsertTarget {
-            columns: Some(vec![None, Some("note".into()), Some("twice".into())]),
+            columns: Some(sources(&[
+                ("id", None),
+                ("note", Some("note")),
+                ("twice", Some("twice")),
+            ])),
             computed: vec!["twice".into()],
             numbered: vec!["id".into()],
             ..target
@@ -982,13 +1014,87 @@ mod tests {
     }
 
     #[test]
+    fn sources_of_a_result_reordered_since_fall_back_to_the_columns_own_names() {
+        let result = QueryResult {
+            columns: vec![column("id"), column("b"), column("a")],
+            rows: rows(vec![vec![
+                Some("1".into()),
+                Some("beta".into()),
+                Some("alpha".into()),
+            ]]),
+            ..QueryResult::default()
+        };
+        let target = InsertTarget {
+            columns: Some(sources(&[
+                ("id", Some("id")),
+                ("a", Some("a")),
+                ("b", Some("b")),
+            ])),
+            ..InsertTarget::default()
+        };
+        assert_eq!(
+            inserts_file(&target, &result),
+            "INSERT INTO table_name (\"id\", \"b\", \"a\") VALUES ('1', 'beta', 'alpha');\n"
+        );
+    }
+
+    #[test]
+    fn a_sql_server_identity_with_no_source_goes_by_its_own_name() {
+        let result = QueryResult {
+            columns: vec![column("code"), column("SEQ"), column("doubled")],
+            rows: rows(vec![vec![
+                Some("1".into()),
+                Some("7".into()),
+                Some("2".into()),
+            ]]),
+            ..QueryResult::default()
+        };
+        let target = |engine, numbered: &str| {
+            let names = result.columns.iter().map(|column| column.name.as_str());
+            InsertTarget {
+                relation: Some(("s".into(), "t".into())),
+                columns: Some(sources(
+                    &names
+                        .map(|name| (name, (name == "code").then_some("code")))
+                        .collect::<Vec<_>>(),
+                )),
+                ..InsertTarget::default()
+            }
+            .knowing(engine, &[definition("seq", "int", numbered)])
+        };
+        let file = |engine, numbered| {
+            let mut writer = FileAs::Inserts
+                .writer(
+                    Vec::new(),
+                    engine,
+                    &target(engine, numbered),
+                    &result.columns,
+                )
+                .unwrap();
+            writer.rows(&result.rows, &[]).unwrap();
+            String::from_utf8(writer.finish().unwrap()).unwrap()
+        };
+
+        assert_eq!(
+            file(Engine::SqlServer, "IDENTITY(1,1)"),
+            "SET IDENTITY_INSERT \"s\".\"t\" ON;\n\
+             INSERT INTO \"s\".\"t\" (\"code\", \"seq\") VALUES (N'1', N'7');\n\
+             SET IDENTITY_INSERT \"s\".\"t\" OFF;\n"
+        );
+        assert_eq!(
+            file(Engine::Postgres, "GENERATED ALWAYS AS IDENTITY"),
+            "INSERT INTO \"s\".\"t\" (\"code\") VALUES ('1');\n"
+        );
+    }
+
+    #[test]
     fn a_result_is_matched_to_its_table_by_the_source_of_each_column() {
         let target = InsertTarget {
-            columns: Some(vec![
-                Some("twice".into()),
-                Some("note".into()),
-                Some("id".into()),
-            ]),
+            columns: Some(sources(&[
+                ("id", Some("twice")),
+                ("note", Some("note")),
+                ("twice", Some("id")),
+            ])),
             ..numbered_target(
                 Engine::Postgres,
                 "GENERATED ALWAYS AS IDENTITY",
