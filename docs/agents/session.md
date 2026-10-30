@@ -107,10 +107,21 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   or the run's messages have nothing to step through, so it stays put), and
   `result_grid::take_keyboard` hands the library the ring's row so its arrows
   step from where the ring is. A structure tab's grid takes focus like a data
-  tab's, its handle held by the loading line until the grid is drawn. Focus
+  tab's, its handle held by the loading line until the grid is drawn, and a
+  relation's by the message that stands in for an empty result. Focus
   Sidebar (`secondary-k e`) puts the keyboard in the explorer's tree, which
   the library draws with a handle of its own; `Workspace::explorer_focus`
   wraps it so `escape` and Toggle Sidebar can tell the keyboard is in there.
+- **A dialog's keyboard is its ring** (`Workspace::dialog_layer`): the layer
+  holds focus, and `left`/`right`/`tab` step a ring across its buttons and
+  then its one other control, the "Don't ask again" box (`enter` or `space`
+  ticks it) or the import question's project (`enter` lists the projects in
+  the palette). `space` never presses a button: a space typed on as a prompt
+  takes the keyboard would otherwise press Run. Import Rows has fields and
+  lists of its own, so it has no ring: Tab moves real focus through it,
+  kept inside the dialog and passing over the preview grid and the SQL,
+  which bind `tab` themselves and would never let it out, and `enter`
+  propagates to whatever control holds focus, so in a field it never imports.
 - **A profile owns a `Session`**, and a session owns two lists of tabs:
   `queries: Vec<QueryTab>` and `objects: Vec<ObjectTab>`. `Tab` is
   `Query(u64) | Object(u64)` and `active: Tab` says which is in front.

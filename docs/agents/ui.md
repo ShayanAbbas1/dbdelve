@@ -42,7 +42,9 @@ while more than one input source is enabled; it can be rebound.
 The library binds `escape` scoped to the input; DBDelve's `show_editor` binding
 is unscoped, and an unscoped binding wins at every depth (see "GPUI hazards" in `AGENTS.md`).
 `show_editor` must therefore `cx.propagate()` on the paths where DBDelve has
-nothing stacked to close, or the completion popup cannot be dismissed. Its two
+nothing stacked to close, or the completion popup cannot be dismissed, and
+first of all while a `PopupMenu` holds the keyboard, or `escape` in a
+dropdown takes down the dialog or form under it. Its two
 last stops are focus moves, not dismissals: from the sidebar's tree it hands
 the keyboard to the surface in front, and from a query tab's grid (the table
 itself, never a cell's open input, which is its descendant) to the buffer
