@@ -844,3 +844,25 @@ fn escape_closes_the_reference_arrows_list(cx: &mut TestAppContext) {
         quit(workspace, cx);
     });
 }
+
+#[gpui::test]
+fn tab_reaches_the_default_sorting_choice_in_settings(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        cx.simulate_keystrokes("secondary-,");
+        settle(cx);
+        cx.simulate_input("Default sorting");
+        settle(cx);
+        let client_sort =
+            |cx: &mut VisualTestContext| workspace.read_with(cx, |w, _| w.settings.client_sort);
+        assert!(!client_sort(cx));
+
+        // Server, then Client.
+        cx.simulate_keystrokes("tab tab");
+        settle(cx);
+        press(cx, "space");
+        assert!(client_sort(cx));
+
+        quit(workspace, cx);
+    });
+}
