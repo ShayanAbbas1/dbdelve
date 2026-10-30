@@ -345,6 +345,8 @@ pub(crate) struct Workspace {
     pub(crate) dialog_choice: std::cell::Cell<usize>,
     /// What held the keyboard when the first dialog went up.
     pub(crate) focus_before_dialog: std::cell::RefCell<Option<FocusHandle>>,
+    /// See [`Workspace::welcome_project_focus`].
+    pub(crate) welcome_project_focus: std::cell::RefCell<Vec<FocusHandle>>,
     pub(crate) newer_release: Option<update::Release>,
 }
 
@@ -480,6 +482,7 @@ impl Workspace {
             dialog_in_front: std::cell::Cell::default(),
             dialog_choice: std::cell::Cell::default(),
             focus_before_dialog: std::cell::RefCell::default(),
+            welcome_project_focus: std::cell::RefCell::default(),
             newer_release: None,
         };
 

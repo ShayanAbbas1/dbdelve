@@ -959,3 +959,48 @@ fn an_empty_table_opened_from_the_sidebar_keeps_the_keyboard(cx: &mut TestAppCon
         quit(workspace, cx);
     });
 }
+
+#[gpui::test]
+fn tab_onto_a_welcome_project_shows_its_rename_and_delete(cx: &mut TestAppContext) {
+    if ["PGHOST", "PGPORT", "PGDATABASE", "PGUSER"]
+        .iter()
+        .any(|name| std::env::var_os(name).is_some())
+    {
+        return;
+    }
+    store::tests::with_home(|| {
+        let directory = store::dbdelve_directory().unwrap();
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("profiles.toml"),
+            "[settings]\ncheck_for_updates = false\n[[projects]]\nname = \"Birds\"\n",
+        )
+        .unwrap();
+        let (workspace, cx) = launch(cx);
+        settle(cx);
+        let row_has_keyboard = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                let row = workspace.read(cx).welcome_project_focus.borrow()[0].clone();
+                row.contains_focused(window, cx)
+            })
+        };
+        assert!(!row_has_keyboard(cx));
+
+        let mut reached = false;
+        for _ in 0..30 {
+            cx.simulate_keystrokes("tab");
+            settle(cx);
+            if row_has_keyboard(cx) {
+                reached = true;
+                break;
+            }
+        }
+        assert!(reached, "Tab never reached the project's buttons");
+        cx.update(|window, cx| {
+            let row = workspace.read(cx).welcome_project_focus.borrow()[0].clone();
+            assert!(!row.is_focused(window), "the row itself is no tab stop");
+        });
+
+        quit(workspace, cx);
+    });
+}

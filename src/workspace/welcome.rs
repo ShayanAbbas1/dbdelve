@@ -327,7 +327,7 @@ impl Workspace {
                 .whitespace_nowrap()
         };
 
-        let projects = self.render_welcome_projects(card_theme, cx);
+        let projects = self.render_welcome_projects(card_theme, window, cx);
         let surface = div()
             .id("welcome-scroll")
             .size_full()
@@ -495,7 +495,23 @@ impl Workspace {
 
     /// The projects made before any connection: each empty, each a way into
     /// the form with itself already picked.
-    fn render_welcome_projects(&self, t: Theme, cx: &mut Context<Self>) -> Option<gpui::Div> {
+    /// What the project row at `index` tracks, which is never a tab stop: it
+    /// only tells whether Tab has reached the row's buttons, drawn unseen
+    /// until something shows them.
+    pub(crate) fn welcome_project_focus(&self, index: usize, cx: &mut App) -> FocusHandle {
+        let mut handles = self.welcome_project_focus.borrow_mut();
+        while handles.len() <= index {
+            handles.push(cx.focus_handle());
+        }
+        handles[index].clone()
+    }
+
+    fn render_welcome_projects(
+        &self,
+        t: Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Div> {
         if self.projects.is_empty() {
             return None;
         }
@@ -518,8 +534,11 @@ impl Workspace {
                 }
             };
             let add_from_row = add.clone();
+            let row_focus = self.welcome_project_focus(index, cx);
+            let focused = row_focus.contains_focused(window, cx);
             rows.push(
                 welcome_row(("welcome-project", index), t)
+                    .track_focus(&row_focus)
                     .group(format!("project-row-{index}"))
                     .child(row_icon(t, icon::PROJECT))
                     .child(
@@ -543,7 +562,7 @@ impl Workspace {
                             .text_color(t.text_faint)
                             .child("No connections yet"),
                     )
-                    .child(self.project_actions(index, &project.name, t, cx))
+                    .child(self.project_actions(index, &project.name, focused, t, cx))
                     .child(
                         button(
                             ("welcome-add-connection", index),

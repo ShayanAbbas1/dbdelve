@@ -2148,11 +2148,13 @@ impl Workspace {
     }
 
     /// Rename and delete, revealed by hovering a row grouped as
-    /// `project-row-{index}`, or held in view while the delete is armed.
+    /// `project-row-{index}`, and held in view while the keyboard is in the
+    /// row or the delete is armed.
     pub(super) fn project_actions(
         &self,
         index: usize,
         name: &str,
+        focused: bool,
         t: Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
@@ -2165,7 +2167,7 @@ impl Workspace {
             .flex()
             .items_center()
             .gap(px(layout::SPACE_XS))
-            .when(!pending, |actions| {
+            .when(!pending && !focused, |actions| {
                 actions
                     .opacity(0.)
                     .group_hover(format!("project-row-{index}"), |style| style.opacity(1.))
