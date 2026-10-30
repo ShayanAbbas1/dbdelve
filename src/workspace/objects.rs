@@ -584,11 +584,12 @@ impl Workspace {
         };
         let profile_id = profile.id.clone();
         let generation = profile.generation;
-        let request = {
-            let issued = profile.session.structure_requests.entry(id).or_default();
-            *issued += 1;
-            *issued
-        };
+        // Numbered across tabs and refreshes: a refresh forgets what was asked
+        // on a connection it keeps, and a number used again would let an answer
+        // from before it pass for the one after.
+        profile.session.last_structure_request += 1;
+        let request = profile.session.last_structure_request;
+        profile.session.structure_requests.insert(id, request);
         let key = (schema.clone(), relation.clone());
         let structure_task = cx.background_executor().spawn(async move {
             let mut structure = connection.structure(&schema, &relation)?;

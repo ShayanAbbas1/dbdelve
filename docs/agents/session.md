@@ -144,6 +144,18 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   a query's error, where the failure is already being read. `ui::status_dot` draws a
   profile's state the same way in the status bar and on each connection row in
   the palette.
+- **Refresh keeps the session; only a dead one is replaced.**
+  `RefreshConnection`, from `Cmd+Shift+R`, the palette and the titlebar's button
+  alike, runs `Workspace::refresh_schema`: the relations and routines are read
+  and land together, sizes follow, and the object tabs go stale as they do on a
+  reconnect. An open transaction, a `SET` and a temporary table survive it: the
+  read runs over the open session, or beside it during a transaction, which a
+  failed read would otherwise abort. The sidebar keeps its rows, folds and
+  selection because `explorer::tree` ids rows by name. A failed read leaves
+  everything as it was and says why, unless `Connection::is_lost` says the
+  session is gone, when it reconnects. With no session at all it connects, which is how
+  `ui::reconnect_button` still works through the same action. The palette's
+  Reconnect is the explicit replacement, for a socket that hangs.
 - **A profile's database is the one it opens, and Select Database moves it.**
   On an engine where `Engine::switches_database`, `Workspace::set_database`
   writes the picked name into the profile's config, persists it and

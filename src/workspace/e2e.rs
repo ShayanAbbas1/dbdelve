@@ -12,10 +12,10 @@ use gpui_component::Root;
 use super::Workspace;
 use crate::{
     actions::CancelQuery,
-    db::Engine,
+    db::{CancelToken, Engine, Fetch},
     keybindings,
     palette::{Mode as PaletteMode, Scope},
-    session::{ObjectBody, QueryState, QueryTab},
+    session::{CatalogState, ObjectBody, QueryState, QueryTab},
     store,
     theme::{self, Fonts},
 };
@@ -1242,6 +1242,92 @@ fn the_export_question_takes_the_keyboard_and_hands_it_back_when_dismissed(
             settle(cx);
             assert_eq!(buffer(&workspace, cx), format!("{before}{typed}"));
         }
+
+        quit(workspace, cx);
+    });
+}
+
+fn relation_names(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Vec<String> {
+    workspace.read_with(cx, |workspace, _| {
+        let Some(CatalogState::Loaded(catalog, _)) =
+            workspace.profile().map(|profile| &profile.catalog)
+        else {
+            panic!("the catalog should have loaded");
+        };
+        catalog
+            .schemas
+            .iter()
+            .flat_map(|schema| &schema.relations)
+            .map(|relation| relation.name.clone())
+            .collect()
+    })
+}
+
+#[gpui::test]
+fn the_refresh_shortcut_finds_a_table_made_elsewhere_over_the_same_session(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        settle(cx);
+        assert!(relation_names(&workspace, cx).is_empty());
+        let generation = workspace.read_with(cx, |workspace, _| {
+            workspace.profile().map(|profile| profile.generation)
+        });
+
+        let database = store::dbdelve_directory()
+            .expect("the test home has a data directory")
+            .join("e2e.db");
+        rusqlite::Connection::open(database)
+            .expect("the database should open")
+            .execute_batch("CREATE TABLE made_elsewhere (id INTEGER)")
+            .expect("the table should be created");
+
+        cx.simulate_keystrokes("secondary-shift-r");
+        settle(cx);
+        assert_eq!(relation_names(&workspace, cx), ["made_elsewhere"]);
+
+        // Sent straight to the session, because its table has to stay
+        // uncommitted: only a read beside the session cannot see it, and a
+        // refresh that dropped the session would leave nothing to `COMMIT`.
+        let session = workspace
+            .read_with(cx, |workspace, _| {
+                workspace.profile().and_then(|profile| profile.connection())
+            })
+            .expect("the profile is connected");
+        let run = |sql: &str| {
+            session
+                .query(sql, &CancelToken::default(), Fetch::default())
+                .expect("the statement should run");
+        };
+        run("BEGIN");
+        run("CREATE TABLE not_committed (id INTEGER)");
+        workspace.update(cx, |workspace, _| {
+            if let Some(profile) = workspace.profile_mut() {
+                profile.in_transaction = true;
+            }
+        });
+
+        cx.simulate_keystrokes("secondary-shift-r");
+        settle(cx);
+        assert_eq!(relation_names(&workspace, cx), ["made_elsewhere"]);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the profile is still open");
+            assert_eq!(Some(profile.generation), generation, "it reconnected");
+            assert!(!profile.refreshing_schema());
+            assert_eq!(
+                profile.session.notice.as_deref(),
+                Some("Schema refreshed."),
+                "the read beside the session failed"
+            );
+        });
+
+        run("COMMIT");
+        cx.simulate_keystrokes("secondary-shift-r");
+        settle(cx);
+        let mut names = relation_names(&workspace, cx);
+        names.sort();
+        assert_eq!(names, ["made_elsewhere", "not_committed"]);
 
         quit(workspace, cx);
     });

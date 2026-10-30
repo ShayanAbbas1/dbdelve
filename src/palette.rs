@@ -390,6 +390,7 @@ pub enum Command {
     DeleteProject(String),
     ImportConnections(Source),
     RefreshConnection,
+    Reconnect,
     /// Put the palette back up over the theme list.
     SelectTheme,
     /// For the side a light or dark theme list was opened for, if any.
@@ -3727,12 +3728,20 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
     }
     items.push(bound(
         command(
-            "Refresh connection",
-            icon::DATABASE,
+            "Refresh schema",
+            icon::REFRESH,
             Command::RefreshConnection,
             CONNECTION,
         ),
         "refresh_connection",
+    ));
+    // For a socket that hangs rather than fails, which nothing else can tell
+    // from a slow server. A refresh keeps the session; this is the way out of it.
+    items.push(command(
+        "Reconnect",
+        icon::DATABASE,
+        Command::Reconnect,
+        CONNECTION,
     ));
     if profile.config.engine().switches_database() {
         items.push(bound(
@@ -3846,6 +3855,7 @@ fn beside_import(command: &Command) -> bool {
             | Command::PickProject(_)
             | Command::ImportConnections(_)
             | Command::RefreshConnection
+            | Command::Reconnect
             | Command::SelectTheme
             | Command::PickFont(_)
             | Command::OpenSettings

@@ -13,6 +13,17 @@ use crate::sql::{Destructive, Mode};
 
 use std::path::Path;
 
+/// The rows on an object tab were read from what the server held then. Their
+/// statement is dbdelve's own, so it re-runs the moment the tab is looked at
+/// again -- a query tab holds SQL the user wrote and is theirs to re-run.
+fn mark_rows_stale(profile: &mut Profile) {
+    for tab in &mut profile.session.objects {
+        if let ObjectBody::Relation { stale, .. } = &mut tab.body {
+            *stale = true;
+        }
+    }
+}
+
 impl Workspace {
     pub(crate) fn remember_profiles(&mut self, cx: &mut Context<Self>) {
         // The file we could not read at startup is still the user's, and what
@@ -181,6 +192,7 @@ impl Workspace {
             in_transaction: false,
             session_changed: false,
             catalog: CatalogState::Loading,
+            schema_refresh: None,
             databases: Databases::default(),
             left_database: false,
             session,
@@ -236,6 +248,7 @@ impl Workspace {
             in_transaction: false,
             session_changed: false,
             catalog: CatalogState::Loading,
+            schema_refresh: None,
             databases: Databases::default(),
             left_database: false,
             session,
@@ -821,15 +834,7 @@ impl Workspace {
         let Some(profile) = self.profiles.get_mut(index) else {
             return;
         };
-        // The rows on an object tab were read over the old connection. Their
-        // statement is dbdelve's own, so it re-runs the moment the tab is
-        // looked at again -- a query tab holds SQL the user wrote and is
-        // theirs to re-run.
-        for tab in &mut profile.session.objects {
-            if let ObjectBody::Relation { stale, .. } = &mut tab.body {
-                *stale = true;
-            }
-        }
+        mark_rows_stale(profile);
         self.begin_connect(index, cx);
     }
 
@@ -840,7 +845,117 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.clear_notice();
-        self.reconnect(self.active, cx);
+        self.refresh_schema(cx);
+    }
+
+    /// Read what the server holds again, over the session already open: an
+    /// open transaction, a `SET` and a temporary table all outlive this, as
+    /// none of them would a new connection.
+    ///
+    /// What is on screen stays until the relations and routines can replace it
+    /// at once, so the sidebar neither blanks nor loses the rows folded open.
+    /// With no session to read over, this is a connect.
+    pub(crate) fn refresh_schema(&mut self, cx: &mut Context<Self>) {
+        let index = self.active;
+        let Some(profile) = self.profiles.get_mut(index) else {
+            return;
+        };
+        let Some(connection) = profile.connection() else {
+            self.reconnect(index, cx);
+            return;
+        };
+        // A catalog still loading is this answer, already on its way, and its
+        // routines landing later would write over a refresh's.
+        if profile.refreshing_schema()
+            || matches!(
+                profile.catalog,
+                CatalogState::Loading | CatalogState::Loaded(_, Routines::Loading)
+            )
+        {
+            return;
+        }
+        profile.schema_refresh = Some(profile.generation);
+        let (id, generation) = (profile.id.clone(), profile.generation);
+        let in_transaction = profile.in_transaction;
+        cx.notify();
+
+        let refresh_task = cx.background_executor().spawn(async move {
+            // A failed read inside the user's transaction fails the transaction
+            // on Postgres, so it never goes on that session: with no other to
+            // be had, an in-memory database's among them, the refresh says so.
+            let lost = |error| (error, connection.is_lost());
+            let reader = match in_transaction {
+                true => connection.apart().map_err(lost)?,
+                false => connection.clone(),
+            };
+            let catalog = reader.catalog().map_err(lost)?;
+            Ok::<_, (DbError, bool)>((catalog, reader.routines()))
+        });
+
+        cx.spawn(async move |workspace, cx| {
+            let result = refresh_task.await;
+            workspace
+                .update(cx, |workspace, cx| {
+                    let Some(profile) = workspace.issued_to(&id, generation) else {
+                        return;
+                    };
+                    profile.schema_refresh = None;
+                    cx.notify();
+                    let (mut catalog, routines) = match result {
+                        Ok(refreshed) => refreshed,
+                        // A session that is gone has no transaction left to
+                        // keep, and a new one is the only way to get an answer.
+                        Err((_, true)) => {
+                            let index = workspace
+                                .profiles
+                                .iter()
+                                .position(|profile| profile.id == id);
+                            if let Some(index) = index {
+                                workspace.reconnect(index, cx);
+                            }
+                            return;
+                        }
+                        // Anything else, a Postgres transaction that has failed
+                        // among them, leaves the session and the sidebar as
+                        // they were rather than trading them for an error.
+                        Err((error, false)) => {
+                            profile.session.notice = Some(error.message);
+                            return;
+                        }
+                    };
+                    let routines = match routines {
+                        Ok(routines) => {
+                            catalog.merge(routines);
+                            Routines::Loaded
+                        }
+                        Err(error) => {
+                            profile.session.notice = Some(error.message);
+                            Routines::Failed
+                        }
+                    };
+                    let complete = matches!(routines, Routines::Loaded);
+                    // Worn until `load_sizes` answers, which a lock can hold up
+                    // for as long as the transaction holding it stays open.
+                    // What the catalog itself carries stays on top: on some
+                    // engines these are its numbers and `load_sizes` has none.
+                    if let CatalogState::Loaded(old, _) = &profile.catalog {
+                        let fresh = catalog.sizes();
+                        catalog.set_sizes(&old.sizes());
+                        catalog.set_sizes(&fresh);
+                    }
+                    profile.catalog = CatalogState::Loaded(catalog, routines);
+                    profile.session.structure_requests.clear();
+                    mark_rows_stale(profile);
+                    workspace.catalog_replaced(&id, generation, true, cx);
+                    workspace.reload_front_object(&id, cx);
+                    workspace.load_sizes(&id, generation, cx);
+                    if complete && workspace.profile().is_some_and(|front| front.id == id) {
+                        workspace.confirm("Schema refreshed.".into(), cx);
+                    }
+                })
+                .ok();
+        })
+        .detach();
     }
 
     /// Ask the server which databases it holds, then offer them in the palette.
@@ -1518,23 +1633,25 @@ impl Workspace {
                     }
                     workspace.load_catalog(&id, generation, cx);
                     workspace.load_import_columns(&id, cx);
-                    // The tab in front is already being looked at, so a
-                    // reconnect has no later visit to re-run it on -- unless
-                    // it names a relation of a database the connection is
-                    // not on, and is about to close.
-                    let active = workspace.profile().filter(|profile| {
-                        profile.id == id && profile.connection().is_some() && !profile.left_database
-                    });
-                    if let Some(Tab::Object(object)) = active.map(|profile| profile.session.active)
-                    {
-                        workspace.load_relation(object, cx);
-                    }
+                    workspace.reload_front_object(&id, cx);
                     workspace.run_waiting_files(&id, cx);
                     cx.notify();
                 })
                 .ok();
         })
         .detach();
+    }
+
+    /// The tab in front is already being looked at, so a reconnect or a
+    /// refresh has no later visit to re-run it on -- unless it names a relation
+    /// of a database the connection is not on, and is about to close.
+    fn reload_front_object(&mut self, id: &str, cx: &mut Context<Self>) {
+        let active = self.profile().filter(|profile| {
+            profile.id == id && profile.connection().is_some() && !profile.left_database
+        });
+        if let Some(Tab::Object(object)) = active.map(|profile| profile.session.active) {
+            self.load_relation(object, cx);
+        }
     }
 
     pub(crate) fn load_catalog(&mut self, id: &str, generation: u64, cx: &mut Context<Self>) {
@@ -1569,28 +1686,7 @@ impl Workspace {
                         Ok(catalog) => CatalogState::Loaded(catalog, Routines::Loading),
                         Err(error) => CatalogState::Failed(error.message),
                     };
-                    // Relations restore before the catalog arrives, wearing
-                    // whatever kind was on disk -- a default, for a profile an
-                    // older build wrote. This is the first moment there is
-                    // anything to correct it from.
-                    if let CatalogState::Loaded(catalog, _) = &profile.catalog {
-                        for tab in &mut profile.session.objects {
-                            if let ObjectKind::Relation(kind) = &mut tab.kind
-                                && let Some(actual) = relation_kind(catalog, &tab.schema, &tab.name)
-                            {
-                                *kind = actual;
-                            }
-                        }
-                    }
-                    // The relations are new, so what was known about any
-                    // one's columns describes a schema that may no longer
-                    // exist. Here and not in `install_completions`, which the
-                    // routines and every new buffer also reach without the
-                    // relations having changed.
-                    profile.session.completion_columns.borrow_mut().clear();
-                    workspace.install_completions(&id, cx);
-                    workspace.refresh_explorer(&id, cx);
-                    workspace.catalog_landed(&id, cx);
+                    workspace.catalog_replaced(&id, generation, false, cx);
                     cx.notify();
                     workspace.load_routines(&id, generation, cx);
                     workspace.load_sizes(&id, generation, cx);
@@ -1598,6 +1694,36 @@ impl Workspace {
                 .ok();
         })
         .detach();
+    }
+
+    /// Bring everything read from the catalog up to the one just put in place.
+    /// `keep` holds on to what the user folded and selected in the sidebar.
+    fn catalog_replaced(&mut self, id: &str, generation: u64, keep: bool, cx: &mut Context<Self>) {
+        let Some(profile) = self.issued_to(id, generation) else {
+            return;
+        };
+        // Relations restore before the catalog arrives, wearing whatever kind
+        // was on disk -- a default, for a profile an older build wrote. This is
+        // the first moment there is anything to correct it from.
+        if let CatalogState::Loaded(catalog, _) = &profile.catalog {
+            for tab in &mut profile.session.objects {
+                if let ObjectKind::Relation(kind) = &mut tab.kind
+                    && let Some(actual) = relation_kind(catalog, &tab.schema, &tab.name)
+                {
+                    *kind = actual;
+                }
+            }
+        }
+        // The relations are new, so what was known about any one's columns
+        // describes a schema that may no longer exist. Here and not in
+        // `install_completions`, which the routines and every new buffer also
+        // reach without the relations having changed. A new cache and not a
+        // cleared one, so a fetch still out writes into the one left behind:
+        // a refresh keeps the generation that would otherwise turn it away.
+        profile.session.completion_columns = completion::ColumnCache::default();
+        self.install_completions(id, cx);
+        self.rebuild_explorer(id, keep, cx);
+        self.catalog_landed(id, cx);
     }
 
     /// Fill the routines in behind the relations already on screen.
@@ -1690,7 +1816,7 @@ impl Workspace {
                         return;
                     };
                     catalog.set_sizes(&sizes);
-                    workspace.refresh_explorer(&id, cx);
+                    workspace.rebuild_explorer(&id, true, cx);
                     cx.notify();
                 })
                 .ok();

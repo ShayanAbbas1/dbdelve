@@ -130,7 +130,7 @@ registry! {
     ("new_project", "New Project", None, [], NewProject),
     ("close_tab", "Close Tab", None, ["secondary-w"], CloseTab),
     ("refresh_relation", "Refresh Rows", None, ["secondary-r"], RefreshRelation),
-    ("refresh_connection", "Refresh Connection", None, ["secondary-shift-r"], RefreshConnection),
+    ("refresh_connection", "Refresh Schema", None, ["secondary-shift-r"], RefreshConnection),
     ("next_tab", "Next Tab", None, ["ctrl-tab"], NextTab),
     ("previous_tab", "Previous Tab", None, ["ctrl-shift-tab"], PreviousTab),
     ("next_profile", "Next Connection", None, ["ctrl-`"], NextProfile),

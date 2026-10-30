@@ -684,7 +684,11 @@ impl Workspace {
             Command::NewConnection => self.open_connection_form(&NewConnection, window, cx),
             Command::NewProject => self.new_project(&NewProject, window, cx),
             Command::ImportConnections(source) => self.import_connections(source, window, cx),
-            Command::RefreshConnection => self.reconnect(self.active, cx),
+            Command::RefreshConnection => {
+                self.clear_notice();
+                self.refresh_schema(cx);
+            }
+            Command::Reconnect => self.reconnect(self.active, cx),
             Command::SelectTheme => self.select_theme(&SelectTheme, window, cx),
             Command::SelectDatabase => self.select_database(&SelectDatabase, window, cx),
             Command::SetDatabase(name) => self.set_database(name, window, cx),

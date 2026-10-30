@@ -2192,6 +2192,24 @@ impl Catalog {
         }
     }
 
+    /// What [`Catalog::set_sizes`] would write back, for carrying the numbers
+    /// over to a newer catalog of the same database.
+    pub fn sizes(&self) -> Sizes {
+        self.schemas
+            .iter()
+            .map(|schema| {
+                let relations = schema.relations.iter().map(|relation| {
+                    let statistics = Statistics {
+                        size: relation.size,
+                        rows: relation.rows,
+                    };
+                    (relation.name.clone(), statistics)
+                });
+                (schema.name.clone(), relations.collect())
+            })
+            .collect()
+    }
+
     /// Every schema with its index, in name order.
     pub fn by_name(&self) -> Vec<(usize, &Schema)> {
         let mut schemas = self.schemas.iter().enumerate().collect::<Vec<_>>();
@@ -4399,6 +4417,13 @@ mod tests {
         assert_eq!(relation("public", "account_overview"), (None, None));
         assert_eq!(relation("archive", "accounts"), (None, None));
         assert_eq!(relation("archive", "unmeasured"), (None, Some(7)));
+
+        let mut carried = catalog.clone();
+        for relation in carried.schemas.iter_mut().flat_map(|s| &mut s.relations) {
+            (relation.size, relation.rows) = (None, None);
+        }
+        carried.set_sizes(&catalog.sizes());
+        assert_eq!(carried, catalog);
     }
 
     #[test]

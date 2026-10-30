@@ -91,35 +91,36 @@ pub fn query_row(name: &str) -> String {
     format!("{QUERY_ROW}{name}")
 }
 
-/// The row id of a relation, by its place in the catalog.
-pub fn relation_row(schema_index: usize, relation_index: usize) -> String {
-    format!("relation-{schema_index}-{relation_index}")
+/// The row id of a relation. By name and not by place, so that a row is the
+/// same row after a schema refresh has moved the catalog around it.
+pub fn relation_row(schema: &str, relation: &str) -> String {
+    format!("relation-{schema}\0{relation}")
 }
 
-fn routine_row(schema_index: usize, routine_index: usize) -> String {
-    format!("routine-{schema_index}-{routine_index}")
+fn routine_row(schema: &str, routine: &Routine) -> String {
+    let (kind, name) = (routine.kind, crate::session::routine_name(routine));
+    format!("routine-{kind:?}-{schema}\0{name}")
 }
 
 /// The row id of the object a tab shows. A routine is found by its name and
 /// arguments, as its tab is named: the name alone does not tell overloads
 /// apart, and a relation of the same name is another object entirely.
 pub fn object_row(catalog: &Catalog, schema: &str, name: &str, kind: ObjectKind) -> Option<String> {
-    let (schema_index, schema) = catalog
+    let schema = catalog
         .schemas
         .iter()
-        .enumerate()
-        .find(|(_, candidate)| candidate.name == schema)?;
+        .find(|candidate| candidate.name == schema)?;
     match kind {
         ObjectKind::Relation(_) => schema
             .relations
             .iter()
-            .position(|relation| relation.name == name)
-            .map(|index| relation_row(schema_index, index)),
-        ObjectKind::Routine(_) => schema
+            .find(|relation| relation.name == name)
+            .map(|relation| relation_row(&schema.name, &relation.name)),
+        ObjectKind::Routine(kind) => schema
             .routines
             .iter()
-            .position(|routine| crate::session::routine_name(routine) == name)
-            .map(|index| routine_row(schema_index, index)),
+            .find(|routine| routine.kind == kind && crate::session::routine_name(routine) == name)
+            .map(|routine| routine_row(&schema.name, routine)),
     }
 }
 
@@ -228,7 +229,7 @@ pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
         .by_name()
         .into_iter()
         .filter_map(|(schema_index, schema)| {
-            let id = format!("{SCHEMA_ROW}{schema_index}");
+            let id = format!("{SCHEMA_ROW}{}", schema.name);
             let schema_matches = builder.name_matches(&id, &schema.name);
             let mut groups = Vec::new();
 
@@ -258,7 +259,7 @@ pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
                     .collect::<Vec<_>>();
 
                 if !children.is_empty() {
-                    groups.push(category(label, schema_index, children));
+                    groups.push(category(label, &schema.name, children));
                 }
             }
 
@@ -269,7 +270,7 @@ pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
                     .enumerate()
                     .filter(|(_, routine)| routine.kind == kind)
                     .filter_map(|(routine_index, routine)| {
-                        let id = routine_row(schema_index, routine_index);
+                        let id = routine_row(&schema.name, routine);
                         let name_matches = builder.name_matches(&id, &routine.name);
                         if !(schema_matches || name_matches || builder.signature_matches(routine)) {
                             return None;
@@ -293,7 +294,7 @@ pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
                     .collect::<Vec<_>>();
 
                 if !children.is_empty() {
-                    groups.push(category(label, schema_index, children));
+                    groups.push(category(label, &schema.name, children));
                 }
             }
 
@@ -387,7 +388,7 @@ fn relation_item(
     inherited: bool,
 ) -> Option<TreeItem> {
     let relation = &schema.relations[relation_index];
-    let id = relation_row(schema_index, relation_index);
+    let id = relation_row(&schema.name, &relation.name);
     let matched = builder.name_matches(&id, &relation.name) || inherited;
 
     let children: Vec<TreeItem> = partitions
@@ -425,8 +426,8 @@ fn relation_item(
     )
 }
 
-fn category(label: &'static str, schema_index: usize, children: Vec<TreeItem>) -> TreeItem {
-    TreeItem::new(format!("category-{label}-{schema_index}"), label)
+fn category(label: &'static str, schema: &str, children: Vec<TreeItem>) -> TreeItem {
+    TreeItem::new(format!("category-{label}-{schema}"), label)
         .expanded(true)
         .children(children)
 }
@@ -693,12 +694,47 @@ mod tests {
     }
 
     #[test]
+    fn a_row_keeps_its_id_when_the_catalog_around_it_moves() {
+        let before = catalog();
+        let mut after = catalog();
+        after.schemas.insert(
+            0,
+            Schema {
+                name: "aardvark".into(),
+                relations: Vec::new(),
+                routines: Vec::new(),
+            },
+        );
+        after.schemas[2].relations.insert(
+            0,
+            Relation {
+                name: "a_new_table".into(),
+                kind: RelationKind::Table,
+                partition_of: None,
+                size: None,
+                rows: None,
+            },
+        );
+
+        fn ids(items: &[TreeItem], into: &mut HashSet<String>) {
+            for item in items {
+                into.insert(item.id.to_string());
+                ids(&item.children, into);
+            }
+        }
+        let (mut old, mut new) = (HashSet::new(), HashSet::new());
+        ids(&tree(&before, "").items, &mut old);
+        ids(&tree(&after, "").items, &mut new);
+        assert!(old.is_subset(&new), "moved: {:?}", old.difference(&new));
+    }
+
+    #[test]
     fn a_tab_finds_its_row_by_kind_and_a_routine_by_its_arguments() {
         let catalog = catalog();
         let row = |name: &str, kind| object_row(&catalog, "public", name, kind);
         assert_eq!(
             row("accounts", ObjectKind::Relation(RelationKind::Table)).as_deref(),
-            Some("relation-1-1")
+            Some("relation-public\0accounts")
         );
         assert_eq!(
             row(
@@ -706,7 +742,7 @@ mod tests {
                 ObjectKind::Routine(RoutineKind::Function)
             )
             .as_deref(),
-            Some("routine-1-1")
+            Some("routine-Function-public\0account_name(account_id bigint)")
         );
         assert_eq!(
             row("account_name", ObjectKind::Routine(RoutineKind::Function)),
@@ -1001,8 +1037,8 @@ mod tests {
             roots,
             [
                 (QUERIES_GROUP, false),
-                ("schema-0", true),
-                ("schema-1", true)
+                ("schema-analytics", true),
+                ("schema-public", true)
             ]
         );
         let group = &explorer.items[0];
@@ -1068,18 +1104,23 @@ mod tests {
         assert_eq!(explorer.items.len(), 1);
         assert_eq!(categories[0].children[0].label, "accounts");
         assert_eq!(
-            marked(&explorer, "relation-1-1", "accounts").as_deref(),
+            marked(&explorer, "relation-public\0accounts", "accounts").as_deref(),
             Some("acct")
         );
         // A routine's row reads `name(args)`, and only the name was matched.
         let label = "account_name(account_id bigint)";
         assert_eq!(categories[2].children[0].label, label);
         assert_eq!(
-            marked(&explorer, "routine-1-1", label).as_deref(),
+            marked(
+                &explorer,
+                "routine-Function-public\0account_name(account_id bigint)",
+                label
+            )
+            .as_deref(),
             Some("acct")
         );
         assert!(
-            explorer.highlights["routine-1-1"]
+            explorer.highlights["routine-Function-public\0account_name(account_id bigint)"]
                 .iter()
                 .all(|range| range.end <= "account_name".len())
         );
@@ -1109,12 +1150,16 @@ mod tests {
         let explorer = tree(&catalog(), "analytics");
 
         assert_eq!(
-            marked(&explorer, "schema-0", "analytics").as_deref(),
+            marked(&explorer, "schema-analytics", "analytics").as_deref(),
             Some("analytics")
         );
         // Kept because its schema matched, not because of its name.
-        assert!(explorer.leaves.contains_key("relation-0-0"));
-        assert!(!explorer.highlights.contains_key("relation-0-0"));
+        assert!(explorer.leaves.contains_key("relation-analytics\0events"));
+        assert!(
+            !explorer
+                .highlights
+                .contains_key("relation-analytics\0events")
+        );
 
         assert!(tree(&catalog(), "").highlights.is_empty());
     }
@@ -1124,7 +1169,9 @@ mod tests {
         let explorer = tree(&catalog(), "account_name");
 
         assert_eq!(
-            explorer.leaves.get("routine-1-1"),
+            explorer
+                .leaves
+                .get("routine-Function-public\0account_name(account_id bigint)"),
             Some(&ExplorerLeaf {
                 target: ExplorerTarget::Routine {
                     schema_index: 1,
@@ -1143,11 +1190,11 @@ mod tests {
 
         // public: relation 0 is a view, relation 1 is a table.
         assert_eq!(
-            kind("relation-1-0"),
+            kind("relation-public\0active_accounts"),
             Some(ObjectKind::Relation(RelationKind::View))
         );
         assert_eq!(
-            kind("relation-1-1"),
+            kind("relation-public\0accounts"),
             Some(ObjectKind::Relation(RelationKind::Table))
         );
     }
