@@ -1073,7 +1073,14 @@ mod tests {
 
     #[test]
     fn a_word_matches_within_one_field_not_across_them() {
-        assert_eq!(found("sort"), [SettingId::DefaultSorting]);
+        assert_eq!(
+            found("sort"),
+            [
+                SettingId::DefaultSorting,
+                SettingId::Keybinding("reset_confirmations"),
+                SettingId::Keybinding("sort_active_column"),
+            ]
+        );
         assert_eq!(found("!keyboard").len(), 12);
     }
 

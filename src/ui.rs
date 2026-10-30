@@ -1285,7 +1285,7 @@ mod tests {
         assert!(!shipped.is_empty());
         assert_ne!(shipped, rebound);
         // An action nothing has bound draws no cap at all.
-        assert_eq!(chord_hint("cancel_query", &overrides), "");
+        assert_eq!(chord_hint("next_page", &overrides), "");
     }
 
     #[test]
