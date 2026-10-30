@@ -938,7 +938,7 @@ impl Workspace {
     /// The grid in front that can take the keyboard: one drawn, with a row for
     /// the ring to sit on. A plan, the run's messages, or the line standing in
     /// for rows that never came, has nothing in it to step through.
-    fn front_grid(&self, cx: &App) -> Option<Focus> {
+    pub(super) fn front_grid(&self, cx: &App) -> Option<Focus> {
         let session = &self.profile()?.session;
         let has_rows = |grid: &Entity<gpui_component::table::TableState<ResultGrid>>| {
             !grid.read(cx).delegate().result().rows.is_empty()

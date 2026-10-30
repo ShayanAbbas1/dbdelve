@@ -978,22 +978,27 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(crate) fn next_result(&mut self, _: &NextResult, _: &mut Window, cx: &mut Context<Self>) {
-        self.step_result(1, cx);
+    pub(crate) fn next_result(
+        &mut self,
+        _: &NextResult,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.step_result(1, window, cx);
     }
 
     pub(crate) fn previous_result(
         &mut self,
         _: &PreviousResult,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.step_result(-1, cx);
+        self.step_result(-1, window, cx);
     }
 
     /// The switcher's chips from the keyboard, Messages among them, through
     /// the doors a click on each goes through.
-    fn step_result(&mut self, step: isize, cx: &mut Context<Self>) {
+    fn step_result(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self
             .profile()
             .and_then(|profile| profile.session.active_query_tab())
@@ -1001,6 +1006,7 @@ impl Workspace {
             return;
         };
         let id = Tab::Query(tab.id);
+        let in_grid = tab.shown().1.focus_handle(cx).contains_focused(window, cx);
         match crate::session::stepped(&tab.switcher_chips(), tab.switcher_selected(), step) {
             Some(Some(index)) => self.show_queued_result(id, index, cx),
             Some(None) => self.show_messages(id, cx),
@@ -1008,6 +1014,16 @@ impl Workspace {
         }
         // A chord pressed in the grid it just swapped out would leave the
         // keyboard on a grid no longer on screen, with no dispatch path.
+        if in_grid && let Some(crate::session::Focus::Grid(grid)) = self.front_grid(cx) {
+            grid.update(cx, |table, cx| {
+                crate::result_grid::take_keyboard(table, window, cx)
+            });
+            if let Some(profile) = self.profile_mut() {
+                profile.session.editor_needs_focus = false;
+            }
+            cx.notify();
+            return;
+        }
         self.refocus_front();
     }
 

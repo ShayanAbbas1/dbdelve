@@ -958,6 +958,35 @@ fn tab_reaches_the_default_sorting_choice_in_settings(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn stepping_to_the_next_result_keeps_the_keyboard_in_the_grid(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        cx.executor().allow_parking();
+        cx.simulate_input("select 1; select 2");
+        cx.simulate_keystrokes("secondary-a secondary-enter");
+        settle(cx);
+        cx.simulate_keystrokes("secondary-k r");
+        settle(cx);
+        let shown = |cx: &mut VisualTestContext| {
+            query_tab(&workspace, cx, |tab, window, cx| {
+                (
+                    tab.switcher_selected(),
+                    tab.shown().1.focus_handle(cx).is_focused(window),
+                )
+            })
+        };
+        assert_eq!(shown(cx), (Some(0), true));
+
+        cx.dispatch_action(crate::actions::NextResult);
+        settle(cx);
+        assert_eq!(shown(cx), (Some(1), true));
+        assert!(!editor_has_keyboard(&workspace, cx));
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn the_palette_switches_who_sorts_the_view(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite(cx);
