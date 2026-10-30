@@ -397,6 +397,8 @@ pub enum Command {
     PickFont(FontSlot),
     SetFont(FontSlot, String),
     ToggleSidebar,
+    FocusSidebar,
+    ToggleResultsFocus,
     ToggleRowPanel,
     ToggleRowEdit,
     ResetEditorZoom,
@@ -3630,6 +3632,26 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         ),
         "toggle_sidebar",
     ));
+    items.push(bound(
+        command(
+            "Focus sidebar",
+            icon::SIDEBAR,
+            Command::FocusSidebar,
+            WINDOW,
+        ),
+        "focus_sidebar",
+    ));
+    if session.active_results().is_some() || session.active_object().is_some() {
+        items.push(bound(
+            command(
+                "Focus results",
+                icon::ROW_PANEL,
+                Command::ToggleResultsFocus,
+                WINDOW,
+            ),
+            "toggle_results_focus",
+        ));
+    }
     items.push(bound(
         command(
             "Toggle row panel",

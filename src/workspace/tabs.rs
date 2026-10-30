@@ -81,6 +81,11 @@ impl Workspace {
             }
             tree.focus(window, cx);
         });
+        // A hand-back asked for earlier, as the palette asks on closing, would
+        // take the keyboard straight back.
+        if let Some(profile) = self.profile_mut() {
+            profile.session.editor_needs_focus = false;
+        }
     }
 
     /// `enter` on the sidebar's selected row: what a click on it does.
