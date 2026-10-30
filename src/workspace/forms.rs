@@ -2469,10 +2469,10 @@ impl Workspace {
                         })
                     };
                     let submenu = submenu
-                        .item(export("CSV…", FileAs::Rows(Format::Csv)))
-                        .item(export("JSON…", FileAs::Rows(Format::Json)));
+                        .item(export("CSV", FileAs::Rows(Format::Csv)))
+                        .item(export("JSON", FileAs::Rows(Format::Json)));
                     match engine.syntax() {
-                        db::Syntax::Sql => submenu.item(export("SQL…", FileAs::Inserts)),
+                        db::Syntax::Sql => submenu.item(export("SQL", FileAs::Inserts)),
                         _ => submenu,
                     }
                 });
