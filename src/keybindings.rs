@@ -163,8 +163,8 @@ registry! {
     // holds: `secondary-f` is the field's search and `secondary-shift-f`
     // Format Query, which as an unscoped binding would win over these. Outside
     // History they are handed on to the field.
-    ("palette_history_filter", "Palette: Cycle History Status", Some("Palette > Input"), ["alt-f"], PaletteHistoryFilter),
-    ("palette_history_sort", "Palette: Cycle History Sort", Some("Palette > Input"), ["alt-s"], PaletteHistorySort),
+    ("palette_history_filter", "Palette: Cycle History Status", Some("Palette > Input"), ["alt-shift-f"], PaletteHistoryFilter),
+    ("palette_history_sort", "Palette: Cycle History Sort", Some("Palette > Input"), ["alt-shift-s"], PaletteHistorySort),
     ("zoom_editor_in", "Zoom In", None, ["secondary-+", "secondary-="], ZoomEditorIn),
     ("zoom_editor_out", "Zoom Out", None, ["secondary--"], ZoomEditorOut),
     ("reset_editor_zoom", "Reset Zoom", None, ["secondary-0"], ResetEditorZoom),
