@@ -640,6 +640,8 @@ pub enum DdlNames {
     Unqualified,
 }
 
+/// What a schema export's file has to do to run back on this engine: name
+/// its tables as the DDL does, and get rows past the foreign keys.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SchemaExport {
     pub names: DdlNames,
@@ -669,8 +671,8 @@ pub struct Abilities {
     pub imports: bool,
     pub assigns_default: bool,
     pub copies_ddl: bool,
-    /// Whether a schema exports as one file of its DDL and rows, how that DDL
-    /// names its tables and how the file replays foreign keys. `None` where the DDL does not run back as written.
+    /// Whether a schema exports as one file of its DDL and rows, and how. `None`
+    /// where the DDL does not run back as written.
     pub exports_schema: Option<SchemaExport>,
     pub switches_database: bool,
     pub switches_database_in_session: bool,
