@@ -55,8 +55,8 @@ pub use mongo::MongoConfig;
 pub use postgres::PostgresConfig;
 pub use snowflake::{SnowflakeConfig, account_identifier, normalize_host};
 #[cfg(test)]
-pub use spec::{Abilities, Hints, Hooks, IdentifierQuote};
-pub use spec::{DdlNames, IdentityInsert, ReadOnlySession, UnreadableFloor};
+pub use spec::{Abilities, ForeignKeyReplay, Hints, Hooks, IdentifierQuote};
+pub use spec::{DdlNames, IdentityInsert, ReadOnlySession, SchemaExport, UnreadableFloor};
 pub use spec::{
     EngineSpec, ExplainPrefix, ForeignTable, FormatDialect, MaterializedViewDrop, Paging, Params,
     ParserDialect, RegexMatch, SelectTop, SkipDuplicates, SqlSpec, StatementSplit, SubstringMatch,

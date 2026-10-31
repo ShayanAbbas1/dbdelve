@@ -161,7 +161,10 @@ pub(super) fn export_schema(
             .map_err(|reason| refused(reason.into()))?;
         let target = InsertTarget {
             relation: Some((schema.to_string(), name.clone())),
-            unqualified: Target::built_in(engine).exports_schema() == Some(DdlNames::Unqualified),
+            unqualified: Target::built_in(engine)
+                .exports_schema()
+                .map(|export| export.names)
+                == Some(DdlNames::Unqualified),
             ..InsertTarget::default()
         }
         .knowing(engine, &table.structure.columns);
@@ -273,6 +276,7 @@ pub(super) fn dependency_order(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::{ForeignKeyReplay, SchemaExport};
 
     #[test]
     fn only_an_engine_whose_ddl_replays_as_written_exports_a_schema() {
@@ -285,22 +289,48 @@ mod tests {
             Engine::MongoDb,
             Engine::Redis,
         ] {
-            assert_eq!(Target::built_in(engine).exports_schema(), None, "{engine:?}");
-        }
-        for engine in [Engine::Postgres, Engine::SqlServer, Engine::ClickHouse] {
             assert_eq!(
                 Target::built_in(engine).exports_schema(),
-                Some(DdlNames::Qualified),
+                None,
                 "{engine:?}"
             );
         }
-        for engine in [Engine::MySql, Engine::MariaDb, Engine::DuckDb] {
+        let export = |names, foreign_keys| {
+            Some(SchemaExport {
+                names,
+                foreign_keys,
+            })
+        };
+        for engine in [Engine::Postgres, Engine::SqlServer] {
             assert_eq!(
                 Target::built_in(engine).exports_schema(),
-                Some(DdlNames::Unqualified),
+                export(DdlNames::Qualified, ForeignKeyReplay::AddedAfterRows),
                 "{engine:?}"
             );
         }
+        assert_eq!(
+            Target::built_in(Engine::ClickHouse).exports_schema(),
+            export(DdlNames::Qualified, ForeignKeyReplay::NotEnforced)
+        );
+        // The pair saves and restores the session's own setting, so a session
+        // that had checks off is not left with them on.
+        for engine in [Engine::MySql, Engine::MariaDb] {
+            assert_eq!(
+                Target::built_in(engine).exports_schema(),
+                export(
+                    DdlNames::Unqualified,
+                    ForeignKeyReplay::ChecksOff {
+                        off: "SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0;",
+                        on: "SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS;",
+                    }
+                ),
+                "{engine:?}"
+            );
+        }
+        assert_eq!(
+            Target::built_in(Engine::DuckDb).exports_schema(),
+            export(DdlNames::Unqualified, ForeignKeyReplay::RefusesCycles)
+        );
     }
 
     fn key(table: &str) -> ForeignKey {

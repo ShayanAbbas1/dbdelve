@@ -640,6 +640,25 @@ pub enum DdlNames {
     Unqualified,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SchemaExport {
+    pub names: DdlNames,
+    pub foreign_keys: ForeignKeyReplay,
+}
+
+/// How an exported file gets rows into tables that reference one another.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForeignKeyReplay {
+    /// Created without their keys, which are added after the rows.
+    AddedAfterRows,
+    /// The file's session runs with checks off: `off` first, `on` last.
+    ChecksOff { off: &'static str, on: &'static str },
+    /// Declared and never enforced, or not had at all.
+    NotEnforced,
+    /// A cycle has no file that runs back, so it is refused by name.
+    RefusesCycles,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Abilities {
     pub edits: bool,
@@ -650,9 +669,9 @@ pub struct Abilities {
     pub imports: bool,
     pub assigns_default: bool,
     pub copies_ddl: bool,
-    /// Whether a schema exports as one file of its DDL and rows, and how that
-    /// DDL names its tables. `None` where the DDL does not run back as written.
-    pub exports_schema: Option<DdlNames>,
+    /// Whether a schema exports as one file of its DDL and rows, how that DDL
+    /// names its tables and how the file replays foreign keys. `None` where the DDL does not run back as written.
+    pub exports_schema: Option<SchemaExport>,
     pub switches_database: bool,
     pub switches_database_in_session: bool,
     /// The catalog lists every database on the server, each as a schema,
@@ -768,7 +787,10 @@ pub(crate) const POSTGRES: EngineSpec = EngineSpec {
         imports: true,
         assigns_default: true,
         copies_ddl: true,
-        exports_schema: Some(DdlNames::Qualified),
+        exports_schema: Some(SchemaExport {
+            names: DdlNames::Qualified,
+            foreign_keys: ForeignKeyReplay::AddedAfterRows,
+        }),
         switches_database: true,
         picks_schema: true,
         schema_switch_waits_for_transaction: true,
@@ -828,7 +850,13 @@ pub(crate) const MYSQL: EngineSpec = EngineSpec {
         imports: true,
         assigns_default: true,
         copies_ddl: true,
-        exports_schema: Some(DdlNames::Unqualified),
+        exports_schema: Some(SchemaExport {
+            names: DdlNames::Unqualified,
+            foreign_keys: ForeignKeyReplay::ChecksOff {
+                off: "SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0;",
+                on: "SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS;",
+            },
+        }),
         switches_database: true,
         // No `picks_schema`: the database is the schema.
         catalog_lists_databases: true,
@@ -891,7 +919,13 @@ pub(crate) const MARIADB: EngineSpec = EngineSpec {
         imports: true,
         assigns_default: true,
         copies_ddl: true,
-        exports_schema: Some(DdlNames::Unqualified),
+        exports_schema: Some(SchemaExport {
+            names: DdlNames::Unqualified,
+            foreign_keys: ForeignKeyReplay::ChecksOff {
+                off: "SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0;",
+                on: "SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS;",
+            },
+        }),
         switches_database: true,
         catalog_lists_databases: true,
         ..Abilities::NONE
@@ -1044,7 +1078,10 @@ pub(crate) const DUCKDB: EngineSpec = EngineSpec {
         imports: true,
         assigns_default: true,
         copies_ddl: true,
-        exports_schema: Some(DdlNames::Unqualified),
+        exports_schema: Some(SchemaExport {
+            names: DdlNames::Unqualified,
+            foreign_keys: ForeignKeyReplay::RefusesCycles,
+        }),
         // The databases attached to the instance the profile opened.
         switches_database: true,
         // Reopening a file detaches everything attached to it, and an
@@ -1189,7 +1226,10 @@ pub(crate) const SQL_SERVER: EngineSpec = EngineSpec {
         imports: true,
         assigns_default: true,
         copies_ddl: true,
-        exports_schema: Some(DdlNames::Qualified),
+        exports_schema: Some(SchemaExport {
+            names: DdlNames::Qualified,
+            foreign_keys: ForeignKeyReplay::AddedAfterRows,
+        }),
         switches_database: true,
         // No `picks_schema`: the default schema is the login's.
         ..Abilities::NONE
@@ -1398,7 +1438,10 @@ pub(crate) const CLICKHOUSE: EngineSpec = EngineSpec {
         inserts_into_views: true,
         imports: true,
         copies_ddl: true,
-        exports_schema: Some(DdlNames::Qualified),
+        exports_schema: Some(SchemaExport {
+            names: DdlNames::Qualified,
+            foreign_keys: ForeignKeyReplay::NotEnforced,
+        }),
         switches_database: true,
         catalog_lists_databases: true,
         chunk_refusal: Some("ClickHouse has no transaction, so each chunk is kept as it lands."),

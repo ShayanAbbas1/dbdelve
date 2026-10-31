@@ -4,7 +4,7 @@
 //! dialect DBDelve knows has few of them, whatever that dialect could do.
 
 use super::plugin::Plugin;
-use super::spec::{Abilities, DdlNames};
+use super::spec::{Abilities, SchemaExport};
 use super::{
     DbError, Engine, Fields, RelationKind, ServerConfig, Syntax, clickhouse, duckdb, external,
     mssql, postgres, redis, turso,
@@ -213,8 +213,8 @@ impl Target {
     }
 
     /// Whether a schema exports as one file of SQL, and how its DDL names its
-    /// tables (see [`DdlNames`]).
-    pub fn exports_schema(self) -> Option<DdlNames> {
+    /// tables and replay their foreign keys (see [`SchemaExport`]).
+    pub fn exports_schema(self) -> Option<SchemaExport> {
         self.abilities().exports_schema
     }
 
