@@ -8,7 +8,7 @@
 
 use super::schema::export_schema;
 use super::*;
-use crate::db::{ConnectionConfig, Fetch};
+use crate::db::{ConnectionConfig, Fetch, Target};
 
 const AWKWARD_TEXTS: [&str; 14] = [
     "it's a \"quote\"",
@@ -728,6 +728,14 @@ fn assert_a_schema_runs_back(connection: Connection, engine: Engine, schema: &'s
             "-- Schema \"{schema}\" exported by DBDelve: 3 tables."
         )),
         "{sql}"
+    );
+    // The rows land where the `CREATE` before them put the table, whichever
+    // schema the file is run in.
+    let qualified = format!("INSERT INTO {}.", engine.quote_identifier(schema));
+    assert_eq!(
+        sql.contains(&qualified),
+        Target::built_in(engine).exports_schema() == Some(crate::db::DdlNames::Qualified),
+        "{engine:?}: {sql}"
     );
 
     for table in [&child, &empty, &parent] {

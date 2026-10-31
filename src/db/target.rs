@@ -4,7 +4,7 @@
 //! dialect DBDelve knows has few of them, whatever that dialect could do.
 
 use super::plugin::Plugin;
-use super::spec::Abilities;
+use super::spec::{Abilities, DdlNames};
 use super::{
     DbError, Engine, Fields, RelationKind, ServerConfig, Syntax, clickhouse, duckdb, external,
     mssql, postgres, redis, turso,
@@ -210,6 +210,12 @@ impl Target {
     /// write out.
     pub fn copies_ddl(self) -> bool {
         self.abilities().copies_ddl
+    }
+
+    /// Whether a schema exports as one file of SQL, and how its DDL names its
+    /// tables (see [`DdlNames`]).
+    pub fn exports_schema(self) -> Option<DdlNames> {
+        self.abilities().exports_schema
     }
 
     /// Whether one server holds several databases a profile can be moved
