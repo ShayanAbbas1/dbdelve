@@ -353,6 +353,34 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   file. A name taken in any case is refused. New saves also install their
   target without replacing an existing entry; a missed directory listing is
   not permission to overwrite it. Staging files are private to each writer.
+- **Folders and pins are shortcuts** (`explorer::Shortcuts` on `Profile`,
+  stored as the profile's `folders` and `pins`, left out when empty). Adding
+  an object or a saved query to a folder, or pinning it, leaves its row where
+  it was: the schemas always list the whole catalog, so an item can be in
+  several folders and deleting a folder loses only the grouping. Folders are
+  flat and their names unique per connection in any case. The sidebar lists
+  Pinned (in the order pinned; a pinned folder moves there with what it
+  holds), then the other folders by name, then Queries, then the schemas. A
+  shortcut's row id is the row it repeats behind `pinned/` or its folder's
+  `folder:{len}:{name}/`, the length keeping a name with a `/` from running
+  into its members' ids, so folds survive a rebuild and the row opens through
+  the same `ExplorerLeaf`. An object is named by schema, name and kind, and by
+  its database only where `Engine::catalog_is_per_database`: `public.users`
+  is in every Postgres database, so without it a folder would show another
+  database's table after Select Database, while MySQL, MariaDB and ClickHouse
+  list every database as a schema already, and keying on the session's
+  database there would hide shortcuts whose objects are still listed. A member
+  of another database is left out, not greyed. One the catalog or the saved
+  queries no longer list stays, greyed, offering only Remove from Folder and
+  Unpin: a dropped table may come back and a permission be granted, and
+  losing the user's grouping to a refresh would be worse than a grey row. A
+  saved query is named by its name alone; a rename follows it into folders
+  and pins and a delete takes it out. A duplicated connection takes the
+  folders and pins less its saved queries, which a duplicate does not copy.
+  New Folder makes one under an unused name and opens the rename field on its
+  row, named after it exists so the field has a row to sit on; a filter is
+  cleared first, since a field focused on a row the filter hides takes the
+  keyboard nowhere.
 - **A named buffer persists to its query file, an unnamed one to its own
   `.scratch-{id}.sql`.** Edits stay in memory until Save, a connection switch,
   opening another query, or normal quit/window close persists the buffers.
