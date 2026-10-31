@@ -2304,6 +2304,8 @@ impl Workspace {
         let menu_schema = active_schema.clone();
         let picks_schema = profile.config.engine().picks_schema();
         let drop_line = self.explorer_drop.clone();
+        let engine = profile.config.engine();
+        let exports_schema = engine.copies_ddl() && engine.syntax() == db::Syntax::Sql;
         let open_queries: HashSet<String> = profile
             .session
             .queries
@@ -2632,21 +2634,36 @@ impl Workspace {
                     );
                 }
                 let Some(leaf) = menu_leaves.get(id.as_ref()).copied() else {
-                    if !picks_schema || !is_schema_row(entry.item().id.as_str()) {
+                    if !is_schema_row(entry.item().id.as_str()) {
                         return menu;
                     }
-                    let workspace = menu_workspace.clone();
                     let schema = entry.item().label.to_string();
-                    return menu.item(
-                        PopupMenuItem::new("Set as Active Schema")
-                            .checked(menu_schema.as_ref() == Some(&entry.item().label))
-                            .on_click(move |_, _, cx| {
+                    let mut menu = menu;
+                    if picks_schema {
+                        let (workspace, schema) = (menu_workspace.clone(), schema.clone());
+                        menu = menu.item(
+                            PopupMenuItem::new("Set as Active Schema")
+                                .checked(menu_schema.as_ref() == Some(&entry.item().label))
+                                .on_click(move |_, _, cx| {
+                                    let schema = schema.clone();
+                                    _ = workspace.update(cx, |workspace, cx| {
+                                        workspace.set_schema(schema, cx);
+                                    });
+                                }),
+                        );
+                    }
+                    if exports_schema {
+                        let workspace = menu_workspace.clone();
+                        menu = menu.item(PopupMenuItem::new("Export as SQL…").on_click(
+                            move |_, _, cx| {
                                 let schema = schema.clone();
                                 _ = workspace.update(cx, |workspace, cx| {
-                                    workspace.set_schema(schema, cx);
+                                    workspace.export_schema(schema, cx);
                                 });
-                            }),
-                    );
+                            },
+                        ));
+                    }
+                    return menu;
                 };
                 let Some(workspace) = menu_workspace.upgrade() else {
                     return menu;
