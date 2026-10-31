@@ -1294,8 +1294,9 @@ impl Workspace {
 
     /// How many controls the dialog in front has to move the ring across:
     /// its buttons, then its "Don't ask again" box or its project, which sit
-    /// left of and above them. None for the import, a form with fields and
-    /// lists of its own, which Tab moves the keyboard itself through.
+    /// left of and above them. None for the import and the schema export,
+    /// forms with controls of their own, which Tab moves the keyboard itself
+    /// through.
     fn dialog_buttons(&self) -> usize {
         let checkbox = usize::from(self.dialog_checkbox());
         match self.dialog_in_front.get() {
@@ -1315,7 +1316,7 @@ impl Workspace {
                 if all { 3 } else { 2 }
             }
             Some("stable-import") => self.stable_import_buttons(),
-            Some("import-rows") | None => 0,
+            Some("import-rows" | "schema-export") | None => 0,
             Some(_) => 2 + checkbox,
         }
     }
@@ -1443,8 +1444,6 @@ impl Workspace {
             ("queue-failure", 0) => self.continue_queue(cx),
             ("queue-failure", _) => self.stop_queue(cx),
             ("pending-run", 2) => self.toggle_dont_ask(cx),
-            ("schema-export", 0) => self.answer_schema_export(cx),
-            ("schema-export", _) => _ = self.cancel_schema_export(cx),
             ("pending-export", 0) => self.answer_pending_export(every_row, cx),
             ("pending-export", 1) if every_row => self.answer_pending_export(false, cx),
             ("pending-export", _) => _ = self.cancel_pending_export(cx),

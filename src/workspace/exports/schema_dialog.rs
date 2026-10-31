@@ -376,45 +376,35 @@ impl Workspace {
                                 .justify_end()
                                 .gap(px(layout::SPACE_SM))
                                 .child(
-                                    self.choice(
-                                        "schema-export",
-                                        1,
-                                        button(
-                                            "cancel-schema-export",
-                                            "Cancel",
-                                            Tone::Quiet,
-                                            Control::Standard,
-                                            t,
-                                        )
-                                        .on_click(
-                                            cx.listener(|workspace, _, _, cx| {
-                                                workspace.cancel_schema_export(cx);
-                                            }),
-                                        ),
+                                    button(
+                                        "cancel-schema-export",
+                                        "Cancel",
+                                        Tone::Quiet,
+                                        Control::Standard,
                                         t,
-                                    ),
+                                    )
+                                    .on_click(cx.listener(
+                                        |workspace, _, _, cx| {
+                                            workspace.cancel_schema_export(cx);
+                                        },
+                                    )),
                                 )
+                                // Quiet while disabled, as Run is in the
+                                // apply review.
                                 .child(
-                                    self.choice(
+                                    button(
                                         "schema-export",
-                                        0,
-                                        // Quiet while disabled, as Run is in the
-                                        // apply review.
-                                        button(
-                                            "schema-export",
-                                            "Export",
-                                            if exports { Tone::Primary } else { Tone::Quiet },
-                                            Control::Standard,
-                                            t,
-                                        )
-                                        .disabled(!exports)
-                                        .on_click(
-                                            cx.listener(|workspace, _, _, cx| {
-                                                workspace.answer_schema_export(cx);
-                                            }),
-                                        ),
+                                        "Export",
+                                        if exports { Tone::Primary } else { Tone::Quiet },
+                                        Control::Standard,
                                         t,
-                                    ),
+                                    )
+                                    .disabled(!exports)
+                                    .on_click(cx.listener(
+                                        |workspace, _, _, cx| {
+                                            workspace.answer_schema_export(cx);
+                                        },
+                                    )),
                                 ),
                         ),
                 )
