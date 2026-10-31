@@ -26,8 +26,9 @@ impl Workspace {
         self.pick_files(Self::open_files, window, cx);
     }
 
-    /// The native file picker, then [`Workspace::open_sql_files`]: whatever
-    /// is picked opens as SQL, whatever its extension.
+    /// The native file picker, then [`Workspace::open_sql_files`]. The picker
+    /// cannot filter by extension, so anything but a `.sql` file is refused
+    /// after it is picked.
     pub(crate) fn pick_sql_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.pick_files(Self::open_sql_files, window, cx);
     }
@@ -102,6 +103,10 @@ impl Workspace {
         }
         let mut refused = Vec::new();
         for path in paths {
+            if !is_sql_file(&path) {
+                refused.push(format!("{} is not a .sql file.", file_name(&path)));
+                continue;
+            }
             match read_sql_file(&path) {
                 Ok(text) => {
                     // `new_query` has said why, which is the notice to keep.
@@ -222,6 +227,13 @@ fn waiting_for(waiting: &mut Vec<(String, u64, String)>, profile: &str) -> Vec<(
     taken.into_iter().map(|(_, tab, sql)| (tab, sql)).collect()
 }
 
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy()
+        .into_owned()
+}
+
 fn is_sql_file(path: &Path) -> bool {
     path.extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("sql"))
@@ -236,10 +248,7 @@ const MAX_SQL_FILE_BYTES: u64 = 4 << 20;
 /// which is the file's encoding and not the user's SQL. Text that is not
 /// UTF-8 is refused rather than read lossily, which would change statements.
 fn read_sql_file(path: &Path) -> Result<String, String> {
-    let name = path
-        .file_name()
-        .unwrap_or(path.as_os_str())
-        .to_string_lossy();
+    let name = file_name(path);
     // Bounded while reading, not by the size up front, which a file still
     // being written or a link to a device does not keep to.
     let mut bytes = Vec::new();
