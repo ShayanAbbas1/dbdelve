@@ -98,7 +98,11 @@ pub fn relation_row(schema: &str, relation: &str) -> String {
 }
 
 fn routine_row(schema: &str, routine: &Routine) -> String {
-    let (kind, name) = (routine.kind, crate::session::routine_name(routine));
+    routine_id(routine.kind, schema, &crate::session::routine_name(routine))
+}
+
+/// `name` is a routine's name and arguments, as its tab is named.
+fn routine_id(kind: RoutineKind, schema: &str, name: &str) -> String {
     format!("routine-{kind:?}-{schema}\0{name}")
 }
 
@@ -155,6 +159,31 @@ pub struct ExplorerLeaf {
     pub size: Option<u64>,
 }
 
+impl ObjectKind {
+    /// How a shortcut stores the kind: by name, so a kind this build lacks
+    /// costs that one shortcut rather than the profile it is in.
+    pub fn slug(self) -> &'static str {
+        match self {
+            ObjectKind::Relation(RelationKind::Table) => "table",
+            ObjectKind::Relation(RelationKind::PartitionedTable) => "partitioned_table",
+            ObjectKind::Relation(RelationKind::View) => "view",
+            ObjectKind::Relation(RelationKind::MaterializedView) => "materialized_view",
+            ObjectKind::Relation(RelationKind::ForeignTable) => "foreign_table",
+            ObjectKind::Relation(RelationKind::Dictionary) => "dictionary",
+            ObjectKind::Routine(RoutineKind::Function) => "function",
+            ObjectKind::Routine(RoutineKind::Procedure) => "procedure",
+        }
+    }
+
+    pub fn from_slug(slug: &str) -> Option<Self> {
+        RELATION_CATEGORIES
+            .map(|(kind, _)| ObjectKind::Relation(kind))
+            .into_iter()
+            .chain(ROUTINE_CATEGORIES.map(|(kind, _)| ObjectKind::Routine(kind)))
+            .find(|kind| kind.slug() == slug)
+    }
+}
+
 #[derive(Default)]
 pub struct ExplorerTree {
     pub items: Vec<TreeItem>,
@@ -162,6 +191,8 @@ pub struct ExplorerTree {
     /// The characters of each row's own name the filter matched, by row id.
     /// A row kept only because its schema or parent matched has none.
     pub highlights: HashMap<String, Vec<Range<usize>>>,
+    /// What each row in a folder or the Pinned group stands for, by row id.
+    pub shortcuts: HashMap<String, Shortcut>,
 }
 
 impl ExplorerTree {
@@ -170,6 +201,7 @@ impl ExplorerTree {
         self.items.extend(other.items);
         self.leaves.extend(other.leaves);
         self.highlights.extend(other.highlights);
+        self.shortcuts.extend(other.shortcuts);
     }
 }
 
@@ -314,6 +346,7 @@ pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
         items,
         leaves: builder.leaves,
         highlights: builder.highlights,
+        shortcuts: HashMap::new(),
     }
 }
 
@@ -343,6 +376,475 @@ pub fn queries(names: &[String], filter: &str) -> ExplorerTree {
         items,
         leaves: HashMap::new(),
         highlights: builder.highlights,
+        shortcuts: HashMap::new(),
+    }
+}
+
+/// The id of the sidebar's Pinned group, listed above everything else.
+pub const PINNED_GROUP: &str = "pinned";
+
+/// A folder's row id. The name follows its length, so no name can run on
+/// into the id of a row under it: a folder is called whatever was typed, `/`
+/// included.
+pub fn folder_row(name: &str) -> String {
+    format!("folder:{}:{name}", name.len())
+}
+
+/// The id of a row listed under `parent`. A shortcut repeats a row listed
+/// elsewhere, and an id may be in the tree only once.
+fn nested_row(parent: &str, row: &str) -> String {
+    format!("{parent}/{row}")
+}
+
+/// What a folder or the Pinned group lists: a shortcut, so the row it
+/// repeats stays where it is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Member {
+    /// A saved query, by name alone: queries are the profile's, not a
+    /// database's.
+    Query(String),
+    Object(ObjectRef),
+}
+
+impl Member {
+    /// The id of the row it repeats, in the Queries group or the schemas.
+    fn row(&self) -> String {
+        match self {
+            Member::Query(name) => query_row(name),
+            Member::Object(object) => object.row(),
+        }
+    }
+
+    /// Whether `other` names the same thing. Not `==`: a relation whose kind
+    /// changed is still the same relation.
+    pub fn is(&self, other: &Member) -> bool {
+        let database = |member: &Member| match member {
+            Member::Query(_) => None,
+            Member::Object(object) => object.database.clone(),
+        };
+        self.row() == other.row() && database(self) == database(other)
+    }
+}
+
+/// A database object by name, as a restored tab is, so a shortcut outlives
+/// the catalog it was made from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObjectRef {
+    /// Where the catalog is one database's (`Engine::catalog_is_per_database`),
+    /// the database it is in: `public.users` is in every Postgres database.
+    /// `None` where every database is a schema of the catalog already.
+    pub database: Option<String>,
+    pub schema: String,
+    /// A routine's name and arguments, as its row and its tab are named.
+    pub name: String,
+    pub kind: ObjectKind,
+}
+
+impl ObjectRef {
+    fn row(&self) -> String {
+        match self.kind {
+            ObjectKind::Relation(_) => relation_row(&self.schema, &self.name),
+            ObjectKind::Routine(kind) => routine_id(kind, &self.schema, &self.name),
+        }
+    }
+
+    /// Its row in `catalog`, or `None` for one the catalog does not list.
+    fn leaf(&self, catalog: &Catalog) -> Option<ExplorerLeaf> {
+        let (schema_index, schema) = catalog
+            .schemas
+            .iter()
+            .enumerate()
+            .find(|(_, schema)| schema.name == self.schema)?;
+        match self.kind {
+            ObjectKind::Relation(_) => schema
+                .relations
+                .iter()
+                .position(|relation| relation.name == self.name)
+                .map(|relation_index| {
+                    let relation = &schema.relations[relation_index];
+                    ExplorerLeaf {
+                        target: ExplorerTarget::Relation {
+                            schema_index,
+                            relation_index,
+                        },
+                        kind: ObjectKind::Relation(relation.kind),
+                        size: relation.size,
+                    }
+                }),
+            ObjectKind::Routine(kind) => schema
+                .routines
+                .iter()
+                .position(|routine| {
+                    routine.kind == kind && crate::session::routine_name(routine) == self.name
+                })
+                .map(|routine_index| ExplorerLeaf {
+                    target: ExplorerTarget::Routine {
+                        schema_index,
+                        routine_index,
+                    },
+                    kind: self.kind,
+                    size: None,
+                }),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Pin {
+    Member(Member),
+    /// A folder, by name. Pinned, it is listed in the Pinned group instead of
+    /// among the folders.
+    Folder(String),
+}
+
+impl Pin {
+    fn is(&self, other: &Pin) -> bool {
+        match (self, other) {
+            (Pin::Member(member), Pin::Member(other)) => member.is(other),
+            (Pin::Folder(name), Pin::Folder(other)) => name == other,
+            _ => false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Folder {
+    pub name: String,
+    /// In the order they were added.
+    pub members: Vec<Member>,
+}
+
+/// A connection's folders and pins. Shortcuts to rows the explorer lists
+/// anyway, so deleting a folder loses nothing but the grouping.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Shortcuts {
+    pub folders: Vec<Folder>,
+    /// In the order they were pinned.
+    pub pins: Vec<Pin>,
+}
+
+impl Shortcuts {
+    pub fn folder(&self, name: &str) -> Option<&Folder> {
+        self.folders.iter().find(|folder| folder.name == name)
+    }
+
+    pub fn holds(&self, folder: &str, member: &Member) -> bool {
+        self.folder(folder)
+            .is_some_and(|folder| folder.members.iter().any(|held| held.is(member)))
+    }
+
+    /// Puts `member` in `folder`, or takes it out if it is in already.
+    pub fn toggle(&mut self, folder: &str, member: Member) {
+        let Some(folder) = self.folders.iter_mut().find(|held| held.name == folder) else {
+            return;
+        };
+        match folder.members.iter().position(|held| held.is(&member)) {
+            Some(at) => _ = folder.members.remove(at),
+            None => folder.members.push(member),
+        }
+    }
+
+    pub fn pinned(&self, pin: &Pin) -> bool {
+        self.pins.iter().any(|held| held.is(pin))
+    }
+
+    pub fn toggle_pin(&mut self, pin: Pin) {
+        match self.pins.iter().position(|held| held.is(&pin)) {
+            Some(at) => _ = self.pins.remove(at),
+            None => self.pins.push(pin),
+        }
+    }
+
+    /// A name no folder has, for one made before it is named.
+    pub fn unused_name(&self) -> String {
+        (1..)
+            .map(|n| match n {
+                1 => "New Folder".to_string(),
+                n => format!("New Folder {n}"),
+            })
+            .find(|name| folder_name_refusal(name, None, &self.folders).is_none())
+            .expect("the names run out before the folders do")
+    }
+
+    pub fn add_folder(&mut self, name: &str) -> Result<(), String> {
+        if let Some(refusal) = folder_name_refusal(name, None, &self.folders) {
+            return Err(refusal);
+        }
+        self.folders.push(Folder {
+            name: name.to_string(),
+            members: Vec::new(),
+        });
+        Ok(())
+    }
+
+    /// Renames a folder, and its pin with it.
+    pub fn rename_folder(&mut self, from: &str, to: &str) -> Result<(), String> {
+        if let Some(refusal) = folder_name_refusal(to, Some(from), &self.folders) {
+            return Err(refusal);
+        }
+        for folder in self.folders.iter_mut().filter(|folder| folder.name == from) {
+            folder.name = to.to_string();
+        }
+        for pin in &mut self.pins {
+            if let Pin::Folder(name) = pin
+                && name == from
+            {
+                *name = to.to_string();
+            }
+        }
+        Ok(())
+    }
+
+    pub fn delete_folder(&mut self, name: &str) {
+        self.folders.retain(|folder| folder.name != name);
+        self.pins
+            .retain(|pin| !matches!(pin, Pin::Folder(held) if held == name));
+    }
+
+    /// Follows a saved query to its new name, wherever it is listed.
+    pub fn rename_query(&mut self, from: &str, to: &str) {
+        let pinned = self.pins.iter_mut().filter_map(|pin| match pin {
+            Pin::Member(member) => Some(member),
+            Pin::Folder(_) => None,
+        });
+        for member in self
+            .folders
+            .iter_mut()
+            .flat_map(|folder| &mut folder.members)
+            .chain(pinned)
+        {
+            if let Member::Query(name) = member
+                && name == from
+            {
+                *name = to.to_string();
+            }
+        }
+    }
+
+    /// Takes a deleted saved query out of every folder and the pins.
+    pub fn forget_query(&mut self, name: &str) {
+        let gone = Member::Query(name.to_string());
+        for folder in &mut self.folders {
+            folder.members.retain(|member| !member.is(&gone));
+        }
+        self.pins.retain(|pin| !pin.is(&Pin::Member(gone.clone())));
+    }
+
+    /// What a duplicate of the connection starts with: everything but the
+    /// saved queries, which a duplicate does not copy.
+    pub fn duplicated(&self) -> Self {
+        let object = |member: &Member| matches!(member, Member::Object(_));
+        Self {
+            folders: self
+                .folders
+                .iter()
+                .map(|folder| Folder {
+                    name: folder.name.clone(),
+                    members: folder
+                        .members
+                        .iter()
+                        .filter(|m| object(m))
+                        .cloned()
+                        .collect(),
+                })
+                .collect(),
+            pins: self
+                .pins
+                .iter()
+                .filter(|pin| !matches!(pin, Pin::Member(member) if !object(member)))
+                .cloned()
+                .collect(),
+        }
+    }
+}
+
+/// Why `name` cannot be a folder's, if it cannot. `keeping` is the folder's
+/// own name on a rename, which it may keep in another case.
+pub fn folder_name_refusal(
+    name: &str,
+    keeping: Option<&str>,
+    folders: &[Folder],
+) -> Option<String> {
+    if name.is_empty() {
+        return Some("A folder needs a name.".to_string());
+    }
+    // Any case, as saved queries are: two folders that differ only by case
+    // sort as one and read as one.
+    folders
+        .iter()
+        .find(|folder| {
+            Some(folder.name.as_str()) != keeping
+                && folder.name.to_lowercase() == name.to_lowercase()
+        })
+        .map(|folder| format!("A folder named {} already exists.", folder.name))
+}
+
+/// What a row in a folder or the Pinned group stands for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Shortcut {
+    Folder(String),
+    Member {
+        member: Member,
+        /// The folder it is listed in, or `None` for a pin.
+        folder: Option<String>,
+        /// In neither the catalog nor the saved queries: dropped, renamed, or
+        /// out of the connecting role's sight. Kept, and drawn greyed, since
+        /// it may well come back.
+        missing: bool,
+    },
+}
+
+impl Shortcut {
+    /// The saved query the row opens, which a missing one does not.
+    pub fn query(&self) -> Option<&str> {
+        match self {
+            Shortcut::Member {
+                member: Member::Query(name),
+                missing: false,
+                ..
+            } => Some(name),
+            _ => None,
+        }
+    }
+}
+
+/// The Pinned group, when anything is pinned, then every folder not pinned,
+/// by name. The filter is the schema tree's: a folder whose name matches keeps
+/// every member, otherwise it keeps those whose names match and goes when none
+/// do. The group's own label is never matched, as the Queries group's is not.
+///
+/// `database` is the one the connection is on where the catalog is one
+/// database's: a member of another is left out rather than greyed, since it is
+/// not missing, only elsewhere.
+pub fn shortcuts(
+    shortcuts: &Shortcuts,
+    catalog: Option<&Catalog>,
+    queries: &[String],
+    database: Option<&str>,
+    filter: &str,
+) -> ExplorerTree {
+    let mut build = ShortcutBuilder {
+        builder: Builder::new(filter),
+        rows: HashMap::new(),
+        catalog,
+        queries,
+        database,
+    };
+    let pinned: Vec<TreeItem> = shortcuts
+        .pins
+        .iter()
+        .filter_map(|pin| match pin {
+            Pin::Member(member) => build.member(PINNED_GROUP, None, member, false),
+            Pin::Folder(name) => {
+                let folder = shortcuts.folder(name)?;
+                build.folder(Some(PINNED_GROUP), folder)
+            }
+        })
+        .collect();
+    let mut folders: Vec<&Folder> = shortcuts
+        .folders
+        .iter()
+        .filter(|folder| !shortcuts.pinned(&Pin::Folder(folder.name.clone())))
+        .collect();
+    folders.sort_by_cached_key(|folder| folder.name.to_lowercase());
+
+    let mut items = Vec::new();
+    if !pinned.is_empty() {
+        items.push(
+            TreeItem::new(PINNED_GROUP, "Pinned")
+                .expanded(true)
+                .children(pinned),
+        );
+    }
+    items.extend(
+        folders
+            .into_iter()
+            .filter_map(|folder| build.folder(None, folder)),
+    );
+    ExplorerTree {
+        items,
+        leaves: build.builder.leaves,
+        highlights: build.builder.highlights,
+        shortcuts: build.rows,
+    }
+}
+
+struct ShortcutBuilder<'a> {
+    builder: Builder,
+    rows: HashMap<String, Shortcut>,
+    catalog: Option<&'a Catalog>,
+    queries: &'a [String],
+    database: Option<&'a str>,
+}
+
+impl ShortcutBuilder<'_> {
+    fn folder(&mut self, parent: Option<&str>, folder: &Folder) -> Option<TreeItem> {
+        let id = match parent {
+            Some(parent) => nested_row(parent, &folder_row(&folder.name)),
+            None => folder_row(&folder.name),
+        };
+        let matched = self.builder.name_matches(&id, &folder.name);
+        let children: Vec<TreeItem> = folder
+            .members
+            .iter()
+            .filter_map(|member| self.member(&id, Some(&folder.name), member, matched))
+            .collect();
+        if !matched && children.is_empty() {
+            return None;
+        }
+        self.rows
+            .insert(id.clone(), Shortcut::Folder(folder.name.clone()));
+        Some(
+            TreeItem::new(id, folder.name.clone())
+                .expanded(true)
+                .children(children),
+        )
+    }
+
+    fn member(
+        &mut self,
+        parent: &str,
+        folder: Option<&str>,
+        member: &Member,
+        inherited: bool,
+    ) -> Option<TreeItem> {
+        let id = nested_row(parent, &member.row());
+        let (label, leaf, present) = match member {
+            Member::Query(name) => (name.as_str(), None, self.queries.contains(name)),
+            Member::Object(object) => {
+                if let (Some(on), Some(of)) = (self.database, object.database.as_deref())
+                    && on != of
+                {
+                    return None;
+                }
+                let leaf = self.catalog.and_then(|catalog| object.leaf(catalog));
+                (object.name.as_str(), leaf, leaf.is_some())
+            }
+        };
+        // A routine's label carries its arguments; only its name is matched,
+        // as in the schema tree.
+        let name = match member {
+            Member::Object(ObjectRef {
+                kind: ObjectKind::Routine(_),
+                ..
+            }) => label.split('(').next().unwrap_or(label),
+            _ => label,
+        };
+        if !(self.builder.name_matches(&id, name) || inherited) {
+            return None;
+        }
+        if let Some(leaf) = leaf {
+            self.builder.leaves.insert(id.clone(), leaf);
+        }
+        self.rows.insert(
+            id.clone(),
+            Shortcut::Member {
+                member: member.clone(),
+                folder: folder.map(str::to_string),
+                missing: !present,
+            },
+        );
+        Some(TreeItem::new(id, label.to_string()))
     }
 }
 
@@ -1197,6 +1699,264 @@ mod tests {
             kind("relation-public\0accounts"),
             Some(ObjectKind::Relation(RelationKind::Table))
         );
+    }
+
+    fn relation(schema: &str, name: &str) -> Member {
+        Member::Object(ObjectRef {
+            database: None,
+            schema: schema.into(),
+            name: name.into(),
+            kind: ObjectKind::Relation(RelationKind::Table),
+        })
+    }
+
+    fn folder(name: &str, members: Vec<Member>) -> Folder {
+        Folder {
+            name: name.into(),
+            members,
+        }
+    }
+
+    fn labels(items: &[TreeItem]) -> Vec<&str> {
+        items.iter().map(|item| item.label.as_ref()).collect()
+    }
+
+    fn every_id(items: &[TreeItem], into: &mut Vec<String>) {
+        for item in items {
+            into.push(item.id.to_string());
+            every_id(&item.children, into);
+        }
+    }
+
+    #[test]
+    fn a_folder_is_shortcuts_and_the_schemas_still_list_everything() {
+        let shortcuts = Shortcuts {
+            folders: vec![folder(
+                "Hot",
+                vec![
+                    relation("public", "accounts"),
+                    Member::Query("daily".into()),
+                ],
+            )],
+            pins: Vec::new(),
+        };
+        let names = ["daily".to_string()];
+        let mut explorer = super::shortcuts(&shortcuts, Some(&catalog()), &names, None, "");
+        explorer.extend(queries(&names, ""));
+        explorer.extend(tree(&catalog(), ""));
+
+        assert_eq!(
+            labels(&explorer.items),
+            ["Hot", "Queries", "analytics", "public"]
+        );
+        let hot = &explorer.items[0];
+        assert_eq!(labels(&hot.children), ["accounts", "daily"]);
+        // The shortcut opens what the row it repeats opens.
+        assert_eq!(
+            explorer.leaves.get(hot.children[0].id.as_ref()),
+            explorer.leaves.get("relation-public\0accounts")
+        );
+        assert!(explorer.leaves.contains_key("relation-public\0accounts"));
+        assert_eq!(
+            explorer.shortcuts[hot.children[1].id.as_ref()].query(),
+            Some("daily")
+        );
+        assert_eq!(
+            explorer.shortcuts[hot.id.as_ref()],
+            Shortcut::Folder("Hot".into())
+        );
+    }
+
+    #[test]
+    fn pins_come_first_in_the_order_pinned_and_a_pinned_folder_moves_into_them() {
+        let shortcuts = Shortcuts {
+            folders: vec![
+                folder("gamma", Vec::new()),
+                folder("beta", vec![relation("analytics", "events")]),
+                folder("Alpha", Vec::new()),
+            ],
+            pins: vec![
+                Pin::Member(Member::Query("daily".into())),
+                Pin::Folder("beta".into()),
+                Pin::Member(relation("public", "accounts")),
+            ],
+        };
+        let explorer = super::shortcuts(&shortcuts, Some(&catalog()), &["daily".into()], None, "");
+
+        assert_eq!(labels(&explorer.items), ["Pinned", "Alpha", "gamma"]);
+        let pinned = &explorer.items[0];
+        assert_eq!(labels(&pinned.children), ["daily", "beta", "accounts"]);
+        assert_eq!(labels(&pinned.children[1].children), ["events"]);
+        // Nothing pinned is no group at all.
+        let unpinned = Shortcuts {
+            pins: Vec::new(),
+            ..shortcuts
+        };
+        let explorer = super::shortcuts(&unpinned, Some(&catalog()), &[], None, "");
+        assert_eq!(labels(&explorer.items), ["Alpha", "beta", "gamma"]);
+    }
+
+    #[test]
+    fn a_missing_member_stays_greyed_and_another_databases_is_left_out() {
+        let elsewhere = |database: &str, name: &str| {
+            Member::Object(ObjectRef {
+                database: Some(database.into()),
+                schema: "public".into(),
+                name: name.into(),
+                kind: ObjectKind::Relation(RelationKind::Table),
+            })
+        };
+        let shortcuts = Shortcuts {
+            folders: vec![folder(
+                "Mixed",
+                vec![
+                    elsewhere("dev", "accounts"),
+                    elsewhere("dev", "dropped"),
+                    elsewhere("prod", "accounts"),
+                    Member::Query("gone".into()),
+                ],
+            )],
+            pins: Vec::new(),
+        };
+        let explorer = super::shortcuts(&shortcuts, Some(&catalog()), &[], Some("dev"), "");
+        let rows = &explorer.items[0].children;
+
+        assert_eq!(labels(rows), ["accounts", "dropped", "gone"]);
+        let missing: Vec<_> = rows
+            .iter()
+            .map(|row| match &explorer.shortcuts[row.id.as_ref()] {
+                Shortcut::Member { missing, .. } => *missing,
+                Shortcut::Folder(_) => panic!("a member is not a folder"),
+            })
+            .collect();
+        assert_eq!(missing, [false, true, true]);
+        assert!(!explorer.leaves.contains_key(rows[1].id.as_ref()));
+        assert_eq!(explorer.shortcuts[rows[2].id.as_ref()].query(), None);
+    }
+
+    #[test]
+    fn the_filter_reaches_into_folders_and_pins() {
+        let shortcuts = Shortcuts {
+            folders: vec![
+                folder("Reports", vec![relation("public", "accounts")]),
+                folder("Misc", vec![relation("analytics", "events")]),
+                folder("Empty", Vec::new()),
+            ],
+            pins: vec![Pin::Member(relation("analytics", "events"))],
+        };
+        let build = |filter| super::shortcuts(&shortcuts, Some(&catalog()), &[], None, filter);
+
+        // With no filter an empty folder still shows.
+        assert_eq!(
+            labels(&build("").items),
+            ["Pinned", "Empty", "Misc", "Reports"]
+        );
+        // A folder's name keeps all of its members.
+        let by_folder = build("reports");
+        assert_eq!(labels(&by_folder.items), ["Reports"]);
+        assert_eq!(labels(&by_folder.items[0].children), ["accounts"]);
+        // A member's name keeps it and its folder, and the group it is pinned in.
+        let by_member = build("events");
+        assert_eq!(labels(&by_member.items), ["Pinned", "Misc"]);
+        assert_eq!(labels(&by_member.items[1].children), ["events"]);
+        assert!(build("zzz").items.is_empty());
+    }
+
+    #[test]
+    fn every_row_id_is_unique_whatever_a_folder_is_called() {
+        let shortcuts = Shortcuts {
+            folders: vec![
+                folder(
+                    "a",
+                    vec![Member::Query("x".into()), relation("public", "accounts")],
+                ),
+                folder("a/query:x", vec![Member::Query("x".into())]),
+                folder("pinned", vec![relation("public", "accounts")]),
+                folder("queries", Vec::new()),
+                folder("schema-public", Vec::new()),
+            ],
+            pins: vec![
+                Pin::Member(Member::Query("x".into())),
+                Pin::Member(relation("public", "accounts")),
+                Pin::Folder("a".into()),
+            ],
+        };
+        let names = ["x".to_string()];
+        let mut explorer = super::shortcuts(&shortcuts, Some(&catalog()), &names, None, "");
+        explorer.extend(queries(&names, ""));
+        explorer.extend(tree(&catalog(), ""));
+
+        let mut ids = Vec::new();
+        every_id(&explorer.items, &mut ids);
+        let unique: HashSet<_> = ids.iter().collect();
+        assert_eq!(unique.len(), ids.len(), "{ids:?}");
+        // A folder named like a schema is still no schema's row.
+        assert!(
+            explorer
+                .shortcuts
+                .keys()
+                .all(|id| !is_schema_row(id) && saved_query(id).is_none())
+        );
+    }
+
+    #[test]
+    fn folders_follow_renames_and_refuse_a_name_taken_in_any_case() {
+        let mut shortcuts = Shortcuts::default();
+        shortcuts.add_folder("Reports").unwrap();
+        assert_eq!(
+            shortcuts.add_folder("reports"),
+            Err("A folder named Reports already exists.".into())
+        );
+        assert!(shortcuts.add_folder("").is_err());
+        assert_eq!(shortcuts.unused_name(), "New Folder");
+        shortcuts.add_folder("New Folder").unwrap();
+        assert_eq!(shortcuts.unused_name(), "New Folder 2");
+
+        shortcuts.toggle("Reports", Member::Query("daily".into()));
+        shortcuts.toggle("Reports", relation("public", "accounts"));
+        shortcuts.toggle_pin(Pin::Folder("Reports".into()));
+        shortcuts.toggle_pin(Pin::Member(Member::Query("daily".into())));
+        // A rename to its own name in another case is no clash.
+        shortcuts.rename_folder("Reports", "REPORTS").unwrap();
+        assert!(shortcuts.rename_folder("REPORTS", "new folder").is_err());
+        assert!(shortcuts.pinned(&Pin::Folder("REPORTS".into())));
+
+        shortcuts.rename_query("daily", "nightly");
+        assert!(shortcuts.holds("REPORTS", &Member::Query("nightly".into())));
+        assert!(shortcuts.pinned(&Pin::Member(Member::Query("nightly".into()))));
+        // A duplicate has no saved queries to point at.
+        let copy = shortcuts.duplicated();
+        assert_eq!(
+            copy.folder("REPORTS").unwrap().members,
+            [relation("public", "accounts")]
+        );
+        assert_eq!(copy.pins, [Pin::Folder("REPORTS".into())]);
+
+        shortcuts.forget_query("nightly");
+        assert!(!shortcuts.holds("REPORTS", &Member::Query("nightly".into())));
+        assert_eq!(shortcuts.pins, [Pin::Folder("REPORTS".into())]);
+        // Toggling again takes it out, whatever kind it has become since.
+        let mut view = relation("public", "accounts");
+        if let Member::Object(object) = &mut view {
+            object.kind = ObjectKind::Relation(RelationKind::View);
+        }
+        shortcuts.toggle("REPORTS", view);
+        assert!(shortcuts.folder("REPORTS").unwrap().members.is_empty());
+        shortcuts.delete_folder("REPORTS");
+        assert!(shortcuts.pins.is_empty());
+    }
+
+    #[test]
+    fn an_object_kind_reads_back_from_its_slug() {
+        for (kind, _) in RELATION_CATEGORIES {
+            let kind = ObjectKind::Relation(kind);
+            assert_eq!(ObjectKind::from_slug(kind.slug()), Some(kind));
+        }
+        for (kind, _) in ROUTINE_CATEGORIES {
+            let kind = ObjectKind::Routine(kind);
+            assert_eq!(ObjectKind::from_slug(kind.slug()), Some(kind));
+        }
+        assert_eq!(ObjectKind::from_slug("sequence"), None);
     }
 
     #[test]
