@@ -2326,6 +2326,14 @@ impl Workspace {
 
         cx.spawn(async move |workspace, cx| {
             let (result, lost) = query_task.await;
+            // Told before anything below asks whether the session or the tab
+            // the run was for is still there: a run closed or reconnected under
+            // still ran, and what it came to is history. The tab's own outcome,
+            // which counts the rows it streamed, replaces this one when the
+            // tab is there to count them.
+            let mut unrecorded = recorded
+                .as_ref()
+                .map(|entry| answered(entry, &result, feed.is_some(), started.elapsed(), engine));
             workspace
                 .update(cx, |workspace, cx| {
                     // The plan is carried out of this block rather than stored
@@ -2604,11 +2612,10 @@ impl Workspace {
                         }
                     };
 
-                    if let Some(landed) = landed
-                        && let Some(profile) = workspace.issued_to(&id, generation)
-                    {
-                        let _ = store::append_history(&profile.id, &landed);
-                        remember_statement(&mut profile.session.history, landed);
+                    if let Some(landed) = landed {
+                        unrecorded = None;
+                        let _ = store::append_history(&id, &landed);
+                        workspace.remember_run(&id, landed);
                     }
                     if keep_rows
                         && let Some(profile) = workspace.issued_to(&id, generation)
@@ -2753,8 +2760,26 @@ impl Workspace {
                     }
                 })
                 .ok();
+            if let Some(entry) = unrecorded {
+                let _ = store::append_history(&id, &entry);
+                workspace
+                    .update(cx, |workspace, _| workspace.remember_run(&id, entry))
+                    .ok();
+            }
         })
         .detach();
+    }
+
+    /// A run's outcome into the history of the profile that sent it, by id
+    /// alone: a reconnect retires the session's generation, not its history.
+    pub(crate) fn remember_run(&mut self, profile_id: &str, entry: store::HistoryEntry) {
+        if let Some(profile) = self
+            .profiles
+            .iter_mut()
+            .find(|profile| profile.id == profile_id)
+        {
+            remember_statement(&mut profile.session.history, entry);
+        }
     }
 
     /// A result dropped because its generation was retired -- a reconnect or a
@@ -3347,9 +3372,77 @@ fn pour(
     changed
 }
 
+/// What a run came to, told from its answer alone, for a run whose tab or
+/// session went while it ran. Rows that streamed went to a grid nobody reads
+/// any more, so a streamed result's count is left unknown rather than
+/// undercounted, unless the row limit already said how many there were. With
+/// the tab gone there is no state to say a Cancel was asked for, so the
+/// engine's own cancel wording is what tells one.
+fn answered(
+    entry: &store::HistoryEntry,
+    result: &Result<QueryResult, DbError>,
+    streamed: bool,
+    elapsed: std::time::Duration,
+    engine: Engine,
+) -> store::HistoryEntry {
+    match result {
+        Ok(result) => {
+            let mut landed = entry.succeeded(result);
+            if streamed && result.capped_from.is_none() {
+                landed.rows = None;
+            }
+            landed
+        }
+        Err(error) => entry.failed(error, elapsed, db::is_cancel(engine, error)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_run_answered_without_its_tab_keeps_only_what_the_answer_says() {
+        let entry = store::HistoryEntry::started("select 1");
+        let streamed = QueryResult {
+            columns: vec![db::Column::default()],
+            elapsed: std::time::Duration::from_millis(9),
+            ..QueryResult::default()
+        };
+        let landed = answered(
+            &entry,
+            &Ok(streamed.clone()),
+            true,
+            Default::default(),
+            Engine::Sqlite,
+        );
+        assert_eq!((landed.rows, landed.ms), (None, Some(9)));
+        let capped = QueryResult {
+            capped_from: Some(7),
+            ..streamed
+        };
+        let landed = answered(
+            &entry,
+            &Ok(capped),
+            true,
+            Default::default(),
+            Engine::Sqlite,
+        );
+        assert_eq!(landed.rows, Some(7));
+
+        let interrupted = DbError {
+            message: "interrupted".into(),
+            position: None,
+        };
+        let landed = answered(
+            &entry,
+            &Err(interrupted),
+            false,
+            Default::default(),
+            Engine::Sqlite,
+        );
+        assert!(landed.cancelled && landed.error.is_none());
+    }
 
     /// `text` with `|` marking the caret, or `[` `]` the selection, toggled.
     fn toggle(text: &str, marker: &str) -> Option<String> {
