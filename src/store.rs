@@ -145,18 +145,53 @@ pub struct StoredProfile {
     pub open_objects: Vec<StoredObject>,
     /// The explorer's folders and pins, both after the tables above. Left out
     /// when empty, so a profile without any is written as it always was.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "readable_entries"
+    )]
     pub folders: Vec<StoredFolder>,
     /// In the order they were pinned.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "readable_entries"
+    )]
     pub pins: Vec<StoredShortcut>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct StoredFolder {
     pub name: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "readable_entries"
+    )]
     pub members: Vec<StoredShortcut>,
+}
+
+/// Every entry this build can read, less those it cannot: a folder or a pin
+/// is only grouping, and one bad entry moving the whole file aside would cost
+/// every connection in it.
+fn readable_entries<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Entry<T> {
+        Read(T),
+        Unread(IgnoredAny),
+    }
+    Ok(Vec::<Entry<T>>::deserialize(deserializer)?
+        .into_iter()
+        .filter_map(|entry| match entry {
+            Entry::Read(entry) => Some(entry),
+            Entry::Unread(_) => None,
+        })
+        .collect())
 }
 
 /// One entry in a folder or the pins: a saved query by `query`, a folder by
@@ -2859,6 +2894,55 @@ open_objects = []
             "{text}"
         );
         assert_eq!(decode_profiles(&text).unwrap().profiles, [profile]);
+    }
+
+    #[test]
+    fn a_folder_or_pin_this_build_cannot_read_costs_that_entry_alone() {
+        let text = r#"
+[[profiles]]
+id = "local"
+name = "local"
+host = "localhost"
+database = "postgres"
+user = "shayan"
+
+[[profiles.folders]]
+members = []
+
+[[profiles.folders]]
+name = "Hot"
+
+[[profiles.folders.members]]
+query = 123
+
+[[profiles.folders.members]]
+query = "daily"
+
+[[profiles.pins]]
+query = 123
+
+[[profiles.pins]]
+folder = "Hot"
+"#;
+        let profile = decode_profiles(text).unwrap().profiles.remove(0);
+        let daily = StoredShortcut {
+            query: Some("daily".into()),
+            ..StoredShortcut::default()
+        };
+        assert_eq!(
+            profile.folders,
+            [StoredFolder {
+                name: "Hot".into(),
+                members: vec![daily],
+            }]
+        );
+        assert_eq!(
+            profile.pins,
+            [StoredShortcut {
+                folder: Some("Hot".into()),
+                ..StoredShortcut::default()
+            }]
+        );
     }
 
     #[test]
