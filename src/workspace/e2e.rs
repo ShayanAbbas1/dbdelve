@@ -1480,6 +1480,7 @@ fn a_count_whose_tab_closed_under_it_still_leaves_its_outcome_in_the_history(
 ) {
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        cx.executor().allow_parking();
         cx.simulate_keystrokes("secondary-k e");
         settle(cx);
         cx.simulate_keystrokes("down down enter");
