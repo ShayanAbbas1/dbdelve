@@ -24,7 +24,7 @@ use super::editing::Short;
 use super::*;
 use crate::db::{Column, Feed, Fetch, QueryResult, Row};
 use crate::export::{FileAs, InsertTarget, Writer};
-use crate::session::{BoundSession, ExportProgress, Exporting, PendingExport, Refetch};
+use crate::session::{BoundSession, ExportProgress, Exporting, PendingExport, Refetch, Routed};
 use crate::sql::Destructive;
 use crate::ui::code_lines;
 
@@ -442,6 +442,42 @@ impl Workspace {
             cx.notify();
             return;
         }
+        let format = FileAs::for_path(&path, engine);
+        self.run_export(
+            id,
+            generation,
+            routed,
+            path,
+            format,
+            move |connection, read_only, path, progress| {
+                export_every_row(
+                    connection, &refetch, &target, read_only, engine, path, progress,
+                )
+            },
+            cx,
+        );
+    }
+
+    /// Run `work` on a thread of its own against the connection `routed`
+    /// resolves to, counting in the status bar while it writes to `path` and
+    /// saying what it ended in, `format` being what the notice names.
+    /// Whatever could refuse it has been asked already.
+    #[allow(clippy::too_many_arguments)]
+    fn run_export(
+        &mut self,
+        id: &str,
+        generation: u64,
+        routed: Routed,
+        path: PathBuf,
+        format: FileAs,
+        work: impl FnOnce(&Connection, bool, &Path, &ExportProgress) -> Result<usize, Ended>
+        + Send
+        + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(profile) = self.issued_to(id, generation) else {
+            return;
+        };
         let read_only = profile.mode == Mode::ReadOnly;
         let progress = Arc::new(ExportProgress::default());
         let started = Instant::now();
@@ -483,18 +519,9 @@ impl Workspace {
         let task = spawn_blocking(cx.background_executor(), {
             let (path, progress) = (path.clone(), progress.clone());
             move || {
-                let format = FileAs::for_path(&path, engine);
-                tracing::info!(format = format.extension(), "export of every row started");
+                tracing::info!(format = format.extension(), "export started");
                 let ended = match routed.resolve() {
-                    Ok((connection, _)) => export_every_row(
-                        &connection,
-                        &refetch,
-                        &target,
-                        read_only,
-                        engine,
-                        &path,
-                        &progress,
-                    ),
+                    Ok((connection, _)) => work(&connection, read_only, &path, &progress),
                     Err(error) => Err(Ended::Failed(error.message)),
                 };
                 log_export(format, ended.as_ref().copied());
@@ -528,7 +555,7 @@ impl Workspace {
                 };
                 match ended {
                     Ok(rows) => {
-                        let message = exported(rows, FileAs::for_path(&path, engine), &path);
+                        let message = exported(rows, format, &path);
                         profile.session.notice = Some(message.clone());
                         workspace.clear_notice_later(id, generation, message, cx);
                     }
