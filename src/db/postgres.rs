@@ -18,11 +18,11 @@ use crate::tls;
 
 use super::ssh::{Tunnel, tunnelled};
 use super::{
-    Catalog, Column, DbError, EditTarget, Engine, Feed, Fetch, QueryResult, Reference,
+    Catalog, Column, DbError, EditTarget, Engine, ExportDdl, Feed, Fetch, QueryResult, Reference,
     RelationKind, Row, RowBuilder, ServerConfig, Sizes, Stopped, Structure, assemble_catalog,
     assemble_databases, assemble_foreign_keys, assemble_references, assemble_sizes,
     assemble_structure, create_table, non_utf8_error, optional_cell, plain_error, required_cell,
-    terminated,
+    split_foreign_keys, terminated,
 };
 
 mod pgpass;
@@ -1208,6 +1208,23 @@ impl Connection {
     /// populated. `relpartbound`, `attfdwoptions`, `pg_get_serial_sequence`
     /// and `relispopulated` are where each is.
     pub fn ddl(&self, schema: &str, relation: &str, kind: RelationKind) -> Result<String, DbError> {
+        Ok(self.render_ddl(schema, relation, kind, false)?.create)
+    }
+
+    /// A table's DDL with its foreign keys left to statements of their own.
+    // Nothing calls it until the schema export is wired in.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn export_ddl(&self, schema: &str, relation: &str) -> Result<ExportDdl, DbError> {
+        self.render_ddl(schema, relation, RelationKind::Table, true)
+    }
+
+    fn render_ddl(
+        &self,
+        schema: &str,
+        relation: &str,
+        kind: RelationKind,
+        keys_apart: bool,
+    ) -> Result<ExportDdl, DbError> {
         let name = Engine::Postgres.qualified(schema, relation);
         let view = match kind {
             RelationKind::View => Some("VIEW"),
@@ -1241,10 +1258,17 @@ impl Connection {
                     statements.push(terminated(required_cell(&indexes, row, "definition")?));
                 }
             }
-            return Ok(statements.join("\n"));
+            return Ok(ExportDdl {
+                create: statements.join("\n"),
+                foreign_keys: Vec::new(),
+            });
         }
 
         let structure = self.structure(schema, relation)?;
+        let (structure, foreign_keys) = match keys_apart {
+            true => split_foreign_keys(Engine::Postgres, schema, relation, &structure),
+            false => (structure, Vec::new()),
+        };
         let storage = self.internal_query(&structure_sql(TABLE_STORAGE_SQL, schema, relation))?;
         if storage.rows.is_empty() {
             return Err(plain_error(format!("{schema} has no relation {relation}.")));
@@ -1284,13 +1308,17 @@ impl Connection {
             (Some(key), None) => ("TABLE", format!(" PARTITION BY {key}")),
             (None, None) => ("TABLE", String::new()),
         };
-        Ok(create_table(
+        let create = create_table(
             Engine::Postgres,
             &format!("CREATE {head} {name}"),
             &structure,
             &tail,
             |index| index.definition.clone(),
-        ))
+        );
+        Ok(ExportDdl {
+            create,
+            foreign_keys,
+        })
     }
 }
 
@@ -3388,6 +3416,53 @@ mod tests {
                 .all(|reference| reference.referenced_column != "number"),
             "a composite key names no single column: {references:?}"
         );
+    }
+
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_export_ddl_adds_foreign_keys_after_the_rows() {
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        let setup = |sql: &str| {
+            connection
+                .query(sql, Fetch::default())
+                .expect("the fixture statements should run");
+        };
+        setup(
+            "DROP TABLE IF EXISTS dbdelve_test_export_child; \
+             DROP TABLE IF EXISTS dbdelve_test_export_parent; \
+             CREATE TABLE dbdelve_test_export_parent (id bigint PRIMARY KEY); \
+             CREATE TABLE dbdelve_test_export_child (id bigint PRIMARY KEY, parent_id bigint, \
+                 CONSTRAINT dbdelve_test_export_fk FOREIGN KEY (parent_id) \
+                     REFERENCES dbdelve_test_export_parent (id))",
+        );
+        let exported = connection.export_ddl("public", "dbdelve_test_export_child");
+        setup("DROP TABLE dbdelve_test_export_child; DROP TABLE dbdelve_test_export_parent");
+        let exported = exported.expect("the table's DDL should load");
+
+        assert!(
+            !exported.create.contains("FOREIGN KEY"),
+            "{}",
+            exported.create
+        );
+        assert_eq!(
+            exported.foreign_keys.len(),
+            1,
+            "{:?}",
+            exported.foreign_keys
+        );
+        assert!(exported.foreign_keys[0].starts_with(
+            "ALTER TABLE \"public\".\"dbdelve_test_export_child\" \
+             ADD CONSTRAINT \"dbdelve_test_export_fk\" FOREIGN KEY"
+        ));
+        setup("CREATE TABLE dbdelve_test_export_parent (id bigint PRIMARY KEY)");
+        let replayed = connection.query(
+            &format!("{}\n{}", exported.create, exported.foreign_keys.join("\n")),
+            Fetch::default(),
+        );
+        setup(
+            "DROP TABLE IF EXISTS dbdelve_test_export_child; DROP TABLE dbdelve_test_export_parent",
+        );
+        replayed.expect("the table and its key should run on the server");
     }
 
     #[test]

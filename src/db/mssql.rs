@@ -34,10 +34,10 @@ use tracing::span;
 
 use super::ssh::{Tunnel, tunnelled};
 use super::{
-    Catalog, Cell, Column, DbError, EditTarget, Engine, Fetch, QueryResult, Reference,
+    Catalog, Cell, Column, DbError, EditTarget, Engine, ExportDdl, Fetch, QueryResult, Reference,
     RelationKind, Row, ServerConfig, SslMode, Stopped, Structure, assemble_catalog,
     assemble_databases, assemble_foreign_keys, assemble_references, assemble_structure,
-    create_table, plain_error, required_cell, terminated,
+    create_table, plain_error, required_cell, split_foreign_keys, terminated,
 };
 
 const DATABASES_SQL: &str = "
@@ -1239,6 +1239,23 @@ impl Connection {
     /// statement per such key and reading `sys.xml_indexes` /
     /// `sys.spatial_index_tessellations` are the upgrade paths.
     pub fn ddl(&self, schema: &str, relation: &str, kind: RelationKind) -> Result<String, DbError> {
+        Ok(self.render_ddl(schema, relation, kind, false)?.create)
+    }
+
+    /// A table's DDL with its foreign keys left to statements of their own.
+    // Nothing calls it until the schema export is wired in.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn export_ddl(&self, schema: &str, relation: &str) -> Result<ExportDdl, DbError> {
+        self.render_ddl(schema, relation, RelationKind::Table, true)
+    }
+
+    fn render_ddl(
+        &self,
+        schema: &str,
+        relation: &str,
+        kind: RelationKind,
+        keys_apart: bool,
+    ) -> Result<ExportDdl, DbError> {
         let name = Engine::SqlServer.qualified(schema, relation);
         if let RelationKind::View | RelationKind::MaterializedView = kind {
             let result = self.internal_query(&structure_sql(
@@ -1250,7 +1267,10 @@ impl Connection {
                 .rows
                 .first()
                 .and_then(|row| row.get(0))
-                .map(terminated)
+                .map(|definition| ExportDdl {
+                    create: terminated(definition),
+                    foreign_keys: Vec::new(),
+                })
                 .ok_or_else(|| plain_error(format!("{name} has no definition to show.")));
         }
 
@@ -1259,7 +1279,11 @@ impl Connection {
         if structure.columns.is_empty() {
             return Err(plain_error(format!("{schema} has no relation {relation}.")));
         }
-        Ok(create_table(
+        let (structure, foreign_keys) = match keys_apart {
+            true => split_foreign_keys(Engine::SqlServer, schema, relation, &structure),
+            false => (structure, Vec::new()),
+        };
+        let create = create_table(
             Engine::SqlServer,
             &format!("CREATE TABLE {name}"),
             &structure,
@@ -1271,7 +1295,11 @@ impl Connection {
                 ),
                 None => index.definition.clone(),
             },
-        ))
+        );
+        Ok(ExportDdl {
+            create,
+            foreign_keys,
+        })
     }
 }
 
@@ -3012,6 +3040,54 @@ mod tests {
                 .iter()
                 .any(|schema| schema.name == "sys" || schema.name == "INFORMATION_SCHEMA")
         );
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_export_ddl_adds_foreign_keys_after_the_rows() {
+        let connection = live();
+        let setup = |sql: &str| {
+            connection
+                .query(sql, Fetch::default())
+                .expect("the fixture statements should run");
+        };
+        setup(
+            "DROP TABLE IF EXISTS dbdelve_test_export_child; \
+             DROP TABLE IF EXISTS dbdelve_test_export_parent; \
+             CREATE TABLE dbdelve_test_export_parent (id bigint NOT NULL PRIMARY KEY); \
+             CREATE TABLE dbdelve_test_export_child (id bigint NOT NULL PRIMARY KEY, \
+                 parent_id bigint NULL, \
+                 CONSTRAINT dbdelve_test_export_fk FOREIGN KEY (parent_id) \
+                     REFERENCES dbdelve_test_export_parent (id))",
+        );
+        let exported = connection.export_ddl("dbo", "dbdelve_test_export_child");
+        setup("DROP TABLE dbdelve_test_export_child; DROP TABLE dbdelve_test_export_parent");
+        let exported = exported.expect("the table's DDL should load");
+
+        assert!(
+            !exported.create.contains("FOREIGN KEY"),
+            "{}",
+            exported.create
+        );
+        assert_eq!(
+            exported.foreign_keys.len(),
+            1,
+            "{:?}",
+            exported.foreign_keys
+        );
+        assert!(exported.foreign_keys[0].starts_with(
+            "ALTER TABLE \"dbo\".\"dbdelve_test_export_child\" \
+             ADD CONSTRAINT \"dbdelve_test_export_fk\" FOREIGN KEY"
+        ));
+        setup("CREATE TABLE dbdelve_test_export_parent (id bigint NOT NULL PRIMARY KEY)");
+        let replayed = connection.query(
+            &format!("{}\n{}", exported.create, exported.foreign_keys.join("\n")),
+            Fetch::default(),
+        );
+        setup(
+            "DROP TABLE IF EXISTS dbdelve_test_export_child; DROP TABLE dbdelve_test_export_parent",
+        );
+        replayed.expect("the table and its key should run on the server");
     }
 
     #[test]
