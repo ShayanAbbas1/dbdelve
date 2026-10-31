@@ -83,15 +83,9 @@ impl Workspace {
         };
 
         for sql in statements {
-            self.new_query(&NewQuery, window, cx);
-            let Some(tab) = self
-                .profile()
-                .and_then(|profile| profile.session.active_query_tab())
-            else {
+            let Some(id) = self.new_query_holding(sql.clone(), window, cx) else {
                 return;
             };
-            let (id, editor) = (tab.id, tab.editor.clone());
-            editor.update(cx, |editor, cx| editor.set_value(sql.clone(), window, cx));
             self.runs_on_connect.push((profile_id.clone(), id, sql));
         }
         // Otherwise its connect is on its way, and lands in `run_waiting_files`.
@@ -101,6 +95,28 @@ impl Workspace {
         {
             self.run_waiting_files(&profile_id, cx);
         }
+    }
+
+    /// A new query tab in front holding `text`, by its id, or `None` when none
+    /// could be made. Checked by id because a `new_query` that refuses leaves
+    /// the user's own tab in front, and `text` would land over their buffer.
+    fn new_query_holding(
+        &mut self,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<u64> {
+        let id = self.profile()?.session.next_query_id;
+        self.new_query(&NewQuery, window, cx);
+        let editor = self
+            .profile()?
+            .session
+            .active_query_tab()
+            .filter(|tab| tab.id == id)?
+            .editor
+            .clone();
+        editor.update(cx, |editor, cx| editor.set_value(text, window, cx));
+        Some(id)
     }
 
     /// Run what [`Workspace::open_data_files`] left waiting for `profile`,
