@@ -791,7 +791,7 @@ fn a_schema_export_that_ends_early_leaves_the_file_that_was_there() {
     let cancelled = ExportProgress::default();
     cancelled.cancelled.store(true, Ordering::Relaxed);
     assert_eq!(
-        export(&[table.name.clone()], &cancelled),
+        export(std::slice::from_ref(&table.name), &cancelled),
         Err(Ended::Cancelled)
     );
 
