@@ -3515,20 +3515,17 @@ pub(super) fn explorer_menu(
         }
         // The export reads the connection's own database, so another one's
         // schemas offer none.
-        if is_schema_row(&row.id)
-            && elsewhere.is_none()
-            && target.exports_schema().is_some()
-        {
+        if is_schema_row(&row.id) && elsewhere.is_none() && target.exports_schema().is_some() {
             let (workspace, profile_id) = (workspace.clone(), row.profile.clone());
             let schema = row.label.to_string();
-            menu = menu.item(PopupMenuItem::new("Export as SQL…").on_click(
-                move |_, _, cx| {
+            menu = menu.item(
+                PopupMenuItem::new("Export as SQL…").on_click(move |_, _, cx| {
                     let schema = schema.clone();
                     on_profile(&workspace, &profile_id, cx, |workspace, cx| {
                         workspace.export_schema(schema, cx);
                     });
-                },
-            ));
+                }),
+            );
         }
         let actions = node_actions(node.kind, &node.name, target);
         return node_items(menu, &node, actions, workspace);
