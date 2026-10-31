@@ -2,8 +2,6 @@
 //! into a table. This root holds the options the dialog edits; the rest of the
 //! pipeline lives beside it.
 
-use std::path::Path;
-
 mod mapping;
 mod plan;
 mod read;
@@ -76,9 +74,9 @@ pub(crate) struct Options {
 }
 
 impl Options {
-    pub(crate) fn detected(path: &Path, bytes: &[u8]) -> Self {
+    pub(crate) fn detected(format: Format, bytes: &[u8]) -> Self {
         Self {
-            format: detect(path, bytes),
+            format,
             header: true,
             delimiter: Delimiter::Auto,
             quote: '"',

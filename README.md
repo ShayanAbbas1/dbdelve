@@ -91,7 +91,9 @@ More engines are planned.
   ![Importing events.csv: format options on the left, each file column mapped to a table column, and a preview of the rows](assets/screenshots/import.png)
 
 - **Open a data file** by dropping it on the window: a CSV, Excel, Parquet or
-  JSON file opens in DuckDB, held in memory, as a query you can change.
+  JSON file opens in DuckDB, held in memory, as a query you can change. A
+  `.sql` file opens in a new query tab on the connection you're on, and runs
+  only when you run it.
 
 - **See the query plan** highlighted in its own pane, with bad row estimates
   called out.

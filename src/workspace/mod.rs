@@ -1339,7 +1339,7 @@ impl Render for Workspace {
             return div()
                 .id("welcome")
                 // A data file dropped anywhere on the window opens in DuckDB.
-                .on_drop(cx.listener(Self::drop_data_files))
+                .on_drop(cx.listener(Self::drop_files))
                 .size_full()
                 .track_focus(&self.focus)
                 .text_color(t.text)
@@ -2036,7 +2036,7 @@ impl Render for Workspace {
         div()
             .id("workspace")
             // A data file dropped anywhere on the window opens in DuckDB.
-            .on_drop(cx.listener(Self::drop_data_files))
+            .on_drop(cx.listener(Self::drop_files))
             .relative()
             // The floor under the focus, so a surface with nothing focusable
             // on it still has a dispatch path for the workspace's own
