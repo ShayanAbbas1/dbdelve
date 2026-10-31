@@ -12,13 +12,14 @@ use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::spinner::Spinner;
 use gpui_component::{ActiveTheme, Sizable};
 
+use super::folders::{DragLabel, DragShortcut};
 use super::welcome::{self, Part, Pose};
 use super::*;
 use crate::actions::{ConfirmDialog, NextDialogButton, PreviousDialogButton, TickDialogBox};
 use crate::connection_form::ConnectionTest;
 use crate::explorer::{
-    Member, PINNED_GROUP, Pin, QUERIES_GROUP, Shortcut, ShortcutDatabase, Shortcuts, is_schema_row,
-    relation_copies, saved_query,
+    Landing, Member, PINNED_GROUP, Pin, QUERIES_GROUP, Shortcut, ShortcutDatabase, Shortcuts,
+    is_schema_row, landing, relation_copies, saved_query,
 };
 use crate::scroller::{SmoothScrollable, smooth_scoped};
 use crate::session::PendingDelete;
@@ -2300,6 +2301,7 @@ impl Workspace {
         let active_schema = profile.active_schema().map(gpui::SharedString::from);
         let menu_schema = active_schema.clone();
         let picks_schema = profile.config.engine().picks_schema();
+        let drop_line = self.explorer_drop.clone();
         let open_queries: HashSet<String> = profile
             .session
             .queries
@@ -2345,6 +2347,11 @@ impl Workspace {
                         _ => None,
                     };
                     let label = entry.item().label.clone();
+                    let drag_label = label.clone();
+                    let line = drop_line
+                        .as_ref()
+                        .filter(|(row, _)| row.as_str() == id && cx.has_active_drag())
+                        .map(|(_, after)| *after);
                     let active = is_schema_row(entry.item().id.as_str())
                         && active_schema.as_ref() == Some(&label);
                     let open = query
@@ -2418,6 +2425,7 @@ impl Workspace {
                         ))
                         .child(
                             div()
+                                .relative()
                                 .flex()
                                 .items_center()
                                 .gap(px(layout::SPACE_SM))
@@ -2475,8 +2483,66 @@ impl Workspace {
                                             .text_size(px(layout::chrome(layout::TEXT_XS)))
                                             .child(human_bytes(size)),
                                     )
+                                })
+                                .when_some(line, |row, after| {
+                                    // Out through `ListItem`'s own `py_1` to
+                                    // the row's edge.
+                                    let edge = gpui::rems(-0.25);
+                                    row.child(
+                                        div()
+                                            .absolute()
+                                            .left_0()
+                                            .right_0()
+                                            .h(px(2.))
+                                            .rounded(px(1.))
+                                            .bg(t.accent)
+                                            .map(|line| match after {
+                                                true => line.bottom(edge),
+                                                false => line.top(edge),
+                                            }),
+                                    )
                                 }),
-                        );
+                        )
+                        .debug_selector(move || format!("explorer-row-{index}"));
+                    // A drag that starts while the database is not known
+                    // carries nothing, as the menus offer nothing then.
+                    let dragged = match (shortcut, &query, leaf) {
+                        _ if rename.is_some() => None,
+                        (Some(shortcut), _, _) => Some(shortcut.pin()),
+                        (None, Some(name), _) => Some(Pin::Member(Member::Query(name.clone()))),
+                        (None, None, Some(leaf)) => workspace
+                            .upgrade()
+                            .and_then(|workspace| workspace.read(cx).member_at(leaf.target))
+                            .map(Pin::Member),
+                        _ => None,
+                    };
+                    let row = match dragged {
+                        Some(pin) => {
+                            let workspace = workspace.clone();
+                            let dragged = DragShortcut {
+                                pin,
+                                from: shortcut.and_then(|shortcut| shortcut.container(id)),
+                                label: drag_label,
+                            };
+                            row.on_drag(dragged, move |dragged, _, _, cx| {
+                                _ = workspace.update(cx, |workspace, _| {
+                                    workspace.explorer_drop = None;
+                                });
+                                cx.new(|_| DragLabel(dragged.label.clone()))
+                            })
+                        }
+                        None => row,
+                    };
+                    let row = match rename.is_none() && (pinned_group || shortcut.is_some()) {
+                        true => drop_target(
+                            row,
+                            entry.item().id.clone(),
+                            shortcut.cloned(),
+                            &workspace,
+                            t,
+                        ),
+                        false => row,
+                    };
                     // A click inside the field is the field's.
                     if rename.is_some() || missing {
                         return row;
@@ -2893,6 +2959,68 @@ fn removal_items(
         true => menu.item(pin_item(true, pin, workspace)),
         false => menu,
     }
+}
+
+/// A row in a folder or the Pinned group, or the group itself, taking a
+/// dragged shortcut: a folder's row and the group's light up, and a member's
+/// draws the line between its neighbours where the drop would go.
+fn drop_target(
+    row: ListItem,
+    id: gpui::SharedString,
+    shortcut: Option<Shortcut>,
+    workspace: &gpui::WeakEntity<Workspace>,
+    t: Theme,
+) -> ListItem {
+    let land = {
+        let id = id.clone();
+        std::rc::Rc::new(move |dragged: &Pin, after: bool| {
+            landing(&id, shortcut.as_ref(), dragged, after)
+        })
+    };
+    let (moved, dropped) = (workspace.clone(), workspace.clone());
+    row.can_drop({
+        let land = land.clone();
+        move |dragged, _, _| {
+            dragged
+                .downcast_ref::<DragShortcut>()
+                .is_some_and(|dragged| land(&dragged.pin, false).is_some())
+        }
+    })
+    .drag_over::<DragShortcut>({
+        let land = land.clone();
+        move |style, dragged, _, _| match land(&dragged.pin, false) {
+            Some(Landing::Folder(_) | Landing::Pinned) => style.bg(t.element_active),
+            _ => style,
+        }
+    })
+    // Every row hears every move, so each says only whether it is the one
+    // under the pointer.
+    .on_drag_move::<DragShortcut>({
+        let (land, row) = (land.clone(), id.clone());
+        move |event, _, cx| {
+            let (position, bounds) = (event.event.position, event.bounds);
+            let after = position.y > bounds.center().y;
+            let beside = bounds.contains(&position)
+                && matches!(
+                    land(&event.drag(cx).pin, after),
+                    Some(Landing::Beside { .. })
+                );
+            _ = moved.update(cx, |workspace, cx| {
+                workspace.hover_drop(&row, beside.then_some(after), cx)
+            });
+        }
+    })
+    .on_drop(move |dragged: &DragShortcut, _, cx| {
+        _ = dropped.update(cx, |workspace, cx| {
+            let after = workspace
+                .explorer_drop
+                .as_ref()
+                .is_some_and(|(row, after)| *row == id && *after);
+            if let Some(landing) = land(&dragged.pin, after) {
+                workspace.drop_shortcut(dragged, landing, cx);
+            }
+        });
+    })
 }
 
 fn pin_item(pinned: bool, pin: Pin, workspace: &gpui::WeakEntity<Workspace>) -> PopupMenuItem {

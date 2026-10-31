@@ -2,8 +2,38 @@
 //! connection on its profile.
 
 use super::*;
-use crate::explorer::{Member, ObjectRef, Pin, ShortcutDatabase, folder_row};
+use crate::explorer::{Container, Landing, Member, ObjectRef, Pin, ShortcutDatabase, folder_row};
 use crate::session::{PendingDelete, routine_name};
+
+/// What a sidebar row carries while it is dragged.
+pub(crate) struct DragShortcut {
+    pub(crate) pin: Pin,
+    /// The folder or the Pinned group it is dragged out of, if either.
+    pub(crate) from: Option<Container>,
+    pub(crate) label: gpui::SharedString,
+}
+
+/// The row's name, following the pointer. Static: anything that moves on its
+/// own is the redraw hazard in `AGENTS.md`.
+pub(crate) struct DragLabel(pub(crate) gpui::SharedString);
+
+impl Render for DragLabel {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = *theme(cx);
+        div()
+            .px(px(layout::SPACE_SM))
+            .py(px(layout::SPACE_XS))
+            .rounded(px(layout::RADIUS_CONTROL))
+            .border_1()
+            .border_color(t.border)
+            .bg(t.overlay)
+            .text_color(t.text)
+            .font_family(fonts(cx).chrome.clone())
+            .text_size(px(layout::chrome(layout::TEXT_MD)))
+            .whitespace_nowrap()
+            .child(self.0.clone())
+    }
+}
 
 impl Workspace {
     /// What a folder or a pin names the object a sidebar row opens by. None
@@ -151,6 +181,45 @@ impl Workspace {
         self.shortcuts_changed(cx);
         if asked {
             self.refocus_front();
+        }
+    }
+
+    pub(crate) fn drop_shortcut(
+        &mut self,
+        dragged: &DragShortcut,
+        landing: Landing,
+        cx: &mut Context<Self>,
+    ) {
+        self.explorer_drop = None;
+        let Some(profile) = self.profile_mut() else {
+            return;
+        };
+        let before = profile.shortcuts.clone();
+        profile
+            .shortcuts
+            .drop_on(&dragged.pin, dragged.from.as_ref(), &landing);
+        match profile.shortcuts == before {
+            true => cx.notify(),
+            false => self.shortcuts_changed(cx),
+        }
+    }
+
+    /// `row` is under a dragged shortcut that would land beside it, after it
+    /// when `after`; `None` once it is not, which clears only its own line.
+    pub(crate) fn hover_drop(
+        &mut self,
+        row: &gpui::SharedString,
+        after: Option<bool>,
+        cx: &mut Context<Self>,
+    ) {
+        let spot = match after {
+            Some(after) => Some((row.clone(), after)),
+            None if self.explorer_drop.as_ref().is_some_and(|(at, _)| at == row) => None,
+            None => return,
+        };
+        if self.explorer_drop != spot {
+            self.explorer_drop = spot;
+            cx.notify();
         }
     }
 
