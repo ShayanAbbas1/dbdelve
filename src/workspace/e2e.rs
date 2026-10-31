@@ -1341,6 +1341,39 @@ fn the_export_question_takes_the_keyboard_and_hands_it_back_when_dismissed(
 }
 
 #[gpui::test]
+fn the_palette_opens_the_schema_export_through_the_schema_picker(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) =
+            launch_on_duckdb_holding(cx, "CREATE TABLE customers (id INTEGER PRIMARY KEY);");
+        let active = workspace.read_with(cx, |workspace, _| {
+            workspace
+                .profile()
+                .unwrap()
+                .active_schema()
+                .map(str::to_owned)
+        });
+        cx.simulate_keystrokes("secondary-shift-p");
+        settle(cx);
+        cx.simulate_input("Export Schema");
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        assert_eq!(
+            front_dialog(&workspace, cx),
+            None,
+            "the picker is not a dialog"
+        );
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("schema-export"));
+        workspace.read_with(cx, |workspace, _| {
+            let dialog = workspace.profile().unwrap().session.schema_export.as_ref();
+            assert_eq!(Some(dialog.unwrap().schema.as_str()), active.as_deref());
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn the_schema_export_dialog_takes_the_keyboard_and_hands_it_back(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_duckdb_holding(

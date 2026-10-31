@@ -113,9 +113,6 @@ impl Workspace {
     /// partition or anything else the catalog lists is left out, as the
     /// file's header says. Each table's foreign keys are read behind it, so
     /// it can say what the tables ticked point at and leave unwritten.
-    ///
-    /// ponytail: asked from the explorer's schema row alone, with no palette
-    /// command, until #188 settles where this is asked from.
     pub(crate) fn open_schema_export(&mut self, schema: String, cx: &mut Context<Self>) {
         let Some(profile) = self.profile() else {
             return;
