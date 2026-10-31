@@ -3472,7 +3472,7 @@ fn render_query_toolbar(
             .flex_shrink_0()
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(match tab.vim {
-                vim::Mode::Normal => t.accent,
+                vim::Mode::Normal { .. } => t.accent,
                 vim::Mode::Insert => t.text_faint,
             })
             .child(tab.vim.label())
