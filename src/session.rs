@@ -2625,6 +2625,8 @@ pub(crate) struct QueryTab {
     pub(crate) row_panel_split: Entity<ResizableState>,
     /// Not persisted: a restored buffer starts in Insert, as a new one does.
     pub(crate) vim: vim::Mode,
+    /// A Normal-mode command still being typed, if one is.
+    pub(crate) vim_pending: Option<vim::Pending>,
     /// The database, and where the engine picks one the schema, this tab was
     /// opened for with New Query Here, or `None` for a tab that runs on the
     /// profile's own session. Kept for good: running the tab puts its
@@ -3252,6 +3254,7 @@ impl QueryTab {
             row_panel_filter: Default::default(),
             row_panel_split: cx.new(|_| ResizableState::default()),
             vim: vim::Mode::default(),
+            vim_pending: None,
             // Kept as written, and handed to the driver as data on the first
             // run: a database the server no longer has fails that run with the
             // open's own words, and the tab stays bound to it.
