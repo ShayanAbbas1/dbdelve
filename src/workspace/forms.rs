@@ -1353,9 +1353,10 @@ impl Workspace {
             PendingDelete::Folder(name, held) => (
                 "Delete folder",
                 format!(
-                    "Delete {name}? Only the folder goes: the {held} item{} in it \
-                     stay listed everywhere else.",
-                    if *held == 1 { "" } else { "s" }
+                    "Delete {name}? Only the folder goes: the {held} {} in it {} listed \
+                     everywhere else.",
+                    if *held == 1 { "item" } else { "items" },
+                    if *held == 1 { "stays" } else { "stay" },
                 ),
             ),
         };
