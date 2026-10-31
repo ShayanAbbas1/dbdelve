@@ -294,10 +294,11 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   its rows are left unknown (`queries::answered`). The palette's History scope hints each row with these
   (`history_hint`), and offers a Status filter (a cancelled run is neither
   Succeeded nor Failed) and a Sort (Newest is the list's own order, by match
-  while typing; Slowest and Most rows put unmeasured runs last). `alt-f` and
-  `alt-s` cycle them, scoped to `Palette > Input` and handed on to the field
-  outside History: `secondary-f` is the field's search and the unscoped
-  `secondary-shift-f` (Format Query) would win over a scoped binding. Both
+  while typing; Slowest and Most rows put unmeasured runs last). `secondary-k f`
+  and `secondary-k o` cycle them, scoped to `Palette > Input`: an Option
+  chord types a character on macOS and would take it from the field, and the
+  unscoped `secondary-shift-f` (Format Query), `secondary-shift-s` and
+  `secondary-k s` would each win over a scoped binding. Both
   reset when the palette opens, so a filter left on cannot hide a run later.
 - **`showing_messages` is a tab flag beside `showing_plan`, not a value of
   `Queue::showing`.** Selecting Messages leaves the selected result to return

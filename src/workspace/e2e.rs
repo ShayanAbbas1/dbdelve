@@ -1443,17 +1443,17 @@ fn the_history_scope_filters_and_sorts_its_runs_from_the_keyboard(cx: &mut TestA
             assert!(last.at.is_some() && last.ms.is_some() && last.error.is_none());
         });
 
-        // Outside History the chords are the field's.
+        // Outside History the chords do nothing.
         cx.simulate_keystrokes("secondary-p");
         settle(cx);
-        cx.simulate_keystrokes("alt-shift-f alt-shift-s");
+        cx.simulate_keystrokes("secondary-k f secondary-k o");
         settle(cx);
         assert_eq!(history_view(&workspace, cx), HistoryView::default());
 
         cx.simulate_keystrokes("tab tab");
         settle(cx);
         assert!(palette_mode(&workspace, cx) == Some(PaletteMode::Search(Scope::History)));
-        cx.simulate_keystrokes("alt-shift-f alt-shift-s alt-shift-s");
+        cx.simulate_keystrokes("secondary-k f secondary-k o secondary-k o");
         settle(cx);
         assert_eq!(
             history_view(&workspace, cx),
