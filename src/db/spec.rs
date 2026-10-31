@@ -614,6 +614,16 @@ pub enum UnreadableFloor {
     FirstKeyword,
 }
 
+/// How the `CREATE` statements [`Connection::ddl`](super::Connection::ddl)
+/// reads name their table, which a file's `INSERT`s have to match, or a file
+/// run in another schema creates its tables there and fills the ones it came
+/// from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DdlNames {
+    Qualified,
+    Unqualified,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Abilities {
     pub edits: bool,
@@ -624,6 +634,9 @@ pub struct Abilities {
     pub imports: bool,
     pub assigns_default: bool,
     pub copies_ddl: bool,
+    /// Whether a schema exports as one file of its DDL and rows, and how that
+    /// DDL names its tables. `None` where the DDL does not run back as written.
+    pub exports_schema: Option<DdlNames>,
     pub switches_database: bool,
     pub switches_database_in_session: bool,
     /// The catalog lists every database on the server, each as a schema,
@@ -645,6 +658,7 @@ impl Abilities {
         imports: false,
         assigns_default: false,
         copies_ddl: false,
+        exports_schema: None,
         switches_database: false,
         switches_database_in_session: false,
         catalog_lists_databases: false,
@@ -729,6 +743,7 @@ pub(crate) const POSTGRES: EngineSpec = EngineSpec {
         imports: true,
         assigns_default: true,
         copies_ddl: true,
+        exports_schema: Some(DdlNames::Qualified),
         switches_database: true,
         picks_schema: true,
         schema_switch_waits_for_transaction: true,
@@ -784,6 +799,7 @@ pub(crate) const MYSQL: EngineSpec = EngineSpec {
         imports: true,
         assigns_default: true,
         copies_ddl: true,
+        exports_schema: Some(DdlNames::Unqualified),
         switches_database: true,
         // No `picks_schema`: the database is the schema.
         catalog_lists_databases: true,
@@ -842,6 +858,7 @@ pub(crate) const MARIADB: EngineSpec = EngineSpec {
         imports: true,
         assigns_default: true,
         copies_ddl: true,
+        exports_schema: Some(DdlNames::Unqualified),
         switches_database: true,
         catalog_lists_databases: true,
         ..Abilities::NONE
@@ -982,6 +999,7 @@ pub(crate) const DUCKDB: EngineSpec = EngineSpec {
         imports: true,
         assigns_default: true,
         copies_ddl: true,
+        exports_schema: Some(DdlNames::Unqualified),
         // The databases attached to the instance the profile opened.
         switches_database: true,
         // Reopening a file detaches everything attached to it, and an
@@ -1117,6 +1135,7 @@ pub(crate) const SQL_SERVER: EngineSpec = EngineSpec {
         imports: true,
         assigns_default: true,
         copies_ddl: true,
+        exports_schema: Some(DdlNames::Qualified),
         switches_database: true,
         // No `picks_schema`: the default schema is the login's.
         ..Abilities::NONE
@@ -1315,6 +1334,7 @@ pub(crate) const CLICKHOUSE: EngineSpec = EngineSpec {
         inserts_into_views: true,
         imports: true,
         copies_ddl: true,
+        exports_schema: Some(DdlNames::Qualified),
         switches_database: true,
         catalog_lists_databases: true,
         chunk_refusal: Some("ClickHouse has no transaction, so each chunk is kept as it lands."),

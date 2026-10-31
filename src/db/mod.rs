@@ -42,12 +42,12 @@ pub use mongo::MongoConfig;
 pub use snowflake::{SnowflakeConfig, account_identifier, normalize_host};
 #[cfg(test)]
 pub use spec::{Abilities, Hints, Hooks, IdentifierQuote};
+pub use spec::{DdlNames, IdentityInsert, ReadOnlySession, UnreadableFloor};
 pub use spec::{
     EngineSpec, ExplainPrefix, ForeignTable, FormatDialect, MaterializedViewDrop, Paging, Params,
     ParserDialect, RegexMatch, SelectTop, SkipDuplicates, SqlSpec, StatementSplit, SubstringMatch,
     Truncate, TypedExplain,
 };
-pub use spec::{IdentityInsert, ReadOnlySession, UnreadableFloor};
 
 /// One run's claim on Cancel: [`Connection::query`] runs under it, and
 /// [`Connection::cancel`] stops only what ran under it.
@@ -616,6 +616,12 @@ impl Engine {
     /// Whether a relation has a definition [`Connection::ddl`] can write out.
     pub fn copies_ddl(self) -> bool {
         self.spec().abilities.copies_ddl
+    }
+
+    /// Whether a schema exports as one file of SQL, and how its DDL names its
+    /// tables (see [`DdlNames`]).
+    pub fn exports_schema(self) -> Option<DdlNames> {
+        self.spec().abilities.exports_schema
     }
 
     /// Whether one server holds several databases a profile can be moved

@@ -4,7 +4,7 @@
 use std::io::Write;
 
 use super::*;
-use crate::db::{ForeignKey, RelationKind, Structure};
+use crate::db::{DdlNames, ForeignKey, RelationKind, Structure};
 
 impl Workspace {
     /// Every plain table of `schema`, written as one file of SQL the user
@@ -161,6 +161,7 @@ pub(super) fn export_schema(
             .map_err(|reason| refused(reason.into()))?;
         let target = InsertTarget {
             relation: Some((schema.to_string(), name.clone())),
+            unqualified: engine.exports_schema() == Some(DdlNames::Unqualified),
             ..InsertTarget::default()
         }
         .knowing(engine, &table.structure.columns);
@@ -272,6 +273,35 @@ pub(super) fn dependency_order(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_engine_whose_ddl_replays_as_written_exports_a_schema() {
+        // Snowflake's DDL is `create or replace`, and SQLite's carries the
+        // triggers that would fire on the rows written after them.
+        for engine in [
+            Engine::Snowflake,
+            Engine::Sqlite,
+            Engine::Turso,
+            Engine::MongoDb,
+            Engine::Redis,
+        ] {
+            assert_eq!(engine.exports_schema(), None, "{engine:?}");
+        }
+        for engine in [Engine::Postgres, Engine::SqlServer, Engine::ClickHouse] {
+            assert_eq!(
+                engine.exports_schema(),
+                Some(DdlNames::Qualified),
+                "{engine:?}"
+            );
+        }
+        for engine in [Engine::MySql, Engine::MariaDb, Engine::DuckDb] {
+            assert_eq!(
+                engine.exports_schema(),
+                Some(DdlNames::Unqualified),
+                "{engine:?}"
+            );
+        }
+    }
 
     fn key(table: &str) -> ForeignKey {
         ForeignKey {

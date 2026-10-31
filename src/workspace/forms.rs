@@ -2304,8 +2304,7 @@ impl Workspace {
         let menu_schema = active_schema.clone();
         let picks_schema = profile.config.engine().picks_schema();
         let drop_line = self.explorer_drop.clone();
-        let engine = profile.config.engine();
-        let exports_schema = engine.copies_ddl() && engine.syntax() == db::Syntax::Sql;
+        let exports_schema = profile.config.engine().exports_schema().is_some();
         let open_queries: HashSet<String> = profile
             .session
             .queries
