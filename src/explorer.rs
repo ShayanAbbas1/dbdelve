@@ -659,6 +659,138 @@ impl Shortcuts {
                 .collect(),
         }
     }
+
+    /// Drops `dragged`, taken from where `from` lists it (`None` for the
+    /// schemas and the saved queries), on `landing`. Out of one folder into
+    /// another is a move; from anywhere else it adds a shortcut and leaves the
+    /// row it came from, since the schemas never stop listing what they list.
+    pub fn drop_on(&mut self, dragged: &Pin, from: Option<&Container>, landing: &Landing) {
+        let (target, beside) = match (landing, dragged) {
+            (Landing::Pinned, _) => {
+                if !self.pinned(dragged) {
+                    self.pins.push(dragged.clone());
+                }
+                return;
+            }
+            (
+                Landing::Beside {
+                    container: Container::Pinned,
+                    row,
+                    after,
+                },
+                _,
+            ) => {
+                place(&mut self.pins, dragged, row, *after);
+                return;
+            }
+            (Landing::Folder(target), Pin::Member(_)) => (target, None),
+            (
+                Landing::Beside {
+                    container: Container::Folder(target),
+                    row: Pin::Member(row),
+                    after,
+                },
+                Pin::Member(_),
+            ) => (target, Some((row, *after))),
+            _ => return,
+        };
+        let Pin::Member(member) = dragged else {
+            return;
+        };
+        let Some(folder) = self.folders.iter_mut().find(|held| held.name == *target) else {
+            return;
+        };
+        match beside {
+            Some((row, after)) => {
+                if !place(&mut folder.members, member, row, after) {
+                    return;
+                }
+            }
+            None if !folder.members.contains(member) => folder.members.push(member.clone()),
+            None => {}
+        }
+        if let Some(Container::Folder(source)) = from
+            && source != target
+            && let Some(source) = self.folders.iter_mut().find(|held| held.name == *source)
+        {
+            source.members.retain(|held| held != member);
+        }
+    }
+}
+
+/// Where a shortcut's row is listed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Container {
+    Folder(String),
+    Pinned,
+}
+
+/// Where a dragged row is dropped.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Landing {
+    /// On a folder's own row: into it.
+    Folder(String),
+    /// On the Pinned group's own row.
+    Pinned,
+    /// On a row listed in a folder or the Pinned group, which puts it before
+    /// or after that row.
+    Beside {
+        container: Container,
+        row: Pin,
+        after: bool,
+    },
+}
+
+/// Puts `item` before or after `row` in `list`, out of wherever it was in it.
+/// False when `row` is not in `list`.
+fn place<T: Clone + PartialEq>(list: &mut Vec<T>, item: &T, row: &T, after: bool) -> bool {
+    if !list.contains(row) {
+        return false;
+    }
+    if item != row {
+        list.retain(|held| held != item);
+        let at = list
+            .iter()
+            .position(|held| held == row)
+            .expect("only the item was taken out");
+        list.insert(at + usize::from(after), item.clone());
+    }
+    true
+}
+
+/// Where `dragged` lands dropped on the row `row`, which `shortcut` stands
+/// for, or `None` when it cannot. A folder holds no folders, so a folder
+/// dropped on a pinned one is reordered among the pins instead.
+pub fn landing(
+    row: &str,
+    shortcut: Option<&Shortcut>,
+    dragged: &Pin,
+    after: bool,
+) -> Option<Landing> {
+    if row == PINNED_GROUP {
+        return Some(Landing::Pinned);
+    }
+    match (shortcut?, dragged) {
+        (Shortcut::Folder(name), Pin::Member(_)) => Some(Landing::Folder(name.clone())),
+        (shortcut @ Shortcut::Folder(name), Pin::Folder(_)) => {
+            (shortcut.container(row) == Some(Container::Pinned)).then(|| Landing::Beside {
+                container: Container::Pinned,
+                row: Pin::Folder(name.clone()),
+                after,
+            })
+        }
+        (
+            Shortcut::Member {
+                folder: Some(_), ..
+            },
+            Pin::Folder(_),
+        ) => None,
+        (shortcut @ Shortcut::Member { member, .. }, _) => Some(Landing::Beside {
+            container: shortcut.container(row)?,
+            row: Pin::Member(member.clone()),
+            after,
+        }),
+    }
 }
 
 /// Why `name` cannot be a folder's, if it cannot. `keeping` is the folder's
@@ -698,6 +830,27 @@ pub enum Shortcut {
 }
 
 impl Shortcut {
+    /// Where its row, `row`, is listed: a pinned folder is told from one that
+    /// is not only by where its row is.
+    pub fn container(&self, row: &str) -> Option<Container> {
+        match self {
+            Shortcut::Folder(name) => {
+                (row == nested_row(PINNED_GROUP, &folder_row(name))).then_some(Container::Pinned)
+            }
+            Shortcut::Member { folder, .. } => {
+                Some(folder.clone().map_or(Container::Pinned, Container::Folder))
+            }
+        }
+    }
+
+    /// What it carries when its row is dragged.
+    pub fn pin(&self) -> Pin {
+        match self {
+            Shortcut::Folder(name) => Pin::Folder(name.clone()),
+            Shortcut::Member { member, .. } => Pin::Member(member.clone()),
+        }
+    }
+
     /// The saved query the row opens, which a missing one does not.
     pub fn query(&self) -> Option<&str> {
         match self {
@@ -2273,5 +2426,219 @@ mod tests {
                 format!("SELECT * FROM {qualified} LIMIT 1000")
             );
         }
+    }
+
+    fn query(name: &str) -> Member {
+        Member::Query(name.into())
+    }
+
+    fn two_folders() -> Shortcuts {
+        Shortcuts {
+            folders: vec![
+                folder("Hot", vec![query("a"), query("b"), query("c")]),
+                folder("Cold", vec![query("d")]),
+            ],
+            pins: vec![Pin::Member(query("a")), Pin::Folder("Cold".into())],
+        }
+    }
+
+    fn members(shortcuts: &Shortcuts, name: &str) -> Vec<Member> {
+        shortcuts.folder(name).unwrap().members.clone()
+    }
+
+    #[test]
+    fn a_drop_into_a_folder_moves_out_of_a_folder_and_adds_from_anywhere_else() {
+        let hot = Container::Folder("Hot".into());
+        let into_cold = Landing::Folder("Cold".into());
+
+        let mut moved = two_folders();
+        moved.drop_on(&Pin::Member(query("b")), Some(&hot), &into_cold);
+        assert_eq!(members(&moved, "Hot"), [query("a"), query("c")]);
+        assert_eq!(members(&moved, "Cold"), [query("d"), query("b")]);
+
+        // From the schemas, Saved Queries or Pinned, the row stays where it was.
+        for from in [None, Some(&Container::Pinned)] {
+            let mut added = two_folders();
+            added.drop_on(&Pin::Member(query("a")), from, &into_cold);
+            assert_eq!(members(&added, "Hot"), [query("a"), query("b"), query("c")]);
+            assert_eq!(members(&added, "Cold"), [query("d"), query("a")]);
+            assert_eq!(added.pins, two_folders().pins);
+        }
+    }
+
+    #[test]
+    fn a_drop_never_lists_a_member_twice_and_into_its_own_folder_does_nothing() {
+        let mut held = two_folders();
+        held.drop_on(
+            &Pin::Member(query("d")),
+            None,
+            &Landing::Folder("Cold".into()),
+        );
+        assert_eq!(held, two_folders());
+
+        let hot = Container::Folder("Hot".into());
+        held.drop_on(
+            &Pin::Member(query("c")),
+            Some(&hot),
+            &Landing::Folder("Hot".into()),
+        );
+        assert_eq!(held, two_folders());
+
+        // Moved into a folder that has it already: out of the one, still once
+        // in the other.
+        let mut moved = two_folders();
+        moved.folders[1].members.push(query("a"));
+        moved.drop_on(
+            &Pin::Member(query("a")),
+            Some(&hot),
+            &Landing::Folder("Cold".into()),
+        );
+        assert_eq!(members(&moved, "Hot"), [query("b"), query("c")]);
+        assert_eq!(members(&moved, "Cold"), [query("d"), query("a")]);
+
+        let mut pinned = two_folders();
+        pinned.drop_on(&Pin::Member(query("a")), Some(&hot), &Landing::Pinned);
+        pinned.drop_on(&Pin::Folder("Cold".into()), None, &Landing::Pinned);
+        assert_eq!(pinned, two_folders());
+        pinned.drop_on(&Pin::Folder("Hot".into()), None, &Landing::Pinned);
+        assert_eq!(pinned.pins.last(), Some(&Pin::Folder("Hot".into())));
+        // A folder holds no folders.
+        let mut nested = two_folders();
+        nested.drop_on(
+            &Pin::Folder("Cold".into()),
+            None,
+            &Landing::Folder("Hot".into()),
+        );
+        assert_eq!(nested, two_folders());
+    }
+
+    #[test]
+    fn a_drop_beside_a_row_lands_on_the_side_of_it_the_pointer_was() {
+        let hot = Container::Folder("Hot".into());
+        let beside = |row: &str, after: bool| Landing::Beside {
+            container: hot.clone(),
+            row: Pin::Member(query(row)),
+            after,
+        };
+        let dropped = |dragged: &str, landing: Landing| {
+            let mut shortcuts = two_folders();
+            shortcuts.drop_on(&Pin::Member(query(dragged)), Some(&hot), &landing);
+            members(&shortcuts, "Hot")
+        };
+        // Down the list: taking the row out first must not shift where it lands.
+        assert_eq!(
+            dropped("a", beside("b", true)),
+            [query("b"), query("a"), query("c")]
+        );
+        assert_eq!(
+            dropped("a", beside("c", false)),
+            [query("b"), query("a"), query("c")]
+        );
+        assert_eq!(
+            dropped("a", beside("c", true)),
+            [query("b"), query("c"), query("a")]
+        );
+        // Up the list.
+        assert_eq!(
+            dropped("c", beside("a", false)),
+            [query("c"), query("a"), query("b")]
+        );
+        assert_eq!(
+            dropped("c", beside("b", true)),
+            [query("a"), query("b"), query("c")]
+        );
+        // On itself.
+        assert_eq!(
+            dropped("b", beside("b", true)),
+            [query("a"), query("b"), query("c")]
+        );
+
+        // From another folder it moves in at that place.
+        let mut moved = two_folders();
+        let cold = Container::Folder("Cold".into());
+        moved.drop_on(&Pin::Member(query("d")), Some(&cold), &beside("b", false));
+        assert_eq!(
+            members(&moved, "Hot"),
+            [query("a"), query("d"), query("b"), query("c")]
+        );
+        assert!(members(&moved, "Cold").is_empty());
+
+        let mut pins = two_folders();
+        pins.drop_on(
+            &Pin::Folder("Cold".into()),
+            Some(&Container::Pinned),
+            &Landing::Beside {
+                container: Container::Pinned,
+                row: Pin::Member(query("a")),
+                after: false,
+            },
+        );
+        assert_eq!(
+            pins.pins,
+            [Pin::Folder("Cold".into()), Pin::Member(query("a"))]
+        );
+        // A row that has since gone takes nothing out of where it came from.
+        let mut stale = two_folders();
+        stale.drop_on(
+            &Pin::Member(query("d")),
+            Some(&cold),
+            &beside("gone", false),
+        );
+        assert_eq!(stale, two_folders());
+    }
+
+    #[test]
+    fn a_rows_landing_follows_what_it_stands_for() {
+        let explorer = super::shortcuts(
+            &two_folders(),
+            None,
+            &["a".into(), "b".into(), "c".into(), "d".into()],
+            &ShortcutDatabase::Unnamed,
+            "",
+        );
+        let hot = folder_row("Hot");
+        let pinned_cold = nested_row(PINNED_GROUP, &folder_row("Cold"));
+        let pinned_a = nested_row(PINNED_GROUP, &query("a").id());
+        let hot_c = nested_row(&hot, &query("c").id());
+        let land = |id: &str, dragged: Pin| landing(id, explorer.shortcuts.get(id), &dragged, true);
+        let member = Pin::Member(query("b"));
+        let folder = Pin::Folder("Hot".into());
+
+        assert_eq!(land(PINNED_GROUP, folder.clone()), Some(Landing::Pinned));
+        assert_eq!(
+            land(&hot, member.clone()),
+            Some(Landing::Folder("Hot".into()))
+        );
+        assert_eq!(land(&hot, folder.clone()), None);
+        // Pinned, a folder is a pin among pins to another folder.
+        assert_eq!(
+            land(&pinned_cold, member.clone()),
+            Some(Landing::Folder("Cold".into()))
+        );
+        assert_eq!(
+            land(&pinned_cold, folder.clone()),
+            Some(Landing::Beside {
+                container: Container::Pinned,
+                row: Pin::Folder("Cold".into()),
+                after: true,
+            })
+        );
+        assert_eq!(
+            land(&pinned_a, folder.clone()),
+            Some(Landing::Beside {
+                container: Container::Pinned,
+                row: Pin::Member(query("a")),
+                after: true,
+            })
+        );
+        assert_eq!(
+            land(&hot_c, member),
+            Some(Landing::Beside {
+                container: Container::Folder("Hot".into()),
+                row: Pin::Member(query("c")),
+                after: true,
+            })
+        );
+        assert_eq!(land(&hot_c, folder), None);
     }
 }
