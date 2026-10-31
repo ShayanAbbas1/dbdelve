@@ -3244,7 +3244,7 @@ fn schema_items(profile: &Profile, pick: SchemaPick) -> Vec<Item> {
         .by_name()
         .into_iter()
         .map(|(_, schema)| &schema.name);
-    schema_items_from(names, profile.active_schema(), pick)
+    schema_items_from(names, profile.schema_in().as_deref(), pick)
 }
 
 fn schema_items_from<'a>(
