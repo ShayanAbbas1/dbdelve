@@ -1473,3 +1473,41 @@ fn the_history_scope_filters_and_sorts_its_runs_from_the_keyboard(cx: &mut TestA
         quit(workspace, cx);
     });
 }
+
+#[gpui::test]
+fn a_count_whose_tab_closed_under_it_still_leaves_its_outcome_in_the_history(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        cx.simulate_keystrokes("secondary-k e");
+        settle(cx);
+        cx.simulate_keystrokes("down down enter");
+        settle(cx);
+        let object = workspace.read_with(cx, |workspace, _| {
+            match workspace.profile().unwrap().session.active {
+                crate::session::Tab::Object(id) => id,
+                crate::session::Tab::Query(_) => panic!("the table did not open"),
+            }
+        });
+
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.count_rows(object, cx);
+                workspace.close_object(object, window, cx);
+            })
+        });
+        settle(cx);
+
+        workspace.read_with(cx, |workspace, _| {
+            let last = &workspace.profile().unwrap().session.history[0];
+            assert!(last.sql.to_lowercase().contains("count"), "{}", last.sql);
+            assert!(last.ms.is_some(), "the count's outcome was dropped");
+        });
+        let profile =
+            workspace.read_with(cx, |workspace, _| workspace.profile().unwrap().id.clone());
+        assert!(store::history(&profile)[0].ms.is_some());
+
+        quit(workspace, cx);
+    });
+}

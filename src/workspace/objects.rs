@@ -400,7 +400,13 @@ impl Workspace {
             .spawn(async move { connection.generated(&sql, &cancel, None, None) });
         cx.spawn(async move |workspace, cx| {
             let result = task.await;
+            // Before the checks below: a filter changed or a tab closed under
+            // the count drops its answer from the tab, not from the history.
+            let landed =
+                super::queries::answered(&recorded, &result, false, started.elapsed(), engine);
+            let _ = store::append_history(&profile_id, &landed);
             _ = workspace.update(cx, |workspace, cx| {
+                workspace.remember_run(&profile_id, landed);
                 // By id alone, so a reconnect that retired this run still
                 // takes its "Counting…" down rather than leaving it forever.
                 let Some(profile) = workspace
@@ -421,21 +427,6 @@ impl Workspace {
                 if !matches!(count, RowCount::Counting { started: at, .. } if *at == started) {
                     return;
                 }
-                let cancelling = matches!(
-                    count,
-                    RowCount::Counting {
-                        cancelling: true,
-                        ..
-                    }
-                );
-                let landed = match &result {
-                    Ok(result) => recorded.succeeded(result),
-                    Err(error) => recorded.failed(
-                        error,
-                        started.elapsed(),
-                        cancelling && db::is_cancel(engine, error),
-                    ),
-                };
                 let rows = result.map(|result| {
                     result
                         .rows
@@ -459,8 +450,6 @@ impl Workspace {
                         }
                     }
                 }
-                let _ = store::append_history(&profile_id, &landed);
-                remember_statement(&mut profile.session.history, landed);
                 cx.notify();
             });
         })

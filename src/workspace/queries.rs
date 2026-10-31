@@ -3378,7 +3378,7 @@ fn pour(
 /// undercounted, unless the row limit already said how many there were. With
 /// the tab gone there is no state to say a Cancel was asked for, so the
 /// engine's own cancel wording is what tells one.
-fn answered(
+pub(super) fn answered(
     entry: &store::HistoryEntry,
     result: &Result<QueryResult, DbError>,
     streamed: bool,

@@ -288,7 +288,10 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   bare JSON string and reads as an entry with only its statement. Only a run
   recorded as it was sent gets an outcome, so the rules for what is history
   (`execute_unchecked`) are the rules for both lines, and each statement of a
-  queue lands its own. The palette's History scope hints each row with these
+  queue lands its own. The outcome is written before anything asks whether
+  the tab, the count or the session it ran for is still there, since a run
+  closed or reconnected under still ran; with no tab to count what streamed,
+  its rows are left unknown (`queries::answered`). The palette's History scope hints each row with these
   (`history_hint`), and offers a Status filter (a cancelled run is neither
   Succeeded nor Failed) and a Sort (Newest is the list's own order, by match
   while typing; Slowest and Most rows put unmeasured runs last). `alt-f` and
