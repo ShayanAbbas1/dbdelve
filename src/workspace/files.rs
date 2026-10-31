@@ -21,9 +21,9 @@ use crate::connection_form::starting_mode;
 use crate::db::DUCKDB_IN_MEMORY;
 
 impl Workspace {
-    /// The native file picker, then [`Workspace::open_files`].
+    /// The native file picker, then [`Workspace::open_data_files`].
     pub(crate) fn pick_data_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.pick_files(Self::open_files, window, cx);
+        self.pick_files(Self::open_data_files, window, cx);
     }
 
     /// The native file picker, then [`Workspace::open_sql_files`]. The picker
@@ -69,12 +69,12 @@ impl Workspace {
     /// file brings the DuckDB profile to the front.
     fn open_files(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         let (sql, data): (Vec<_>, Vec<_>) = paths.into_iter().partition(|path| is_sql_file(path));
-        let refused = match sql.is_empty() {
+        let mut refused = match sql.is_empty() {
             true => Vec::new(),
             false => self.open_sql_tabs(sql, window, cx),
         };
         if !data.is_empty() {
-            self.open_data_files(data, window, cx);
+            refused.extend(self.open_data_tabs(data, window, cx));
         }
         self.note_refused(refused, cx);
     }
@@ -126,19 +126,37 @@ impl Workspace {
         }
     }
 
-    pub(crate) fn open_data_files(
+    fn open_data_files(
         &mut self,
         paths: Vec<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let statements: Vec<String> = paths.iter().filter_map(|path| reading(path)).collect();
+        let refused = self.open_data_tabs(paths, window, cx);
+        self.note_refused(refused, cx);
+    }
+
+    /// Each file in a query tab on the DuckDB profile, and what was refused,
+    /// as [`Workspace::open_sql_tabs`] hands it back.
+    fn open_data_tabs(
+        &mut self,
+        paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<String> {
+        let mut statements = Vec::new();
+        let mut refused = Vec::new();
+        for path in &paths {
+            match reading(path) {
+                Some(sql) => statements.push(sql),
+                None => refused.push(format!(
+                    "{} is not a CSV, TSV, Parquet, JSON or Excel file.",
+                    file_name(path)
+                )),
+            }
+        }
         if statements.is_empty() {
-            self.note(
-                "DBDelve opens .sql, .csv, .tsv, .parquet, .json and .xlsx files.".to_string(),
-                cx,
-            );
-            return;
+            return refused;
         }
 
         let index = match self.profiles.iter().position(|profile| {
@@ -160,12 +178,12 @@ impl Workspace {
         // form, which would cover the tabs this opens.
         self.activate(index, cx);
         let Some(profile_id) = self.profile().map(|profile| profile.id.clone()) else {
-            return;
+            return refused;
         };
 
         for sql in statements {
             let Some(id) = self.new_query_holding(sql.clone(), window, cx) else {
-                return;
+                return Vec::new();
             };
             self.runs_on_connect.push((profile_id.clone(), id, sql));
         }
@@ -176,6 +194,7 @@ impl Workspace {
         {
             self.run_waiting_files(&profile_id, cx);
         }
+        refused
     }
 
     /// A new query tab in front holding `text`, by its id, or `None` when none
