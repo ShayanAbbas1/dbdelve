@@ -275,6 +275,24 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   statement by statement (the slot's live state for the slot, `done` for the
   rest), and the switcher offers a Messages chip once any statement said
   something, with or without a queue.
+- **History is what a buffer sent, each statement once, with its last run.**
+  `store::HistoryEntry` is a line per event in `.history.jsonl`: one as a run
+  is sent (`sql` and `at`) and one as it lands, under the same pair, with its
+  time, rows or server count, cap, error (cut to 500 characters) or cancel.
+  Reading keeps each statement's newest line, so the outcome supersedes the
+  start with no id between them, the file stays append-only, and a run the
+  app quit under keeps its start. A line from before runs were timed is a
+  bare JSON string and reads as an entry with only its statement. Only a run
+  recorded as it was sent gets an outcome, so the rules for what is history
+  (`execute_unchecked`) are the rules for both lines, and each statement of a
+  queue lands its own. The palette's History scope hints each row with these
+  (`history_hint`), and offers a Status filter (a cancelled run is neither
+  Succeeded nor Failed) and a Sort (Newest is the list's own order, by match
+  while typing; Slowest and Most rows put unmeasured runs last). `alt-f` and
+  `alt-s` cycle them, scoped to `Palette > Input` and handed on to the field
+  outside History: `secondary-f` is the field's search and the unscoped
+  `secondary-shift-f` (Format Query) would win over a scoped binding. Both
+  reset when the palette opens, so a filter left on cannot hide a run later.
 - **`showing_messages` is a tab flag beside `showing_plan`, not a value of
   `Queue::showing`.** Selecting Messages leaves the selected result to return
   to, and a no-queue run can still offer the chip. It resets when a run
