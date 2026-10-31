@@ -40,6 +40,7 @@ use crate::{
     structure_grid::StructureGrid,
     theme::ConnectionColor,
     ui::row_readout,
+    vim,
 };
 
 /// A connection and everything it owns.
@@ -915,6 +916,13 @@ impl Session {
         }
     }
 
+    pub(crate) fn active_query_tab_mut(&mut self) -> Option<&mut QueryTab> {
+        match self.active {
+            Tab::Query(id) => self.query_tab_mut(id),
+            Tab::Object(_) => None,
+        }
+    }
+
     /// Every chip the strip draws, left to right: the dragged order first,
     /// then anything newer than it in the default one.
     pub(crate) fn strip_order(&self) -> Vec<TabKey> {
@@ -1573,6 +1581,8 @@ pub(crate) struct QueryTab {
     /// tab must not resize another's. Not persisted -- a fresh tab always
     /// starts at the built-in default.
     pub(crate) row_panel_split: Entity<ResizableState>,
+    /// Not persisted: a restored buffer starts in Insert, as a new one does.
+    pub(crate) vim: vim::Mode,
 }
 
 /// A plan, and what it is a plan of.
@@ -2147,6 +2157,7 @@ impl QueryTab {
             row_panel_editing: false,
             row_panel_filter: Default::default(),
             row_panel_split: cx.new(|_| ResizableState::default()),
+            vim: vim::Mode::default(),
         };
         (tab, notice)
     }

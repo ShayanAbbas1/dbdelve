@@ -61,6 +61,7 @@ use crate::{
         Code, Control, Tone, button, code_highlights, compact_count, group_thousands, icon_button,
         key_hint, keycap_text, kind_color, object_icon, reconnect_button, row_icon, section_label,
     },
+    vim,
     workspace::error_in_buffer,
 };
 
@@ -236,6 +237,8 @@ fn render_editor_surface(
     // more transparent, since it is also one step further from the data.
     let buffer = completion_target(editor)
         .key_context("Editor")
+        .on_action(cx.listener(vim::escape))
+        .capture_key_down(cx.listener(vim::key_down))
         .flex_1()
         .min_h_0()
         .bg(t.panel_glass())
@@ -3454,12 +3457,24 @@ fn render_query_toolbar(
     let rename_workspace = workspace.clone();
     let run_workspace = workspace.clone();
 
+    let vim_mode = session.active_query_tab().map(|tab| {
+        div()
+            .flex_shrink_0()
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(match tab.vim {
+                vim::Mode::Normal => t.accent,
+                vim::Mode::Insert => t.text_faint,
+            })
+            .child(tab.vim.label())
+    });
+
     control_row()
         .gap(px(layout::SPACE_SM))
         // Between the buffer and this bar; the split's handle is under it.
         .border_t_1()
         .border_color(t.border)
         .text_size(px(layout::chrome(layout::TEXT_SM)))
+        .children(vim_mode)
         .children(plan_toggle)
         .children(new_row)
         .child(div().flex_1())
