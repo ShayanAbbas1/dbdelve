@@ -10,6 +10,7 @@
 //! A SQL file is the other kind: its text opens in a new query tab on the
 //! connection in front, as the user's buffer, and runs only when they run it.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use gpui::{ExternalPaths, PathPromptOptions};
@@ -67,12 +68,14 @@ impl Workspace {
     /// file brings the DuckDB profile to the front.
     fn open_files(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         let (sql, data): (Vec<_>, Vec<_>) = paths.into_iter().partition(|path| is_sql_file(path));
-        if !sql.is_empty() {
-            self.open_sql_files(sql, window, cx);
-        }
+        let refused = match sql.is_empty() {
+            true => Vec::new(),
+            false => self.open_sql_tabs(sql, window, cx),
+        };
         if !data.is_empty() {
             self.open_data_files(data, window, cx);
         }
+        self.note_refused(refused, cx);
     }
 
     pub(crate) fn open_sql_files(
@@ -81,19 +84,40 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let refused = self.open_sql_tabs(paths, window, cx);
+        self.note_refused(refused, cx);
+    }
+
+    /// Each file's text in a new query tab on the connection in front, and
+    /// what was refused, for the caller to say once everything has opened:
+    /// every new tab clears the notice, and a data file moves the front.
+    fn open_sql_tabs(
+        &mut self,
+        paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<String> {
         if self.profile().is_none() {
-            self.note("Open a connection to open a SQL file in.".to_string(), cx);
-            return;
+            return vec!["Open a connection to open a SQL file in.".to_string()];
         }
+        let mut refused = Vec::new();
         for path in paths {
             match read_sql_file(&path) {
                 Ok(text) => {
+                    // `new_query` has said why, which is the notice to keep.
                     if self.new_query_holding(text, window, cx).is_none() {
-                        return;
+                        return Vec::new();
                     }
                 }
-                Err(message) => self.note(message, cx),
+                Err(message) => refused.push(message),
             }
+        }
+        refused
+    }
+
+    fn note_refused(&mut self, refused: Vec<String>, cx: &mut Context<Self>) {
+        if !refused.is_empty() {
+            self.note(refused.join(" "), cx);
         }
     }
 
@@ -216,17 +240,18 @@ fn read_sql_file(path: &Path) -> Result<String, String> {
         .file_name()
         .unwrap_or(path.as_os_str())
         .to_string_lossy();
-    let size = std::fs::metadata(path)
-        .map_err(|error| format!("Could not open {name}: {error}"))?
-        .len();
-    if size > MAX_SQL_FILE_BYTES {
+    // Bounded while reading, not by the size up front, which a file still
+    // being written or a link to a device does not keep to.
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|file| file.take(MAX_SQL_FILE_BYTES + 1).read_to_end(&mut bytes))
+        .map_err(|error| format!("Could not open {name}: {error}"))?;
+    if bytes.len() as u64 > MAX_SQL_FILE_BYTES {
         return Err(format!(
-            "{name} is {} MB, more than the editor opens ({} MB).",
-            size >> 20,
+            "{name} is more than the {} MB the editor opens.",
             MAX_SQL_FILE_BYTES >> 20
         ));
     }
-    let bytes = std::fs::read(path).map_err(|error| format!("Could not open {name}: {error}"))?;
     sql_text(bytes).ok_or_else(|| format!("{name} is not UTF-8 text."))
 }
 
@@ -304,6 +329,22 @@ mod tests {
             Some("SELECT 1; -- \u{e9}t\u{e9}\r\n")
         );
         assert_eq!(sql_text(b"SELECT '\xe9';".to_vec()), None);
+    }
+
+    #[test]
+    fn a_sql_file_past_the_cap_is_refused_and_one_at_it_opens() {
+        let dir = std::env::temp_dir().join(format!("dbdelve-sql-file-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (at, past) = (dir.join("at.sql"), dir.join("past.sql"));
+        std::fs::write(&at, vec![b' '; MAX_SQL_FILE_BYTES as usize]).unwrap();
+        std::fs::write(&past, vec![b' '; MAX_SQL_FILE_BYTES as usize + 1]).unwrap();
+        let (at, past) = (read_sql_file(&at), read_sql_file(&past));
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(at.is_ok());
+        assert_eq!(
+            past,
+            Err("past.sql is more than the 4 MB the editor opens.".to_string())
+        );
     }
 
     #[test]
