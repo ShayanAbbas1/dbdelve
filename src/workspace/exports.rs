@@ -1168,6 +1168,8 @@ fn rendered(engine: Engine, columns: &[Column], rows: Vec<Row>) -> Vec<Row> {
     chunk.rows
 }
 
+mod schema;
+
 #[cfg(test)]
 mod round_trip;
 
