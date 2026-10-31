@@ -1414,3 +1414,101 @@ fn the_refresh_shortcut_finds_a_table_made_elsewhere_over_the_same_session(
         quit(workspace, cx);
     });
 }
+
+fn history_view(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) -> crate::palette::HistoryView {
+    workspace.read_with(cx, |workspace, cx| {
+        workspace
+            .palette
+            .as_ref()
+            .expect("the palette is up")
+            .read(cx)
+            .history()
+    })
+}
+
+#[gpui::test]
+fn the_history_scope_filters_and_sorts_its_runs_from_the_keyboard(cx: &mut TestAppContext) {
+    use crate::palette::{HistoryOrder, HistoryStatus, HistoryView};
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        cx.simulate_input("select 1");
+        cx.simulate_keystrokes("secondary-enter");
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let last = &workspace.profile().unwrap().session.history[0];
+            assert_eq!((last.sql.as_str(), last.rows), ("select 1", Some(1)));
+            assert!(last.at.is_some() && last.ms.is_some() && last.error.is_none());
+        });
+
+        // Outside History the chords do nothing.
+        cx.simulate_keystrokes("secondary-p");
+        settle(cx);
+        cx.simulate_keystrokes("secondary-k f secondary-k o");
+        settle(cx);
+        assert_eq!(history_view(&workspace, cx), HistoryView::default());
+
+        cx.simulate_keystrokes("tab tab");
+        settle(cx);
+        assert!(palette_mode(&workspace, cx) == Some(PaletteMode::Search(Scope::History)));
+        cx.simulate_keystrokes("secondary-k f secondary-k o secondary-k o");
+        settle(cx);
+        assert_eq!(
+            history_view(&workspace, cx),
+            HistoryView {
+                status: HistoryStatus::Succeeded,
+                order: HistoryOrder::MostRows,
+            }
+        );
+
+        // A palette opened again starts unfiltered.
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+        cx.simulate_keystrokes("secondary-p");
+        settle(cx);
+        assert_eq!(history_view(&workspace, cx), HistoryView::default());
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_count_whose_tab_closed_under_it_still_leaves_its_outcome_in_the_history(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        cx.executor().allow_parking();
+        cx.simulate_keystrokes("secondary-k e");
+        settle(cx);
+        cx.simulate_keystrokes("down down enter");
+        settle(cx);
+        let object = workspace.read_with(cx, |workspace, _| {
+            match workspace.profile().unwrap().session.active {
+                crate::session::Tab::Object(id) => id,
+                crate::session::Tab::Query(_) => panic!("the table did not open"),
+            }
+        });
+
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.count_rows(object, cx);
+                workspace.close_object(object, window, cx);
+            })
+        });
+        settle(cx);
+
+        workspace.read_with(cx, |workspace, _| {
+            let last = &workspace.profile().unwrap().session.history[0];
+            assert!(last.sql.to_lowercase().contains("count"), "{}", last.sql);
+            assert!(last.ms.is_some(), "the count's outcome was dropped");
+        });
+        let profile =
+            workspace.read_with(cx, |workspace, _| workspace.profile().unwrap().id.clone());
+        assert!(store::history(&profile)[0].ms.is_some());
+
+        quit(workspace, cx);
+    });
+}

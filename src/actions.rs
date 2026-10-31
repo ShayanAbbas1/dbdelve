@@ -211,6 +211,8 @@ actions!(
         PaletteScopeLeft,
         PaletteScopeRight,
         PaletteRowActions,
+        PaletteHistoryFilter,
+        PaletteHistorySort,
         SwitchConnection,
         SearchEverything,
         CycleMode,

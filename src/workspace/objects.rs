@@ -390,8 +390,9 @@ impl Workspace {
             cancel: cancel.clone(),
             cancelling: false,
         };
-        let _ = store::append_history(&profile_id, &sql);
-        remember_statement(&mut profile.session.history, &sql);
+        let recorded = store::HistoryEntry::started(sql.as_str());
+        let _ = store::append_history(&profile_id, &recorded);
+        remember_statement(&mut profile.session.history, recorded.clone());
         cx.notify();
 
         let task = cx
@@ -399,7 +400,13 @@ impl Workspace {
             .spawn(async move { connection.generated(&sql, &cancel, None, None) });
         cx.spawn(async move |workspace, cx| {
             let result = task.await;
+            // Before the checks below: a filter changed or a tab closed under
+            // the count drops its answer from the tab, not from the history.
+            let landed =
+                super::queries::answered(&recorded, &result, false, started.elapsed(), engine);
+            let _ = store::append_history(&profile_id, &landed);
             _ = workspace.update(cx, |workspace, cx| {
+                workspace.remember_run(&profile_id, landed);
                 // By id alone, so a reconnect that retired this run still
                 // takes its "Counting…" down rather than leaving it forever.
                 let Some(profile) = workspace

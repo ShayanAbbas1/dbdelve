@@ -275,6 +275,31 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   statement by statement (the slot's live state for the slot, `done` for the
   rest), and the switcher offers a Messages chip once any statement said
   something, with or without a queue.
+- **History is what a buffer sent, each statement once, with its last run.**
+  `store::HistoryEntry` is a line per event in `.history.jsonl`: one as a run
+  is sent (`sql` and `at`) and one as it lands, under the same pair, with its
+  time, rows or server count, cap, error (cut to 500 characters) or cancel.
+  Reading keeps each statement's latest run by `at`, the later line on a tie
+  and an untimed line below any timed one, so the outcome supersedes the
+  start with no id between them, an earlier run of the same statement that
+  lands last never stands in for the later one, the file stays append-only,
+  and a run the app quit under keeps its start. The session's list
+  (`sql::remember_statement`) keeps the same rule. A line from before runs were timed is a
+  bare JSON string and reads as an entry with only its statement. Only a run
+  recorded as it was sent gets an outcome, so the rules for what is history
+  (`execute_unchecked`) are the rules for both lines, and each statement of a
+  queue lands its own. The outcome is written before anything asks whether
+  the tab, the count or the session it ran for is still there, since a run
+  closed or reconnected under still ran; with no tab to count what streamed,
+  its rows are left unknown (`queries::answered`). The palette's History scope hints each row with these
+  (`history_hint`), and offers a Status filter (a cancelled run is neither
+  Succeeded nor Failed) and a Sort (Newest is the list's own order, by match
+  while typing; Slowest and Most rows put unmeasured runs last). `secondary-k f`
+  and `secondary-k o` cycle them, scoped to `Palette > Input`: an Option
+  chord types a character on macOS and would take it from the field, and the
+  unscoped `secondary-shift-f` (Format Query), `secondary-shift-s` and
+  `secondary-k s` would each win over a scoped binding. Both
+  reset when the palette opens, so a filter left on cannot hide a run later.
 - **`showing_messages` is a tab flag beside `showing_plan`, not a value of
   `Queue::showing`.** Selecting Messages leaves the selected result to return
   to, and a no-queue run can still offer the chip. It resets when a run
