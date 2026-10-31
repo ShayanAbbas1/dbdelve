@@ -41,8 +41,10 @@ pub use duckdb::IN_MEMORY as DUCKDB_IN_MEMORY;
 pub use mongo::MongoConfig;
 pub use snowflake::{SnowflakeConfig, account_identifier, normalize_host};
 #[cfg(test)]
-pub use spec::{Abilities, ForeignKeyReplay, Hints, Hooks, IdentifierQuote};
-pub use spec::{DdlNames, IdentityInsert, ReadOnlySession, SchemaExport, UnreadableFloor};
+pub use spec::{Abilities, Hints, Hooks, IdentifierQuote};
+pub use spec::{
+    DdlNames, ForeignKeyReplay, IdentityInsert, ReadOnlySession, SchemaExport, UnreadableFloor,
+};
 pub use spec::{
     EngineSpec, ExplainPrefix, ForeignTable, FormatDialect, MaterializedViewDrop, Paging, Params,
     ParserDialect, RegexMatch, SelectTop, SkipDuplicates, SqlSpec, StatementSplit, SubstringMatch,
@@ -1743,8 +1745,6 @@ impl Connection {
     /// A table's DDL for a schema export. An engine that adds its foreign keys
     /// after the rows gets them as statements of their own; every other
     /// engine's is [`Connection::ddl`] whole, its keys declared with the table.
-    // Nothing calls it until the schema export is wired in.
-    #[allow(dead_code)]
     pub fn export_ddl(&self, schema: &str, relation: &str) -> Result<ExportDdl, DbError> {
         let apart = |engine: Engine| {
             engine
@@ -1767,8 +1767,6 @@ impl Connection {
 
     /// The sequences the columns of `tables` own, for a schema export. Only
     /// Postgres has them to bring back.
-    // Nothing calls it until the schema export is wired in.
-    #[allow(dead_code)]
     pub fn sequences(&self, schema: &str, tables: &[String]) -> Result<Sequences, DbError> {
         match self {
             Self::Postgres(connection) => connection.sequences(schema, tables),
@@ -3006,8 +3004,6 @@ pub(super) fn assemble_structure(
 }
 
 /// The sequences a schema export has to bring back with its tables.
-// Nothing reads it until the schema export is wired in.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Sequences {
     /// `CREATE SEQUENCE`, written before the tables whose defaults name them.
@@ -3018,8 +3014,6 @@ pub struct Sequences {
 
 /// A table's DDL for a schema export: `create` without the foreign keys an
 /// engine adds after the rows, and those keys as statements of their own.
-// Nothing reads it until the schema export is wired in.
-#[cfg_attr(not(test), allow(dead_code))]
 pub struct ExportDdl {
     pub create: String,
     pub foreign_keys: Vec<String>,

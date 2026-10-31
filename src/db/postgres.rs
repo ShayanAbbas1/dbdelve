@@ -1212,8 +1212,6 @@ impl Connection {
     }
 
     /// A table's DDL with its foreign keys left to statements of their own.
-    // Nothing calls it until the schema export is wired in.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn export_ddl(&self, schema: &str, relation: &str) -> Result<ExportDdl, DbError> {
         self.render_ddl(schema, relation, RelationKind::Table, true)
     }
@@ -1225,8 +1223,6 @@ impl Connection {
     /// ponytail: a sequence a default names without owning
     /// (`DEFAULT nextval('shared')`) is not written; `pg_attrdef` is where it
     /// would be found.
-    // Nothing calls it until the schema export is wired in.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn sequences(&self, schema: &str, tables: &[String]) -> Result<Sequences, DbError> {
         let mut sequences = Sequences::default();
         if tables.is_empty() {
