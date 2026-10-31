@@ -6,6 +6,7 @@
 //! comment beside the column, since a value the grid spells the same either
 //! way would pass here and still be gone. Snowflake and Turso are not covered.
 
+use super::schema::export_schema;
 use super::*;
 use crate::db::{ConnectionConfig, Fetch};
 
@@ -684,6 +685,100 @@ fn live_a_nul_in_text_exported_as_sql_runs_back_on_sql_server() {
     let table = Throwaway::new(open("dbdelve_MSSQL_URL"), Engine::SqlServer, "dbo", "nul");
     table.run("CREATE TABLE {table} (id INT PRIMARY KEY, body NVARCHAR(MAX))");
     assert_nul_in_text_runs_back(&table);
+}
+
+#[test]
+fn a_schema_exported_as_sql_runs_back_on_duckdb() {
+    let file = DuckDbFile::new("schema");
+    let connection = file.open();
+    // Declared parent first, so it is dropped last: the child's key holds it.
+    let parent = Throwaway::new(connection.clone(), Engine::DuckDb, "main", "parent");
+    let child = Throwaway::new(connection.clone(), Engine::DuckDb, "main", "child");
+    let empty = Throwaway::new(connection, Engine::DuckDb, "main", "empty");
+    parent.run("CREATE TABLE {table} (id INTEGER PRIMARY KEY, body VARCHAR)");
+    child.run(&format!(
+        "CREATE TABLE {{table}} (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES {} (id))",
+        Engine::DuckDb.qualified("main", &parent.name)
+    ));
+    empty.run("CREATE TABLE {table} (id INTEGER PRIMARY KEY)");
+    parent.seed_awkward_texts("body");
+    child.run(&format!(
+        "INSERT INTO {{table}} VALUES (1, {FIRST_TEXT_ID}), (2, NULL)"
+    ));
+    let (parent_before, child_before) = (parent.rows(), child.rows());
+
+    // Child named first: the file must still create and fill the parent first.
+    let tables = [child.name.clone(), empty.name.clone(), parent.name.clone()];
+    let path = parent.directory.join("schema.sql");
+    let written = export_schema(
+        &parent.connection,
+        "main",
+        &tables,
+        false,
+        Engine::DuckDb,
+        &path,
+        &ExportProgress::default(),
+    )
+    .expect("the export finishes");
+    assert_eq!(written, parent_before.rows.len() + child_before.rows.len());
+    let sql = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        sql.starts_with("-- Schema \"main\" exported by DBDelve: 3 tables."),
+        "{sql}"
+    );
+
+    for table in [&child, &empty, &parent] {
+        table.run("DROP TABLE {table}");
+    }
+    let problems = parent.replay(&sql);
+    assert!(problems.is_empty(), "{sql}\n{}", problems.join("\n"));
+    assert!(differences(&parent_before, &parent.rows(), None).is_empty());
+    assert!(differences(&child_before, &child.rows(), None).is_empty());
+    assert!(empty.rows().rows.is_empty());
+}
+
+#[test]
+fn a_schema_export_that_ends_early_leaves_the_file_that_was_there() {
+    let file = DuckDbFile::new("schema-ends");
+    let table = Throwaway::new(file.open(), Engine::DuckDb, "main", "kept");
+    table.run("CREATE TABLE {table} (id INTEGER PRIMARY KEY)");
+    let path = table.directory.join("schema.sql");
+    std::fs::write(&path, "kept").unwrap();
+    let export = |tables: &[String], progress: &ExportProgress| {
+        export_schema(
+            &table.connection,
+            "main",
+            tables,
+            false,
+            Engine::DuckDb,
+            &path,
+            progress,
+        )
+    };
+
+    let missing = [table.name.clone(), "dbdelve_no_such_table".to_string()];
+    match export(&missing, &ExportProgress::default()) {
+        Err(Ended::Failed(message)) => {
+            assert!(message.contains("dbdelve_no_such_table"), "{message}")
+        }
+        other => panic!("{other:?}"),
+    }
+    let cancelled = ExportProgress::default();
+    cancelled.cancelled.store(true, Ordering::Relaxed);
+    assert_eq!(
+        export(&[table.name.clone()], &cancelled),
+        Err(Ended::Cancelled)
+    );
+
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "kept");
+    let partials = std::fs::read_dir(&table.directory)
+        .unwrap()
+        .filter(|entry| {
+            let name = entry.as_ref().unwrap().file_name();
+            name.to_string_lossy().ends_with(".partial")
+        })
+        .count();
+    assert_eq!(partials, 0);
 }
 
 #[test]
