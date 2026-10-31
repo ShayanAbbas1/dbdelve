@@ -2296,6 +2296,7 @@ impl Workspace {
         let highlights = profile.session.explorer_highlights.clone();
         let shortcuts = profile.session.explorer_shortcuts.clone();
         let menu_shortcuts = shortcuts.clone();
+        let profile_id = profile.id.clone();
         let menu_leaves = leaves.clone();
         let menu_workspace = workspace.clone();
         let active_schema = profile.active_schema().map(gpui::SharedString::from);
@@ -2520,6 +2521,7 @@ impl Workspace {
                         Some(pin) => {
                             let workspace = workspace.clone();
                             let dragged = DragShortcut {
+                                profile: profile_id.clone(),
                                 pin,
                                 from: shortcut.and_then(|shortcut| shortcut.container(id)),
                                 label: drag_label,

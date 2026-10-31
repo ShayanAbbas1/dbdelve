@@ -7,6 +7,9 @@ use crate::session::{PendingDelete, routine_name};
 
 /// What a sidebar row carries while it is dragged.
 pub(crate) struct DragShortcut {
+    /// A drag outlives a connection switch, so the drop checks it lands on
+    /// the profile it was picked up from.
+    pub(crate) profile: String,
     pub(crate) pin: Pin,
     /// The folder or the Pinned group it is dragged out of, if either.
     pub(crate) from: Option<Container>,
@@ -191,7 +194,11 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.explorer_drop = None;
-        let Some(profile) = self.profile_mut() else {
+        let Some(profile) = self
+            .profile_mut()
+            .filter(|profile| profile.id == dragged.profile)
+        else {
+            cx.notify();
             return;
         };
         let before = profile.shortcuts.clone();
