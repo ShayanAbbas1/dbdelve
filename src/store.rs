@@ -143,6 +143,42 @@ pub struct StoredProfile {
     pub open_queries: Vec<StoredQueryTab>,
     #[serde(default)]
     pub open_objects: Vec<StoredObject>,
+    /// The explorer's folders and pins, both after the tables above. Left out
+    /// when empty, so a profile without any is written as it always was.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folders: Vec<StoredFolder>,
+    /// In the order they were pinned.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pins: Vec<StoredShortcut>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct StoredFolder {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<StoredShortcut>,
+}
+
+/// One entry in a folder or the pins: a saved query by `query`, a folder by
+/// `folder` (a pin only), or else a database object. Every field optional
+/// rather than an enum, so an entry a newer build wrote costs that entry, not
+/// the file: the loader drops what it cannot read.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct StoredShortcut {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
+    /// Only where the catalog is one database's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// `explorer::ObjectKind::slug`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 /// One query buffer in the strip. The SQL itself is not here: a saved buffer
@@ -2554,6 +2590,8 @@ user = "shayan"
                 ssh: None,
                 open_queries: Vec::new(),
                 open_objects: Vec::new(),
+                folders: Vec::new(),
+                pins: Vec::new(),
             };
 
             save_profiles(&ProfileList {
@@ -2631,6 +2669,8 @@ user = "shayan"
                     bars: Vec::new(),
                 },
             ],
+            folders: Vec::new(),
+            pins: Vec::new(),
         };
         let file = ProfileFile {
             fonts: None,
@@ -2732,7 +2772,110 @@ open_objects = []
             ssh: None,
             open_queries: Vec::new(),
             open_objects: Vec::new(),
+            folders: Vec::new(),
+            pins: Vec::new(),
         }
+    }
+
+    fn written_alone(profile: StoredProfile) -> String {
+        encode_profiles(&ProfileList {
+            profiles: vec![profile],
+            active: None,
+            fonts: None,
+            settings: None,
+            projects: Vec::new(),
+            unavailable: Vec::new(),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn a_profile_without_folders_or_pins_is_written_as_it_always_was() {
+        let text = written_alone(a_stored_profile());
+        assert!(
+            !text.contains("folders") && !text.contains("pins"),
+            "{text}"
+        );
+        // And a file from before they existed reads back and writes the same.
+        assert_eq!(
+            written_alone(decode_profiles(&text).unwrap().profiles.remove(0)),
+            text
+        );
+    }
+
+    #[test]
+    fn folders_and_pins_survive_the_round_trip_after_the_open_objects() {
+        let object = |schema: &str, name: &str, kind: &str| StoredShortcut {
+            database: Some("dbdelve_dev".into()),
+            schema: Some(schema.into()),
+            name: Some(name.into()),
+            kind: Some(kind.into()),
+            ..StoredShortcut::default()
+        };
+        let query = StoredShortcut {
+            query: Some("daily".into()),
+            ..StoredShortcut::default()
+        };
+        let profile = StoredProfile {
+            open_objects: vec![StoredObject {
+                schema: "public".into(),
+                name: "accounts".into(),
+                routine: false,
+                structure: false,
+                kind: RelationKind::Table,
+                filter: String::new(),
+                filters: Vec::new(),
+                active: true,
+                filter_engine: None,
+                origin: None,
+                bars: Vec::new(),
+            }],
+            folders: vec![
+                StoredFolder {
+                    name: "a/b".into(),
+                    members: vec![
+                        object("public", "accounts", "table"),
+                        object("public", "total(integer)", "function"),
+                        query.clone(),
+                    ],
+                },
+                StoredFolder {
+                    name: "Empty".into(),
+                    members: Vec::new(),
+                },
+            ],
+            pins: vec![
+                StoredShortcut {
+                    folder: Some("a/b".into()),
+                    ..StoredShortcut::default()
+                },
+                query,
+            ],
+            ..a_stored_profile()
+        };
+        let text = written_alone(profile.clone());
+        assert!(
+            text.find("[[profiles.open_objects]]") < text.find("[[profiles.folders]]"),
+            "{text}"
+        );
+        assert_eq!(decode_profiles(&text).unwrap().profiles, [profile]);
+    }
+
+    #[test]
+    fn an_unavailable_profiles_folders_and_pins_go_back_as_they_came() {
+        let text = format!(
+            "{}\n[[profiles.folders]]\nname = \"Hot\"\n\n[[profiles.folders.members]]\n\
+             schema = \"default\"\nname = \"events\"\nkind = \"sequence\"\n\n\
+             [[profiles.pins]]\nfolder = \"Hot\"\n",
+            PLUGIN.trim_end()
+        );
+        let list = decode_profiles(&text).unwrap();
+        assert_eq!(list.unavailable.len(), 1);
+        let written = encode_profiles(&list).unwrap();
+        for line in ["name = \"Hot\"", "kind = \"sequence\"", "folder = \"Hot\""] {
+            assert!(written.contains(line), "{line} in:\n{written}");
+        }
+        assert_eq!(decode_profiles(&written).unwrap(), list);
     }
 
     #[test]
@@ -2869,6 +3012,8 @@ open_objects = []
                 active: true,
                 bars: Vec::new(),
             }],
+            folders: Vec::new(),
+            pins: Vec::new(),
         };
         let file = ProfileFile {
             fonts: None,
@@ -2943,6 +3088,8 @@ open_objects = []
                 active: true,
                 bars: Vec::new(),
             }],
+            folders: Vec::new(),
+            pins: Vec::new(),
         };
         let file = ProfileFile {
             active: None,
@@ -2991,6 +3138,8 @@ open_objects = []
             ssh: None,
             open_queries: Vec::new(),
             open_objects: Vec::new(),
+            folders: Vec::new(),
+            pins: Vec::new(),
         };
         let file = ProfileFile {
             active: None,
@@ -3110,6 +3259,8 @@ open_objects = []
                 active: true,
                 bars: Vec::new(),
             }],
+            folders: Vec::new(),
+            pins: Vec::new(),
         };
         let text = toml::to_string_pretty(&ProfileFile {
             active: None,
@@ -3218,6 +3369,8 @@ open_objects = []
                     ssh: None,
                     open_queries: Vec::new(),
                     open_objects: Vec::new(),
+                    folders: Vec::new(),
+                    pins: Vec::new(),
                 },
                 StoredProfile {
                     id: "local".into(),
@@ -3248,6 +3401,8 @@ open_objects = []
                     ssh: None,
                     open_queries: Vec::new(),
                     open_objects: Vec::new(),
+                    folders: Vec::new(),
+                    pins: Vec::new(),
                 },
             ],
         };
@@ -3900,6 +4055,8 @@ open_objects = []
                 active: true,
                 bars: Vec::new(),
             }],
+            folders: Vec::new(),
+            pins: Vec::new(),
         };
         let text = toml::to_string_pretty(&ProfileFile {
             active: Some("dev".into()),
@@ -4267,6 +4424,8 @@ name = \"accounts\"
                     }],
                 },
             ],
+            folders: Vec::new(),
+            pins: Vec::new(),
         };
         let file = ProfileFile {
             fonts: None,
@@ -4344,6 +4503,8 @@ name = \"accounts\"
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![object],
+            folders: Vec::new(),
+            pins: Vec::new(),
         };
         let text = toml::to_string_pretty(&ProfileFile {
             fonts: None,

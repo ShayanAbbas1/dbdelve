@@ -135,6 +135,9 @@ pub mod icon {
     pub const SEARCH: &str = "icons/search.svg";
     pub const DATABASE: &str = "icons/database.svg";
     pub const PROJECT: &str = "icons/folder.svg";
+    /// A folder of shortcuts in the explorer, closed and open.
+    pub const FOLDER: &str = "icons/folder.svg";
+    pub const FOLDER_OPEN: &str = "icons/folder-open.svg";
     pub const BROWSE: &str = "icons/folder-open.svg";
     pub const LEAVE_PROJECT: &str = "icons/folder-minus.svg";
     pub const ADD_TO_PROJECT: &str = "icons/folder-plus.svg";

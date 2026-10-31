@@ -12,8 +12,8 @@ use crate::result_grid::{ColumnView, ColumnWidth};
 
 use super::*;
 use crate::session::{
-    Finished, Lane, PendingDiscard, PendingRun, QueryRename, Queue, Resume, Step, TabKey,
-    next_step, query_name_refusal,
+    Finished, Lane, PendingDelete, PendingDiscard, PendingRun, QueryRename, Queue, Resume, Step,
+    TabKey, next_step, query_name_refusal,
 };
 
 impl Workspace {
@@ -1396,6 +1396,12 @@ impl Workspace {
                 profile.session.rekey(&from, TabKey::Saved(name.clone()));
             }
             profile.session.naming = false;
+            if let Some(previous) = &previous {
+                profile.shortcuts.rename_query(previous, &name);
+            }
+        }
+        if previous.is_some() {
+            self.remember_profiles(cx);
         }
         self.reload_saved_queries(cx);
         // Naming a relation's buffer is how it stops being a relation's buffer:
@@ -1690,11 +1696,25 @@ impl Workspace {
     pub(crate) fn start_query_rename(
         &mut self,
         name: String,
+        row: gpui::SharedString,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.start_rename(name, false, row, window, cx);
+    }
+
+    /// The field over a saved query's row or a folder's.
+    pub(crate) fn start_rename(
+        &mut self,
+        name: String,
+        folder: bool,
+        row: gpui::SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let placeholder = if folder { "Folder name" } else { "Query name" };
         let input = cx.new(|cx| {
-            let mut input = InputState::new(window, cx).placeholder("Query name");
+            let mut input = InputState::new(window, cx).placeholder(placeholder);
             input.set_value(name.clone(), window, cx);
             input
         });
@@ -1730,6 +1750,8 @@ impl Workspace {
         };
         profile.session.query_rename = Some(QueryRename {
             name,
+            folder,
+            row,
             input,
             error: None,
         });
@@ -1753,6 +1775,10 @@ impl Workspace {
         );
         if typed == previous {
             self.end_query_rename(cx);
+            return;
+        }
+        if rename.folder {
+            self.commit_folder_rename(previous, typed, cx);
             return;
         }
         let id = profile.id.clone();
@@ -1793,6 +1819,7 @@ impl Workspace {
                 }
             }
             profile.session.notice = Some(format!("Renamed {previous} to {typed}."));
+            profile.shortcuts.rename_query(&previous, &typed);
         }
         self.end_query_rename(cx);
         self.reload_saved_queries(cx);
@@ -1812,7 +1839,7 @@ impl Workspace {
 
     /// Put the field away while it holds focus, and hand the keyboard back:
     /// an unmounted field keeps the window's focus, and every binding with it.
-    fn end_query_rename(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn end_query_rename(&mut self, cx: &mut Context<Self>) {
         self.drop_query_rename();
         self.refocus_front();
         cx.notify();
@@ -1831,7 +1858,7 @@ impl Workspace {
         let Some(profile) = self.profile_mut() else {
             return;
         };
-        profile.session.pending_delete = Some(name);
+        profile.session.pending_delete = Some(PendingDelete::Query(name));
         cx.notify();
     }
 
@@ -1884,6 +1911,7 @@ impl Workspace {
         }
         if let Some(profile) = self.profile_mut() {
             profile.session.notice = Some(format!("Deleted {name}."));
+            profile.shortcuts.forget_query(&name);
         }
         self.reload_saved_queries(cx);
         self.remember_profiles(cx);

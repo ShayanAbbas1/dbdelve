@@ -11,6 +11,7 @@ mod editing;
 mod exports;
 mod files;
 mod filters;
+mod folders;
 mod forms;
 mod import_dialog;
 mod import_rows;

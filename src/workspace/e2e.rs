@@ -1512,3 +1512,53 @@ fn a_count_whose_tab_closed_under_it_still_leaves_its_outcome_in_the_history(
         quit(workspace, cx);
     });
 }
+
+#[gpui::test]
+fn a_new_folder_takes_its_name_from_the_keyboard_and_hands_it_back(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                let leaf =
+                    workspace.profile().unwrap().session.explorer_leaves["relation-main\0birds"];
+                let member = workspace.member_at(leaf.target);
+                assert!(member.is_some(), "the table is nameable");
+                workspace.new_folder(member, window, cx);
+            });
+        });
+        settle(cx);
+        let naming = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                let session = &workspace.read(cx).profile().unwrap().session;
+                session
+                    .query_rename
+                    .as_ref()
+                    .map(|rename| rename.input.focus_handle(cx).is_focused(window))
+            })
+        };
+        assert_eq!(
+            naming(cx),
+            Some(true),
+            "the folder's field has the keyboard"
+        );
+
+        cx.simulate_input("Birds");
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        assert_eq!(naming(cx), None);
+        assert!(editor_has_keyboard(&workspace, cx));
+        cx.update(|_, cx| {
+            let profile = workspace.read(cx).profile().unwrap();
+            let folders = &profile.shortcuts.folders;
+            assert_eq!(folders.len(), 1);
+            assert_eq!(folders[0].name, "Birds");
+            assert_eq!(folders[0].members.len(), 1);
+            let tree = profile.session.explorer_tree.read(cx);
+            let row = tree.entry(0).expect("the folder leads the sidebar");
+            assert_eq!(row.item().label.as_ref(), "Birds");
+            assert_eq!(row.item().children[0].label.as_ref(), "birds");
+        });
+
+        quit(workspace, cx);
+    });
+}

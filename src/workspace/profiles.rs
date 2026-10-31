@@ -7,8 +7,9 @@ use super::*;
 use gpui_component::menu::PopupMenuItem;
 
 use crate::connection_form::{ConnectionTest, duplicate_profile_name, keep_schema};
+use crate::explorer::Shortcuts;
 use crate::import::{self, Source};
-use crate::session::STALE_ROWS;
+use crate::session::{STALE_ROWS, restored_shortcuts};
 use crate::sql::{Destructive, Mode};
 
 use std::path::Path;
@@ -195,6 +196,7 @@ impl Workspace {
             schema_refresh: None,
             databases: Databases::default(),
             left_database: false,
+            shortcuts: restored_shortcuts(&stored.folders, &stored.pins),
             session,
         });
         // The saved queries are listed before anything has connected.
@@ -251,6 +253,7 @@ impl Workspace {
             schema_refresh: None,
             databases: Databases::default(),
             left_database: false,
+            shortcuts: Shortcuts::default(),
             session,
         });
         if let Some(password) = password
@@ -640,6 +643,7 @@ impl Workspace {
         };
         let color = form.color;
         let mode = form.mode;
+        let shortcuts = form.shortcuts.clone();
         let editing = form.editing.clone();
         let typed = form
             .naming_project
@@ -696,6 +700,12 @@ impl Workspace {
             None => {
                 let index =
                     self.create_profile(name, config, color, mode, Origin::Form, window, cx);
+                if shortcuts != Shortcuts::default() {
+                    self.profiles[index].shortcuts = shortcuts;
+                    self.remember_profiles(cx);
+                    let id = self.profiles[index].id.clone();
+                    self.refresh_query_library(&id, cx);
+                }
                 if project.is_some() {
                     self.move_to_project(index, project.as_deref(), cx);
                 }
@@ -1954,8 +1964,19 @@ impl Workspace {
             return;
         };
         let filter = profile.session.explorer_filter.read(cx).value();
-        let mut explorer = explorer::queries(&profile.session.saved_queries, &filter);
-        if let CatalogState::Loaded(catalog, _) = &profile.catalog {
+        let catalog = match &profile.catalog {
+            CatalogState::Loaded(catalog, _) => Some(catalog),
+            _ => None,
+        };
+        let mut explorer = explorer::shortcuts(
+            &profile.shortcuts,
+            catalog,
+            &profile.session.saved_queries,
+            profile.shortcut_database().as_deref(),
+            &filter,
+        );
+        explorer.extend(explorer::queries(&profile.session.saved_queries, &filter));
+        if let Some(catalog) = catalog {
             explorer.extend(build_explorer_tree(catalog, &filter));
         }
         let tree = profile.session.explorer_tree.clone();
@@ -1979,6 +2000,7 @@ impl Workspace {
         if let Some(profile) = self.profiles.iter_mut().find(|profile| profile.id == id) {
             profile.session.explorer_leaves = Arc::new(explorer.leaves);
             profile.session.explorer_highlights = Arc::new(explorer.highlights);
+            profile.session.explorer_shortcuts = Arc::new(explorer.shortcuts);
         }
         tree.update(cx, |tree, cx| {
             tree.set_items(items, cx);
