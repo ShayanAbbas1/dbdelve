@@ -361,9 +361,10 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   flat and their names unique per connection in any case. The sidebar lists
   Pinned (in the order pinned; a pinned folder moves there with what it
   holds), then the other folders by name, then Queries, then the schemas. A
-  shortcut's row id is the row it repeats behind `pinned/` or its folder's
-  `folder:{len}:{name}/`, the length keeping a name with a `/` from running
-  into its members' ids, so folds survive a rebuild and the row opens through
+  shortcut's row id is everything it is named by (database, kind and the row
+  it repeats) behind `pinned/` or its folder's `folder:{len}:{name}/`, the
+  length keeping a name with a `/` from running into its members' ids, so no
+  two members share a row, folds survive a rebuild, and the row opens through
   the same `ExplorerLeaf`. An object is named by schema, name and kind, and by
   its database only where `Engine::catalog_is_per_database`: `public.users`
   is in every Postgres database, so without it a folder would show another

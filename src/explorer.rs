@@ -415,6 +415,24 @@ impl Member {
         }
     }
 
+    /// Its id under a folder or the Pinned group: everything it is named by,
+    /// so no two members are one row. The database's length keeps a name
+    /// with a `/` from running into the rest.
+    fn id(&self) -> String {
+        match self {
+            Member::Query(name) => query_row(name),
+            Member::Object(object) => {
+                let database = object
+                    .database
+                    .as_deref()
+                    .map_or_else(String::new, |database| {
+                        format!("database:{}:{database}/", database.len())
+                    });
+                format!("{database}{}-{}", object.kind.slug(), object.row())
+            }
+        }
+    }
+
     /// Whether `other` names the same thing. Not `==`: a relation whose kind
     /// changed is still the same relation.
     pub fn is(&self, other: &Member) -> bool {
@@ -822,7 +840,7 @@ impl ShortcutBuilder<'_> {
         member: &Member,
         inherited: bool,
     ) -> Option<TreeItem> {
-        let id = nested_row(parent, &member.row());
+        let id = nested_row(parent, &member.id());
         let (label, leaf, present) = match member {
             Member::Query(name) => (name.as_str(), None, self.queries.contains(name)),
             Member::Object(object) => {
@@ -1916,6 +1934,39 @@ mod tests {
             listed(ShortcutDatabase::Unknown),
             [("events".to_string(), true)]
         );
+    }
+
+    #[test]
+    fn members_differing_only_by_database_or_kind_are_rows_of_their_own() {
+        let object = |database: Option<&str>, kind: RelationKind| {
+            Member::Object(ObjectRef {
+                database: database.map(str::to_string),
+                schema: "public".into(),
+                name: "accounts".into(),
+                kind: ObjectKind::Relation(kind),
+            })
+        };
+        let members = vec![
+            object(Some("dev"), RelationKind::Table),
+            object(None, RelationKind::Table),
+            object(Some("dev"), RelationKind::View),
+        ];
+        let shortcuts = Shortcuts {
+            folders: vec![folder("Hot", members.clone())],
+            pins: Vec::new(),
+        };
+        let database = ShortcutDatabase::On("dev".into());
+        let explorer = super::shortcuts(&shortcuts, Some(&catalog()), &[], &database, "");
+
+        let listed: Vec<_> = explorer.items[0]
+            .children
+            .iter()
+            .map(|row| match &explorer.shortcuts[row.id.as_ref()] {
+                Shortcut::Member { member, .. } => member.clone(),
+                Shortcut::Folder(_) => panic!("a member is not a folder"),
+            })
+            .collect();
+        assert_eq!(listed, members);
     }
 
     #[test]
