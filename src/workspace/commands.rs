@@ -318,7 +318,9 @@ impl Workspace {
                 crate::palette::listed_imports(source, side)
                     .position(|(_, candidate)| candidate.name == picked)
             }
-            PaletteMode::Schema => self.profile().and_then(crate::palette::active_schema_row),
+            PaletteMode::Schema(pick) => self
+                .profile()
+                .and_then(|profile| crate::palette::active_schema_row(profile, pick)),
             PaletteMode::MoveToProject(index) => self.profiles.get(index).and_then(|profile| {
                 crate::palette::current_project_row(index, &profile.id, &self.projects)
             }),
@@ -789,6 +791,8 @@ impl Workspace {
             }
             Command::SelectSchema => self.select_schema(window, cx),
             Command::SetSchema(name) => self.set_schema(name, cx),
+            Command::PickSchemaToExport => self.pick_schema_to_export(window, cx),
+            Command::ExportSchema(name) => self.open_schema_export(name, cx),
             Command::SetTheme(side, theme) => self.set_theme(side, *theme, window, cx),
             Command::BrowseThemes(source, side) => {
                 self.open_palette(PaletteMode::ImportTheme(source, side), window, cx)
