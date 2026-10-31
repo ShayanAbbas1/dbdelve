@@ -1765,6 +1765,17 @@ impl Connection {
         }
     }
 
+    /// The sequences the columns of `tables` own, for a schema export. Only
+    /// Postgres has them to bring back.
+    // Nothing calls it until the schema export is wired in.
+    #[allow(dead_code)]
+    pub fn sequences(&self, schema: &str, tables: &[String]) -> Result<Sequences, DbError> {
+        match self {
+            Self::Postgres(connection) => connection.sequences(schema, tables),
+            _ => Ok(Sequences::default()),
+        }
+    }
+
     /// Ask the server to stop the statement running under `cancel` -- on
     /// Postgres, MySQL and SQLite, whatever this connection is running.
     ///
@@ -2992,6 +3003,17 @@ pub(super) fn assemble_structure(
     }
 
     Ok(structure)
+}
+
+/// The sequences a schema export has to bring back with its tables.
+// Nothing reads it until the schema export is wired in.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Sequences {
+    /// `CREATE SEQUENCE`, written before the tables whose defaults name them.
+    pub before_tables: Vec<String>,
+    /// `ALTER SEQUENCE … OWNED BY` and `setval`, written after the rows.
+    pub after_rows: Vec<String>,
 }
 
 /// A table's DDL for a schema export: `create` without the foreign keys an
