@@ -3183,8 +3183,9 @@ fn revealed(row: gpui::Div, index: usize, animate: bool) -> AnyElement {
 
 /// Whether the sidebar draws its tree: with a catalog that lists something,
 /// and while the catalog is away too, so a connection that is down or still
-/// loading has its saved queries within reach.
+/// loading has its saved queries, folders and pins within reach.
 pub(super) fn explorer_drawn(profile: &Profile) -> bool {
     matches!(&profile.catalog, CatalogState::Loaded(catalog, _) if !catalog.schemas.is_empty())
         || !profile.session.saved_queries.is_empty()
+        || profile.shortcuts != Shortcuts::default()
 }
