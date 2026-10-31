@@ -626,6 +626,9 @@ pub struct Abilities {
     pub copies_ddl: bool,
     pub switches_database: bool,
     pub switches_database_in_session: bool,
+    /// The catalog lists every database on the server, each as a schema,
+    /// rather than the one the connection is on.
+    pub catalog_lists_databases: bool,
     pub picks_schema: bool,
     pub exact_row_estimates: bool,
     pub schema_switch_waits_for_transaction: bool,
@@ -644,6 +647,7 @@ impl Abilities {
         copies_ddl: false,
         switches_database: false,
         switches_database_in_session: false,
+        catalog_lists_databases: false,
         picks_schema: false,
         exact_row_estimates: false,
         schema_switch_waits_for_transaction: false,
@@ -782,6 +786,7 @@ pub(crate) const MYSQL: EngineSpec = EngineSpec {
         copies_ddl: true,
         switches_database: true,
         // No `picks_schema`: the database is the schema.
+        catalog_lists_databases: true,
         ..Abilities::NONE
     },
     hooks: Hooks {
@@ -838,6 +843,7 @@ pub(crate) const MARIADB: EngineSpec = EngineSpec {
         assigns_default: true,
         copies_ddl: true,
         switches_database: true,
+        catalog_lists_databases: true,
         ..Abilities::NONE
     },
     hooks: Hooks {
@@ -1310,6 +1316,7 @@ pub(crate) const CLICKHOUSE: EngineSpec = EngineSpec {
         imports: true,
         copies_ddl: true,
         switches_database: true,
+        catalog_lists_databases: true,
         chunk_refusal: Some("ClickHouse has no transaction, so each chunk is kept as it lands."),
         ..Abilities::NONE
     },

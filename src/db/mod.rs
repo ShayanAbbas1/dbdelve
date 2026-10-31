@@ -630,6 +630,14 @@ impl Engine {
         self.spec().abilities.switches_database_in_session
     }
 
+    /// Whether the catalog holds one database's objects, so naming an object
+    /// takes its database as well as its schema: `public.users` is in every
+    /// Postgres database, while MySQL lists every database as a schema.
+    pub fn catalog_is_per_database(self) -> bool {
+        let abilities = self.spec().abilities;
+        abilities.switches_database && !abilities.catalog_lists_databases
+    }
+
     /// Whether a profile picks the schema unqualified names resolve in.
     pub fn picks_schema(self) -> bool {
         self.spec().abilities.picks_schema
@@ -4253,6 +4261,27 @@ mod tests {
         assert!(Engine::DuckDb.switches_database_in_session());
         assert!(Engine::DuckDb.picks_schema());
         assert!(!Engine::Postgres.switches_database_in_session());
+    }
+
+    #[test]
+    fn only_a_catalog_of_one_database_names_its_objects_by_database() {
+        let per_database: Vec<_> = Engine::ALL
+            .into_iter()
+            .filter(|engine| engine.catalog_is_per_database())
+            .collect();
+        for engine in [Engine::Postgres, Engine::SqlServer, Engine::DuckDb] {
+            assert!(per_database.contains(&engine), "{engine:?}");
+        }
+        // Every database is a schema of the catalog already, and a file holds
+        // one database whatever it is called.
+        for engine in [
+            Engine::MySql,
+            Engine::MariaDb,
+            Engine::ClickHouse,
+            Engine::Sqlite,
+        ] {
+            assert!(!per_database.contains(&engine), "{engine:?}");
+        }
     }
 
     #[test]
