@@ -1077,6 +1077,8 @@ mod tests {
             [
                 SettingId::DefaultSorting,
                 SettingId::Keybinding("reset_confirmations"),
+                SettingId::Keybinding("palette_history_filter"),
+                SettingId::Keybinding("palette_history_sort"),
                 SettingId::Keybinding("sort_active_column"),
             ]
         );

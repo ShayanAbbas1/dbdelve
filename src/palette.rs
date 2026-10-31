@@ -40,8 +40,8 @@ use crate::{
     Workspace,
     actions::LimitTarget,
     actions::{
-        PaletteNext, PaletteNextScope, PalettePrevious, PalettePreviousScope, PaletteRowActions,
-        PaletteScopeLeft, PaletteScopeRight,
+        PaletteHistoryFilter, PaletteHistorySort, PaletteNext, PaletteNextScope, PalettePrevious,
+        PalettePreviousScope, PaletteRowActions, PaletteScopeLeft, PaletteScopeRight,
     },
     db::{ConnectionConfig, Engine, ExplainMode, RelationKind, RoutineKind, Syntax},
     explorer::ROW_LIMITS,
@@ -55,7 +55,7 @@ use crate::{
         routine_name,
     },
     sql,
-    store::StoredProject,
+    store::{HistoryEntry, StoredProject},
     structure_grid::Section,
     theme::{
         Appearance, ConnectionColor, FontSlot, Fonts, Theme, fonts, install_theme, layout,
@@ -497,7 +497,124 @@ struct Item {
     in_all: bool,
     /// The header the row sits under.
     group: Group,
+    /// What History filters and sorts a row by.
+    ran: Ran,
     command: Command,
+}
+
+/// How a run ended, for History's filter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Outcome {
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+/// What History knows of a row's last run. All `None` for a statement from
+/// before runs were timed, and for one whose answer never came back.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Ran {
+    outcome: Option<Outcome>,
+    ms: Option<u64>,
+    rows: Option<u64>,
+}
+
+impl Ran {
+    fn of(entry: &HistoryEntry) -> Self {
+        let outcome = if entry.error.is_some() {
+            Some(Outcome::Failed)
+        } else if entry.cancelled {
+            Some(Outcome::Cancelled)
+        } else {
+            entry.ms.map(|_| Outcome::Succeeded)
+        };
+        Self {
+            outcome,
+            ms: entry.ms,
+            rows: entry.rows,
+        }
+    }
+}
+
+/// Which runs History lists. A cancelled run is neither a success nor a
+/// failure, so only All lists it, and so a run that never answered.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HistoryStatus {
+    #[default]
+    All,
+    Succeeded,
+    Failed,
+}
+
+impl HistoryStatus {
+    const ALL: [HistoryStatus; 3] = [
+        HistoryStatus::All,
+        HistoryStatus::Succeeded,
+        HistoryStatus::Failed,
+    ];
+
+    fn title(self) -> &'static str {
+        match self {
+            HistoryStatus::All => "All",
+            HistoryStatus::Succeeded => "Succeeded",
+            HistoryStatus::Failed => "Failed",
+        }
+    }
+
+    fn admits(self, outcome: Option<Outcome>) -> bool {
+        match self {
+            HistoryStatus::All => true,
+            HistoryStatus::Succeeded => outcome == Some(Outcome::Succeeded),
+            HistoryStatus::Failed => outcome == Some(Outcome::Failed),
+        }
+    }
+}
+
+/// The order History lists its rows in. Newest is the order the list is
+/// already in, by match while something is typed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HistoryOrder {
+    #[default]
+    Newest,
+    Slowest,
+    MostRows,
+}
+
+impl HistoryOrder {
+    const ALL: [HistoryOrder; 3] = [
+        HistoryOrder::Newest,
+        HistoryOrder::Slowest,
+        HistoryOrder::MostRows,
+    ];
+
+    fn title(self) -> &'static str {
+        match self {
+            HistoryOrder::Newest => "Newest",
+            HistoryOrder::Slowest => "Slowest",
+            HistoryOrder::MostRows => "Most rows",
+        }
+    }
+
+    fn key(self, ran: Ran) -> Option<u64> {
+        match self {
+            HistoryOrder::Newest => None,
+            HistoryOrder::Slowest => ran.ms,
+            HistoryOrder::MostRows => ran.rows,
+        }
+    }
+}
+
+/// The step after `current` in `all`, wrapping, for a chord that cycles.
+fn next_of<T: Copy + PartialEq>(all: &[T], current: T) -> T {
+    let at = all.iter().position(|each| *each == current).unwrap_or(0);
+    all[(at + 1) % all.len()]
+}
+
+/// History's filter and order, as the palette holds them while it is open.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HistoryView {
+    pub status: HistoryStatus,
+    pub order: HistoryOrder,
 }
 
 /// Which group a row is in. Told apart by what the group is, never by what its
@@ -529,6 +646,7 @@ impl Item {
             scope: Scope::Commands,
             in_all: true,
             group: Group::Bare,
+            ran: Ran::default(),
             command,
         }
     }
@@ -587,6 +705,11 @@ impl Item {
         self.in_all = false;
         self
     }
+
+    fn ran(mut self, ran: Ran) -> Self {
+        self.ran = ran;
+        self
+    }
 }
 
 /// One line of the list: a group's header, or a row by its index into the
@@ -615,6 +738,10 @@ struct Arranged {
 ///
 /// A row is scored on its label and on each of its other texts apart, the
 /// best of them counting, so a match never runs from one into the next.
+///
+/// History alone keeps to `history`'s filter, and its order other than Newest
+/// puts the rows that match in that order, those without the measure last
+/// and in the order they would otherwise have had.
 fn arrange(
     items: &[Item],
     scope: Option<Scope>,
@@ -622,19 +749,29 @@ fn arrange(
     fuzzy: &mut Fuzzy,
     recents: &[(Scope, String)],
     collapsed: &HashSet<String>,
+    history: HistoryView,
 ) -> Arranged {
     if scope == Some(Scope::Connections) {
         return tree(items, query, fuzzy, collapsed);
     }
-    let ranked = fuzzy.rank(
+    let mut ranked = fuzzy.rank(
         query,
         items.iter().enumerate().filter(|(_, item)| match scope {
             None | Some(Scope::All) => item.in_all,
+            Some(Scope::History) => {
+                item.scope == Scope::History && history.status.admits(item.ran.outcome)
+            }
             Some(scope) => item.scope == scope,
         }),
         |(_, item)| &item.label,
         |(_, item)| &item.also,
     );
+    if scope == Some(Scope::History) && history.order != HistoryOrder::Newest {
+        ranked.sort_by_key(|((_, item), _)| match history.order.key(item.ran) {
+            Some(key) => (false, std::cmp::Reverse(key)),
+            None => (true, std::cmp::Reverse(0)),
+        });
+    }
 
     let recent: Vec<usize> = if query.is_empty()
         && matches!(scope, Some(Scope::All | Scope::Commands | Scope::Objects))
@@ -978,8 +1115,11 @@ pub struct Palette {
     collapsed: HashSet<String>,
     /// The chords drawn in the footer and the field, read from the keymap so a
     /// rebind shows up here too: previous row, next row, scope left, scope
-    /// right, close, row actions.
-    hint_chords: [Option<String>; 6],
+    /// right, close, row actions, History's filter, History's order.
+    hint_chords: [Option<String>; 8],
+    /// History's filter and order. Not kept past the palette: a filter left
+    /// on from last time would hide runs from someone who forgot setting it.
+    history: HistoryView,
     naming: Option<Naming>,
     /// The mode the palette opened in, for [`stroke`].
     opened: Mode,
@@ -1095,8 +1235,11 @@ impl Palette {
                 "palette_scope_right",
                 "show_editor",
                 "palette_row_actions",
+                "palette_history_filter",
+                "palette_history_sort",
             ]
             .map(|id| chord_for(id, &workspace.settings.custom_keybindings)),
+            history: HistoryView::default(),
             naming,
             opened: mode,
             workspace: handle,
@@ -1177,6 +1320,7 @@ impl Palette {
                 &mut self.fuzzy,
                 &self.recents,
                 &self.collapsed,
+                self.history,
             )
         };
         self.rows = rows;
@@ -1301,6 +1445,26 @@ impl Palette {
     fn move_selection(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
         let row = step(&self.rows, self.selected, delta);
         self.select(row, true, window, cx);
+    }
+
+    #[cfg(test)]
+    pub fn history(&self) -> HistoryView {
+        self.history
+    }
+
+    fn set_history(&mut self, history: HistoryView, cx: &mut Context<Self>) {
+        self.history = history;
+        self.rearrange();
+        cx.notify();
+    }
+
+    /// The chords that cycle History's filter and order mean nothing in
+    /// another scope, so there they are handed on to the field.
+    fn cycle_history(&mut self, step: fn(HistoryView) -> HistoryView, cx: &mut Context<Self>) {
+        match self.mode {
+            Mode::Search(Scope::History) => self.set_history(step(self.history), cx),
+            _ => cx.propagate(),
+        }
     }
 
     fn cycle_scope(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
@@ -1566,7 +1730,10 @@ impl Palette {
                             div()
                                 .flex_shrink_0()
                                 .text_size(px(layout::chrome(layout::TEXT_XS)))
-                                .text_color(t.text_faint)
+                                .text_color(match item.ran.outcome {
+                                    Some(Outcome::Failed) => t.danger,
+                                    _ => t.text_faint,
+                                })
                                 .child(item.hint.clone()),
                         )
                     })
@@ -1662,6 +1829,84 @@ impl Palette {
             .children(pills)
     }
 
+    /// History's filter and order, as pills under the scopes: the same control
+    /// as a scope, since each is one choice of a few made at a glance.
+    fn render_history_bar(&self, t: Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let label = |text: &'static str| {
+            div()
+                .text_size(px(layout::chrome(layout::TEXT_XS)))
+                .text_color(t.text_muted)
+                .mr(px(layout::SPACE_XS))
+                .child(text)
+        };
+        let statuses = HistoryStatus::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(index, status)| {
+                scope_pill(
+                    ("palette-history-status", index),
+                    status.title(),
+                    status == self.history.status,
+                    t,
+                )
+                .on_click(cx.listener(move |palette, _, _, cx| {
+                    palette.set_history(
+                        HistoryView {
+                            status,
+                            ..palette.history
+                        },
+                        cx,
+                    );
+                }))
+            });
+        let orders = HistoryOrder::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(index, order)| {
+                scope_pill(
+                    ("palette-history-order", index),
+                    order.title(),
+                    order == self.history.order,
+                    t,
+                )
+                .on_click(cx.listener(move |palette, _, _, cx| {
+                    palette.set_history(
+                        HistoryView {
+                            order,
+                            ..palette.history
+                        },
+                        cx,
+                    );
+                }))
+            });
+        div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .justify_between()
+            .gap(px(layout::SPACE_XS))
+            .px(px(layout::SPACE_MD))
+            .py(px(layout::SPACE_SM))
+            .border_b_1()
+            .border_color(t.border)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(layout::SPACE_XS))
+                    .child(label("Status"))
+                    .children(statuses),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(layout::SPACE_XS))
+                    .child(label("Sort"))
+                    .children(orders),
+            )
+    }
+
     fn render_empty(&self, t: Theme) -> impl IntoElement {
         let (title, line) = match self.mode {
             Mode::NameProject(_) => match self.naming.as_ref().and_then(|n| n.refusal.clone()) {
@@ -1685,6 +1930,10 @@ impl Palette {
             Mode::Search(Scope::Objects) if self.catalog_loading => (
                 "Loading database objects…".to_string(),
                 "They are listed here as soon as they arrive.".to_string(),
+            ),
+            Mode::Search(Scope::History) if self.history.status != HistoryStatus::All => (
+                format!("No {} runs", self.history.status.title().to_lowercase()),
+                "Show All to see every statement.".to_string(),
             ),
             Mode::Search(Scope::Connections) if self.import_pending => (
                 "Connections are on hold".to_string(),
@@ -1735,8 +1984,17 @@ impl Palette {
     }
 
     fn render_footer(&self, t: Theme) -> impl IntoElement {
-        let [previous, next, left, right, close, actions] =
-            self.hint_chords.each_ref().map(Option::as_deref);
+        let [
+            previous,
+            next,
+            left,
+            right,
+            close,
+            actions,
+            history_filter,
+            history_sort,
+        ] = self.hint_chords.each_ref().map(Option::as_deref);
+        let in_history = self.mode == Mode::Search(Scope::History);
         div()
             .flex()
             .items_center()
@@ -1758,6 +2016,11 @@ impl Palette {
                     })
                     .when(matches!(self.mode, Mode::Search(_)), |hints| {
                         hints.child(footer_hint(&[left, right], "Scope", t))
+                    })
+                    .when(in_history, |hints| {
+                        hints
+                            .child(footer_hint(&[history_filter], "Status", t))
+                            .child(footer_hint(&[history_sort], "Sort", t))
                     }),
             )
             .child(footer_hint(&[close], "Close", t))
@@ -1772,9 +2035,16 @@ impl Render for Palette {
         let width = layout::PALETTE_WIDTH
             .min(viewport.width.as_f32() - 2. * layout::SPACE_LG)
             .max(0.);
-        let list_height =
-            (viewport.height.as_f32() - top - layout::chrome(layout::PALETTE_CHROME_HEIGHT))
-                .clamp(layout::PALETTE_MIN_HEIGHT, layout::PALETTE_MAX_HEIGHT);
+        let in_history = self.mode == Mode::Search(Scope::History);
+        let history_bar = match in_history {
+            true => layout::chrome(layout::CONTROL_HEIGHT_COMPACT) + 2. * layout::SPACE_SM,
+            false => 0.,
+        };
+        let list_height = (viewport.height.as_f32()
+            - top
+            - layout::chrome(layout::PALETTE_CHROME_HEIGHT)
+            - history_bar)
+            .clamp(layout::PALETTE_MIN_HEIGHT, layout::PALETTE_MAX_HEIGHT);
 
         let list = if self.rows.is_empty() {
             self.render_empty(t).into_any_element()
@@ -1866,6 +2136,24 @@ impl Render for Palette {
                         palette.arrow(1, window, cx)
                     }))
                     .on_action(cx.listener(|palette, _: &PaletteRowActions, _, cx| palette.act(cx)))
+                    .on_action(cx.listener(|palette, _: &PaletteHistoryFilter, _, cx| {
+                        palette.cycle_history(
+                            |view| HistoryView {
+                                status: next_of(&HistoryStatus::ALL, view.status),
+                                ..view
+                            },
+                            cx,
+                        )
+                    }))
+                    .on_action(cx.listener(|palette, _: &PaletteHistorySort, _, cx| {
+                        palette.cycle_history(
+                            |view| HistoryView {
+                                order: next_of(&HistoryOrder::ALL, view.order),
+                                ..view
+                            },
+                            cx,
+                        )
+                    }))
                     .child(
                         search_field(
                             icon(icon::SEARCH)
@@ -1881,6 +2169,9 @@ impl Render for Palette {
                         ),
                     )
                     .child(self.render_scopes(t, cx))
+                    .when(in_history, |card| {
+                        card.child(self.render_history_bar(t, cx))
+                    })
                     .child(list)
                     .child(self.render_footer(t)),
             )
@@ -2570,8 +2861,12 @@ fn column_items(profile: &Profile, cx: &App) -> Vec<Item> {
         .collect()
 }
 
-/// Every statement this profile has run, newest first.
+/// Every statement this profile has run, newest first, each with when it last
+/// ran and how that went.
 fn history_items(profile: &Profile) -> Vec<Item> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as u64);
     profile
         .session
         .history
@@ -2587,8 +2882,87 @@ fn history_items(profile: &Profile) -> Vec<Item> {
             )
             .mono()
             .scope(Scope::History)
+            .hint(history_hint(entry, now))
+            .ran(Ran::of(entry))
         })
         .collect()
+}
+
+/// A run, at a glance: when, what it came to, and how long it took. Empty for
+/// a statement from before runs were timed, which has none of the three.
+fn history_hint(entry: &HistoryEntry, now: u64) -> String {
+    let outcome = if entry.error.is_some() {
+        Some("failed".to_string())
+    } else if entry.cancelled {
+        Some("cancelled".to_string())
+    } else if let Some(rows) = entry.rows {
+        Some(match rows {
+            1 => "1 row".to_string(),
+            rows => format!("{} rows", group_thousands(rows)),
+        })
+    } else {
+        entry
+            .affected
+            .map(|affected| format!("{} affected", group_thousands(affected)))
+    };
+    let capped = (entry.capped && entry.error.is_none()).then(|| "capped".to_string());
+    [
+        entry.at.map(|at| ago(at, now)),
+        outcome,
+        capped,
+        entry.ms.map(took),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" · ")
+}
+
+/// How long before `now` a run started, coarser the further back it was.
+///
+/// ponytail: past a week it is the date in UTC, since `time` is built here
+/// without the local offset; a run near midnight can read a day off. Enable
+/// `local-offset` (or ask the platform) if that is ever noticed.
+fn ago(at: u64, now: u64) -> String {
+    const MINUTE: u64 = 60_000;
+    const HOUR: u64 = 60 * MINUTE;
+    const DAY: u64 = 24 * HOUR;
+    let since = now.saturating_sub(at);
+    match since {
+        _ if since < MINUTE => "just now".to_string(),
+        _ if since < HOUR => format!("{}m ago", since / MINUTE),
+        _ if since < DAY => format!("{}h ago", since / HOUR),
+        _ if since < 2 * DAY => "yesterday".to_string(),
+        _ if since < 7 * DAY => format!("{}d ago", since / DAY),
+        _ => {
+            let date = |ms: u64| {
+                time::OffsetDateTime::from_unix_timestamp((ms / 1_000) as i64)
+                    .map(|moment| moment.date())
+                    .ok()
+            };
+            match (date(at), date(now)) {
+                (Some(then), Some(today)) => {
+                    let month = &then.month().to_string()[..3];
+                    match then.year() == today.year() {
+                        true => format!("{month} {}", then.day()),
+                        false => format!("{month} {}, {}", then.day(), then.year()),
+                    }
+                }
+                _ => format!("{}d ago", since / DAY),
+            }
+        }
+    }
+}
+
+/// A run's duration in the unit it is read in: milliseconds for the quick
+/// ones, seconds to one place, then minutes.
+fn took(ms: u64) -> String {
+    match ms {
+        _ if ms < 1_000 => format!("{ms} ms"),
+        _ if ms < 60_000 => format!("{:.1} s", ms as f64 / 1_000.),
+        _ if ms < 3_600_000 => format!("{}m {}s", ms / 60_000, ms % 60_000 / 1_000),
+        _ => format!("{}h {}m", ms / 3_600_000, ms % 3_600_000 / 60_000),
+    }
 }
 
 /// Every family the text system can resolve, for one slot.
@@ -3927,6 +4301,7 @@ mod tests {
             &mut Fuzzy::new(),
             &recents,
             &HashSet::new(),
+            HistoryView::default(),
         );
         labels(items, &arranged.rows)
     }
@@ -4035,6 +4410,7 @@ mod tests {
             &mut Fuzzy::new(),
             &recents,
             &HashSet::new(),
+            HistoryView::default(),
         )
         .rows;
         assert_eq!(rows[..2], [Row::Header(RECENT_GROUP.into()), Row::Item(1)]);
@@ -4071,6 +4447,7 @@ mod tests {
             &mut Fuzzy::new(),
             &recents,
             &HashSet::new(),
+            HistoryView::default(),
         )
         .rows;
         assert_eq!(
@@ -4198,6 +4575,157 @@ mod tests {
             arranged(&items, Some(Scope::History), "from accounts", &[]).len(),
             1
         );
+    }
+
+    fn run(sql: &str, outcome: Option<Outcome>, ms: Option<u64>, rows: Option<u64>) -> Item {
+        item(sql, Scope::History, "").ran(Ran { outcome, ms, rows })
+    }
+
+    fn history(
+        items: &[Item],
+        query: &str,
+        status: HistoryStatus,
+        order: HistoryOrder,
+    ) -> Vec<String> {
+        let rows = arrange(
+            items,
+            Some(Scope::History),
+            &Query::new(query),
+            &mut Fuzzy::new(),
+            &[],
+            &HashSet::new(),
+            HistoryView { status, order },
+        )
+        .rows;
+        labels(items, &rows)
+    }
+
+    #[test]
+    fn history_filters_by_how_a_run_ended_and_sorts_with_the_unmeasured_last() {
+        use HistoryOrder::*;
+        use HistoryStatus::*;
+        let items = [
+            run("select fast", Some(Outcome::Succeeded), Some(5), Some(900)),
+            run("select broken", Some(Outcome::Failed), Some(40), None),
+            run("select legacy", None, None, None),
+            run("select slow", Some(Outcome::Succeeded), Some(800), Some(3)),
+            run(
+                "select stopped",
+                Some(Outcome::Cancelled),
+                Some(2_000),
+                None,
+            ),
+        ];
+
+        assert_eq!(
+            history(&items, "", All, Newest),
+            [
+                "select fast",
+                "select broken",
+                "select legacy",
+                "select slow",
+                "select stopped"
+            ]
+        );
+        assert_eq!(
+            history(&items, "", Succeeded, Newest),
+            ["select fast", "select slow"]
+        );
+        assert_eq!(history(&items, "", Failed, Newest), ["select broken"]);
+        assert_eq!(
+            history(&items, "", All, Slowest),
+            [
+                "select stopped",
+                "select slow",
+                "select broken",
+                "select fast",
+                "select legacy"
+            ]
+        );
+        // Ties and the unmeasured keep the order they had, newest first.
+        assert_eq!(
+            history(&items, "", All, MostRows),
+            [
+                "select fast",
+                "select slow",
+                "select broken",
+                "select legacy",
+                "select stopped"
+            ]
+        );
+        // What is typed still decides which rows are listed.
+        assert_eq!(history(&items, "slow", All, MostRows), ["select slow"]);
+        // Under All the history keeps its own order, whatever History is set to.
+        let all = arrange(
+            &items,
+            Some(Scope::All),
+            &Query::new(""),
+            &mut Fuzzy::new(),
+            &[],
+            &HashSet::new(),
+            HistoryView {
+                status: Failed,
+                order: Slowest,
+            },
+        )
+        .rows;
+        assert_eq!(labels(&items, &all)[1], "select fast");
+    }
+
+    #[test]
+    fn a_runs_hint_says_when_what_it_came_to_and_how_long() {
+        let minute = 60_000;
+        let now = 1_761_900_000_000; // 2025-10-31
+        let at = |ago: u64| HistoryEntry {
+            sql: "select 1".into(),
+            at: Some(now - ago),
+            ..HistoryEntry::default()
+        };
+        let hint = |entry: HistoryEntry| history_hint(&entry, now);
+
+        assert_eq!(hint(HistoryEntry::default()), "");
+        assert_eq!(hint(at(0)), "just now");
+        assert_eq!(
+            hint(HistoryEntry {
+                rows: Some(1),
+                ms: Some(18),
+                ..at(3 * minute)
+            }),
+            "3m ago · 1 row · 18 ms"
+        );
+        assert_eq!(
+            hint(HistoryEntry {
+                rows: Some(1_000),
+                capped: true,
+                ms: Some(1_250),
+                ..at(2 * 60 * minute)
+            }),
+            "2h ago · 1,000 rows · capped · 1.2 s"
+        );
+        assert_eq!(
+            hint(HistoryEntry {
+                affected: Some(5),
+                ms: Some(123_000),
+                ..at(30 * 60 * minute)
+            }),
+            "yesterday · 5 affected · 2m 3s"
+        );
+        assert_eq!(
+            hint(HistoryEntry {
+                error: Some("no such table".into()),
+                ms: Some(4),
+                ..at(3 * 24 * 60 * minute)
+            }),
+            "3d ago · failed · 4 ms"
+        );
+        assert_eq!(
+            hint(HistoryEntry {
+                cancelled: true,
+                ..at(20 * 24 * 60 * minute)
+            }),
+            "Oct 11 · cancelled"
+        );
+        assert_eq!(hint(at(400 * 24 * 60 * minute)), "Sep 26, 2024");
     }
 
     #[test]
@@ -4351,6 +4879,7 @@ mod tests {
             &mut Fuzzy::new(),
             &[],
             &collapsed,
+            HistoryView::default(),
         );
         let drawn = rows
             .iter()

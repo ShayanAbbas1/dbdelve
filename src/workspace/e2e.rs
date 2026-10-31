@@ -1414,3 +1414,62 @@ fn the_refresh_shortcut_finds_a_table_made_elsewhere_over_the_same_session(
         quit(workspace, cx);
     });
 }
+
+fn history_view(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) -> crate::palette::HistoryView {
+    workspace.read_with(cx, |workspace, cx| {
+        workspace
+            .palette
+            .as_ref()
+            .expect("the palette is up")
+            .read(cx)
+            .history()
+    })
+}
+
+#[gpui::test]
+fn the_history_scope_filters_and_sorts_its_runs_from_the_keyboard(cx: &mut TestAppContext) {
+    use crate::palette::{HistoryOrder, HistoryStatus, HistoryView};
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        cx.simulate_input("select 1");
+        cx.simulate_keystrokes("secondary-enter");
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let last = &workspace.profile().unwrap().session.history[0];
+            assert_eq!((last.sql.as_str(), last.rows), ("select 1", Some(1)));
+            assert!(last.at.is_some() && last.ms.is_some() && last.error.is_none());
+        });
+
+        // Outside History the chords are the field's.
+        cx.simulate_keystrokes("secondary-p");
+        settle(cx);
+        cx.simulate_keystrokes("alt-f alt-s");
+        settle(cx);
+        assert_eq!(history_view(&workspace, cx), HistoryView::default());
+
+        cx.simulate_keystrokes("tab tab");
+        settle(cx);
+        assert!(palette_mode(&workspace, cx) == Some(PaletteMode::Search(Scope::History)));
+        cx.simulate_keystrokes("alt-f alt-s alt-s");
+        settle(cx);
+        assert_eq!(
+            history_view(&workspace, cx),
+            HistoryView {
+                status: HistoryStatus::Succeeded,
+                order: HistoryOrder::MostRows,
+            }
+        );
+
+        // A palette opened again starts unfiltered.
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+        cx.simulate_keystrokes("secondary-p");
+        settle(cx);
+        assert_eq!(history_view(&workspace, cx), HistoryView::default());
+
+        quit(workspace, cx);
+    });
+}
