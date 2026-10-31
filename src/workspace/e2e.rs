@@ -1362,11 +1362,6 @@ fn the_schema_export_dialog_takes_the_keyboard_and_hands_it_back(cx: &mut TestAp
         settle(cx);
         assert_eq!(front_dialog(&workspace, cx), Some("schema-export"));
         assert!(dialog_has_keyboard(&workspace, cx));
-        assert_eq!(
-            ringed_button(&workspace, cx),
-            0,
-            "the ring starts on Export"
-        );
         for _ in 0..500 {
             if read(&workspace, cx) == Some(true) {
                 break;
@@ -1397,7 +1392,9 @@ fn the_schema_export_dialog_takes_the_keyboard_and_hands_it_back(cx: &mut TestAp
         settle(cx);
         assert_eq!(buffer(&workspace, cx), format!("{before}x"));
 
-        // `enter` on the ring's Export asks where, and writes what was ticked.
+        // Tab walks every control: Structure, Rows, Select all, Select none,
+        // each table, Cancel and Export. `space` unticks a table and `enter`
+        // on Export asks where, and writes what is ticked.
         workspace.update(cx, |workspace, cx| {
             workspace.open_schema_export("main".into(), cx);
         });
@@ -1409,8 +1406,25 @@ fn the_schema_export_dialog_takes_the_keyboard_and_hands_it_back(cx: &mut TestAp
             std::thread::sleep(std::time::Duration::from_millis(10));
             settle(cx);
         }
-        cx.simulate_keystrokes("enter");
+        for _ in 0..5 {
+            cx.simulate_keystrokes("tab");
+            settle(cx);
+            assert!(in_dialog(&workspace, cx));
+        }
+        press(cx, "space");
+        workspace.read_with(cx, |workspace, _| {
+            let dialog = workspace.profile().unwrap().session.schema_export.as_ref();
+            assert_eq!(
+                dialog.unwrap().tables,
+                vec![
+                    ("customers".to_string(), false),
+                    ("orders".to_string(), true)
+                ]
+            );
+        });
+        cx.simulate_keystrokes("tab tab tab");
         settle(cx);
+        press(cx, "enter");
         assert_eq!(front_dialog(&workspace, cx), None, "enter left it up");
         let path = store::dbdelve_directory().unwrap().join("main.sql");
         let chosen = path.clone();
@@ -1425,7 +1439,7 @@ fn the_schema_export_dialog_takes_the_keyboard_and_hands_it_back(cx: &mut TestAp
         let written = std::fs::read_to_string(&path).expect("the file is written");
         assert!(
             written.starts_with(
-                "-- Schema \"main\" exported by DBDelve: 2 tables, structure and rows.\n"
+                "-- Schema \"main\" exported by DBDelve: 1 table, structure and rows.\n"
             ),
             "{written}"
         );
