@@ -1443,6 +1443,8 @@ impl Workspace {
             ("queue-failure", 0) => self.continue_queue(cx),
             ("queue-failure", _) => self.stop_queue(cx),
             ("pending-run", 2) => self.toggle_dont_ask(cx),
+            ("schema-export", 0) => self.answer_schema_export(cx),
+            ("schema-export", _) => _ = self.cancel_schema_export(cx),
             ("pending-export", 0) => self.answer_pending_export(every_row, cx),
             ("pending-export", 1) if every_row => self.answer_pending_export(false, cx),
             ("pending-export", _) => _ = self.cancel_pending_export(cx),
@@ -3513,22 +3515,25 @@ pub(super) fn explorer_menu(
                     }),
             );
         }
-        // The export reads the connection's own database, so another one's
-        // schemas offer none.
-        if is_schema_row(&row.id) && elsewhere.is_none() && target.exports_schema().is_some() {
-            let (workspace, profile_id) = (workspace.clone(), row.profile.clone());
-            let schema = row.label.to_string();
-            menu = menu.item(
-                PopupMenuItem::new("Export as SQL…").on_click(move |_, _, cx| {
+        let actions = node_actions(node.kind, &node.name, target);
+        let menu = node_items(menu, &node, actions, workspace);
+        // Last, below the node's own actions. The export reads the
+        // connection's own database, so another one's schemas offer none.
+        if !is_schema_row(&row.id) || elsewhere.is_some() || target.exports_schema().is_none() {
+            return menu;
+        }
+        let (workspace, profile_id) = (workspace.clone(), row.profile.clone());
+        let schema = row.label.to_string();
+        return menu
+            .separator()
+            .item(
+                PopupMenuItem::new("Export Schema as SQL…").on_click(move |_, _, cx| {
                     let schema = schema.clone();
                     on_profile(&workspace, &profile_id, cx, |workspace, cx| {
-                        workspace.export_schema(schema, cx);
+                        workspace.open_schema_export(schema, cx);
                     });
                 }),
             );
-        }
-        let actions = node_actions(node.kind, &node.name, target);
-        return node_items(menu, &node, actions, workspace);
     };
     let member = match elsewhere {
         None => state.member_in(&row.profile, leaf.target),
