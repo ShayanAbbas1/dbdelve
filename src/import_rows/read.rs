@@ -12,21 +12,15 @@ use serde_json::value::RawValue;
 
 use super::{Delimiter, Encoding, Format, Options, Problem};
 
-pub(crate) fn detect(path: &Path, bytes: &[u8]) -> Format {
-    let extension = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(str::to_ascii_lowercase);
-    match extension.as_deref() {
-        Some("tsv") => return Format::Tsv,
-        Some("json" | "jsonl" | "ndjson") => return Format::Json,
-        Some("csv") => return Format::Csv,
-        _ => {}
-    }
-    let body = bytes.strip_prefix(UTF8_BOM).unwrap_or(bytes);
-    match body.iter().find(|b| !b.is_ascii_whitespace()) {
-        Some(b'[' | b'{') => Format::Json,
-        _ => Format::Csv,
+/// The format a file's extension names, or `None` for a file Import Rows
+/// does not read.
+pub(crate) fn detect(path: &Path) -> Option<Format> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    match extension.as_str() {
+        "tsv" => Some(Format::Tsv),
+        "json" | "jsonl" | "ndjson" => Some(Format::Json),
+        "csv" => Some(Format::Csv),
+        _ => None,
     }
 }
 
@@ -609,7 +603,7 @@ mod tests {
     }
 
     fn csv_bytes(bytes: &[u8]) -> Table {
-        read(bytes, &Options::detected(Path::new("f.csv"), bytes)).unwrap()
+        read(bytes, &Options::detected(Format::Csv, bytes)).unwrap()
     }
 
     fn text(t: &str) -> Cell {
@@ -680,7 +674,7 @@ mod tests {
             text.as_bytes(),
             &Options {
                 skip_lines: 2,
-                ..Options::detected(Path::new("f.csv"), text.as_bytes())
+                ..Options::detected(Format::Csv, text.as_bytes())
             },
         )
         .unwrap();
@@ -695,7 +689,7 @@ mod tests {
             text.as_bytes(),
             &Options {
                 header: false,
-                ..Options::detected(Path::new("f.csv"), text.as_bytes())
+                ..Options::detected(Format::Csv, text.as_bytes())
             },
         )
         .unwrap();
@@ -827,7 +821,7 @@ mod tests {
         let json = |name: &str, text: &str| {
             read(
                 text.as_bytes(),
-                &Options::detected(Path::new(name), text.as_bytes()),
+                &Options::detected(detect(Path::new(name)).unwrap(), text.as_bytes()),
             )
             .unwrap()
         };
@@ -868,7 +862,7 @@ mod tests {
         let text = r#"[{"a": 123456789012345678901234567890, "b": 0.12345678901234567890123, "c": 1.50, "d": {"e": [1.50, "x\"y"], "e": 2}, "f": 1e400}]"#;
         let t = read(
             text.as_bytes(),
-            &Options::detected(Path::new("f.json"), text.as_bytes()),
+            &Options::detected(Format::Json, text.as_bytes()),
         )
         .unwrap();
         let shown: Vec<String> = t.rows[0]
@@ -899,16 +893,12 @@ mod tests {
 
     #[test]
     fn a_record_that_is_not_an_object_is_a_problem_and_bad_json_says_where() {
-        let t = read(
-            b"[{\"a\":1}, 2]",
-            &Options::detected(Path::new("f.json"), b"["),
-        )
-        .unwrap();
+        let t = read(b"[{\"a\":1}, 2]", &Options::detected(Format::Json, b"[")).unwrap();
         assert_eq!(t.problems[0].message, "Record 2 is not an object.");
         assert_eq!(
             read(
                 b"{\"a\":1}\n{\"a\":}\n",
-                &Options::detected(Path::new("f.jsonl"), b"{")
+                &Options::detected(Format::Json, b"{")
             )
             .err()
             .unwrap(),
@@ -951,12 +941,13 @@ mod tests {
     }
 
     #[test]
-    fn the_format_comes_from_the_extension_then_the_first_byte() {
-        assert_eq!(detect(Path::new("x.tsv"), b"a,b"), Format::Tsv);
-        assert_eq!(detect(Path::new("x.jsonl"), b"{"), Format::Json);
-        assert_eq!(detect(Path::new("x.ndjson"), b"{"), Format::Json);
-        assert_eq!(detect(Path::new("x.txt"), b"  ["), Format::Json);
-        assert_eq!(detect(Path::new("x.dat"), b"\xEF\xBB\xBF{"), Format::Json);
-        assert_eq!(detect(Path::new("x.txt"), b"a,b"), Format::Csv);
+    fn the_format_comes_from_the_extension_alone() {
+        assert_eq!(detect(Path::new("x.TSV")), Some(Format::Tsv));
+        assert_eq!(detect(Path::new("x.jsonl")), Some(Format::Json));
+        assert_eq!(detect(Path::new("x.ndjson")), Some(Format::Json));
+        assert_eq!(detect(Path::new("x.csv")), Some(Format::Csv));
+        assert_eq!(detect(Path::new("x.txt")), None);
+        assert_eq!(detect(Path::new("x.sql")), None);
+        assert_eq!(detect(Path::new("no-extension")), None);
     }
 }

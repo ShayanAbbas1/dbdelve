@@ -496,7 +496,7 @@ fn calendar_date(
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use super::super::Format;
 
     use super::*;
     use crate::db::{Column, Row};
@@ -510,7 +510,7 @@ mod tests {
         }
     }
     fn opts() -> Options {
-        Options::detected(Path::new("f.csv"), b"")
+        Options::detected(Format::Csv, b"")
     }
     fn v(cell: Cell, rule: Rule, o: &Options) -> Result<Option<Value>, String> {
         value(&cell, &rule, o, None, Engine::Postgres)
@@ -585,7 +585,7 @@ mod tests {
             Row::new([Some("3"), Some("a,\"b\"\nc")]).unwrap(),
         ];
         let file = render_delimited(',', &columns, &rows);
-        let o = Options::detected(Path::new("f.csv"), file.as_bytes());
+        let o = Options::detected(Format::Csv, file.as_bytes());
         let table = read(file.as_bytes(), &o).unwrap();
         let got: Vec<Vec<Value>> = table
             .rows

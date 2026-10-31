@@ -12,7 +12,7 @@ use gpui::PathPromptOptions;
 use super::import_dialog::{import_blocked, new_preview, show_preview, show_preview_row};
 use super::*;
 use crate::import_rows::{
-    Delimiter, Options, Outcome, Plan, Run, Spellings, Step, TargetColumn, prepare, send,
+    Delimiter, Options, Outcome, Plan, Run, Spellings, Step, TargetColumn, detect, prepare, send,
 };
 use crate::session::{ImportDialog, ImportInputs, ImportPhase};
 
@@ -134,6 +134,14 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some(format) = detect(&path) else {
+            let name = path
+                .file_name()
+                .unwrap_or(path.as_os_str())
+                .to_string_lossy();
+            self.note(format!("{name} is not a CSV, TSV or JSON file."), cx);
+            return;
+        };
         // ponytail: whole file in memory; stream rows if multi-GB imports matter
         let read = cx.background_executor().spawn({
             let path = path.clone();
@@ -163,7 +171,7 @@ impl Workspace {
                 {
                     return;
                 }
-                let options = Options::detected(&path, &bytes);
+                let options = Options::detected(format, &bytes);
                 session.editor_needs_focus = true;
                 session.import_rows = Some(ImportDialog {
                     schema,

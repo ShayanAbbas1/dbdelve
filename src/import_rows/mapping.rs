@@ -395,7 +395,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::import_rows::{DateFormat, Decimal, read};
+    use crate::import_rows::{DateFormat, Decimal, detect, read};
 
     fn col(
         name: &str,
@@ -414,7 +414,7 @@ mod tests {
     }
 
     fn opts(path: &str, bytes: &[u8]) -> Options {
-        Options::detected(Path::new(path), bytes)
+        Options::detected(detect(Path::new(path)).unwrap(), bytes)
     }
 
     fn targets_of(maps: &[Mapping]) -> Vec<Target> {

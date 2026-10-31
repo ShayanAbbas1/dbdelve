@@ -1913,12 +1913,12 @@ mod tests {
 
     #[test]
     fn an_import_asked_to_skip_duplicates_runs_into_a_table_with_no_key() {
-        use crate::import_rows::{OnDuplicate, Options, Plan, TargetColumn, prepare};
+        use crate::import_rows::{Format, OnDuplicate, Options, Plan, TargetColumn, prepare};
         let connection = memory("CREATE TABLE t AS SELECT 1 AS id, 'a' AS name;");
         let structure = connection.structure("main", "t").unwrap();
         let targets = TargetColumn::from_structure(&structure, Engine::DuckDb);
         let bytes = b"id,name\n2,b\n";
-        let mut options = Options::detected(std::path::Path::new("rows.csv"), bytes);
+        let mut options = Options::detected(Format::Csv, bytes);
         options.on_duplicate = OnDuplicate::Skip;
         let checked = prepare(bytes, &options, &targets, None, Engine::DuckDb)
             .unwrap()

@@ -323,9 +323,9 @@ pub(crate) fn send(
 /// mid-transaction, each counted back on `connection`.
 #[cfg(test)]
 pub(crate) fn live_round_trip(connection: Connection, engine: Engine, schema: &str) {
-    use std::path::Path;
-
-    use super::{CHUNK_BYTES, OnDuplicate, Options, TargetColumn, Transaction, chunks, prepare};
+    use super::{
+        CHUNK_BYTES, Format, OnDuplicate, Options, TargetColumn, Transaction, chunks, prepare,
+    };
     use crate::db::Fetch;
 
     const TABLE: &str = "dbdelve_import_test";
@@ -369,7 +369,7 @@ pub(crate) fn live_round_trip(connection: Connection, engine: Engine, schema: &s
     };
     let plan = |rows: &str, transaction, on_duplicate| {
         let bytes = format!("{key},name\n{rows}");
-        let mut options = Options::detected(Path::new("rows.csv"), bytes.as_bytes());
+        let mut options = Options::detected(Format::Csv, bytes.as_bytes());
         options.transaction = transaction;
         options.on_duplicate = on_duplicate;
         let checked = prepare(bytes.as_bytes(), &options, &targets, None, engine)
