@@ -2848,8 +2848,9 @@ mod tests {
 
         assert_eq!(shortcuts.folders.len(), 1);
         let held = &shortcuts.folders[0].members;
-        assert_eq!(held.len(), 2, "{held:?}");
-        assert_eq!(held[1], Member::Query("daily".into()));
+        // A table and a view of one name are two objects.
+        assert_eq!(held.len(), 3, "{held:?}");
+        assert_eq!(held[2], Member::Query("daily".into()));
         assert_eq!(
             shortcuts.pins,
             [

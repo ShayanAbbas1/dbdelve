@@ -407,14 +407,6 @@ pub enum Member {
 }
 
 impl Member {
-    /// The id of the row it repeats, in the Queries group or the schemas.
-    fn row(&self) -> String {
-        match self {
-            Member::Query(name) => query_row(name),
-            Member::Object(object) => object.row(),
-        }
-    }
-
     /// Its id under a folder or the Pinned group: everything it is named by,
     /// so no two members are one row. The database's length keeps a name
     /// with a `/` from running into the rest.
@@ -431,16 +423,6 @@ impl Member {
                 format!("{database}{}-{}", object.kind.slug(), object.row())
             }
         }
-    }
-
-    /// Whether `other` names the same thing. Not `==`: a relation whose kind
-    /// changed is still the same relation.
-    pub fn is(&self, other: &Member) -> bool {
-        let database = |member: &Member| match member {
-            Member::Query(_) => None,
-            Member::Object(object) => object.database.clone(),
-        };
-        self.row() == other.row() && database(self) == database(other)
     }
 }
 
@@ -487,10 +469,10 @@ impl ObjectRef {
             .enumerate()
             .find(|(_, schema)| schema.name == self.schema)?;
         match self.kind {
-            ObjectKind::Relation(_) => schema
+            ObjectKind::Relation(kind) => schema
                 .relations
                 .iter()
-                .position(|relation| relation.name == self.name)
+                .position(|relation| relation.kind == kind && relation.name == self.name)
                 .map(|relation_index| {
                     let relation = &schema.relations[relation_index];
                     ExplorerLeaf {
@@ -528,16 +510,6 @@ pub enum Pin {
     Folder(String),
 }
 
-impl Pin {
-    fn is(&self, other: &Pin) -> bool {
-        match (self, other) {
-            (Pin::Member(member), Pin::Member(other)) => member.is(other),
-            (Pin::Folder(name), Pin::Folder(other)) => name == other,
-            _ => false,
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Folder {
     pub name: String,
@@ -561,7 +533,7 @@ impl Shortcuts {
 
     pub fn holds(&self, folder: &str, member: &Member) -> bool {
         self.folder(folder)
-            .is_some_and(|folder| folder.members.iter().any(|held| held.is(member)))
+            .is_some_and(|folder| folder.members.iter().any(|held| held == member))
     }
 
     /// Puts `member` in `folder`, or takes it out if it is in already.
@@ -569,18 +541,18 @@ impl Shortcuts {
         let Some(folder) = self.folders.iter_mut().find(|held| held.name == folder) else {
             return;
         };
-        match folder.members.iter().position(|held| held.is(&member)) {
+        match folder.members.iter().position(|held| *held == member) {
             Some(at) => _ = folder.members.remove(at),
             None => folder.members.push(member),
         }
     }
 
     pub fn pinned(&self, pin: &Pin) -> bool {
-        self.pins.iter().any(|held| held.is(pin))
+        self.pins.contains(pin)
     }
 
     pub fn toggle_pin(&mut self, pin: Pin) {
-        match self.pins.iter().position(|held| held.is(&pin)) {
+        match self.pins.iter().position(|held| *held == pin) {
             Some(at) => _ = self.pins.remove(at),
             None => self.pins.push(pin),
         }
@@ -656,9 +628,9 @@ impl Shortcuts {
     pub fn forget_query(&mut self, name: &str) {
         let gone = Member::Query(name.to_string());
         for folder in &mut self.folders {
-            folder.members.retain(|member| !member.is(&gone));
+            folder.members.retain(|member| *member != gone);
         }
-        self.pins.retain(|pin| !pin.is(&Pin::Member(gone.clone())));
+        self.pins.retain(|pin| *pin != Pin::Member(gone.clone()));
     }
 
     /// What a duplicate of the connection starts with: everything but the
@@ -1970,6 +1942,34 @@ mod tests {
     }
 
     #[test]
+    fn a_table_pinned_before_a_view_took_its_name_stays_missing() {
+        let table = Member::Object(ObjectRef {
+            database: None,
+            schema: "public".into(),
+            name: "active_accounts".into(),
+            kind: ObjectKind::Relation(RelationKind::Table),
+        });
+        let shortcuts = Shortcuts {
+            folders: Vec::new(),
+            pins: vec![Pin::Member(table)],
+        };
+        let explorer = super::shortcuts(
+            &shortcuts,
+            Some(&catalog()),
+            &[],
+            &ShortcutDatabase::Unnamed,
+            "",
+        );
+
+        let row = &explorer.items[0].children[0];
+        assert!(!explorer.leaves.contains_key(row.id.as_ref()));
+        assert!(matches!(
+            explorer.shortcuts[row.id.as_ref()],
+            Shortcut::Member { missing: true, .. }
+        ));
+    }
+
+    #[test]
     fn the_filter_reaches_into_folders_and_pins() {
         let shortcuts = Shortcuts {
             folders: vec![
@@ -2084,13 +2084,16 @@ mod tests {
         shortcuts.forget_query("nightly");
         assert!(!shortcuts.holds("REPORTS", &Member::Query("nightly".into())));
         assert_eq!(shortcuts.pins, [Pin::Folder("REPORTS".into())]);
-        // Toggling again takes it out, whatever kind it has become since.
+        // A view of the name is another object, which toggles in beside it.
         let mut view = relation("public", "accounts");
         if let Member::Object(object) = &mut view {
             object.kind = ObjectKind::Relation(RelationKind::View);
         }
-        shortcuts.toggle("REPORTS", view);
-        assert!(shortcuts.folder("REPORTS").unwrap().members.is_empty());
+        shortcuts.toggle("REPORTS", view.clone());
+        assert_eq!(
+            shortcuts.folder("REPORTS").unwrap().members,
+            [relation("public", "accounts"), view]
+        );
         shortcuts.delete_folder("REPORTS");
         assert!(shortcuts.pins.is_empty());
     }
