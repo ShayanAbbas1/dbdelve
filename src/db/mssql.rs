@@ -729,6 +729,8 @@ pub struct Connection {
     /// good rather than reconnecting, and has no session of the user's to
     /// report lost.
     alongside: bool,
+    /// The login's default schema in the database it opened on.
+    default_schema: Option<String>,
 }
 
 impl Connection {
@@ -740,6 +742,7 @@ impl Connection {
                 server: server.clone(),
                 tunnel,
                 alongside: false,
+                default_schema: None,
             };
             let mut session = connection.connect()?;
             // Asked even when the profile names one, for the server's spelling
@@ -755,6 +758,9 @@ impl Connection {
                     ),
                     false => error,
                 })?;
+            // Only where a list of schemas opens, so not worth failing a login over.
+            connection.default_schema =
+                first_value(&mut session, "SELECT SCHEMA_NAME()").unwrap_or_default();
             *connection.session.lock().expect("unshared until returned") = Some(session);
             Ok(connection)
         })
@@ -809,6 +815,10 @@ impl Connection {
             alongside: true,
             ..self.clone()
         }
+    }
+
+    pub fn current_schema(&self) -> Option<&str> {
+        self.default_schema.as_deref()
     }
 
     fn in_flight(&self) -> std::sync::MutexGuard<'_, InFlight> {
@@ -2157,13 +2167,16 @@ fn ask(session: &mut Session, statement: &str) -> Result<Collected, DbError> {
 }
 
 fn current_database(session: &mut Session) -> Result<String, DbError> {
-    Ok(ask(session, "SELECT DB_NAME()")?
+    Ok(first_value(session, "SELECT DB_NAME()")?.unwrap_or_default())
+}
+
+fn first_value(session: &mut Session, sql: &str) -> Result<Option<String>, DbError> {
+    Ok(ask(session, sql)?
         .result
         .rows
         .first()
         .and_then(|row| row.get(0))
-        .map(str::to_string)
-        .unwrap_or_default())
+        .map(str::to_string))
 }
 
 fn held_to_database(session: &mut Session, database: &str) -> Result<(), DbError> {
@@ -2743,6 +2756,12 @@ mod tests {
             )
             .expect("query should succeed");
         assert_eq!(first(&result), vec![Some("5000")]);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_connection_knows_the_logins_default_schema() {
+        assert_eq!(live().current_schema(), Some("dbo"));
     }
 
     #[test]
@@ -4822,6 +4841,7 @@ mod tests {
             .unwrap(),
             tunnel: None,
             alongside: false,
+            default_schema: None,
         };
         let user = connection.clone();
         let run = std::thread::spawn(move || user.query("SELECT 1", Fetch::default()));

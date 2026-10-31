@@ -651,6 +651,12 @@ impl Engine {
         self.spec().abilities.picks_schema
     }
 
+    /// Whether the catalog lists databases as its schemas, so the database a
+    /// session is on is the schema it is in.
+    pub fn catalog_lists_databases(self) -> bool {
+        self.spec().abilities.catalog_lists_databases
+    }
+
     /// A database the server keeps for itself, listed after the user's own.
     pub fn is_system_database(self, name: &str) -> bool {
         self.spec().system_databases.contains(&name)
@@ -1675,6 +1681,7 @@ impl Connection {
         match self {
             Self::Postgres(connection) => connection.current_schema(),
             Self::DuckDb(connection) => Some(connection.current_schema()),
+            Self::SqlServer(connection) => connection.current_schema(),
             _ => None,
         }
     }
