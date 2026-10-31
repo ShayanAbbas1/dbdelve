@@ -161,6 +161,7 @@ pub fn render_main_content(
     strip: &TabStrip,
     custom_limit: Option<&(LimitTarget, Entity<InputState>)>,
     keybindings: &HashMap<String, String>,
+    vim_mode: bool,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     let body = match profile.session.active_object() {
@@ -185,6 +186,7 @@ pub fn render_main_content(
             row_panel,
             plan_copied,
             custom_limit,
+            vim_mode,
             cx,
         ),
     };
@@ -322,6 +324,7 @@ fn render_query_surface(
     row_panel: &RowPanel,
     plan_copied: bool,
     custom_limit: Option<&(LimitTarget, Entity<InputState>)>,
+    vim_mode: bool,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     let Some(tab) = profile.session.active_query_tab() else {
@@ -392,7 +395,13 @@ fn render_query_surface(
         &tab.editor,
         editor_font_size,
         &tab.query,
-        render_query_toolbar(&profile.session, profile.config.target(), custom_limit, cx),
+        render_query_toolbar(
+            &profile.session,
+            profile.config.target(),
+            custom_limit,
+            vim_mode,
+            cx,
+        ),
         bottom,
         cx,
     )
@@ -3459,6 +3468,7 @@ fn render_query_toolbar(
     session: &Session,
     target: Target,
     custom_limit: Option<&(LimitTarget, Entity<InputState>)>,
+    vim_mode: bool,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     let engine = target.engine;
@@ -3540,7 +3550,7 @@ fn render_query_toolbar(
     let rename_workspace = workspace.clone();
     let run_workspace = workspace.clone();
 
-    let vim_mode = session.active_query_tab().map(|tab| {
+    let vim_label = session.active_query_tab().filter(|_| vim_mode).map(|tab| {
         div()
             .flex_shrink_0()
             .font_weight(FontWeight::SEMIBOLD)
@@ -3557,7 +3567,7 @@ fn render_query_toolbar(
         .border_t_1()
         .border_color(t.border)
         .text_size(px(layout::chrome(layout::TEXT_SM)))
-        .children(vim_mode)
+        .children(vim_label)
         .children(plan_toggle)
         .child(div().flex_1())
         .children(naming)

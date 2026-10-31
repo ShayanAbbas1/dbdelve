@@ -522,6 +522,7 @@ pub struct StoredSettings {
     pub run_unreadable: Option<bool>,
     #[serde(default)]
     pub verbose_logging: Option<bool>,
+    pub vim_mode: Option<bool>,
     /// Whether the first-run greeting has played. Absent in a file written
     /// before there was one.
     #[serde(default)]
@@ -3965,6 +3966,7 @@ open_objects = []
                 alias_completions: Some(true),
                 run_unreadable: Some(true),
                 verbose_logging: Some(true),
+                vim_mode: Some(true),
                 welcomed: Some(true),
                 custom_keybindings: Some(HashMap::from([(
                     "apply_edits".to_string(),

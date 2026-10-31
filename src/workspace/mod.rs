@@ -84,6 +84,9 @@ pub(crate) struct Settings {
     /// Whether the diagnostic log takes DBDelve's debug lines and other
     /// crates' info, applied as it changes (`logging::set_verbose`).
     pub(crate) verbose_logging: bool,
+    /// Whether the query buffer has Vim's modes. Off by default: with it on,
+    /// `escape` stops typing, which nobody who did not ask for it expects.
+    pub(crate) vim_mode: bool,
     /// Whether the first-run greeting has played on the welcome surface.
     pub(crate) welcomed: bool,
     /// Keybinding overrides, keyed by action id. Applied to the keymap on
@@ -124,6 +127,7 @@ impl Default for Settings {
             alias_completions: true,
             run_unreadable: false,
             verbose_logging: false,
+            vim_mode: false,
             welcomed: false,
             custom_keybindings: HashMap::new(),
         }
@@ -613,6 +617,7 @@ impl Workspace {
                 workspace.settings.verbose_logging =
                     stored_settings.verbose_logging.unwrap_or(false);
                 crate::logging::set_verbose(workspace.settings.verbose_logging);
+                workspace.settings.vim_mode = stored_settings.vim_mode.unwrap_or(false);
                 workspace.settings.welcomed = welcome::welcomed(
                     stored_settings.welcomed,
                     !profiles.is_empty() || !unavailable.is_empty(),
@@ -1224,6 +1229,15 @@ impl Workspace {
             return;
         }
         self.settings.color_titlebar = color;
+        self.remember_profiles(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn set_vim_mode(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.settings.vim_mode == on {
+            return;
+        }
+        self.settings.vim_mode = on;
         self.remember_profiles(cx);
         cx.notify();
     }
@@ -2261,6 +2275,7 @@ impl Render for Workspace {
                 &self.tab_strip,
                 self.custom_limit.as_ref(),
                 &self.settings.custom_keybindings,
+                self.settings.vim_mode,
                 cx,
             )))
             .children(results_status);

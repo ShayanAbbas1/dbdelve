@@ -25,7 +25,11 @@ impl Mode {
     }
 }
 
+/// None with Vim mode off in Settings, so the buffer types as it always did.
 fn mode(workspace: &mut Workspace) -> Option<&mut Mode> {
+    if !workspace.settings.vim_mode {
+        return None;
+    }
     let tab = workspace.profile_mut()?.session.active_query_tab_mut()?;
     Some(&mut tab.vim)
 }

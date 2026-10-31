@@ -67,6 +67,7 @@ impl Workspace {
             check_for_updates: Some(self.settings.check_for_updates),
             color_titlebar: Some(self.settings.color_titlebar),
             client_sort: Some(self.settings.client_sort),
+            vim_mode: Some(self.settings.vim_mode),
             qualify_completions: Some(self.settings.qualify_completions),
             alias_completions: Some(self.settings.alias_completions),
             run_unreadable: Some(self.settings.run_unreadable),
