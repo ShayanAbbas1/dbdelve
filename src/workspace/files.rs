@@ -6,6 +6,9 @@
 //! each in a query tab of its own whose statement is the one DBDelve wrote to
 //! read it, on screen and the user's to change: `SELECT * FROM read_csv(…)`.
 //! The file itself is only ever read.
+//!
+//! A SQL file is the other kind: its text opens in a new query tab on the
+//! connection in front, as the user's buffer, and runs only when they run it.
 
 use std::path::{Path, PathBuf};
 
@@ -17,8 +20,23 @@ use crate::connection_form::starting_mode;
 use crate::db::DUCKDB_IN_MEMORY;
 
 impl Workspace {
-    /// The native file picker, then [`Workspace::open_data_files`].
+    /// The native file picker, then [`Workspace::open_files`].
     pub(crate) fn pick_data_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pick_files(Self::open_files, window, cx);
+    }
+
+    /// The native file picker, then [`Workspace::open_sql_files`]: whatever
+    /// is picked opens as SQL, whatever its extension.
+    pub(crate) fn pick_sql_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pick_files(Self::open_sql_files, window, cx);
+    }
+
+    fn pick_files(
+        &mut self,
+        open: fn(&mut Self, Vec<PathBuf>, &mut Window, &mut Context<Self>),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let picked = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -28,7 +46,7 @@ impl Workspace {
         cx.spawn_in(window, async move |workspace, cx| {
             let picked = picked.await;
             _ = workspace.update_in(cx, |workspace, window, cx| match picked {
-                Ok(Ok(Some(paths))) => workspace.open_data_files(paths, window, cx),
+                Ok(Ok(Some(paths))) => open(workspace, paths, window, cx),
                 Ok(Err(error)) => workspace.note(error.to_string(), cx),
                 Ok(Ok(None)) | Err(_) => {}
             });
@@ -36,13 +54,47 @@ impl Workspace {
         .detach();
     }
 
-    pub(crate) fn drop_data_files(
+    pub(crate) fn drop_files(
         &mut self,
         dropped: &ExternalPaths,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_data_files(dropped.paths().to_vec(), window, cx);
+        self.open_files(dropped.paths().to_vec(), window, cx);
+    }
+
+    /// SQL files into the connection in front first, since opening a data
+    /// file brings the DuckDB profile to the front.
+    fn open_files(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        let (sql, data): (Vec<_>, Vec<_>) = paths.into_iter().partition(|path| is_sql_file(path));
+        if !sql.is_empty() {
+            self.open_sql_files(sql, window, cx);
+        }
+        if !data.is_empty() {
+            self.open_data_files(data, window, cx);
+        }
+    }
+
+    pub(crate) fn open_sql_files(
+        &mut self,
+        paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.profile().is_none() {
+            self.note("Open a connection to open a SQL file in.".to_string(), cx);
+            return;
+        }
+        for path in paths {
+            match read_sql_file(&path) {
+                Ok(text) => {
+                    if self.new_query_holding(text, window, cx).is_none() {
+                        return;
+                    }
+                }
+                Err(message) => self.note(message, cx),
+            }
+        }
     }
 
     pub(crate) fn open_data_files(
@@ -54,7 +106,7 @@ impl Workspace {
         let statements: Vec<String> = paths.iter().filter_map(|path| reading(path)).collect();
         if statements.is_empty() {
             self.note(
-                "DBDelve opens .csv, .tsv, .parquet, .json and .xlsx files.".to_string(),
+                "DBDelve opens .sql, .csv, .tsv, .parquet, .json and .xlsx files.".to_string(),
                 cx,
             );
             return;
@@ -146,6 +198,46 @@ fn waiting_for(waiting: &mut Vec<(String, u64, String)>, profile: &str) -> Vec<(
     taken.into_iter().map(|(_, tab, sql)| (tab, sql)).collect()
 }
 
+fn is_sql_file(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("sql"))
+}
+
+// ponytail: the editor holds the whole file, so a dump past this is refused
+// rather than opened into a buffer that crawls; running a file that size
+// without loading it is the upgrade.
+const MAX_SQL_FILE_BYTES: u64 = 4 << 20;
+
+/// A SQL file's text, exactly as written but for a UTF-8 byte order mark,
+/// which is the file's encoding and not the user's SQL. Text that is not
+/// UTF-8 is refused rather than read lossily, which would change statements.
+fn read_sql_file(path: &Path) -> Result<String, String> {
+    let name = path
+        .file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy();
+    let size = std::fs::metadata(path)
+        .map_err(|error| format!("Could not open {name}: {error}"))?
+        .len();
+    if size > MAX_SQL_FILE_BYTES {
+        return Err(format!(
+            "{name} is {} MB, more than the editor opens ({} MB).",
+            size >> 20,
+            MAX_SQL_FILE_BYTES >> 20
+        ));
+    }
+    let bytes = std::fs::read(path).map_err(|error| format!("Could not open {name}: {error}"))?;
+    sql_text(bytes).ok_or_else(|| format!("{name} is not UTF-8 text."))
+}
+
+fn sql_text(bytes: Vec<u8>) -> Option<String> {
+    let text = String::from_utf8(bytes).ok()?;
+    Some(match text.strip_prefix('\u{feff}') {
+        Some(rest) => rest.to_string(),
+        None => text,
+    })
+}
+
 /// The statement that reads a file, by its extension, or `None` for a file
 /// this does not know how to read.
 fn reading(path: &Path) -> Option<String> {
@@ -201,6 +293,17 @@ mod tests {
         );
         assert_eq!(reading(Path::new("/data/notes.md")), None);
         assert_eq!(reading(Path::new("/data/no-extension")), None);
+    }
+
+    #[test]
+    fn a_sql_file_opens_as_written_without_its_byte_order_mark() {
+        assert!(is_sql_file(Path::new("/dumps/schema.SQL")));
+        assert!(!is_sql_file(Path::new("/dumps/rows.csv")));
+        assert_eq!(
+            sql_text(b"\xef\xbb\xbfSELECT 1; -- \xc3\xa9t\xc3\xa9\r\n".to_vec()).as_deref(),
+            Some("SELECT 1; -- \u{e9}t\u{e9}\r\n")
+        );
+        assert_eq!(sql_text(b"SELECT '\xe9';".to_vec()), None);
     }
 
     #[test]

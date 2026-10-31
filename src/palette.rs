@@ -417,6 +417,8 @@ pub enum Command {
     OpenSettings,
     /// Pick data files to open in DuckDB.
     OpenDataFiles,
+    /// Pick SQL files to open in new query tabs on the connection in front.
+    OpenSqlFiles,
     /// Put the palette up over the columns of the grid in front.
     GoToColumn,
     /// Scroll the grid in front to this column, by index into its columns.
@@ -3388,6 +3390,14 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         command("New query", icon::SCRATCH_QUERY, Command::NewQuery, QUERY),
         "new_query",
     )];
+    if profile.config.engine().syntax() == Syntax::Sql {
+        items.push(command(
+            "Open SQL file…",
+            icon::SCRATCH_QUERY,
+            Command::OpenSqlFiles,
+            QUERY,
+        ));
+    }
 
     if runnable {
         items.push(bound(
