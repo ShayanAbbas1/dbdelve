@@ -2527,11 +2527,14 @@ impl Workspace {
                                 from: shortcut.and_then(|shortcut| shortcut.container(id)),
                                 label: drag_label,
                             };
-                            row.on_drag(dragged, move |dragged, _, _, cx| {
+                            row.on_drag(dragged, move |dragged, grab, _, cx| {
                                 _ = workspace.update(cx, |workspace, _| {
                                     workspace.explorer_drop = None;
                                 });
-                                cx.new(|_| DragLabel(dragged.label.clone()))
+                                cx.new(|_| DragLabel {
+                                    label: dragged.label.clone(),
+                                    grab,
+                                })
                             })
                         }
                         None => row,

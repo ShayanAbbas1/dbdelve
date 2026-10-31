@@ -18,12 +18,19 @@ pub(crate) struct DragShortcut {
 
 /// The row's name, following the pointer. Static: anything that moves on its
 /// own is the redraw hazard in `AGENTS.md`.
-pub(crate) struct DragLabel(pub(crate) gpui::SharedString);
+pub(crate) struct DragLabel {
+    pub(crate) label: gpui::SharedString,
+    /// Where the pointer took hold of the row, from its corner.
+    pub(crate) grab: gpui::Point<gpui::Pixels>,
+}
 
 impl Render for DragLabel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = *theme(cx);
-        div()
+        // gpui draws a preview where the row's corner would be, so one taken
+        // from the far side of a wide row starts off the window's left edge.
+        // Padded by the grab, it sits just past the pointer instead.
+        let label = div()
             .px(px(layout::SPACE_SM))
             .py(px(layout::SPACE_XS))
             .rounded(px(layout::RADIUS_CONTROL))
@@ -34,7 +41,11 @@ impl Render for DragLabel {
             .font_family(fonts(cx).chrome.clone())
             .text_size(px(layout::chrome(layout::TEXT_MD)))
             .whitespace_nowrap()
-            .child(self.0.clone())
+            .child(self.label.clone());
+        div()
+            .pl(self.grab.x + px(layout::SPACE_MD))
+            .pt(self.grab.y + px(layout::SPACE_MD))
+            .child(label)
     }
 }
 
