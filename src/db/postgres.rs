@@ -1436,20 +1436,25 @@ impl Connection {
             .iter()
             .map(|table| Engine::Postgres.quote_literal(table))
             .collect();
+        // Not `pg_sequences`, which reads where every sequence in the database
+        // stands, so one dropped by another session meanwhile fails the read.
         let result = self.internal_query(&format!(
             "SELECT sequence_namespace.nspname AS sequence_schema,
                  sequence_class.relname AS sequence_name,
                  table_class.relname AS table_name,
                  attribute.attname AS column_name,
                  dependency.deptype::text AS owner_kind,
-                 sequences.data_type::text AS data_type,
-                 sequences.start_value::text AS start_value,
-                 sequences.min_value::text AS min_value,
-                 sequences.max_value::text AS max_value,
-                 sequences.increment_by::text AS increment_by,
-                 sequences.cycle::text AS cycle,
-                 sequences.cache_size::text AS cache_size,
-                 sequences.last_value::text AS last_value
+                 pg_catalog.format_type(sequence.seqtypid, NULL) AS data_type,
+                 sequence.seqstart::text AS start_value,
+                 sequence.seqmin::text AS min_value,
+                 sequence.seqmax::text AS max_value,
+                 sequence.seqincrement::text AS increment_by,
+                 sequence.seqcycle::text AS cycle,
+                 sequence.seqcache::text AS cache_size,
+                 CASE WHEN access.readable
+                     THEN pg_catalog.pg_sequence_last_value(sequence_class.oid)::text
+                 END AS last_value,
+                 access.readable::text AS readable
              FROM pg_catalog.pg_depend AS dependency
              JOIN pg_catalog.pg_class AS sequence_class
                  ON sequence_class.oid = dependency.objid AND sequence_class.relkind = 'S'
@@ -1460,9 +1465,11 @@ impl Connection {
                  ON table_namespace.oid = table_class.relnamespace
              JOIN pg_catalog.pg_attribute AS attribute
                  ON attribute.attrelid = table_class.oid AND attribute.attnum = dependency.refobjsubid
-             JOIN pg_catalog.pg_sequences AS sequences
-                 ON sequences.schemaname = sequence_namespace.nspname
-                 AND sequences.sequencename = sequence_class.relname
+             JOIN pg_catalog.pg_sequence AS sequence ON sequence.seqrelid = sequence_class.oid
+             CROSS JOIN LATERAL (
+                 SELECT pg_catalog.has_sequence_privilege(sequence_class.oid, 'SELECT, USAGE')
+                     AS readable
+             ) AS access
              WHERE dependency.classid = 'pg_catalog.pg_class'::regclass
                  AND dependency.refclassid = 'pg_catalog.pg_class'::regclass
                  AND dependency.deptype IN ('a', 'i')
@@ -1479,10 +1486,17 @@ impl Connection {
             let table = Engine::Postgres.qualified(schema, cell("table_name")?);
             let column = Engine::Postgres.quote_identifier(cell("column_name")?);
             let owned = cell("owner_kind")? == "a";
-            // NULL when the sequence was never used, or the role may not read it.
+            // `last_value` is NULL for a role that may not read the sequence as
+            // well as for one never used, and only the second starts again.
             let set = match optional_cell(&result, row, "last_value") {
-                Some(last) => format!("{last}, true"),
-                None => format!("{}, false", cell("start_value")?),
+                Some(last) => Some(format!("{last}, true")),
+                None if cell("readable")? == "true" => {
+                    Some(format!("{}, false", cell("start_value")?))
+                }
+                None => {
+                    sequences.unreadable.push(sequence.clone());
+                    None
+                }
             };
             if owned {
                 sequences.before_tables.push(format!(
@@ -1503,11 +1517,13 @@ impl Connection {
                 sequences.after_rows.push(format!(
                     "ALTER SEQUENCE {sequence} OWNED BY {table}.{column};"
                 ));
-                sequences.after_rows.push(format!(
-                    "SELECT pg_catalog.setval({}, {set});",
-                    Engine::Postgres.quote_literal(&sequence)
-                ));
-            } else {
+                if let Some(set) = set {
+                    sequences.after_rows.push(format!(
+                        "SELECT pg_catalog.setval({}, {set});",
+                        Engine::Postgres.quote_literal(&sequence)
+                    ));
+                }
+            } else if let Some(set) = set {
                 sequences.after_rows.push(format!(
                     "SELECT pg_catalog.setval(pg_catalog.pg_get_serial_sequence({}, {}), {set});",
                     Engine::Postgres.quote_literal(&table),
@@ -4317,6 +4333,48 @@ mod tests {
                 .after_rows
                 .last()
                 .is_some_and(|sql| sql.ends_with(", 1, false);")),
+            "{:?}",
+            sequences.after_rows
+        );
+    }
+
+    #[test]
+    #[ignore = "needs the dev Postgres"]
+    fn live_an_unreadable_sequence_is_named_not_set_to_start() {
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        let setup = |sql: &str| {
+            connection
+                .query(sql, Fetch::default())
+                .expect("the fixture statements should run");
+        };
+        // `GRANT SELECT ON ALL TABLES` leaves the sequences out, so a role
+        // granted that reads every row and no sequence: the catalog shows it a
+        // NULL `last_value`, as it does a sequence never used.
+        setup(
+            "DROP TABLE IF EXISTS dbdelve_test_seq_hidden; \
+             DROP ROLE IF EXISTS dbdelve_test_no_sequences; \
+             CREATE ROLE dbdelve_test_no_sequences; \
+             CREATE TABLE dbdelve_test_seq_hidden (id serial PRIMARY KEY); \
+             INSERT INTO dbdelve_test_seq_hidden DEFAULT VALUES; \
+             GRANT SELECT ON dbdelve_test_seq_hidden TO dbdelve_test_no_sequences; \
+             SET ROLE dbdelve_test_no_sequences",
+        );
+        let sequences = connection.sequences("public", &["dbdelve_test_seq_hidden".to_string()]);
+        setup(
+            "RESET ROLE; DROP TABLE dbdelve_test_seq_hidden; \
+             DROP ROLE dbdelve_test_no_sequences",
+        );
+        let sequences = sequences.expect("the sequences should load");
+
+        assert_eq!(
+            sequences.unreadable,
+            vec!["\"public\".\"dbdelve_test_seq_hidden_id_seq\"".to_string()]
+        );
+        assert!(
+            !sequences
+                .after_rows
+                .iter()
+                .any(|sql| sql.contains("setval")),
             "{:?}",
             sequences.after_rows
         );
