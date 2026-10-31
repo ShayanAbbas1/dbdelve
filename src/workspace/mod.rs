@@ -11,6 +11,7 @@ mod editing;
 mod exports;
 mod files;
 mod filters;
+mod folders;
 mod forms;
 mod import_dialog;
 mod import_rows;
@@ -256,6 +257,10 @@ pub(crate) struct Workspace {
     pub(crate) grid_zoom: u32,
     pub(crate) shell_split: Entity<ResizableState>,
     pub(crate) tab_strip: crate::tab_drag::TabStrip,
+    /// The sidebar row a dragged shortcut would land beside, and whether
+    /// after it: what draws the insertion line, and what a drop on that row
+    /// reads, since a drop is not told where on the row it was let go.
+    pub(crate) explorer_drop: Option<(gpui::SharedString, bool)>,
     /// Where the sidebar's edge is unless a drag has moved it. The library
     /// rescales every panel by its share when the window changes size, so this
     /// is what puts the sidebar back.
@@ -441,6 +446,7 @@ impl Workspace {
             grid_zoom: 100,
             shell_split: cx.new(|_| ResizableState::default()),
             tab_strip: crate::tab_drag::TabStrip::default(),
+            explorer_drop: None,
             sidebar_width: std::cell::Cell::new(px(layout::SIDEBAR_DEFAULT_WIDTH)),
             sidebar_container: std::cell::Cell::new(px(0.)),
             sidebar_last_size: std::cell::Cell::new(px(layout::SIDEBAR_DEFAULT_WIDTH)),

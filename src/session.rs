@@ -11,7 +11,7 @@
 
 use std::{collections::HashMap, ops::Range, path::PathBuf, rc::Rc, sync::Arc};
 
-use gpui::{App, AppContext, Context, Entity, Window};
+use gpui::{App, AppContext, Context, Entity, SharedString, Window};
 use gpui_component::{
     input::{CompletionProvider, EditorState, InputEvent, InputState},
     resizable::ResizableState,
@@ -26,7 +26,9 @@ use crate::{
         ExplainMode, QueryResult, Relation, RelationKind, Routine, Row, Structure, Syntax,
     },
     explain::{self, Plan},
-    explorer::{ExplorerLeaf, ObjectKind},
+    explorer::{
+        ExplorerLeaf, Member, ObjectKind, ObjectRef, Pin, Shortcut, ShortcutDatabase, Shortcuts,
+    },
     filter::{
         Conjunction, FilterBar, FilterRow, applied_filters, filter_bars, restored_filter,
         stored_filter,
@@ -79,7 +81,26 @@ pub(crate) struct Profile {
     /// is left of that database goes on the next frame, which has the window
     /// a connect does not, as on a switch.
     pub(crate) left_database: bool,
+    /// The explorer's folders and pins.
+    pub(crate) shortcuts: Shortcuts,
     pub(crate) session: Session,
+}
+
+/// See [`Profile::shortcut_database`]. The shown catalog's own word comes
+/// first: a `USE` of the user's can move the session it was read on without
+/// the profile hearing of it, and a shortcut names what the sidebar shows.
+fn shortcut_database(
+    engine: Engine,
+    shown: Option<&Catalog>,
+    active: impl FnOnce() -> Option<String>,
+) -> ShortcutDatabase {
+    if !engine.catalog_is_per_database() {
+        return ShortcutDatabase::Unnamed;
+    }
+    shown
+        .and_then(|catalog| catalog.database.clone())
+        .or_else(active)
+        .map_or(ShortcutDatabase::Unknown, ShortcutDatabase::On)
 }
 
 impl Profile {
@@ -111,17 +132,32 @@ impl Profile {
     }
 
     /// The database the connection is on: as last listed, else as the
-    /// profile names it, else the one it opened on.
+    /// server spelled it on connecting, else as the profile names it, else
+    /// the one it opened on. The server's spelling before the profile's, so
+    /// a folder names the database as the list will once it comes.
     pub(crate) fn active_database(&self) -> Option<String> {
-        let opened = match &self.state {
-            ProfileState::Connected(connection) => connection.current_database(),
+        let connection = match &self.state {
+            ProfileState::Connected(connection) => Some(connection),
             _ => None,
         };
         self.databases
             .current
             .clone()
+            .or_else(|| connection?.spelled_database().map(str::to_string))
             .or_else(|| self.config.database_name())
-            .or_else(|| opened.map(str::to_string))
+            .or_else(|| connection?.current_database().map(str::to_string))
+    }
+
+    /// The database a folder or a pin names its objects by, where the
+    /// catalog is one database's. Where it lists every database as a schema,
+    /// none: keying on the one the session is on would hide every shortcut
+    /// after a switch, though the catalog still lists them all.
+    pub(crate) fn shortcut_database(&self) -> ShortcutDatabase {
+        let shown = match &self.catalog {
+            CatalogState::Loaded(catalog, _) => Some(catalog),
+            _ => None,
+        };
+        shortcut_database(self.config.engine(), shown, || self.active_database())
     }
 
     pub(crate) fn refreshing_schema(&self) -> bool {
@@ -224,8 +260,94 @@ impl Profile {
                 .map(|tab| tab.stored(self.session.active == Tab::Query(tab.id)))
                 .collect(),
             open_objects,
+            folders: self
+                .shortcuts
+                .folders
+                .iter()
+                .map(|folder| store::StoredFolder {
+                    name: folder.name.clone(),
+                    members: folder.members.iter().map(stored_member).collect(),
+                })
+                .collect(),
+            pins: self
+                .shortcuts
+                .pins
+                .iter()
+                .map(|pin| match pin {
+                    Pin::Member(member) => stored_member(member),
+                    Pin::Folder(name) => store::StoredShortcut {
+                        folder: Some(name.clone()),
+                        ..Default::default()
+                    },
+                })
+                .collect(),
         }
     }
+}
+
+fn stored_member(member: &Member) -> store::StoredShortcut {
+    match member {
+        Member::Query(name) => store::StoredShortcut {
+            query: Some(name.clone()),
+            ..Default::default()
+        },
+        Member::Object(object) => store::StoredShortcut {
+            database: object.database.clone(),
+            schema: Some(object.schema.clone()),
+            name: Some(object.name.clone()),
+            kind: Some(object.kind.slug().to_string()),
+            ..Default::default()
+        },
+    }
+}
+
+fn restored_member(stored: &store::StoredShortcut) -> Option<Member> {
+    if let Some(name) = &stored.query {
+        return Some(Member::Query(name.clone()));
+    }
+    Some(Member::Object(ObjectRef {
+        database: stored.database.clone(),
+        schema: stored.schema.clone()?,
+        name: stored.name.clone()?,
+        kind: ObjectKind::from_slug(stored.kind.as_deref()?)?,
+    }))
+}
+
+/// A profile's folders and pins as read back, less any entry this build
+/// cannot read and any that repeats one before it, which a hand-edited file
+/// can hold and the tree cannot: an id may be in it once.
+pub(crate) fn restored_shortcuts(
+    folders: &[store::StoredFolder],
+    pins: &[store::StoredShortcut],
+) -> Shortcuts {
+    let mut shortcuts = Shortcuts::default();
+    for folder in folders {
+        if shortcuts.add_folder(folder.name.trim()).is_err() {
+            continue;
+        }
+        let name = folder.name.trim();
+        for member in folder.members.iter().filter_map(restored_member) {
+            if !shortcuts.holds(name, &member) {
+                shortcuts.toggle(name, member);
+            }
+        }
+    }
+    for stored in pins {
+        let pin = match &stored.folder {
+            Some(name) if shortcuts.folder(name.trim()).is_some() => {
+                Pin::Folder(name.trim().to_string())
+            }
+            Some(_) => continue,
+            None => match restored_member(stored) {
+                Some(member) => Pin::Member(member),
+                None => continue,
+            },
+        };
+        if !shortcuts.pinned(&pin) {
+            shortcuts.toggle_pin(pin);
+        }
+    }
+    shortcuts
 }
 
 pub(crate) enum ProfileState {
@@ -275,6 +397,7 @@ pub(crate) struct Session {
     /// The matched characters of each row's name, by tree item id, as
     /// [`crate::explorer::ExplorerTree::highlights`] built them.
     pub(crate) explorer_highlights: Arc<HashMap<String, Vec<Range<usize>>>>,
+    pub(crate) explorer_shortcuts: Arc<HashMap<String, Shortcut>>,
     /// `cmd+enter` reaches the workspace only through the focused element's
     /// dispatch path, so an unfocused editor makes the primary keystroke dead.
     pub(crate) editor_needs_focus: bool,
@@ -299,7 +422,7 @@ pub(crate) struct Session {
     pub(crate) page_shown: usize,
     pub(crate) naming: bool,
     /// The saved query the delete dialog is asking about.
-    pub(crate) pending_delete: Option<String>,
+    pub(crate) pending_delete: Option<PendingDelete>,
     /// The sidebar row a saved query is being renamed in.
     pub(crate) query_rename: Option<QueryRename>,
     /// The same hazard as `save_name_needs_focus`, for the row's field.
@@ -709,6 +832,7 @@ impl Session {
             explorer_tree: cx.new(|cx| TreeState::new(cx)),
             explorer_leaves: Arc::new(HashMap::new()),
             explorer_highlights: Arc::new(HashMap::new()),
+            explorer_shortcuts: Arc::new(HashMap::new()),
             editor_needs_focus: true,
             save_name_needs_focus: false,
             saved_queries,
@@ -1113,8 +1237,13 @@ impl Session {
 
 /// A saved query's sidebar row turned into a field holding its name.
 pub(crate) struct QueryRename {
-    /// The name it has on disk now.
+    /// The name it has on disk now, or the folder's name.
     pub(crate) name: String,
+    /// A folder's name rather than a saved query's.
+    pub(crate) folder: bool,
+    /// The row the field is drawn over, by id: a saved query can be listed
+    /// in several places, and the field belongs in the one it was asked from.
+    pub(crate) row: SharedString,
     pub(crate) input: Entity<InputState>,
     /// Why the name typed was refused, until it is typed over.
     pub(crate) error: Option<String>,
@@ -1136,6 +1265,14 @@ pub(crate) fn query_name_refusal(
         .iter()
         .find(|saved| Some(saved.as_str()) != keeping && store::same_query_name(saved, name))
         .map(|saved| format!("A query named {saved} already exists."))
+}
+
+/// What the Delete dialog asks about.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PendingDelete {
+    Query(String),
+    /// A folder and how many it holds: one holding nothing goes unasked.
+    Folder(String, usize),
 }
 
 /// A close held up by the unapplied-edits question, and the saved query to
@@ -2693,6 +2830,81 @@ mod tests {
             sql: "UPDATE t SET a = 1".into(),
             notes: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_shortcut_names_the_database_the_shown_catalog_was_read_from() {
+        let read_from = |database: Option<&str>| Catalog {
+            database: database.map(str::to_string),
+            ..Catalog::default()
+        };
+        let opened_on = || Some("memory".to_string());
+        // A user's `USE other` then a refresh: the catalog is `other`'s,
+        // whatever the profile was opened or picked on.
+        assert_eq!(
+            shortcut_database(Engine::DuckDb, Some(&read_from(Some("other"))), opened_on),
+            ShortcutDatabase::On("other".into())
+        );
+        assert_eq!(
+            shortcut_database(Engine::DuckDb, Some(&read_from(None)), opened_on),
+            ShortcutDatabase::On("memory".into())
+        );
+        assert_eq!(
+            shortcut_database(Engine::DuckDb, None, || None),
+            ShortcutDatabase::Unknown
+        );
+        assert_eq!(
+            shortcut_database(Engine::MySql, Some(&read_from(Some("other"))), opened_on),
+            ShortcutDatabase::Unnamed
+        );
+    }
+
+    #[test]
+    fn shortcuts_read_back_less_what_cannot_be_read_or_repeats() {
+        let entry =
+            |query: Option<&str>, folder: Option<&str>, kind: Option<&str>| store::StoredShortcut {
+                query: query.map(str::to_string),
+                folder: folder.map(str::to_string),
+                schema: Some("public".into()),
+                name: Some("accounts".into()),
+                kind: kind.map(str::to_string),
+                ..Default::default()
+            };
+        let folders = [
+            store::StoredFolder {
+                name: "Hot".into(),
+                members: vec![
+                    entry(None, None, Some("table")),
+                    entry(None, None, Some("view")),
+                    entry(None, None, Some("sequence")),
+                    entry(Some("daily"), None, None),
+                ],
+            },
+            store::StoredFolder {
+                name: "hot".into(),
+                members: Vec::new(),
+            },
+        ];
+        let pins = [
+            entry(None, Some("Hot"), None),
+            entry(None, Some("Gone"), None),
+            entry(Some("daily"), None, None),
+            entry(Some("daily"), None, None),
+        ];
+        let shortcuts = restored_shortcuts(&folders, &pins);
+
+        assert_eq!(shortcuts.folders.len(), 1);
+        let held = &shortcuts.folders[0].members;
+        // A table and a view of one name are two objects.
+        assert_eq!(held.len(), 3, "{held:?}");
+        assert_eq!(held[2], Member::Query("daily".into()));
+        assert_eq!(
+            shortcuts.pins,
+            [
+                Pin::Folder("Hot".into()),
+                Pin::Member(Member::Query("daily".into()))
+            ]
+        );
     }
 
     #[test]

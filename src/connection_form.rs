@@ -18,6 +18,7 @@ use crate::{
         ConnectionConfig, Engine, Fields, MongoConfig, ServerConfig, SnowflakeConfig, SshTunnel,
         SslMode,
     },
+    explorer::Shortcuts,
     session::Profile,
     sql::Mode,
     theme::ConnectionColor,
@@ -101,6 +102,8 @@ pub(crate) struct ConnectionForm {
     /// The URL field as of its last change, to tell a URL pasted whole from
     /// one being typed.
     pub(crate) last_url: SharedString,
+    /// What a duplicate takes from the connection it copies, given on save.
+    pub(crate) shortcuts: Shortcuts,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -334,6 +337,7 @@ impl ConnectionForm {
             backdrop_shown: false,
             placeholders_for: None,
             last_url: SharedString::default(),
+            shortcuts: Shortcuts::default(),
             _subscriptions: subscriptions,
         };
         // The form is the whole window while it is open, and a window with
@@ -390,6 +394,7 @@ impl ConnectionForm {
         let mut form = Self::new(Some(&config), window, cx);
         form.color = profile.color;
         form.mode = starting_mode(Some(profile.mode));
+        form.shortcuts = profile.shortcuts.duplicated();
         form.name.update(cx, |input, cx| {
             input.set_value(name, window, cx);
         });

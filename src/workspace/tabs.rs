@@ -108,7 +108,14 @@ impl Workspace {
             return;
         };
         let leaf = profile.session.explorer_leaves.get(id.as_ref()).copied();
-        if let Some(name) = crate::explorer::saved_query(&id) {
+        let query = crate::explorer::saved_query(&id).or_else(|| {
+            profile
+                .session
+                .explorer_shortcuts
+                .get(id.as_ref())
+                .and_then(|shortcut| shortcut.query())
+        });
+        if let Some(name) = query {
             self.open_saved_query(name.to_string(), window, cx);
         } else if let Some(leaf) = leaf {
             self.open_explorer_target(leaf.target, window, cx);

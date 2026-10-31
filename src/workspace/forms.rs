@@ -12,14 +12,19 @@ use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::spinner::Spinner;
 use gpui_component::{ActiveTheme, Sizable};
 
+use super::folders::{DragLabel, DragShortcut};
 use super::welcome::{self, Part, Pose};
 use super::*;
 use crate::actions::{ConfirmDialog, NextDialogButton, PreviousDialogButton, TickDialogBox};
 use crate::connection_form::ConnectionTest;
-use crate::explorer::{QUERIES_GROUP, is_schema_row, relation_copies, saved_query};
+use crate::explorer::{
+    Landing, Member, PINNED_GROUP, Pin, QUERIES_GROUP, Shortcut, ShortcutDatabase, Shortcuts,
+    is_schema_row, landing, relation_copies, saved_query,
+};
 use crate::scroller::{SmoothScrollable, smooth_scoped};
+use crate::session::PendingDelete;
 use crate::sql::{Destructive, Stop};
-use crate::ui::{Status, code_lines, raised_card};
+use crate::ui::{Status, code_lines, raised_card, row_icon_tinted};
 
 impl Workspace {
     pub(crate) fn render_connection_form(
@@ -986,11 +991,11 @@ impl Workspace {
             ("pending-run", _) => self.cancel_pending_run(cx),
             ("discard", 0) => self.confirm_discard_close(window, cx),
             ("discard", _) => _ = self.cancel_discard_close(cx),
-            ("delete", 0) => {
-                if let Some(name) = deleting {
-                    self.delete_saved_query(name, window, cx);
-                }
-            }
+            ("delete", 0) => match deleting {
+                Some(PendingDelete::Query(name)) => self.delete_saved_query(name, window, cx),
+                Some(PendingDelete::Folder(name, _)) => self.delete_folder(name, cx),
+                None => {}
+            },
             ("delete", _) => _ = self.cancel_delete_query(cx),
             // The button is disabled while the batch runs.
             ("apply-review", 0) if !running => self.run_apply_review(cx),
@@ -1331,15 +1336,32 @@ impl Workspace {
     }
 
     /// What Delete asks before a saved query's file goes, since nothing
-    /// brings it back.
+    /// brings it back, or before a folder holding anything goes.
     pub(crate) fn render_delete_confirmation(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let t = popup_theme(cx);
         let session = &self.profile()?.session;
-        let name = session.pending_delete.clone()?;
-        let open = session.tab_holding(&name).is_some();
+        let deleting = session.pending_delete.clone()?;
+        let (heading, question) = match &deleting {
+            PendingDelete::Query(name) if session.tab_holding(name).is_some() => (
+                "Delete query",
+                format!("Delete {name}? Its tab is closed too. This cannot be undone."),
+            ),
+            PendingDelete::Query(name) => (
+                "Delete query",
+                format!("Delete {name}? This cannot be undone."),
+            ),
+            PendingDelete::Folder(name, held) => (
+                "Delete folder",
+                format!(
+                    "Delete {name}? Only the folder goes: the {held} {} in it {} listed \
+                     everywhere else.",
+                    if *held == 1 { "item" } else { "items" },
+                    if *held == 1 { "stays" } else { "stay" },
+                ),
+            ),
+        };
         let cancel_workspace = cx.entity().downgrade();
         let delete_workspace = cancel_workspace.clone();
-        let deleted = name.clone();
 
         Some(
             div()
@@ -1351,19 +1373,12 @@ impl Workspace {
                 .justify_center()
                 .child(
                     dialog(t)
-                        .child(section_label(t, "Delete query"))
+                        .child(section_label(t, heading))
                         .child(
                             div()
                                 .text_size(px(layout::chrome(layout::TEXT_SM)))
                                 .text_color(t.text_muted)
-                                .child(if open {
-                                    format!(
-                                        "Delete {name}? Its tab is closed too. This cannot \
-                                         be undone."
-                                    )
-                                } else {
-                                    format!("Delete {name}? This cannot be undone.")
-                                }),
+                                .child(question),
                         )
                         .child(
                             div()
@@ -1405,11 +1420,13 @@ impl Workspace {
                                         .on_click(
                                             move |_, window, cx| {
                                                 _ = delete_workspace.update(cx, |workspace, cx| {
-                                                    workspace.delete_saved_query(
-                                                        deleted.clone(),
-                                                        window,
-                                                        cx,
-                                                    );
+                                                    match deleting.clone() {
+                                                        PendingDelete::Query(name) => workspace
+                                                            .delete_saved_query(name, window, cx),
+                                                        PendingDelete::Folder(name, _) => {
+                                                            workspace.delete_folder(name, cx)
+                                                        }
+                                                    }
                                                 });
                                             },
                                         ),
@@ -2278,11 +2295,15 @@ impl Workspace {
         let workspace = cx.entity().downgrade();
         let leaves = profile.session.explorer_leaves.clone();
         let highlights = profile.session.explorer_highlights.clone();
+        let shortcuts = profile.session.explorer_shortcuts.clone();
+        let menu_shortcuts = shortcuts.clone();
+        let profile_id = profile.id.clone();
         let menu_leaves = leaves.clone();
         let menu_workspace = workspace.clone();
         let active_schema = profile.active_schema().map(gpui::SharedString::from);
         let menu_schema = active_schema.clone();
         let picks_schema = profile.config.engine().picks_schema();
+        let drop_line = self.explorer_drop.clone();
         let open_queries: HashSet<String> = profile
             .session
             .queries
@@ -2291,7 +2312,7 @@ impl Workspace {
             .collect();
         let renaming = profile.session.query_rename.as_ref().map(|rename| {
             (
-                rename.name.clone(),
+                rename.row.clone(),
                 rename.input.clone(),
                 rename.error.clone(),
             )
@@ -2309,18 +2330,36 @@ impl Workspace {
                 &profile.session.explorer_tree,
                 move |index, entry, _, _, cx| {
                     let t = *theme(cx);
-                    let leaf = leaves.get(entry.item().id.as_str()).copied();
-                    let query = saved_query(entry.item().id.as_str()).map(str::to_string);
-                    let group = entry.item().id.as_ref() == QUERIES_GROUP;
+                    let id = entry.item().id.as_str();
+                    let leaf = leaves.get(id).copied();
+                    let shortcut = shortcuts.get(id);
+                    let missing = matches!(shortcut, Some(Shortcut::Member { missing: true, .. }));
+                    let query = saved_query(id)
+                        .or_else(|| shortcut.and_then(Shortcut::query))
+                        .map(str::to_string);
+                    let pinned_group = id == PINNED_GROUP;
+                    let group = id == QUERIES_GROUP || pinned_group;
+                    // A shortcut is listed away from its schema, which is
+                    // then all that tells two of the same name apart.
+                    let schema = match shortcut {
+                        Some(Shortcut::Member {
+                            member: Member::Object(object),
+                            ..
+                        }) => Some(object.schema.clone()),
+                        _ => None,
+                    };
                     let label = entry.item().label.clone();
+                    let drag_label = label.clone();
+                    let line = drop_line
+                        .as_ref()
+                        .filter(|(row, _)| row.as_str() == id && cx.has_active_drag())
+                        .map(|(_, after)| *after);
                     let active = is_schema_row(entry.item().id.as_str())
                         && active_schema.as_ref() == Some(&label);
                     let open = query
                         .as_ref()
                         .is_some_and(|name| open_queries.contains(name));
-                    let rename = renaming
-                        .as_ref()
-                        .filter(|(name, ..)| query.as_ref() == Some(name));
+                    let rename = renaming.as_ref().filter(|(row, ..)| row.as_str() == id);
                     let matched = highlights
                         .get(entry.item().id.as_str())
                         .map_or(&[][..], Vec::as_slice);
@@ -2328,11 +2367,16 @@ impl Workspace {
                     // category only labels the run of objects under it, and the
                     // objects themselves are what the eye is actually hunting for.
                     let (label, row) = match (leaf, entry.depth()) {
+                        // Should be there and is not: greyed, and opens nothing.
+                        _ if missing => (
+                            highlighted(label, matched, t),
+                            ListItem::new(index).text_color(t.text_muted),
+                        ),
                         (Some(_), _) => (
                             highlighted(label, matched, t),
                             ListItem::new(index).text_color(t.text),
                         ),
-                        _ if query.is_some() => (
+                        _ if query.is_some() || matches!(shortcut, Some(Shortcut::Folder(_))) => (
                             highlighted(label, matched, t),
                             ListItem::new(index).text_color(t.text),
                         ),
@@ -2353,11 +2397,24 @@ impl Workspace {
                     // A folder shows which way it is facing; an object shows what
                     // kind of object it is. Both occupy the same slot, so the
                     // labels line up down the column either way.
-                    let row_icon_path = match leaf {
-                        Some(leaf) => object_icon(leaf.kind),
-                        None if query.is_some() => icon::SAVED_QUERY,
-                        None if entry.is_expanded() => icon::CHEVRON_DOWN,
-                        None => icon::CHEVRON_RIGHT,
+                    let row_icon_path = match (leaf, shortcut) {
+                        (Some(leaf), _) => object_icon(leaf.kind),
+                        (
+                            None,
+                            Some(Shortcut::Member {
+                                member: Member::Object(object),
+                                ..
+                            }),
+                        ) => object_icon(object.kind),
+                        _ if query.is_some() || missing => icon::SAVED_QUERY,
+                        (None, Some(Shortcut::Folder(_)))
+                            if entry.is_folder() && entry.is_expanded() =>
+                        {
+                            icon::FOLDER_OPEN
+                        }
+                        (None, Some(Shortcut::Folder(_))) => icon::FOLDER,
+                        _ if entry.is_expanded() => icon::CHEVRON_DOWN,
+                        _ => icon::CHEVRON_RIGHT,
                     };
                     let row = row
                         .mx(px(layout::SPACE_XS))
@@ -2370,15 +2427,24 @@ impl Workspace {
                         ))
                         .child(
                             div()
+                                .relative()
                                 .flex()
                                 .items_center()
                                 .gap(px(layout::SPACE_SM))
                                 .min_w_0()
                                 .flex_1()
-                                .child(row_icon(t, row_icon_path))
+                                .child(match missing {
+                                    true => {
+                                        row_icon_tinted(t, row_icon_path, None).into_any_element()
+                                    }
+                                    false => row_icon(t, row_icon_path).into_any_element(),
+                                })
                                 .child(match rename {
                                     Some((_, input, error)) => {
                                         rename_field(label, input, error.clone(), t)
+                                    }
+                                    None if pinned_group => {
+                                        div().flex_1().child(row_icon(t, icon::PIN))
                                     }
                                     None => div()
                                         .flex_1()
@@ -2387,6 +2453,17 @@ impl Workspace {
                                         .text_ellipsis()
                                         .whitespace_nowrap()
                                         .child(label),
+                                })
+                                .when_some(schema.filter(|_| rename.is_none()), |row, schema| {
+                                    row.child(
+                                        div()
+                                            .flex_none()
+                                            .whitespace_nowrap()
+                                            .text_color(t.text_faint)
+                                            .text_size(px(layout::chrome(layout::TEXT_XS)))
+                                            .font_weight(FontWeight::NORMAL)
+                                            .child(schema),
+                                    )
                                 })
                                 .when(rename.is_none() && (active || open), |row| {
                                     row.child(
@@ -2408,10 +2485,72 @@ impl Workspace {
                                             .text_size(px(layout::chrome(layout::TEXT_XS)))
                                             .child(human_bytes(size)),
                                     )
+                                })
+                                .when_some(line, |row, after| {
+                                    // Out through `ListItem`'s own `py_1` to
+                                    // the row's edge.
+                                    let edge = gpui::rems(-0.25);
+                                    row.child(
+                                        div()
+                                            .absolute()
+                                            .left_0()
+                                            .right_0()
+                                            .h(px(2.))
+                                            .rounded(px(1.))
+                                            .bg(t.accent)
+                                            .map(|line| match after {
+                                                true => line.bottom(edge),
+                                                false => line.top(edge),
+                                            }),
+                                    )
                                 }),
-                        );
+                        )
+                        .debug_selector(move || format!("explorer-row-{index}"));
+                    // A drag that starts while the database is not known
+                    // carries nothing, as the menus offer nothing then.
+                    let dragged = match (shortcut, &query, leaf) {
+                        _ if rename.is_some() => None,
+                        (Some(shortcut), _, _) => Some(shortcut.pin()),
+                        (None, Some(name), _) => Some(Pin::Member(Member::Query(name.clone()))),
+                        (None, None, Some(leaf)) => workspace
+                            .upgrade()
+                            .and_then(|workspace| workspace.read(cx).member_at(leaf.target))
+                            .map(Pin::Member),
+                        _ => None,
+                    };
+                    let row = match dragged {
+                        Some(pin) => {
+                            let workspace = workspace.clone();
+                            let dragged = DragShortcut {
+                                profile: profile_id.clone(),
+                                pin,
+                                from: shortcut.and_then(|shortcut| shortcut.container(id)),
+                                label: drag_label,
+                            };
+                            row.on_drag(dragged, move |dragged, grab, _, cx| {
+                                _ = workspace.update(cx, |workspace, _| {
+                                    workspace.explorer_drop = None;
+                                });
+                                cx.new(|_| DragLabel {
+                                    label: dragged.label.clone(),
+                                    grab,
+                                })
+                            })
+                        }
+                        None => row,
+                    };
+                    let row = match rename.is_none() && (pinned_group || shortcut.is_some()) {
+                        true => drop_target(
+                            row,
+                            entry.item().id.clone(),
+                            shortcut.cloned(),
+                            &workspace,
+                            t,
+                        ),
+                        false => row,
+                    };
                     // A click inside the field is the field's.
-                    if rename.is_some() {
+                    if rename.is_some() || missing {
                         return row;
                     }
                     if let Some(name) = query {
@@ -2437,10 +2576,62 @@ impl Workspace {
                 },
             )
             .context_menu(move |_, entry, menu, window, cx| {
-                if let Some(name) = saved_query(entry.item().id.as_str()) {
-                    return saved_query_menu(menu, name, &menu_workspace);
+                let id = entry.item().id.clone();
+                let shortcut = menu_shortcuts.get(id.as_ref()).cloned();
+                let shortcuts = menu_workspace
+                    .upgrade()
+                    .and_then(|workspace| {
+                        workspace
+                            .read(cx)
+                            .profile()
+                            .map(|profile| profile.shortcuts.clone())
+                    })
+                    .unwrap_or_default();
+                let held_in = match &shortcut {
+                    Some(Shortcut::Member { folder, .. }) => folder.clone(),
+                    _ => None,
+                };
+                match &shortcut {
+                    Some(Shortcut::Folder(name)) => {
+                        let pinned = shortcuts.pinned(&Pin::Folder(name.clone()));
+                        return folder_menu(menu, name, id, pinned, &menu_workspace);
+                    }
+                    Some(Shortcut::Member {
+                        member,
+                        missing: true,
+                        ..
+                    }) => {
+                        return removal_items(menu, member, held_in, &shortcuts, &menu_workspace);
+                    }
+                    _ => {}
                 }
-                let Some(leaf) = menu_leaves.get(entry.item().id.as_str()).copied() else {
+                if id.as_ref() == PINNED_GROUP {
+                    let workspace = menu_workspace.clone();
+                    return menu.item(PopupMenuItem::new("New Folder…").on_click(
+                        move |_, window, cx| {
+                            _ = workspace.update(cx, |workspace, cx| {
+                                workspace.new_folder(None, window, cx);
+                            });
+                        },
+                    ));
+                }
+                let query = saved_query(&id)
+                    .or_else(|| shortcut.as_ref().and_then(Shortcut::query))
+                    .map(str::to_string);
+                if let Some(name) = query {
+                    let menu = saved_query_menu(menu, &name, id, &menu_workspace);
+                    let member = Member::Query(name);
+                    return shortcut_menu(
+                        menu,
+                        member,
+                        held_in,
+                        &shortcuts,
+                        &menu_workspace,
+                        window,
+                        cx,
+                    );
+                }
+                let Some(leaf) = menu_leaves.get(id.as_ref()).copied() else {
                     if !picks_schema || !is_schema_row(entry.item().id.as_str()) {
                         return menu;
                     }
@@ -2461,8 +2652,27 @@ impl Workspace {
                     return menu;
                 };
                 let workspace = workspace.read(cx);
+                let member = workspace.member_at(leaf.target);
+                let unknown = workspace.profile().is_some_and(|profile| {
+                    profile.shortcut_database() == ShortcutDatabase::Unknown
+                });
+                let with_shortcuts =
+                    |menu: PopupMenu, window: &mut Window, cx: &mut App| match member.clone() {
+                        Some(member) => shortcut_menu(
+                            menu,
+                            member,
+                            held_in.clone(),
+                            &shortcuts,
+                            &menu_workspace,
+                            window,
+                            cx,
+                        ),
+                        None if unknown => unknown_database_items(menu),
+                        None => menu,
+                    };
+                // A routine offers what a folder or a pin does, and no more.
                 let Some((schema, relation, kind)) = workspace.relation_at(leaf.target) else {
-                    return menu;
+                    return with_shortcuts(menu, window, cx);
                 };
                 let engine = workspace.engine();
                 let copy = |label: &'static str, text: String| {
@@ -2523,7 +2733,7 @@ impl Workspace {
                     ));
                 }
                 menu = menu.item(PopupMenuItem::submenu("Export", exports));
-                relation_copies(engine, &schema, &relation, kind)
+                let menu = relation_copies(engine, &schema, &relation, kind)
                     .into_iter()
                     .fold(menu, |menu, group| {
                         group
@@ -2543,7 +2753,8 @@ impl Workspace {
                                     ))
                                 }
                             })
-                    })
+                    });
+                with_shortcuts(menu, window, cx)
             })
         });
         let content = div()
@@ -2609,6 +2820,7 @@ impl Workspace {
 fn saved_query_menu(
     menu: PopupMenu,
     name: &str,
+    row: gpui::SharedString,
     workspace: &gpui::WeakEntity<Workspace>,
 ) -> PopupMenu {
     let action =
@@ -2623,13 +2835,218 @@ fn saved_query_menu(
     menu.item(action("Open", |workspace, name, window, cx| {
         workspace.open_saved_query(name, window, cx)
     }))
-    .item(action("Rename…", |workspace, name, window, cx| {
-        workspace.start_query_rename(name, window, cx)
-    }))
+    .item({
+        let workspace = workspace.clone();
+        let name = name.to_string();
+        PopupMenuItem::new("Rename…").on_click(move |_, window, cx| {
+            _ = workspace.update(cx, |workspace, cx| {
+                workspace.start_query_rename(name.clone(), row.clone(), window, cx)
+            });
+        })
+    })
     .separator()
     .item(action("Delete…", |workspace, name, _, cx| {
         workspace.ask_delete_saved_query(name, cx)
     }))
+}
+
+/// What a folder's row offers.
+fn folder_menu(
+    menu: PopupMenu,
+    name: &str,
+    row: gpui::SharedString,
+    pinned: bool,
+    workspace: &gpui::WeakEntity<Workspace>,
+) -> PopupMenu {
+    let (rename, name) = ((workspace.clone(), name.to_string()), name.to_string());
+    let delete = (workspace.clone(), name.clone());
+    menu.item(
+        PopupMenuItem::new("Rename…").on_click(move |_, window, cx| {
+            let (workspace, name) = &rename;
+            _ = workspace.update(cx, |workspace, cx| {
+                workspace.start_rename(name.clone(), true, row.clone(), window, cx)
+            });
+        }),
+    )
+    .item(pin_item(pinned, Pin::Folder(name), workspace))
+    .separator()
+    .item(PopupMenuItem::new("Delete…").on_click(move |_, _, cx| {
+        let (workspace, name) = &delete;
+        _ = workspace.update(cx, |workspace, cx| {
+            workspace.ask_delete_folder(name.clone(), cx)
+        });
+    }))
+}
+
+/// What every object's and saved query's row offers for folders and pins,
+/// wherever the row is drawn: "Add to Folder" with a check on each folder it
+/// is in, which toggles, and Pin or Unpin.
+fn shortcut_menu(
+    menu: PopupMenu,
+    member: Member,
+    held_in: Option<String>,
+    shortcuts: &Shortcuts,
+    workspace: &gpui::WeakEntity<Workspace>,
+    window: &mut Window,
+    cx: &mut App,
+) -> PopupMenu {
+    let mut folders: Vec<(String, bool)> = shortcuts
+        .folders
+        .iter()
+        .map(|folder| (folder.name.clone(), shortcuts.holds(&folder.name, &member)))
+        .collect();
+    folders.sort_by_cached_key(|(name, _)| name.to_lowercase());
+    let (submenu_workspace, submenu_member) = (workspace.clone(), member.clone());
+    // Built here rather than through `PopupMenu::submenu`, as "Export" is.
+    let submenu = PopupMenu::build(window, cx, move |submenu, _, _| {
+        let toggle = |name: &String, held: bool| {
+            let (workspace, member, name) = (
+                submenu_workspace.clone(),
+                submenu_member.clone(),
+                name.clone(),
+            );
+            PopupMenuItem::new(name.clone())
+                .checked(held)
+                .on_click(move |_, _, cx| {
+                    _ = workspace.update(cx, |workspace, cx| {
+                        workspace.toggle_in_folder(name.clone(), member.clone(), cx)
+                    });
+                })
+        };
+        let submenu = folders.iter().fold(submenu, |submenu, (name, held)| {
+            submenu.item(toggle(name, *held))
+        });
+        let submenu = match folders.is_empty() {
+            true => submenu,
+            false => submenu.separator(),
+        };
+        submenu.item(
+            PopupMenuItem::new("New Folder…").on_click(move |_, window, cx| {
+                _ = submenu_workspace.update(cx, |workspace, cx| {
+                    workspace.new_folder(Some(submenu_member.clone()), window, cx)
+                });
+            }),
+        )
+    });
+    let pin = Pin::Member(member.clone());
+    let menu = menu
+        .separator()
+        .item(PopupMenuItem::submenu("Add to Folder", submenu))
+        .item(pin_item(shortcuts.pinned(&pin), pin, workspace));
+    match held_in {
+        Some(folder) => menu.item(remove_item(folder, member, workspace)),
+        None => menu,
+    }
+}
+
+/// Folders and pins, greyed while the database an object is in is not known:
+/// a shortcut made without it would open the same name in any database.
+fn unknown_database_items(menu: PopupMenu) -> PopupMenu {
+    menu.separator()
+        .item(PopupMenuItem::new("Add to Folder").disabled(true))
+        .item(PopupMenuItem::new("Pin").disabled(true))
+        .label("The database is not known yet.")
+}
+
+/// All a missing member's row offers: taking it out of where it is listed.
+fn removal_items(
+    menu: PopupMenu,
+    member: &Member,
+    held_in: Option<String>,
+    shortcuts: &Shortcuts,
+    workspace: &gpui::WeakEntity<Workspace>,
+) -> PopupMenu {
+    let pin = Pin::Member(member.clone());
+    let menu = match held_in {
+        Some(folder) => menu.item(remove_item(folder, member.clone(), workspace)),
+        None => menu,
+    };
+    match shortcuts.pinned(&pin) {
+        true => menu.item(pin_item(true, pin, workspace)),
+        false => menu,
+    }
+}
+
+/// A row in a folder or the Pinned group, or the group itself, taking a
+/// dragged shortcut: a folder's row and the group's light up, and a member's
+/// draws the line between its neighbours where the drop would go.
+fn drop_target(
+    row: ListItem,
+    id: gpui::SharedString,
+    shortcut: Option<Shortcut>,
+    workspace: &gpui::WeakEntity<Workspace>,
+    t: Theme,
+) -> ListItem {
+    let land = {
+        let id = id.clone();
+        std::rc::Rc::new(move |dragged: &Pin, after: bool| {
+            landing(&id, shortcut.as_ref(), dragged, after)
+        })
+    };
+    let (moved, dropped) = (workspace.clone(), workspace.clone());
+    row.can_drop({
+        let land = land.clone();
+        move |dragged, _, _| {
+            dragged
+                .downcast_ref::<DragShortcut>()
+                .is_some_and(|dragged| land(&dragged.pin, false).is_some())
+        }
+    })
+    .drag_over::<DragShortcut>({
+        let land = land.clone();
+        move |style, dragged, _, _| match land(&dragged.pin, false) {
+            Some(Landing::Folder(_) | Landing::Pinned) => style.bg(t.element_active),
+            _ => style,
+        }
+    })
+    // Every row hears every move, so each says only whether it is the one
+    // under the pointer.
+    .on_drag_move::<DragShortcut>({
+        let (land, row) = (land.clone(), id.clone());
+        move |event, _, cx| {
+            let (position, bounds) = (event.event.position, event.bounds);
+            let after = position.y > bounds.center().y;
+            let beside = bounds.contains(&position)
+                && matches!(
+                    land(&event.drag(cx).pin, after),
+                    Some(Landing::Beside { .. })
+                );
+            _ = moved.update(cx, |workspace, cx| {
+                workspace.hover_drop(&row, beside.then_some(after), cx)
+            });
+        }
+    })
+    .on_drop(move |dragged: &DragShortcut, _, cx| {
+        _ = dropped.update(cx, |workspace, cx| {
+            let after = workspace
+                .explorer_drop
+                .as_ref()
+                .is_some_and(|(row, after)| *row == id && *after);
+            if let Some(landing) = land(&dragged.pin, after) {
+                workspace.drop_shortcut(dragged, landing, cx);
+            }
+        });
+    })
+}
+
+fn pin_item(pinned: bool, pin: Pin, workspace: &gpui::WeakEntity<Workspace>) -> PopupMenuItem {
+    let workspace = workspace.clone();
+    PopupMenuItem::new(if pinned { "Unpin" } else { "Pin" }).on_click(move |_, _, cx| {
+        _ = workspace.update(cx, |workspace, cx| workspace.toggle_pin(pin.clone(), cx));
+    })
+}
+
+fn remove_item(
+    folder: String,
+    member: Member,
+    workspace: &gpui::WeakEntity<Workspace>,
+) -> PopupMenuItem {
+    let workspace = workspace.clone();
+    PopupMenuItem::new("Remove from Folder").on_click(move |_, _, cx| {
+        _ = workspace.update(cx, |workspace, cx| {
+            workspace.toggle_in_folder(folder.clone(), member.clone(), cx)
+        });
+    })
 }
 
 /// A saved query's name as a field, laid over the label it replaces. The
@@ -2904,8 +3321,9 @@ fn revealed(row: gpui::Div, index: usize, animate: bool) -> AnyElement {
 
 /// Whether the sidebar draws its tree: with a catalog that lists something,
 /// and while the catalog is away too, so a connection that is down or still
-/// loading has its saved queries within reach.
+/// loading has its saved queries, folders and pins within reach.
 pub(super) fn explorer_drawn(profile: &Profile) -> bool {
     matches!(&profile.catalog, CatalogState::Loaded(catalog, _) if !catalog.schemas.is_empty())
         || !profile.session.saved_queries.is_empty()
+        || profile.shortcuts != Shortcuts::default()
 }

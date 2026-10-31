@@ -353,6 +353,58 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   file. A name taken in any case is refused. New saves also install their
   target without replacing an existing entry; a missed directory listing is
   not permission to overwrite it. Staging files are private to each writer.
+- **Folders and pins are shortcuts** (`explorer::Shortcuts` on `Profile`,
+  stored as the profile's `folders` and `pins`, left out when empty). Adding
+  an object or a saved query to a folder, or pinning it, leaves its row where
+  it was: the schemas always list the whole catalog, so an item can be in
+  several folders and deleting a folder loses only the grouping. Folders are
+  flat and their names unique per connection in any case. The sidebar lists
+  Pinned (in the user's order; a pinned folder moves there with what it
+  holds), then the other folders by name, then Queries, then the schemas. A
+  shortcut's row id is everything it is named by (database, kind and the row
+  it repeats) behind `pinned/` or its folder's `folder:{len}:{name}/`, the
+  length keeping a name with a `/` from running into its members' ids, so no
+  two members share a row, folds survive a rebuild, and the row opens through
+  the same `ExplorerLeaf`. An object is named by schema, name and kind, and by
+  its database only where `Engine::catalog_is_per_database`: `public.users`
+  is in every Postgres database, so without it a folder would show another
+  database's table after Select Database, while MySQL, MariaDB and ClickHouse
+  list every database as a schema already, and keying on the session's
+  database there would hide shortcuts whose objects are still listed. A member
+  of another database is left out, not greyed. The database is the one the
+  shown catalog was read from where the catalog says (`Catalog::database`,
+  DuckDB's, read under the same lock as its objects), ahead of the database
+  list and the profile: a user's `USE` moves a DuckDB session without the
+  profile hearing of it, and a shortcut names what the sidebar shows. SQL
+  Server needs none, since it moves a `USE` back. While a per-database engine's
+  database is not known, nothing is named by it (Add to Folder and Pin are
+  greyed on objects) and no member naming one is shown: a shortcut without
+  its database would match any. One stored without a database there is
+  greyed, never matched, for the same reason. One the catalog or the saved
+  queries no longer list stays, greyed, offering only Remove from Folder and
+  Unpin: a dropped table may come back and a permission be granted, and
+  losing the user's grouping to a refresh would be worse than a grey row. A
+  saved query is named by its name alone; a rename follows it into folders
+  and pins and a delete takes it out. A duplicated connection takes the
+  folders and pins less its saved queries, which a duplicate does not copy.
+  New Folder makes one under an unused name and opens the rename field on its
+  row, named after it exists so the field has a row to sit on; a filter is
+  cleared first, since a field focused on a row the filter hides takes the
+  keyboard nowhere.
+  Any object, saved query or folder row drags (`DragShortcut`, a static
+  label for its preview); the state change is `Shortcuts::drop_on`. Dropped
+  on a folder's row, a member taken out of another folder moves, and one from
+  anywhere else (the schemas, Queries, Pinned) is added and stays where it
+  was: a folder is shortcuts, so taking a row out of the schema tree is never
+  what a drop does, while a folder-to-folder drag is the one place a copy
+  would leave behind something nobody asked to keep. On the Pinned group's
+  row anything is pinned; on a member's row in a folder or Pinned it goes
+  before or after that row by the pointer's half, which on a folder means
+  added or moved there by the same rule. A folder holds no folders, so a
+  folder dropped on a pinned folder is reordered among the pins. Nothing
+  lands where no row takes it, and an object dragged while its database is
+  unknown carries nothing. The Pinned group exists only while something is
+  pinned, so pinning the first thing is the menu's.
 - **A named buffer persists to its query file, an unnamed one to its own
   `.scratch-{id}.sql`.** Edits stay in memory until Save, a connection switch,
   opening another query, or normal quit/window close persists the buffers.

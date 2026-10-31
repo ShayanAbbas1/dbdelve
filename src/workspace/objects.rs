@@ -1808,6 +1808,7 @@ mod tests {
                         _ => Vec::new(),
                     },
                 }],
+                database: None,
             },
             routines,
         )

@@ -742,20 +742,19 @@ impl Connection {
                 alongside: false,
             };
             let mut session = connection.connect()?;
-            if connection.server.database.is_empty() {
-                // The login's default database, named so that `held_to_database`
-                // and a reconnect return to it rather than to "".
-                connection.server.database = current_database(&mut session).map_err(|error| {
-                    match error.message.is_empty() {
-                        true => plain_error(
-                            "The connection closed while asking which database the login landed \
-                             in."
+            // Asked even when the profile names one, for the server's spelling
+            // of it: names are read in any case, and the list of databases
+            // spells them the server's way. With none named, the login's
+            // default, so `held_to_database` and a reconnect return to it
+            // rather than to "".
+            connection.server.database =
+                current_database(&mut session).map_err(|error| match error.message.is_empty() {
+                    true => plain_error(
+                        "The connection closed while asking which database the login landed in."
                             .into(),
-                        ),
-                        false => error,
-                    }
+                    ),
+                    false => error,
                 })?;
-            }
             *connection.session.lock().expect("unshared until returned") = Some(session);
             Ok(connection)
         })
@@ -792,6 +791,12 @@ impl Connection {
             lost: None,
             rowcount: false,
         })
+    }
+
+    /// The profile's database, or the login's default when it names none,
+    /// as the server spelled it on opening.
+    pub fn current_database(&self) -> &str {
+        &self.server.database
     }
 
     /// A second session, for a statement to run on beside this one's; see
@@ -2725,6 +2730,19 @@ mod tests {
 
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_database_named_in_another_case_is_held_as_the_server_spells_it() {
+        let named = live_config().database;
+        let connection = Connection::open(&ServerConfig {
+            database: named.to_uppercase(),
+            ..live_config()
+        })
+        .expect("a database name is read in any case");
+
+        assert_eq!(connection.current_database(), named);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
     fn live_a_blank_database_holds_a_use_to_where_the_login_landed() {
         let connection = Connection::open(&ServerConfig {
             database: String::new(),
@@ -2736,6 +2754,7 @@ mod tests {
             .unwrap()
             .current
             .expect("a login lands somewhere");
+        assert_eq!(connection.current_database(), landed);
 
         let elsewhere = if landed == "master" {
             "tempdb"

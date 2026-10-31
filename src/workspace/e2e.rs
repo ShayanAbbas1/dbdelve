@@ -13,7 +13,7 @@ use super::Workspace;
 use crate::{
     actions::CancelQuery,
     db::{CancelToken, Engine, Fetch},
-    keybindings,
+    explorer, keybindings,
     palette::{Mode as PaletteMode, Scope},
     session::{CatalogState, ObjectBody, QueryState, QueryTab},
     store,
@@ -1508,6 +1508,252 @@ fn a_count_whose_tab_closed_under_it_still_leaves_its_outcome_in_the_history(
         let profile =
             workspace.read_with(cx, |workspace, _| workspace.profile().unwrap().id.clone());
         assert!(store::history(&profile)[0].ms.is_some());
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_new_folder_takes_its_name_from_the_keyboard_and_hands_it_back(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                let leaf =
+                    workspace.profile().unwrap().session.explorer_leaves["relation-main\0birds"];
+                let member = workspace.member_at(leaf.target);
+                assert!(member.is_some(), "the table is nameable");
+                workspace.new_folder(member, window, cx);
+            });
+        });
+        settle(cx);
+        let naming = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                let session = &workspace.read(cx).profile().unwrap().session;
+                session
+                    .query_rename
+                    .as_ref()
+                    .map(|rename| rename.input.focus_handle(cx).is_focused(window))
+            })
+        };
+        assert_eq!(
+            naming(cx),
+            Some(true),
+            "the folder's field has the keyboard"
+        );
+
+        cx.simulate_input("Birds");
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        assert_eq!(naming(cx), None);
+        assert!(editor_has_keyboard(&workspace, cx));
+        cx.update(|_, cx| {
+            let profile = workspace.read(cx).profile().unwrap();
+            let folders = &profile.shortcuts.folders;
+            assert_eq!(folders.len(), 1);
+            assert_eq!(folders[0].name, "Birds");
+            assert_eq!(folders[0].members.len(), 1);
+            let tree = profile.session.explorer_tree.read(cx);
+            let row = tree.entry(0).expect("the folder leads the sidebar");
+            assert_eq!(row.item().label.as_ref(), "Birds");
+            assert_eq!(row.item().children[0].label.as_ref(), "birds");
+        });
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_folder_keeps_the_sidebar_drawn_while_the_catalog_is_away(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        cx.update(|_, cx| {
+            workspace.update(cx, |workspace, _| {
+                let profile = workspace.profile_mut().unwrap();
+                profile.catalog = CatalogState::Failed("gone".into());
+                assert!(profile.session.saved_queries.is_empty());
+                assert!(!super::forms::explorer_drawn(profile));
+
+                profile.shortcuts.add_folder("Hot").unwrap();
+                assert!(
+                    super::forms::explorer_drawn(profile),
+                    "its Remove and Unpin are reachable"
+                );
+            });
+        });
+
+        quit(workspace, cx);
+    });
+}
+
+/// Where the sidebar draws `row`, by its id.
+fn explorer_row(
+    workspace: &Entity<Workspace>,
+    row: &str,
+    cx: &mut VisualTestContext,
+) -> gpui::Bounds<gpui::Pixels> {
+    let index = cx
+        .update(|_, cx| {
+            let tree = workspace
+                .read(cx)
+                .profile()
+                .unwrap()
+                .session
+                .explorer_tree
+                .clone();
+            tree.read(cx).index_of(&row.to_string().into())
+        })
+        .expect("the row is listed");
+    // `debug_bounds` takes a `'static` selector; a test's few rows can leak.
+    let selector: &'static str = format!("explorer-row-{index}").leak();
+    cx.debug_bounds(selector).expect("the row is drawn")
+}
+
+/// The id of the row listing `member` in `folder`, or among the pins.
+fn shortcut_row(
+    workspace: &Entity<Workspace>,
+    member: &explorer::Member,
+    folder: Option<&str>,
+    cx: &mut VisualTestContext,
+) -> String {
+    cx.update(|_, cx| {
+        let session = &workspace.read(cx).profile().unwrap().session;
+        let listed = explorer::Shortcut::Member {
+            member: member.clone(),
+            folder: folder.map(str::to_string),
+            missing: false,
+        };
+        session
+            .explorer_shortcuts
+            .iter()
+            .find(|(_, shortcut)| **shortcut == listed)
+            .map(|(row, _)| row.clone())
+            .expect("the shortcut is listed")
+    })
+}
+
+/// A left-button drag from `from` to `to`, frame by frame, as the pointer
+/// would make it.
+fn drag(
+    cx: &mut VisualTestContext,
+    from: gpui::Point<gpui::Pixels>,
+    to: gpui::Point<gpui::Pixels>,
+) {
+    let none = gpui::Modifiers::default();
+    cx.simulate_mouse_down(from, gpui::MouseButton::Left, none);
+    for at in [from + gpui::point(gpui::px(0.), gpui::px(8.)), to] {
+        cx.simulate_mouse_move(at, gpui::MouseButton::Left, none);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+    cx.simulate_mouse_up(to, gpui::MouseButton::Left, none);
+    settle(cx);
+}
+
+#[gpui::test]
+fn a_shortcut_dragged_between_folders_moves_and_one_from_the_schemas_is_added(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        let table = "relation-main\0birds";
+        let birds = cx.update(|_, cx| {
+            workspace.update(cx, |workspace, cx| {
+                let leaf = workspace.profile().unwrap().session.explorer_leaves[table];
+                let birds = workspace.member_at(leaf.target).unwrap();
+                let shortcuts = &mut workspace.profile_mut().unwrap().shortcuts;
+                shortcuts.add_folder("Hot").unwrap();
+                shortcuts.add_folder("Cold").unwrap();
+                workspace.toggle_in_folder("Hot".into(), birds.clone(), cx);
+                birds
+            })
+        });
+        settle(cx);
+        let held = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                let shortcuts = &workspace.read(cx).profile().unwrap().shortcuts;
+                ["Hot", "Cold"].map(|name| shortcuts.holds(name, &birds))
+            })
+        };
+        let in_hot = shortcut_row(&workspace, &birds, Some("Hot"), cx);
+
+        let from = explorer_row(&workspace, &in_hot, cx).center();
+        let to = explorer_row(&workspace, &explorer::folder_row("Cold"), cx).center();
+        drag(cx, from, to);
+        assert_eq!(
+            held(cx),
+            [false, true],
+            "out of one folder into another moves"
+        );
+
+        let from = explorer_row(&workspace, table, cx).center();
+        let to = explorer_row(&workspace, &explorer::folder_row("Hot"), cx).center();
+        drag(cx, from, to);
+        assert_eq!(held(cx), [true, true], "from the schemas it is added");
+        assert!(
+            sidebar_has_keyboard(&workspace, cx),
+            "the sidebar keeps the keyboard"
+        );
+        assert!(
+            cx.update(|_, cx| workspace
+                .read(cx)
+                .profile()
+                .unwrap()
+                .session
+                .objects
+                .is_empty()),
+            "a drag opens nothing"
+        );
+
+        // Dropped where nothing takes it, a drag changes nothing.
+        let from = explorer_row(&workspace, table, cx).center();
+        drag(cx, from, from + gpui::point(gpui::px(0.), gpui::px(2_000.)));
+        assert_eq!(held(cx), [true, true]);
+
+        let at = explorer_row(&workspace, table, cx).center();
+        cx.simulate_click(at, gpui::Modifiers::default());
+        settle(cx);
+        assert_eq!(
+            cx.update(|_, cx| workspace.read(cx).profile().unwrap().session.objects.len()),
+            1,
+            "a click still opens the row"
+        );
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_pin_dropped_on_the_top_half_of_another_goes_before_it(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            "create table birds (name text); create table fish (name text);",
+        );
+        let [birds, fish] = cx.update(|_, cx| {
+            workspace.update(cx, |workspace, cx| {
+                ["birds", "fish"].map(|name| {
+                    let leaf = workspace.profile().unwrap().session.explorer_leaves
+                        [&explorer::relation_row("main", name)];
+                    let member = workspace.member_at(leaf.target).unwrap();
+                    workspace.toggle_pin(explorer::Pin::Member(member.clone()), cx);
+                    member
+                })
+            })
+        });
+        settle(cx);
+
+        let from = explorer_row(&workspace, &shortcut_row(&workspace, &fish, None, cx), cx);
+        let onto = explorer_row(&workspace, &shortcut_row(&workspace, &birds, None, cx), cx);
+        drag(
+            cx,
+            from.center(),
+            onto.origin + gpui::point(gpui::px(20.), gpui::px(2.)),
+        );
+        let pins = cx.update(|_, cx| workspace.read(cx).profile().unwrap().shortcuts.pins.clone());
+        assert_eq!(
+            pins,
+            [explorer::Pin::Member(fish), explorer::Pin::Member(birds)]
+        );
 
         quit(workspace, cx);
     });
