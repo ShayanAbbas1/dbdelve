@@ -41,8 +41,8 @@ pub use duckdb::IN_MEMORY as DUCKDB_IN_MEMORY;
 pub use mongo::MongoConfig;
 pub use snowflake::{SnowflakeConfig, account_identifier, normalize_host};
 #[cfg(test)]
-pub use spec::{Abilities, Hints, Hooks, IdentifierQuote};
-pub use spec::{DdlNames, IdentityInsert, ReadOnlySession, UnreadableFloor};
+pub use spec::{Abilities, ForeignKeyReplay, Hints, Hooks, IdentifierQuote};
+pub use spec::{DdlNames, IdentityInsert, ReadOnlySession, SchemaExport, UnreadableFloor};
 pub use spec::{
     EngineSpec, ExplainPrefix, ForeignTable, FormatDialect, MaterializedViewDrop, Paging, Params,
     ParserDialect, RegexMatch, SelectTop, SkipDuplicates, SqlSpec, StatementSplit, SubstringMatch,
@@ -619,8 +619,8 @@ impl Engine {
     }
 
     /// Whether a schema exports as one file of SQL, and how its DDL names its
-    /// tables (see [`DdlNames`]).
-    pub fn exports_schema(self) -> Option<DdlNames> {
+    /// tables and replay their foreign keys (see [`SchemaExport`]).
+    pub fn exports_schema(self) -> Option<SchemaExport> {
         self.spec().abilities.exports_schema
     }
 

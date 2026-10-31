@@ -734,7 +734,7 @@ fn assert_a_schema_runs_back(connection: Connection, engine: Engine, schema: &'s
     let qualified = format!("INSERT INTO {}.", engine.quote_identifier(schema));
     assert_eq!(
         sql.contains(&qualified),
-        engine.exports_schema() == Some(crate::db::DdlNames::Qualified),
+        engine.exports_schema().map(|export| export.names) == Some(crate::db::DdlNames::Qualified),
         "{engine:?}: {sql}"
     );
 
