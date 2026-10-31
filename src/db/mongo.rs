@@ -1227,6 +1227,7 @@ impl Connection {
                 relations,
                 routines: Vec::new(),
             }],
+            database: None,
         })
     }
 

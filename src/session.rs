@@ -86,6 +86,23 @@ pub(crate) struct Profile {
     pub(crate) session: Session,
 }
 
+/// See [`Profile::shortcut_database`]. The shown catalog's own word comes
+/// first: a `USE` of the user's can move the session it was read on without
+/// the profile hearing of it, and a shortcut names what the sidebar shows.
+fn shortcut_database(
+    engine: Engine,
+    shown: Option<&Catalog>,
+    active: impl FnOnce() -> Option<String>,
+) -> ShortcutDatabase {
+    if !engine.catalog_is_per_database() {
+        return ShortcutDatabase::Unnamed;
+    }
+    shown
+        .and_then(|catalog| catalog.database.clone())
+        .or_else(active)
+        .map_or(ShortcutDatabase::Unknown, ShortcutDatabase::On)
+}
+
 impl Profile {
     /// Why a queue of reads on this connection runs in turn rather than at
     /// once, said to the user when one does.
@@ -136,11 +153,11 @@ impl Profile {
     /// none: keying on the one the session is on would hide every shortcut
     /// after a switch, though the catalog still lists them all.
     pub(crate) fn shortcut_database(&self) -> ShortcutDatabase {
-        if !self.config.engine().catalog_is_per_database() {
-            return ShortcutDatabase::Unnamed;
-        }
-        self.active_database()
-            .map_or(ShortcutDatabase::Unknown, ShortcutDatabase::On)
+        let shown = match &self.catalog {
+            CatalogState::Loaded(catalog, _) => Some(catalog),
+            _ => None,
+        };
+        shortcut_database(self.config.engine(), shown, || self.active_database())
     }
 
     pub(crate) fn refreshing_schema(&self) -> bool {
@@ -2813,6 +2830,33 @@ mod tests {
             sql: "UPDATE t SET a = 1".into(),
             notes: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_shortcut_names_the_database_the_shown_catalog_was_read_from() {
+        let read_from = |database: Option<&str>| Catalog {
+            database: database.map(str::to_string),
+            ..Catalog::default()
+        };
+        let opened_on = || Some("memory".to_string());
+        // A user's `USE other` then a refresh: the catalog is `other`'s,
+        // whatever the profile was opened or picked on.
+        assert_eq!(
+            shortcut_database(Engine::DuckDb, Some(&read_from(Some("other"))), opened_on),
+            ShortcutDatabase::On("other".into())
+        );
+        assert_eq!(
+            shortcut_database(Engine::DuckDb, Some(&read_from(None)), opened_on),
+            ShortcutDatabase::On("memory".into())
+        );
+        assert_eq!(
+            shortcut_database(Engine::DuckDb, None, || None),
+            ShortcutDatabase::Unknown
+        );
+        assert_eq!(
+            shortcut_database(Engine::MySql, Some(&read_from(Some("other"))), opened_on),
+            ShortcutDatabase::Unnamed
+        );
     }
 
     #[test]

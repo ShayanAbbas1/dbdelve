@@ -359,10 +359,28 @@ impl Connection {
             .map_err(|error| rolled_back(&connection, sql, error))
     }
 
-    /// The tables and views of the database the connection opened, less the
-    /// catalogs DuckDB keeps for itself.
+    /// The tables and views of the database the connection is on, less the
+    /// catalogs DuckDB keeps for itself, and which database that is: a `USE`
+    /// of the user's moves this connection, so the profile cannot say.
     pub fn catalog(&self) -> Result<Catalog, DbError> {
-        let relations = self.internal_query(
+        let _deadline = self.deadline();
+        let connection = lock(&self.connection)?;
+        // Both under the one lock, so no statement moves the connection
+        // between the database named and the objects listed.
+        let read = |sql: &str| {
+            run(&connection, sql, Fetch::default())
+                .map_err(|error| rolled_back(&connection, sql, error))
+        };
+        let on = read("SELECT current_database() AS database_name")?;
+        let database = match on.rows.first() {
+            Some(row) => required_cell(&on, row, "database_name")?.to_string(),
+            None => {
+                return Err(plain_error(
+                    "Catalog query returned no database_name.".into(),
+                ));
+            }
+        };
+        let relations = read(
             "SELECT schema_name, table_name AS relation_name, 'table' AS relation_kind,
                     estimated_size AS row_estimate
              FROM duckdb_tables()
@@ -373,7 +391,10 @@ impl Connection {
              WHERE NOT internal AND database_name = current_database()
              ORDER BY schema_name, relation_name",
         )?;
-        assemble_catalog(relations, QueryResult::default())
+        Ok(Catalog {
+            database: Some(database),
+            ..assemble_catalog(relations, QueryResult::default())?
+        })
     }
 
     /// DuckDB's macros are functions of a kind, but not ones with a body to
@@ -2219,6 +2240,20 @@ mod tests {
         assert_eq!(at(&connection.alongside().unwrap()), on("memory", "main"));
         assert_eq!(connection.current_database(), "memory");
         assert_eq!(connection.current_schema(), "main");
+    }
+
+    #[test]
+    fn the_catalog_names_the_database_a_use_moved_it_to() {
+        let connection = memory(
+            "CREATE TABLE here (id INTEGER);
+             ATTACH ':memory:' AS other;
+             USE other;
+             CREATE TABLE there (id INTEGER);",
+        );
+        let catalog = connection.catalog().unwrap();
+        assert_eq!(catalog.database.as_deref(), Some("other"));
+        assert_eq!(catalog.schemas[0].relations[0].name, "there");
+        assert_eq!(connection.current_database(), "memory");
     }
 
     #[test]

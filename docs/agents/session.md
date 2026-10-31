@@ -371,7 +371,12 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   database's table after Select Database, while MySQL, MariaDB and ClickHouse
   list every database as a schema already, and keying on the session's
   database there would hide shortcuts whose objects are still listed. A member
-  of another database is left out, not greyed. While a per-database engine's
+  of another database is left out, not greyed. The database is the one the
+  shown catalog was read from where the catalog says (`Catalog::database`,
+  DuckDB's, read under the same lock as its objects), ahead of the database
+  list and the profile: a user's `USE` moves a DuckDB session without the
+  profile hearing of it, and a shortcut names what the sidebar shows. SQL
+  Server needs none, since it moves a `USE` back. While a per-database engine's
   database is not known, nothing is named by it (Add to Folder and Pin are
   greyed on objects) and no member naming one is shown: a shortcut without
   its database would match any. One stored without a database there is

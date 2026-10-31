@@ -2170,6 +2170,10 @@ pub struct Statistics {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Catalog {
     pub schemas: Vec<Schema>,
+    /// The database this was read from, where a statement of the user's can
+    /// move the session it is read on off the one the profile picked:
+    /// DuckDB's `USE`. None where the profile says which.
+    pub database: Option<String>,
 }
 
 impl Catalog {
@@ -2882,6 +2886,7 @@ pub(super) fn assemble_catalog(
 
     Ok(Catalog {
         schemas: schemas.into_values().collect(),
+        database: None,
     })
 }
 
@@ -4159,6 +4164,7 @@ mod tests {
                 schema("ops", &["jobs"], &[]),
                 schema("public", &["accounts"], &[]),
             ],
+            database: None,
         };
         catalog.merge(Catalog {
             schemas: vec![
@@ -4167,6 +4173,7 @@ mod tests {
                 // and is a schema the explorer has to show.
                 schema("audit", &[], &["trail"]),
             ],
+            database: None,
         });
 
         let named = |name: &str| {

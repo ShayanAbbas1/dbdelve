@@ -1010,6 +1010,7 @@ mod tests {
                     routines: Vec::new(),
                 },
             ],
+            database: None,
         }
     }
 
@@ -1194,6 +1195,7 @@ mod tests {
                     relations: vec![relation("wide")],
                     routines: Vec::new(),
                 }],
+                database: None,
             },
             &[("public", "wide", &names)],
         );
@@ -1284,6 +1286,7 @@ mod tests {
                     relations: vec![relation("users"), relation("orders")],
                     routines: Vec::new(),
                 }],
+                database: None,
             },
             &[("shop", "users", &["_id", "name", "email"])],
         );
@@ -1364,6 +1367,7 @@ mod tests {
         let mut completions = detached(
             Catalog {
                 schemas: Vec::new(),
+                database: None,
             },
             &[],
         );
@@ -1420,6 +1424,7 @@ mod tests {
                     relations: AWKWARD.iter().map(|awkward| relation(awkward)).collect(),
                     routines: Vec::new(),
                 }],
+                database: None,
             },
             &held,
         );
@@ -1469,6 +1474,7 @@ mod tests {
                     routines: Vec::new(),
                 },
             ],
+            database: None,
         };
         let text = "parent_id IN (SELECT id FROM accounts) AND ema";
         let scope = ("public".to_string(), "accounts".to_string());

@@ -1468,6 +1468,7 @@ mod tests {
                     ],
                 },
             ],
+            database: None,
         }
     }
 
@@ -1512,6 +1513,7 @@ mod tests {
                 ],
                 routines: Vec::new(),
             }],
+            database: None,
         }
     }
 
