@@ -1583,6 +1583,8 @@ pub(crate) struct QueryTab {
     pub(crate) row_panel_split: Entity<ResizableState>,
     /// Not persisted: a restored buffer starts in Insert, as a new one does.
     pub(crate) vim: vim::Mode,
+    /// A Normal-mode command still being typed, if one is.
+    pub(crate) vim_pending: Option<vim::Pending>,
 }
 
 /// A plan, and what it is a plan of.
@@ -2158,6 +2160,7 @@ impl QueryTab {
             row_panel_filter: Default::default(),
             row_panel_split: cx.new(|_| ResizableState::default()),
             vim: vim::Mode::default(),
+            vim_pending: None,
         };
         (tab, notice)
     }
