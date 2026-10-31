@@ -70,6 +70,9 @@ pub(crate) struct Settings {
     /// holds rather than by asking the server again. Off by default, which is
     /// how every tab sorted before this was a choice.
     pub(crate) client_sort: bool,
+    /// Whether the query buffer has Vim's modes. Off by default: with it on,
+    /// `escape` stops typing, which nobody who did not ask for it expects.
+    pub(crate) vim_mode: bool,
     /// Whether the first-run greeting has played on the welcome surface.
     pub(crate) welcomed: bool,
     /// Keybinding overrides, keyed by action id. Applied to the keymap on
@@ -106,6 +109,7 @@ impl Default for Settings {
             check_for_updates: true,
             color_titlebar: true,
             client_sort: false,
+            vim_mode: false,
             welcomed: false,
             custom_keybindings: HashMap::new(),
         }
@@ -565,6 +569,7 @@ impl Workspace {
                     stored_settings.check_for_updates.unwrap_or(true);
                 workspace.settings.color_titlebar = stored_settings.color_titlebar.unwrap_or(true);
                 workspace.settings.client_sort = stored_settings.client_sort.unwrap_or(false);
+                workspace.settings.vim_mode = stored_settings.vim_mode.unwrap_or(false);
                 workspace.settings.welcomed = welcome::welcomed(
                     stored_settings.welcomed,
                     !profiles.is_empty() || !unavailable.is_empty(),
@@ -986,6 +991,15 @@ impl Workspace {
             return;
         }
         self.settings.color_titlebar = color;
+        self.remember_profiles(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn set_vim_mode(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.settings.vim_mode == on {
+            return;
+        }
+        self.settings.vim_mode = on;
         self.remember_profiles(cx);
         cx.notify();
     }
@@ -1979,6 +1993,7 @@ impl Render for Workspace {
                 self.plan_copied,
                 &self.tab_strip,
                 self.custom_limit.as_ref(),
+                self.settings.vim_mode,
                 cx,
             )))
             .children(results_status);
