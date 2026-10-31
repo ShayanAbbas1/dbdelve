@@ -2343,6 +2343,7 @@ impl Connection {
         match self {
             Self::Postgres(connection) => connection.current_schema(),
             Self::DuckDb(connection) => Some(connection.current_schema()),
+            Self::SqlServer(connection) => connection.current_schema(),
             _ => None,
         }
     }

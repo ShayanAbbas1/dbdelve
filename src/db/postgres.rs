@@ -6281,7 +6281,8 @@ mod tests {
              GRANT SELECT ON dbdelve_test_seq_hidden TO dbdelve_test_no_sequences; \
              SET ROLE dbdelve_test_no_sequences",
         );
-        let sequences = connection.sequences("public", &["dbdelve_test_seq_hidden".to_string()]);
+        let sequences =
+            connection.export_sequences("public", &["dbdelve_test_seq_hidden".to_string()]);
         setup(
             "RESET ROLE; DROP TABLE dbdelve_test_seq_hidden; \
              DROP ROLE dbdelve_test_no_sequences",

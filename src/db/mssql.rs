@@ -854,6 +854,8 @@ pub struct Connection {
     /// A Cancel for this session's schema graph read ([`Self::schema_graph`]),
     /// asked and taken under [`Self::in_flight`]'s lock.
     graph: GraphCancel,
+    /// The login's default schema in the database it opened on.
+    default_schema: Option<String>,
 }
 
 impl Connection {
@@ -866,6 +868,7 @@ impl Connection {
                 tunnel,
                 alongside: false,
                 graph: GraphCancel::default(),
+                default_schema: None,
             };
             let mut session = connection.connect()?;
             // Asked even when the profile names one, for the server's spelling
@@ -881,6 +884,9 @@ impl Connection {
                     ),
                     false => error,
                 })?;
+            // Only where a list of schemas opens, so not worth failing a login over.
+            connection.default_schema =
+                first_value(&mut session, "SELECT SCHEMA_NAME()").unwrap_or_default();
             *connection.session.lock().expect("unshared until returned") = Some(session);
             Ok(connection)
         })
@@ -975,8 +981,14 @@ impl Connection {
         // The server's spelling, as `open` asks for it: a restore after a
         // `USE` and a reconnect then name it as the server does.
         connection.server.database = current_database(&mut session)?;
+        connection.default_schema =
+            first_value(&mut session, "SELECT SCHEMA_NAME()").unwrap_or_default();
         *connection.session.lock().expect("unshared until returned") = Some(session);
         Ok(connection)
+    }
+
+    pub fn current_schema(&self) -> Option<&str> {
+        self.default_schema.as_deref()
     }
 
     fn in_flight(&self) -> std::sync::MutexGuard<'_, InFlight> {
@@ -2739,13 +2751,16 @@ fn ask(session: &mut Session, statement: &str) -> Result<Collected, DbError> {
 }
 
 fn current_database(session: &mut Session) -> Result<String, DbError> {
-    Ok(ask(session, "SELECT DB_NAME()")?
+    Ok(first_value(session, "SELECT DB_NAME()")?.unwrap_or_default())
+}
+
+fn first_value(session: &mut Session, sql: &str) -> Result<Option<String>, DbError> {
+    Ok(ask(session, sql)?
         .result
         .rows
         .first()
         .and_then(|row| row.get(0))
-        .map(str::to_string)
-        .unwrap_or_default())
+        .map(str::to_string))
 }
 
 fn held_to_database(session: &mut Session, database: &str) -> Result<(), DbError> {
@@ -3730,6 +3745,12 @@ mod tests {
             .schema_graph("archive")
             .expect("the graph should read");
         seed::assert_archive_points_at_accounts(&archive, "dbo");
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_connection_knows_the_logins_default_schema() {
+        assert_eq!(live().current_schema(), Some("dbo"));
     }
 
     #[test]
@@ -6029,6 +6050,7 @@ mod tests {
             tunnel: None,
             alongside: true,
             graph: GraphCancel::default(),
+            default_schema: None,
         };
         let reader = side.clone();
         let read = std::thread::spawn(move || reader.schema_graph("dbo"));
@@ -6059,6 +6081,7 @@ mod tests {
             tunnel: None,
             alongside: false,
             graph: GraphCancel::default(),
+            default_schema: None,
         };
         let user = connection.clone();
         let run = std::thread::spawn(move || user.query("SELECT 1", Fetch::default()));
