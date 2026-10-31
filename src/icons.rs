@@ -22,7 +22,7 @@ use icondata_core::IconData;
 /// The gpui-component widgets ask for their own paths — those are Lucide names
 /// too, so they resolve here as well. Add a row when something asks for one;
 /// an unlisted path simply draws nothing.
-const ICONS: [(&str, &IconData); 70] = [
+const ICONS: [(&str, &IconData); 71] = [
     ("icons/git-fork.svg", icondata_lu::LuGitFork),
     ("icons/chevron-down.svg", icondata_lu::LuChevronDown),
     ("icons/chevron-right.svg", icondata_lu::LuChevronRight),
@@ -79,6 +79,7 @@ const ICONS: [(&str, &IconData); 70] = [
     ("icons/folder-open.svg", icondata_lu::LuFolderOpen),
     ("icons/folder-minus.svg", icondata_lu::LuFolderMinus),
     ("icons/folder-plus.svg", icondata_lu::LuFolderPlus),
+    ("icons/pin.svg", icondata_lu::LuPin),
     (
         "icons/sliders-horizontal.svg",
         icondata_lu::LuSlidersHorizontal,
@@ -138,6 +139,8 @@ pub mod icon {
     /// A folder of shortcuts in the explorer, closed and open.
     pub const FOLDER: &str = "icons/folder.svg";
     pub const FOLDER_OPEN: &str = "icons/folder-open.svg";
+    /// The Pinned group's header, which is the icon alone.
+    pub const PIN: &str = "icons/pin.svg";
     pub const BROWSE: &str = "icons/folder-open.svg";
     pub const LEAVE_PROJECT: &str = "icons/folder-minus.svg";
     pub const ADD_TO_PROJECT: &str = "icons/folder-plus.svg";

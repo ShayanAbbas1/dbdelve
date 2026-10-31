@@ -2333,7 +2333,8 @@ impl Workspace {
                     let query = saved_query(id)
                         .or_else(|| shortcut.and_then(Shortcut::query))
                         .map(str::to_string);
-                    let group = id == QUERIES_GROUP || id == PINNED_GROUP;
+                    let pinned_group = id == PINNED_GROUP;
+                    let group = id == QUERIES_GROUP || pinned_group;
                     // A shortcut is listed away from its schema, which is
                     // then all that tells two of the same name apart.
                     let schema = match shortcut {
@@ -2431,6 +2432,9 @@ impl Workspace {
                                 .child(match rename {
                                     Some((_, input, error)) => {
                                         rename_field(label, input, error.clone(), t)
+                                    }
+                                    None if pinned_group => {
+                                        div().flex_1().child(row_icon(t, icon::PIN))
                                     }
                                     None => div()
                                         .flex_1()
