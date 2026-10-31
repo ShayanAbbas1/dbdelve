@@ -145,12 +145,14 @@ pub(super) fn export_schema(
         .iter()
         .map(|table| (table.name.clone(), table.structure.foreign_keys.clone()))
         .collect();
-    let order = dependency_order(schema, keys).map_err(|caught| {
-        refused(format!(
+    let ordered = dependency_order(schema, keys);
+    if !ordered.cyclic.is_empty() {
+        return Err(refused(format!(
             "{} reference each other or themselves, so no order of them runs back.",
-            caught.join(", ")
-        ))
-    })?;
+            ordered.cyclic.join(", ")
+        )));
+    }
+    let order = ordered.order;
     let mut planned = Vec::with_capacity(order.len());
     for name in &order {
         let table = read
@@ -235,20 +237,41 @@ fn header(schema: &str, tables: usize) -> String {
     )
 }
 
-/// The `tables` of `schema`, each after the ones its keys point at, or the ones
-/// caught in a cycle, which no order runs back. A key to anything this export
-/// does not write holds nothing back: the file cannot create it either way.
-/// Where nothing forces an order, the tables keep the one they came in, so the
-/// file reads as the catalog does.
+/// What `dependency_order` made of a schema's tables.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Ordered {
+    /// Every table: the acyclic ones in dependency order, then the tables in or
+    /// behind a cycle, in the order they came.
+    pub order: Vec<String>,
+    /// Only the members of a cycle, a self-reference included.
+    pub cyclic: Vec<String>,
+    /// Tables of `schema` some exported table points at that are not exported,
+    /// sorted, each once.
+    pub missing: Vec<String>,
+}
+
+/// The `tables` of `schema`, each after the ones its keys point at. Tables in a
+/// cycle, which no order runs back, and the ones waiting behind a cycle go on
+/// the end as they came; `cyclic` names the members of the cycles alone. A key
+/// to a table this export does not write holds nothing back, since the file
+/// cannot create it either way, and is reported in `missing`. Where nothing
+/// forces an order, the tables keep the one they came in, so the file reads as
+/// the catalog does.
 ///
-/// ponytail: a cycle, a table pointing at itself among them, is refused until
-/// #188 settles how a file replays one (its keys added after the rows, or the
-/// checks turned off inside the file).
-pub(super) fn dependency_order(
-    schema: &str,
-    tables: Vec<(String, Vec<ForeignKey>)>,
-) -> Result<Vec<String>, Vec<String>> {
+/// ponytail: a cycle, a table pointing at itself among them, is refused by
+/// `export_schema` until #188 settles how a file replays one (its keys added
+/// after the rows, or the checks turned off inside the file).
+pub(super) fn dependency_order(schema: &str, tables: Vec<(String, Vec<ForeignKey>)>) -> Ordered {
     let names: Vec<String> = tables.iter().map(|(name, _)| name.clone()).collect();
+    let mut missing: Vec<String> = tables
+        .iter()
+        .flat_map(|(_, keys)| keys)
+        .filter(|key| key.referenced_schema == schema && !names.contains(&key.referenced_table))
+        .map(|key| key.referenced_table.clone())
+        .collect();
+    missing.sort();
+    missing.dedup();
+
     let mut placed: Vec<String> = Vec::with_capacity(tables.len());
     let mut waiting = tables;
     while !waiting.is_empty() {
@@ -265,10 +288,49 @@ pub(super) fn dependency_order(
             !ready
         });
         if waiting.len() == before {
-            return Err(waiting.into_iter().map(|(name, _)| name).collect());
+            break;
         }
     }
-    Ok(placed)
+
+    // A waiting table is in a cycle when following keys between waiting tables
+    // leads back to it; one that only leads into a cycle never does.
+    let leads_to = |from: &str| -> Vec<&str> {
+        waiting
+            .iter()
+            .find(|(name, _)| name == from)
+            .into_iter()
+            .flat_map(|(_, keys)| keys)
+            .filter(|key| key.referenced_schema == schema)
+            .map(|key| key.referenced_table.as_str())
+            .filter(|table| waiting.iter().any(|(name, _)| name == table))
+            .collect()
+    };
+    let cyclic = waiting
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .filter(|start| {
+            let mut seen: Vec<&str> = Vec::new();
+            let mut stack = leads_to(start);
+            while let Some(table) = stack.pop() {
+                if table == *start {
+                    return true;
+                }
+                if !seen.contains(&table) {
+                    seen.push(table);
+                    stack.extend(leads_to(table));
+                }
+            }
+            false
+        })
+        .map(str::to_string)
+        .collect();
+
+    placed.extend(waiting.into_iter().map(|(name, _)| name));
+    Ordered {
+        order: placed,
+        cyclic,
+        missing,
+    }
 }
 
 #[cfg(test)]
@@ -336,6 +398,10 @@ mod tests {
         }
     }
 
+    fn names(of: &[&str]) -> Vec<String> {
+        of.iter().map(|name| name.to_string()).collect()
+    }
+
     #[test]
     fn a_table_comes_after_the_tables_it_references_and_ties_keep_their_order() {
         let tables = vec![
@@ -346,28 +412,61 @@ mod tests {
         ];
         assert_eq!(
             dependency_order("s", tables),
-            Ok(vec![
-                "products".into(),
-                "customers".into(),
-                "orders".into(),
-                "lines".into()
-            ])
+            Ordered {
+                order: names(&["products", "customers", "orders", "lines"]),
+                cyclic: vec![],
+                missing: vec![],
+            }
         );
     }
 
     #[test]
-    fn tables_that_reference_each_other_or_themselves_are_named_and_refused() {
+    fn tables_that_reference_each_other_or_themselves_are_named() {
         let pair = vec![
             ("plain".into(), vec![]),
             ("employees".into(), vec![key("departments")]),
             ("departments".into(), vec![key("employees")]),
+            ("badge".into(), vec![key("employees")]),
         ];
         assert_eq!(
             dependency_order("s", pair),
-            Err(vec!["employees".into(), "departments".into()])
+            Ordered {
+                order: names(&["plain", "employees", "departments", "badge"]),
+                cyclic: names(&["employees", "departments"]),
+                missing: vec![],
+            }
         );
         let own = vec![("employees".into(), vec![key("employees")])];
-        assert_eq!(dependency_order("s", own), Err(vec!["employees".into()]));
+        let ordered = dependency_order("s", own);
+        assert_eq!(ordered.order, names(&["employees"]));
+        assert_eq!(ordered.cyclic, names(&["employees"]));
+    }
+
+    #[test]
+    fn a_key_to_an_unticked_table_is_missing_not_cyclic() {
+        let mut elsewhere = key("customers");
+        elsewhere.referenced_schema = "other".into();
+        let tables = vec![
+            ("orders".into(), vec![key("customers"), elsewhere]),
+            ("lines".into(), vec![key("customers")]),
+        ];
+        assert_eq!(
+            dependency_order("s", tables),
+            Ordered {
+                order: names(&["orders", "lines"]),
+                cyclic: vec![],
+                missing: names(&["customers"]),
+            }
+        );
+        // In a cycle and pointing outside it: the unticked table is still
+        // missing, once, and is no member of the cycle.
+        let tables = vec![
+            ("a".into(), vec![key("b"), key("gone")]),
+            ("b".into(), vec![key("a"), key("gone")]),
+        ];
+        let ordered = dependency_order("s", tables);
+        assert_eq!(ordered.cyclic, names(&["a", "b"]));
+        assert_eq!(ordered.missing, names(&["gone"]));
     }
 
     #[test]
@@ -388,13 +487,5 @@ mod tests {
             header("s", 1).lines().next(),
             Some("-- Schema \"s\" exported by DBDelve: 1 table.")
         );
-    }
-
-    #[test]
-    fn a_key_to_anything_outside_the_export_does_not_hold_a_table_back() {
-        let mut elsewhere = key("customers");
-        elsewhere.referenced_schema = "other".into();
-        let tables = vec![("orders".into(), vec![elsewhere, key("a_view")])];
-        assert_eq!(dependency_order("s", tables), Ok(vec!["orders".into()]));
     }
 }
