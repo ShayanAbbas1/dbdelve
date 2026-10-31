@@ -14,6 +14,8 @@ pub(crate) struct SchemaExportDialog {
     pub(crate) schema: String,
     /// Every plain table, in catalog order, and whether it is ticked.
     pub(crate) tables: Vec<(String, bool)>,
+    /// The partitioned tables, named rather than offered.
+    pub(crate) partitioned: Vec<String>,
     pub(crate) structure: bool,
     pub(crate) rows: bool,
     /// Each table's foreign keys, read on a session of its own when the dialog opens.
@@ -29,10 +31,11 @@ pub(crate) enum Loading<T> {
 }
 
 impl SchemaExportDialog {
-    fn new(schema: String, tables: Vec<String>, generation: u64) -> Self {
+    fn new(schema: String, tables: Vec<String>, partitioned: Vec<String>, generation: u64) -> Self {
         Self {
             schema,
             tables: tables.into_iter().map(|table| (table, true)).collect(),
+            partitioned,
             structure: true,
             rows: true,
             keys: Loading::Reading,
@@ -60,20 +63,28 @@ impl SchemaExportDialog {
             tables,
             structure: self.structure,
             rows: self.rows,
+            partitioned: self.partitioned.clone(),
         })
     }
 
-    /// The dialog's warnings: missing references and, rows only, cycles.
+    /// The dialog's warnings: partitioned tables, missing references and,
+    /// rows only, cycles.
     pub(crate) fn warnings(&self, engine: Engine) -> Vec<String> {
+        let mut warnings = Vec::new();
+        if !self.partitioned.is_empty() {
+            warnings.push(format!(
+                "Partitioned tables are not exported yet: {}.",
+                self.partitioned.join(", ")
+            ));
+        }
         let Loading::Read(keys) = &self.keys else {
-            return Vec::new();
+            return warnings;
         };
         let ticked = self
             .ticked()
             .map(|name| (name.clone(), keys.get(name).cloned().unwrap_or_default()))
             .collect();
         let ordered = dependency_order(&self.schema, ticked);
-        let mut warnings = Vec::new();
         if !ordered.missing.is_empty() {
             warnings.push(format!(
                 "Referenced but not exported: {}.",
@@ -112,8 +123,9 @@ impl SchemaExportDialog {
 
 impl Workspace {
     /// The dialog over `schema`'s plain tables, every one ticked. A view, a
-    /// partition or anything else the catalog lists is left out, as the
-    /// file's header says. Each table's foreign keys are read behind it, so
+    /// partitioned table and its partitions, or anything else the catalog
+    /// lists is left out, as the file's header says; a partitioned table is
+    /// named in the dialog too. Each table's foreign keys are read behind it, so
     /// it can say what the tables ticked point at and leave unwritten.
     pub(crate) fn open_schema_export(&mut self, schema: String, cx: &mut Context<Self>) {
         let Some(profile) = self.profile() else {
@@ -130,22 +142,26 @@ impl Workspace {
             self.note(refused("its tables have not been read yet."), cx);
             return;
         };
-        let tables: Vec<String> = catalog
+        let relations = catalog
             .schemas
             .iter()
             .find(|each| each.name == schema)
-            .map(|found| {
-                found
-                    .relations
-                    .iter()
-                    .filter(|relation| {
-                        matches!(relation.kind, RelationKind::Table)
-                            && relation.partition_of.is_none()
-                    })
-                    .map(|relation| relation.name.clone())
-                    .collect()
-            })
+            .map(|found| found.relations.as_slice())
             .unwrap_or_default();
+        let of_kind = |kind: RelationKind| -> Vec<String> {
+            relations
+                .iter()
+                .filter(|relation| relation.kind == kind && relation.partition_of.is_none())
+                .map(|relation| relation.name.clone())
+                .collect()
+        };
+        // ponytail: a partitioned table and its partitions are named, not
+        // written: that needs each partition's `PARTITION OF … FOR VALUES`,
+        // which Postgres `ddl`'s ponytail says `relpartbound` holds.
+        let (tables, partitioned) = (
+            of_kind(RelationKind::Table),
+            of_kind(RelationKind::PartitionedTable),
+        );
         if tables.is_empty() {
             self.note(refused("it has no tables."), cx);
             return;
@@ -172,6 +188,7 @@ impl Workspace {
         profile.session.schema_export = Some(SchemaExportDialog::new(
             schema.clone(),
             tables.clone(),
+            partitioned,
             read,
         ));
         cx.notify();
@@ -465,6 +482,7 @@ mod tests {
         let mut dialog = SchemaExportDialog::new(
             "s".into(),
             keys.iter().map(|(name, _)| name.to_string()).collect(),
+            Vec::new(),
             1,
         );
         dialog.landed(
@@ -494,6 +512,7 @@ mod tests {
                 tables: vec!["a".into(), "b".into()],
                 structure: true,
                 rows: true,
+                partitioned: Vec::new(),
             })
         );
         dialog.structure = false;
@@ -528,8 +547,27 @@ mod tests {
     }
 
     #[test]
+    fn partitioned_tables_are_named_as_not_exported_and_carried_to_the_header() {
+        let mut dialog = SchemaExportDialog::new(
+            "s".into(),
+            vec!["a".into()],
+            vec!["events".into(), "logs".into()],
+            1,
+        );
+        let note = "Partitioned tables are not exported yet: events, logs.".to_string();
+        // Before the keys are read, as the catalog already said.
+        assert_eq!(dialog.warnings(Engine::Postgres), vec![note.clone()]);
+        dialog.landed(1, Ok(HashMap::new()));
+        assert_eq!(dialog.warnings(Engine::Postgres), vec![note]);
+        assert_eq!(
+            dialog.request().map(|request| request.partitioned),
+            Ok(vec!["events".to_string(), "logs".to_string()])
+        );
+    }
+
+    #[test]
     fn keys_landing_for_a_closed_dialog_are_dropped() {
-        let mut dialog = SchemaExportDialog::new("s".into(), vec!["a".into()], 2);
+        let mut dialog = SchemaExportDialog::new("s".into(), vec!["a".into()], Vec::new(), 2);
         dialog.landed(1, Ok(HashMap::new()));
         assert!(matches!(dialog.keys, Loading::Reading));
         dialog.landed(2, Err("gone".into()));
