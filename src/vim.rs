@@ -11,7 +11,7 @@ use gpui_component::input;
 
 use self::{
     grammar::{Parse, parse},
-    run::run,
+    run::Run,
 };
 use crate::{session::QueryTab, workspace::Workspace};
 
@@ -116,7 +116,7 @@ pub(crate) fn key_down(
         Some(pending) => pending.keys + key,
     };
     match parse(&keys) {
-        Parse::Complete(command) => run(command, tab, window, cx),
+        Parse::Complete(command) => command.run(tab, window, cx),
         Parse::More => {
             tab.vim_pending = Some(Pending {
                 keys,
