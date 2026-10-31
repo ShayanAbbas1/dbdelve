@@ -3517,8 +3517,7 @@ pub(super) fn explorer_menu(
         // schemas offer none.
         if is_schema_row(&row.id)
             && elsewhere.is_none()
-            && target.copies_ddl()
-            && target.engine.syntax() == db::Syntax::Sql
+            && target.exports_schema().is_some()
         {
             let (workspace, profile_id) = (workspace.clone(), row.profile.clone());
             let schema = row.label.to_string();
