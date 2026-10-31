@@ -1672,12 +1672,20 @@ impl Connection {
     }
 
     /// The database a connection opens on before any picked one, where the
-    /// profile does not name it: the database a DuckDB file opens as, or the
-    /// one a SQL Server login lands in. None where the profile's own config
-    /// says.
+    /// profile does not name it: the database a DuckDB file opens as. None
+    /// where the profile's own config says.
     pub fn current_database(&self) -> Option<&str> {
         match self {
             Self::DuckDb(connection) => Some(connection.current_database()),
+            _ => None,
+        }
+    }
+
+    /// The database the connection is on as the server spells it, where
+    /// that can differ from the profile's: SQL Server reads a name in any
+    /// case, and a login naming none lands where only the server can say.
+    pub fn spelled_database(&self) -> Option<&str> {
+        match self {
             Self::SqlServer(connection) => Some(connection.current_database()),
             _ => None,
         }

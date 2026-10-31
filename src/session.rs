@@ -115,17 +115,20 @@ impl Profile {
     }
 
     /// The database the connection is on: as last listed, else as the
-    /// profile names it, else the one it opened on.
+    /// server spelled it on connecting, else as the profile names it, else
+    /// the one it opened on. The server's spelling before the profile's, so
+    /// a folder names the database as the list will once it comes.
     pub(crate) fn active_database(&self) -> Option<String> {
-        let opened = match &self.state {
-            ProfileState::Connected(connection) => connection.current_database(),
+        let connection = match &self.state {
+            ProfileState::Connected(connection) => Some(connection),
             _ => None,
         };
         self.databases
             .current
             .clone()
+            .or_else(|| connection?.spelled_database().map(str::to_string))
             .or_else(|| self.config.database_name())
-            .or_else(|| opened.map(str::to_string))
+            .or_else(|| connection?.current_database().map(str::to_string))
     }
 
     /// The database a folder or a pin names its objects by, where the
