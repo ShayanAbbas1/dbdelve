@@ -30,7 +30,11 @@ impl Workspace {
     /// cannot filter by extension, so anything but a `.sql` file is refused
     /// after it is picked.
     pub(crate) fn pick_sql_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.pick_files(Self::open_sql_files, window, cx);
+        self.pick_files(
+            |workspace, paths, window, cx| workspace.open_sql_files(paths, Vec::new(), window, cx),
+            window,
+            cx,
+        );
     }
 
     fn pick_files(
@@ -65,49 +69,67 @@ impl Workspace {
         self.open_files(dropped.paths().to_vec(), window, cx);
     }
 
-    /// SQL files into the connection in front first, since opening a data
-    /// file brings the DuckDB profile to the front.
     fn open_files(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
-        let (sql, data): (Vec<_>, Vec<_>) = paths.into_iter().partition(|path| is_sql_file(path));
-        let mut refused = match sql.is_empty() {
-            true => Vec::new(),
-            false => self.open_sql_tabs(sql, window, cx),
-        };
-        if !data.is_empty() {
-            refused.extend(self.open_data_tabs(data, window, cx));
-        }
-        self.note_refused(refused, cx);
+        let (sql, data) = paths.into_iter().partition(|path| is_sql_file(path));
+        self.open_sql_files(sql, data, window, cx);
     }
 
-    pub(crate) fn open_sql_files(
+    /// `sql` read on the background executor, since a file on a stalled
+    /// mount or a link to a pipe would hold the window for as long as it
+    /// waits. Then each opens in a new query tab, and only after them `data`,
+    /// since opening a data file brings the DuckDB profile to the front.
+    fn open_sql_files(
         &mut self,
-        paths: Vec<PathBuf>,
+        sql: Vec<PathBuf>,
+        data: Vec<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let refused = self.open_sql_tabs(paths, window, cx);
-        self.note_refused(refused, cx);
+        let front = self.profile().map(|profile| profile.id.clone());
+        let read = cx
+            .background_executor()
+            .spawn(async move { sql.iter().map(|path| read_sql_file(path)).collect() });
+        cx.spawn_in(window, async move |workspace, cx| {
+            let read: Vec<_> = read.await;
+            _ = workspace.update_in(cx, |workspace, window, cx| {
+                let mut refused = workspace.open_sql_tabs(front, read, window, cx);
+                if !data.is_empty() {
+                    refused.extend(workspace.open_data_tabs(data, window, cx));
+                }
+                workspace.note_refused(refused, cx);
+            });
+        })
+        .detach();
     }
 
-    /// Each file's text in a new query tab on the connection in front, and
-    /// what was refused, for the caller to say once everything has opened:
-    /// every new tab clears the notice, and a data file moves the front.
+    /// Each file's text in a new query tab on `front`, the connection in
+    /// front when they were picked, and what was refused, for the caller to
+    /// say once everything has opened: every new tab clears the notice, and a
+    /// data file moves the front.
     fn open_sql_tabs(
         &mut self,
-        paths: Vec<PathBuf>,
+        front: Option<String>,
+        read: Vec<Result<String, String>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<String> {
-        if self.profile().is_none() {
+        if read.is_empty() {
+            return Vec::new();
+        }
+        let Some(front) = front else {
             return vec!["Open a connection to open a SQL file in.".to_string()];
+        };
+        // Only while the user was waiting on a stalled read could another
+        // connection have come to the front, and the files are not theirs.
+        if self.profile().map(|profile| &profile.id) != Some(&front) {
+            return vec![
+                "The SQL files were not opened: another connection came to the front while they were read."
+                    .to_string(),
+            ];
         }
         let mut refused = Vec::new();
-        for path in paths {
-            if !is_sql_file(&path) {
-                refused.push(format!("{} is not a .sql file.", file_name(&path)));
-                continue;
-            }
-            match read_sql_file(&path) {
+        for text in read {
+            match text {
                 Ok(text) => {
                     // `new_query` has said why, which is the notice to keep.
                     if self.new_query_holding(text, window, cx).is_none() {
@@ -268,6 +290,9 @@ const MAX_SQL_FILE_BYTES: u64 = 4 << 20;
 /// UTF-8 is refused rather than read lossily, which would change statements.
 fn read_sql_file(path: &Path) -> Result<String, String> {
     let name = file_name(path);
+    if !is_sql_file(path) {
+        return Err(format!("{name} is not a .sql file."));
+    }
     // Bounded while reading, not by the size up front, which a file still
     // being written or a link to a device does not keep to.
     let mut bytes = Vec::new();
@@ -369,6 +394,10 @@ mod tests {
         let (at, past) = (read_sql_file(&at), read_sql_file(&past));
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(at.is_ok());
+        assert_eq!(
+            read_sql_file(Path::new("/data/people.csv")),
+            Err("people.csv is not a .sql file.".to_string())
+        );
         assert_eq!(
             past,
             Err("past.sql is more than the 4 MB the editor opens.".to_string())
