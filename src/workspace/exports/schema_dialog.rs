@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use gpui::{ElementId, SharedString};
 use gpui_component::checkbox::Checkbox;
 
-use super::schema::{SchemaRequest, dependency_order};
+use super::schema::{Ordered, SchemaRequest, cycle_refusal, dependency_order};
 use super::*;
 use crate::db::{ForeignKey, ForeignKeyReplay, RelationKind, Target};
 
@@ -77,14 +77,9 @@ impl SchemaExportDialog {
                 self.partitioned.join(", ")
             ));
         }
-        let Loading::Read(keys) = &self.keys else {
+        let Some(ordered) = self.ordered() else {
             return warnings;
         };
-        let ticked = self
-            .ticked()
-            .map(|name| (name.clone(), keys.get(name).cloned().unwrap_or_default()))
-            .collect();
-        let ordered = dependency_order(&self.schema, ticked);
         if !ordered.missing.is_empty() {
             warnings.push(format!(
                 "Referenced but not exported: {}.",
@@ -108,6 +103,31 @@ impl SchemaExportDialog {
             ));
         }
         warnings
+    }
+
+    /// Why the engine would refuse the file as ticked, said before the save
+    /// panel rather than after it.
+    pub(crate) fn refusal(&self, engine: Engine) -> Option<String> {
+        let refuses = Target::built_in(engine)
+            .exports_schema()
+            .is_some_and(|export| export.foreign_keys == ForeignKeyReplay::RefusesCycles);
+        if !refuses || !self.structure {
+            return None;
+        }
+        let ordered = self.ordered()?;
+        (!ordered.cyclic.is_empty()).then(|| cycle_refusal(&ordered.cyclic))
+    }
+
+    /// The ticked tables as the file would order them, once their keys are read.
+    fn ordered(&self) -> Option<Ordered> {
+        let Loading::Read(keys) = &self.keys else {
+            return None;
+        };
+        let ticked = self
+            .ticked()
+            .map(|name| (name.clone(), keys.get(name).cloned().unwrap_or_default()))
+            .collect();
+        Some(dependency_order(&self.schema, ticked))
     }
 
     fn landed(&mut self, generation: u64, keys: Result<HashMap<String, Vec<ForeignKey>>, String>) {
@@ -242,6 +262,9 @@ impl Workspace {
         let Ok(request) = dialog.request() else {
             return;
         };
+        if dialog.refusal(profile.config.engine()).is_some() {
+            return;
+        }
         let schema = dialog.schema.clone();
         profile.session.schema_export = None;
         let (id, generation) = (profile.id.clone(), profile.generation);
@@ -273,7 +296,8 @@ impl Workspace {
         let open = profile.session.schema_export.as_ref()?;
         let request = open.request();
         let reading = matches!(open.keys, Loading::Reading);
-        let exports = !reading && request.is_ok();
+        let refusal = open.refusal(profile.config.engine());
+        let exports = !reading && request.is_ok() && refusal.is_none();
         let mut notes = match &open.keys {
             Loading::Reading => vec![("Reading each table's foreign keys…".into(), t.text_muted)],
             Loading::Failed(error) => vec![(
@@ -287,6 +311,7 @@ impl Workspace {
                 .into_iter()
                 .map(|warning| (warning, t.text)),
         );
+        notes.extend(refusal.map(|reason| (reason, t.danger)));
         if let Err(reason) = request {
             notes.push((reason.to_string(), t.text_muted));
         }
@@ -563,6 +588,20 @@ mod tests {
             dialog.request().map(|request| request.partitioned),
             Ok(vec!["events".to_string(), "logs".to_string()])
         );
+    }
+
+    #[test]
+    fn a_cycle_an_engine_refuses_disables_export_with_the_reason() {
+        let mut dialog = dialog(&[("plain", vec![]), ("employees", vec![key("employees")])]);
+        let reason = "employees reference each other or themselves, so no order of them runs back.";
+        assert_eq!(dialog.refusal(Engine::DuckDb).as_deref(), Some(reason));
+        assert_eq!(dialog.refusal(Engine::Postgres), None);
+        tick(&mut dialog, "employees", false);
+        assert_eq!(dialog.refusal(Engine::DuckDb), None);
+        tick(&mut dialog, "employees", true);
+        // Rows alone run back in any order the engine checks as they land.
+        dialog.structure = false;
+        assert_eq!(dialog.refusal(Engine::DuckDb), None);
     }
 
     #[test]

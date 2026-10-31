@@ -122,10 +122,7 @@ pub(super) fn export_schema(
         && request.structure
         && !ordered.cyclic.is_empty()
     {
-        return Err(refused(format!(
-            "{} reference each other or themselves, so no order of them runs back.",
-            ordered.cyclic.join(", ")
-        )));
+        return Err(refused(cycle_refusal(&ordered.cyclic)));
     }
     // With the checks off or none enforced, no order of the rows fails.
     if matches!(
@@ -224,6 +221,15 @@ pub(super) fn export_schema(
             false => Ok(written),
         }
     })
+}
+
+/// Why an engine that refuses cycles (`ForeignKeyReplay::RefusesCycles`)
+/// writes no structure for `cyclic`.
+pub(super) fn cycle_refusal(cyclic: &[String]) -> String {
+    format!(
+        "{} reference each other or themselves, so no order of them runs back.",
+        cyclic.join(", ")
+    )
 }
 
 /// Why the rows cannot be written with where their sequences stand: a
