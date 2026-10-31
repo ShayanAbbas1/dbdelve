@@ -1252,8 +1252,6 @@ impl Connection {
     }
 
     /// A table's DDL with its foreign keys left to statements of their own.
-    // Nothing calls it until the schema export is wired in.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn export_ddl(&self, schema: &str, relation: &str) -> Result<ExportDdl, DbError> {
         self.render_ddl(schema, relation, RelationKind::Table, true)
     }

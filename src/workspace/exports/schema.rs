@@ -4,7 +4,9 @@
 use std::io::Write;
 
 use super::*;
-use crate::db::{DdlNames, ForeignKey, RelationKind, Structure, Target};
+use crate::db::{
+    DdlNames, ExportDdl, ForeignKey, ForeignKeyReplay, RelationKind, Sequences, Structure,
+};
 
 impl Workspace {
     /// Every plain table of `schema`, written as one file of SQL the user
@@ -97,6 +99,11 @@ impl Workspace {
             cx.notify();
             return;
         }
+        let request = SchemaRequest {
+            tables,
+            structure: true,
+            rows: true,
+        };
         self.run_export(
             id,
             generation,
@@ -104,7 +111,7 @@ impl Workspace {
             FileAs::Inserts,
             move |connection, read_only, path, progress| {
                 export_schema(
-                    connection, &schema, &tables, read_only, engine, path, progress,
+                    connection, &schema, &request, read_only, engine, path, progress,
                 )
             },
             cx,
@@ -112,49 +119,76 @@ impl Workspace {
     }
 }
 
+/// What a schema export writes: which tables, and whether their structure,
+/// their rows or both.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SchemaRequest {
+    pub tables: Vec<String>,
+    pub structure: bool,
+    pub rows: bool,
+}
+
 /// One table as the file needs it, read before anything is written.
 struct Table {
     name: String,
-    ddl: String,
+    ddl: ExportDdl,
     structure: Structure,
 }
 
-/// Every table of `tables` in `schema`, written to `path` as their `CREATE`
-/// statements and then their rows, a table always after the ones it points at.
-/// The rows written, all tables told.
+/// The tables of `request` in `schema`, written to `path` as their structure,
+/// their rows or both, a table always after the ones it points at, in the way
+/// the engine replays foreign keys (`ForeignKeyReplay`). The rows written, all
+/// tables told.
 ///
 /// Everything that can refuse is asked before the file is opened, so a refusal
 /// leaves whatever was at `path` as it was.
 pub(super) fn export_schema(
     connection: &Connection,
     schema: &str,
-    tables: &[String],
+    request: &SchemaRequest,
     read_only: bool,
     engine: Engine,
     path: &Path,
     progress: &ExportProgress,
 ) -> Result<usize, Ended> {
     let refused = |reason: String| Ended::Failed(format!("The schema was not exported: {reason}"));
-    let (asking, named, names) = (connection.clone(), schema.to_string(), tables.to_vec());
+    let export = Target::built_in(engine)
+        .exports_schema()
+        .ok_or_else(|| refused("this engine's structure does not run back as written.".into()))?;
+    let (asking, named, names) = (
+        connection.clone(),
+        schema.to_string(),
+        request.tables.clone(),
+    );
     // On a thread of its own, as `knowing_the_table` is: a read behind a
     // schema lock must not hold a Cancel up.
-    let read = unless_cancelled(progress, move || read_tables(&asking, &named, &names))?
-        .ok_or_else(|| refused("the read of its tables stopped.".into()))?
-        .map_err(refused)?;
+    let (read, sequences) =
+        unless_cancelled(progress, move || read_tables(&asking, &named, &names))?
+            .ok_or_else(|| refused("the read of its tables stopped.".into()))?
+            .map_err(refused)?;
     let keys = read
         .iter()
         .map(|table| (table.name.clone(), table.structure.foreign_keys.clone()))
         .collect();
-    let ordered = dependency_order(schema, keys);
-    if !ordered.cyclic.is_empty() {
+    let mut ordered = dependency_order(schema, keys);
+    if export.foreign_keys == ForeignKeyReplay::RefusesCycles
+        && request.structure
+        && !ordered.cyclic.is_empty()
+    {
         return Err(refused(format!(
             "{} reference each other or themselves, so no order of them runs back.",
             ordered.cyclic.join(", ")
         )));
     }
-    let order = ordered.order;
-    let mut planned = Vec::with_capacity(order.len());
-    for name in &order {
+    // With the checks off or none enforced, no order of the rows fails.
+    if matches!(
+        export.foreign_keys,
+        ForeignKeyReplay::ChecksOff { .. } | ForeignKeyReplay::NotEnforced
+    ) {
+        ordered.cyclic.clear();
+    }
+    let mut planned = Vec::with_capacity(ordered.order.len());
+    for name in &ordered.order {
         let table = read
             .iter()
             .find(|table| &table.name == name)
@@ -163,37 +197,80 @@ pub(super) fn export_schema(
             .map_err(|reason| refused(reason.into()))?;
         let target = InsertTarget {
             relation: Some((schema.to_string(), name.clone())),
-            unqualified: Target::built_in(engine)
-                .exports_schema()
-                .map(|export| export.names)
-                == Some(DdlNames::Unqualified),
+            unqualified: export.names == DdlNames::Unqualified,
             ..InsertTarget::default()
         }
         .knowing(engine, &table.structure.columns);
         planned.push((table, refetch, target));
     }
 
+    // An `OWNED BY` ties a sequence to a column the structure creates, so it
+    // goes with the structure; a `setval` sets one where the rows left it.
+    let (owned, set): (Vec<&String>, Vec<&String>) = sequences
+        .after_rows
+        .iter()
+        .partition(|statement| statement.starts_with("ALTER SEQUENCE"));
+    let before_tables: &[String] = match request.structure {
+        true => &sequences.before_tables,
+        false => &[],
+    };
+    let mut after_rows = Vec::new();
+    if request.rows {
+        after_rows.extend(set);
+    }
+    if request.structure {
+        after_rows.extend(owned);
+    }
+    let checks = match export.foreign_keys {
+        ForeignKeyReplay::ChecksOff { off, on } => Some((off, on)),
+        _ => None,
+    };
+    let sequenced = !before_tables.is_empty() || !after_rows.is_empty();
+
     write_replacing(path, |out| {
         let failed = could_not_write(path);
-        out.write_all(header(schema, planned.len()).as_bytes())
+        out.write_all(header(schema, request, &ordered, sequenced).as_bytes())
             .map_err(&failed)?;
-        for (table, _, _) in &planned {
-            write!(out, "{}\n\n", table.ddl).map_err(&failed)?;
+        if let Some((off, _)) = checks {
+            write!(out, "{off}\n\n").map_err(&failed)?;
+        }
+        for statement in before_tables {
+            write!(out, "{statement}\n\n").map_err(&failed)?;
+        }
+        if request.structure {
+            for (table, _, _) in &planned {
+                write!(out, "{}\n\n", table.ddl.create).map_err(&failed)?;
+            }
         }
         let mut written = 0;
-        for (_, refetch, target) in &planned {
-            let sink = Sink {
-                format: FileAs::Inserts,
-                engine,
-                target,
-                path,
-                out: Some(&mut *out),
-                writer: None,
-                progress,
-            };
-            // The count is the progress's, which every table adds to.
-            written = stream(connection, refetch, read_only, sink, progress)?;
-            out.write_all(b"\n").map_err(&failed)?;
+        if request.rows {
+            for (_, refetch, target) in &planned {
+                let sink = Sink {
+                    format: FileAs::Inserts,
+                    engine,
+                    target,
+                    path,
+                    out: Some(&mut *out),
+                    writer: None,
+                    progress,
+                };
+                // The count is the progress's, which every table adds to.
+                written = stream(connection, refetch, read_only, sink, progress)?;
+                out.write_all(b"\n").map_err(&failed)?;
+            }
+        }
+        for statement in &after_rows {
+            write!(out, "{statement}\n\n").map_err(&failed)?;
+        }
+        if request.structure {
+            for (table, _, _) in &planned {
+                for statement in &table.ddl.foreign_keys {
+                    write!(out, "{statement}\n\n").map_err(&failed)?;
+                }
+            }
+        }
+        if let Some((_, on)) = checks {
+            writeln!(out, "{on}").map_err(&failed)?;
         }
         match progress.cancelled.load(Ordering::Relaxed) {
             true => Err(Ended::Cancelled),
@@ -206,37 +283,74 @@ fn read_tables(
     connection: &Connection,
     schema: &str,
     tables: &[String],
-) -> Result<Vec<Table>, String> {
+) -> Result<(Vec<Table>, Sequences), String> {
     let own = connection.apart().map_err(|error| error.to_string())?;
-    tables
+    let read = tables
         .iter()
         .map(|name| {
             let failed = |error: DbError| format!("could not read {name}: {error}");
             Ok(Table {
                 structure: own.structure(schema, name).map_err(failed)?,
-                ddl: own.ddl(schema, name, RelationKind::Table).map_err(failed)?,
+                ddl: own.export_ddl(schema, name).map_err(failed)?,
                 name: name.clone(),
             })
         })
-        .collect()
+        .collect::<Result<_, String>>()?;
+    let sequences = own
+        .sequences(schema, tables)
+        .map_err(|error| format!("could not read its sequences: {error}"))?;
+    Ok((read, sequences))
 }
 
 /// What the file says of itself, every line a comment. A name holding a line
 /// break would end the comment and run the rest as SQL, so it reads as a space.
 ///
-/// ponytail: the tables are read one at a time and only tables are written,
-/// until #188 settles a snapshot and the rest of a schema's objects.
-fn header(schema: &str, tables: usize) -> String {
-    let schema = schema.replace(['\r', '\n'], " ");
-    let count = match tables {
+/// ponytail: the tables are read one at a time and only tables and their
+/// sequences are written, until #188 settles a snapshot and the rest of a
+/// schema's objects.
+fn header(schema: &str, request: &SchemaRequest, ordered: &Ordered, sequences: bool) -> String {
+    let line = |text: &str| text.replace(['\r', '\n'], " ");
+    let names = |tables: &[String]| {
+        tables
+            .iter()
+            .map(|table| line(table))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let count = match ordered.order.len() {
         1 => "1 table".to_string(),
         tables => format!("{tables} tables"),
     };
-    format!(
-        "-- Schema \"{schema}\" exported by DBDelve: {count}.\n\
+    let what = match (request.structure, request.rows) {
+        (true, true) => "structure and rows",
+        (true, false) => "structure only",
+        _ => "rows only",
+    };
+    let owned = if sequences {
+        " and the sequences their columns own"
+    } else {
+        ""
+    };
+    let mut header = format!(
+        "-- Schema \"{}\" exported by DBDelve: {count}, {what}.\n\
          -- Each table was read on its own, not from one snapshot.\n\
-         -- Only tables are written: views, sequences and every other object are left out.\n\n"
-    )
+         -- Only tables{owned} are written: views, routines, triggers and every other object are left out.\n",
+        line(schema)
+    );
+    if !ordered.missing.is_empty() {
+        header += &format!(
+            "-- Referenced but not exported: {}.\n",
+            names(&ordered.missing)
+        );
+    }
+    // With the structure, the keys come after the rows or the cycle is refused.
+    if !request.structure && !ordered.cyclic.is_empty() {
+        header += &format!(
+            "-- These tables reference each other, so their rows may not run back in this order: {}.\n",
+            names(&ordered.cyclic)
+        );
+    }
+    header + "\n"
 }
 
 /// What `dependency_order` made of a schema's tables.
@@ -259,10 +373,6 @@ pub(super) struct Ordered {
 /// cannot create it either way, and is reported in `missing`. Where nothing
 /// forces an order, the tables keep the one they came in, so the file reads as
 /// the catalog does.
-///
-/// ponytail: a cycle, a table pointing at itself among them, is refused by
-/// `export_schema` until #188 settles how a file replays one (its keys added
-/// after the rows, or the checks turned off inside the file).
 pub(super) fn dependency_order(schema: &str, tables: Vec<(String, Vec<ForeignKey>)>) -> Ordered {
     let names: Vec<String> = tables.iter().map(|(name, _)| name.clone()).collect();
     let mut missing: Vec<String> = tables
@@ -475,23 +585,75 @@ mod tests {
         assert_eq!(ordered.missing, names(&["gone"]));
     }
 
+    fn request(structure: bool, rows: bool) -> SchemaRequest {
+        SchemaRequest {
+            tables: names(&["a", "b"]),
+            structure,
+            rows,
+        }
+    }
+
     #[test]
     fn the_header_keeps_a_schema_name_inside_its_comment() {
-        let written = header("odd\nDROP TABLE t; --", 2);
+        let ordered = Ordered {
+            order: names(&["a", "b"]),
+            cyclic: vec![],
+            missing: names(&["gone\r\nDROP TABLE t; --"]),
+        };
+        let written = header(
+            "odd\nDROP TABLE t; --",
+            &request(true, true),
+            &ordered,
+            false,
+        );
         assert!(
             written
                 .lines()
                 .all(|line| line.starts_with("-- ") || line.is_empty()),
             "{written}"
         );
-        assert!(
-            written
-                .starts_with("-- Schema \"odd DROP TABLE t; --\" exported by DBDelve: 2 tables.\n")
-        );
-        assert!(written.contains("not from one snapshot"));
+        assert!(written.starts_with(
+            "-- Schema \"odd DROP TABLE t; --\" exported by DBDelve: 2 tables, structure and rows.\n"
+        ));
+        assert!(written.contains("-- Referenced but not exported: gone  DROP TABLE t; --.\n"));
+        let one = Ordered {
+            order: names(&["a"]),
+            cyclic: vec![],
+            missing: vec![],
+        };
         assert_eq!(
-            header("s", 1).lines().next(),
-            Some("-- Schema \"s\" exported by DBDelve: 1 table.")
+            header("s", &request(true, true), &one, false)
+                .lines()
+                .next(),
+            Some("-- Schema \"s\" exported by DBDelve: 1 table, structure and rows.")
+        );
+    }
+
+    #[test]
+    fn the_header_says_what_was_written_and_what_was_not() {
+        let ordered = Ordered {
+            order: names(&["plain", "a", "b"]),
+            cyclic: names(&["a", "b"]),
+            missing: names(&["customers", "gone"]),
+        };
+        assert_eq!(
+            header("s", &request(false, true), &ordered, true),
+            "-- Schema \"s\" exported by DBDelve: 3 tables, rows only.\n\
+             -- Each table was read on its own, not from one snapshot.\n\
+             -- Only tables and the sequences their columns own are written: views, routines, triggers and every other object are left out.\n\
+             -- Referenced but not exported: customers, gone.\n\
+             -- These tables reference each other, so their rows may not run back in this order: a, b.\n\n"
+        );
+        // With the structure, the keys come after the rows, so the order holds.
+        let plain = Ordered {
+            missing: vec![],
+            ..ordered
+        };
+        assert_eq!(
+            header("s", &request(true, false), &plain, false),
+            "-- Schema \"s\" exported by DBDelve: 3 tables, structure only.\n\
+             -- Each table was read on its own, not from one snapshot.\n\
+             -- Only tables are written: views, routines, triggers and every other object are left out.\n\n"
         );
     }
 }
