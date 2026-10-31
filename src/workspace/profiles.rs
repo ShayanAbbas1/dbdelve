@@ -1571,6 +1571,10 @@ impl Workspace {
         // with nothing coming; forgetting them makes its next visit ask again,
         // as `stale` does for a relation tab's rows.
         profile.session.structure_requests.clear();
+        // What the old connection listed: an edit may have moved the profile
+        // onto another database, and `active_database` reads this first, so a
+        // folder would go on naming the old one.
+        profile.databases = Databases::default();
 
         let id = profile.id.clone();
         let mut config = profile.config.clone();
