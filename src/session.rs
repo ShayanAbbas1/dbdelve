@@ -26,7 +26,9 @@ use crate::{
         ExplainMode, QueryResult, Relation, RelationKind, Routine, Row, Structure, Syntax,
     },
     explain::{self, Plan},
-    explorer::{ExplorerLeaf, Member, ObjectKind, ObjectRef, Pin, Shortcut, Shortcuts},
+    explorer::{
+        ExplorerLeaf, Member, ObjectKind, ObjectRef, Pin, Shortcut, ShortcutDatabase, Shortcuts,
+    },
     filter::{
         Conjunction, FilterBar, FilterRow, applied_filters, filter_bars, restored_filter,
         stored_filter,
@@ -130,12 +132,12 @@ impl Profile {
     /// catalog is one database's. Where it lists every database as a schema,
     /// none: keying on the one the session is on would hide every shortcut
     /// after a switch, though the catalog still lists them all.
-    pub(crate) fn shortcut_database(&self) -> Option<String> {
-        self.config
-            .engine()
-            .catalog_is_per_database()
-            .then(|| self.active_database())
-            .flatten()
+    pub(crate) fn shortcut_database(&self) -> ShortcutDatabase {
+        if !self.config.engine().catalog_is_per_database() {
+            return ShortcutDatabase::Unnamed;
+        }
+        self.active_database()
+            .map_or(ShortcutDatabase::Unknown, ShortcutDatabase::On)
     }
 
     pub(crate) fn refreshing_schema(&self) -> bool {

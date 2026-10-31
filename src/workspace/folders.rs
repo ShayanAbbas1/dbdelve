@@ -2,13 +2,18 @@
 //! connection on its profile.
 
 use super::*;
-use crate::explorer::{Member, ObjectRef, Pin, folder_row};
+use crate::explorer::{Member, ObjectRef, Pin, ShortcutDatabase, folder_row};
 use crate::session::{PendingDelete, routine_name};
 
 impl Workspace {
-    /// What a folder or a pin names the object a sidebar row opens by.
+    /// What a folder or a pin names the object a sidebar row opens by. None
+    /// while the database it is in is not known.
     pub(crate) fn member_at(&self, target: ExplorerTarget) -> Option<Member> {
-        let database = self.profile()?.shortcut_database();
+        let database = match self.profile()?.shortcut_database() {
+            ShortcutDatabase::Unnamed => None,
+            ShortcutDatabase::On(database) => Some(database),
+            ShortcutDatabase::Unknown => return None,
+        };
         let catalog = self.catalog()?;
         let (schema, name, kind) = match target {
             ExplorerTarget::Relation {

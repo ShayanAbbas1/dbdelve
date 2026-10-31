@@ -1972,7 +1972,7 @@ impl Workspace {
             &profile.shortcuts,
             catalog,
             &profile.session.saved_queries,
-            profile.shortcut_database().as_deref(),
+            &profile.shortcut_database(),
             &filter,
         );
         explorer.extend(explorer::queries(&profile.session.saved_queries, &filter));

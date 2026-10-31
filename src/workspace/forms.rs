@@ -17,8 +17,8 @@ use super::*;
 use crate::actions::{ConfirmDialog, NextDialogButton, PreviousDialogButton, TickDialogBox};
 use crate::connection_form::ConnectionTest;
 use crate::explorer::{
-    Member, PINNED_GROUP, Pin, QUERIES_GROUP, Shortcut, Shortcuts, is_schema_row, relation_copies,
-    saved_query,
+    Member, PINNED_GROUP, Pin, QUERIES_GROUP, Shortcut, ShortcutDatabase, Shortcuts, is_schema_row,
+    relation_copies, saved_query,
 };
 use crate::scroller::{SmoothScrollable, smooth_scoped};
 use crate::session::PendingDelete;
@@ -2577,6 +2577,9 @@ impl Workspace {
                 };
                 let workspace = workspace.read(cx);
                 let member = workspace.member_at(leaf.target);
+                let unknown = workspace.profile().is_some_and(|profile| {
+                    profile.shortcut_database() == ShortcutDatabase::Unknown
+                });
                 let with_shortcuts =
                     |menu: PopupMenu, window: &mut Window, cx: &mut App| match member.clone() {
                         Some(member) => shortcut_menu(
@@ -2588,6 +2591,7 @@ impl Workspace {
                             window,
                             cx,
                         ),
+                        None if unknown => unknown_database_items(menu),
                         None => menu,
                     };
                 // A routine offers what a folder or a pin does, and no more.
@@ -2857,6 +2861,15 @@ fn shortcut_menu(
         Some(folder) => menu.item(remove_item(folder, member, workspace)),
         None => menu,
     }
+}
+
+/// Folders and pins, greyed while the database an object is in is not known:
+/// a shortcut made without it would open the same name in any database.
+fn unknown_database_items(menu: PopupMenu) -> PopupMenu {
+    menu.separator()
+        .item(PopupMenuItem::new("Add to Folder").disabled(true))
+        .item(PopupMenuItem::new("Pin").disabled(true))
+        .label("The database is not known yet.")
 }
 
 /// All a missing member's row offers: taking it out of where it is listed.

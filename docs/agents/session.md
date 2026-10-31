@@ -370,7 +370,11 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   database's table after Select Database, while MySQL, MariaDB and ClickHouse
   list every database as a schema already, and keying on the session's
   database there would hide shortcuts whose objects are still listed. A member
-  of another database is left out, not greyed. One the catalog or the saved
+  of another database is left out, not greyed. While a per-database engine's
+  database is not known, nothing is named by it (Add to Folder and Pin are
+  greyed on objects) and no member naming one is shown: a shortcut without
+  its database would match any. One stored without a database there is
+  greyed, never matched, for the same reason. One the catalog or the saved
   queries no longer list stays, greyed, offering only Remove from Folder and
   Unpin: a dropped table may come back and a permission be granted, and
   losing the user's grouping to a refresh would be worse than a grey row. A

@@ -440,6 +440,19 @@ pub struct ObjectRef {
     pub kind: ObjectKind,
 }
 
+/// The database a shortcut names its objects by.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ShortcutDatabase {
+    /// None: the catalog lists every database as a schema.
+    Unnamed,
+    /// The one the catalog is of.
+    On(String),
+    /// The catalog is one database's and which is not known yet. Nothing is
+    /// matched or made then: a shortcut made without its database would open
+    /// the same schema and name in whatever database came next.
+    Unknown,
+}
+
 impl ObjectRef {
     fn row(&self) -> String {
         match self.kind {
@@ -713,14 +726,15 @@ impl Shortcut {
 /// every member, otherwise it keeps those whose names match and goes when none
 /// do. The group's own label is never matched, as the Queries group's is not.
 ///
-/// `database` is the one the connection is on where the catalog is one
-/// database's: a member of another is left out rather than greyed, since it is
-/// not missing, only elsewhere.
+/// Where the catalog is one database's, a member of another is left out
+/// rather than greyed, since it is not missing, only elsewhere, and so is
+/// every member with a database while which one is open is not known. One
+/// without a database there is greyed: it cannot say which it was made in.
 pub fn shortcuts(
     shortcuts: &Shortcuts,
     catalog: Option<&Catalog>,
     queries: &[String],
-    database: Option<&str>,
+    database: &ShortcutDatabase,
     filter: &str,
 ) -> ExplorerTree {
     let mut build = ShortcutBuilder {
@@ -774,7 +788,7 @@ struct ShortcutBuilder<'a> {
     rows: HashMap<String, Shortcut>,
     catalog: Option<&'a Catalog>,
     queries: &'a [String],
-    database: Option<&'a str>,
+    database: &'a ShortcutDatabase,
 }
 
 impl ShortcutBuilder<'_> {
@@ -812,12 +826,15 @@ impl ShortcutBuilder<'_> {
         let (label, leaf, present) = match member {
             Member::Query(name) => (name.as_str(), None, self.queries.contains(name)),
             Member::Object(object) => {
-                if let (Some(on), Some(of)) = (self.database, object.database.as_deref())
-                    && on != of
-                {
-                    return None;
-                }
-                let leaf = self.catalog.and_then(|catalog| object.leaf(catalog));
+                let here = match (self.database, object.database.as_deref()) {
+                    (ShortcutDatabase::Unnamed, _) => true,
+                    (ShortcutDatabase::On(on), Some(of)) if on == of => true,
+                    (ShortcutDatabase::On(_) | ShortcutDatabase::Unknown, Some(_)) => return None,
+                    (ShortcutDatabase::On(_) | ShortcutDatabase::Unknown, None) => false,
+                };
+                let leaf = here
+                    .then(|| self.catalog.and_then(|catalog| object.leaf(catalog)))
+                    .flatten();
                 (object.name.as_str(), leaf, leaf.is_some())
             }
         };
@@ -1741,7 +1758,13 @@ mod tests {
             pins: Vec::new(),
         };
         let names = ["daily".to_string()];
-        let mut explorer = super::shortcuts(&shortcuts, Some(&catalog()), &names, None, "");
+        let mut explorer = super::shortcuts(
+            &shortcuts,
+            Some(&catalog()),
+            &names,
+            &ShortcutDatabase::Unnamed,
+            "",
+        );
         explorer.extend(queries(&names, ""));
         explorer.extend(tree(&catalog(), ""));
 
@@ -1781,7 +1804,13 @@ mod tests {
                 Pin::Member(relation("public", "accounts")),
             ],
         };
-        let explorer = super::shortcuts(&shortcuts, Some(&catalog()), &["daily".into()], None, "");
+        let explorer = super::shortcuts(
+            &shortcuts,
+            Some(&catalog()),
+            &["daily".into()],
+            &ShortcutDatabase::Unnamed,
+            "",
+        );
 
         assert_eq!(labels(&explorer.items), ["Pinned", "Alpha", "gamma"]);
         let pinned = &explorer.items[0];
@@ -1792,7 +1821,13 @@ mod tests {
             pins: Vec::new(),
             ..shortcuts
         };
-        let explorer = super::shortcuts(&unpinned, Some(&catalog()), &[], None, "");
+        let explorer = super::shortcuts(
+            &unpinned,
+            Some(&catalog()),
+            &[],
+            &ShortcutDatabase::Unnamed,
+            "",
+        );
         assert_eq!(labels(&explorer.items), ["Alpha", "beta", "gamma"]);
     }
 
@@ -1818,7 +1853,13 @@ mod tests {
             )],
             pins: Vec::new(),
         };
-        let explorer = super::shortcuts(&shortcuts, Some(&catalog()), &[], Some("dev"), "");
+        let explorer = super::shortcuts(
+            &shortcuts,
+            Some(&catalog()),
+            &[],
+            &ShortcutDatabase::On("dev".into()),
+            "",
+        );
         let rows = &explorer.items[0].children;
 
         assert_eq!(labels(rows), ["accounts", "dropped", "gone"]);
@@ -1835,6 +1876,49 @@ mod tests {
     }
 
     #[test]
+    fn a_member_matches_only_in_the_database_it_names() {
+        let object = |database: Option<&str>, schema: &str, name: &str| {
+            Member::Object(ObjectRef {
+                database: database.map(str::to_string),
+                schema: schema.into(),
+                name: name.into(),
+                kind: ObjectKind::Relation(RelationKind::Table),
+            })
+        };
+        let shortcuts = Shortcuts {
+            folders: vec![folder(
+                "Hot",
+                vec![
+                    object(Some("dev"), "public", "accounts"),
+                    object(None, "analytics", "events"),
+                ],
+            )],
+            pins: Vec::new(),
+        };
+        let listed = |database: ShortcutDatabase| {
+            let explorer = super::shortcuts(&shortcuts, Some(&catalog()), &[], &database, "");
+            explorer.items[0]
+                .children
+                .iter()
+                .map(|row| match &explorer.shortcuts[row.id.as_ref()] {
+                    Shortcut::Member { missing, .. } => (row.label.to_string(), *missing),
+                    Shortcut::Folder(_) => panic!("a member is not a folder"),
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // Without a database, a member cannot say which one it was made in.
+        assert_eq!(
+            listed(ShortcutDatabase::On("dev".into())),
+            [("accounts".into(), false), ("events".into(), true)]
+        );
+        assert_eq!(
+            listed(ShortcutDatabase::Unknown),
+            [("events".to_string(), true)]
+        );
+    }
+
+    #[test]
     fn the_filter_reaches_into_folders_and_pins() {
         let shortcuts = Shortcuts {
             folders: vec![
@@ -1844,7 +1928,15 @@ mod tests {
             ],
             pins: vec![Pin::Member(relation("analytics", "events"))],
         };
-        let build = |filter| super::shortcuts(&shortcuts, Some(&catalog()), &[], None, filter);
+        let build = |filter| {
+            super::shortcuts(
+                &shortcuts,
+                Some(&catalog()),
+                &[],
+                &ShortcutDatabase::Unnamed,
+                filter,
+            )
+        };
 
         // With no filter an empty folder still shows.
         assert_eq!(
@@ -1882,7 +1974,13 @@ mod tests {
             ],
         };
         let names = ["x".to_string()];
-        let mut explorer = super::shortcuts(&shortcuts, Some(&catalog()), &names, None, "");
+        let mut explorer = super::shortcuts(
+            &shortcuts,
+            Some(&catalog()),
+            &names,
+            &ShortcutDatabase::Unnamed,
+            "",
+        );
         explorer.extend(queries(&names, ""));
         explorer.extend(tree(&catalog(), ""));
 

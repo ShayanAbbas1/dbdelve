@@ -794,6 +794,12 @@ impl Connection {
         })
     }
 
+    /// The profile's database, or the login's default when it names none,
+    /// as asked on opening.
+    pub fn current_database(&self) -> &str {
+        &self.server.database
+    }
+
     /// A second session, for a statement to run on beside this one's; see
     /// [`super::Connection::query_alongside`]. It logs in on its first run,
     /// as a reconnect does.
@@ -2736,6 +2742,7 @@ mod tests {
             .unwrap()
             .current
             .expect("a login lands somewhere");
+        assert_eq!(connection.current_database(), landed);
 
         let elsewhere = if landed == "master" {
             "tempdb"
