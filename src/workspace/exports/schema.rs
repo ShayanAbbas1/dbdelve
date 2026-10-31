@@ -67,6 +67,9 @@ pub(crate) struct SchemaRequest {
     pub tables: Vec<String>,
     pub structure: bool,
     pub rows: bool,
+    /// The schema's partitioned tables, which no file writes yet, so the
+    /// header can say they are left out.
+    pub partitioned: Vec<String>,
 }
 
 /// One table as the file needs it, read before anything is written.
@@ -292,10 +295,17 @@ fn header(schema: &str, request: &SchemaRequest, ordered: &Ordered, sequences: b
             "Only tables are written, and the sequences their columns own are set, not created"
         }
     };
+    let partitioned = match request.partitioned.as_slice() {
+        [] => String::new(),
+        tables => format!(
+            "partitioned tables and their partitions ({}), ",
+            names(tables)
+        ),
+    };
     let mut header = format!(
         "-- Schema \"{}\" exported by DBDelve: {count}, {what}.\n\
          -- Each table was read on its own, not from one snapshot.\n\
-         -- {written}: views, routines, triggers and every other object are left out.\n",
+         -- {written}: {partitioned}views, routines, triggers and every other object are left out.\n",
         line(schema)
     );
     if !ordered.missing.is_empty() {
@@ -547,6 +557,7 @@ mod tests {
             tables: names(&["a", "b"]),
             structure,
             rows,
+            partitioned: Vec::new(),
         }
     }
 
@@ -569,6 +580,25 @@ mod tests {
         assert_eq!(
             sequence_refusal(&request(true, true), &Sequences::default()),
             None
+        );
+    }
+
+    #[test]
+    fn the_header_names_the_partitioned_tables_it_leaves_out() {
+        let ordered = Ordered {
+            order: names(&["a", "b"]),
+            cyclic: vec![],
+            missing: vec![],
+        };
+        let partitioned = SchemaRequest {
+            partitioned: names(&["events", "odd\nDROP TABLE t; --"]),
+            ..request(true, true)
+        };
+        assert!(
+            header("s", &partitioned, &ordered, false).contains(
+                "-- Only tables are written: partitioned tables and their partitions (events, odd \
+                 DROP TABLE t; --), views, routines, triggers and every other object are left out.\n"
+            )
         );
     }
 

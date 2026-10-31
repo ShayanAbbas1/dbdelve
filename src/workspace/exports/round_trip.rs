@@ -814,6 +814,7 @@ impl Fixture {
             tables: tables.iter().map(|table| table.name.clone()).collect(),
             structure,
             rows,
+            partitioned: Vec::new(),
         };
         let written = export_schema(
             &self.parent.connection,
@@ -989,6 +990,7 @@ fn live_a_schema_with_sequences_runs_back_on_postgres() {
         tables: vec![serial.name.clone(), identity.name.clone()],
         structure: true,
         rows: true,
+        partitioned: Vec::new(),
     };
     export_schema(
         &serial.connection,
@@ -1052,6 +1054,7 @@ fn a_schema_export_that_ends_early_leaves_the_file_that_was_there() {
             tables: tables.to_vec(),
             structure: true,
             rows: true,
+            partitioned: Vec::new(),
         };
         export_schema(
             &table.connection,

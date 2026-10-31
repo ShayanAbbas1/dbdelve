@@ -52,7 +52,8 @@ MariaDB turn checks off for the file's session and restore them, ClickHouse
 needs nothing, DuckDB refuses a cycle by name. An engine whose DDL does not
 run back as written (Snowflake's `create or replace`, SQLite's triggers)
 has none and does not offer it. Postgres sequences are created and set with
-`setval`. The file never contains `DROP` or `TRUNCATE`, whatever the engine.
+`setval`. A partitioned table is named in the dialog and the header, not
+written. The file never contains `DROP` or `TRUNCATE`, whatever the engine.
 
 DBDelve _does_ write SQL when the user asks it to, and only then, always
 where the user can read it:
