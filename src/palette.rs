@@ -2579,11 +2579,11 @@ fn history_items(profile: &Profile) -> Vec<Item> {
         // The label is what the matcher scores as well as what the row reads
         // as, so collapsing the whitespace is also what makes `select from
         // accounts` find a statement whose `FROM` was on its own line.
-        .map(|sql| {
+        .map(|entry| {
             Item::new(
-                one_line(sql),
+                one_line(&entry.sql),
                 icon::HISTORY,
-                Command::RecallStatement(sql.clone()),
+                Command::RecallStatement(entry.sql.clone()),
             )
             .mono()
             .scope(Scope::History)

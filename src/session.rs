@@ -284,10 +284,11 @@ pub(crate) struct Session {
     /// Every query file this profile has, open in a tab or not: what the
     /// sidebar's Queries group and the palette list.
     pub(crate) saved_queries: Vec<String>,
-    /// The statements this profile has run, newest first. Held rather than read
-    /// off disk when the palette opens, for the reason `saved_queries` is: the
-    /// list is wanted while a list is being built, which is a frame.
-    pub(crate) history: Vec<String>,
+    /// The statements this profile has run, newest first, each with what is
+    /// known of its last run. Held rather than read off disk when the palette
+    /// opens, for the reason `saved_queries` is: the list is wanted while a
+    /// list is being built, which is a frame.
+    pub(crate) history: Vec<store::HistoryEntry>,
     pub(crate) save_name: Entity<InputState>,
     /// The page in front, and where to jump to once it is typed over: see
     /// `sync_page_input`. One field for the window, because only the relation

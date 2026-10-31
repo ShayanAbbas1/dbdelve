@@ -390,8 +390,9 @@ impl Workspace {
             cancel: cancel.clone(),
             cancelling: false,
         };
-        let _ = store::append_history(&profile_id, &sql);
-        remember_statement(&mut profile.session.history, &sql);
+        let recorded = store::HistoryEntry::started(sql.as_str());
+        let _ = store::append_history(&profile_id, &recorded);
+        remember_statement(&mut profile.session.history, recorded.clone());
         cx.notify();
 
         let task = cx
@@ -420,6 +421,21 @@ impl Workspace {
                 if !matches!(count, RowCount::Counting { started: at, .. } if *at == started) {
                     return;
                 }
+                let cancelling = matches!(
+                    count,
+                    RowCount::Counting {
+                        cancelling: true,
+                        ..
+                    }
+                );
+                let landed = match &result {
+                    Ok(result) => recorded.succeeded(result),
+                    Err(error) => recorded.failed(
+                        error,
+                        started.elapsed(),
+                        cancelling && db::is_cancel(engine, error),
+                    ),
+                };
                 let rows = result.map(|result| {
                     result
                         .rows
@@ -443,6 +459,8 @@ impl Workspace {
                         }
                     }
                 }
+                let _ = store::append_history(&profile_id, &landed);
+                remember_statement(&mut profile.session.history, landed);
                 cx.notify();
             });
         })

@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::db::{EditTarget, Engine, ExplainMode, RelationKind, Row, SshTunnel};
+use crate::db::{
+    DbError, EditTarget, Engine, ExplainMode, QueryResult, RelationKind, Row, SshTunnel, Stopped,
+};
 
 const PROFILES_FILE: &str = "profiles.toml";
 /// The release variant's name. Both the support directory and the keychain
@@ -1084,19 +1086,110 @@ pub fn delete_scratch(profile_id: &str, tab: u64) -> Result<(), String> {
     }
 }
 
-/// One statement on its way into a profile's history, newest at the end.
+/// How much of a failed run's error a history line keeps. The file is read
+/// whole on every connect, and a server can answer with pages of context.
+const HISTORY_ERROR_CHARS: usize = 500;
+
+/// One run of a statement, as the history keeps it.
 ///
-/// A JSON string per line rather than the SQL itself: a statement holds
-/// newlines, semicolons and comments, so there is no separator to put between
-/// two of them that is not also SQL. Appended rather than rewritten, so a run
-/// costs one write and no history can be lost to a rewrite that failed
-/// halfway -- see [`compact_history`] for the one rewrite that does happen.
-pub fn append_history(profile_id: &str, sql: &str) -> Result<(), String> {
+/// Everything but the statement is optional, and omitted from the line when
+/// unknown: a line from before runs were timed is a bare statement, and a run
+/// whose answer never came back (the app quit under it) has only its start.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryEntry {
+    pub sql: String,
+    /// When the run was sent, in milliseconds since the epoch. With `sql`, what
+    /// names the run: its outcome is written under the same pair.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<u64>,
+    /// How long it took, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ms: Option<u64>,
+    /// How many rows it returned, for a statement that returns any columns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows: Option<u64>,
+    /// The server's row count, for a statement that returned no columns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub affected: Option<u64>,
+    /// Whether the row limit kept fewer rows than it returned.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub capped: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancelled: bool,
+}
+
+/// A history line as either build wrote it: a bare statement before runs were
+/// timed, an entry after.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum HistoryLine {
+    Bare(String),
+    Entry(HistoryEntry),
+}
+
+impl HistoryEntry {
+    /// A run about to be sent, stamped with the wall clock: it is read back
+    /// across launches, which an `Instant` cannot be.
+    pub fn started(sql: impl Into<String>) -> Self {
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_millis() as u64);
+        Self {
+            sql: sql.into(),
+            at: Some(at),
+            ..Self::default()
+        }
+    }
+
+    /// This run, answered with `result`. Rows only for a statement with
+    /// columns: the server's count is the answer to one without, and a
+    /// `SELECT` that came back empty still returned zero rows.
+    pub fn succeeded(&self, result: &QueryResult) -> Self {
+        let returned = !result.columns.is_empty();
+        Self {
+            ms: Some(result.elapsed.as_millis() as u64),
+            rows: returned.then(|| result.total_rows() as u64),
+            affected: result.rows_affected.filter(|_| !returned),
+            capped: result.capped_from.is_some() || result.stopped == Some(Stopped::AtLimit),
+            cancelled: result.stopped == Some(Stopped::Cancelled),
+            ..self.clone()
+        }
+    }
+
+    /// This run, ended by `error`. A cancel keeps no error: it is the stop the
+    /// user asked for, not something the statement got wrong.
+    pub fn failed(&self, error: &DbError, elapsed: std::time::Duration, cancelled: bool) -> Self {
+        Self {
+            ms: Some(elapsed.as_millis() as u64),
+            error: (!cancelled).then(|| error.message.chars().take(HISTORY_ERROR_CHARS).collect()),
+            cancelled,
+            ..self.clone()
+        }
+    }
+}
+
+/// One run on its way into a profile's history, newest at the end.
+///
+/// JSON per line rather than the SQL itself: a statement holds newlines,
+/// semicolons and comments, so there is no separator to put between two of
+/// them that is not also SQL. Appended rather than rewritten, so a run costs
+/// one write and no history can be lost to a rewrite that failed halfway --
+/// see [`compact_history`] for the one rewrite that does happen.
+///
+/// A run is written twice, as it is sent and again as it lands, the second
+/// line carrying the outcome under the same `sql` and `at`. Reading keeps a
+/// statement's newest line, so the outcome supersedes the start without
+/// either line naming the other, and a run whose answer never came still has
+/// its start. Rewriting the start line in place instead would make every run
+/// a rewrite of the file.
+pub fn append_history(profile_id: &str, entry: &HistoryEntry) -> Result<(), String> {
     let directory = query_directory(profile_id)?;
     fs::create_dir_all(&directory)
         .map_err(|error| format!("Could not create {}: {error}", directory.display()))?;
     let path = directory.join(HISTORY_FILE);
-    let line = serde_json::to_string(sql)
+    let line = serde_json::to_string(entry)
         .map_err(|error| format!("Could not encode the statement: {error}"))?;
     let mut file = fs::OpenOptions::new()
         .create(true)
@@ -1119,9 +1212,11 @@ pub fn append_history(profile_id: &str, sql: &str) -> Result<(), String> {
 /// that fails halfway leaves the history it was trimming intact.
 ///
 /// The rewrite is what [`decode_history`] would have returned anyway -- newest
-/// first, each statement once -- put back oldest first so a later read walks
-/// it the same way. Failures are dropped: the history is still correct to read,
-/// it just costs the disk it already had.
+/// first, each statement once, with what is known of its last run -- put back
+/// oldest first so a later read walks it the same way. A bare line goes back
+/// as an entry holding only its statement, which reads the same. Failures are
+/// dropped: the history is still correct to read, it just costs the disk it
+/// already had.
 fn compact_history(path: &Path) {
     let Ok(text) = fs::read_to_string(path) else {
         return;
@@ -1130,8 +1225,8 @@ fn compact_history(path: &Path) {
         return;
     }
     let mut kept = String::new();
-    for sql in decode_history(&text).iter().rev() {
-        let Ok(line) = serde_json::to_string(sql) else {
+    for entry in decode_history(&text).iter().rev() {
+        let Ok(line) = serde_json::to_string(entry) else {
             return;
         };
         kept.push_str(&line);
@@ -1140,10 +1235,10 @@ fn compact_history(path: &Path) {
     let _ = write_file(path, &kept);
 }
 
-/// What this profile has run, newest first and each statement once. A missing
-/// or unreadable file reads as no history: there is nothing here that the user
-/// wrote and cannot get back another way.
-pub fn history(profile_id: &str) -> Vec<String> {
+/// What this profile has run, newest first and each statement once, with what
+/// is known of its last run. A missing or unreadable file reads as no history:
+/// there is nothing here that the user wrote and cannot get back another way.
+pub fn history(profile_id: &str) -> Vec<HistoryEntry> {
     let Ok(directory) = query_directory(profile_id) else {
         return Vec::new();
     };
@@ -1156,12 +1251,18 @@ pub fn history(profile_id: &str) -> Vec<String> {
 /// A line that will not decode is skipped rather than ending the read: the file
 /// is appended to on every run, and the half-written last line a crash leaves
 /// behind is not a reason to lose everything before it.
-fn decode_history(text: &str) -> Vec<String> {
+fn decode_history(text: &str) -> Vec<HistoryEntry> {
     let mut seen = HashSet::new();
     text.lines()
         .rev()
-        .filter_map(|line| serde_json::from_str::<String>(line).ok())
-        .filter(|sql| seen.insert(sql.clone()))
+        .filter_map(|line| match serde_json::from_str(line).ok()? {
+            HistoryLine::Bare(sql) => Some(HistoryEntry {
+                sql,
+                ..HistoryEntry::default()
+            }),
+            HistoryLine::Entry(entry) => Some(entry),
+        })
+        .filter(|entry| seen.insert(entry.sql.clone()))
         .take(HISTORY_DEPTH)
         .collect()
 }
@@ -3240,16 +3341,86 @@ open_objects = []
         );
 
         assert_eq!(
-            decode_history(&text),
+            statements(&decode_history(&text)),
             ["SELECT 1", "SELECT\n  *\nFROM accounts; -- all"]
         );
+    }
+
+    fn statements(entries: &[HistoryEntry]) -> Vec<&str> {
+        entries.iter().map(|entry| entry.sql.as_str()).collect()
+    }
+
+    fn ran(sql: &str, at: u64) -> HistoryEntry {
+        HistoryEntry {
+            sql: sql.into(),
+            at: Some(at),
+            ..HistoryEntry::default()
+        }
+    }
+
+    #[test]
+    fn a_history_written_before_runs_were_timed_reads_beside_one_written_after() {
+        let finished = HistoryEntry {
+            ms: Some(18),
+            rows: Some(42),
+            ..ran("SELECT 2", 1_000)
+        };
+        let text = format!(
+            "{}\n{}\n",
+            serde_json::to_string("SELECT 1").unwrap(),
+            serde_json::to_string(&finished).unwrap(),
+        );
+
+        let entries = decode_history(&text);
+        assert_eq!(entries[0], finished);
+        assert_eq!(
+            entries[1],
+            HistoryEntry {
+                sql: "SELECT 1".into(),
+                ..HistoryEntry::default()
+            }
+        );
+    }
+
+    #[test]
+    fn a_runs_outcome_supersedes_its_start_and_an_unanswered_run_keeps_its_start() {
+        let failed = HistoryEntry {
+            ms: Some(5),
+            error: Some("no such table: t".into()),
+            ..ran("SELECT * FROM t", 2_000)
+        };
+        let text = [
+            ran("SELECT * FROM t", 2_000),
+            ran("SELECT 1", 3_000),
+            failed.clone(),
+        ]
+        .iter()
+        .map(|entry| serde_json::to_string(entry).unwrap() + "\n")
+        .collect::<String>();
+
+        assert_eq!(decode_history(&text), [failed, ran("SELECT 1", 3_000)]);
+    }
+
+    #[test]
+    fn a_cancelled_run_keeps_no_error_and_a_long_one_is_cut() {
+        let error = DbError {
+            message: "x".repeat(HISTORY_ERROR_CHARS * 2),
+            position: None,
+        };
+        let start = ran("SELECT 1", 0);
+        let failed = start.failed(&error, std::time::Duration::from_millis(7), false);
+        assert_eq!(failed.error.unwrap().len(), HISTORY_ERROR_CHARS);
+        assert_eq!(failed.ms, Some(7));
+
+        let cancelled = start.failed(&error, std::time::Duration::ZERO, true);
+        assert!(cancelled.cancelled && cancelled.error.is_none());
     }
 
     #[test]
     fn a_half_written_line_does_not_take_the_history_with_it() {
         let text = format!("{}\n\"SELECT 2", serde_json::to_string("SELECT 1").unwrap());
 
-        assert_eq!(decode_history(&text), ["SELECT 1"]);
+        assert_eq!(statements(&decode_history(&text)), ["SELECT 1"]);
     }
 
     #[test]
@@ -3258,8 +3429,13 @@ open_objects = []
             // One past the slack, so the last append is the one that has to
             // trip the compaction.
             let runs = HISTORY_SLACK + 1;
+            // Every run timed, so the rewrite has something to keep.
             for n in 0..runs {
-                append_history("dev", &format!("SELECT {n}")).unwrap();
+                let entry = HistoryEntry {
+                    ms: Some(n as u64),
+                    ..ran(&format!("SELECT {n}"), n as u64)
+                };
+                append_history("dev", &entry).unwrap();
             }
 
             let path = query_directory("dev").unwrap().join(HISTORY_FILE);
@@ -3270,9 +3446,16 @@ open_objects = []
             // newest HISTORY_DEPTH runs and not some older window of them.
             let read_back = history("dev");
             assert_eq!(read_back.len(), HISTORY_DEPTH);
-            assert_eq!(read_back[0], format!("SELECT {}", runs - 1));
+            let newest = (runs - 1) as u64;
             assert_eq!(
-                read_back[HISTORY_DEPTH - 1],
+                read_back[0],
+                HistoryEntry {
+                    ms: Some(newest),
+                    ..ran(&format!("SELECT {newest}"), newest)
+                }
+            );
+            assert_eq!(
+                read_back[HISTORY_DEPTH - 1].sql,
                 format!("SELECT {}", runs - HISTORY_DEPTH)
             );
 

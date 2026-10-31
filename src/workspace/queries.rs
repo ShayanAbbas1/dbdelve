@@ -2207,16 +2207,22 @@ impl Workspace {
         // worth getting back. Only the buffer's — a relation's preview is SQL
         // dbdelve wrote, and nobody asked to keep it. Nor an edit reviewed
         // rather than appended: recalled into a buffer, it would run without
-        // the count that guards it.
-        if let Some(statement) = &statement
-            && !(generated && engine.reviews_query_edits())
-            && let Some(profile) = self.issued_to(&id, generation)
-        {
-            // A line that could not be written is not worth a notice on every
-            // run: the statement is still in the buffer, so nothing is lost.
-            let _ = store::append_history(&profile.id, statement);
-            remember_statement(&mut profile.session.history, statement);
-        }
+        // the count that guards it. Its outcome is written as it lands, under
+        // the same rules, since only a run recorded here has one to record.
+        let recorded = match &statement {
+            Some(statement) if !(generated && engine.reviews_query_edits()) => {
+                self.issued_to(&id, generation).map(|profile| {
+                    let entry = store::HistoryEntry::started(statement.as_str());
+                    // A line that could not be written is not worth a notice
+                    // on every run: the statement is still in the buffer, so
+                    // nothing is lost.
+                    let _ = store::append_history(&profile.id, &entry);
+                    remember_statement(&mut profile.session.history, entry.clone());
+                    entry
+                })
+            }
+            _ => None,
+        };
         // Marked on the way out, like the history: a statement that failed
         // part way may still have opened a transaction.
         if !generated && let Some(profile) = self.issued_to(&id, generation) {
@@ -2325,7 +2331,7 @@ impl Workspace {
                     // The plan is carried out of this block rather than stored
                     // inside it: `slot` holds the session borrowed, and the tab
                     // it belongs on has to be reached through the same session.
-                    let (succeeded, produced_grid, plan, rest, notice) = {
+                    let (succeeded, produced_grid, plan, rest, notice, landed) = {
                         let Some(profile) = workspace.issued_to(&id, generation) else {
                             workspace.drop_stale_run(&id, tab, lane.as_ref(), cx);
                             return;
@@ -2382,6 +2388,10 @@ impl Workspace {
                         // something other than the cancel ended it. Whatever
                         // the cancel cost besides is said either way.
                         let ran = statement.as_deref().unwrap_or_default();
+                        // Read before the cost is appended to the message,
+                        // which is what the engine's cancel is told by.
+                        let cancel_landed = cancelled
+                            && matches!(&result, Err(error) if db::is_cancel(engine, error));
                         let result = match result {
                             Err(error)
                                 if cancelled
@@ -2426,7 +2436,9 @@ impl Workspace {
                                     .collect();
                                 let plan = explain::parse(&columns, &result.rows);
                                 let answer = (plan, columns, result.rows);
-                                (true, false, Some(answer), Vec::new(), result.notice)
+                                // The Explain command's run is dbdelve's
+                                // prefix, never recorded.
+                                (true, false, Some(answer), Vec::new(), result.notice, None)
                             }
                             Ok(mut result) => {
                                 // Rows that streamed in were scrolled through as
@@ -2500,6 +2512,8 @@ impl Workspace {
                                         Vec::new(),
                                     )
                                 });
+                                let landed =
+                                    recorded.as_ref().map(|entry| entry.succeeded(&result));
                                 *state = QueryState::Complete {
                                     rows: result.total_rows(),
                                     bytes: result.bytes,
@@ -2555,7 +2569,7 @@ impl Workspace {
                                 if feed.is_some() {
                                     render_aside(&results, engine, cx);
                                 }
-                                (true, produced_grid, plan, rest, notice)
+                                (true, produced_grid, plan, rest, notice, landed)
                             }
                             Err(mut error) => {
                                 // Rows of a statement that failed part way are
@@ -2569,6 +2583,9 @@ impl Workspace {
                                         }
                                     });
                                 }
+                                let landed = recorded.as_ref().map(|entry| {
+                                    entry.failed(&error, started.elapsed(), cancel_landed)
+                                });
                                 // Into the user's statement, not the prefix
                                 // dbdelve put in front of it, which is on no
                                 // screen to count from.
@@ -2582,11 +2599,17 @@ impl Workspace {
                                     Some(previous) if cancelled => previous,
                                     _ => QueryState::Failed(error),
                                 };
-                                (false, false, None, Vec::new(), None)
+                                (false, false, None, Vec::new(), None, landed)
                             }
                         }
                     };
 
+                    if let Some(landed) = landed
+                        && let Some(profile) = workspace.issued_to(&id, generation)
+                    {
+                        let _ = store::append_history(&profile.id, &landed);
+                        remember_statement(&mut profile.session.history, landed);
+                    }
                     if keep_rows
                         && let Some(profile) = workspace.issued_to(&id, generation)
                         && profile.session.notice.as_deref() == Some(Self::REFRESHING)

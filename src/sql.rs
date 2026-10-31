@@ -2273,12 +2273,17 @@ fn sql_update_statement(
     })
 }
 
-/// A statement at the front of the history, and there only once however many
-/// times it has been run: a query run five times is one row to recall, not five
-/// rows to read past.
-pub(crate) fn remember_statement(history: &mut Vec<String>, sql: &str) {
-    history.retain(|past| past != sql);
-    history.insert(0, sql.to_string());
+/// A run at the front of the history, and its statement there only once
+/// however many times it has been run: a query run five times is one row to
+/// recall, not five rows to read past. The same rule `store::history` reads
+/// the file by, so what is held matches what the next launch reads back,
+/// a run's outcome replacing its start included.
+pub(crate) fn remember_statement(
+    history: &mut Vec<crate::store::HistoryEntry>,
+    entry: crate::store::HistoryEntry,
+) {
+    history.retain(|past| past.sql != entry.sql);
+    history.insert(0, entry);
     history.truncate(crate::store::HISTORY_DEPTH);
 }
 
@@ -6548,10 +6553,14 @@ mod tests {
 
     #[test]
     fn a_statement_run_again_moves_to_the_front_rather_than_doubling() {
-        let mut history = vec!["SELECT 2".to_string(), "SELECT 1".to_string()];
-        remember_statement(&mut history, "SELECT 1");
+        let entry = |sql: &str| crate::store::HistoryEntry {
+            sql: sql.into(),
+            ..Default::default()
+        };
+        let mut history = vec![entry("SELECT 2"), entry("SELECT 1")];
+        remember_statement(&mut history, entry("SELECT 1"));
 
-        assert_eq!(history, ["SELECT 1", "SELECT 2"]);
+        assert_eq!(history, [entry("SELECT 1"), entry("SELECT 2")]);
     }
 
     #[test]
