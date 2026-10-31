@@ -3,14 +3,14 @@
 //   count       := {digits}
 //   modifier    := a | i
 //   motion      := [<count>] <motion-keys>
-//   text-object := <text-object-keys>
-//                | <modifier> <text-object-keys>
-//                | <count> <modifier> <text-object-keys>
+//   text-object := [<count>] <modifier> <text-object-keys>
 //   mode-change := i
 //   shorthand   := x | X | D | C | s | S | Y
+//   paste       := [<count>] <paste-keys>
 //   command     := <motion>
 //                | <mode-change>
 //                | [<count>] <shorthand>
+//                | <paste>
 //                | [<count>] <operator> <motion>
 //                | [<count>] <operator> <text-object>
 //                | [<count>] <operator> <operator>
@@ -20,11 +20,11 @@ use strum::{EnumIter, IntoEnumIterator};
 
 /// `{digits}`: how many times.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Count(pub(super) u32);
+pub(super) struct Count(pub(super) u32);
 
 /// What a command does to what it acts on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, EnumIter)]
-pub(crate) enum Operator {
+pub(super) enum Operator {
     /// `d`
     Delete,
     /// `y`
@@ -49,7 +49,7 @@ impl Operator {
 
 /// How much of a text object to take.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, EnumIter)]
-pub(crate) enum Modifier {
+pub(super) enum Modifier {
     /// `a`: the object and what surrounds it.
     Around,
     /// `i`: the object alone.
@@ -70,7 +70,7 @@ impl Modifier {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, EnumIter)]
-pub(crate) enum MotionKeys {
+pub(super) enum MotionKeys {
     /// `h`
     Left,
     /// `l`
@@ -113,7 +113,7 @@ impl MotionKeys {
 
 /// Which mode Normal leaves for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, EnumIter)]
-pub(crate) enum ModeChange {
+pub(super) enum ModeChange {
     /// `i`
     Insert,
 }
@@ -132,7 +132,7 @@ impl ModeChange {
 
 /// One key standing for an operator and its target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, EnumIter)]
-pub(crate) enum Shorthand {
+enum Shorthand {
     /// `x`: `dl`
     DeleteRight,
     /// `X`: `dh`
@@ -181,15 +181,41 @@ impl Shorthand {
     }
 }
 
+/// Puts back what was last cut or yanked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, EnumIter)]
+pub(super) enum PasteKeys {
+    /// `p`
+    After,
+}
+
+impl PasteKeys {
+    fn key(self) -> char {
+        match self {
+            Self::After => 'p',
+        }
+    }
+
+    fn from_key(key: char) -> Option<Self> {
+        Self::iter().find(|paste| paste.key() == key)
+    }
+}
+
+/// `[<count>] <paste-keys>`
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Paste {
+    pub(super) count: Option<Count>,
+    pub(super) keys: PasteKeys,
+}
+
 /// `[<count>] <motion-keys>`
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Motion {
-    pub(crate) count: Option<Count>,
-    pub(crate) keys: MotionKeys,
+pub(super) struct Motion {
+    pub(super) count: Option<Count>,
+    pub(super) keys: MotionKeys,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, EnumIter)]
-pub(crate) enum TextObjectKeys {
+pub(super) enum TextObjectKeys {
     /// `p`
     Paragraph,
 }
@@ -206,22 +232,17 @@ impl TextObjectKeys {
     }
 }
 
+/// `[<count>] <modifier> <text-object-keys>`
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TextObject {
-    /// `<text-object-keys>`
-    Bare(TextObjectKeys),
-    /// `[<count>] <modifier> <text-object-keys>`: a count only comes with a
-    /// modifier.
-    Modified {
-        count: Option<Count>,
-        modifier: Modifier,
-        keys: TextObjectKeys,
-    },
+pub(super) struct TextObject {
+    pub(super) count: Option<Count>,
+    pub(super) modifier: Modifier,
+    pub(super) keys: TextObjectKeys,
 }
 
 /// What an operator acts on: the alternatives after `<operator>`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Target {
+pub(super) enum Target {
     /// `<motion>`
     Motion(Motion),
     /// `<text-object>`
@@ -231,17 +252,22 @@ pub(crate) enum Target {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Command {
+pub(super) struct Operate {
+    pub(super) count: Option<Count>,
+    pub(super) operator: Operator,
+    pub(super) target: Target,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Command {
     /// `<motion>`
     Motion(Motion),
     /// `<mode-change>`
     ModeChange(ModeChange),
+    /// `<paste>`
+    Paste(Paste),
     /// `[<count>] <operator> <motion | text-object | operator>`
-    Operate {
-        count: Option<Count>,
-        operator: Operator,
-        target: Target,
-    },
+    Operate(Operate),
 }
 
 /// What the keys typed so far amount to.
@@ -328,6 +354,19 @@ fn shorthand(keys: &str) -> Result<(Shorthand, &str), Stop> {
     Ok((shorthand, chars.as_str()))
 }
 
+/// `<paste-keys>`
+fn paste_keys(keys: &str) -> Result<(PasteKeys, &str), Stop> {
+    let mut chars = keys.chars();
+    let paste_keys = match chars.next() {
+        None => return Err(Stop::Pending),
+        Some(key) => match PasteKeys::from_key(key) {
+            None => return Err(Stop::Invalid),
+            Some(paste_keys) => paste_keys,
+        },
+    };
+    Ok((paste_keys, chars.as_str()))
+}
+
 /// `motion := [<count>] <motion-keys>`
 fn motion(keys: &str) -> Result<(Motion, &str), Stop> {
     let (count, rest) = count(keys);
@@ -357,23 +396,13 @@ fn text_object_keys(keys: &str) -> Result<(TextObjectKeys, &str), Stop> {
     Ok((object_keys, chars.as_str()))
 }
 
-/// `text-object := <text-object-keys> | [<count>] <modifier> <text-object-keys>`
+/// `text-object := [<count>] <modifier> <text-object-keys>`
 fn text_object(keys: &str) -> Result<(TextObject, &str), Stop> {
-    // <text-object-keys>
-    let not_bare = match text_object_keys(keys) {
-        Ok((object_keys, rest)) => return Ok((TextObject::Bare(object_keys), rest)),
-        Err(stop) => stop,
-    };
-
-    // | [<count>] <modifier> <text-object-keys>
     let (count, rest) = count(keys);
-    let (modifier, rest) = match modifier(rest) {
-        Ok(found) => found,
-        Err(not_modifier) => return Err(none_matched([not_bare, not_modifier])),
-    };
+    let (modifier, rest) = modifier(rest)?;
     let (object_keys, rest) = text_object_keys(rest)?;
     Ok((
-        TextObject::Modified {
+        TextObject {
             count,
             modifier,
             keys: object_keys,
@@ -392,7 +421,7 @@ fn none_matched<const N: usize>(stops: [Stop; N]) -> Stop {
     }
 }
 
-/// `command := <motion> | <mode-change> | [<count>] <shorthand> | [<count>] <operator> (<motion> | <text-object> | <operator>)`
+/// `command := <motion> | <mode-change> | [<count>] <shorthand> | <paste> | [<count>] <operator> (<motion> | <text-object> | <operator>)`
 ///
 /// Each alternative is tried in turn and the first to match returns, so the
 /// ones after it are never read.
@@ -409,7 +438,7 @@ fn command(keys: &str) -> Result<(Command, &str), Stop> {
         Err(stop) => stop,
     };
 
-    // Both alternatives left start with `[<count>]`.
+    // Every alternative left starts with `[<count>]`.
     let (count, rest) = count(keys);
 
     // | [<count>] <shorthand>
@@ -417,14 +446,20 @@ fn command(keys: &str) -> Result<(Command, &str), Stop> {
         Ok((shorthand, rest)) => {
             let (operator, target) = shorthand.expand();
             return Ok((
-                Command::Operate {
+                Command::Operate(Operate {
                     count,
                     operator,
                     target,
-                },
+                }),
                 rest,
             ));
         }
+        Err(stop) => stop,
+    };
+
+    // | <paste>
+    let not_paste = match paste_keys(rest) {
+        Ok((keys, rest)) => return Ok((Command::Paste(Paste { count, keys }), rest)),
         Err(stop) => stop,
     };
 
@@ -436,14 +471,17 @@ fn command(keys: &str) -> Result<(Command, &str), Stop> {
                 not_motion,
                 not_mode_change,
                 not_shorthand,
+                not_paste,
                 not_operator,
             ]));
         }
     };
-    let operate = |target| Command::Operate {
-        count,
-        operator: first,
-        target,
+    let operate = |target| {
+        Command::Operate(Operate {
+            count,
+            operator: first,
+            target,
+        })
     };
     let not_motion = match motion(rest) {
         Ok((motion, rest)) => return Ok((operate(Target::Motion(motion)), rest)),
