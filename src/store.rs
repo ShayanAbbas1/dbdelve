@@ -1180,10 +1180,10 @@ impl HistoryEntry {
 ///
 /// A run is written twice, as it is sent and again as it lands, the second
 /// line carrying the outcome under the same `sql` and `at`. Reading keeps a
-/// statement's newest line, so the outcome supersedes the start without
-/// either line naming the other, and a run whose answer never came still has
-/// its start. Rewriting the start line in place instead would make every run
-/// a rewrite of the file.
+/// statement's latest run, the later line of it, so the outcome supersedes
+/// the start without either line naming the other, and a run whose answer
+/// never came still has its start. Rewriting the start line in place instead
+/// would make every run a rewrite of the file.
 pub fn append_history(profile_id: &str, entry: &HistoryEntry) -> Result<(), String> {
     let directory = query_directory(profile_id)?;
     fs::create_dir_all(&directory)
@@ -1251,19 +1251,39 @@ pub fn history(profile_id: &str) -> Vec<HistoryEntry> {
 /// A line that will not decode is skipped rather than ending the read: the file
 /// is appended to on every run, and the half-written last line a crash leaves
 /// behind is not a reason to lose everything before it.
+///
+/// Each statement is its latest run, by `at` rather than by line: two runs of
+/// one statement can land in either order, and the earlier one's outcome,
+/// written last, must not stand in for the run after it. A tie is one run, and
+/// its later line is its outcome. A line with no `at`, from before runs were
+/// timed, is older than any that has one. Statements are ordered by where that
+/// run's line is, newest first, which is the order
+/// [`crate::sql::remember_statement`] keeps them in as they are run.
 fn decode_history(text: &str) -> Vec<HistoryEntry> {
-    let mut seen = HashSet::new();
-    text.lines()
-        .rev()
-        .filter_map(|line| match serde_json::from_str(line).ok()? {
-            HistoryLine::Bare(sql) => Some(HistoryEntry {
+    let mut latest: HashMap<String, (usize, HistoryEntry)> = HashMap::new();
+    let lines = text.lines().enumerate().filter_map(|(at_line, line)| {
+        let entry = match serde_json::from_str(line).ok()? {
+            HistoryLine::Bare(sql) => HistoryEntry {
                 sql,
                 ..HistoryEntry::default()
-            }),
-            HistoryLine::Entry(entry) => Some(entry),
-        })
-        .filter(|entry| seen.insert(entry.sql.clone()))
+            },
+            HistoryLine::Entry(entry) => entry,
+        };
+        Some((at_line, entry))
+    });
+    for (at_line, entry) in lines {
+        match latest.get(&entry.sql) {
+            Some((_, kept)) if kept.at > entry.at => {}
+            _ => {
+                latest.insert(entry.sql.clone(), (at_line, entry));
+            }
+        }
+    }
+    let mut kept: Vec<_> = latest.into_values().collect();
+    kept.sort_by_key(|(at_line, _)| std::cmp::Reverse(*at_line));
+    kept.into_iter()
         .take(HISTORY_DEPTH)
+        .map(|(_, entry)| entry)
         .collect()
 }
 
@@ -3399,6 +3419,30 @@ open_objects = []
         .collect::<String>();
 
         assert_eq!(decode_history(&text), [failed, ran("SELECT 1", 3_000)]);
+    }
+
+    #[test]
+    fn an_earlier_run_that_lands_last_never_stands_in_for_the_later_one() {
+        let done = |at| HistoryEntry {
+            ms: Some(at),
+            ..ran("SELECT 1", at)
+        };
+        let text = [
+            ran("SELECT 1", 1_000),
+            ran("SELECT 1", 2_000),
+            done(2_000),
+            ran("SELECT 2", 3_000),
+            done(1_000),
+            HistoryEntry {
+                sql: "SELECT 1".into(),
+                ..HistoryEntry::default()
+            },
+        ]
+        .iter()
+        .map(|entry| serde_json::to_string(entry).unwrap() + "\n")
+        .collect::<String>();
+
+        assert_eq!(decode_history(&text), [ran("SELECT 2", 3_000), done(2_000)]);
     }
 
     #[test]

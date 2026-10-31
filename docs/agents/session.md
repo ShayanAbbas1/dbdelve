@@ -279,9 +279,12 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   `store::HistoryEntry` is a line per event in `.history.jsonl`: one as a run
   is sent (`sql` and `at`) and one as it lands, under the same pair, with its
   time, rows or server count, cap, error (cut to 500 characters) or cancel.
-  Reading keeps each statement's newest line, so the outcome supersedes the
-  start with no id between them, the file stays append-only, and a run the
-  app quit under keeps its start. A line from before runs were timed is a
+  Reading keeps each statement's latest run by `at`, the later line on a tie
+  and an untimed line below any timed one, so the outcome supersedes the
+  start with no id between them, an earlier run of the same statement that
+  lands last never stands in for the later one, the file stays append-only,
+  and a run the app quit under keeps its start. The session's list
+  (`sql::remember_statement`) keeps the same rule. A line from before runs were timed is a
   bare JSON string and reads as an entry with only its statement. Only a run
   recorded as it was sent gets an outcome, so the rules for what is history
   (`execute_unchecked`) are the rules for both lines, and each statement of a

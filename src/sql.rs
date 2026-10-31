@@ -2276,12 +2276,20 @@ fn sql_update_statement(
 /// A run at the front of the history, and its statement there only once
 /// however many times it has been run: a query run five times is one row to
 /// recall, not five rows to read past. The same rule `store::history` reads
-/// the file by, so what is held matches what the next launch reads back,
-/// a run's outcome replacing its start included.
+/// the file by, so what is held matches what the next launch reads back: a
+/// run's outcome replaces its start, and the outcome of a run older than the
+/// one held changes nothing, since two runs of one statement can land in
+/// either order.
 pub(crate) fn remember_statement(
     history: &mut Vec<crate::store::HistoryEntry>,
     entry: crate::store::HistoryEntry,
 ) {
+    if history
+        .iter()
+        .any(|past| past.sql == entry.sql && past.at > entry.at)
+    {
+        return;
+    }
     history.retain(|past| past.sql != entry.sql);
     history.insert(0, entry);
     history.truncate(crate::store::HISTORY_DEPTH);
@@ -6549,6 +6557,22 @@ mod tests {
     #[test]
     fn an_empty_batch_of_rows_has_nothing_to_send() {
         assert!(update_batch(Engine::Postgres, &[]).is_err());
+    }
+
+    #[test]
+    fn an_older_runs_outcome_leaves_the_newer_run_alone() {
+        let run = |at, ms| crate::store::HistoryEntry {
+            sql: "SELECT 1".into(),
+            at: Some(at),
+            ms,
+            ..Default::default()
+        };
+        let mut history = vec![run(2, None)];
+        remember_statement(&mut history, run(1, Some(10)));
+        assert_eq!(history, [run(2, None)]);
+
+        remember_statement(&mut history, run(2, Some(20)));
+        assert_eq!(history, [run(2, Some(20))]);
     }
 
     #[test]
