@@ -107,6 +107,9 @@ pub(super) fn export_schema(
         unless_cancelled(progress, move || read_tables(&asking, &named, &names))?
             .ok_or_else(|| refused("the read of its tables stopped.".into()))?
             .map_err(refused)?;
+    if let Some(reason) = sequence_refusal(request, &sequences) {
+        return Err(refused(reason));
+    }
     let keys = read
         .iter()
         .map(|table| (table.name.clone(), table.structure.foreign_keys.clone()))
@@ -217,6 +220,19 @@ pub(super) fn export_schema(
             true => Err(Ended::Cancelled),
             false => Ok(written),
         }
+    })
+}
+
+/// Why the rows cannot be written with where their sequences stand: a
+/// `setval` to the start for a sequence the role may not read would replay
+/// into a key the next `INSERT` collides with. The structure alone sets none.
+fn sequence_refusal(request: &SchemaRequest, sequences: &Sequences) -> Option<String> {
+    (request.rows && !sequences.unreadable.is_empty()).then(|| {
+        format!(
+            "this role may not read where these sequences stand, so the file cannot set them: \
+             {}. Grant it SELECT on them, or export the structure alone.",
+            sequences.unreadable.join(", ")
+        )
     })
 }
 
@@ -528,6 +544,28 @@ mod tests {
             structure,
             rows,
         }
+    }
+
+    #[test]
+    fn rows_are_refused_with_a_sequence_the_role_may_not_read() {
+        let sequences = Sequences {
+            unreadable: names(&["\"s\".\"a_id_seq\""]),
+            ..Sequences::default()
+        };
+        assert_eq!(
+            sequence_refusal(&request(true, true), &sequences).as_deref(),
+            Some(
+                "this role may not read where these sequences stand, so the file cannot set \
+                 them: \"s\".\"a_id_seq\". Grant it SELECT on them, or export the structure \
+                 alone."
+            )
+        );
+        assert!(sequence_refusal(&request(false, true), &sequences).is_some());
+        assert_eq!(sequence_refusal(&request(true, false), &sequences), None);
+        assert_eq!(
+            sequence_refusal(&request(true, true), &Sequences::default()),
+            None
+        );
     }
 
     #[test]

@@ -3010,6 +3010,9 @@ pub struct Sequences {
     pub before_tables: Vec<String>,
     /// `ALTER SEQUENCE … OWNED BY` and `setval`, written after the rows.
     pub after_rows: Vec<String>,
+    /// Sequences the role may not read where they stand, by qualified name,
+    /// which no `setval` can be written for: the catalog shows them unused.
+    pub unreadable: Vec<String>,
 }
 
 /// A table's DDL for a schema export: `create` without the foreign keys an
