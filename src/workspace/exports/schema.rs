@@ -444,7 +444,7 @@ mod tests {
 
     #[test]
     fn a_key_to_an_unticked_table_is_missing_not_cyclic() {
-        let mut elsewhere = key("customers");
+        let mut elsewhere = key("invoices");
         elsewhere.referenced_schema = "other".into();
         let tables = vec![
             ("orders".into(), vec![key("customers"), elsewhere]),
