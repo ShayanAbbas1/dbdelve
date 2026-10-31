@@ -359,7 +359,7 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   it was: the schemas always list the whole catalog, so an item can be in
   several folders and deleting a folder loses only the grouping. Folders are
   flat and their names unique per connection in any case. The sidebar lists
-  Pinned (in the order pinned; a pinned folder moves there with what it
+  Pinned (in the user's order; a pinned folder moves there with what it
   holds), then the other folders by name, then Queries, then the schemas. A
   shortcut's row id is everything it is named by (database, kind and the row
   it repeats) behind `pinned/` or its folder's `folder:{len}:{name}/`, the
@@ -386,6 +386,20 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   row, named after it exists so the field has a row to sit on; a filter is
   cleared first, since a field focused on a row the filter hides takes the
   keyboard nowhere.
+  Any object, saved query or folder row drags (`DragShortcut`, a static
+  label for its preview); the state change is `Shortcuts::drop_on`. Dropped
+  on a folder's row, a member taken out of another folder moves, and one from
+  anywhere else (the schemas, Queries, Pinned) is added and stays where it
+  was: a folder is shortcuts, so taking a row out of the schema tree is never
+  what a drop does, while a folder-to-folder drag is the one place a copy
+  would leave behind something nobody asked to keep. On the Pinned group's
+  row anything is pinned; on a member's row in a folder or Pinned it goes
+  before or after that row by the pointer's half, which on a folder means
+  added or moved there by the same rule. A folder holds no folders, so a
+  folder dropped on a pinned folder is reordered among the pins. Nothing
+  lands where no row takes it, and an object dragged while its database is
+  unknown carries nothing. The Pinned group exists only while something is
+  pinned, so pinning the first thing is the menu's.
 - **A named buffer persists to its query file, an unnamed one to its own
   `.scratch-{id}.sql`.** Edits stay in memory until Save, a connection switch,
   opening another query, or normal quit/window close persists the buffers.
