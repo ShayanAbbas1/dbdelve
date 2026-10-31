@@ -1161,6 +1161,11 @@ fn rendered(engine: Engine, columns: &[Column], rows: Vec<Row>) -> Vec<Row> {
 }
 
 mod schema;
+mod schema_dialog;
+
+#[cfg(test)]
+pub(crate) use schema_dialog::Loading;
+pub(crate) use schema_dialog::SchemaExportDialog;
 
 #[cfg(test)]
 mod round_trip;

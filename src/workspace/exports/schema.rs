@@ -4,70 +4,16 @@
 use std::io::Write;
 
 use super::*;
-use crate::db::{
-    DdlNames, ExportDdl, ForeignKey, ForeignKeyReplay, RelationKind, Sequences, Structure,
-};
+use crate::db::{DdlNames, ExportDdl, ForeignKey, ForeignKeyReplay, Sequences, Structure};
 
 impl Workspace {
-    /// Every plain table of `schema`, written as one file of SQL the user
-    /// picks. A view, a partition or anything else the catalog lists is left
-    /// out, as the file's header says.
-    ///
-    /// ponytail: every plain table, with no picker and no palette command,
-    /// until #188 settles where this is asked from.
-    pub(crate) fn export_schema(&mut self, schema: String, cx: &mut Context<Self>) {
-        let Some(profile) = self.profile() else {
-            return;
-        };
-        let (id, generation) = (profile.id.clone(), profile.generation);
-        let engine = profile.config.engine();
-        let tables: Vec<String> = self
-            .catalog()
-            .and_then(|catalog| catalog.schemas.iter().find(|each| each.name == schema))
-            .map(|found| {
-                found
-                    .relations
-                    .iter()
-                    .filter(|relation| {
-                        matches!(relation.kind, RelationKind::Table)
-                            && relation.partition_of.is_none()
-                    })
-                    .map(|relation| relation.name.clone())
-                    .collect()
-            })
-            .unwrap_or_default();
-        if tables.is_empty() {
-            self.note("The schema was not exported: it has no tables.".into(), cx);
-            return;
-        }
-        let refusal = tables.iter().find_map(|table| {
-            relation_refetch(engine, &schema, table, "", &[], &[])
-                .and_then(|refetch| self.cleared(refetch))
-                .err()
-        });
-        if let Some(reason) = refusal {
-            self.note(format!("The schema was not exported: {reason}"), cx);
-            return;
-        }
-        let chosen = choose_path(&schema, FileAs::Inserts, cx);
-        cx.spawn(async move |workspace, cx| {
-            let Some(path) = chosen.await else {
-                return;
-            };
-            _ = workspace.update(cx, |workspace, cx| {
-                workspace.start_schema_export(&id, generation, schema, tables, path, cx);
-            });
-        })
-        .detach();
-    }
-
     /// Asked again once the save panel has answered, as `start_export` is.
-    fn start_schema_export(
+    pub(super) fn start_schema_export(
         &mut self,
         id: &str,
         generation: u64,
         schema: String,
-        tables: Vec<String>,
+        request: SchemaRequest,
         path: PathBuf,
         cx: &mut Context<Self>,
     ) {
@@ -77,7 +23,7 @@ impl Workspace {
         let engine = profile.config.engine();
         let refusal = match &profile.session.exporting {
             Some(_) => Some("an export of every row is already running on this connection."),
-            None => tables.iter().find_map(|table| {
+            None => request.tables.iter().find_map(|table| {
                 match relation_refetch(engine, &schema, table, "", &[], &[]) {
                     Ok(refetch) => refetch_refusal(
                         engine,
@@ -99,11 +45,6 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let request = SchemaRequest {
-            tables,
-            structure: true,
-            rows: true,
-        };
         self.run_export(
             id,
             generation,
