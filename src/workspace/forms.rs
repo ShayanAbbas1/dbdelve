@@ -1144,6 +1144,8 @@ impl Workspace {
             ("queue-failure", 0) => self.continue_queue(cx),
             ("queue-failure", _) => self.stop_queue(cx),
             ("pending-run", 2) => self.toggle_dont_ask(cx),
+            ("schema-export", 0) => self.answer_schema_export(cx),
+            ("schema-export", _) => _ = self.cancel_schema_export(cx),
             ("pending-export", 0) => self.answer_pending_export(every_row, cx),
             ("pending-export", 1) if every_row => self.answer_pending_export(false, cx),
             ("pending-export", _) => _ = self.cancel_pending_export(cx),
@@ -2854,11 +2856,11 @@ impl Workspace {
                     }
                     if exports_schema {
                         let workspace = menu_workspace.clone();
-                        menu = menu.item(PopupMenuItem::new("Export as SQL…").on_click(
+                        menu = menu.item(PopupMenuItem::new("Export Schema as SQL…").on_click(
                             move |_, _, cx| {
                                 let schema = schema.clone();
                                 _ = workspace.update(cx, |workspace, cx| {
-                                    workspace.export_schema(schema, cx);
+                                    workspace.open_schema_export(schema, cx);
                                 });
                             },
                         ));

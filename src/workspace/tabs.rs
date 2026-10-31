@@ -837,7 +837,7 @@ impl Workspace {
         // Whatever is in front, in the order it is stacked: the palette paints
         // over the stale-edit prompt, the stopped-run prompt and the run
         // prompt, which paint over the export question, which paints over the
-        // discard-close confirmation, which paints over the delete
+        // schema export, which paints over the discard-close confirmation, which paints over the delete
         // confirmation, which paints over the import dialog, which paints
         // over the apply review, which paints over the surface and the
         // settings panel beside it -- so `escape` backs out
@@ -859,6 +859,9 @@ impl Workspace {
             return;
         }
         if self.cancel_pending_export(cx) {
+            return;
+        }
+        if self.cancel_schema_export(cx) {
             return;
         }
         if self.cancel_discard_close(cx) {

@@ -49,6 +49,7 @@ use crate::{
     structure_grid::StructureGrid,
     theme::ConnectionColor,
     ui::row_readout,
+    workspace::SchemaExportDialog,
 };
 
 /// A connection and everything it owns.
@@ -573,6 +574,11 @@ pub(crate) struct Session {
     /// An export asked for over rows that are not the whole result, held
     /// until the user says which rows it writes.
     pub(crate) pending_export: Option<PendingExport>,
+    /// The tables, structure and rows a schema export is being chosen over.
+    pub(crate) schema_export: Option<SchemaExportDialog>,
+    /// Numbered across opens, so a read the dialog it was for has closed
+    /// before landing is not taken for the reopened one's.
+    pub(crate) last_schema_export: u64,
     /// The export of every row this connection is running, at most one.
     pub(crate) exporting: Option<Exporting>,
     /// The query tab whose queue stopped on a failed statement, held until
@@ -1030,6 +1036,8 @@ impl Session {
             import_rows: None,
             pending_run: None,
             pending_export: None,
+            schema_export: None,
+            last_schema_export: 0,
             exporting: None,
             queue_failure: None,
             stale_edit: None,
