@@ -127,6 +127,9 @@ impl Workspace {
                     .to_string(),
             ];
         }
+        if self.engine().syntax() != db::Syntax::Sql {
+            return vec!["A SQL file opens only on a connection that runs SQL.".to_string()];
+        }
         let mut refused = Vec::new();
         for text in read {
             match text {
