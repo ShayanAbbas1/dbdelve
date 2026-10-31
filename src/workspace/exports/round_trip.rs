@@ -687,18 +687,19 @@ fn live_a_nul_in_text_exported_as_sql_runs_back_on_sql_server() {
     assert_nul_in_text_runs_back(&table);
 }
 
-#[test]
-fn a_schema_exported_as_sql_runs_back_on_duckdb() {
-    let file = DuckDbFile::new("schema");
-    let connection = file.open();
+/// A parent, a child whose key points at it and an empty table, exported as
+/// one schema with the child named first, dropped, and run back.
+fn assert_a_schema_runs_back(connection: Connection, engine: Engine, schema: &'static str) {
     // Declared parent first, so it is dropped last: the child's key holds it.
-    let parent = Throwaway::new(connection.clone(), Engine::DuckDb, "main", "parent");
-    let child = Throwaway::new(connection.clone(), Engine::DuckDb, "main", "child");
-    let empty = Throwaway::new(connection, Engine::DuckDb, "main", "empty");
-    parent.run("CREATE TABLE {table} (id INTEGER PRIMARY KEY, body VARCHAR)");
+    let parent = Throwaway::new(connection.clone(), engine, schema, "parent");
+    let child = Throwaway::new(connection.clone(), engine, schema, "child");
+    let empty = Throwaway::new(connection, engine, schema, "empty");
+    // A table-level key: MySQL parses a column's `REFERENCES` and enforces none.
+    parent.run("CREATE TABLE {table} (id INTEGER PRIMARY KEY, body TEXT)");
     child.run(&format!(
-        "CREATE TABLE {{table}} (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES {} (id))",
-        Engine::DuckDb.qualified("main", &parent.name)
+        "CREATE TABLE {{table}} (id INTEGER PRIMARY KEY, parent_id INTEGER, \
+         FOREIGN KEY (parent_id) REFERENCES {} (id))",
+        engine.qualified(schema, &parent.name)
     ));
     empty.run("CREATE TABLE {table} (id INTEGER PRIMARY KEY)");
     parent.seed_awkward_texts("body");
@@ -712,10 +713,10 @@ fn a_schema_exported_as_sql_runs_back_on_duckdb() {
     let path = parent.directory.join("schema.sql");
     let written = export_schema(
         &parent.connection,
-        "main",
+        schema,
         &tables,
         false,
-        Engine::DuckDb,
+        engine,
         &path,
         &ExportProgress::default(),
     )
@@ -723,7 +724,9 @@ fn a_schema_exported_as_sql_runs_back_on_duckdb() {
     assert_eq!(written, parent_before.rows.len() + child_before.rows.len());
     let sql = std::fs::read_to_string(&path).unwrap();
     assert!(
-        sql.starts_with("-- Schema \"main\" exported by DBDelve: 3 tables."),
+        sql.starts_with(&format!(
+            "-- Schema \"{schema}\" exported by DBDelve: 3 tables."
+        )),
         "{sql}"
     );
 
@@ -731,10 +734,32 @@ fn a_schema_exported_as_sql_runs_back_on_duckdb() {
         table.run("DROP TABLE {table}");
     }
     let problems = parent.replay(&sql);
-    assert!(problems.is_empty(), "{sql}\n{}", problems.join("\n"));
+    assert!(
+        problems.is_empty(),
+        "{engine:?}: {sql}\n{}",
+        problems.join("\n")
+    );
     assert!(differences(&parent_before, &parent.rows(), None).is_empty());
     assert!(differences(&child_before, &child.rows(), None).is_empty());
     assert!(empty.rows().rows.is_empty());
+}
+
+#[test]
+fn a_schema_exported_as_sql_runs_back_on_duckdb() {
+    let file = DuckDbFile::new("schema");
+    assert_a_schema_runs_back(file.open(), Engine::DuckDb, "main");
+}
+
+#[test]
+#[ignore = "needs the dev Postgres"]
+fn live_a_schema_exported_as_sql_runs_back_on_postgres() {
+    assert_a_schema_runs_back(postgres(), Engine::Postgres, "public");
+}
+
+#[test]
+#[ignore = "needs the dev MySQL"]
+fn live_a_schema_exported_as_sql_runs_back_on_mysql() {
+    assert_a_schema_runs_back(open("dbdelve_MYSQL_URL"), Engine::MySql, "dbdelve_dev");
 }
 
 #[test]
