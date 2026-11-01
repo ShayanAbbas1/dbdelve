@@ -242,10 +242,23 @@ fn carried(data_type: &DataType) -> bool {
             | Date64
             | Time32(_)
             | Time64(_)
-            | Timestamp(..)
+            | Timestamp(_, None)
             | Duration(_)
             | Interval(_)
-    )
+    ) || matches!(data_type, Timestamp(_, Some(zone)) if is_offset(zone))
+}
+
+/// Protocol 1 carries a timestamp's zone only as an offset, `+HH:MM` or
+/// `-HH:MM`. A named zone needs a time zone database the host does not ship,
+/// so it would pass here and fail only when its first value was rendered.
+fn is_offset(zone: &str) -> bool {
+    let [b'+' | b'-', h1, h2, b':', m1, m2] = zone.as_bytes() else {
+        return false;
+    };
+    let two = |tens: &u8, ones: &u8| {
+        (tens.is_ascii_digit() && ones.is_ascii_digit()).then(|| (tens - b'0') * 10 + ones - b'0')
+    };
+    two(h1, h2).is_some_and(|hours| hours < 24) && two(m1, m2).is_some_and(|minutes| minutes < 60)
 }
 
 fn guarded<T>(decode: impl FnOnce() -> Result<T, Violation>) -> Result<T, Violation> {
@@ -443,6 +456,25 @@ mod tests {
             &batch.schema(),
             &encode_batch(&int64_batch()).unwrap(),
         ));
+    }
+
+    #[test]
+    fn a_timestamp_zone_is_carried_only_as_an_offset() {
+        let at = |zone: &str| -> ArrayRef {
+            Arc::new(TimestampSecondArray::from(vec![Some(0)]).with_timezone(zone))
+        };
+        let utc = RecordBatch::try_from_iter([("t", at("+00:00"))]).unwrap();
+        let schema = decode_schema(&encode_schema(&utc.schema())).unwrap();
+        assert_eq!(
+            decode_batch(&schema, &encode_batch(&utc).unwrap()).unwrap(),
+            utc
+        );
+
+        for zone in ["UTC", "Europe/Paris", "+0000", "+24:00", "Z"] {
+            let named = RecordBatch::try_from_iter([("t", at(zone))]).unwrap();
+            assert!(encode_batch(&named).is_err(), "{zone}");
+            refused_as_arrow(decode_schema(&encode_schema(&named.schema())));
+        }
     }
 
     #[test]

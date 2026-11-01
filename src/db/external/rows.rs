@@ -307,6 +307,14 @@ mod tests {
                 "2024-02-29 17:34:56+05:00",
             ),
             (
+                "timestamp_utc",
+                Arc::new(
+                    TimestampSecondArray::from(vec![Some(1_709_210_096), None])
+                        .with_timezone("+00:00"),
+                ),
+                "2024-02-29 12:34:56+00:00",
+            ),
+            (
                 "duration",
                 Arc::new(DurationSecondArray::from(vec![Some(90), None])),
                 "PT90S",
