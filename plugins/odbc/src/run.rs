@@ -173,10 +173,9 @@ pub fn query(
     id: u64,
     sql: &str,
 ) -> Response {
-    let statement = match session.handle().allocate_statement() {
-        odbc_api::handles::SqlResult::Success(statement)
-        | odbc_api::handles::SqlResult::SuccessWithInfo(statement) => statement,
-        _ => return failure::from(session.handle(), "SQLAllocHandle"),
+    let statement = match session.statement() {
+        Ok(statement) => statement,
+        Err(error) => return error,
     };
     if !raw::set_noscan(&statement) {
         return failure::from(&statement, "SQLSetStmtAttr");
@@ -412,7 +411,7 @@ fn column_field(name: String, type_name: String) -> Field {
         .with_metadata(HashMap::from([("dbdelve.type".to_string(), type_name)]))
 }
 
-fn rendered(fetched: Fetched, bytes: &[u8]) -> String {
+pub fn rendered(fetched: Fetched, bytes: &[u8]) -> String {
     match fetched {
         Fetched::Text => {
             let units: Vec<u16> = bytes
@@ -613,6 +612,7 @@ mod tests {
     fn no_odbc_api_value_reader_is_used_outside_raw() {
         let sources = [
             ("main.rs", include_str!("main.rs")),
+            ("catalog.rs", include_str!("catalog.rs")),
             ("connect.rs", include_str!("connect.rs")),
             ("failure.rs", include_str!("failure.rs")),
             ("run.rs", include_str!("run.rs")),

@@ -18,7 +18,8 @@ use arrow_schema::SchemaRef;
 use dbdelve_plugin_protocol::arrow::{decode_batch, decode_schema};
 use dbdelve_plugin_protocol::limits::CANCEL_DEADLINE;
 use dbdelve_plugin_protocol::{
-    ErrorKind, Frame, Kind, PROTOCOL, Password, Request, Response, read_frame, write_frame,
+    ErrorKind, Frame, Kind, PROTOCOL, Password, Reference, RelationKind, Request, Response,
+    read_frame, write_frame,
 };
 
 struct Bridge {
@@ -406,4 +407,157 @@ fn live_cancel_mid_stream_ends_the_read() {
     assert_eq!(error_of(&outcome).0, ErrorKind::Cancelled);
     let after = bridge.query("SELECT 5 FROM SYSIBM.SYSDUMMY1");
     assert_eq!(after.rows, [vec![Some("5".to_string())]]);
+}
+
+fn run_all(bridge: &mut Bridge, statements: &[&str]) {
+    for sql in statements {
+        let outcome = bridge.query(sql);
+        assert!(
+            matches!(outcome.terminal, Response::End { .. }),
+            "{sql}: {:?}",
+            outcome.terminal
+        );
+    }
+}
+
+/// `PARENT`'s key is declared (B, A), against its column order, so only
+/// `KEY_SEQ` gives it right; `X_Y` sits beside `XZY`, which its unescaped
+/// name would match as a pattern.
+#[test]
+#[ignore = "needs a Db2 and IBM's driver: set dbdelve_ODBC_DB2, _USER and _PASSWORD"]
+fn live_the_catalog_reads_relations_keys_indexes_and_references() {
+    let mut bridge = Bridge::open(0);
+    run_all(
+        &mut bridge,
+        &[
+            "DROP TABLE IF EXISTS DBDELVE_CAT_LEAF",
+            "DROP TABLE IF EXISTS DBDELVE_CAT_CHILD",
+            "DROP TABLE IF EXISTS DBDELVE_CAT_PARENT",
+            "DROP TABLE IF EXISTS DBDELVE_CAT_X_Y",
+            "DROP TABLE IF EXISTS DBDELVE_CAT_XZY",
+            "CREATE TABLE DBDELVE_CAT_PARENT (A INTEGER NOT NULL, B VARCHAR(20) NOT NULL, \
+             AMOUNT DECIMAL(10,2) DEFAULT 0, PRIMARY KEY (B, A))",
+            "CREATE TABLE DBDELVE_CAT_CHILD (ID INTEGER NOT NULL PRIMARY KEY, PA INTEGER, \
+             PB VARCHAR(20), NOTE VARCHAR(10), \
+             FOREIGN KEY (PB, PA) REFERENCES DBDELVE_CAT_PARENT (B, A))",
+            "CREATE INDEX DBDELVE_CAT_CHILD_NOTE ON DBDELVE_CAT_CHILD (NOTE)",
+            "CREATE TABLE DBDELVE_CAT_LEAF (ID INTEGER NOT NULL PRIMARY KEY, \
+             CHILD INTEGER REFERENCES DBDELVE_CAT_CHILD (ID))",
+            "CREATE OR REPLACE VIEW DBDELVE_CAT_VIEW AS SELECT ID FROM DBDELVE_CAT_LEAF",
+            "CREATE TABLE DBDELVE_CAT_X_Y (ONLY_HERE INTEGER)",
+            "CREATE TABLE DBDELVE_CAT_XZY (NOT_THIS INTEGER)",
+        ],
+    );
+    let schema = env::var("dbdelve_ODBC_DB2_USER").unwrap().to_uppercase();
+
+    let Response::Catalog { schemas } = bridge.request(Request::Catalog) else {
+        panic!("a catalog");
+    };
+    let relations = &schemas
+        .iter()
+        .find(|listed| listed.name == schema)
+        .expect("the user's schema")
+        .relations;
+    let kind = |name: &str| {
+        relations
+            .iter()
+            .find(|relation| relation.name == name)
+            .map(|relation| relation.kind)
+    };
+    assert_eq!(kind("DBDELVE_CAT_PARENT"), Some(RelationKind::Table));
+    assert_eq!(kind("DBDELVE_CAT_VIEW"), Some(RelationKind::View));
+
+    let structure = |bridge: &mut Bridge, relation: &str| match bridge.request(Request::Structure {
+        schema: schema.clone(),
+        relation: relation.to_string(),
+    }) {
+        Response::Structure(structure) => structure,
+        other => panic!("a structure of {relation}, got {other:?}"),
+    };
+    let parent = structure(&mut bridge, "DBDELVE_CAT_PARENT");
+    let columns: Vec<_> = parent
+        .columns
+        .iter()
+        .map(|column| {
+            (
+                column.name.as_str(),
+                column.data_type.as_str(),
+                column.nullable,
+            )
+        })
+        .collect();
+    assert_eq!(
+        columns,
+        [
+            ("A", "INTEGER", false),
+            ("B", "VARCHAR(20)", false),
+            ("AMOUNT", "DECIMAL(10,2)", true),
+        ]
+    );
+    assert_eq!(parent.columns[2].default.as_deref(), Some("0"));
+    assert_eq!(parent.primary_key, ["B", "A"]);
+    let primary: Vec<_> = parent
+        .indexes
+        .iter()
+        .filter(|index| index.primary)
+        .collect();
+    assert_eq!(primary.len(), 1, "{:?}", parent.indexes);
+    assert_eq!(primary[0].columns, ["B", "A"]);
+
+    let child = structure(&mut bridge, "DBDELVE_CAT_CHILD");
+    let note = child
+        .indexes
+        .iter()
+        .find(|index| index.name == "DBDELVE_CAT_CHILD_NOTE")
+        .expect("the NOTE index");
+    assert_eq!(
+        (note.columns.as_slice(), note.unique),
+        (&["NOTE".to_string()][..], false)
+    );
+    let keys: Vec<_> = child
+        .foreign_keys
+        .iter()
+        .map(|key| {
+            (
+                key.column.as_str(),
+                key.referenced_schema.as_str(),
+                key.referenced_table.as_str(),
+                key.referenced_column.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            ("PB", schema.as_str(), "DBDELVE_CAT_PARENT", "B"),
+            ("PA", schema.as_str(), "DBDELVE_CAT_PARENT", "A"),
+        ]
+    );
+
+    let narrow = structure(&mut bridge, "DBDELVE_CAT_X_Y");
+    let names: Vec<_> = narrow
+        .columns
+        .iter()
+        .map(|column| column.name.as_str())
+        .collect();
+    assert_eq!(names, ["ONLY_HERE"]);
+
+    let references =
+        |bridge: &mut Bridge, relation: &str| match bridge.request(Request::References {
+            schema: schema.clone(),
+            relation: relation.to_string(),
+        }) {
+            Response::References { references } => references,
+            other => panic!("references of {relation}, got {other:?}"),
+        };
+    assert_eq!(references(&mut bridge, "DBDELVE_CAT_PARENT"), []);
+    assert_eq!(
+        references(&mut bridge, "DBDELVE_CAT_CHILD"),
+        [Reference {
+            schema: schema.clone(),
+            table: "DBDELVE_CAT_LEAF".to_string(),
+            column: "CHILD".to_string(),
+            referenced_column: "ID".to_string(),
+        }]
+    );
 }

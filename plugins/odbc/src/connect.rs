@@ -1,7 +1,7 @@
 use std::mem::ManuallyDrop;
 
 use dbdelve_plugin_protocol::{REFERENCES, Response};
-use odbc_api::handles::{self, SqlResult, SqlText};
+use odbc_api::handles::{self, SqlResult, SqlText, StatementImpl};
 use odbc_api::sys::{AttrOdbcVersion, InfoType};
 
 use crate::{failure, raw};
@@ -86,6 +86,13 @@ impl Session {
 
     pub fn handle(&self) -> &handles::Connection<'static> {
         &self.handle
+    }
+
+    pub fn statement(&self) -> Result<StatementImpl<'_>, Response> {
+        match self.handle.allocate_statement() {
+            SqlResult::Success(statement) | SqlResult::SuccessWithInfo(statement) => Ok(statement),
+            _ => Err(failure::from(&*self.handle, "SQLAllocHandle")),
+        }
     }
 
     pub fn statement_timeout(&self) -> u32 {

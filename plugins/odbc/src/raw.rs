@@ -13,9 +13,9 @@
 use odbc_api::handles::{self, Statement, StatementImpl};
 use odbc_api::sys::{
     CDataType, Desc, HDbc, HStmt, InfoType, Len, Nullability, Pointer, SQLCancel, SQLColAttributeW,
-    SQLDescribeColW, SQLExecDirectW, SQLFetch, SQLGetData, SQLGetInfoW, SQLMoreResults,
-    SQLNumResultCols, SQLRowCount, SQLSetStmtAttrW, SqlDataType, SqlReturn, StatementAttribute,
-    ULen,
+    SQLColumnsW, SQLDescribeColW, SQLExecDirectW, SQLFetch, SQLForeignKeysW, SQLGetData,
+    SQLGetInfoW, SQLMoreResults, SQLNumResultCols, SQLPrimaryKeysW, SQLRowCount, SQLSetStmtAttrW,
+    SQLTablesW, SqlDataType, SqlReturn, StatementAttribute, ULen,
 };
 
 use crate::failure;
@@ -57,6 +57,25 @@ pub fn info_string(connection: &handles::Connection, info: InfoType) -> Option<S
     }
     let chars = (bytes / 2).min(buffer.len().saturating_sub(1));
     Some(String::from_utf16_lossy(&buffer[..chars]))
+}
+
+/// A `SQLUINTEGER` `SQLGetInfo` answers, such as a bitmask.
+pub fn info_u32(connection: &handles::Connection, info: InfoType) -> Option<u32> {
+    let mut value: u32 = 0;
+    let mut bytes: i16 = 0;
+    // SAFETY: a live connection handle the caller borrows; the driver writes
+    // one `SQLUINTEGER` into `value`, the size it is given, and the length
+    // out is an `SQLSMALLINT`.
+    let result = unsafe {
+        SQLGetInfoW(
+            connection.as_sys(),
+            info,
+            &mut value as *mut u32 as Pointer,
+            4,
+            &mut bytes,
+        )
+    };
+    succeeded(result).then_some(value)
 }
 
 fn get_info(handle: HDbc, info: InfoType, buffer: &mut [u16]) -> Option<usize> {
@@ -300,6 +319,191 @@ pub fn get_data(
             return Ok(Some(value));
         }
         first = false;
+    }
+}
+
+/// A catalog function's text argument. `None` is passed as the NULL pointer,
+/// which ODBC reads as "any", where an empty string means "none":
+/// odbc-api's catalog calls take `&SqlText` and cannot pass NULL, so
+/// `SQLTables` there would list only tables without a catalog, and
+/// `SQLForeignKeys` would look for a table named "".
+struct Argument(Option<Vec<u16>>);
+
+impl Argument {
+    fn new(text: Option<&str>) -> Option<Self> {
+        let wide = text.map(|text| text.encode_utf16().collect::<Vec<u16>>());
+        match &wide {
+            Some(wide) if i16::try_from(wide.len()).is_err() => None,
+            _ => Some(Self(wide)),
+        }
+    }
+
+    fn pointer(&self) -> *const u16 {
+        self.0
+            .as_ref()
+            .map_or(std::ptr::null(), |wide| wide.as_ptr())
+    }
+
+    fn length(&self) -> i16 {
+        self.0.as_ref().map_or(0, |wide| wide.len() as i16)
+    }
+}
+
+fn arguments<const N: usize>(texts: [Option<&str>; N]) -> Option<[Argument; N]> {
+    let arguments: Vec<Argument> = texts
+        .into_iter()
+        .map(Argument::new)
+        .collect::<Option<_>>()?;
+    arguments.try_into().ok()
+}
+
+pub fn tables(statement: &StatementImpl, schema: &str, table: &str) -> SqlReturn {
+    let Some([catalog, schema, table, kinds]) = arguments([None, Some(schema), Some(table), None])
+    else {
+        return SqlReturn::ERROR;
+    };
+    // SAFETY: a live statement handle; each argument is NULL or holds exactly
+    // its length in UTF-16 units for the whole call.
+    unsafe {
+        SQLTablesW(
+            statement.as_sys(),
+            catalog.pointer(),
+            catalog.length(),
+            schema.pointer(),
+            schema.length(),
+            table.pointer(),
+            table.length(),
+            kinds.pointer(),
+            kinds.length(),
+        )
+    }
+}
+
+/// Every column of the tables `schema` and `table` match, as patterns.
+pub fn columns(
+    statement: &StatementImpl,
+    catalog: Option<&str>,
+    schema: Option<&str>,
+    table: &str,
+) -> SqlReturn {
+    let Some([catalog, schema, table, column]) = arguments([catalog, schema, Some(table), None])
+    else {
+        return SqlReturn::ERROR;
+    };
+    // SAFETY: as in `tables`.
+    unsafe {
+        SQLColumnsW(
+            statement.as_sys(),
+            catalog.pointer(),
+            catalog.length(),
+            schema.pointer(),
+            schema.length(),
+            table.pointer(),
+            table.length(),
+            column.pointer(),
+            column.length(),
+        )
+    }
+}
+
+pub fn primary_keys(
+    statement: &StatementImpl,
+    catalog: Option<&str>,
+    schema: Option<&str>,
+    table: &str,
+) -> SqlReturn {
+    let Some([catalog, schema, table]) = arguments([catalog, schema, Some(table)]) else {
+        return SqlReturn::ERROR;
+    };
+    // SAFETY: as in `tables`.
+    unsafe {
+        SQLPrimaryKeysW(
+            statement.as_sys(),
+            catalog.pointer(),
+            catalog.length(),
+            schema.pointer(),
+            schema.length(),
+            table.pointer(),
+            table.length(),
+        )
+    }
+}
+
+/// Each side is (catalog, schema, table); the side left all `None` is the
+/// one asked for.
+pub fn foreign_keys(
+    statement: &StatementImpl,
+    primary: [Option<&str>; 3],
+    foreign: [Option<&str>; 3],
+) -> SqlReturn {
+    let Some([pk_catalog, pk_schema, pk_table]) = arguments(primary) else {
+        return SqlReturn::ERROR;
+    };
+    let Some([fk_catalog, fk_schema, fk_table]) = arguments(foreign) else {
+        return SqlReturn::ERROR;
+    };
+    // SAFETY: as in `tables`.
+    unsafe {
+        SQLForeignKeysW(
+            statement.as_sys(),
+            pk_catalog.pointer(),
+            pk_catalog.length(),
+            pk_schema.pointer(),
+            pk_schema.length(),
+            pk_table.pointer(),
+            pk_table.length(),
+            fk_catalog.pointer(),
+            fk_catalog.length(),
+            fk_schema.pointer(),
+            fk_schema.length(),
+            fk_table.pointer(),
+            fk_table.length(),
+        )
+    }
+}
+
+// odbc-sys declares no `SQLStatistics`. The symbol is the driver manager's,
+// which odbc-sys already links on every platform.
+unsafe extern "system" {
+    fn SQLStatisticsW(
+        statement: HStmt,
+        catalog: *const u16,
+        catalog_length: i16,
+        schema: *const u16,
+        schema_length: i16,
+        table: *const u16,
+        table_length: i16,
+        unique: u16,
+        reserved: u16,
+    ) -> SqlReturn;
+}
+
+/// Every index of one table, and its `SQL_TABLE_STAT` row, which callers skip.
+pub fn statistics(
+    statement: &StatementImpl,
+    catalog: Option<&str>,
+    schema: Option<&str>,
+    table: &str,
+) -> SqlReturn {
+    const SQL_INDEX_ALL: u16 = 1;
+    const SQL_QUICK: u16 = 0;
+    let Some([catalog, schema, table]) = arguments([catalog, schema, Some(table)]) else {
+        return SqlReturn::ERROR;
+    };
+    // SAFETY: as in `tables`; the signature is ODBC's `SQLStatisticsW`, whose
+    // last two arguments are `SQLUSMALLINT`s.
+    unsafe {
+        SQLStatisticsW(
+            statement.as_sys(),
+            catalog.pointer(),
+            catalog.length(),
+            schema.pointer(),
+            schema.length(),
+            table.pointer(),
+            table.length(),
+            SQL_INDEX_ALL,
+            SQL_QUICK,
+        )
     }
 }
 

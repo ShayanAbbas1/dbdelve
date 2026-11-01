@@ -7,6 +7,7 @@
 //! answers every other request, in order, and is the only writer of stdout.
 //! It exits on stdin EOF, as every plugin must.
 
+mod catalog;
 mod connect;
 mod failure;
 mod raw;
@@ -20,7 +21,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
 use dbdelve_plugin_protocol::{
-    ErrorKind, Kind, PROTOCOL, REFERENCES, Request, Response, Tls, Violation, read_frame,
+    ErrorKind, Kind, MAX_PAYLOAD, PROTOCOL, REFERENCES, Request, Response, Tls, Violation,
+    read_frame,
 };
 use odbc_api::handles;
 
@@ -153,6 +155,13 @@ impl<W: Write> Bridge<W> {
                 Some(session) => run::query(session, &self.control, &mut self.out, id, &sql),
                 None => not_open(),
             },
+            Request::Catalog => self.catalog(catalog::catalog),
+            Request::Structure { schema, relation } => {
+                self.catalog(|session| catalog::structure(session, &schema, &relation))
+            }
+            Request::References { schema, relation } => {
+                self.catalog(|session| catalog::references(session, &schema, &relation))
+            }
             _ => refusal(
                 ErrorKind::Unsupported,
                 "The ODBC bridge does not answer this request.".to_string(),
@@ -185,8 +194,21 @@ impl<W: Write> Bridge<W> {
         Ok(opened)
     }
 
+    fn catalog(&self, read: impl FnOnce(&Session) -> Result<Response, Response>) -> Response {
+        match &self.session {
+            Some(session) => read(session).unwrap_or_else(|error| error),
+            None => not_open(),
+        }
+    }
+
     fn reply(&mut self, id: u64, response: Response) {
-        run::write_or_exit(&mut self.out, Kind::Control, id, &response.to_payload());
+        let mut payload = response.to_payload();
+        // A catalog of a vast database can outgrow a frame; writing it would
+        // fail and end the process, where this keeps the session.
+        if payload.len() > MAX_PAYLOAD {
+            payload = failure::plain("The answer is larger than one protocol frame.").to_payload();
+        }
+        run::write_or_exit(&mut self.out, Kind::Control, id, &payload);
     }
 }
 
@@ -269,7 +291,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_request_is_unsupported_and_data_is_a_protocol_error() {
+    fn an_unknown_request_is_unsupported_and_data_or_a_catalog_unopened_is_a_protocol_error() {
         let input = [
             frame(Kind::Control, 2, br#"{"type":"databases"}"#),
             frame(Kind::Data, 3, b"rows"),
@@ -286,7 +308,7 @@ mod tests {
             [
                 (2, Some(ErrorKind::Unsupported)),
                 (3, Some(ErrorKind::Protocol)),
-                (4, Some(ErrorKind::Unsupported)),
+                (4, Some(ErrorKind::Protocol)),
             ]
         );
     }
