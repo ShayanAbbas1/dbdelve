@@ -1,0 +1,5 @@
+id = "odbc"
+name = "ODBC"
+version = "0.6.2"
+protocol = 1
+executable = "bin/dbdelve-odbc"

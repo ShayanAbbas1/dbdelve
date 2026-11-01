@@ -2185,6 +2185,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbdelve-plugin-odbc"
+version = "0.6.2"
+dependencies = [
+ "dbdelve-plugin-protocol",
+ "odbc-api",
+]
+
+[[package]]
 name = "dbdelve-plugin-protocol"
 version = "0.6.2"
 dependencies = [
@@ -6400,6 +6408,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "odbc-api"
+version = "29.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8532ca21ccfef7f60246ce4f4d25d4a46d2aa501832dfaab17e2a27e621fb52"
+dependencies = [
+ "atoi",
+ "log",
+ "odbc-sys",
+ "thiserror 2.0.20",
+ "widestring",
+]
+
+[[package]]
+name = "odbc-sys"
+version = "0.31.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "245cb4fe8236df4fd352ba96075d754233c6509d654d9f1c1482158b7d6c083d"
+dependencies = [
+ "unix-odbc",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10168,6 +10198,15 @@ checksum = "fc1de2c688dc15305988b563c3854064043356019f97a4b46276fe734c4f07ea"
 dependencies = [
  "crypto-common 0.1.7",
  "subtle",
+]
+
+[[package]]
+name = "unix-odbc"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26bdaf2156eebadc0dbabec5b2c2a6f92bff5cface28f3f0a367d2ee9aeca0e2"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

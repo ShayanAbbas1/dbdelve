@@ -112,7 +112,7 @@ jobs:
           sudo apt-get update -o Acquire::Retries=3
           sudo apt-get install -y build-essential pkg-config cmake \
             libfontconfig-dev libxkbcommon-dev libxkbcommon-x11-dev \
-            libwayland-dev libdbus-1-dev sqlite3 \
+            libwayland-dev libdbus-1-dev sqlite3 unixodbc-dev \
             mesa-vulkan-drivers libvulkan1 libegl1 libgles2 libgl1-mesa-dri
       # Before rust-cache, which saves only the binaries that appear after it
       # runs: the prebuilt download is quicker than carrying it in the cache.
@@ -132,14 +132,16 @@ jobs:
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
       # The plugin crates are workspace members outside default-members, so
-      # the plain cargo commands above never build them.
+      # the plain cargo commands above never build them. The ODBC bridge links
+      # unixodbc-dev's libodbc on Linux, compiles unixODBC from source with the
+      # runner's C compiler on macOS, and links the system odbc32 on Windows.
       - &plugins
         name: plugins
         # bash on Windows too: pwsh fails a step only on its last command.
         shell: bash
         run: |
-          cargo clippy -p dbdelve-plugin-protocol -p dbdelve-plugin-echo --all-targets -- -D warnings
-          cargo test -p dbdelve-plugin-protocol -p dbdelve-plugin-echo
+          cargo clippy -p dbdelve-plugin-protocol -p dbdelve-plugin-echo -p dbdelve-plugin-odbc --all-targets -- -D warnings
+          cargo test -p dbdelve-plugin-protocol -p dbdelve-plugin-echo -p dbdelve-plugin-odbc
       - name: seed databases
         run: |
           sqlite3 dev/dbdelve_dev.db < dev/sqlite/001-dbdelve-demo.sql

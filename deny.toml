@@ -23,6 +23,9 @@ exceptions = [
     { crate = "dbdelve", allow = ["GPL-3.0-only"] },
     { crate = "dbdelve-plugin-protocol", allow = ["GPL-3.0-only"] },
     { crate = "dbdelve-plugin-echo", allow = ["GPL-3.0-only"] },
+    { crate = "dbdelve-plugin-odbc", allow = ["GPL-3.0-only"] },
+    # unixODBC, compiled into the macOS bridge alone; the app links no ODBC.
+    { crate = "unix-odbc", allow = ["LGPL-2.1-or-later"] },
     # The fonts the app embeds.
     { crate = "guic-gpui-assets", allow = ["OFL-1.1"] },
     # MPL-2.0's copyleft covers only the crate's own files, if changed.
