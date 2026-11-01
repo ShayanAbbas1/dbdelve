@@ -53,6 +53,7 @@ use arrow_ipc::{
     MessageHeader, MetadataVersion, RecordBatchBuilder,
 };
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
+use dbdelve_plugin_protocol as wire;
 use dbdelve_plugin_protocol::arrow::{encode_batch, encode_schema};
 use dbdelve_plugin_protocol::limits::{BATCH_ROWS, MAX_FRAME, WINDOW};
 use dbdelve_plugin_protocol::{
@@ -111,6 +112,65 @@ fn main() {
             },
         };
         jobs.send(job).expect("the worker outlives the reader");
+    }
+}
+
+fn catalog() -> Vec<wire::Schema> {
+    let relation = |name: &str, kind| wire::Relation {
+        name: name.into(),
+        kind,
+    };
+    vec![
+        wire::Schema {
+            name: "main".into(),
+            relations: vec![
+                relation("accounts", wire::RelationKind::Table),
+                relation("active_accounts", wire::RelationKind::View),
+                relation("totals", wire::RelationKind::MaterializedView),
+            ],
+        },
+        wire::Schema {
+            name: "audit".into(),
+            relations: vec![relation("log", wire::RelationKind::Table)],
+        },
+    ]
+}
+
+/// Echoes the schema and relation asked about into the foreign key, so a test
+/// sees both arrive.
+fn structure(schema: &str, relation: &str) -> wire::Structure {
+    let column = |name: &str, data_type: &str, nullable, default: Option<&str>| wire::Column {
+        name: name.into(),
+        data_type: data_type.into(),
+        nullable,
+        default: default.map(Into::into),
+    };
+    wire::Structure {
+        columns: vec![
+            column("id", "bigint", false, None),
+            column("label", "text", true, Some("'none'")),
+        ],
+        primary_key: vec!["id".into()],
+        indexes: vec![
+            wire::Index {
+                name: "pk".into(),
+                columns: vec!["id".into()],
+                unique: true,
+                primary: true,
+            },
+            wire::Index {
+                name: "by_label".into(),
+                columns: vec!["label".into()],
+                unique: false,
+                primary: false,
+            },
+        ],
+        foreign_keys: vec![wire::ForeignKey {
+            column: "label".into(),
+            referenced_schema: schema.into(),
+            referenced_table: relation.into(),
+            referenced_column: "id".into(),
+        }],
     }
 }
 
@@ -273,6 +333,29 @@ impl Echo {
                 },
             ),
             Request::Query { sql, eligible } => self.query(id, &sql, eligible),
+            Request::Catalog => self.reply(id, Response::Catalog { schemas: catalog() }),
+            Request::Structure { schema, relation } => match relation.as_str() {
+                "fail" => self.error(
+                    id,
+                    ErrorKind::Server,
+                    "no such relation".into(),
+                    None,
+                    false,
+                ),
+                "lost" => self.error(id, ErrorKind::Server, "session gone".into(), None, true),
+                _ => self.reply(id, Response::Structure(structure(&schema, &relation))),
+            },
+            Request::References { schema, relation } => self.reply(
+                id,
+                Response::References {
+                    references: vec![wire::Reference {
+                        schema: "referrers".into(),
+                        table: format!("{schema}.{relation}"),
+                        column: "owner_id".into(),
+                        referenced_column: "id".into(),
+                    }],
+                },
+            ),
             Request::Close => {
                 self.reply(id, Response::Closed);
                 process::exit(0);

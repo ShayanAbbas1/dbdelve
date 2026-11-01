@@ -19,10 +19,16 @@ use std::time::{Duration, Instant};
 use arrow_schema::SchemaRef;
 use dbdelve_plugin_protocol::arrow::{decode_batch, decode_schema};
 use dbdelve_plugin_protocol::limits::{HELLO_DEADLINE, OPEN_DEADLINE};
-use dbdelve_plugin_protocol::{ErrorKind, PROTOCOL, Password, Request, Response};
+use dbdelve_plugin_protocol::{
+    ErrorKind, PROTOCOL, Password, REFERENCES, RelationKind as WireKind, Request, Response,
+    Structure as WireStructure,
+};
 
 use super::plugin::Plugin;
-use super::{DbError, Engine, Fetch, QueryResult, Stopped};
+use super::{
+    Catalog, ColumnDefinition, DbError, Engine, Fetch, ForeignKey, Index, IndexKind,
+    NamedDefinition, QueryResult, Reference, Relation, RelationKind, Schema, Stopped, Structure,
+};
 use host::{Host, Routed, failure};
 use rows::Rows;
 
@@ -163,6 +169,116 @@ impl Connection {
         Ok(())
     }
 
+    pub fn catalog(&self) -> Result<Catalog, DbError> {
+        let Response::Catalog { schemas } = self.call(Request::Catalog)? else {
+            return Err(self
+                .host
+                .violated("an answer to `catalog` that is not `catalog`"));
+        };
+        let schemas = schemas
+            .into_iter()
+            .map(|schema| Schema {
+                name: schema.name,
+                relations: schema
+                    .relations
+                    .into_iter()
+                    .map(|relation| Relation {
+                        name: relation.name,
+                        kind: match relation.kind {
+                            WireKind::Table => RelationKind::Table,
+                            WireKind::View => RelationKind::View,
+                            WireKind::MaterializedView => RelationKind::MaterializedView,
+                        },
+                        partition_of: None,
+                        size: None,
+                        rows: None,
+                    })
+                    .collect(),
+                routines: Vec::new(),
+            })
+            .collect();
+        Ok(Catalog {
+            schemas,
+            database: None,
+        })
+    }
+
+    pub fn structure(&self, schema: &str, relation: &str) -> Result<Structure, DbError> {
+        let request = Request::Structure {
+            schema: schema.to_owned(),
+            relation: relation.to_owned(),
+        };
+        match self.call(request)? {
+            Response::Structure(wire) => Ok(structure_from(wire)),
+            _ => Err(self
+                .host
+                .violated("an answer to `structure` that is not `structure`")),
+        }
+    }
+
+    /// Empty when the plugin did not offer `references`: nothing is sent it
+    /// never listed.
+    pub fn references(&self, schema: &str, relation: &str) -> Result<Vec<Reference>, DbError> {
+        if !self.opened.optional.iter().any(|name| name == REFERENCES) {
+            return Ok(Vec::new());
+        }
+        let request = Request::References {
+            schema: schema.to_owned(),
+            relation: relation.to_owned(),
+        };
+        match self.call(request)? {
+            Response::References { references } => Ok(references
+                .into_iter()
+                .map(|wire| Reference {
+                    schema: wire.schema,
+                    table: wire.table,
+                    column: wire.column,
+                    referenced_column: wire.referenced_column,
+                })
+                .collect()),
+            _ => Err(self
+                .host
+                .violated("an answer to `references` that is not `references`")),
+        }
+    }
+
+    /// One non-query request, under the session like a statement.
+    fn call(&self, request: Request) -> Result<Response, DbError> {
+        let _session = self.host.session();
+        let (_, answers) = self.host.request(request)?;
+        match answers.recv() {
+            Ok(Routed::Control(Response::Error {
+                kind,
+                message,
+                position,
+                lost,
+                ..
+            })) => Err(self.plugin_error(kind, message, position, lost)),
+            Ok(Routed::Control(response)) => Ok(response),
+            Ok(Routed::Data(_)) => Err(self.host.violated("data in answer to a catalog request")),
+            Ok(Routed::Reset(_)) | Err(_) => Err(self.host.reset_error(false)),
+        }
+    }
+
+    fn plugin_error(
+        &self,
+        kind: ErrorKind,
+        message: String,
+        position: Option<u32>,
+        lost: bool,
+    ) -> DbError {
+        if lost {
+            self.host.lose_session();
+        }
+        match kind {
+            ErrorKind::Cancelled => failure(CANCELLED.to_owned()),
+            _ => DbError {
+                message,
+                position: position.and_then(|at| usize::try_from(at).ok()),
+            },
+        }
+    }
+
     fn read(
         &self,
         id: u64,
@@ -211,16 +327,7 @@ impl Connection {
                     lost,
                     ..
                 }) => {
-                    if lost {
-                        self.host.lose_session();
-                    }
-                    return Err(match kind {
-                        ErrorKind::Cancelled => failure(CANCELLED.to_owned()),
-                        _ => DbError {
-                            message,
-                            position: position.and_then(|at| usize::try_from(at).ok()),
-                        },
-                    });
+                    return Err(self.plugin_error(kind, message, position, lost));
                 }
                 Routed::Control(_) => {
                     return Err(self
@@ -230,6 +337,65 @@ impl Connection {
                 Routed::Reset(_) => return Err(self.host.reset_error(true)),
             }
         }
+    }
+}
+
+/// The key goes into `constraints` in the `PRIMARY KEY (a, b)` rendering
+/// `Structure::primary_key` and `row_key` read back. Names are written bare,
+/// since the plugin's dialect is not known here; a column whose name holds `, `
+/// cannot be told from two, so it reads back as no key and the grid stays
+/// read-only rather than guess.
+fn structure_from(wire: WireStructure) -> Structure {
+    let constraints = match wire.primary_key.is_empty() {
+        true => Vec::new(),
+        false => vec![NamedDefinition {
+            name: "PRIMARY KEY".into(),
+            definition: format!("PRIMARY KEY ({})", wire.primary_key.join(", ")),
+        }],
+    };
+    Structure {
+        columns: wire
+            .columns
+            .into_iter()
+            .map(|column| ColumnDefinition {
+                name: column.name,
+                data_type: column.data_type,
+                nullable: column.nullable,
+                default: column.default,
+            })
+            .collect(),
+        indexes: wire
+            .indexes
+            .into_iter()
+            .map(|index| Index {
+                kind: match (index.primary, index.unique) {
+                    (true, _) => IndexKind::Primary,
+                    (false, true) => IndexKind::Unique,
+                    (false, false) => IndexKind::Plain,
+                },
+                definition: format!(
+                    "{}INDEX {} ({})",
+                    if index.unique { "UNIQUE " } else { "" },
+                    index.name,
+                    index.columns.join(", ")
+                ),
+                name: index.name,
+                columns: index.columns,
+                predicate: None,
+            })
+            .collect(),
+        constraints,
+        foreign_keys: wire
+            .foreign_keys
+            .into_iter()
+            .map(|key| ForeignKey {
+                column: key.column,
+                referenced_schema: key.referenced_schema,
+                referenced_table: key.referenced_table,
+                referenced_column: key.referenced_column,
+            })
+            .collect(),
+        referenced_by: Vec::new(),
     }
 }
 
@@ -883,6 +1049,95 @@ mod tests {
         let error = worker.join().unwrap().err().unwrap();
         assert_eq!(error.message, CANCELLED);
         assert!(!connection.is_lost());
+    }
+
+    #[test]
+    fn the_catalog_lists_schemas_and_kinds() {
+        let catalog = open_with(&[]).unwrap().catalog().unwrap();
+        let names: Vec<_> = catalog.schemas.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["main", "audit"]);
+        let kinds: Vec<_> = catalog.schemas[0]
+            .relations
+            .iter()
+            .map(|r| r.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                RelationKind::Table,
+                RelationKind::View,
+                RelationKind::MaterializedView
+            ]
+        );
+    }
+
+    #[test]
+    fn structure_round_trips_and_its_key_reads_back() {
+        let structure = open_with(&[])
+            .unwrap()
+            .structure("main", "accounts")
+            .unwrap();
+        assert_eq!(structure.primary_key(), ["id"]);
+        assert_eq!(structure.row_key(), ["id"]);
+        assert_eq!(structure.indexes[0].kind, IndexKind::Primary);
+        assert_eq!(structure.indexes[1].kind, IndexKind::Plain);
+        assert_eq!(structure.foreign_keys[0].referenced_schema, "main");
+        assert_eq!(structure.foreign_keys[0].referenced_table, "accounts");
+        assert_eq!(structure.columns[1].default.as_deref(), Some("'none'"));
+    }
+
+    #[test]
+    fn a_column_name_holding_a_comma_reads_back_as_no_key() {
+        let wire = WireStructure {
+            columns: ["a, b"]
+                .map(|name| dbdelve_plugin_protocol::Column {
+                    name: name.into(),
+                    data_type: "int".into(),
+                    nullable: false,
+                    default: None,
+                })
+                .into(),
+            primary_key: vec!["a, b".into()],
+            ..Default::default()
+        };
+        assert!(structure_from(wire).row_key().is_empty());
+    }
+
+    #[test]
+    fn references_are_asked_only_when_negotiated() {
+        let references = open_with(&[])
+            .unwrap()
+            .references("main", "accounts")
+            .unwrap();
+        assert_eq!(references.len(), 1);
+        assert_eq!(references[0].table, "main.accounts");
+        let plain = open_with(&[("DBDELVE_ECHO_PLAIN", "1")]).unwrap();
+        assert!(plain.references("main", "accounts").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_catalog_error_is_the_calls_and_lost_marks_the_connection() {
+        let connection = open_with(&[]).unwrap();
+        let error = connection.structure("main", "fail").unwrap_err();
+        assert_eq!(error.message, "no such relation");
+        assert!(!connection.is_lost());
+        assert_eq!(
+            connection.structure("main", "lost").unwrap_err().message,
+            "session gone"
+        );
+        assert!(connection.is_lost());
+    }
+
+    #[test]
+    fn a_catalog_call_after_a_reset_is_the_reset() {
+        let connection = open_with(&[]).unwrap();
+        let _ = connection.query("exit 3", capped(10, false));
+        let error = connection.catalog().unwrap_err();
+        assert!(
+            error.message.contains("connection was reset"),
+            "{}",
+            error.message
+        );
     }
 
     #[test]
