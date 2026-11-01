@@ -30,6 +30,9 @@ mod external;
 mod mongo;
 mod mssql;
 mod mysql;
+// Read by the connection form and the tunnelled open, which come with the plugin host.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod odbc_string;
 #[expect(dead_code, reason = "read once plugins are discovered and persisted")]
 mod plugin;
 mod postgres;
