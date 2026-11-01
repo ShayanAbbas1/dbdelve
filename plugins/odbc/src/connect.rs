@@ -21,7 +21,10 @@ pub fn environment() -> Result<&'static handles::Environment, Response> {
             ));
         }
     };
-    if !succeeded(environment.declare_version(AttrOdbcVersion::Odbc3_80)) {
+    // ODBC 3.0, not 3.80: IBM's Db2 driver (12.1), told 3.80, answers every
+    // static `SQLGetInfo` string (`SQL_DRIVER_NAME`, `SQL_SEARCH_PATTERN_ESCAPE`,
+    // `SQL_IDENTIFIER_QUOTE_CHAR`) with `03.80`. Nothing here needs 3.80.
+    if !succeeded(environment.declare_version(AttrOdbcVersion::Odbc3)) {
         return Err(failure::from(&environment, "SQLSetEnvAttr"));
     }
     Ok(Box::leak(Box::new(environment)))
@@ -97,9 +100,6 @@ impl Session {
         Ok(Response::Opened {
             dbms_name: info(InfoType::DbmsName)?,
             dbms_version: info(InfoType::DbmsVer)?,
-            // As the driver answers it: IBM's Db2 driver (12.1) answers
-            // `SQL_DRIVER_NAME` with its ODBC version, `03.80`, as it does
-            // `SQL_DRIVER_ODBC_VER`, through the narrow call and the wide alike.
             driver: info(InfoType::DriverName)?,
             // ODBC cannot say whether a transaction is open, so ending a read
             // early is never provably safe: the bridge always drains.
