@@ -47,7 +47,7 @@ pub fn read_frame(input: &mut impl Read) -> Result<Option<Frame>, Violation> {
         return Err(Violation::Oversize(len));
     }
     if len < HEADER {
-        return Err(Violation::Truncated);
+        return Err(Violation::Short(len));
     }
 
     let mut header = [0; HEADER as usize];
@@ -158,10 +158,10 @@ mod tests {
     }
 
     #[test]
-    fn a_length_shorter_than_the_header_is_truncated() {
+    fn a_length_shorter_than_the_header_is_short() {
         let mut bytes = 8u32.to_le_bytes().to_vec();
         bytes.extend([0; 8]);
-        assert_eq!(read_frame(&mut bytes.as_slice()), Err(Violation::Truncated));
+        assert_eq!(read_frame(&mut bytes.as_slice()), Err(Violation::Short(8)));
     }
 
     #[test]

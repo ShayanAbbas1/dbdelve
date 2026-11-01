@@ -19,9 +19,10 @@ pub use message::*;
 pub enum Violation {
     /// A length prefix over [`limits::MAX_FRAME`].
     Oversize(u32),
-    /// The stream ended inside a frame, or a length was shorter than the
-    /// header every frame carries.
+    /// The stream ended inside a frame: the other side died mid-write.
     Truncated,
+    /// A length shorter than the header every frame carries.
+    Short(u32),
     UnknownKind(u8),
     Json(String),
     Arrow(String),
@@ -39,6 +40,7 @@ impl fmt::Display for Violation {
                 limits::MAX_FRAME
             ),
             Self::Truncated => f.write_str("a frame was cut short"),
+            Self::Short(len) => write!(f, "a frame of {len} bytes, shorter than its header"),
             Self::UnknownKind(kind) => write!(f, "a frame of unknown kind {kind}"),
             Self::Json(error) => write!(f, "a control message that does not read: {error}"),
             Self::Arrow(error) => write!(f, "result data that does not read: {error}"),

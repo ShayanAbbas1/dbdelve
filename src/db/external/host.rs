@@ -5,6 +5,11 @@
 //! so credit can always come back and `cancel` can always be answered. Callers
 //! and `cancel` hand frames to the writer thread and never block on a pipe the
 //! plugin stopped reading.
+//!
+//! The plugin's death is read from its exit, by the watcher, and not from its
+//! stdout closing: anything that inherited the pipe's write end, a driver's
+//! helper process or another child forked at the wrong moment, keeps stdout
+//! open after the plugin is gone.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufReader, Read, Write};
@@ -16,7 +21,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use dbdelve_plugin_protocol::limits::{CANCEL_DEADLINE, CLOSE_GRACE, STDERR_RING, WINDOW};
-use dbdelve_plugin_protocol::{Frame, Kind, Request, Response, read_frame, write_frame};
+use dbdelve_plugin_protocol::{Frame, Kind, Request, Response, Violation, read_frame, write_frame};
 
 use crate::db::DbError;
 use crate::db::plugin::Plugin;
@@ -50,9 +55,11 @@ pub(super) struct Host {
 struct Shared {
     name: String,
     routing: Mutex<Routing>,
-    /// Taken by whoever reaps it: the reader when the plugin dies or breaks the
-    /// protocol, or the handle's drop.
+    /// Taken by whoever reaps it: the watcher once the plugin has exited, or
+    /// the handle's drop.
     process: Mutex<Option<Process>>,
+    /// The reader has stopped: stdout closed, or the plugin broke the protocol.
+    read_done: AtomicBool,
 }
 
 /// One lock for both, so a request is either registered before the reset and
@@ -137,6 +144,7 @@ impl Host {
                 #[cfg(windows)]
                 _job: job,
             })),
+            read_done: AtomicBool::new(false),
         });
         let (writer, frames) = mpsc::channel();
         thread::spawn({
@@ -146,6 +154,10 @@ impl Host {
         thread::spawn({
             let shared = Arc::clone(&shared);
             move || read(stdout, &shared)
+        });
+        thread::spawn({
+            let shared = Arc::clone(&shared);
+            move || watch(&shared)
         });
         let ring = Arc::new(Mutex::new(Ring::default()));
         let stderr_reader = thread::spawn({
@@ -275,13 +287,13 @@ impl Host {
 
     /// Something the caller found in what the plugin sent, past what the
     /// reader checks: data that does not decode, an answer out of place. The
-    /// plugin is ended and the reset error for the running statement returned
-    /// at once, worded for the violation rather than the kill.
-    pub(super) fn violated(&self, violation: &str) -> DbError {
+    /// plugin is ended and the reset error returned at once, worded for the
+    /// violation rather than the kill.
+    pub(super) fn violated(&self, violation: &str, running_query: bool) -> DbError {
         let cause = self
             .shared
             .end(broke_protocol(&self.shared.name, violation));
-        reset_error(&cause, true)
+        reset_error(&cause, running_query)
     }
 
     /// `running_query`: the request that met the reset was a statement, which
@@ -317,8 +329,8 @@ impl Host {
         }
     }
 
-    /// Ends the plugin without waiting for it; the reader then sees its stdout
-    /// close and reports the reset.
+    /// Ends the plugin without waiting for it; the watcher then sees it exit
+    /// and reports the reset.
     pub(super) fn kill(&self) {
         self.shared.kill();
     }
@@ -364,7 +376,16 @@ impl Drop for Host {
 /// worded without the rest: a grandchild still holding the pipe keeps it open.
 const STDERR_SETTLE: Duration = Duration::from_secs(1);
 
+/// How long the reader has, once the plugin has exited, to route what it wrote
+/// before it went. Past it a grandchild holding stdout is taken to be keeping
+/// the pipe open, and the reset goes out without the rest.
+const EXIT_SETTLE: Duration = Duration::from_millis(500);
+
 const POLL: Duration = Duration::from_millis(10);
+
+/// ponytail: the watcher polls; a wait on the process itself (`waitid` with
+/// `WNOWAIT`, `WaitForSingleObject`) would wake only on the exit.
+const WATCH: Duration = Duration::from_millis(50);
 
 impl Shared {
     fn route(&self, frame: Frame) -> Result<(), String> {
@@ -406,19 +427,13 @@ impl Shared {
         Ok(())
     }
 
-    /// `broke`: the protocol violation that ended it, `None` when its stdout
-    /// simply closed.
-    fn reset(&self, broke: Option<String>) {
-        let process = lock(&self.process).take();
-        let status = process.and_then(|process| match broke {
-            Some(_) => process.reap(Duration::ZERO),
-            None => process.reap(CLOSE_GRACE),
-        });
+    /// Fails every pending request, with how the plugin exited unless it
+    /// was ended for a cause of its own.
+    fn reset(&self, status: Option<ExitStatus>) {
         let name = &self.name;
-        let cause = match (broke, status) {
-            (Some(violation), _) => broke_protocol(name, &violation),
-            (None, Some(status)) => format!("The {name} plugin stopped ({status})."),
-            (None, None) => format!("The {name} plugin stopped."),
+        let cause = match status {
+            Some(status) => format!("The {name} plugin stopped ({status})."),
+            None => format!("The {name} plugin stopped."),
         };
         let mut routing = lock(&self.routing);
         // A cause given when the plugin was ended on purpose says more than
@@ -468,11 +483,53 @@ fn read(stdout: ChildStdout, shared: &Shared) {
                     break Some(violation);
                 }
             }
-            Ok(None) => break None,
+            // A plugin that dies mid-write leaves half a frame: a crash, which
+            // its exit status says more about than the frame does.
+            Ok(None) | Err(Violation::Truncated) => break None,
             Err(violation) => break Some(violation.to_string()),
         }
     };
-    shared.reset(broke);
+    if let Some(violation) = broke {
+        shared.end(broke_protocol(&shared.name, &violation));
+    }
+    shared.read_done.store(true, Ordering::Release);
+}
+
+/// Reaps the plugin once it exits and only then fails what is pending, so a
+/// pipe something else still holds open cannot leave a caller waiting. A
+/// plugin that closed its stdout and lives on is given [`CLOSE_GRACE`].
+fn watch(shared: &Shared) {
+    let mut closed_at = None;
+    let status = loop {
+        thread::sleep(WATCH);
+        let mut process = lock(&shared.process);
+        // The handle's drop took it to reap: nobody is left to tell.
+        let Some(running) = process.as_mut() else {
+            return;
+        };
+        match running.child.try_wait() {
+            Ok(None) => {}
+            Ok(Some(status)) => {
+                process.take();
+                break Some(status);
+            }
+            Err(_) => {
+                break process
+                    .take()
+                    .and_then(|process| process.reap(Duration::ZERO));
+            }
+        }
+        if shared.read_done.load(Ordering::Acquire)
+            && closed_at.get_or_insert_with(Instant::now).elapsed() >= CLOSE_GRACE
+        {
+            let _ = running.child.kill();
+        }
+    };
+    let settle = Instant::now() + EXIT_SETTLE;
+    while !shared.read_done.load(Ordering::Acquire) && Instant::now() < settle {
+        thread::sleep(POLL);
+    }
+    shared.reset(status);
 }
 
 fn write(mut stdin: ChildStdin, frames: Receiver<Vec<u8>>, shared: &Shared) {

@@ -10,6 +10,8 @@
 //! | `hang`         | nothing, ever: stops reading stdin, so `cancel` and EOF go unseen      |
 //! | `crash`        | a schema and one batch, then aborts                                    |
 //! | `exit N`       | exits with status N, answering nothing                                 |
+//! | `orphan`       | starts a process that holds its stdout for 20 s, then exits with status 0 |
+//! | `cut`          | half a frame, then exits with status 4                                 |
 //! | `flood`        | 16 MiB of batches, ignoring credit                                     |
 //! | `oversize`     | a length prefix over `MAX_FRAME`, and nothing after it                 |
 //! | `garbage`      | a control frame that is not JSON                                       |
@@ -28,7 +30,9 @@
 //!
 //! Environment: `DBDELVE_ECHO_PROTOCOL=<n>` makes `hello` claim protocol n;
 //! `DBDELVE_ECHO_STDERR=<text>` writes the text to stderr and exits before
-//! `hello`; `DBDELVE_ECHO_PLAIN=1` leaves `references` out of `optional`.
+//! `hello`; `DBDELVE_ECHO_PLAIN=1` leaves `references` out of `optional`;
+//! `DBDELVE_ECHO_LINGER=<ms>` only sleeps that long, which is what `orphan`
+//! starts.
 //!
 //! It exits on stdin EOF, as every plugin must.
 
@@ -64,6 +68,10 @@ fn main() {
     if let Ok(text) = env::var("DBDELVE_ECHO_STDERR") {
         eprintln!("{text}");
         process::exit(1);
+    }
+    if let Ok(ms) = env::var("DBDELVE_ECHO_LINGER") {
+        thread::sleep(Duration::from_millis(ms.parse().unwrap_or(0)));
+        return;
     }
 
     let control = Arc::new(Control::default());
@@ -401,6 +409,24 @@ impl Echo {
                 process::abort();
             }
             "exit" => process::exit(argument.parse().unwrap_or(1)),
+            "orphan" => {
+                let _ = self.out.flush();
+                // Inherits stdout, as a driver's helper process would.
+                let _ = process::Command::new(env::current_exe().unwrap())
+                    .env("DBDELVE_ECHO_LINGER", "20000")
+                    .stdin(process::Stdio::null())
+                    .stderr(process::Stdio::null())
+                    .spawn();
+                process::exit(0);
+            }
+            "cut" => {
+                let mut half = 100u32.to_le_bytes().to_vec();
+                half.push(Kind::Control as u8);
+                half.extend(id.to_le_bytes());
+                half.extend(br#"{"type":"#);
+                self.write_raw(&half);
+                process::exit(4);
+            }
             "flood" => self.flood(id),
             "oversize" => self.write_raw(&(MAX_FRAME + 1).to_le_bytes()),
             "garbage" => self.write(Kind::Control, id, br#"{"type": "end", "rows": "#),

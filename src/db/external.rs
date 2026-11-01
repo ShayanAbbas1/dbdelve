@@ -173,7 +173,7 @@ impl Connection {
         let Response::Catalog { schemas } = self.call(Request::Catalog)? else {
             return Err(self
                 .host
-                .violated("an answer to `catalog` that is not `catalog`"));
+                .violated("an answer to `catalog` that is not `catalog`", false));
         };
         let schemas = schemas
             .into_iter()
@@ -212,7 +212,7 @@ impl Connection {
             Response::Structure(wire) => Ok(structure_from(wire)),
             _ => Err(self
                 .host
-                .violated("an answer to `structure` that is not `structure`")),
+                .violated("an answer to `structure` that is not `structure`", false)),
         }
     }
 
@@ -238,7 +238,7 @@ impl Connection {
                 .collect()),
             _ => Err(self
                 .host
-                .violated("an answer to `references` that is not `references`")),
+                .violated("an answer to `references` that is not `references`", false)),
         }
     }
 
@@ -255,7 +255,9 @@ impl Connection {
                 ..
             })) => Err(self.plugin_error(kind, message, position, lost)),
             Ok(Routed::Control(response)) => Ok(response),
-            Ok(Routed::Data(_)) => Err(self.host.violated("data in answer to a catalog request")),
+            Ok(Routed::Data(_)) => Err(self
+                .host
+                .violated("data in answer to a catalog request", false)),
             Ok(Routed::Reset(_)) | Err(_) => Err(self.host.reset_error(false)),
         }
     }
@@ -292,7 +294,7 @@ impl Connection {
             match routed {
                 Routed::Data(payload) => {
                     read.data(&payload)
-                        .map_err(|violation| self.host.violated(&violation))?;
+                        .map_err(|violation| self.host.violated(&violation, true))?;
                     if read.stop_due() {
                         self.host.send(id, Request::Stop);
                     }
@@ -318,7 +320,7 @@ impl Connection {
                     };
                     return read
                         .finish(end)
-                        .map_err(|violation| self.host.violated(&violation));
+                        .map_err(|violation| self.host.violated(&violation, true));
                 }
                 Routed::Control(Response::Error {
                     kind,
@@ -330,9 +332,10 @@ impl Connection {
                     return Err(self.plugin_error(kind, message, position, lost));
                 }
                 Routed::Control(_) => {
-                    return Err(self
-                        .host
-                        .violated("an answer to a query that is neither `end` nor `error`"));
+                    return Err(self.host.violated(
+                        "an answer to a query that is neither `end` nor `error`",
+                        true,
+                    ));
                 }
                 Routed::Reset(_) => return Err(self.host.reset_error(true)),
             }
@@ -747,6 +750,53 @@ mod tests {
         };
         assert!(cause.contains("bytes of credit left"), "{cause}");
         assert!(connection.is_lost());
+    }
+
+    /// The grandchild holds stdout open for 20 s, so only the exit itself can
+    /// tell the caller in time.
+    #[test]
+    fn a_plugin_that_exits_is_a_reset_even_while_its_stdout_stays_open() {
+        let connection = Connection::open(&config()).unwrap();
+        let started = Instant::now();
+        let error = connection.query("orphan", Fetch::default()).err().unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(
+            error.message.starts_with("The Echo plugin stopped ("),
+            "{}",
+            error.message
+        );
+        assert!(error.message.ends_with("committed is unknown."));
+        assert!(connection.is_lost());
+        let again = connection.catalog().unwrap_err();
+        assert!(again.message.contains("The connection was reset"));
+    }
+
+    #[test]
+    fn a_crash_mid_frame_is_a_stop_with_its_status_not_a_violation() {
+        let connection = Connection::open(&config()).unwrap();
+        let error = connection.query("cut", Fetch::default()).err().unwrap();
+        assert!(
+            error.message.starts_with("The Echo plugin stopped ("),
+            "{}",
+            error.message
+        );
+        assert!(error.message.contains('4'), "{}", error.message);
+    }
+
+    #[test]
+    fn a_catalog_answer_out_of_place_says_nothing_of_a_commit() {
+        let connection = open_with(&[]).unwrap();
+        let error = connection.host.violated("a test's violation", false);
+        assert!(
+            error
+                .message
+                .contains("broke protocol 1 (a test's violation)")
+        );
+        assert!(!error.message.contains("committed is unknown"));
     }
 
     #[test]
