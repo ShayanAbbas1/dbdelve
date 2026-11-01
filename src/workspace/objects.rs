@@ -342,7 +342,8 @@ impl Workspace {
     /// a count goes.
     pub(crate) fn count_rows(&mut self, id: u64, cx: &mut Context<Self>) {
         self.clear_notice();
-        let engine = self.engine();
+        let target = self.target();
+        let engine = target.engine;
         let Some(profile) = self.profile_mut() else {
             return;
         };
@@ -403,7 +404,7 @@ impl Workspace {
             // Before the checks below: a filter changed or a tab closed under
             // the count drops its answer from the tab, not from the history.
             let landed =
-                super::queries::answered(&recorded, &result, false, started.elapsed(), engine);
+                super::queries::answered(&recorded, &result, false, started.elapsed(), target);
             let _ = store::append_history(&profile_id, &landed);
             _ = workspace.update(cx, |workspace, cx| {
                 workspace.remember_run(&profile_id, landed);

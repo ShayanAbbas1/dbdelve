@@ -2769,7 +2769,10 @@ mod tests {
             .query_with(LARGE_SQL, &run, Fetch::default())
             .expect_err("a cancelled run is an error");
         assert!(
-            crate::db::is_cancel(crate::db::Engine::Snowflake, &error),
+            crate::db::is_cancel(
+                crate::db::Target::built_in(crate::db::Engine::Snowflake),
+                &error
+            ),
             "{}",
             error.message
         );

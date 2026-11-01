@@ -1689,7 +1689,10 @@ mod tests {
             .unwrap_err();
         thread.join().unwrap();
         assert!(error.message.contains("rolled back"), "{error:?}");
-        assert!(super::super::is_cancel(Engine::DuckDb, &error), "{error:?}");
+        assert!(
+            super::super::is_cancel(crate::db::Target::built_in(Engine::DuckDb), &error),
+            "{error:?}"
+        );
     }
 
     #[test]
@@ -1718,7 +1721,10 @@ mod tests {
         });
         let error = connection.query(RUNAWAY, Fetch::default()).unwrap_err();
         thread.join().unwrap();
-        assert!(super::super::is_cancel(Engine::DuckDb, &error), "{error:?}");
+        assert!(
+            super::super::is_cancel(crate::db::Target::built_in(Engine::DuckDb), &error),
+            "{error:?}"
+        );
         let refused = connection
             .query("SELECT 1", Fetch::default())
             .expect_err("an aborted transaction refuses everything but a ROLLBACK");

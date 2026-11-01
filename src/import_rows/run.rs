@@ -2,7 +2,7 @@
 //! means for the rest, and the sentence the import ends on.
 
 use super::Plan;
-use crate::db::{self, CancelToken, Connection, DbError, Engine};
+use crate::db::{self, CancelToken, Connection, DbError, Engine, Target};
 use crate::sql::{self, Destructive, Mode, Stop};
 use crate::ui::group_thousands;
 
@@ -298,12 +298,13 @@ impl From<DbError> for Failure {
 /// One submission, on the import's own connection from [`Connection::apart`].
 pub(crate) fn send(
     connection: &Connection,
-    engine: Engine,
+    target: Target,
     sql: &str,
     mode: Mode,
     confirmed: &[Destructive],
     cancel: &CancelToken,
 ) -> Result<Option<u64>, Failure> {
+    let engine = target.engine;
     admitted(engine, sql, mode, confirmed).map_err(|message| DbError {
         message,
         position: None,
@@ -312,7 +313,7 @@ pub(crate) fn send(
         .generated(sql, cancel, None, None)
         .map(|result| result.rows_affected)
         .map_err(|error| Failure {
-            cancel: db::is_cancel(engine, &error),
+            cancel: db::is_cancel(target, &error),
             applied: db::applied(engine, &error),
             error,
         })
@@ -399,7 +400,7 @@ pub(crate) fn live_round_trip(connection: Connection, engine: Engine, schema: &s
                 step,
                 send(
                     &own,
-                    engine,
+                    Target::built_in(engine),
                     &plan.sql(step).unwrap(),
                     Mode::ReadWrite,
                     &[],
@@ -495,7 +496,15 @@ pub(crate) fn live_round_trip(connection: Connection, engine: Engine, schema: &s
         let cancel = CancelToken::default();
         for step in [Step::Begin, Step::Chunk(0)] {
             let sql = clean.sql(step).unwrap();
-            send(&own, engine, &sql, Mode::ReadWrite, &[], &cancel).unwrap();
+            send(
+                &own,
+                Target::built_in(engine),
+                &sql,
+                Mode::ReadWrite,
+                &[],
+                &cancel,
+            )
+            .unwrap();
         }
         drop(own);
         assert_eq!(count(), 0, "a dropped session's transaction is rolled back");

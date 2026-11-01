@@ -3086,7 +3086,11 @@ mod tests {
         let connection = live();
         let started = Instant::now();
         let error = blocked_then_cancelled(&connection);
-        assert!(is_cancel(Engine::Redis, &error), "{}", error.message);
+        assert!(
+            is_cancel(crate::db::Target::built_in(Engine::Redis), &error),
+            "{}",
+            error.message
+        );
         assert!(started.elapsed() < Duration::from_secs(5));
         assert_eq!(cells(&ran(&connection, "PING")), [some(&["PONG"])]);
         let info = ran(&connection, "CLIENT INFO");
@@ -3880,7 +3884,11 @@ mod tests {
         .expect("connection should open");
         assert_eq!(cells(&ran(&connection, "GET counter")), [some(&["42"])]);
         let error = blocked_then_cancelled(&connection);
-        assert!(is_cancel(Engine::Redis, &error), "{}", error.message);
+        assert!(
+            is_cancel(crate::db::Target::built_in(Engine::Redis), &error),
+            "{}",
+            error.message
+        );
     }
 
     fn conformance_subject() -> crate::db::conformance::Subject {

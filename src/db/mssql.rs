@@ -4028,7 +4028,7 @@ mod tests {
             started.elapsed()
         );
         assert!(
-            crate::db::is_cancel(Engine::SqlServer, &error),
+            crate::db::is_cancel(crate::db::Target::built_in(Engine::SqlServer), &error),
             "{}",
             error.message
         );

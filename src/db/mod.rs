@@ -57,7 +57,7 @@ pub use spec::{
     Truncate, TypedExplain,
 };
 pub use spec::{IdentityInsert, ReadOnlySession, UnreadableFloor};
-pub use target::Target;
+pub use target::{Target, cancel_cost, is_cancel};
 
 /// One run's claim on Cancel: [`Connection::query`] runs under it, and
 /// [`Connection::cancel`] stops only what ran under it.
@@ -2422,30 +2422,6 @@ pub enum Stopped {
     Cancelled,
 }
 
-/// Whether `error` is the user's Cancel landing, in the words each engine's
-/// stop comes back in, rather than anything else that ended the statement while
-/// the cancel was on its way. A server answering in another language reads as
-/// not a cancel, which drops the rows instead of keeping them as a result.
-pub fn is_cancel(engine: Engine, error: &DbError) -> bool {
-    let message = error.message.as_str();
-    match engine {
-        Engine::Postgres => message == "canceling statement due to user request",
-        Engine::MySql | Engine::MariaDb => message == "Query execution was interrupted",
-        Engine::Sqlite => message == "interrupted",
-        Engine::Turso => message == turso::INTERRUPTED,
-        // Followed by what became of the transaction a bracketed batch opened.
-        Engine::DuckDb => message.starts_with(duckdb::INTERRUPTED),
-        // The second is dbdelve's own, a cancel between partitions.
-        Engine::Snowflake => matches!(message, "SQL execution canceled" | "Cancelled."),
-        Engine::SqlServer => message.starts_with(mssql::CANCELLED),
-        Engine::MongoDb => message == "Cancelled.",
-        Engine::Redis => message == redis::CANCELLED,
-        Engine::ClickHouse => message == clickhouse::CANCELLED,
-        // Nothing built in cancels it; a plugin's cancel is answered per target.
-        Engine::Generic => false,
-    }
-}
-
 /// How many of a failed statement's own writes stay applied: the documents an
 /// ordered `insertMany` wrote ahead of the one that failed. Every other engine
 /// undoes the whole statement.
@@ -2457,67 +2433,6 @@ pub fn applied(engine: Engine, error: &DbError) -> u64 {
             .and_then(|(_, n)| n.strip_suffix('.')?.parse().ok())
             .unwrap_or(0),
         _ => 0,
-    }
-}
-
-/// What a Cancel took beyond the statement it stopped, which the user has to
-/// be told even where the rows it had are kept: on SQL Server the error
-/// itself, which says the session was reset. Postgres and DuckDB cannot say
-/// whether a transaction was open, and a cancel aborts the one it lands in,
-/// even a read's; SQLite rolls back the transaction an interrupted write was
-/// in. MySQL's `KILL QUERY` and SQLite's interrupt of a read undo only the
-/// statement, and Snowflake has no session to lose. A ClickHouse `KILL QUERY`
-/// ends only the wait on a mutation `statement` started, not the mutation.
-pub fn cancel_cost(
-    engine: Engine,
-    error: &DbError,
-    reads: bool,
-    statement: &str,
-) -> Option<String> {
-    match engine {
-        Engine::ClickHouse if crate::sql::mutation_as_dml(engine.spec(), statement).is_some() => {
-            Some("The mutation keeps running in the background; KILL MUTATION stops it.".into())
-        }
-        Engine::SqlServer => Some(error.message.clone()),
-        Engine::Postgres => Some(
-            "A cancel aborts the transaction it lands in: if one was open, it refuses every \
-             statement until a ROLLBACK."
-                .into(),
-        ),
-        Engine::Sqlite if !reads => Some(
-            "If the statement was inside a transaction, SQLite rolled the whole transaction \
-             back."
-                .into(),
-        ),
-        Engine::Turso if !reads => Some(
-            "If the statement was inside a transaction, Turso will not commit it: the COMMIT \
-             fails and the transaction is rolled back."
-                .into(),
-        ),
-        Engine::DuckDb => Some(
-            "A cancel aborts the transaction it lands in: if one was open, it refuses every \
-             statement until a ROLLBACK, and a COMMIT rolls it back."
-                .into(),
-        ),
-        // Redis has no way to stop a command short of ending its session.
-        Engine::Redis => Some(
-            "A cancel closes the session it lands on: a MULTI or WATCH it held is gone, and the \
-             next command opens a new one."
-                .into(),
-        ),
-        Engine::ClickHouse if !reads => Some(
-            "ClickHouse has no transaction to roll back: what the statement had already written \
-             stays."
-                .into(),
-        ),
-        Engine::ClickHouse
-        | Engine::Sqlite
-        | Engine::Turso
-        | Engine::MySql
-        | Engine::MariaDb
-        | Engine::Snowflake
-        | Engine::MongoDb
-        | Engine::Generic => None,
     }
 }
 
@@ -3207,7 +3122,7 @@ pub(super) fn result(columns: &[&str], rows: &[&[Option<&str>]]) -> QueryResult 
 pub(super) mod at_once {
     use std::time::{Duration, Instant};
 
-    use super::{CancelToken, Connection, DbError, Engine, Fetch, QueryResult, is_cancel};
+    use super::{CancelToken, Connection, DbError, Engine, Fetch, QueryResult, Target, is_cancel};
     use crate::{session::runs_at_once, sql::Mode};
 
     /// Each statement on a connection of its own, all at once, as
@@ -3309,7 +3224,11 @@ pub(super) mod at_once {
         eprintln!("{engine:?}: two runaways cancelled after {elapsed:?}");
         for outcome in outcomes {
             let error = outcome.expect_err("the statement should have been stopped");
-            assert!(is_cancel(engine, &error), "{}", error.message);
+            assert!(
+                is_cancel(Target::built_in(engine), &error),
+                "{}",
+                error.message
+            );
         }
         assert!(elapsed < Duration::from_secs(10), "{elapsed:?}");
         connection
@@ -3345,7 +3264,11 @@ pub(super) mod at_once {
             (join(stopped), join(finished))
         });
         let error = stopped.expect_err("the statement cancelled should have been stopped");
-        assert!(is_cancel(engine, &error), "{}", error.message);
+        assert!(
+            is_cancel(Target::built_in(engine), &error),
+            "{}",
+            error.message
+        );
         finished.expect("the statement beside it should run to its end");
     }
 }
@@ -3500,16 +3423,22 @@ mod tests {
             (Engine::Snowflake, "SQL execution canceled"),
             (Engine::SqlServer, reset.as_str()),
         ] {
-            assert!(is_cancel(engine, &error(words)), "{engine:?}");
-            assert!(!is_cancel(engine, &error("division by zero")), "{engine:?}");
+            assert!(
+                is_cancel(Target::built_in(engine), &error(words)),
+                "{engine:?}"
+            );
+            assert!(
+                !is_cancel(Target::built_in(engine), &error("division by zero")),
+                "{engine:?}"
+            );
         }
         // The statement had finished: a whole result, not a cancelled one.
         assert!(!is_cancel(
-            Engine::SqlServer,
+            Target::built_in(Engine::SqlServer),
             &error("The statement finished, but Cancel arrived after that.")
         ));
         assert!(!is_cancel(
-            Engine::MariaDb,
+            Target::built_in(Engine::MariaDb),
             &error("Query execution was interrupted (max_statement_time exceeded)")
         ));
     }
@@ -4772,23 +4701,40 @@ mod tests {
         let error = plain_error(clickhouse::CANCELLED.into());
         let mutation = "ALTER TABLE t DELETE WHERE a = 1 SETTINGS mutations_sync = 2;";
         assert_eq!(
-            cancel_cost(Engine::ClickHouse, &error, false, mutation).as_deref(),
+            cancel_cost(
+                crate::db::Target::built_in(Engine::ClickHouse),
+                &error,
+                false,
+                mutation
+            )
+            .as_deref(),
             Some("The mutation keeps running in the background; KILL MUTATION stops it.")
         );
         assert_eq!(
-            cancel_cost(Engine::ClickHouse, &error, false, "INSERT INTO t SELECT 1").as_deref(),
+            cancel_cost(
+                crate::db::Target::built_in(Engine::ClickHouse),
+                &error,
+                false,
+                "INSERT INTO t SELECT 1"
+            )
+            .as_deref(),
             Some(
                 "ClickHouse has no transaction to roll back: what the statement had already \
                  written stays."
             )
         );
         assert_eq!(
-            cancel_cost(Engine::ClickHouse, &error, true, "SELECT 1"),
+            cancel_cost(
+                crate::db::Target::built_in(Engine::ClickHouse),
+                &error,
+                true,
+                "SELECT 1"
+            ),
             None
         );
         for engine in [Engine::MySql, Engine::MariaDb, Engine::Snowflake] {
             assert_eq!(
-                cancel_cost(engine, &error, false, mutation),
+                cancel_cost(Target::built_in(engine), &error, false, mutation),
                 None,
                 "{engine:?}"
             );

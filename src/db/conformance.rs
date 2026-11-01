@@ -322,11 +322,7 @@ pub(super) fn cancel_stops_a_long_query(subject: &Subject) {
         }
     };
     let error = outcome.expect_err(&format!("{at}: the run should have been cancelled"));
-    assert!(
-        is_cancel(subject.target.engine, &error),
-        "{at}: {}",
-        error.message
-    );
+    assert!(is_cancel(subject.target, &error), "{at}: {}", error.message);
     assert!(started.elapsed() < WITHIN, "{at}");
     subject.read("cancel_stops_a_long_query");
 }

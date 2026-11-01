@@ -2032,7 +2032,8 @@ impl Workspace {
             return;
         };
         // Read before the task, which outlives the borrow of `self`.
-        let engine = profile.config.engine();
+        let target = profile.config.target();
+        let engine = target.engine;
         let connection = profile.connection();
         let id = profile.id.clone();
         let generation = profile.generation;
@@ -2361,7 +2362,7 @@ impl Workspace {
             // tab is there to count them.
             let mut unrecorded = recorded
                 .as_ref()
-                .map(|entry| answered(entry, &result, feed.is_some(), started.elapsed(), engine));
+                .map(|entry| answered(entry, &result, feed.is_some(), started.elapsed(), target));
             workspace
                 .update(cx, |workspace, cx| {
                     // The plan is carried out of this block rather than stored
@@ -2427,24 +2428,24 @@ impl Workspace {
                         // Read before the cost is appended to the message,
                         // which is what the engine's cancel is told by.
                         let cancel_landed = cancelled
-                            && matches!(&result, Err(error) if db::is_cancel(engine, error));
+                            && matches!(&result, Err(error) if db::is_cancel(target, error));
                         let result = match result {
                             Err(error)
                                 if cancelled
                                     && reads_only
-                                    && db::is_cancel(engine, &error)
+                                    && db::is_cancel(target, &error)
                                     && results.read(cx).delegate().streamed_set().is_some() =>
                             {
                                 Ok(QueryResult {
                                     columns: results.read(cx).delegate().result().columns.clone(),
                                     elapsed: started.elapsed(),
                                     stopped: Some(Stopped::Cancelled),
-                                    notice: db::cancel_cost(engine, &error, true, ran),
+                                    notice: db::cancel_cost(target, &error, true, ran),
                                     ..QueryResult::default()
                                 })
                             }
-                            Err(mut error) if cancelled && db::is_cancel(engine, &error) => {
-                                if let Some(cost) = db::cancel_cost(engine, &error, reads_only, ran)
+                            Err(mut error) if cancelled && db::is_cancel(target, &error) => {
+                                if let Some(cost) = db::cancel_cost(target, &error, reads_only, ran)
                                     && cost != error.message
                                 {
                                     error.message = format!("{}\n\n{cost}", error.message);
@@ -3411,7 +3412,7 @@ pub(super) fn answered(
     result: &Result<QueryResult, DbError>,
     streamed: bool,
     elapsed: std::time::Duration,
-    engine: Engine,
+    target: Target,
 ) -> store::HistoryEntry {
     match result {
         Ok(result) => {
@@ -3421,7 +3422,7 @@ pub(super) fn answered(
             }
             landed
         }
-        Err(error) => entry.failed(error, elapsed, db::is_cancel(engine, error)),
+        Err(error) => entry.failed(error, elapsed, db::is_cancel(target, error)),
     }
 }
 
@@ -3442,7 +3443,7 @@ mod tests {
             &Ok(streamed.clone()),
             true,
             Default::default(),
-            Engine::Sqlite,
+            Target::built_in(Engine::Sqlite),
         );
         assert_eq!((landed.rows, landed.ms), (None, Some(9)));
         let capped = QueryResult {
@@ -3454,7 +3455,7 @@ mod tests {
             &Ok(capped),
             true,
             Default::default(),
-            Engine::Sqlite,
+            Target::built_in(Engine::Sqlite),
         );
         assert_eq!(landed.rows, Some(7));
 
@@ -3467,7 +3468,7 @@ mod tests {
             &Err(interrupted),
             false,
             Default::default(),
-            Engine::Sqlite,
+            Target::built_in(Engine::Sqlite),
         );
         assert!(landed.cancelled && landed.error.is_none());
     }

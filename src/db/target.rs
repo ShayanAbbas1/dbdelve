@@ -5,7 +5,9 @@
 
 use super::plugin::Plugin;
 use super::spec::Abilities;
-use super::{Engine, RelationKind, Syntax};
+use super::{
+    DbError, Engine, RelationKind, Syntax, clickhouse, duckdb, external, mssql, redis, turso,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Driver {
@@ -118,6 +120,111 @@ impl Target {
     }
 }
 
+/// Whether `error` is the user's Cancel landing, in the words each engine's
+/// stop comes back in, rather than anything else that ended the statement while
+/// the cancel was on its way. A server answering in another language reads as
+/// not a cancel, which drops the rows instead of keeping them as a result.
+///
+/// A plugin's words are its own, whatever dialect it speaks: the host turns
+/// every cancelled terminal into one that starts with
+/// [`external::CANCELLED`].
+pub fn is_cancel(target: Target, error: &DbError) -> bool {
+    let message = error.message.as_str();
+    let engine = match target.driver {
+        Driver::BuiltIn => target.engine,
+        Driver::Plugin(_) => return message.starts_with(external::CANCELLED),
+    };
+    match engine {
+        Engine::Postgres => message == "canceling statement due to user request",
+        Engine::MySql | Engine::MariaDb => message == "Query execution was interrupted",
+        Engine::Sqlite => message == "interrupted",
+        Engine::Turso => message == turso::INTERRUPTED,
+        // Followed by what became of the transaction a bracketed batch opened.
+        Engine::DuckDb => message.starts_with(duckdb::INTERRUPTED),
+        // The second is dbdelve's own, a cancel between partitions.
+        Engine::Snowflake => matches!(message, "SQL execution canceled" | "Cancelled."),
+        Engine::SqlServer => message.starts_with(mssql::CANCELLED),
+        Engine::MongoDb => message == "Cancelled.",
+        Engine::Redis => message == redis::CANCELLED,
+        Engine::ClickHouse => message == clickhouse::CANCELLED,
+        // Nothing built in reaches it.
+        Engine::Generic => false,
+    }
+}
+
+/// What a Cancel took beyond the statement it stopped, which the user has to
+/// be told even where the rows it had are kept: on SQL Server the error
+/// itself, which says the session was reset. Postgres and DuckDB cannot say
+/// whether a transaction was open, and a cancel aborts the one it lands in,
+/// even a read's; SQLite rolls back the transaction an interrupted write was
+/// in. MySQL's `KILL QUERY` and SQLite's interrupt of a read undo only the
+/// statement, and Snowflake has no session to lose. A ClickHouse `KILL QUERY`
+/// ends only the wait on a mutation `statement` started, not the mutation.
+///
+/// Through a plugin nothing says what the driver's cancel does to an open
+/// transaction, so it is assumed to abort it, as the worst of the built-ins
+/// does.
+pub fn cancel_cost(
+    target: Target,
+    error: &DbError,
+    reads: bool,
+    statement: &str,
+) -> Option<String> {
+    let engine = match target.driver {
+        Driver::BuiltIn => target.engine,
+        Driver::Plugin(_) => {
+            return Some(
+                "A cancel through a plugin driver may abort the transaction it lands in.".into(),
+            );
+        }
+    };
+    match engine {
+        Engine::ClickHouse if crate::sql::mutation_as_dml(engine.spec(), statement).is_some() => {
+            Some("The mutation keeps running in the background; KILL MUTATION stops it.".into())
+        }
+        Engine::SqlServer => Some(error.message.clone()),
+        Engine::Postgres => Some(
+            "A cancel aborts the transaction it lands in: if one was open, it refuses every \
+             statement until a ROLLBACK."
+                .into(),
+        ),
+        Engine::Sqlite if !reads => Some(
+            "If the statement was inside a transaction, SQLite rolled the whole transaction \
+             back."
+                .into(),
+        ),
+        Engine::Turso if !reads => Some(
+            "If the statement was inside a transaction, Turso will not commit it: the COMMIT \
+             fails and the transaction is rolled back."
+                .into(),
+        ),
+        Engine::DuckDb => Some(
+            "A cancel aborts the transaction it lands in: if one was open, it refuses every \
+             statement until a ROLLBACK, and a COMMIT rolls it back."
+                .into(),
+        ),
+        // Redis has no way to stop a command short of ending its session.
+        Engine::Redis => Some(
+            "A cancel closes the session it lands on: a MULTI or WATCH it held is gone, and the \
+             next command opens a new one."
+                .into(),
+        ),
+        Engine::ClickHouse if !reads => Some(
+            "ClickHouse has no transaction to roll back: what the statement had already written \
+             stays."
+                .into(),
+        ),
+        Engine::ClickHouse
+        | Engine::Sqlite
+        | Engine::Turso
+        | Engine::MySql
+        | Engine::MariaDb
+        | Engine::Snowflake
+        | Engine::MongoDb
+        | Engine::Generic => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,5 +273,24 @@ mod tests {
             .label(),
             "Generic SQL via ODBC"
         );
+    }
+
+    #[test]
+    fn a_plugins_cancel_is_read_in_the_drivers_words_not_the_dialects() {
+        let target = Target {
+            engine: Engine::Postgres,
+            driver: Driver::Plugin(odbc()),
+        };
+        let error = |message: &str| DbError {
+            message: message.into(),
+            position: None,
+        };
+        let cancelled = error(&format!("{} Operation canceled", external::CANCELLED));
+        assert!(is_cancel(target, &cancelled));
+        assert!(!is_cancel(
+            target,
+            &error("canceling statement due to user request")
+        ));
+        assert!(cancel_cost(target, &cancelled, true, "SELECT 1").is_some());
     }
 }

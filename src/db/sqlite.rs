@@ -1192,7 +1192,7 @@ SELECT count(*) FROM forever
         })
         .expect_err("the statement should be interrupted");
         assert!(
-            crate::db::is_cancel(Engine::Sqlite, &error),
+            crate::db::is_cancel(crate::db::Target::built_in(Engine::Sqlite), &error),
             "{}",
             error.message
         );

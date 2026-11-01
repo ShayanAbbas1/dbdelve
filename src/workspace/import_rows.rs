@@ -576,11 +576,11 @@ impl Workspace {
 
     /// Send the run's next submission, or end the run when there is none.
     fn import_step(&mut self, profile: String, started: Instant, cx: &mut Context<Self>) {
-        let Some((mode, confirmed)) = self
+        let Some((mode, confirmed, target)) = self
             .profiles
             .iter()
             .find(|found| found.id == profile)
-            .map(|found| (found.mode, found.confirmed.clone()))
+            .map(|found| (found.mode, found.confirmed.clone(), found.config.target()))
         else {
             return;
         };
@@ -610,7 +610,7 @@ impl Workspace {
                 message,
                 position: None,
             })?;
-            send(&connection, plan.engine, &sql, mode, &confirmed, &cancel)
+            send(&connection, target, &sql, mode, &confirmed, &cancel)
         }));
         cx.spawn(async move |workspace, cx| {
             let landed = sent.await;
