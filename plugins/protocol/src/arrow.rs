@@ -22,6 +22,7 @@ use arrow_ipc::{Message, MessageHeader, root_as_message};
 use arrow_schema::{ArrowError, DataType, Schema, SchemaRef};
 
 use crate::Violation;
+use crate::limits::MAX_BATCH_CELLS;
 
 /// What opens every encapsulated message since Arrow 0.15; arrow-ipc keeps its
 /// own copy private.
@@ -47,6 +48,14 @@ pub fn encode_batch(batch: &RecordBatch) -> Result<Vec<u8>, ArrowError> {
             "column {} is {}, which protocol 1 cannot carry",
             field.name(),
             field.data_type()
+        )));
+    }
+    let columns = batch.num_columns();
+    if cells(batch.num_rows() as u64, columns) > MAX_BATCH_CELLS as u64 {
+        return Err(ArrowError::InvalidArgumentError(format!(
+            "a batch of {} rows of {columns} columns is over the {MAX_BATCH_CELLS} cells \
+             protocol 1 allows; send fewer rows a batch",
+            batch.num_rows()
         )));
     }
     let options = IpcWriteOptions::default();
@@ -101,16 +110,15 @@ pub fn decode_batch(schema: &SchemaRef, payload: &[u8]) -> Result<RecordBatch, V
         if batch.compression().is_some() {
             return Err(arrow("a compressed batch, which protocol 1 does not carry"));
         }
-        // Columns of type Null take no buffer at all, so without this a batch
-        // of them could claim more rows than the host would ever finish
-        // rendering. Any other column spends at least a bit per row.
         let rows = batch.length();
-        if rows < 0 || rows as u64 > 8 * payload.len() as u64 {
+        let columns = schema.fields().len();
+        if u64::try_from(rows).map_or(true, |rows| cells(rows, columns) > MAX_BATCH_CELLS as u64) {
             return Err(arrow(format!(
-                "a batch claiming {rows} rows in {} bytes",
-                payload.len()
+                "a batch of {rows} rows of {columns} columns, over the {MAX_BATCH_CELLS} cells \
+                 protocol 1 allows"
             )));
         }
+        spans_apart(&batch, body.len())?;
         let body = Buffer::from(body);
         RecordBatchDecoder::try_new(
             &body,
@@ -122,6 +130,43 @@ pub fn decode_batch(schema: &SchemaRef, payload: &[u8]) -> Result<RecordBatch, V
         .and_then(|decoder| decoder.with_require_alignment(false).read_record_batch())
         .map_err(|error| arrow(error.to_string()))
     })
+}
+
+fn cells(rows: u64, columns: usize) -> u64 {
+    rows.saturating_mul(columns.max(1) as u64)
+}
+
+/// Every buffer must lie inside the body and apart from every other. The
+/// decoder copies a misaligned buffer in full, as declared, before it
+/// validates anything, so overlapping spans would let one frame decode to many
+/// times its size. Alignment itself is left tolerant: a writer may pad an
+/// `i128` to 8 bytes rather than 16.
+fn spans_apart(batch: &arrow_ipc::RecordBatch<'_>, body: usize) -> Result<(), Violation> {
+    let mut spans = Vec::new();
+    for buffer in batch.buffers().iter().flat_map(|buffers| buffers.iter()) {
+        let (offset, length) = (buffer.offset(), buffer.length());
+        let inside = offset >= 0
+            && length >= 0
+            && offset
+                .checked_add(length)
+                .is_some_and(|end| end as u64 <= body as u64);
+        if !inside {
+            return Err(arrow(format!(
+                "a buffer of {length} bytes at {offset}, outside a {body}-byte body"
+            )));
+        }
+        if length > 0 {
+            spans.push((offset, offset + length));
+        }
+    }
+    spans.sort_unstable();
+    match spans.windows(2).find(|pair| pair[0].1 > pair[1].0) {
+        Some(pair) => Err(arrow(format!(
+            "buffers that overlap, at {} and {}",
+            pair[0].0, pair[1].0
+        ))),
+        None => Ok(()),
+    }
 }
 
 /// Splits an encapsulated message into its header and its body, refusing a
@@ -236,12 +281,20 @@ mod tests {
     /// A record batch message built by hand, as a plugin that ignored the rules
     /// would: one Int64 column of `rows` rows, its values in `body`.
     fn hand_built(rows: i64, compressed: bool, body: &[u8]) -> Vec<u8> {
+        built(rows, &[(0, 0), (0, body.len() as i64)], compressed, body)
+    }
+
+    /// `spans` are each buffer's offset and length, two to an Int64 column:
+    /// its validity, then its values.
+    fn built(rows: i64, spans: &[(i64, i64)], compressed: bool, body: &[u8]) -> Vec<u8> {
         let mut fbb = flatbuffers::FlatBufferBuilder::new();
-        let nodes = fbb.create_vector(&[FieldNode::new(rows, 0)]);
-        let buffers = fbb.create_vector(&[
-            arrow_ipc::Buffer::new(0, 0),
-            arrow_ipc::Buffer::new(0, body.len() as i64),
-        ]);
+        let nodes: Vec<_> = spans.chunks(2).map(|_| FieldNode::new(rows, 0)).collect();
+        let nodes = fbb.create_vector(&nodes);
+        let spans: Vec<_> = spans
+            .iter()
+            .map(|&(offset, length)| arrow_ipc::Buffer::new(offset, length))
+            .collect();
+        let buffers = fbb.create_vector(&spans);
         let compression = compressed.then(|| {
             let mut compression = BodyCompressionBuilder::new(&mut fbb);
             compression.add_codec(CompressionType::LZ4_FRAME);
@@ -291,9 +344,56 @@ mod tests {
     }
 
     #[test]
-    fn a_batch_claiming_more_rows_than_its_bytes_could_hold_is_refused() {
+    fn a_batch_over_the_cell_budget_is_refused_on_both_sides() {
         let schema = Arc::new(Schema::new(vec![Field::new("z", DataType::Null, true)]));
         refused_as_arrow(decode_batch(&schema, &hand_built(1 << 40, false, &[])));
+
+        let wide = Arc::new(Schema::new(
+            (0..1024)
+                .map(|n| Field::new(format!("z{n}"), DataType::Null, true))
+                .collect::<Vec<_>>(),
+        ));
+        refused_as_arrow(decode_batch(&wide, &hand_built(1025, false, &[])));
+
+        let nulls: ArrayRef = Arc::new(NullArray::new(MAX_BATCH_CELLS + 1));
+        assert!(encode_batch(&RecordBatch::try_from_iter([("z", nulls)]).unwrap()).is_err());
+    }
+
+    fn two_int64_columns() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Int64, true),
+            Field::new("b", DataType::Int64, true),
+        ]))
+    }
+
+    #[test]
+    fn buffers_that_overlap_or_stray_outside_the_body_are_refused() {
+        let schema = two_int64_columns();
+        let body: Vec<u8> = (0..4i64).flat_map(|n| n.to_le_bytes()).collect();
+        let apart = [(0, 0), (0, 16), (16, 0), (16, 16)];
+        decode_batch(&schema, &built(2, &apart, false, &body)).unwrap();
+
+        let shared = [(0, 0), (0, 16), (0, 0), (0, 16)];
+        refused_as_arrow(decode_batch(
+            &schema,
+            &built(2, &shared, false, &body[..16]),
+        ));
+        let overlapping = [(0, 0), (0, 16), (0, 0), (8, 16)];
+        refused_as_arrow(decode_batch(
+            &schema,
+            &built(2, &overlapping, false, &body[..24]),
+        ));
+        let negative = [(0, 0), (-8, 16), (16, 0), (16, 16)];
+        refused_as_arrow(decode_batch(&schema, &built(2, &negative, false, &body)));
+        let past = [(0, 0), (0, 16), (16, 0), (24, 16)];
+        refused_as_arrow(decode_batch(&schema, &built(2, &past, false, &body)));
+    }
+
+    #[test]
+    fn a_misaligned_buffer_still_decodes() {
+        let body: Vec<u8> = [0; 4].into_iter().chain(7i64.to_le_bytes()).collect();
+        let batch = decode_batch(&int64_schema(), &built(1, &[(0, 0), (4, 8)], false, &body));
+        assert_eq!(batch.unwrap().num_rows(), 1);
     }
 
     #[test]

@@ -17,6 +17,13 @@ pub const WINDOW: u64 = 8 << 20;
 /// quickly. A guideline for plugins; the host enforces only the credit.
 pub const BATCH_TARGET: usize = 1 << 20;
 pub const BATCH_ROWS: usize = 1024;
+
+/// The most cells one record batch may carry, counting a batch with no
+/// columns as one cell a row: a rule, enforced on both sides. A cell costs
+/// the host to render whether or not it took bytes on the wire, and a Null
+/// column takes none, so the frame's size alone cannot bound it. A plugin
+/// sends at most `MAX_BATCH_CELLS / columns` rows a batch.
+pub const MAX_BATCH_CELLS: usize = 1 << 20;
 pub const BATCH_AGE: Duration = Duration::from_millis(100);
 
 /// From `cancel` sent to the query's terminal frame received. Past it the host
