@@ -20,7 +20,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use dbdelve_plugin_protocol::limits::{CANCEL_DEADLINE, CLOSE_GRACE, STDERR_RING, WINDOW};
+use dbdelve_plugin_protocol::limits::{
+    CANCEL_DEADLINE, CLOSE_GRACE, STDERR_RING, WINDOW, credit_cost,
+};
 use dbdelve_plugin_protocol::{Frame, Kind, Request, Response, Violation, read_frame, write_frame};
 
 use crate::db::DbError;
@@ -399,7 +401,10 @@ impl Shared {
                 let _ = pending.sender.send(Routed::Control(response));
             }
             Kind::Data => {
-                let size = frame.payload.len() as i64;
+                if frame.payload.is_empty() {
+                    return Err(format!("an empty data frame for request {id}"));
+                }
+                let size = credit_cost(frame.payload.len()) as i64;
                 let mut routing = lock(&self.routing);
                 let pending = routing
                     .pending
@@ -411,7 +416,7 @@ impl Shared {
                     .ok_or_else(|| format!("result data for request {id}, which is not a query"))?;
                 if size > *credit && *credit != WINDOW as i64 {
                     return Err(format!(
-                        "{size} bytes of result data with {credit} bytes of credit left"
+                        "result data costing {size} with {credit} of credit left"
                     ));
                 }
                 *credit -= size;

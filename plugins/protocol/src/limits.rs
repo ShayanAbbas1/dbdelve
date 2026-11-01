@@ -8,10 +8,23 @@ use std::time::Duration;
 /// lift it when a plugin needs them.
 pub const MAX_FRAME: u32 = 64 << 20;
 
-/// A query's data credit, in data-frame payload bytes. A plugin may send a data
-/// frame that fits in what is left, or any one frame when nothing is
-/// outstanding, so a single row larger than the window still gets through alone.
+/// A query's data credit, which each data frame spends [`credit_cost`] of. A
+/// plugin may send a data frame that fits in what is left, or any one frame
+/// when nothing is outstanding, so a single row larger than the window still
+/// gets through alone.
 pub const WINDOW: u64 = 8 << 20;
+
+/// What a data frame spends of a query's credit beyond its payload. A frame
+/// costs the host a queue entry and a grant back whatever it carries, so a
+/// stream of tiny frames must run out of credit as a stream of large ones does.
+pub const FRAME_COST: u64 = 1 << 10;
+
+/// What one data frame of `payload` bytes spends of a query's credit, and what
+/// the host grants back once its rows are handed on. A data frame is never
+/// empty: the host reads an empty one as a protocol violation.
+pub const fn credit_cost(payload: usize) -> u64 {
+    payload as u64 + FRAME_COST
+}
 
 /// When a plugin should close a batch, whichever comes first: so first rows show
 /// quickly. A guideline for plugins; the host enforces only the credit.

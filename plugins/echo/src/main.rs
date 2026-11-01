@@ -15,6 +15,7 @@
 //! | `flood`        | 16 MiB of batches, ignoring credit                                     |
 //! | `oversize`     | a length prefix over `MAX_FRAME`, and nothing after it                 |
 //! | `garbage`      | a control frame that is not JSON                                       |
+//! | `empty`        | a data frame with no payload                                           |
 //! | `compressed`   | a schema, then a batch carrying compression metadata                   |
 //! | `dictionary`   | a schema, then a dictionary batch                                      |
 //! | `begin`, `commit`, `rollback` | opens or closes the fake transaction                    |
@@ -59,7 +60,7 @@ use arrow_ipc::{
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use dbdelve_plugin_protocol as wire;
 use dbdelve_plugin_protocol::arrow::{encode_batch, encode_schema};
-use dbdelve_plugin_protocol::limits::{BATCH_ROWS, MAX_FRAME, WINDOW};
+use dbdelve_plugin_protocol::limits::{BATCH_ROWS, MAX_FRAME, WINDOW, credit_cost};
 use dbdelve_plugin_protocol::{
     ErrorKind, Kind, PROTOCOL, REFERENCES, Request, Response, Tls, read_frame, write_frame,
 };
@@ -247,8 +248,8 @@ impl Control {
 
     /// The host's rule exactly: a frame goes when it fits in what is left, or
     /// alone when nothing is outstanding.
-    fn take_credit(&self, size: usize) -> Result<(), Interrupt> {
-        let size = size as i64;
+    fn take_credit(&self, payload: usize) -> Result<(), Interrupt> {
+        let size = credit_cost(payload) as i64;
         let mut running = self.query.lock().unwrap();
         loop {
             if running.cancel {
@@ -430,6 +431,7 @@ impl Echo {
             "flood" => self.flood(id),
             "oversize" => self.write_raw(&(MAX_FRAME + 1).to_le_bytes()),
             "garbage" => self.write(Kind::Control, id, br#"{"type": "end", "rows": "#),
+            "empty" => self.write(Kind::Data, id, &[]),
             "compressed" => {
                 let schema = numbered_schema();
                 if self.send(id, &encode_schema(&schema)).is_ok() {

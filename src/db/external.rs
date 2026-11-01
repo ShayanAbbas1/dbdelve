@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use arrow_schema::SchemaRef;
 use dbdelve_plugin_protocol::arrow::{decode_batch, decode_schema};
-use dbdelve_plugin_protocol::limits::{HELLO_DEADLINE, OPEN_DEADLINE};
+use dbdelve_plugin_protocol::limits::{HELLO_DEADLINE, OPEN_DEADLINE, credit_cost};
 use dbdelve_plugin_protocol::{
     ErrorKind, PROTOCOL, Password, REFERENCES, RelationKind as WireKind, Request, Response,
     Structure as WireStructure,
@@ -301,7 +301,7 @@ impl Connection {
                     // Only now, with every kept row handed on: a feed whose
                     // taker has stopped taking holds this back, and the plugin
                     // stops sending without the reader ever pausing.
-                    let bytes = payload.len() as u64;
+                    let bytes = credit_cost(payload.len());
                     self.host.send(id, Request::Credit { bytes });
                 }
                 Routed::Control(Response::End {
@@ -663,7 +663,7 @@ mod tests {
 
     #[test]
     fn a_violation_after_open_is_a_reset_and_ends_the_process() {
-        for statement in ["garbage", "oversize"] {
+        for statement in ["garbage", "oversize", "empty"] {
             let connection = Connection::open(&config()).unwrap();
             let pid = connection.host.pid().unwrap();
             let query = Request::Query {
@@ -717,7 +717,7 @@ mod tests {
             match answers.recv_timeout(Duration::from_secs(10)).unwrap() {
                 Routed::Data(payload) => {
                     received += payload.len() as u64;
-                    let bytes = payload.len() as u64;
+                    let bytes = credit_cost(payload.len());
                     connection.host.send(id, Request::Credit { bytes });
                 }
                 Routed::Control(Response::End { rows, .. }) => break rows,
@@ -748,7 +748,7 @@ mod tests {
                 Routed::Control(other) => panic!("{other:?}"),
             }
         };
-        assert!(cause.contains("bytes of credit left"), "{cause}");
+        assert!(cause.contains("of credit left"), "{cause}");
         assert!(connection.is_lost());
     }
 
@@ -1053,7 +1053,8 @@ mod tests {
     /// sits in `push` while the plugin spends its window and waits.
     #[test]
     fn a_cancel_is_answered_under_a_stalled_consumer_and_the_window_holds() {
-        use dbdelve_plugin_protocol::limits::{BATCH_TARGET, MAX_FRAME, WINDOW};
+        use dbdelve_plugin_protocol::MAX_PAYLOAD;
+        use dbdelve_plugin_protocol::limits::{BATCH_TARGET, WINDOW};
 
         let connection = Connection::open(&config()).unwrap();
         let pid = connection.host.pid().unwrap();
@@ -1085,7 +1086,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(!worker.is_finished(), "the consumer was stalled throughout");
-        let bound = WINDOW.max(u64::from(MAX_FRAME)) as i64;
+        let bound = WINDOW.max(credit_cost(MAX_PAYLOAD)) as i64;
         assert!(
             connection.host.peak() <= bound,
             "{}",
