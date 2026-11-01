@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use dbdelve_plugin_protocol::limits::{CLOSE_GRACE, STDERR_RING, WINDOW};
+use dbdelve_plugin_protocol::limits::{CANCEL_DEADLINE, CLOSE_GRACE, STDERR_RING, WINDOW};
 use dbdelve_plugin_protocol::{Frame, Kind, Request, Response, read_frame, write_frame};
 
 use crate::db::DbError;
@@ -40,6 +40,8 @@ pub(super) struct Host {
     /// One statement or catalog call at a time, as every built-in
     /// connection's mutex does. `stop`, `cancel` and `credit` never take it.
     session: Mutex<()>,
+    /// The query a `cancel` targets.
+    running: Mutex<Option<u64>>,
     /// A plugin said the session is gone while the process lives on.
     lost: AtomicBool,
 }
@@ -61,6 +63,10 @@ struct Routing {
     /// here is one for a request that is finished or was never sent.
     pending: HashMap<u64, Pending>,
     reset: Option<String>,
+    /// The most data any query has had outstanding: sent by the plugin and
+    /// not yet granted back.
+    #[cfg(test)]
+    peak: i64,
 }
 
 struct Pending {
@@ -158,6 +164,7 @@ impl Host {
             stderr: ring,
             stderr_reader,
             session: Mutex::new(()),
+            running: Mutex::new(None),
             lost: AtomicBool::new(false),
         }))
     }
@@ -167,7 +174,8 @@ impl Host {
     pub(super) fn request(&self, request: Request) -> Result<(u64, Receiver<Routed>), DbError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (sender, answers) = mpsc::channel();
-        let credit = matches!(request, Request::Query { .. }).then_some(WINDOW as i64);
+        let query = matches!(request, Request::Query { .. });
+        let credit = query.then_some(WINDOW as i64);
         {
             let mut routing = lock(&self.shared.routing);
             if let Some(cause) = &routing.reset {
@@ -175,11 +183,50 @@ impl Host {
             }
             routing.pending.insert(id, Pending { sender, credit });
         }
+        // Before the query leaves, so a Cancel pressed the moment it is sent
+        // has it to reach.
+        if query {
+            *lock(&self.running) = Some(id);
+        }
         if let Err(error) = self.write(id, &request) {
             lock(&self.shared.routing).pending.remove(&id);
+            self.done(id);
             return Err(error);
         }
         Ok((id, answers))
+    }
+
+    /// The query `id` has returned to its caller: a Cancel now has nothing to
+    /// reach.
+    pub(super) fn done(&self, id: u64) {
+        let mut running = lock(&self.running);
+        if *running == Some(id) {
+            *running = None;
+        }
+    }
+
+    /// Cancels the running query, if there is one. A plugin that has not
+    /// answered it within [`CANCEL_DEADLINE`] is ended, which resets the
+    /// connection: a Cancel that cannot land must still give the user their
+    /// connection back. The deadline is met when the query's terminal frame
+    /// arrives, not when its caller takes it, so a consumer that stopped
+    /// taking rows never trips it.
+    pub(super) fn cancel(&self) {
+        let Some(id) = *lock(&self.running) else {
+            return;
+        };
+        self.send(id, Request::Cancel);
+        let shared = Arc::clone(&self.shared);
+        thread::spawn(move || {
+            thread::sleep(CANCEL_DEADLINE);
+            if lock(&shared.routing).pending.contains_key(&id) {
+                shared.end(format!(
+                    "The {} plugin did not answer a cancel within {} s and was stopped.",
+                    shared.name,
+                    CANCEL_DEADLINE.as_secs()
+                ));
+            }
+        });
     }
 
     /// `stop`, `cancel` or `credit` for a running query. Nothing is sent once
@@ -281,6 +328,21 @@ impl Host {
     }
 
     #[cfg(test)]
+    pub(super) fn running(&self) -> Option<u64> {
+        *lock(&self.running)
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_pending(&self, id: u64) -> bool {
+        lock(&self.shared.routing).pending.contains_key(&id)
+    }
+
+    #[cfg(test)]
+    pub(super) fn peak(&self) -> i64 {
+        lock(&self.shared.routing).peak
+    }
+
+    #[cfg(test)]
     pub(super) fn pid(&self) -> Option<u32> {
         lock(&self.shared.process)
             .as_ref()
@@ -345,7 +407,13 @@ impl Shared {
                     ));
                 }
                 *credit -= size;
+                #[cfg(test)]
+                let outstanding = WINDOW as i64 - *credit;
                 let _ = pending.sender.send(Routed::Data(frame.payload));
+                #[cfg(test)]
+                {
+                    routing.peak = routing.peak.max(outstanding);
+                }
             }
         }
         Ok(())

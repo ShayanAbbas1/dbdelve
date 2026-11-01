@@ -13,7 +13,7 @@ mod rows;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::mpsc::RecvTimeoutError;
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use arrow_schema::SchemaRef;
@@ -150,7 +150,25 @@ impl Connection {
             eligible,
         };
         let (id, answers) = self.host.request(query)?;
-        let mut read = Read::new(fetch, eligible, started);
+        let result = self.read(id, &answers, Read::new(fetch, eligible, started));
+        self.host.done(id);
+        result
+    }
+
+    /// The user's Cancel, which may abort an open transaction, as cancelling
+    /// a built-in's statement does. With nothing running it does nothing, as
+    /// on Postgres.
+    pub fn cancel(&self) -> Result<(), DbError> {
+        self.host.cancel();
+        Ok(())
+    }
+
+    fn read(
+        &self,
+        id: u64,
+        answers: &Receiver<Routed>,
+        mut read: Read<'_>,
+    ) -> Result<QueryResult, DbError> {
         loop {
             let Ok(routed) = answers.recv() else {
                 return Err(self.host.reset_error(true));
@@ -372,7 +390,7 @@ mod tests {
     use std::process::{Command, Stdio};
     use std::time::Instant;
 
-    use dbdelve_plugin_protocol::limits::CLOSE_GRACE;
+    use dbdelve_plugin_protocol::limits::{CANCEL_DEADLINE, CLOSE_GRACE};
 
     use super::*;
     use crate::db::Feed;
@@ -759,6 +777,112 @@ mod tests {
             assert!(connection.is_lost());
             assert!(gone_within(pid, Duration::from_secs(5)), "{statement}");
         }
+    }
+
+    /// `sql` on its own thread, cancelled after `after`: the result, and how
+    /// long it took to come back once cancelled.
+    fn cancelled(connection: &Connection, sql: &str, after: Duration) -> (DbError, Duration) {
+        let running = connection.clone();
+        let sql = sql.to_owned();
+        let worker = std::thread::spawn(move || running.query(&sql, Fetch::default()));
+        std::thread::sleep(after);
+        let cancelled = Instant::now();
+        connection.cancel().unwrap();
+        let error = worker.join().unwrap().err().unwrap();
+        (error, cancelled.elapsed())
+    }
+
+    #[test]
+    fn a_cancel_ends_the_running_statement() {
+        let connection = Connection::open(&config()).unwrap();
+        let (error, took) = cancelled(&connection, "sleep 60000", Duration::from_millis(200));
+        assert!(error.message.starts_with(CANCELLED), "{}", error.message);
+        assert!(took < CANCEL_DEADLINE / 2, "{took:?}");
+        assert!(!connection.is_lost());
+
+        let cancels = connection.query("cancels", Fetch::default()).unwrap();
+        assert_eq!(cell(&cancels), Some("1"));
+    }
+
+    #[test]
+    fn a_cancel_with_nothing_running_sends_nothing() {
+        let connection = Connection::open(&config()).unwrap();
+        connection.cancel().unwrap();
+        connection.query("rows 1", Fetch::default()).unwrap();
+        connection.cancel().unwrap();
+        let cancels = connection.query("cancels", Fetch::default()).unwrap();
+        assert_eq!(cell(&cancels), Some("0"));
+    }
+
+    #[test]
+    fn a_plugin_that_does_not_answer_a_cancel_is_killed_at_the_deadline() {
+        let connection = Connection::open(&config()).unwrap();
+        let pid = connection.host.pid().unwrap();
+        let (error, took) = cancelled(&connection, "hang", Duration::from_millis(200));
+        assert!(took < CANCEL_DEADLINE + Duration::from_secs(1), "{took:?}");
+        assert!(
+            error.message.starts_with(
+                "The Echo plugin did not answer a cancel within 5 s and was stopped. The \
+                 connection was reset"
+            ),
+            "{}",
+            error.message
+        );
+        assert!(error.message.ends_with("committed is unknown."));
+        assert!(connection.is_lost());
+        assert!(gone_within(pid, Duration::from_secs(1)));
+    }
+
+    /// The feed holds ten rows and nobody takes them, so the query's thread
+    /// sits in `push` while the plugin spends its window and waits.
+    #[test]
+    fn a_cancel_is_answered_under_a_stalled_consumer_and_the_window_holds() {
+        use dbdelve_plugin_protocol::limits::{BATCH_TARGET, MAX_FRAME, WINDOW};
+
+        let connection = Connection::open(&config()).unwrap();
+        let pid = connection.host.pid().unwrap();
+        let feed = Feed::bounded(10);
+        let worker = {
+            let (connection, feed) = (connection.clone(), feed.clone());
+            std::thread::spawn(move || {
+                let fetch = Fetch {
+                    feed: Some(&feed),
+                    ..Fetch::default()
+                };
+                connection.query("rows 10000000", fetch)
+            })
+        };
+
+        let waiting = Instant::now();
+        while connection.host.peak() < (WINDOW - BATCH_TARGET as u64) as i64 {
+            assert!(
+                waiting.elapsed() < Duration::from_secs(20),
+                "the window never filled"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let id = connection.host.running().unwrap();
+        connection.cancel().unwrap();
+        let cancelled = Instant::now();
+        while connection.host.is_pending(id) && echo::alive(pid) {
+            assert!(cancelled.elapsed() < CANCEL_DEADLINE + Duration::from_secs(1));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!worker.is_finished(), "the consumer was stalled throughout");
+        let bound = WINDOW.max(u64::from(MAX_FRAME)) as i64;
+        assert!(
+            connection.host.peak() <= bound,
+            "{}",
+            connection.host.peak()
+        );
+
+        while !worker.is_finished() {
+            feed.take();
+            std::thread::yield_now();
+        }
+        let error = worker.join().unwrap().err().unwrap();
+        assert_eq!(error.message, CANCELLED);
+        assert!(!connection.is_lost());
     }
 
     #[test]
