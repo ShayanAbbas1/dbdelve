@@ -5,6 +5,7 @@
 //! | statement      | answer                                                                 |
 //! | -------------- | ---------------------------------------------------------------------- |
 //! | `rows N`       | `n` (Int64, 1 to N) and `label` (Utf8 `row n`, null where n is a multiple of 7), 1,024 rows a batch |
+//! | `miscount N M` | `rows N`, then an `end` claiming M rows                                |
 //! | `types`        | one row of every type protocol 1 carries, then a row of nulls          |
 //! | `sleep MS`     | an `end` after MS milliseconds, or `error {kind: cancelled}` on `cancel` |
 //! | `hang`         | nothing, ever: stops reading stdin, so `cancel` and EOF go unseen      |
@@ -35,6 +36,7 @@
 //! Environment: `DBDELVE_ECHO_PROTOCOL=<n>` makes `hello` claim protocol n;
 //! `DBDELVE_ECHO_STDERR=<text>` writes the text to stderr and exits before
 //! `hello`; `DBDELVE_ECHO_PLAIN=1` leaves `references` out of `optional`;
+//! `DBDELVE_ECHO_DRAINS=1` opens with `stops_early: false`;
 //! `DBDELVE_ECHO_LINGER=<ms>` only sleeps that long, which is what `orphan`
 //! starts.
 //!
@@ -291,6 +293,8 @@ impl Control {
 struct Echo {
     control: Arc<Control>,
     out: BufWriter<StdoutLock<'static>>,
+    /// Opened with `stops_early: false`, as the ODBC bridge always is.
+    drains: bool,
     transaction: bool,
     optional: Vec<String>,
 }
@@ -301,6 +305,7 @@ impl Echo {
         Self {
             control,
             out: BufWriter::new(io::stdout().lock()),
+            drains: env::var("DBDELVE_ECHO_DRAINS").is_ok_and(|value| value == "1"),
             transaction: false,
             optional: match plain {
                 true => Vec::new(),
@@ -349,7 +354,7 @@ impl Echo {
                     dbms_name: "Echo".to_string(),
                     dbms_version: env!("CARGO_PKG_VERSION").to_string(),
                     driver: "dbdelve-echo".to_string(),
-                    stops_early: true,
+                    stops_early: !self.drains,
                     optional: self.optional.clone(),
                 },
             ),
@@ -399,13 +404,19 @@ impl Echo {
         let command = words.next().unwrap_or_default();
         let argument = words.next().unwrap_or_default();
         let number = || argument.parse::<u64>().unwrap_or(0);
+        let batches = |total| {
+            (1..=total)
+                .step_by(BATCH_ROWS)
+                .map(move |from| numbered(from, (from + BATCH_ROWS as u64).min(total + 1)))
+        };
         match command {
             "rows" => {
                 let total = number();
-                let batches = (1..=total)
-                    .step_by(BATCH_ROWS)
-                    .map(move |from| numbered(from, (from + BATCH_ROWS as u64).min(total + 1)));
-                self.stream(id, numbered_schema(), batches, total, eligible, 0);
+                self.stream(id, numbered_schema(), batches(total), total, eligible, 0);
+            }
+            "miscount" => {
+                let claimed = words.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+                self.stream(id, numbered_schema(), batches(number()), claimed, false, 0);
             }
             "types" => {
                 let batch = types();

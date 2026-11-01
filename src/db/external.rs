@@ -151,7 +151,7 @@ impl Connection {
         let _session = self.host.session();
         fetch.hold()?;
         let started = Instant::now();
-        let eligible = fetch.reads_only && fetch.limit.is_some();
+        let eligible = fetch.reads_only && fetch.limit.is_some() && self.opened.stops_early;
         let query = Request::Query {
             sql: sql.to_owned(),
             eligible,
@@ -419,6 +419,8 @@ struct Read<'a> {
     set: Option<(SchemaRef, Rows)>,
     result: QueryResult,
     kept: usize,
+    /// Rows in the batches decoded, kept or not: what `end` may not undercount.
+    seen: u64,
     /// When the kept rows reached the limit.
     filled: Option<Duration>,
     stop_sent: bool,
@@ -433,6 +435,7 @@ impl<'a> Read<'a> {
             set: None,
             result: QueryResult::default(),
             kept: 0,
+            seen: 0,
             filled: None,
             stop_sent: false,
         }
@@ -461,6 +464,7 @@ impl<'a> Read<'a> {
             return Ok(());
         }
         let batch = decode_batch(schema, payload).map_err(|violation| violation.to_string())?;
+        self.seen += batch.num_rows() as u64;
         let batch = batch.slice(0, batch.num_rows().min(room));
         let (feed, result) = (self.fetch.feed, &mut self.result);
         // Decoding validated every buffer, but the formatters are arrow's, and
@@ -501,9 +505,17 @@ impl<'a> Read<'a> {
         if end.stopped && !(self.eligible && self.stop_sent) {
             return Err("`end` saying it stopped a statement it was not asked to stop".into());
         }
-        let capped = !end.stopped
-            && self.fetch.limit.is_some_and(|limit| self.kept >= limit)
-            && end.rows > self.kept as u64;
+        // Short of the limit every row the statement made has arrived, so the
+        // count must match exactly; past it, rows were dropped unread and it
+        // can only be larger. Trusting it otherwise shows a cut result whole.
+        let reached = self.fetch.limit.is_some_and(|limit| self.kept >= limit);
+        if end.rows < self.seen || (!reached && end.rows > self.seen) {
+            return Err(format!(
+                "`end` counting {} rows where {} arrived",
+                end.rows, self.seen
+            ));
+        }
+        let capped = !end.stopped && reached && end.rows > self.kept as u64;
         self.result.capped_from = capped.then(|| usize::try_from(end.rows).unwrap_or(usize::MAX));
         self.result.stopped = end.stopped.then_some(Stopped::AtLimit);
         self.result.elapsed = match self.filled {
@@ -902,6 +914,36 @@ mod tests {
 
         let cancels = connection.query("cancels", Fetch::default()).unwrap();
         assert_eq!(cell(&cancels), Some("0"));
+    }
+
+    #[test]
+    fn a_plugin_that_cannot_stop_early_is_never_told_it_may() {
+        let connection = open_with(&[("DBDELVE_ECHO_DRAINS", "1")]).unwrap();
+        assert!(!connection.stops_at_limit());
+        let result = connection.query("rows 1000000", capped(100, true)).unwrap();
+        assert_eq!(result.stopped, None);
+        assert_eq!(result.capped_from, Some(1_000_000));
+    }
+
+    #[test]
+    fn an_end_whose_count_contradicts_the_rows_that_arrived_is_a_violation() {
+        for (statement, limit) in [
+            ("miscount 10 11", None),
+            ("miscount 10 9", None),
+            ("miscount 2000 1024", Some(1500)),
+        ] {
+            let connection = Connection::open(&config()).unwrap();
+            let fetch = Fetch {
+                limit,
+                ..Fetch::default()
+            };
+            let error = connection.query(statement, fetch).unwrap_err();
+            assert!(
+                error.message.contains("broke protocol 1 (`end` counting"),
+                "{statement}: {}",
+                error.message
+            );
+        }
     }
 
     #[test]
