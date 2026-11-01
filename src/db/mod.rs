@@ -284,14 +284,6 @@ impl Engine {
         Self::Generic,
     ];
 
-    /// The engines a user can start a profile for here, which is every one with
-    /// a built-in driver until plugins add tiles of their own.
-    pub fn built_in() -> impl Iterator<Item = Self> {
-        Self::ALL
-            .into_iter()
-            .filter(|engine| engine.has_built_in_driver())
-    }
-
     pub fn label(self) -> &'static str {
         self.spec().label
     }
@@ -3486,7 +3478,7 @@ mod tests {
     fn new_row_is_withheld_only_from_a_mongo_view() {
         // Generic SQL is left out: it has no abilities of its own, since a
         // plugin target forces every write off.
-        for engine in Engine::built_in() {
+        for engine in Target::tiles(&[]).map(|target| target.engine) {
             assert!(
                 Target::built_in(engine).takes_inserts(RelationKind::Table),
                 "{engine:?}"
@@ -4049,7 +4041,7 @@ mod tests {
             ConnectionConfig::from_url("generic://x").unwrap_err(),
             GENERIC_REFUSAL
         );
-        assert!(!Engine::built_in().any(|engine| engine == Engine::Generic));
+        assert!(!Target::tiles(&[]).any(|target| target.engine == Engine::Generic));
         assert_eq!(
             Engine::from_dbms_name("PostgreSQL 16.2"),
             Some(Engine::Postgres)

@@ -12,10 +12,6 @@ use super::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Driver {
     BuiltIn,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "made once a profile can name a plugin")
-    )]
     Plugin(&'static Plugin),
 }
 
@@ -31,6 +27,20 @@ impl Target {
             engine,
             driver: Driver::BuiltIn,
         }
+    }
+
+    /// What a profile can be started for: every engine DBDelve has a driver
+    /// for, then each plugin speaking Generic SQL until its form picks another
+    /// dialect.
+    pub fn tiles(plugins: &[&'static Plugin]) -> impl Iterator<Item = Self> {
+        Engine::ALL
+            .into_iter()
+            .filter(|engine| engine.has_built_in_driver())
+            .map(Self::built_in)
+            .chain(plugins.iter().map(|&plugin| Self {
+                engine: Engine::Generic,
+                driver: Driver::Plugin(plugin),
+            }))
     }
 
     /// A plugin is the read-only tier whatever it speaks: none of the write
@@ -292,5 +302,15 @@ mod tests {
             &error("canceling statement due to user request")
         ));
         assert!(cancel_cost(target, &cancelled, true, "SELECT 1").is_some());
+    }
+
+    #[test]
+    fn a_plugins_tile_follows_the_built_ins_and_speaks_generic_sql() {
+        let plugin = odbc();
+        let tiles: Vec<_> = Target::tiles(&[plugin]).collect();
+        let (last, built_ins) = tiles.split_last().unwrap();
+        assert!(built_ins.iter().all(|tile| tile.driver == Driver::BuiltIn));
+        assert_eq!(last.engine, Engine::Generic);
+        assert_eq!(last.label(), "Generic SQL via ODBC");
     }
 }
