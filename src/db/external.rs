@@ -12,6 +12,7 @@ mod host;
 mod rows;
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -35,7 +36,7 @@ use rows::Rows;
 
 pub const CANCELLED: &str = "Cancelled.";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ExternalConfig {
     pub plugin: &'static Plugin,
     /// The built-in dialect DBDelve writes SQL in for this connection.
@@ -46,6 +47,19 @@ pub struct ExternalConfig {
     pub password: String,
     /// Seconds, 0 for none.
     pub statement_timeout: u32,
+}
+
+/// By hand, so no `{:?}` prints the password, nor the connection string, which
+/// can carry one of its own (`PWD=`).
+impl fmt::Debug for ExternalConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ExternalConfig")
+            .field("plugin", &self.plugin.id)
+            .field("speaks", &self.speaks)
+            .field("user", &self.user)
+            .field("statement_timeout", &self.statement_timeout)
+            .finish_non_exhaustive()
+    }
 }
 
 /// What the plugin said about the connection it opened.
@@ -631,6 +645,17 @@ mod tests {
         assert!(echo::alive(pid), "a clone still holds the connection");
         drop(clone);
         assert!(gone_within(pid, CLOSE_GRACE + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn a_config_never_prints_its_secrets() {
+        let config = ExternalConfig {
+            connection: "DSN=echo;PWD=hunter2".to_owned(),
+            password: "hunter3".to_owned(),
+            ..config()
+        };
+        let printed = format!("{config:?}");
+        assert!(!printed.contains("hunter"), "{printed}");
     }
 
     #[test]
