@@ -991,6 +991,18 @@ mod tests {
 
         connection.query("lost", Fetch::default()).err().unwrap();
         assert!(connection.is_lost());
+        for refused in [
+            connection.query("rows 1", Fetch::default()).unwrap_err(),
+            connection.catalog().unwrap_err(),
+        ] {
+            assert!(
+                refused
+                    .message
+                    .starts_with("The Echo plugin lost its session. The connection was reset"),
+                "{}",
+                refused.message
+            );
+        }
     }
 
     #[test]

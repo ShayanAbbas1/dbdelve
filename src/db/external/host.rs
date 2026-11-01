@@ -201,6 +201,13 @@ impl Host {
             if let Some(cause) = &routing.reset {
                 return Err(reset_error(cause, false));
             }
+            // A driver may quietly reconnect a lost session, which would run
+            // the next statement without the Read-only hold the workspace's
+            // own reconnect re-applies.
+            if self.lost.load(Ordering::Relaxed) && !matches!(request, Request::Close) {
+                let cause = format!("The {} plugin lost its session.", self.plugin.name);
+                return Err(reset_error(&cause, false));
+            }
             routing.pending.insert(id, Pending { sender, credit });
         }
         let in_flight = InFlight { host: self, id };
