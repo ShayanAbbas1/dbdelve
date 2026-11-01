@@ -39,6 +39,7 @@ mod xlsx;
 pub use duckdb::IN_MEMORY as DUCKDB_IN_MEMORY;
 
 pub use mongo::MongoConfig;
+pub use postgres::PostgresConfig;
 pub use snowflake::{SnowflakeConfig, account_identifier, normalize_host};
 #[cfg(test)]
 pub use spec::{Abilities, Hints, Hooks, IdentifierQuote};
@@ -321,6 +322,12 @@ impl Engine {
     /// `readPreference`, …), which outnumber any set of fields worth drawing.
     pub fn takes_options(self) -> bool {
         self.spec().takes_options
+    }
+
+    /// Whether a profile can name a section of a connection service file
+    /// rather than spell out where to connect.
+    pub fn takes_service(self) -> bool {
+        self.spec().takes_service
     }
 
     /// Whether the host may instead be a DNS name whose SRV records list the
@@ -984,7 +991,7 @@ impl ServerConfig {
 /// blank host that every layer below has to keep deciding is fine.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConnectionConfig {
-    Postgres(ServerConfig),
+    Postgres(PostgresConfig),
     MySql(ServerConfig),
     MariaDb(ServerConfig),
     SqlServer(ServerConfig),
@@ -1013,6 +1020,14 @@ pub enum ConnectionConfig {
 }
 
 impl ConnectionConfig {
+    /// A Postgres profile that names no connection service.
+    pub fn postgres(server: ServerConfig) -> Self {
+        Self::Postgres(PostgresConfig {
+            server,
+            service: None,
+        })
+    }
+
     /// A DuckDB profile on the database `path` opens, with nothing picked.
     pub fn duckdb(path: String, statement_timeout: u32) -> Self {
         Self::DuckDb {
@@ -1043,7 +1058,7 @@ impl ConnectionConfig {
     /// there is one — the credential fields, and the Keychain.
     pub fn server(&self) -> Option<&ServerConfig> {
         match self {
-            Self::Postgres(server)
+            Self::Postgres(PostgresConfig { server, .. })
             | Self::MySql(server)
             | Self::MariaDb(server)
             | Self::SqlServer(server)
@@ -1060,7 +1075,7 @@ impl ConnectionConfig {
     /// reads it from the Keychain, which the profile on disk never holds.
     pub fn server_mut(&mut self) -> Option<&mut ServerConfig> {
         match self {
-            Self::Postgres(server)
+            Self::Postgres(PostgresConfig { server, .. })
             | Self::MySql(server)
             | Self::MariaDb(server)
             | Self::SqlServer(server)
@@ -1077,9 +1092,9 @@ impl ConnectionConfig {
     pub fn set_database(&mut self, name: String) {
         match self {
             // Schemas belong to one database, so the active one doesn't carry over.
-            Self::Postgres(server) => {
-                server.database = name;
-                server.schema = None;
+            Self::Postgres(postgres) => {
+                postgres.server.database = name;
+                postgres.server.schema = None;
             }
             Self::MySql(server)
             | Self::MariaDb(server)
@@ -1101,6 +1116,14 @@ impl ConnectionConfig {
         }
     }
 
+    /// The connection service file section the profile names.
+    pub fn service(&self) -> Option<&str> {
+        match self {
+            Self::Postgres(postgres) => postgres.service.as_deref(),
+            _ => None,
+        }
+    }
+
     /// The database as the profile holds it, which may be blank.
     pub fn database(&self) -> Option<&str> {
         match self {
@@ -1116,7 +1139,9 @@ impl ConnectionConfig {
         let database = self.database()?;
         match self {
             Self::Snowflake(account) => Some(account.stored_database()),
-            Self::Postgres(_) if database.is_empty() => Some("postgres".into()),
+            Self::Postgres(postgres) if database.is_empty() && postgres.service.is_none() => {
+                Some("postgres".into())
+            }
             Self::Redis(_) => Some(format!(
                 "db{}",
                 if database.is_empty() { "0" } else { database }
@@ -1129,7 +1154,7 @@ impl ConnectionConfig {
     /// None until one is picked.
     pub fn schema(&self) -> Option<&str> {
         match self {
-            Self::Postgres(server) => server.schema.as_deref(),
+            Self::Postgres(postgres) => postgres.server.schema.as_deref(),
             Self::Snowflake(account) => account.schema.as_deref(),
             Self::DuckDb { schema, .. } => schema.as_deref(),
             _ => None,
@@ -1138,7 +1163,7 @@ impl ConnectionConfig {
 
     pub fn set_schema(&mut self, schema: Option<String>) {
         match self {
-            Self::Postgres(server) => server.schema = schema,
+            Self::Postgres(postgres) => postgres.server.schema = schema,
             Self::Snowflake(account) => account.schema = schema,
             Self::DuckDb { schema: picked, .. } => *picked = schema,
             _ => {}
@@ -1191,7 +1216,7 @@ impl ConnectionConfig {
     /// which variant is carrying it.
     pub fn statement_timeout(&self) -> u32 {
         match self {
-            Self::Postgres(server)
+            Self::Postgres(PostgresConfig { server, .. })
             | Self::MySql(server)
             | Self::MariaDb(server)
             | Self::SqlServer(server)
@@ -1233,8 +1258,8 @@ impl ConnectionConfig {
     /// What was being talked to, for an error or a title to name.
     pub fn endpoint(&self) -> String {
         match self {
-            Self::Postgres(server)
-            | Self::MySql(server)
+            Self::Postgres(postgres) => postgres.endpoint(),
+            Self::MySql(server)
             | Self::MariaDb(server)
             | Self::SqlServer(server)
             | Self::ClickHouse(server)
@@ -1268,9 +1293,10 @@ pub enum Connection {
 impl Connection {
     pub fn open(config: ConnectionConfig) -> Result<Self, DbError> {
         match config {
-            ConnectionConfig::Postgres(server) => {
-                postgres::Connection::open(&server).map(Self::Postgres)
-            }
+            ConnectionConfig::Postgres(postgres) => postgres
+                .resolved()
+                .and_then(|server| postgres::Connection::open(&server))
+                .map(Self::Postgres),
             ConnectionConfig::MySql(server) => {
                 mysql::Connection::open(&server, Engine::MySql).map(Self::MySql)
             }
@@ -1683,10 +1709,12 @@ impl Connection {
 
     /// The database the connection is on as the server spells it, where
     /// that can differ from the profile's: SQL Server reads a name in any
-    /// case, and a login naming none lands where only the server can say.
+    /// case, a login naming none lands where only the server can say, and a
+    /// Postgres service can name one the profile leaves blank.
     pub fn spelled_database(&self) -> Option<&str> {
         match self {
             Self::SqlServer(connection) => Some(connection.current_database()),
+            Self::Postgres(connection) => Some(connection.current_database()),
             _ => None,
         }
     }
@@ -3700,7 +3728,7 @@ mod tests {
             .is_none()
         );
         assert!(
-            ConnectionConfig::Postgres(ServerConfig::default())
+            ConnectionConfig::postgres(ServerConfig::default())
                 .server()
                 .is_some()
         );
@@ -3738,7 +3766,7 @@ mod tests {
 
     #[test]
     fn an_edit_reconnects_for_a_new_destination_but_not_for_a_blank_password() {
-        let stored = ConnectionConfig::Postgres(ServerConfig {
+        let stored = ConnectionConfig::postgres(ServerConfig {
             host: "db.example.test".into(),
             port: Some(5432),
             database: "dbdelve".into(),
@@ -3751,11 +3779,16 @@ mod tests {
             // What the form hands back: it never fills the password in.
             server.password.clear();
             change(&mut server);
-            ConnectionConfig::Postgres(server)
+            ConnectionConfig::postgres(server)
         };
 
         assert!(!stored.needs_reconnect(&stored.clone()));
         assert!(!stored.needs_reconnect(&edited(|_| {})));
+        let mut named = stored.clone();
+        if let ConnectionConfig::Postgres(postgres) = &mut named {
+            postgres.service = Some("harness".into());
+        }
+        assert!(stored.needs_reconnect(&named));
         assert!(stored.needs_reconnect(&edited(|server| server.host = "elsewhere".into())));
         assert!(stored.needs_reconnect(&edited(|server| server.port = Some(6432))));
         assert!(stored.needs_reconnect(&edited(|server| server.database = "other".into())));
@@ -4240,6 +4273,15 @@ mod tests {
             ConnectionConfig::Snowflake(account).endpoint(),
             "myorg.privatelink.example"
         );
+    }
+
+    #[test]
+    fn a_service_leaves_a_blank_database_for_the_connection_to_say() {
+        let config = ConnectionConfig::Postgres(PostgresConfig {
+            service: Some("harness".into()),
+            ..PostgresConfig::default()
+        });
+        assert_eq!(config.database_name(), None);
     }
 
     #[test]

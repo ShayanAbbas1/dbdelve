@@ -539,7 +539,9 @@ one waiting on a column ignores whatever is typed into it.
 
 Pick the engine first, from the searchable picker the engine pill in the form's header opens; it decides which fields exist.
 Then paste a URL into the form's URL row, which fills the fields as it lands (one
-typed rather than pasted fills them on Enter), or fill the fields in.
+typed rather than pasted fills them on Enter), or fill the fields in. Where
+`Engine::takes_service`, a service stands in for the host and username, which
+are otherwise required; what it leaves unset fails on connect, naming the key.
 `secondary-enter` connects, or saves an edit (`submit_connection`, scoped to
 `ConnectionForm`): it is Run Query's chord, and the unscoped Run Query reaches
 the form first, finds no handler there and lets it through

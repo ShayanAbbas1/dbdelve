@@ -198,6 +198,22 @@ Decided, and not to be re-litigated:
   Either way `db::cancel_cost` says what the cancel cost: SQL Server's session
   reset, Postgres's aborted transaction, a SQLite write's rolled-back
   transaction.
+- **A Postgres profile can name a libpq service** (`service=` in a URL, the
+  form's Service field, `PGSERVICE` at launch), held on `PostgresConfig` beside
+  its `ServerConfig`, as `MongoConfig` holds Mongo's own settings, because no
+  other engine has one. `PostgresConfig::resolved` reads the file as a connection
+  opens and hands `postgres::Connection::open` a complete `ServerConfig`, before
+  the tunnel, TLS and `.pgpass`, so a password in it never reaches the profile or
+  the Keychain, and that connection's side sessions keep what it read.
+  What the profile states wins, then the service, then the `PG*` variables, and a
+  setting DBDelve cannot carry is refused by name rather than dropped.
+  `ServerConfig::sslmode` has no "unset", so the default `prefer` means the
+  service's mode decides, `disable` included, and a URL stating `sslmode=prefer`
+  beside a service is refused. The form's selector cannot show it, so the line
+  under it says so: a service profile showing Prefer connects in whatever mode
+  its service or `PGSSLMODE` sets. libpq checks a root certificate on any
+  encrypted connection, so `require` with one reads as `verify-ca`, which the
+  line under Require says too, and `prefer` with one is refused.
 - **Postgres's side session** (describe, and the check before a stop at the
   limit) opens with a 2-second `statement_timeout`, and neither ever blocks
   the run on it: a describe waits its turn there on a thread of its own, and a

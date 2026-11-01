@@ -218,6 +218,7 @@ impl Profile {
                 .unwrap_or_default(),
             sslmode: server.map(|server| server.sslmode.as_str().to_string()),
             root_certificate: server.and_then(|server| server.root_certificate.clone()),
+            service: self.config.service().map(str::to_string),
             engine: Some(self.config.engine().as_str().to_string()),
             path: match &self.config {
                 ConnectionConfig::Sqlite { path, .. }

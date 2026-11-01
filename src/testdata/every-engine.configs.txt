@@ -1,62 +1,73 @@
 legacy Postgres(
-    ServerConfig {
-        host: "old.internal",
-        port: Some(
-            5432,
-        ),
-        database: "app",
-        user: "ada",
-        password: "",
-        sslmode: Prefer,
-        root_certificate: None,
-        statement_timeout: 0,
-        ssh: None,
-        schema: None,
+    PostgresConfig {
+        server: ServerConfig {
+            host: "old.internal",
+            port: Some(
+                5432,
+            ),
+            database: "app",
+            user: "ada",
+            password: "",
+            sslmode: Prefer,
+            root_certificate: None,
+            statement_timeout: 0,
+            ssh: None,
+            schema: None,
+        },
+        service: None,
     },
 )
 pg Postgres(
-    ServerConfig {
-        host: "db.internal",
-        port: Some(
-            5432,
-        ),
-        database: "orders",
-        user: "ada",
-        password: "",
-        sslmode: VerifyFull,
-        root_certificate: Some(
-            "/certs/ca.pem",
-        ),
-        statement_timeout: 30,
-        ssh: Some(
-            SshTunnel {
-                host: "bastion.internal",
-                port: Some(
-                    2222,
-                ),
-                user: "jump",
-                identity_file: Some(
-                    "~/.ssh/id_ed25519",
-                ),
-            },
-        ),
-        schema: Some(
-            "billing",
-        ),
+    PostgresConfig {
+        server: ServerConfig {
+            host: "db.internal",
+            port: Some(
+                5432,
+            ),
+            database: "orders",
+            user: "ada",
+            password: "",
+            sslmode: VerifyFull,
+            root_certificate: Some(
+                "/certs/ca.pem",
+            ),
+            statement_timeout: 30,
+            ssh: Some(
+                SshTunnel {
+                    host: "bastion.internal",
+                    port: Some(
+                        2222,
+                    ),
+                    user: "jump",
+                    identity_file: Some(
+                        "~/.ssh/id_ed25519",
+                    ),
+                },
+            ),
+            schema: Some(
+                "billing",
+            ),
+        },
+        service: None,
     },
 )
 alias Postgres(
-    ServerConfig {
-        host: "localhost",
-        port: None,
-        database: "postgres",
-        user: "postgres",
-        password: "",
-        sslmode: Prefer,
-        root_certificate: None,
-        statement_timeout: 0,
-        ssh: None,
-        schema: None,
+    PostgresConfig {
+        server: ServerConfig {
+            host: "localhost",
+            port: None,
+            database: "postgres",
+            user: "postgres",
+            password: "",
+            sslmode: Prefer,
+            root_certificate: None,
+            statement_timeout: 0,
+            ssh: None,
+            schema: None,
+        },
+        service: Some(
+            "reports",
+        ),
     },
 )
 mysql MySql(

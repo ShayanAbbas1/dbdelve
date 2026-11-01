@@ -124,6 +124,7 @@ host = "localhost"
 database = "postgres"
 user = "postgres"
 engine = "postgresql"
+service = "reports"
 
 [[profiles]]
 id = "mysql"
