@@ -227,6 +227,7 @@ fn render_editor_surface(
     split: gpui::ElementId,
     editor: &Entity<EditorState>,
     font_size: f32,
+    block_cursor: bool,
     query: &QueryState,
     toolbar: AnyElement,
     bottom: AnyElement,
@@ -272,7 +273,14 @@ fn render_editor_surface(
                         .menu("Format Query", Box::new(FormatQuery))
                         .menu("Toggle Line Comment", Box::new(ToggleComment))
                 }),
-        );
+        )
+        .when(block_cursor, |buffer| {
+            buffer.child(vim::block_cursor(
+                editor,
+                font_size,
+                t.cursor.alpha(0.4).into(),
+            ))
+        });
     let top = div()
         .size_full()
         .flex()
@@ -386,6 +394,7 @@ fn render_query_surface(
         )),
         &tab.editor,
         editor_font_size,
+        vim_mode && tab.vim == vim::Mode::Normal,
         &tab.query,
         render_query_toolbar(
             &profile.session,
