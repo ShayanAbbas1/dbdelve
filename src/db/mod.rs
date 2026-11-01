@@ -24,9 +24,14 @@ mod clickhouse;
 #[cfg(test)]
 mod conformance;
 mod duckdb;
+// Only the tests open one until `Connection` has an `External` arm.
+#[cfg_attr(not(test), expect(dead_code))]
+mod external;
 mod mongo;
 mod mssql;
 mod mysql;
+#[expect(dead_code, reason = "read once plugins are discovered and persisted")]
+mod plugin;
 mod postgres;
 mod redis;
 mod snowflake;

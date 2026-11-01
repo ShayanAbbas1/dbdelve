@@ -486,8 +486,6 @@ fn spawn(local: SocketAddr, host: &str, args: &[String]) -> io::Result<Tunnel> {
 
 #[cfg(unix)]
 fn watched(program: &str, args: &[String]) -> io::Result<Child> {
-    use std::os::unix::process::CommandExt;
-
     let mut command = Command::new("/bin/sh");
     command
         .args(["-c", WATCHDOG, "sh", program])
@@ -495,10 +493,19 @@ fn watched(program: &str, args: &[String]) -> io::Result<Child> {
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    // std hands the child the spawning thread's signal mask, and the GCD
-    // worker a background connect runs on blocks every signal: ssh would
-    // ignore the watchdog's kill and outlive DBDelve. SIGTERM's disposition
-    // too, since an ignored one survives exec just the same.
+    unmask_signals(&mut command);
+    command.spawn()
+}
+
+/// std hands a child the spawning thread's signal mask, and the GCD worker a
+/// background connect runs on blocks every signal: ssh would ignore the
+/// watchdog's kill and outlive DBDelve, and a plugin would ignore every signal
+/// it did not unblock itself. SIGTERM's disposition too, since an ignored one
+/// survives exec just the same.
+#[cfg(unix)]
+pub(super) fn unmask_signals(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
     // SAFETY: sigemptyset, pthread_sigmask and signal are async-signal-safe,
     // which is all a hook between fork and exec may call.
     unsafe {
@@ -515,7 +522,6 @@ fn watched(program: &str, args: &[String]) -> io::Result<Child> {
             Ok(())
         });
     }
-    command.spawn()
 }
 
 /// Windows' own OpenSSH, when no other ssh is on PATH: it is not always put
@@ -565,7 +571,7 @@ fn spawn(local: SocketAddr, host: &str, args: &[String]) -> io::Result<Tunnel> {
 // ponytail: ssh runs for a moment before it joins the job, so a DBDelve killed
 // in that window leaves it behind. Upgrade: spawn suspended, assign, resume.
 #[cfg(windows)]
-fn kill_on_close_job(process: &Child) -> io::Result<std::os::windows::io::OwnedHandle> {
+pub(super) fn kill_on_close_job(process: &Child) -> io::Result<std::os::windows::io::OwnedHandle> {
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,

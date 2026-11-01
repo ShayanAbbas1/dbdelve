@@ -2111,6 +2111,7 @@ dependencies = [
  "base64 0.22.1",
  "calamine",
  "cbc 0.1.2",
+ "dbdelve-plugin-protocol",
  "duckdb",
  "encoding_rs",
  "futures-util",
