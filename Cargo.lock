@@ -2188,6 +2188,8 @@ dependencies = [
 name = "dbdelve-plugin-odbc"
 version = "0.6.2"
 dependencies = [
+ "arrow-array",
+ "arrow-schema",
  "dbdelve-plugin-protocol",
  "odbc-api",
 ]

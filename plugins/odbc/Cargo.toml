@@ -17,6 +17,10 @@ path = "src/main.rs"
 # the graph holds the one version odbc-api locks.
 [dependencies]
 dbdelve-plugin-protocol = { path = "../protocol" }
+# The versions the protocol crate links, so the batches built here are the
+# types it encodes.
+arrow-array = "=60.0.0"
+arrow-schema = "=60.0.0"
 odbc-api = { version = "=29.2.0", default-features = false, features = ["odbc_version_3_80", "wide"] }
 
 # macOS has no system driver manager, so unixODBC is compiled from its vendored

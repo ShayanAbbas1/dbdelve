@@ -10,28 +10,32 @@
 mod connect;
 mod failure;
 mod raw;
+mod run;
 
 use std::collections::BTreeMap;
 use std::io::{self, BufWriter, Read, Write};
 use std::process;
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
 use dbdelve_plugin_protocol::{
     ErrorKind, Kind, PROTOCOL, REFERENCES, Request, Response, Tls, Violation, read_frame,
-    write_frame,
 };
 use odbc_api::handles;
 
 use crate::connect::Session;
+use crate::run::Control;
 
 fn main() {
+    let control = Arc::new(Control::default());
     let (jobs, inbox) = mpsc::channel();
+    let worker = Arc::clone(&control);
     thread::spawn(move || {
-        Bridge::new(BufWriter::new(io::stdout().lock())).work(inbox);
+        Bridge::new(BufWriter::new(io::stdout().lock()), worker).work(inbox);
         process::exit(0);
     });
-    match serve(&mut io::stdin().lock(), &jobs) {
+    match serve(&mut io::stdin().lock(), &jobs, &control) {
         Ok(()) => process::exit(0),
         Err(violation) => {
             eprintln!("dbdelve-odbc: {violation}");
@@ -46,7 +50,7 @@ enum Job {
 }
 
 /// Reads frames until EOF, or until the worker has answered `close`.
-fn serve(input: &mut impl Read, jobs: &Sender<Job>) -> Result<(), Violation> {
+fn serve(input: &mut impl Read, jobs: &Sender<Job>, control: &Control) -> Result<(), Violation> {
     while let Some(frame) = read_frame(input)? {
         let id = frame.request;
         let job = match frame.kind {
@@ -56,10 +60,24 @@ fn serve(input: &mut impl Read, jobs: &Sender<Job>) -> Result<(), Violation> {
                 "The ODBC bridge takes no data frames.".to_string(),
             ),
             Kind::Control => match Request::from_payload(&frame.payload) {
-                // Each targets a running statement, and this bridge runs none
-                // yet: a no-op, as `cancel` is with nothing running.
-                Ok(Request::Credit { .. } | Request::Stop | Request::Cancel) => continue,
-                Ok(request) => Job::Run(id, request),
+                Ok(Request::Credit { bytes }) => {
+                    control.credit(id, bytes);
+                    continue;
+                }
+                Ok(Request::Stop) => {
+                    control.stop(id);
+                    continue;
+                }
+                Ok(Request::Cancel) => {
+                    control.cancel(id);
+                    continue;
+                }
+                Ok(request) => {
+                    if matches!(request, Request::Query { .. }) {
+                        control.start(id);
+                    }
+                    Job::Run(id, request)
+                }
                 Err(violation) => Job::Refuse(id, ErrorKind::Unsupported, violation.to_string()),
             },
         };
@@ -72,15 +90,17 @@ fn serve(input: &mut impl Read, jobs: &Sender<Job>) -> Result<(), Violation> {
 
 struct Bridge<W: Write> {
     out: W,
+    control: Arc<Control>,
     environment: Option<&'static handles::Environment>,
     session: Option<Session>,
 }
 
 impl<W: Write> Bridge<W> {
     /// Nothing touches the driver manager until the first `open`.
-    fn new(out: W) -> Self {
+    fn new(out: W, control: Arc<Control>) -> Self {
         Self {
             out,
+            control,
             environment: None,
             session: None,
         }
@@ -97,7 +117,7 @@ impl<W: Write> Bridge<W> {
                     break;
                 }
                 Job::Run(id, request) => {
-                    let response = self.run(request);
+                    let response = self.run(id, request);
                     self.reply(id, response);
                 }
                 Job::Refuse(id, kind, message) => self.reply(id, refusal(kind, message)),
@@ -106,7 +126,7 @@ impl<W: Write> Bridge<W> {
         self.out
     }
 
-    fn run(&mut self, request: Request) -> Response {
+    fn run(&mut self, id: u64, request: Request) -> Response {
         match request {
             Request::Hello { .. } => Response::Hello {
                 protocol: PROTOCOL,
@@ -122,10 +142,17 @@ impl<W: Write> Bridge<W> {
                 },
             },
             Request::Open {
-                fields, password, ..
+                fields,
+                password,
+                statement_timeout,
             } => self
-                .open(&fields, &password.0)
+                .open(&fields, &password.0, statement_timeout)
                 .unwrap_or_else(|error| error),
+            // `eligible` is not read: the bridge always drains (`stops_early`).
+            Request::Query { sql, .. } => match &self.session {
+                Some(session) => run::query(session, &self.control, &mut self.out, id, &sql),
+                None => not_open(),
+            },
             _ => refusal(
                 ErrorKind::Unsupported,
                 "The ODBC bridge does not answer this request.".to_string(),
@@ -137,6 +164,7 @@ impl<W: Write> Bridge<W> {
         &mut self,
         fields: &BTreeMap<String, String>,
         password: &str,
+        statement_timeout: u32,
     ) -> Result<Response, Response> {
         if self.session.is_some() {
             let message = "The ODBC bridge is already open.".to_string();
@@ -151,19 +179,22 @@ impl<W: Write> Bridge<W> {
             Some(environment) => environment,
             None => *self.environment.insert(connect::environment()?),
         };
-        let session = Session::open(environment, connection, user, password)?;
+        let session = Session::open(environment, connection, user, password, statement_timeout)?;
         let opened = session.opened()?;
         self.session = Some(session);
         Ok(opened)
     }
 
     fn reply(&mut self, id: u64, response: Response) {
-        // The host has gone, or killed this process mid-write: nothing is left
-        // to answer.
-        if write_frame(&mut self.out, Kind::Control, id, &response.to_payload()).is_err() {
-            process::exit(1);
-        }
+        run::write_or_exit(&mut self.out, Kind::Control, id, &response.to_payload());
     }
+}
+
+fn not_open() -> Response {
+    refusal(
+        ErrorKind::Protocol,
+        "The ODBC bridge has no open connection.".to_string(),
+    )
 }
 
 fn refusal(kind: ErrorKind, message: String) -> Response {
@@ -179,6 +210,7 @@ fn refusal(kind: ErrorKind, message: String) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dbdelve_plugin_protocol::write_frame;
 
     fn frame(kind: Kind, id: u64, payload: &[u8]) -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -193,9 +225,11 @@ mod tests {
     /// The frame loop and the worker over in-memory pipes; no driver manager
     /// is touched, since nothing here opens.
     fn exchange(input: Vec<u8>) -> Vec<(u64, Response)> {
+        let control = Arc::new(Control::default());
         let (jobs, inbox) = mpsc::channel();
-        let worker = thread::spawn(move || Bridge::new(Vec::new()).work(inbox));
-        serve(&mut input.as_slice(), &jobs).unwrap();
+        let worker = Arc::clone(&control);
+        let worker = thread::spawn(move || Bridge::new(Vec::new(), worker).work(inbox));
+        serve(&mut input.as_slice(), &jobs, &control).unwrap();
         drop(jobs);
         let output = worker.join().unwrap();
         let mut output = output.as_slice();
@@ -305,7 +339,7 @@ mod tests {
         let whole = request(1, Request::Hello { protocol: PROTOCOL });
         let (jobs, _inbox) = mpsc::channel();
         assert_eq!(
-            serve(&mut &whole[..whole.len() - 1], &jobs),
+            serve(&mut &whole[..whole.len() - 1], &jobs, &Control::default()),
             Err(Violation::Truncated)
         );
     }

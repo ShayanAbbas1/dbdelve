@@ -31,9 +31,11 @@ pub fn environment() -> Result<&'static handles::Environment, Response> {
 ///
 /// odbc-api's `Connection` is not used because it never hands out its raw
 /// handle, and `SQL_DBMS_VER` and `SQL_DRIVER_NAME` need one; statements are
-/// allocated from this handle and run through odbc-api's `Preallocated`.
+/// allocated from this handle and run through `raw`.
 pub struct Session {
     handle: ManuallyDrop<handles::Connection<'static>>,
+    /// Seconds; 0 is none.
+    statement_timeout: u32,
 }
 
 impl Session {
@@ -45,6 +47,7 @@ impl Session {
         connection: &str,
         user: &str,
         password: &str,
+        statement_timeout: u32,
     ) -> Result<Self, Response> {
         let mut handle = match environment.allocate_connection() {
             SqlResult::Success(handle) | SqlResult::SuccessWithInfo(handle) => handle,
@@ -72,6 +75,7 @@ impl Session {
         match succeeded(connected) {
             true => Ok(Self {
                 handle: ManuallyDrop::new(handle),
+                statement_timeout,
             }),
             false => Err(failure::from(&handle, function)),
         }
@@ -79,6 +83,10 @@ impl Session {
 
     pub fn handle(&self) -> &handles::Connection<'static> {
         &self.handle
+    }
+
+    pub fn statement_timeout(&self) -> u32 {
+        self.statement_timeout
     }
 
     pub fn opened(&self) -> Result<Response, Response> {
@@ -89,6 +97,9 @@ impl Session {
         Ok(Response::Opened {
             dbms_name: info(InfoType::DbmsName)?,
             dbms_version: info(InfoType::DbmsVer)?,
+            // As the driver answers it: IBM's Db2 driver (12.1) answers
+            // `SQL_DRIVER_NAME` with its ODBC version, `03.80`, as it does
+            // `SQL_DRIVER_ODBC_VER`, through the narrow call and the wide alike.
             driver: info(InfoType::DriverName)?,
             // ODBC cannot say whether a transaction is open, so ending a read
             // early is never provably safe: the bridge always drains.

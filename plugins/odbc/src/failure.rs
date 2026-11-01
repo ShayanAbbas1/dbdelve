@@ -3,8 +3,9 @@
 use dbdelve_plugin_protocol::{ErrorKind, Response};
 use odbc_api::handles::{Diagnostics, Record, slice_to_cow_utf8};
 
-/// IM002 is the driver manager finding neither a DSN nor a driver by that name,
-/// which on macOS is what a named driver in the user's own `odbcinst.ini` gets.
+/// IM002 is the driver manager finding no DSN by that name and no default
+/// driver. A `DRIVER=` name it has no entry for is not IM002: unixODBC then
+/// loads the name as a library path and fails with 01000, "Can't open lib".
 const NO_DRIVER_HINT: &str = "Name the driver by its library path (DRIVER=/path/to/library) or register it with the driver manager.";
 
 /// So a driver that stacks hundreds of warnings on one call cannot make an
@@ -13,6 +14,11 @@ const MOST_RECORDS: i16 = 16;
 
 /// Every diagnostic record the last call on `handle` left, as one `error`.
 pub fn from(handle: &impl Diagnostics, function: &str) -> Response {
+    error(&records(handle), function)
+}
+
+/// The (SQLSTATE, message) pairs the last call on `handle` left, first first.
+pub fn records(handle: &impl Diagnostics) -> Vec<(String, String)> {
     let mut record = Record::with_capacity(512);
     let mut records = Vec::new();
     let mut number = 1;
@@ -21,7 +27,7 @@ pub fn from(handle: &impl Diagnostics, function: &str) -> Response {
         records.push((record.state.as_str().to_string(), message));
         number += 1;
     }
-    error(&records, function)
+    records
 }
 
 pub fn plain(message: &str) -> Response {
@@ -34,7 +40,6 @@ pub fn plain(message: &str) -> Response {
     }
 }
 
-/// `records` are (SQLSTATE, message) pairs, first first.
 fn error(records: &[(String, String)], function: &str) -> Response {
     let state = |wanted: &str| records.iter().any(|(state, _)| state == wanted);
     let mut message = records
@@ -49,11 +54,11 @@ fn error(records: &[(String, String)], function: &str) -> Response {
         message.push('\n');
         message.push_str(NO_DRIVER_HINT);
     }
+    // Never `Cancelled` from the SQLSTATE alone: Db2 reports its own query
+    // timeout as HY008, which is no Cancel of the user's. The query path marks
+    // a failure cancelled when the user's `cancel` arrived.
     Response::Error {
-        kind: match state("HY008") {
-            true => ErrorKind::Cancelled,
-            false => ErrorKind::Server,
-        },
+        kind: ErrorKind::Server,
         message,
         sqlstate: records.first().map(|(state, _)| state.clone()),
         position: None,
@@ -94,15 +99,15 @@ mod tests {
     }
 
     #[test]
-    fn a_connection_exception_is_lost_and_a_cancel_is_cancelled() {
+    fn a_connection_exception_is_lost_and_a_timeout_is_no_cancel() {
         let Response::Error { lost, .. } = error(&records(&[("08S01", "link")]), "f") else {
             panic!("an error");
         };
         assert!(lost);
-        let Response::Error { kind, .. } = error(&records(&[("HY008", "cancelled")]), "f") else {
+        let Response::Error { kind, .. } = error(&records(&[("HY008", "timed out")]), "f") else {
             panic!("an error");
         };
-        assert_eq!(kind, ErrorKind::Cancelled);
+        assert_eq!(kind, ErrorKind::Server);
     }
 
     #[test]
