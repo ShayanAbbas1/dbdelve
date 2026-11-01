@@ -1822,10 +1822,12 @@ impl ResultGrid {
     /// cell is. `None` where its rows are written back nowhere, or into a
     /// table on an engine that takes no inserts.
     pub fn insert_target(&self) -> Option<InsertTarget> {
-        if !self.engine.takes_inserts(db::RelationKind::Table) {
+        let edit = self.result.edit.as_ref()?;
+        // Only a built-in driver's result carries `edit`: one read through a
+        // plugin never does, so the grid caches the engine alone.
+        if !db::Target::built_in(self.engine).takes_inserts(db::RelationKind::Table) {
             return None;
         }
-        let edit = self.result.edit.as_ref()?;
         let columns = edit
             .columns
             .iter()

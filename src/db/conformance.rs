@@ -11,14 +11,14 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::db::{
-    CancelToken, Connection, Engine, Fetch, QueryResult, RelationKind, Stopped, is_cancel,
+    CancelToken, Connection, Engine, Fetch, QueryResult, RelationKind, Stopped, Target, is_cancel,
 };
 use crate::result_grid::{NewValue, PendingRow};
 use crate::sql;
 
 pub(super) struct Subject {
     pub connection: Connection,
-    pub engine: Engine,
+    pub target: Target,
     pub schema: &'static str,
     pub relation: &'static str,
     pub key: &'static str,
@@ -171,7 +171,10 @@ impl Subject {
         self.connection
             .query(sql, &CancelToken::default(), fetch)
             .unwrap_or_else(|error| {
-                panic!("{scenario} on {:?}: `{sql}` failed: {error}", self.engine)
+                panic!(
+                    "{scenario} on {:?}: `{sql}` failed: {error}",
+                    self.target.engine
+                )
             })
     }
 
@@ -182,7 +185,7 @@ impl Subject {
     fn fixture(&self, scenario: &str) -> &Fixture {
         self.fixture
             .as_ref()
-            .unwrap_or_else(|| panic!("{scenario} on {:?} needs a fixture", self.engine))
+            .unwrap_or_else(|| panic!("{scenario} on {:?} needs a fixture", self.target.engine))
     }
 
     fn label_of(&self, scenario: &str, key: &str) -> Vec<Option<String>> {
@@ -203,19 +206,19 @@ pub(super) fn connects(subject: &Subject) {
     assert!(
         !subject.connection.is_lost(),
         "connects on {:?}: the session is lost",
-        subject.engine
+        subject.target.engine
     );
     let result = subject.read("connects");
     assert_eq!(
         names(&result),
         subject.columns,
         "connects on {:?}",
-        subject.engine
+        subject.target.engine
     );
 }
 
 pub(super) fn query_round_trip(subject: &Subject) {
-    let at = format!("query_round_trip on {:?}", subject.engine);
+    let at = format!("query_round_trip on {:?}", subject.target.engine);
     let result = subject.read("query_round_trip");
     assert_eq!(names(&result), subject.columns, "{at}");
     assert_eq!(result.rows.len(), 3, "{at}");
@@ -228,7 +231,7 @@ pub(super) fn query_round_trip(subject: &Subject) {
 }
 
 pub(super) fn catalog_round_trip(subject: &Subject) {
-    let at = format!("catalog_round_trip on {:?}", subject.engine);
+    let at = format!("catalog_round_trip on {:?}", subject.target.engine);
     let catalog = subject
         .connection
         .catalog()
@@ -244,7 +247,7 @@ pub(super) fn catalog_round_trip(subject: &Subject) {
         .find(|relation| relation.name == subject.relation)
         .unwrap_or_else(|| panic!("{at}: no relation {}", subject.relation));
     assert_eq!(relation.kind, RelationKind::Table, "{at}");
-    if subject.engine.copies_ddl() {
+    if subject.target.copies_ddl() {
         let ddl = subject
             .connection
             .ddl(subject.schema, subject.relation, RelationKind::Table)
@@ -254,7 +257,7 @@ pub(super) fn catalog_round_trip(subject: &Subject) {
 }
 
 pub(super) fn structure_round_trip(subject: &Subject) {
-    let at = format!("structure_round_trip on {:?}", subject.engine);
+    let at = format!("structure_round_trip on {:?}", subject.target.engine);
     let structure = subject
         .connection
         .structure(subject.schema, subject.relation)
@@ -271,7 +274,7 @@ pub(super) fn structure_round_trip(subject: &Subject) {
 }
 
 pub(super) fn types_render_as_expected(subject: &Subject) {
-    let at = format!("types_render_as_expected on {:?}", subject.engine);
+    let at = format!("types_render_as_expected on {:?}", subject.target.engine);
     let fixture = subject.fixture("types_render_as_expected");
     let result = subject.read("types_render_as_expected");
     let types: Vec<Option<&str>> = result
@@ -300,7 +303,7 @@ pub(super) fn types_render_as_expected(subject: &Subject) {
 }
 
 pub(super) fn cancel_stops_a_long_query(subject: &Subject) {
-    let at = format!("cancel_stops_a_long_query on {:?}", subject.engine);
+    let at = format!("cancel_stops_a_long_query on {:?}", subject.target.engine);
     let token = CancelToken::default();
     let (sender, receiver) = mpsc::channel();
     let connection = subject.connection.clone();
@@ -319,14 +322,24 @@ pub(super) fn cancel_stops_a_long_query(subject: &Subject) {
         }
     };
     let error = outcome.expect_err(&format!("{at}: the run should have been cancelled"));
-    assert!(is_cancel(subject.engine, &error), "{at}: {}", error.message);
+    assert!(
+        is_cancel(subject.target.engine, &error),
+        "{at}: {}",
+        error.message
+    );
     assert!(started.elapsed() < WITHIN, "{at}");
     subject.read("cancel_stops_a_long_query");
 }
 
 pub(super) fn row_limit_stops_an_eligible_read(subject: &Subject) {
-    let at = format!("row_limit_stops_an_eligible_read on {:?}", subject.engine);
-    assert!(sql::stoppable(subject.engine, subject.endless), "{at}");
+    let at = format!(
+        "row_limit_stops_an_eligible_read on {:?}",
+        subject.target.engine
+    );
+    assert!(
+        sql::stoppable(subject.target.engine, subject.endless),
+        "{at}"
+    );
     let started = Instant::now();
     let result = subject.run(
         "row_limit_stops_an_eligible_read",
@@ -346,7 +359,7 @@ pub(super) fn row_limit_stops_an_eligible_read(subject: &Subject) {
 pub(super) fn row_limit_drains_an_ineligible_read(subject: &Subject) {
     let at = format!(
         "row_limit_drains_an_ineligible_read on {:?}",
-        subject.engine
+        subject.target.engine
     );
     let full = subject.read("row_limit_drains_an_ineligible_read");
     let capped = subject.run(
@@ -366,8 +379,8 @@ pub(super) fn row_limit_drains_an_ineligible_read(subject: &Subject) {
 
 pub(super) fn capped_read_keeps_the_users_transaction(subject: &Subject) {
     let scenario = "capped_read_keeps_the_users_transaction";
-    let at = format!("{scenario} on {:?}", subject.engine);
-    let engine = subject.engine;
+    let at = format!("{scenario} on {:?}", subject.target.engine);
+    let engine = subject.target.engine;
     let delete = sql_delete(engine, subject.schema, 950);
     let _cleanup = Cleanup {
         connection: &subject.connection,
@@ -443,8 +456,8 @@ pub(super) fn capped_read_keeps_the_users_transaction(subject: &Subject) {
 
 pub(super) fn read_only_session_refuses_a_write(subject: &Subject) {
     let scenario = "read_only_session_refuses_a_write";
-    let at = format!("{scenario} on {:?}", subject.engine);
-    let engine = subject.engine;
+    let at = format!("{scenario} on {:?}", subject.target.engine);
+    let engine = subject.target.engine;
     if !engine.holds_read_only() {
         subject
             .connection
@@ -487,8 +500,8 @@ pub(super) fn read_only_session_refuses_a_write(subject: &Subject) {
 
 pub(super) fn generated_writes_round_trip(subject: &Subject) {
     let scenario = "generated_writes_round_trip";
-    let at = format!("{scenario} on {:?}", subject.engine);
-    let engine = subject.engine;
+    let at = format!("{scenario} on {:?}", subject.target.engine);
+    let engine = subject.target.engine;
     let (schema, relation, key) = (subject.schema, subject.relation, subject.key);
     let structure = subject
         .connection
@@ -521,7 +534,7 @@ pub(super) fn generated_writes_round_trip(subject: &Subject) {
         generated(delete);
     }
 
-    if engine.takes_inserts(RelationKind::Table) {
+    if subject.target.takes_inserts(RelationKind::Table) {
         let insert = sql::insert_row(
             engine,
             schema,

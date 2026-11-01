@@ -757,6 +757,15 @@ impl Workspace {
             .unwrap_or_default()
     }
 
+    /// [`Self::engine`] and the driver that reaches it, which the abilities
+    /// are asked of.
+    pub(crate) fn target(&self) -> Target {
+        self.profile()
+            .map_or(Target::built_in(Engine::default()), |profile| {
+                profile.config.target()
+            })
+    }
+
     pub(crate) fn issued_to(&mut self, id: &str, generation: u64) -> Option<&mut Profile> {
         self.profiles
             .iter_mut()
@@ -1113,7 +1122,7 @@ impl Render for Workspace {
             profile
                 .session
                 .active_object()
-                .is_some_and(|tab| tab.takes_imports(profile.config.engine()))
+                .is_some_and(|tab| tab.takes_imports(profile.config.target()))
         });
         if imports_rows != self.menu_imports_rows {
             self.menu_imports_rows = imports_rows;
@@ -1471,7 +1480,13 @@ impl Render for Workspace {
                     query,
                     QueryState::Complete { rows, .. } if limit.is_none_or(|limit| *rows < limit)
                 );
-            session::relation_rows(count, filter, estimate, engine.exact_row_estimates(), whole)
+            session::relation_rows(
+                count,
+                filter,
+                estimate,
+                profile.config.target().exact_row_estimates(),
+                whole,
+            )
         });
         // The way to an exact number, which is never run unasked. Its tooltip
         // is the statement it runs.

@@ -23,7 +23,7 @@ use crate::{
     Workspace, completion,
     db::{
         CancelToken, Catalog, Connection, ConnectionConfig, Databases, DbError, Engine,
-        ExplainMode, QueryResult, Relation, RelationKind, Routine, Row, Structure, Syntax,
+        ExplainMode, QueryResult, Relation, RelationKind, Routine, Row, Structure, Syntax, Target,
     },
     explain::{self, Plan},
     explorer::{
@@ -90,11 +90,11 @@ pub(crate) struct Profile {
 /// first: a `USE` of the user's can move the session it was read on without
 /// the profile hearing of it, and a shortcut names what the sidebar shows.
 fn shortcut_database(
-    engine: Engine,
+    target: Target,
     shown: Option<&Catalog>,
     active: impl FnOnce() -> Option<String>,
 ) -> ShortcutDatabase {
-    if !engine.catalog_is_per_database() {
+    if !target.catalog_is_per_database() {
         return ShortcutDatabase::Unnamed;
     }
     shown
@@ -121,7 +121,7 @@ impl Profile {
     /// in. None where nothing is picked and the server named none, or wasn't
     /// asked, rather than a guess at its default.
     pub(crate) fn active_schema(&self) -> Option<&str> {
-        if !self.config.engine().picks_schema() {
+        if !self.config.target().picks_schema() {
             return None;
         }
         let current = match &self.state {
@@ -157,7 +157,7 @@ impl Profile {
             CatalogState::Loaded(catalog, _) => Some(catalog),
             _ => None,
         };
-        shortcut_database(self.config.engine(), shown, || self.active_database())
+        shortcut_database(self.config.target(), shown, || self.active_database())
     }
 
     pub(crate) fn refreshing_schema(&self) -> bool {
@@ -2180,13 +2180,13 @@ pub(crate) struct ObjectTab {
 
 impl ObjectTab {
     /// Whether New row is offered here: on a relation the engine inserts into.
-    pub(crate) fn takes_inserts(&self, engine: Engine) -> bool {
-        matches!(self.kind, ObjectKind::Relation(kind) if engine.takes_inserts(kind))
+    pub(crate) fn takes_inserts(&self, target: Target) -> bool {
+        matches!(self.kind, ObjectKind::Relation(kind) if target.takes_inserts(kind))
     }
 
     /// Whether Import Rows is offered here.
-    pub(crate) fn takes_imports(&self, engine: Engine) -> bool {
-        matches!(self.kind, ObjectKind::Relation(kind) if engine.takes_imports(kind))
+    pub(crate) fn takes_imports(&self, target: Target) -> bool {
+        matches!(self.kind, ObjectKind::Relation(kind) if target.takes_imports(kind))
     }
 
     /// The `WHERE` this tab reads the relation under, and `""` for a routine
@@ -2842,19 +2842,31 @@ mod tests {
         // A user's `USE other` then a refresh: the catalog is `other`'s,
         // whatever the profile was opened or picked on.
         assert_eq!(
-            shortcut_database(Engine::DuckDb, Some(&read_from(Some("other"))), opened_on),
+            shortcut_database(
+                Target::built_in(Engine::DuckDb),
+                Some(&read_from(Some("other"))),
+                opened_on
+            ),
             ShortcutDatabase::On("other".into())
         );
         assert_eq!(
-            shortcut_database(Engine::DuckDb, Some(&read_from(None)), opened_on),
+            shortcut_database(
+                Target::built_in(Engine::DuckDb),
+                Some(&read_from(None)),
+                opened_on
+            ),
             ShortcutDatabase::On("memory".into())
         );
         assert_eq!(
-            shortcut_database(Engine::DuckDb, None, || None),
+            shortcut_database(Target::built_in(Engine::DuckDb), None, || None),
             ShortcutDatabase::Unknown
         );
         assert_eq!(
-            shortcut_database(Engine::MySql, Some(&read_from(Some("other"))), opened_on),
+            shortcut_database(
+                Target::built_in(Engine::MySql),
+                Some(&read_from(Some("other"))),
+                opened_on
+            ),
             ShortcutDatabase::Unnamed
         );
     }

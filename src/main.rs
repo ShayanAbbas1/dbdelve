@@ -72,7 +72,7 @@ use completion::SchemaCompletions;
 use connection_form::{ConnectionForm, default_profile_name};
 use db::{
     CancelToken, Catalog, Connection, ConnectionConfig, Databases, DbError, Engine, ExplainMode,
-    Fields, RelationKind, ServerConfig, SnowflakeConfig, SslMode,
+    Fields, RelationKind, ServerConfig, SnowflakeConfig, SslMode, Target,
 };
 use explorer::{ExplorerTarget, ObjectKind, PREVIEW_ROW_LIMIT, tree as build_explorer_tree};
 use export::{FileAs, Format};

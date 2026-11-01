@@ -775,7 +775,7 @@ mod tests {
                 statement_timeout: 0,
             })
             .expect("connection should open"),
-            engine: Engine::Turso,
+            target: crate::db::Target::built_in(Engine::Turso),
             schema: "main",
             relation: "conformance",
             key: "id",

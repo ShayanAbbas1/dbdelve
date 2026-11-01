@@ -5009,7 +5009,7 @@ mod live {
         use crate::db::conformance::{COLUMNS, Fixture, Subject, sql_find, sql_read};
         Subject {
             connection: live_any(live_config()),
-            engine: Engine::ClickHouse,
+            target: crate::db::Target::built_in(Engine::ClickHouse),
             schema: "dbdelve_dev",
             relation: "conformance",
             key: "id",

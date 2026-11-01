@@ -2253,7 +2253,7 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
                 statement_timeout: 0,
             })
             .expect("connection should open"),
-            engine: Engine::Sqlite,
+            target: crate::db::Target::built_in(Engine::Sqlite),
             schema: "main",
             relation: "conformance",
             key: "id",

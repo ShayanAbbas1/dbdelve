@@ -87,7 +87,7 @@ fn an_engine_in_the_read_only_tier_edits_and_inserts_nothing() {
     assert!(!FAKE.writes_back(["text"]));
     assert!(!FAKE.writes_back([]), "a cell no driver typed");
     for kind in [RelationKind::Table, RelationKind::View] {
-        assert!(!FAKE.takes_inserts(kind), "{kind:?}");
+        assert!(!FAKE.abilities.takes_inserts(kind), "{kind:?}");
     }
 
     const WRITES: EngineSpec = EngineSpec {
@@ -100,8 +100,8 @@ fn an_engine_in_the_read_only_tier_edits_and_inserts_nothing() {
     };
     assert!(WRITES.writes_back(["text"]) && WRITES.writes_back([]));
     assert!(!WRITES.writes_back(["text", "bytea"]));
-    assert!(WRITES.takes_inserts(RelationKind::Table));
-    assert!(!WRITES.takes_inserts(RelationKind::View));
+    assert!(WRITES.abilities.takes_inserts(RelationKind::Table));
+    assert!(!WRITES.abilities.takes_inserts(RelationKind::View));
 }
 
 #[test]

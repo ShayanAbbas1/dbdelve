@@ -3506,7 +3506,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
                 ROWS,
             ));
         }
-        if profile.config.engine().edits_query_rows() && workspace.has_nameable_row(cx) {
+        if profile.config.target().edits_query_rows() && workspace.has_nameable_row(cx) {
             items.push(command(
                 "Delete row…",
                 icon::DELETE,
@@ -3641,10 +3641,10 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
                     ROWS,
                 ));
             }
-            if tab.takes_inserts(profile.config.engine()) {
+            if tab.takes_inserts(profile.config.target()) {
                 items.push(command("Insert…", icon::PLUS, Command::NewRow, ROWS));
             }
-            if tab.takes_imports(profile.config.engine()) {
+            if tab.takes_imports(profile.config.target()) {
                 items.push(command(
                     &format!("Import Rows into {}…", tab.name),
                     icon::PLUS,
@@ -3665,18 +3665,22 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         }
         // The explorer's menu for this relation, clipboard and all.
         if let ObjectKind::Relation(kind) = tab.kind {
-            let engine = profile.config.engine();
             items.extend(
-                crate::explorer::relation_copies(engine, &tab.schema, &tab.name, kind)
-                    .into_iter()
-                    .flatten()
-                    .map(|(label, text)| {
-                        let copies = match text {
-                            Some(text) => Command::CopyText(text),
-                            None => Command::CopyDdl,
-                        };
-                        command(label, icon::COPY, copies, TAB).detail(tab.name.clone())
-                    }),
+                crate::explorer::relation_copies(
+                    profile.config.target(),
+                    &tab.schema,
+                    &tab.name,
+                    kind,
+                )
+                .into_iter()
+                .flatten()
+                .map(|(label, text)| {
+                    let copies = match text {
+                        Some(text) => Command::CopyText(text),
+                        None => Command::CopyDdl,
+                    };
+                    command(label, icon::COPY, copies, TAB).detail(tab.name.clone())
+                }),
             );
         }
         items.push(bound(
@@ -4134,7 +4138,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         Command::Reconnect,
         CONNECTION,
     ));
-    if profile.config.engine().switches_database() {
+    if profile.config.target().switches_database() {
         items.push(bound(
             command(
                 "Select database…",
@@ -4145,7 +4149,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             "select_database",
         ));
     }
-    if profile.config.engine().picks_schema() {
+    if profile.config.target().picks_schema() {
         items.push(command(
             "Select schema…",
             icon::PROJECT,

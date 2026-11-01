@@ -2527,7 +2527,7 @@ mod tests {
             .expect("the dev seed loads");
         Subject {
             connection,
-            engine: Engine::DuckDb,
+            target: crate::db::Target::built_in(Engine::DuckDb),
             schema: "main",
             relation: "conformance",
             key: "id",

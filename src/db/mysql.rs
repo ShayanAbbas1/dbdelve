@@ -2263,7 +2263,7 @@ mod tests {
         use crate::db::conformance::{COLUMNS, Fixture, Subject, sql_find, sql_read};
         Subject {
             connection: live_profile(engine),
-            engine,
+            target: crate::db::Target::built_in(engine),
             schema: "dbdelve_dev",
             relation: "conformance",
             key: "id",

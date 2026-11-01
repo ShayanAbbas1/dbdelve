@@ -29,7 +29,6 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let engine = self.engine();
         let target = self
             .profile()
             .and_then(|profile| profile.session.active_object())
@@ -37,7 +36,7 @@ impl Workspace {
                 (
                     tab.schema.clone(),
                     tab.name.clone(),
-                    tab.takes_imports(engine),
+                    tab.takes_imports(self.target()),
                 )
             });
         match target {

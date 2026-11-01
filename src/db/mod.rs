@@ -41,6 +41,7 @@ mod snowflake;
 mod spec;
 mod sqlite;
 mod ssh;
+mod target;
 mod turso;
 mod xlsx;
 
@@ -56,6 +57,7 @@ pub use spec::{
     Truncate, TypedExplain,
 };
 pub use spec::{IdentityInsert, ReadOnlySession, UnreadableFloor};
+pub use target::Target;
 
 /// One run's claim on Cancel: [`Connection::query`] runs under it, and
 /// [`Connection::cancel`] stops only what ran under it.
@@ -474,17 +476,6 @@ impl Engine {
         }
     }
 
-    /// Whether New row may insert into a relation of `kind`.
-    pub fn takes_inserts(self, kind: RelationKind) -> bool {
-        self.spec().takes_inserts(kind)
-    }
-
-    /// Whether Import Rows may insert a file's rows into a relation of
-    /// `kind`: where New row may, on an engine that takes imports at all.
-    pub fn takes_imports(self, kind: RelationKind) -> bool {
-        self.spec().abilities.imports && self.takes_inserts(kind)
-    }
-
     /// How a boolean is spelled as an Import Rows value. Import Rows reads
     /// `spec().sql.boolean_literal` itself (`sql::sql_insert_rows`), so this is
     /// the per-engine readout the tests pin.
@@ -586,12 +577,6 @@ impl Engine {
         self.spec().sql.paging != Paging::LimitOffset
     }
 
-    /// Whether the row count the catalog carries for a table is exact rather
-    /// than the statistics' estimate.
-    pub fn exact_row_estimates(self) -> bool {
-        self.spec().abilities.exact_row_estimates
-    }
-
     /// The aggregate a relation's row count is written with.
     #[cfg(test)]
     pub fn count_all(self) -> &'static str {
@@ -657,36 +642,6 @@ impl Engine {
 
     pub fn syntax(self) -> Syntax {
         self.spec().syntax
-    }
-
-    /// Whether a relation has a definition [`Connection::ddl`] can write out.
-    pub fn copies_ddl(self) -> bool {
-        self.spec().abilities.copies_ddl
-    }
-
-    /// Whether one server holds several databases a profile can be moved
-    /// between, which [`Connection::databases`] lists.
-    pub fn switches_database(self) -> bool {
-        self.spec().abilities.switches_database
-    }
-
-    /// Whether moving the profile onto another database is a `USE` on the
-    /// connection already open rather than a new connection.
-    pub fn switches_database_in_session(self) -> bool {
-        self.spec().abilities.switches_database_in_session
-    }
-
-    /// Whether the catalog holds one database's objects, so naming an object
-    /// takes its database as well as its schema: `public.users` is in every
-    /// Postgres database, while MySQL lists every database as a schema.
-    pub fn catalog_is_per_database(self) -> bool {
-        let abilities = self.spec().abilities;
-        abilities.switches_database && !abilities.catalog_lists_databases
-    }
-
-    /// Whether a profile picks the schema unqualified names resolve in.
-    pub fn picks_schema(self) -> bool {
-        self.spec().abilities.picks_schema
     }
 
     /// A database the server keeps for itself, listed after the user's own.
@@ -783,27 +738,6 @@ impl Engine {
     /// not text.
     pub fn writes_back<'a>(self, types: impl IntoIterator<Item = &'a str>) -> bool {
         self.spec().writes_back(types)
-    }
-
-    /// Whether a grid's cells and rows may be written back at all, which an
-    /// engine in the read-only tier never is.
-    pub fn edits_rows(self) -> bool {
-        self.spec().abilities.edits
-    }
-
-    /// Whether a query tab's grid takes a deleted row, as a relation's preview
-    /// does, shown for review before it runs and never written into the
-    /// buffer. Redis opens a key as a query tab of its own, its contents having
-    /// no relation to open, and that is where its fields, items and members
-    /// are taken out; an engine that reviews a query tab's edits
-    /// ([`Engine::reviews_query_edits`]) takes them there too. A new row needs
-    /// no such gate: any grid written back to one table takes one.
-    pub fn edits_query_rows(self) -> bool {
-        match self.syntax() {
-            Syntax::Redis => true,
-            Syntax::Sql => self.reviews_query_edits(),
-            Syntax::Mongo => false,
-        }
     }
 
     /// Whether a query tab's edits are shown in the review dialog an object
@@ -1008,7 +942,7 @@ pub struct ServerConfig {
     /// directly. None is the ordinary direct connection.
     pub ssh: Option<SshTunnel>,
     /// The schema unqualified names resolve in first, where
-    /// [`Engine::picks_schema`]. None leaves the server's
+    /// [`Target::picks_schema`]. None leaves the server's
     /// `search_path` alone.
     pub schema: Option<String>,
 }
@@ -1083,6 +1017,10 @@ impl ConnectionConfig {
             Self::MongoDb(_) => Engine::MongoDb,
             Self::Redis(_) => Engine::Redis,
         }
+    }
+
+    pub fn target(&self) -> Target {
+        Target::built_in(self.engine())
     }
 
     /// The server half, for the callers that only have something to say when
@@ -1171,7 +1109,7 @@ impl ConnectionConfig {
         }
     }
 
-    /// The schema picked as the active one, where [`Engine::picks_schema`].
+    /// The schema picked as the active one, where [`Target::picks_schema`].
     /// None until one is picked.
     pub fn schema(&self) -> Option<&str> {
         match self {
@@ -1655,7 +1593,7 @@ impl Connection {
     }
 
     /// The databases on the server, for a profile to be moved onto one. Empty
-    /// where [`Engine::switches_database`] is false.
+    /// where [`Target::switches_database`] is false.
     pub fn databases(&self, engine: Engine) -> Result<Databases, DbError> {
         let mut databases = match self {
             Self::Postgres(connection) => connection.databases(),
@@ -1676,7 +1614,7 @@ impl Connection {
     /// session this connection opens from here on. Never waits, so switches
     /// made one after another are recorded in that order; the sessions
     /// already open follow on [`Self::apply_schema`]. A no-op where
-    /// [`Engine::picks_schema`] is false.
+    /// [`Target::picks_schema`] is false.
     pub fn set_schema(&self, schema: Option<&str>) {
         match self {
             Self::Postgres(connection) => connection.set_schema(schema),
@@ -1687,7 +1625,7 @@ impl Connection {
     }
 
     /// The same for the database, None for the one the connection opened,
-    /// where [`Engine::switches_database_in_session`]: the schema picked in
+    /// where [`Target::switches_database_in_session`]: the schema picked in
     /// the database left behind goes with it. A no-op elsewhere, where a
     /// database is moved onto by connecting again.
     pub fn set_database(&self, database: Option<&str>) {
@@ -2150,7 +2088,7 @@ pub struct Relation {
     /// How many rows the engine's statistics say the table holds, from the
     /// same place `size` comes from, so it is `None` wherever `size` is and
     /// also wherever the statistics were never gathered. An estimate unless
-    /// [`Engine::exact_row_estimates`] says otherwise.
+    /// [`Target::exact_row_estimates`] says otherwise.
     pub rows: Option<u64>,
 }
 
@@ -3608,7 +3546,7 @@ mod tests {
             let clickhouse = engine == Engine::ClickHouse;
             assert_eq!(engine.reviews_query_edits(), clickhouse, "{engine:?}");
             assert_eq!(
-                engine.edits_query_rows(),
+                Target::built_in(engine).edits_query_rows(),
                 clickhouse || engine == Engine::Redis,
                 "{engine:?}"
             );
@@ -3620,14 +3558,17 @@ mod tests {
         // Generic SQL is left out: it has no abilities of its own, since a
         // plugin target forces every write off.
         for engine in Engine::built_in() {
-            assert!(engine.takes_inserts(RelationKind::Table), "{engine:?}");
+            assert!(
+                Target::built_in(engine).takes_inserts(RelationKind::Table),
+                "{engine:?}"
+            );
             assert_eq!(
-                engine.takes_inserts(RelationKind::View),
+                Target::built_in(engine).takes_inserts(RelationKind::View),
                 engine != Engine::MongoDb,
                 "{engine:?}"
             );
             assert_eq!(
-                engine.takes_imports(RelationKind::Table),
+                Target::built_in(engine).takes_imports(RelationKind::Table),
                 engine != Engine::Redis,
                 "{engine:?}"
             );
@@ -4345,17 +4286,17 @@ mod tests {
         config.set_database("other".into());
         assert_eq!(config.database_name().as_deref(), Some("other"));
         assert_eq!(config.schema(), None, "a schema of the database left");
-        assert!(Engine::DuckDb.switches_database());
-        assert!(Engine::DuckDb.switches_database_in_session());
-        assert!(Engine::DuckDb.picks_schema());
-        assert!(!Engine::Postgres.switches_database_in_session());
+        assert!(Target::built_in(Engine::DuckDb).switches_database());
+        assert!(Target::built_in(Engine::DuckDb).switches_database_in_session());
+        assert!(Target::built_in(Engine::DuckDb).picks_schema());
+        assert!(!Target::built_in(Engine::Postgres).switches_database_in_session());
     }
 
     #[test]
     fn only_a_catalog_of_one_database_names_its_objects_by_database() {
         let per_database: Vec<_> = Engine::ALL
             .into_iter()
-            .filter(|engine| engine.catalog_is_per_database())
+            .filter(|&engine| Target::built_in(engine).catalog_is_per_database())
             .collect();
         for engine in [Engine::Postgres, Engine::SqlServer, Engine::DuckDb] {
             assert!(per_database.contains(&engine), "{engine:?}");

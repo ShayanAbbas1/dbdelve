@@ -4802,7 +4802,7 @@ mod tests {
                 live_config(),
             ))
             .expect("connection should open"),
-            engine: Engine::SqlServer,
+            target: crate::db::Target::built_in(Engine::SqlServer),
             schema: "dbo",
             relation: "conformance",
             key: "id",

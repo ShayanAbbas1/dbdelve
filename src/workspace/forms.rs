@@ -2155,7 +2155,7 @@ impl Workspace {
         };
         let separator = || crumb_separator(t);
         let mut steps = Vec::new();
-        if profile.config.engine().switches_database() {
+        if profile.config.target().switches_database() {
             let database = profile
                 .active_database()
                 .unwrap_or_else(|| "Database".into());
@@ -2168,7 +2168,7 @@ impl Workspace {
                     .into_any_element(),
             );
         }
-        if profile.config.engine().picks_schema() {
+        if profile.config.target().picks_schema() {
             let schema = profile.active_schema();
             steps.push(separator());
             steps.push(
@@ -2302,7 +2302,7 @@ impl Workspace {
         let menu_workspace = workspace.clone();
         let active_schema = profile.active_schema().map(gpui::SharedString::from);
         let menu_schema = active_schema.clone();
-        let picks_schema = profile.config.engine().picks_schema();
+        let picks_schema = profile.config.target().picks_schema();
         let drop_line = self.explorer_drop.clone();
         let open_queries: HashSet<String> = profile
             .session
@@ -2674,7 +2674,8 @@ impl Workspace {
                 let Some((schema, relation, kind)) = workspace.relation_at(leaf.target) else {
                     return with_shortcuts(menu, window, cx);
                 };
-                let engine = workspace.engine();
+                let target = workspace.target();
+                let engine = target.engine;
                 let copy = |label: &'static str, text: String| {
                     PopupMenuItem::new(label).on_click(move |_, _, cx| {
                         cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
@@ -2722,7 +2723,7 @@ impl Workspace {
                 let mut menu = menu
                     .item(open("Open Data", false))
                     .item(open("Open Structure", true));
-                if engine.takes_imports(kind) {
+                if target.takes_imports(kind) {
                     menu = menu.item(PopupMenuItem::new("Import Rows…").on_click(
                         move |_, window, cx| {
                             let (schema, relation) = import_names.clone();
@@ -2733,7 +2734,7 @@ impl Workspace {
                     ));
                 }
                 menu = menu.item(PopupMenuItem::submenu("Export", exports));
-                let menu = relation_copies(engine, &schema, &relation, kind)
+                let menu = relation_copies(target, &schema, &relation, kind)
                     .into_iter()
                     .fold(menu, |menu, group| {
                         group

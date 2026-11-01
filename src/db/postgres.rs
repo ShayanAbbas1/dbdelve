@@ -2639,7 +2639,7 @@ mod tests {
         use crate::db::conformance::{COLUMNS, Fixture, Subject, sql_find, sql_read};
         Subject {
             connection: live_profile(),
-            engine: Engine::Postgres,
+            target: crate::db::Target::built_in(Engine::Postgres),
             schema: "public",
             relation: "conformance",
             key: "id",

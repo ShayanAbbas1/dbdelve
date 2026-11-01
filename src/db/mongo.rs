@@ -4660,7 +4660,7 @@ mod tests {
                 live_config(),
             ))
             .expect("connection should open"),
-            engine: Engine::MongoDb,
+            target: crate::db::Target::built_in(Engine::MongoDb),
             schema: "dbdelve_dev",
             relation: "conformance",
             key: "_id",

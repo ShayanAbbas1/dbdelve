@@ -41,7 +41,7 @@ use crate::{
         ToggleRowPanel,
     },
     db,
-    db::{Engine, ExplainMode, RoutineKind},
+    db::{Engine, ExplainMode, RoutineKind, Target},
     explain::{self, LabelPart},
     explorer::ROW_LIMITS,
     filter::{Conjunction, FilterRow, Operator},
@@ -161,7 +161,7 @@ pub fn render_main_content(
         Some(tab) => render_object(
             tab,
             &profile.id,
-            profile.config.engine(),
+            profile.config.target(),
             matches!(profile.state, ProfileState::Failed(_)),
             row_panel,
             profile
@@ -751,13 +751,14 @@ fn round_count(value: f64) -> String {
 fn render_object(
     tab: &ObjectTab,
     profile_id: &str,
-    engine: Engine,
+    target: Target,
     disconnected: bool,
     row_panel: &RowPanel,
     form: Option<&InsertForm>,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     let t = *theme(cx);
+    let engine = target.engine;
     // Scopes this tab's scroll state to its own id -- see the same line in
     // `render_query_surface`.
     let scope = Tab::Object(tab.id).scroll_scope(profile_id);
@@ -802,7 +803,7 @@ fn render_object(
         return render_routine(tab, &scope, cx);
     };
 
-    let takes_inserts = tab.takes_inserts(engine);
+    let takes_inserts = tab.takes_inserts(target);
     let controls = relation_controls(false, takes_inserts, cx).into_any_element();
     div()
         .size_full()

@@ -3889,7 +3889,7 @@ mod tests {
                 live_config(),
             ))
             .expect("connection should open"),
-            engine: Engine::Redis,
+            target: crate::db::Target::built_in(Engine::Redis),
             schema: "db0",
             relation: KEYS,
             key: "key",

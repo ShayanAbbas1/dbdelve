@@ -983,12 +983,12 @@ impl Workspace {
         let Some(profile) = self.profile() else {
             return;
         };
-        let engine = profile.config.engine();
-        if !engine.switches_database() {
+        let target = profile.config.target();
+        if !target.switches_database() {
             self.note(
                 format!(
                     "A {} connection has no other database to switch to.",
-                    engine.label()
+                    target.label()
                 ),
                 cx,
             );
@@ -1001,7 +1001,7 @@ impl Workspace {
         let (id, generation) = (profile.id.clone(), profile.generation);
         let fetch = cx
             .background_executor()
-            .spawn(async move { connection.databases(engine) });
+            .spawn(async move { connection.databases(target.engine) });
         cx.spawn_in(window, async move |workspace, cx| {
             let result = fetch.await;
             _ = workspace.update_in(cx, |workspace, window, cx| {
@@ -1107,7 +1107,7 @@ impl Workspace {
                 true => String::new(),
                 false => name,
             });
-        let in_session = profile.config.engine().switches_database_in_session();
+        let in_session = profile.config.target().switches_database_in_session();
         self.remember_profiles(cx);
         match in_session {
             true => self.use_database(index, left, cx),
@@ -1202,7 +1202,7 @@ impl Workspace {
 
     /// Move the open connection onto the database the profile at `index` now
     /// names, where that is a `USE` and not a new connection
-    /// ([`Engine::switches_database_in_session`]). The catalog is read again
+    /// ([`Target::switches_database_in_session`]). The catalog is read again
     /// under a new generation, as a connect would; a `USE` that fails puts
     /// the profile back on `left`, the database and schema it was on.
     fn use_database(
@@ -1258,7 +1258,7 @@ impl Workspace {
         let Some(profile) = self.profile() else {
             return;
         };
-        if !profile.config.engine().picks_schema() {
+        if !profile.config.target().picks_schema() {
             return;
         }
         let unready = match (&profile.state, &profile.catalog) {

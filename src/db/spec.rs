@@ -175,11 +175,6 @@ impl EngineSpec {
             })
     }
 
-    /// [`Engine::takes_inserts`](super::Engine::takes_inserts).
-    pub fn takes_inserts(&self, kind: RelationKind) -> bool {
-        self.abilities.inserts && (kind != RelationKind::View || self.abilities.inserts_into_views)
-    }
-
     /// [`Engine::generates`](super::Engine::generates).
     pub fn generates(&self, column: &ColumnDefinition) -> bool {
         marked(column, self.sql.generated_defaults)
@@ -665,6 +660,11 @@ impl Abilities {
         schema_switch_waits_for_transaction: false,
         chunk_refusal: None,
     };
+
+    /// [`Target::takes_inserts`](super::Target::takes_inserts).
+    pub fn takes_inserts(&self, kind: RelationKind) -> bool {
+        self.inserts && (kind != RelationKind::View || self.inserts_into_views)
+    }
 }
 
 /// The answers no strategy expresses, as code.

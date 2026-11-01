@@ -1,7 +1,10 @@
 use super::{check, fragment, visible};
 use crate::{
     connection_form,
-    db::{ColumnDefinition, Engine, Index, IndexKind, NamedDefinition, RelationKind, Structure},
+    db::{
+        ColumnDefinition, Engine, Index, IndexKind, NamedDefinition, RelationKind, Structure,
+        Target,
+    },
     filter::{self, Operator},
 };
 
@@ -127,27 +130,37 @@ fn engine_answers_per_engine() {
             &mut out,
             engine,
             "exact_row_estimates",
-            engine.exact_row_estimates(),
+            Target::built_in(engine).exact_row_estimates(),
         );
-        answer(&mut out, engine, "copies_ddl", engine.copies_ddl());
+        answer(
+            &mut out,
+            engine,
+            "copies_ddl",
+            Target::built_in(engine).copies_ddl(),
+        );
         answer(
             &mut out,
             engine,
             "switches_database",
-            engine.switches_database(),
+            Target::built_in(engine).switches_database(),
         );
         answer(
             &mut out,
             engine,
             "switches_database_in_session",
-            engine.switches_database_in_session(),
+            Target::built_in(engine).switches_database_in_session(),
         );
-        answer(&mut out, engine, "picks_schema", engine.picks_schema());
+        answer(
+            &mut out,
+            engine,
+            "picks_schema",
+            Target::built_in(engine).picks_schema(),
+        );
         answer(
             &mut out,
             engine,
             "edits_query_rows",
-            engine.edits_query_rows(),
+            Target::built_in(engine).edits_query_rows(),
         );
         fragment(&mut out, engine, "sort_clause", Some(engine.sort_clause()));
         fragment(
@@ -185,13 +198,13 @@ fn engine_answers_per_engine() {
                 &mut out,
                 engine,
                 &format!("takes_inserts {kind:?}"),
-                engine.takes_inserts(kind),
+                Target::built_in(engine).takes_inserts(kind),
             );
             answer(
                 &mut out,
                 engine,
                 &format!("takes_imports {kind:?}"),
-                engine.takes_imports(kind),
+                Target::built_in(engine).takes_imports(kind),
             );
         }
         for name in [

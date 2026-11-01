@@ -49,7 +49,7 @@ impl Workspace {
     /// [`Workspace::has_editable_cell`] is.
     pub(crate) fn has_nameable_row(&self, cx: &App) -> bool {
         self.profile().is_some_and(|profile| {
-            profile.config.engine().edits_rows()
+            profile.config.target().edits_rows()
                 && profile.session.active_results().is_some_and(|results| {
                     let grid = results.read(cx);
                     grid.delegate()
