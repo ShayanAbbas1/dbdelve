@@ -320,18 +320,21 @@ fn ssh_args(
 /// `ssh -G` cannot distinguish a default `ask` from an explicit one, so both
 /// receive `accept-new`. If configuration evaluation fails, add no override.
 fn host_key_checking_is_ask(args: &[String]) -> bool {
-    ssh_command()
-        .arg("-G")
-        .args(args)
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .is_ok_and(|output| {
-            output.status.success()
-                && String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .any(|line| line == "stricthostkeychecking ask")
-        })
+    crate::db::spawn(
+        ssh_command()
+            .arg("-G")
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .and_then(Child::wait_with_output)
+    .is_ok_and(|output| {
+        output.status.success()
+            && String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|line| line == "stricthostkeychecking ask")
+    })
 }
 
 enum Ready {
@@ -494,7 +497,7 @@ fn watched(program: &str, args: &[String]) -> io::Result<Child> {
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     unmask_signals(&mut command);
-    command.spawn()
+    crate::db::spawn(&mut command)
 }
 
 /// std hands a child the spawning thread's signal mask, and the GCD worker a
@@ -546,12 +549,13 @@ fn ssh_command() -> Command {
 
 #[cfg(windows)]
 fn spawn(local: SocketAddr, host: &str, args: &[String]) -> io::Result<Tunnel> {
-    let mut process = ssh_command()
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()?;
+    let mut process = crate::db::spawn(
+        ssh_command()
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped()),
+    )?;
     match kill_on_close_job(&process) {
         Ok(job) => Ok(Tunnel {
             local,

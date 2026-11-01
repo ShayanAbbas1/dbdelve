@@ -115,11 +115,7 @@ impl Host {
                 plugin.executable.display()
             ))
         };
-        let spawned = {
-            let _spawning = lock(&SPAWNING);
-            command.spawn()
-        };
-        let mut child = spawned.map_err(could_not_start)?;
+        let mut child = crate::db::spawn(&mut command).map_err(could_not_start)?;
         #[cfg(windows)]
         let job = match crate::db::ssh::kill_on_close_job(&child) {
             Ok(job) => job,
@@ -369,15 +365,6 @@ impl Drop for Host {
 const STDERR_SETTLE: Duration = Duration::from_secs(1);
 
 const POLL: Duration = Duration::from_millis(10);
-
-/// macOS has no `pipe2`: std creates a child's pipes and only then marks them
-/// close-on-exec, so a plugin another thread forks in between inherits them for
-/// life, and the plugin whose stdout it holds never reads as dead. One spawn at
-/// a time keeps plugins out of each other's pipes.
-///
-/// ponytail: other children DBDelve spawns (ssh's watchdog shell) can still
-/// inherit a plugin's pipe; one lock around every spawn in the app closes that.
-static SPAWNING: Mutex<()> = Mutex::new(());
 
 impl Shared {
     fn route(&self, frame: Frame) -> Result<(), String> {

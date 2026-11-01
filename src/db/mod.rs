@@ -3265,6 +3265,23 @@ pub(super) mod at_once {
     }
 }
 
+/// Every child `src/db/` starts goes through here. macOS has no `pipe2`: std
+/// creates a child's pipes and only then marks them close-on-exec, so a child
+/// another thread forks in between inherits them for life. A plugin whose
+/// stdout an ssh watchdog holds never reads as closed, and a watchdog whose
+/// stdin a plugin holds never sees DBDelve go.
+///
+/// The lock cannot reach a spawn inside a dependency, so it narrows the race
+/// rather than closing it: the defence is that a plugin's death is read from
+/// its exit, not from its stdout closing (`external::host`).
+pub(crate) fn spawn(command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+    static SPAWNING: Mutex<()> = Mutex::new(());
+    let _alone = SPAWNING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    command.spawn()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

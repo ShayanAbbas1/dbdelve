@@ -1142,15 +1142,13 @@ mod tests {
 
     #[test]
     fn stdin_eof_ends_echo() {
-        let mut child = Command::new(&echo::plugin().executable)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .spawn()
-            .unwrap();
+        let mut child = crate::db::spawn(
+            Command::new(&echo::plugin().executable)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null()),
+        )
+        .unwrap();
         drop(child.stdin.take());
-        // Generous because macOS has no pipe2: std marks a pipe close-on-exec
-        // only after creating it, so a plugin another test spawns in between
-        // inherits this stdin's write end and holds EOF off until it exits.
         let start = Instant::now();
         while child.try_wait().unwrap().is_none() {
             if start.elapsed() > Duration::from_secs(15) {
