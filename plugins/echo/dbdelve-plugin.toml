@@ -1,0 +1,6 @@
+# Test code: staged only by `dev/plugins.sh --echo`, never shipped.
+id = "echo"
+name = "Echo"
+version = "0.6.2"
+protocol = 1
+executable = "bin/dbdelve-echo"

@@ -2167,6 +2167,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbdelve-plugin-echo"
+version = "0.6.2"
+dependencies = [
+ "arrow-array",
+ "arrow-buffer",
+ "arrow-data",
+ "arrow-ipc",
+ "arrow-schema",
+ "dbdelve-plugin-protocol",
+ "flatbuffers",
+]
+
+[[package]]
 name = "dbdelve-plugin-protocol"
 version = "0.6.2"
 dependencies = [

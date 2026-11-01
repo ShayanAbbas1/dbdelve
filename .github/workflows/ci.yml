@@ -138,8 +138,8 @@ jobs:
         # bash on Windows too: pwsh fails a step only on its last command.
         shell: bash
         run: |
-          cargo clippy -p dbdelve-plugin-protocol --all-targets -- -D warnings
-          cargo test -p dbdelve-plugin-protocol
+          cargo clippy -p dbdelve-plugin-protocol -p dbdelve-plugin-echo --all-targets -- -D warnings
+          cargo test -p dbdelve-plugin-protocol -p dbdelve-plugin-echo
       - name: seed databases
         run: |
           sqlite3 dev/dbdelve_dev.db < dev/sqlite/001-dbdelve-demo.sql

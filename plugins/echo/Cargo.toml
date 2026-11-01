@@ -1,0 +1,24 @@
+[package]
+name = "dbdelve-plugin-echo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A fake engine plugin the host's tests drive"
+publish = false
+
+[[bin]]
+name = "dbdelve-echo"
+path = "src/main.rs"
+
+# The arrow-* crates at the version the protocol crate links, so the arrays
+# echo builds are the types it encodes. flatbuffers and arrow-ipc's own writer
+# hand-build the compressed and dictionary messages protocol 1 forbids, which
+# the protocol crate's encoder will not write.
+[dependencies]
+dbdelve-plugin-protocol = { path = "../protocol" }
+arrow-schema = "=60.0.0"
+arrow-array = "=60.0.0"
+arrow-buffer = "=60.0.0"
+arrow-data = "=60.0.0"
+arrow-ipc = { version = "=60.0.0", default-features = false }
+flatbuffers = { version = "=25.12.19", default-features = false }
