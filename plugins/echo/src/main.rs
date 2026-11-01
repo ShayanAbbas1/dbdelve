@@ -25,6 +25,9 @@
 //! | `sets N`       | one row, and `end {more_sets: N - 1}`                                  |
 //! | `cancels`      | how many `cancel` frames it has received, as one cell                  |
 //!
+//! `structure` of a relation named `fail` or `lost` answers as those
+//! statements do; `sleep` waits up to 60 s for a `cancel`; `hang` is as above.
+//!
 //! `stop` ends a read early only when the query was `eligible` and the fake
 //! transaction is closed; otherwise echo stops sending and answers with the
 //! total the statement would have produced.
@@ -111,8 +114,17 @@ fn main() {
                 Ok(Request::Query { sql, .. }) if sql.trim() == "hang" => loop {
                     thread::park();
                 },
+                Ok(Request::Structure { relation, .. }) if relation == "hang" => loop {
+                    thread::park();
+                },
                 Ok(request) => {
-                    if matches!(request, Request::Query { .. }) {
+                    if matches!(
+                        request,
+                        Request::Query { .. }
+                            | Request::Catalog
+                            | Request::Structure { .. }
+                            | Request::References { .. }
+                    ) {
                         control.start(id);
                     }
                     Job::Run(id, request)
@@ -352,6 +364,9 @@ impl Echo {
                     false,
                 ),
                 "lost" => self.error(id, ErrorKind::Server, "session gone".into(), None, true),
+                "sleep" if self.control.cancelled_within(Duration::from_secs(60)) => {
+                    self.cancelled(id);
+                }
                 _ => self.reply(id, Response::Structure(structure(&schema, &relation))),
             },
             Request::References { schema, relation } => self.reply(

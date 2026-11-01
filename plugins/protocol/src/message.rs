@@ -10,8 +10,8 @@ pub const PROTOCOL: u32 = 1;
 
 /// What the host sends. The request id is in the frame header, never here, so
 /// the host's reader routes a frame without parsing it; `credit`, `stop` and
-/// `cancel` carry the id of the query they target and get no answer of their
-/// own, the query's terminal frame being the answer.
+/// `cancel` carry the id of the request they target and get no answer of their
+/// own, that request's terminal frame being the answer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
@@ -42,7 +42,10 @@ pub enum Request {
     /// The row limit is reached: send no more rows, then end the statement
     /// early if that is provably safe, or fetch it to the end without sending.
     Stop,
-    /// The user's Cancel, which may abort their transaction.
+    /// The user's Cancel, which may abort their transaction. It targets a
+    /// `query`, `catalog`, `structure` or `references`, and is answered within
+    /// [`crate::limits::CANCEL_DEADLINE`] by that request's own answer or an
+    /// `error { kind: cancelled }`; a plugin that does neither is killed.
     Cancel,
     Catalog,
     Structure {

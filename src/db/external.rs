@@ -12,6 +12,7 @@ mod host;
 mod rows;
 
 use std::collections::BTreeMap;
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
@@ -155,15 +156,14 @@ impl Connection {
             sql: sql.to_owned(),
             eligible,
         };
-        let (id, answers) = self.host.request(query)?;
-        let result = self.read(id, &answers, Read::new(fetch, eligible, started));
-        self.host.done(id);
-        result
+        let (in_flight, answers) = self.host.request(query)?;
+        self.read(in_flight.id, &answers, Read::new(fetch, eligible, started))
     }
 
     /// The user's Cancel, which may abort an open transaction, as cancelling
-    /// a built-in's statement does. With nothing running it does nothing, as
-    /// on Postgres.
+    /// a built-in's statement does. It reaches a catalog request too, which
+    /// a wedged driver could otherwise hold the session with for good. With
+    /// nothing running it does nothing, as on Postgres.
     pub fn cancel(&self) -> Result<(), DbError> {
         self.host.cancel();
         Ok(())
@@ -245,7 +245,7 @@ impl Connection {
     /// One non-query request, under the session like a statement.
     fn call(&self, request: Request) -> Result<Response, DbError> {
         let _session = self.host.session();
-        let (_, answers) = self.host.request(request)?;
+        let (_in_flight, answers) = self.host.request(request)?;
         match answers.recv() {
             Ok(Routed::Control(Response::Error {
                 kind,
@@ -463,14 +463,19 @@ impl<'a> Read<'a> {
         let batch = decode_batch(schema, payload).map_err(|violation| violation.to_string())?;
         let batch = batch.slice(0, batch.num_rows().min(room));
         let (feed, result) = (self.fetch.feed, &mut self.result);
-        rows.push_batch(&batch, |row| {
-            result.bytes += row.text_len();
-            match feed {
-                Some(feed) => feed.push(row),
-                None => result.rows.push(row),
-            }
-        })
-        .map_err(|error| error.message)?;
+        // Decoding validated every buffer, but the formatters are arrow's, and
+        // a panic in them is the plugin's data, never DBDelve's crash.
+        let pushed = panic::catch_unwind(AssertUnwindSafe(|| {
+            rows.push_batch(&batch, |row| {
+                result.bytes += row.text_len();
+                match feed {
+                    Some(feed) => feed.push(row),
+                    None => result.rows.push(row),
+                }
+            })
+        }))
+        .map_err(|_| "result data that made rendering panic".to_owned())?;
+        pushed.map_err(|error| error.message)?;
         self.kept += batch.num_rows();
         if batch.num_rows() > 0 && self.fetch.limit == Some(self.kept) {
             self.filled = Some(self.started.elapsed());
@@ -711,7 +716,8 @@ mod tests {
             sql: "rows 1000000".to_owned(),
             eligible: false,
         };
-        let (id, answers) = connection.host.request(query).unwrap();
+        let (in_flight, answers) = connection.host.request(query).unwrap();
+        let id = in_flight.id;
         let mut received = 0;
         let rows = loop {
             match answers.recv_timeout(Duration::from_secs(10)).unwrap() {
@@ -1018,6 +1024,43 @@ mod tests {
 
         let cancels = connection.query("cancels", Fetch::default()).unwrap();
         assert_eq!(cell(&cancels), Some("1"));
+    }
+
+    #[test]
+    fn a_cancel_reaches_a_catalog_call() {
+        let connection = Connection::open(&config()).unwrap();
+        let running = connection.clone();
+        let worker = std::thread::spawn(move || running.structure("main", "sleep"));
+        std::thread::sleep(Duration::from_millis(200));
+        let cancelled = Instant::now();
+        connection.cancel().unwrap();
+        let error = worker.join().unwrap().unwrap_err();
+        assert_eq!(error.message, CANCELLED);
+        assert!(cancelled.elapsed() < CANCEL_DEADLINE / 2);
+        assert!(!connection.is_lost());
+        connection.catalog().unwrap();
+    }
+
+    #[test]
+    fn a_catalog_call_that_does_not_answer_a_cancel_is_killed_at_the_deadline() {
+        let connection = Connection::open(&config()).unwrap();
+        let running = connection.clone();
+        let worker = std::thread::spawn(move || running.structure("main", "hang"));
+        std::thread::sleep(Duration::from_millis(200));
+        let cancelled = Instant::now();
+        connection.cancel().unwrap();
+        let error = worker.join().unwrap().unwrap_err();
+        let took = cancelled.elapsed();
+        assert!(took < CANCEL_DEADLINE + Duration::from_secs(1), "{took:?}");
+        assert!(
+            error
+                .message
+                .starts_with("The Echo plugin did not answer a cancel within 5 s"),
+            "{}",
+            error.message
+        );
+        assert!(!error.message.contains("committed is unknown"));
+        assert!(connection.is_lost());
     }
 
     #[test]

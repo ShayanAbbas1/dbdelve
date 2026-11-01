@@ -47,7 +47,7 @@ pub(super) struct Host {
     /// One statement or catalog call at a time, as every built-in
     /// connection's mutex does. `stop`, `cancel` and `credit` never take it.
     session: Mutex<()>,
-    /// The query a `cancel` targets.
+    /// The query or catalog request a `cancel` targets.
     running: Mutex<Option<u64>>,
     /// A plugin said the session is gone while the process lives on.
     lost: AtomicBool,
@@ -181,10 +181,20 @@ impl Host {
 
     /// Registers a request and sends it. `Err` is the reset error when the
     /// plugin is already gone: nothing is sent, and nothing ever starts another.
-    pub(super) fn request(&self, request: Request) -> Result<(u64, Receiver<Routed>), DbError> {
+    /// A Cancel can reach a query or a catalog request until the returned
+    /// [`InFlight`] is dropped.
+    pub(super) fn request(
+        &self,
+        request: Request,
+    ) -> Result<(InFlight<'_>, Receiver<Routed>), DbError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (sender, answers) = mpsc::channel();
         let query = matches!(request, Request::Query { .. });
+        let cancellable = query
+            || matches!(
+                request,
+                Request::Catalog | Request::Structure { .. } | Request::References { .. }
+            );
         let credit = query.then_some(WINDOW as i64);
         {
             let mut routing = lock(&self.shared.routing);
@@ -193,34 +203,40 @@ impl Host {
             }
             routing.pending.insert(id, Pending { sender, credit });
         }
-        // Before the query leaves, so a Cancel pressed the moment it is sent
-        // has it to reach.
-        if query {
-            *lock(&self.running) = Some(id);
-        }
-        if let Err(error) = self.write(id, &request) {
+        let in_flight = InFlight { host: self, id };
+        // A Cancel reads `running` and only then queues its frame, so setting
+        // it and queuing the request under one lock keeps the cancel behind
+        // the request it targets, never ahead of it.
+        let written = match cancellable {
+            true => {
+                let mut running = lock(&self.running);
+                *running = Some(id);
+                self.write(id, &request)
+            }
+            false => self.write(id, &request),
+        };
+        if let Err(error) = written {
             lock(&self.shared.routing).pending.remove(&id);
-            self.done(id);
             return Err(error);
         }
-        Ok((id, answers))
+        Ok((in_flight, answers))
     }
 
-    /// The query `id` has returned to its caller: a Cancel now has nothing to
-    /// reach.
-    pub(super) fn done(&self, id: u64) {
+    /// The request `id` has returned to its caller: a Cancel now has nothing
+    /// to reach.
+    fn done(&self, id: u64) {
         let mut running = lock(&self.running);
         if *running == Some(id) {
             *running = None;
         }
     }
 
-    /// Cancels the running query, if there is one. A plugin that has not
-    /// answered it within [`CANCEL_DEADLINE`] is ended, which resets the
-    /// connection: a Cancel that cannot land must still give the user their
-    /// connection back. The deadline is met when the query's terminal frame
-    /// arrives, not when its caller takes it, so a consumer that stopped
-    /// taking rows never trips it.
+    /// Cancels the running query or catalog request, if there is one. A
+    /// plugin that has not answered it within [`CANCEL_DEADLINE`] is ended,
+    /// which resets the connection: a Cancel that cannot land must still give
+    /// the user their connection back. The deadline is met when the request's
+    /// terminal frame arrives, not when its caller takes it, so a consumer
+    /// that stopped taking rows never trips it.
     pub(super) fn cancel(&self) {
         let Some(id) = *lock(&self.running) else {
             return;
@@ -357,6 +373,19 @@ impl Host {
         lock(&self.shared.process)
             .as_ref()
             .map(|process| process.child.id())
+    }
+}
+
+/// A request a Cancel can reach until this drops, unwinding included, so a
+/// Cancel never lands on a request whose caller has gone.
+pub(super) struct InFlight<'a> {
+    host: &'a Host,
+    pub(super) id: u64,
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        self.host.done(self.id);
     }
 }
 
