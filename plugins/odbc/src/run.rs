@@ -14,8 +14,8 @@ use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use dbdelve_plugin_protocol::arrow::{encode_batch, encode_schema};
 use dbdelve_plugin_protocol::limits::{BATCH_AGE, BATCH_ROWS, BATCH_TARGET, WINDOW};
 use dbdelve_plugin_protocol::{ErrorKind, Kind, MAX_PAYLOAD, Response, write_frame};
-use odbc_api::handles::StatementImpl;
-use odbc_api::sys::{SqlDataType, SqlReturn};
+use odbc_api::handles::{Statement, StatementImpl};
+use odbc_api::sys::{HStmt, SqlDataType, SqlReturn};
 
 use crate::connect::Session;
 use crate::failure;
@@ -44,7 +44,18 @@ struct Running {
     left: i64,
     stop: bool,
     cancel: bool,
+    statement: Option<Published>,
 }
+
+/// The handle of the statement the worker is running, for `cancel` to reach
+/// from the stdin thread.
+#[derive(Clone, Copy)]
+struct Published(HStmt);
+
+// SAFETY: the handle is only ever passed to SQLCancel, which ODBC allows from
+// another thread, and only under the lock the worker takes to unpublish it
+// before the handle is freed.
+unsafe impl Send for Published {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Interrupt {
@@ -62,6 +73,7 @@ impl Control {
             left: WINDOW as i64,
             stop: false,
             cancel: false,
+            statement: None,
         };
     }
 
@@ -76,8 +88,38 @@ impl Control {
         self.update(id, |running| running.stop = true);
     }
 
+    /// Wakes a worker waiting for credit, and interrupts a driver call in
+    /// progress with `SQLCancel`, called here on the stdin thread.
     pub fn cancel(&self, id: u64) {
-        self.update(id, |running| running.cancel = true);
+        let mut running = self.query.lock().unwrap();
+        if running.id != Some(id) {
+            return;
+        }
+        running.cancel = true;
+        self.wake.notify_all();
+        if let Some(Published(statement)) = running.statement {
+            // SAFETY: the worker unpublishes the handle under this lock before
+            // freeing it, and the lock is held across the call, so the handle
+            // is live until it returns.
+            unsafe { raw::cancel(statement) }
+        }
+    }
+
+    /// `false` when the query was cancelled before its statement could start,
+    /// so it never does.
+    ///
+    /// ponytail: a `cancel` landing between this and `SQLExecDirect` entering
+    /// the driver finds nothing running, and the statement then runs to its
+    /// end, unless the host's cancel deadline kills the bridge first. Closing
+    /// that window needs the driver's async mode.
+    fn publish(&self, statement: HStmt) -> bool {
+        let mut running = self.query.lock().unwrap();
+        running.statement = Some(Published(statement));
+        !running.cancel
+    }
+
+    fn unpublish(&self) {
+        self.query.lock().unwrap().statement = None;
     }
 
     fn update(&self, id: u64, change: impl FnOnce(&mut Running)) {
@@ -144,14 +186,19 @@ pub fn query(
     if session.statement_timeout() > 0 {
         let _ = raw::set_query_timeout(&statement, session.statement_timeout());
     }
-    Run {
-        statement: &statement,
-        control,
-        out,
-        id,
-        messages: Vec::new(),
-    }
-    .run(sql)
+    let response = match control.publish(statement.as_sys()) {
+        true => Run {
+            statement: &statement,
+            control,
+            out,
+            id,
+            messages: Vec::new(),
+        }
+        .run(sql),
+        false => cancelled(),
+    };
+    control.unpublish();
+    response
 }
 
 struct Run<'a, W: Write> {
@@ -226,7 +273,7 @@ impl<W: Write> Run<'_, W> {
         let mut scratch = vec![0; CHUNK];
         loop {
             match self.control.interrupted() {
-                Some(Interrupt::Cancel) => return Err(self.cancelled()),
+                Some(Interrupt::Cancel) => return Err(cancelled()),
                 Some(Interrupt::Stop) => draining = true,
                 None => {}
             }
@@ -309,7 +356,7 @@ impl<W: Write> Run<'_, W> {
                 Ok(false)
             }
             Err(Interrupt::Stop) => Ok(true),
-            Err(Interrupt::Cancel) => Err(self.cancelled()),
+            Err(Interrupt::Cancel) => Err(cancelled()),
         }
     }
 
@@ -333,16 +380,6 @@ impl<W: Write> Run<'_, W> {
             *kind = ErrorKind::Cancelled;
         }
         response
-    }
-
-    fn cancelled(&self) -> Response {
-        Response::Error {
-            kind: ErrorKind::Cancelled,
-            message: "The statement was cancelled.".to_string(),
-            sqlstate: None,
-            position: None,
-            lost: false,
-        }
     }
 
     fn end(&mut self, rows: u64, rows_affected: Option<u64>, more_sets: u32) -> Response {
@@ -392,6 +429,16 @@ fn rendered(fetched: Fetched, bytes: &[u8]) -> String {
             }
             text
         }
+    }
+}
+
+fn cancelled() -> Response {
+    Response::Error {
+        kind: ErrorKind::Cancelled,
+        message: "The statement was cancelled.".to_string(),
+        sqlstate: None,
+        position: None,
+        lost: false,
     }
 }
 
@@ -538,6 +585,17 @@ mod tests {
         assert_eq!(control.interrupted(), None);
         control.cancel(2);
         assert_eq!(control.interrupted(), Some(Interrupt::Cancel));
+    }
+
+    #[test]
+    fn a_query_cancelled_before_its_statement_is_published_never_runs() {
+        let control = Control::default();
+        control.start(3);
+        assert!(control.publish(HStmt(std::ptr::null_mut())));
+        control.unpublish();
+        control.start(4);
+        control.cancel(4);
+        assert!(!control.publish(HStmt(std::ptr::null_mut())));
     }
 
     #[test]

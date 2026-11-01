@@ -12,9 +12,10 @@
 
 use odbc_api::handles::{self, Statement, StatementImpl};
 use odbc_api::sys::{
-    CDataType, Desc, HDbc, InfoType, Len, Nullability, Pointer, SQLColAttributeW, SQLDescribeColW,
-    SQLExecDirectW, SQLFetch, SQLGetData, SQLGetInfoW, SQLMoreResults, SQLNumResultCols,
-    SQLRowCount, SQLSetStmtAttrW, SqlDataType, SqlReturn, StatementAttribute, ULen,
+    CDataType, Desc, HDbc, HStmt, InfoType, Len, Nullability, Pointer, SQLCancel, SQLColAttributeW,
+    SQLDescribeColW, SQLExecDirectW, SQLFetch, SQLGetData, SQLGetInfoW, SQLMoreResults,
+    SQLNumResultCols, SQLRowCount, SQLSetStmtAttrW, SqlDataType, SqlReturn, StatementAttribute,
+    ULen,
 };
 
 use crate::failure;
@@ -307,6 +308,20 @@ fn truncated(statement: &StatementImpl) -> bool {
         .iter()
         .any(|(state, _)| state == "01004")
 }
+
+/// Cancels whatever runs on `statement`, from a thread other than the one
+/// running it.
+///
+/// # Safety
+///
+/// `statement` must be a live statement handle, and must stay allocated until
+/// this returns.
+pub unsafe fn cancel(statement: HStmt) {
+    // SAFETY: the caller keeps the handle allocated for the call; ODBC allows
+    // SQLCancel on a statement another thread is using.
+    let _ = unsafe { SQLCancel(statement) };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use arrow_array::{Array, StringArray};
 use arrow_schema::SchemaRef;
 use dbdelve_plugin_protocol::arrow::{decode_batch, decode_schema};
+use dbdelve_plugin_protocol::limits::CANCEL_DEADLINE;
 use dbdelve_plugin_protocol::{
     ErrorKind, Frame, Kind, PROTOCOL, Password, Request, Response, read_frame, write_frame,
 };
@@ -94,8 +95,13 @@ impl Bridge {
     fn query_until(
         &mut self,
         sql: &str,
-        mut interrupt: impl FnMut(usize) -> Option<Request>,
+        interrupt: impl FnMut(usize) -> Option<Request>,
     ) -> Outcome {
+        let id = self.start(sql);
+        self.collect(id, interrupt)
+    }
+
+    fn start(&mut self, sql: &str) -> u64 {
         let id = self.next;
         self.next += 1;
         self.send(
@@ -105,6 +111,10 @@ impl Bridge {
                 eligible: false,
             },
         );
+        id
+    }
+
+    fn collect(&mut self, id: u64, mut interrupt: impl FnMut(usize) -> Option<Request>) -> Outcome {
         let mut schema = None;
         let mut rows = Vec::new();
         let mut interrupted = false;
@@ -362,4 +372,38 @@ fn live_the_statement_timeout_ends_a_long_statement() {
     assert!(start.elapsed() < Duration::from_secs(10));
     let after = bridge.query("SELECT 3 FROM SYSIBM.SYSDUMMY1");
     assert_eq!(after.rows, [vec![Some("3".to_string())]]);
+}
+
+/// `SQLCancel` from the bridge's stdin thread, while the worker is inside the
+/// driver: if the driver manager serialised it behind the running call, the
+/// answer would wait for the whole statement and the host would kill the
+/// bridge at its deadline.
+#[test]
+#[ignore = "needs a Db2 and IBM's driver: set dbdelve_ODBC_DB2, _USER and _PASSWORD"]
+fn live_cancel_interrupts_a_running_statement_and_the_session_survives() {
+    let mut bridge = Bridge::open(0);
+    let id = bridge.start(LONG);
+    thread::sleep(Duration::from_secs(1));
+    let sent = Instant::now();
+    bridge.send(id, Request::Cancel);
+    let outcome = bridge.collect(id, |_| None);
+    let took = sent.elapsed();
+    eprintln!("cancel answered after {took:?}: {:?}", outcome.terminal);
+    assert_eq!(error_of(&outcome).0, ErrorKind::Cancelled);
+    assert!(took < CANCEL_DEADLINE, "{took:?}");
+    let after = bridge.query("SELECT 4 FROM SYSIBM.SYSDUMMY1");
+    assert_eq!(after.rows, [vec![Some("4".to_string())]]);
+}
+
+#[test]
+#[ignore = "needs a Db2 and IBM's driver: set dbdelve_ODBC_DB2, _USER and _PASSWORD"]
+fn live_cancel_mid_stream_ends_the_read() {
+    let mut bridge = Bridge::open(0);
+    let sql = "WITH T(N) AS (SELECT 1 FROM SYSIBM.SYSDUMMY1 UNION ALL \
+               SELECT N + 1 FROM T WHERE N < 2000000000) SELECT N FROM T";
+    let outcome = bridge.query_until(sql, |kept| (kept >= 10).then_some(Request::Cancel));
+    eprintln!("cancelled after {} rows", outcome.rows.len());
+    assert_eq!(error_of(&outcome).0, ErrorKind::Cancelled);
+    let after = bridge.query("SELECT 5 FROM SYSIBM.SYSDUMMY1");
+    assert_eq!(after.rows, [vec![Some("5".to_string())]]);
 }
