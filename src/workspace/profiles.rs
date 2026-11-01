@@ -106,7 +106,11 @@ impl Workspace {
         let (engine, unreadable_engine) = match stored.engine.as_deref() {
             None => (Engine::Postgres, None),
             Some(stored) => match Engine::parse(stored) {
-                Ok(engine) => (engine, None),
+                Ok(engine) if engine.has_built_in_driver() => (engine, None),
+                Ok(_) => (
+                    Engine::Postgres,
+                    Some(crate::db::GENERIC_REFUSAL.to_string()),
+                ),
                 Err(message) => (Engine::Postgres, Some(message)),
             },
         };
@@ -2235,6 +2239,9 @@ fn stored_config(
                 _ => ConnectionConfig::Postgres(server),
             }
         }
+        // `restore_profile` and `decode_profiles` hold such a profile back before
+        // it reaches here.
+        Engine::Generic => unreachable!("{}", crate::db::GENERIC_REFUSAL),
         Engine::Snowflake => ConnectionConfig::Snowflake(SnowflakeConfig {
             account: stored.account.clone().unwrap_or_default(),
             // Blank on disk is the derived host, the same as absent.

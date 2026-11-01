@@ -17,6 +17,12 @@ pub struct EngineSpec {
     /// profile already written with it.
     pub id: &'static str,
     pub label: &'static str,
+    /// Whether DBDelve connects to this engine itself. Without one, a profile
+    /// reaches it through a plugin and nothing here can open a connection.
+    pub built_in_driver: bool,
+    /// What a driver reports as the DBMS name for this engine, compared
+    /// case-insensitively as a prefix.
+    pub dbms_names: &'static [&'static str],
     /// Every spelling [`Engine::parse`](super::Engine::parse) reads: the URL
     /// schemes as well as `id`.
     pub schemes: &'static [&'static str],
@@ -592,6 +598,12 @@ pub enum SubstringMatch {
     /// `LIKE` over `toString(column)`: ClickHouse's `LIKE` takes only a string
     /// or a `FixedString`, and `toString` keeps `Nullable`, so a NULL stays NULL.
     LikeToString,
+    /// `LIKE` with no escaping, for an engine with no default escape character
+    /// (Db2, the SQL standard, Oracle, SQL Server) where `Like`'s backslash
+    /// would match a literal backslash. The `ESCAPE` clause is not an option:
+    /// the grammar the filter gate parses with does not read it. A value
+    /// holding a wildcard or a backslash is refused rather than matched wrongly.
+    LikePlain,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -685,6 +697,8 @@ impl Hooks {
 
 pub(crate) const POSTGRES: EngineSpec = EngineSpec {
     id: "postgres",
+    built_in_driver: true,
+    dbms_names: &["PostgreSQL"],
     label: "Postgres",
     schemes: &["postgres", "postgresql"],
     file_extensions: &[],
@@ -739,6 +753,8 @@ pub(crate) const POSTGRES: EngineSpec = EngineSpec {
 
 pub(crate) const MYSQL: EngineSpec = EngineSpec {
     id: "mysql",
+    built_in_driver: true,
+    dbms_names: &["MySQL"],
     label: "MySQL",
     schemes: &["mysql"],
     file_extensions: &[],
@@ -797,6 +813,8 @@ pub(crate) const MYSQL: EngineSpec = EngineSpec {
 
 pub(crate) const MARIADB: EngineSpec = EngineSpec {
     id: "mariadb",
+    built_in_driver: true,
+    dbms_names: &["MariaDB"],
     label: "MariaDB",
     schemes: &["mariadb"],
     file_extensions: &[],
@@ -854,6 +872,8 @@ pub(crate) const MARIADB: EngineSpec = EngineSpec {
 
 pub(crate) const SQLITE: EngineSpec = EngineSpec {
     id: "sqlite",
+    built_in_driver: true,
+    dbms_names: &["SQLite"],
     label: "SQLite",
     schemes: &["sqlite", "sqlite3", "file"],
     file_extensions: &["db", "sqlite", "sqlite3", "db3"],
@@ -903,6 +923,8 @@ pub(crate) const SQLITE: EngineSpec = EngineSpec {
 
 pub(crate) const TURSO: EngineSpec = EngineSpec {
     id: "turso",
+    built_in_driver: true,
+    dbms_names: &[],
     label: "Turso",
     schemes: &["turso"],
     file_extensions: &[],
@@ -942,6 +964,8 @@ pub(crate) const TURSO: EngineSpec = EngineSpec {
 
 pub(crate) const DUCKDB: EngineSpec = EngineSpec {
     id: "duckdb",
+    built_in_driver: true,
+    dbms_names: &["DuckDB"],
     label: "DuckDB",
     schemes: &["duckdb"],
     file_extensions: &["duckdb", "ddb"],
@@ -998,6 +1022,8 @@ pub(crate) const DUCKDB: EngineSpec = EngineSpec {
 
 pub(crate) const SNOWFLAKE: EngineSpec = EngineSpec {
     id: "snowflake",
+    built_in_driver: true,
+    dbms_names: &["Snowflake"],
     label: "Snowflake",
     schemes: &["snowflake"],
     file_extensions: &[],
@@ -1059,6 +1085,8 @@ pub(crate) const SNOWFLAKE: EngineSpec = EngineSpec {
 
 pub(crate) const SQL_SERVER: EngineSpec = EngineSpec {
     id: "mssql",
+    built_in_driver: true,
+    dbms_names: &["Microsoft SQL Server"],
     label: "SQL Server",
     schemes: &["mssql", "sqlserver"],
     file_extensions: &[],
@@ -1130,6 +1158,8 @@ pub(crate) const SQL_SERVER: EngineSpec = EngineSpec {
 
 pub(crate) const MONGODB: EngineSpec = EngineSpec {
     id: "mongodb",
+    built_in_driver: true,
+    dbms_names: &[],
     label: "MongoDB",
     schemes: &["mongodb", "mongodb+srv"],
     file_extensions: &[],
@@ -1167,6 +1197,8 @@ pub(crate) const MONGODB: EngineSpec = EngineSpec {
 
 pub(crate) const REDIS: EngineSpec = EngineSpec {
     id: "redis",
+    built_in_driver: true,
+    dbms_names: &[],
     label: "Redis",
     schemes: &["redis", "rediss"],
     file_extensions: &[],
@@ -1206,6 +1238,8 @@ pub(crate) const REDIS: EngineSpec = EngineSpec {
 
 pub(crate) const CLICKHOUSE: EngineSpec = EngineSpec {
     id: "clickhouse",
+    built_in_driver: true,
+    dbms_names: &["ClickHouse"],
     label: "ClickHouse",
     schemes: &["clickhouse"],
     file_extensions: &[],
@@ -1324,4 +1358,40 @@ pub(crate) const CLICKHOUSE: EngineSpec = EngineSpec {
         match_value: Some(clickhouse::match_value),
         ..Hooks::NONE
     },
+};
+
+pub(crate) const GENERIC: EngineSpec = EngineSpec {
+    id: "generic",
+    built_in_driver: false,
+    dbms_names: &[],
+    label: "Generic SQL",
+    schemes: &["generic"],
+    file_extensions: &[],
+    logo: "icons/engine-generic.svg",
+    brand: 0x7A8594,
+    syntax: Syntax::Sql,
+    layout: Fields::Server,
+    default_port: None,
+    takes_options: false,
+    resolves_srv: false,
+    system_databases: &[],
+    binary_types: &[],
+    // Db2's decimal float, which right-aligns like any number.
+    numeric_types: &["decfloat"],
+    type_wrappers: &[],
+    hints: Hints::DEFAULT,
+    sql: SqlSpec {
+        // Db2's `TRUNCATE TABLE` alone is a syntax error; `DELETE FROM` is the
+        // one spelling every SQL database accepts.
+        truncate: Truncate::DeleteFrom,
+        // Db2, like the standard, has no default `LIKE` escape.
+        substring: SubstringMatch::LikePlain,
+        // `literal_offsets` only feeds Import Rows' date values, which no
+        // plugin target admits yet; false is the answer that cannot send an
+        // offset to a server whose timestamp literal takes none (Db2).
+        literal_offsets: false,
+        ..SqlSpec::ANSI
+    },
+    abilities: Abilities::NONE,
+    hooks: Hooks::NONE,
 };

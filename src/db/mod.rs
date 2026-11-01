@@ -128,6 +128,9 @@ pub enum Engine {
     SqlServer,
     MongoDb,
     Redis,
+    /// SQL with no dialect of its own, reached through a plugin. No built-in
+    /// driver: nothing in DBDelve opens a connection to it.
+    Generic,
 }
 
 /// The shape of a connection's details. The form draws one of these and never
@@ -221,6 +224,10 @@ impl ExplainMode {
     }
 }
 
+/// Why a profile cannot be made for `Engine::Generic` from anything but a plugin.
+pub(crate) const GENERIC_REFUSAL: &str =
+    "Generic SQL has no driver of its own; connect through ODBC.";
+
 impl Engine {
     /// Everything that sets this engine apart, as data.
     pub fn spec(self) -> &'static EngineSpec {
@@ -236,7 +243,14 @@ impl Engine {
             Self::SqlServer => &spec::SQL_SERVER,
             Self::MongoDb => &spec::MONGODB,
             Self::Redis => &spec::REDIS,
+            Self::Generic => &spec::GENERIC,
         }
+    }
+
+    /// Whether DBDelve opens connections to this engine itself, which the
+    /// pickers that make a profile list it by.
+    pub fn has_built_in_driver(self) -> bool {
+        self.spec().built_in_driver
     }
 
     /// The engine's brand logo.
@@ -250,7 +264,7 @@ impl Engine {
     }
 
     /// Presentation order, which is the order the form's chips appear in.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Postgres,
         Self::MySql,
         Self::MariaDb,
@@ -262,7 +276,16 @@ impl Engine {
         Self::SqlServer,
         Self::MongoDb,
         Self::Redis,
+        Self::Generic,
     ];
+
+    /// The engines a user can start a profile for here, which is every one with
+    /// a built-in driver until plugins add tiles of their own.
+    pub fn built_in() -> impl Iterator<Item = Self> {
+        Self::ALL
+            .into_iter()
+            .filter(|engine| engine.has_built_in_driver())
+    }
 
     pub fn label(self) -> &'static str {
         self.spec().label
@@ -295,6 +318,21 @@ impl Engine {
             .find(|(spelling, _)| *spelling == value)
             .map(|(_, engine)| engine)
             .ok_or_else(|| format!("{value} is not a database engine dbdelve speaks."))
+    }
+
+    /// The engine a driver's reported DBMS name (`SQL_DBMS_NAME`) belongs to,
+    /// by prefix and whatever its case. Read only by the connection form's
+    /// dialect suggestion, which Task 12 adds.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn from_dbms_name(name: &str) -> Option<Self> {
+        let name = name.trim().to_ascii_lowercase();
+        Self::ALL.into_iter().find(|engine| {
+            engine
+                .spec()
+                .dbms_names
+                .iter()
+                .any(|known| name.starts_with(&known.to_ascii_lowercase()))
+        })
     }
 
     /// The engine whose files end in `extension`, whatever its case.
@@ -1188,6 +1226,7 @@ impl ConnectionConfig {
             Engine::Snowflake => {
                 Err("Snowflake has no connection URL. Fill the fields in instead.".to_string())
             }
+            Engine::Generic => Err(GENERIC_REFUSAL.to_string()),
         }
     }
 
@@ -2461,6 +2500,8 @@ pub fn is_cancel(engine: Engine, error: &DbError) -> bool {
         Engine::MongoDb => message == "Cancelled.",
         Engine::Redis => message == redis::CANCELLED,
         Engine::ClickHouse => message == clickhouse::CANCELLED,
+        // Nothing built in cancels it; a plugin's cancel is answered per target.
+        Engine::Generic => false,
     }
 }
 
@@ -2534,7 +2575,8 @@ pub fn cancel_cost(
         | Engine::MySql
         | Engine::MariaDb
         | Engine::Snowflake
-        | Engine::MongoDb => None,
+        | Engine::MongoDb
+        | Engine::Generic => None,
     }
 }
 
@@ -3572,7 +3614,9 @@ mod tests {
 
     #[test]
     fn new_row_is_withheld_only_from_a_mongo_view() {
-        for engine in Engine::ALL {
+        // Generic SQL is left out: it has no abilities of its own, since a
+        // plugin target forces every write off.
+        for engine in Engine::built_in() {
             assert!(engine.takes_inserts(RelationKind::Table), "{engine:?}");
             assert_eq!(
                 engine.takes_inserts(RelationKind::View),
@@ -4123,6 +4167,25 @@ mod tests {
         assert_eq!(Engine::parse("snowflake"), Ok(Engine::Snowflake));
         assert_eq!(Engine::Snowflake.as_str(), "snowflake");
         assert!(ConnectionConfig::from_url("snowflake://account/db").is_err());
+    }
+
+    #[test]
+    fn generic_sql_is_an_engine_with_no_way_to_connect_to_it() {
+        assert_eq!(Engine::parse("generic"), Ok(Engine::Generic));
+        assert_eq!(
+            ConnectionConfig::from_url("generic://x").unwrap_err(),
+            GENERIC_REFUSAL
+        );
+        assert!(!Engine::built_in().any(|engine| engine == Engine::Generic));
+        assert_eq!(
+            Engine::from_dbms_name("PostgreSQL 16.2"),
+            Some(Engine::Postgres)
+        );
+        assert_eq!(
+            Engine::from_dbms_name("microsoft sql server"),
+            Some(Engine::SqlServer)
+        );
+        assert_eq!(Engine::from_dbms_name("DB2/LINUXX8664"), None);
     }
 
     #[test]

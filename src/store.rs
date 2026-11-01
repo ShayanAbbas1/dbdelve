@@ -764,7 +764,9 @@ struct Tag {
 fn readable(tag: Option<&toml::Value>) -> bool {
     match tag {
         None => true,
-        Some(toml::Value::String(engine)) => Engine::parse(engine).is_ok(),
+        Some(toml::Value::String(engine)) => {
+            Engine::parse(engine).is_ok_and(Engine::has_built_in_driver)
+        }
         Some(_) => false,
     }
 }
@@ -1912,7 +1914,7 @@ pub(crate) mod tests {
     #[test]
     fn every_engine_spelling_decodes_as_it_does_today() {
         let mut engines = vec![None];
-        for (spelling, _) in Engine::schemes() {
+        for (spelling, _) in Engine::schemes().filter(|(_, engine)| engine.has_built_in_driver()) {
             engines.extend([
                 Some(spelling.to_string()),
                 Some(spelling.to_uppercase()),
@@ -1930,6 +1932,13 @@ pub(crate) mod tests {
                 "{text}"
             );
         }
+    }
+
+    #[test]
+    fn a_profile_on_generic_sql_is_held_back_whole() {
+        let list = decode_profiles(&supported_stub(Some("generic"), "")).expect("loads");
+        assert!(list.profiles.is_empty());
+        assert_eq!(list.unavailable.len(), 1);
     }
 
     #[test]

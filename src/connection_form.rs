@@ -449,6 +449,7 @@ impl ConnectionForm {
             // An ACL user and a password are both optional: a server with
             // neither configured takes any connection.
             Engine::Redis => ConnectionConfig::Redis(self.server_requiring(&[], cx)?),
+            Engine::Generic => return Err(crate::db::GENERIC_REFUSAL.to_string()),
         };
 
         let name = match read(&self.name) {

@@ -255,7 +255,7 @@ pub(crate) fn form_entrance_ms(backdrop_shown: bool) -> f32 {
 
 /// When the last piece has landed.
 pub(crate) fn entrance_ms(intro: bool) -> f32 {
-    let tiles = tile_at(intro, Engine::ALL.len() - 1) + SETTLE_MS;
+    let tiles = tile_at(intro, Engine::built_in().count() - 1) + SETTLE_MS;
     let greeting = if intro {
         GREETING_AT_MS + GREETING_MS
     } else {
@@ -471,7 +471,7 @@ impl Workspace {
             .grid_cols(columns)
             .gap(px(layout::WELCOME_ITEM_GAP))
             .p(px(layout::WELCOME_SECTION_PADDING))
-            .children(Engine::ALL.into_iter().enumerate().map(|(index, engine)| {
+            .children(Engine::built_in().enumerate().map(|(index, engine)| {
                 let brand = theme::engine_brand(engine, t, &planes);
                 let tile = item(("welcome-engine", index))
                     .w_full()
@@ -971,7 +971,7 @@ mod tests {
         for intro in [true, false] {
             let end = entrance_ms(intro);
             let mut parts = vec![Part::Mark, Part::Title, Part::Card, Part::Backdrop];
-            parts.extend((0..Engine::ALL.len()).map(Part::Tile));
+            parts.extend((0..Engine::built_in().count()).map(Part::Tile));
             for part in parts {
                 assert_eq!(pose(part, intro, 0.).opacity, 0., "{part:?}");
                 assert_eq!(

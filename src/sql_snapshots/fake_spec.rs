@@ -12,6 +12,8 @@ use crate::{
 
 const FAKE: EngineSpec = EngineSpec {
     id: "fake",
+    built_in_driver: true,
+    dbms_names: &[],
     label: "Fake",
     schemes: &[],
     file_extensions: &[],

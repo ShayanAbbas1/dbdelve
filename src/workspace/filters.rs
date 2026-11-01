@@ -8,7 +8,7 @@ use std::rc::Rc;
 use gpui_component::input::{CompletionProvider, EditorState};
 
 use super::*;
-use crate::filter::shape_value;
+use crate::filter::{refusal, shape_value};
 
 impl Workspace {
     /// Run a relation's statement again. The rows are a snapshot, and this is
@@ -105,12 +105,20 @@ impl Workspace {
                         StructureState::Loaded(structure) => structure.columns.as_slice(),
                         _ => &[],
                     };
-                    Some(derived_filter(engine, &filter_bars(filters), columns))
+                    let bars = filter_bars(filters);
+                    Some(match refusal(engine, &bars) {
+                        Some(sentence) => Err(sentence),
+                        None => Ok(derived_filter(engine, &bars, columns)),
+                    })
                 }
                 ObjectBody::Routine(_) | ObjectBody::Structure { .. } => None,
             }
         }) else {
             return;
+        };
+        let derived = match derived {
+            Ok(derived) => derived,
+            Err(sentence) => return self.note(sentence.to_string(), cx),
         };
         self.requery_relation(
             id,

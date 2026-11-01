@@ -124,6 +124,17 @@ source: src/sql_snapshots.rs
 [redis] batch_counts => |ok|
 [redis] batch_repeats 0 => |ok|
 [redis] batch_repeats 10 at SELECT 2 => |ok|
+[generic] statement 0..8 => |SELECT 1|
+[generic] statement 10..18 => |SELECT 2|
+[generic] queued 0..8 => |SELECT 1|
+[generic] queued 10..18 => |SELECT 2|
+[generic] queued in 0..9 0..8 => |SELECT 1|
+[generic] expected_sets => |1|
+[generic] split_reads => (none)
+[generic] one_batch => |SELECT 1; SELECT 2|
+[generic] batch_counts => |ok|
+[generic] batch_repeats 0 => |ok|
+[generic] batch_repeats 10 at SELECT 2 => |ok|
 
 == go and a counted go: |SELECT 1;\u{a}GO\u{a}SELECT 2\u{a}GO 2\u{a}|
 [postgres] statement 0..8 => |SELECT 1|
@@ -260,6 +271,17 @@ source: src/sql_snapshots.rs
 [redis] batch_counts => |ok|
 [redis] batch_repeats 0 => |ok|
 [redis] batch_repeats 13 at SELECT 2 => |ok|
+[generic] statement 0..8 => |SELECT 1|
+[generic] statement 10..26 => |GO\u{a}SELECT 2\u{a}GO 2|
+[generic] queued 0..8 => |SELECT 1|
+[generic] queued 10..26 => |GO\u{a}SELECT 2\u{a}GO 2|
+[generic] queued in 0..9 0..8 => |SELECT 1|
+[generic] expected_sets => |1|
+[generic] split_reads => (none)
+[generic] one_batch => |SELECT 1;\u{a}GO\u{a}SELECT 2\u{a}GO 2\u{a}|
+[generic] batch_counts => |ok|
+[generic] batch_repeats 0 => |ok|
+[generic] batch_repeats 13 at SELECT 2 => |ok|
 
 == go in a string and a comment: |SELECT 'GO'\u{a}-- GO\u{a}SELECT 2|
 [postgres] statement 0..26 => |SELECT 'GO'\u{a}-- GO\u{a}SELECT 2|
@@ -367,6 +389,15 @@ source: src/sql_snapshots.rs
 [redis] batch_counts => |ok|
 [redis] batch_repeats 0 => |ok|
 [redis] batch_repeats 18 at SELECT 2 => |ok|
+[generic] statement 0..26 => |SELECT 'GO'\u{a}-- GO\u{a}SELECT 2|
+[generic] queued 0..26 => |SELECT 'GO'\u{a}-- GO\u{a}SELECT 2|
+[generic] queued in 0..9 0..26 => |SELECT 'GO'\u{a}-- GO\u{a}SELECT 2|
+[generic] expected_sets => |1|
+[generic] split_reads => (none)
+[generic] one_batch => |SELECT 'GO'\u{a}-- GO\u{a}SELECT 2|
+[generic] batch_counts => |ok|
+[generic] batch_repeats 0 => |ok|
+[generic] batch_repeats 18 at SELECT 2 => |ok|
 
 == final go without a newline: |SELECT 1\u{a}GO|
 [postgres] statement 0..11 => |SELECT 1\u{a}GO|
@@ -475,6 +506,15 @@ source: src/sql_snapshots.rs
 [redis] batch_counts => |ok|
 [redis] batch_repeats 0 => |ok|
 [redis] batch_repeats 11 at the end => |ok|
+[generic] statement 0..11 => |SELECT 1\u{a}GO|
+[generic] queued 0..11 => |SELECT 1\u{a}GO|
+[generic] queued in 0..9 0..11 => |SELECT 1\u{a}GO|
+[generic] expected_sets => |1|
+[generic] split_reads => (none)
+[generic] one_batch => |SELECT 1\u{a}GO|
+[generic] batch_counts => |ok|
+[generic] batch_repeats 0 => |ok|
+[generic] batch_repeats 11 at the end => |ok|
 
 == begin end block: |IF 1=1 BEGIN DELETE FROM t; DELETE FROM u; END|
 [postgres] statement 0..26 => |IF 1=1 BEGIN DELETE FROM t|
@@ -612,6 +652,19 @@ source: src/sql_snapshots.rs
 [redis] batch_counts => |ok|
 [redis] batch_repeats 0 => |ok|
 [redis] batch_repeats 46 at the end => |ok|
+[generic] statement 0..26 => |IF 1=1 BEGIN DELETE FROM t|
+[generic] statement 28..41 => |DELETE FROM u|
+[generic] statement 43..46 => |END|
+[generic] queued 0..26 => |IF 1=1 BEGIN DELETE FROM t|
+[generic] queued 28..41 => |DELETE FROM u|
+[generic] queued 43..46 => |END|
+[generic] queued in 0..9 0..26 => |IF 1=1 BEGIN DELETE FROM t|
+[generic] expected_sets => |1|
+[generic] split_reads => (none)
+[generic] one_batch => |IF 1=1 BEGIN DELETE FROM t; DELETE FROM u; END|
+[generic] batch_counts => |ok|
+[generic] batch_repeats 0 => |ok|
+[generic] batch_repeats 46 at the end => |ok|
 
 == variable and temp table across a go: |DECLARE @x int = 1;\u{a}SELECT @x\u{a}GO\u{a}SELECT * FROM #tmp|
 [postgres] statement 0..18 => |DECLARE @x int = 1|
@@ -748,6 +801,17 @@ source: src/sql_snapshots.rs
 [redis] batch_counts => |ok|
 [redis] batch_repeats 0 => |ok|
 [redis] batch_repeats 51 at the end => |ok|
+[generic] statement 0..18 => |DECLARE @x int = 1|
+[generic] statement 20..51 => |SELECT @x\u{a}GO\u{a}SELECT * FROM #tmp|
+[generic] queued 0..18 => |DECLARE @x int = 1|
+[generic] queued 20..51 => |SELECT @x\u{a}GO\u{a}SELECT * FROM #tmp|
+[generic] queued in 0..9 0..18 => |DECLARE @x int = 1|
+[generic] expected_sets => |1|
+[generic] split_reads => (none)
+[generic] one_batch => |DECLARE @x int = 1;\u{a}SELECT @x\u{a}GO\u{a}SELECT * FROM #tmp|
+[generic] batch_counts => |ok|
+[generic] batch_repeats 0 => |ok|
+[generic] batch_repeats 51 at the end => |ok|
 
 == only a comment: |/* only a comment */|
 [postgres] statement => (none)
@@ -849,6 +913,15 @@ source: src/sql_snapshots.rs
 [redis] batch_counts => |ok|
 [redis] batch_repeats 0 => |ok|
 [redis] batch_repeats 20 at the end => |ok|
+[generic] statement => (none)
+[generic] queued => (none)
+[generic] queued in 0..9 => (none)
+[generic] expected_sets => |1|
+[generic] split_reads => (none)
+[generic] one_batch => |/* only a comment */|
+[generic] batch_counts => |ok|
+[generic] batch_repeats 0 => |ok|
+[generic] batch_repeats 20 at the end => |ok|
 
 == go inside a string: |SELECT 'a\u{a}GO\u{a}b'\u{a}GO\u{a}SELECT 2|
 [postgres] statement 0..18 => |SELECT 'a\u{a}GO\u{a}b'\u{a}GO|
@@ -990,6 +1063,17 @@ source: src/sql_snapshots.rs
 [redis] batch_counts => |ok|
 [redis] batch_repeats 0 => |ok|
 [redis] batch_repeats 19 at SELECT 2 => |ok|
+[generic] statement 0..18 => |SELECT 'a\u{a}GO\u{a}b'\u{a}GO|
+[generic] statement 19..27 => |SELECT 2|
+[generic] queued 0..18 => |SELECT 'a\u{a}GO\u{a}b'\u{a}GO|
+[generic] queued 19..27 => |SELECT 2|
+[generic] queued in 0..9 0..18 => |SELECT 'a\u{a}GO\u{a}b'\u{a}GO|
+[generic] expected_sets => |1|
+[generic] split_reads => (none)
+[generic] one_batch => |SELECT 'a\u{a}GO\u{a}b'\u{a}GO\u{a}SELECT 2|
+[generic] batch_counts => |ok|
+[generic] batch_repeats 0 => |ok|
+[generic] batch_repeats 19 at SELECT 2 => |ok|
 
 == go inside a block comment: |/*\u{a}GO\u{a}*/\u{a}SELECT 1\u{a}GO\u{a}SELECT 2|
 [postgres] statement 9..20 => |SELECT 1\u{a}GO|
@@ -1124,6 +1208,17 @@ source: src/sql_snapshots.rs
 [redis] batch_counts => |ok|
 [redis] batch_repeats 0 => |ok|
 [redis] batch_repeats 21 at SELECT 2 => |ok|
+[generic] statement 9..20 => |SELECT 1\u{a}GO|
+[generic] statement 21..29 => |SELECT 2|
+[generic] queued 9..20 => |SELECT 1\u{a}GO|
+[generic] queued 21..29 => |SELECT 2|
+[generic] queued in 0..9 => (none)
+[generic] expected_sets => |1|
+[generic] split_reads => (none)
+[generic] one_batch => |/*\u{a}GO\u{a}*/\u{a}SELECT 1\u{a}GO\u{a}SELECT 2|
+[generic] batch_counts => |ok|
+[generic] batch_repeats 0 => |ok|
+[generic] batch_repeats 21 at SELECT 2 => |ok|
 
 == trailing comment and quoted semicolon: |SELECT 1 -- trailing\u{a};\u{a}\u{a}SELECT 'a;b'|
 [postgres] statement 0..8 => |SELECT 1|
@@ -1251,6 +1346,17 @@ source: src/sql_snapshots.rs
 [redis] batch_counts => |ok|
 [redis] batch_repeats 0 => |ok|
 [redis] batch_repeats 36 at the end => |ok|
+[generic] statement 0..8 => |SELECT 1|
+[generic] statement 24..36 => |SELECT 'a;b'|
+[generic] queued 0..8 => |SELECT 1|
+[generic] queued 24..36 => |SELECT 'a;b'|
+[generic] queued in 0..9 0..8 => |SELECT 1|
+[generic] expected_sets => |1|
+[generic] split_reads => (none)
+[generic] one_batch => |SELECT 1 -- trailing\u{a};\u{a}\u{a}SELECT 'a;b'|
+[generic] batch_counts => |ok|
+[generic] batch_repeats 0 => |ok|
+[generic] batch_repeats 36 at the end => |ok|
 
 == mongosh: |db.a.find({})\u{a}db.b.find({})|
 [postgres] statement 0..27 => |db.a.find({})\u{a}db.b.find({})|
@@ -1356,6 +1462,15 @@ source: src/sql_snapshots.rs
 [redis] batch_counts => |ok|
 [redis] batch_repeats 0 => |ok|
 [redis] batch_repeats 27 at the end => |ok|
+[generic] statement 0..27 => |db.a.find({})\u{a}db.b.find({})|
+[generic] queued 0..27 => |db.a.find({})\u{a}db.b.find({})|
+[generic] queued in 0..9 0..27 => |db.a.find({})\u{a}db.b.find({})|
+[generic] expected_sets => |1|
+[generic] split_reads => (none)
+[generic] one_batch => |db.a.find({})\u{a}db.b.find({})|
+[generic] batch_counts => |ok|
+[generic] batch_repeats 0 => |ok|
+[generic] batch_repeats 27 at the end => |ok|
 
 == redis-cli: |GET a\u{a}SET b 1|
 [postgres] statement 0..5 => |GET a|
@@ -1468,3 +1583,12 @@ source: src/sql_snapshots.rs
 [redis] batch_counts => |ok|
 [redis] batch_repeats 0 => |ok|
 [redis] batch_repeats 13 at the end => |ok|
+[generic] statement 0..5 => |GET a|
+[generic] queued 0..5 => |GET a|
+[generic] queued in 0..9 0..5 => |GET a|
+[generic] expected_sets => |1|
+[generic] split_reads => (none)
+[generic] one_batch => |GET a\u{a}SET b 1|
+[generic] batch_counts => |ok|
+[generic] batch_repeats 0 => |ok|
+[generic] batch_repeats 13 at the end => |ok|

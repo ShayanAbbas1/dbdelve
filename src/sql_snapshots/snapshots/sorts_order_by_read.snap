@@ -350,3 +350,33 @@ source: src/sql_snapshots.rs
 [redis] paged preview => (none)
 [redis] redis scan => (none)
 [redis] redis sort => (none)
+[generic] no order by => |[] (0 keys)|
+[generic] simple => |[a asc=true] (1 keys)|
+[generic] desc then bare => |[a asc=false ; b asc=true] (2 keys)|
+[generic] lower-case desc => |[a asc=false] (1 keys)|
+[generic] asc spelled out => |[a asc=true] (1 keys)|
+[generic] ordinal => |[1 asc=true] (1 keys)|
+[generic] expression => |[lower(a) asc=false ; b + 1 asc=true] (2 keys)|
+[generic] double-quoted => |["Name" asc=false ; "id" asc=true] (2 keys)|
+[generic] double-quoted, escaped quote => (none)
+[generic] backticked, escaped tick => (none)
+[generic] backticked => |[`Name` asc=false ; `id` asc=true] (2 keys)|
+[generic] bracketed => (none)
+[generic] subquery only => |[] (0 keys)|
+[generic] subquery and outer => |[b asc=false] (1 keys)|
+[generic] then limit => |[a asc=false] (1 keys)|
+[generic] then limit offset => |[a asc=true] (1 keys)|
+[generic] then offset fetch => (none)
+[generic] where, group by, order by => |[a asc=false] (1 keys)|
+[generic] union ordered => |[a asc=false] (1 keys)|
+[generic] cte => |[a asc=true] (1 keys)|
+[generic] trailing comment => |[a asc=true] (1 keys)|
+[generic] semicolon => |[a asc=true] (1 keys)|
+[generic] two statements => (none)
+[generic] nulls first => (none)
+[generic] explain => (none)
+[generic] no from => (none)
+[generic] unparseable => (none)
+[generic] update => (none)
+[generic] unpaged preview => |[] (0 keys)|
+[generic] paged preview => |[] (0 keys)|

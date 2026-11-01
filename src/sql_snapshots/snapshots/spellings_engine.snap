@@ -100,3 +100,12 @@ source: src/sql_snapshots.rs
 [redis] explain_suffix Plan => ||
 [redis] explain_prefix Analyze => (none)
 [redis] explain_suffix Analyze => ||
+[generic] boolean_literal true => |true|
+[generic] boolean_literal false => |false|
+[generic] count_all => |COUNT(*)|
+[generic] transaction_start => |BEGIN|
+[generic] all_or_nothing => |BEGIN|
+[generic] explain_prefix Plan => (none)
+[generic] explain_suffix Plan => ||
+[generic] explain_prefix Analyze => (none)
+[generic] explain_suffix Analyze => ||

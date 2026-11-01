@@ -111,3 +111,13 @@ source: src/sql_snapshots.rs
 [redis] duplicates #0 id => |1|
 [redis] duplicates #1 id => |2|
 [redis] empty name #0  => |1|
+[generic] columns #0 id => |"id"|
+[generic] columns #1 Name => |"Name"|
+[generic] columns #2 we"ird => |"we""ird"|
+[generic] columns #3 back`tick => |"back`tick"|
+[generic] columns #4 ümlaut => |"ümlaut"|
+[generic] columns #5 select => |"select"|
+[generic] columns #6 out of range => (none)
+[generic] duplicates #0 id => |1|
+[generic] duplicates #1 id => |2|
+[generic] empty name #0  => |1|

@@ -3127,8 +3127,7 @@ fn database_items(profile: &Profile) -> Vec<Item> {
 /// Every engine, the one the connection form is set to marked as current.
 fn engine_items(workspace: &Workspace) -> Vec<Item> {
     let current = workspace.form.as_ref().map(|form| form.engine);
-    Engine::ALL
-        .into_iter()
+    Engine::built_in()
         .map(|engine| {
             let hint = if current == Some(engine) {
                 "current"

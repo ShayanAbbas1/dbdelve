@@ -559,7 +559,10 @@ pub(crate) fn sql_predicate(
         Operator::IsEmpty => Some(format!("{name} = {}", literal(""))),
         Operator::IsNotEmpty => Some(format!("{name} <> {}", literal(""))),
         Operator::Contains | Operator::NotContains | Operator::StartsWith | Operator::EndsWith => {
-            Some(substring(spec, &name, data_type, operator, value))
+            // `None` would read as a bar that narrows nothing; `refusal` is how
+            // the caller learns it was refused, and says why.
+            (!refuses_plain_like(spec, operator, value))
+                .then(|| substring(spec, &name, data_type, operator, value))
         }
         Operator::InList | Operator::NotInList => {
             let items: Vec<_> = value
@@ -693,6 +696,7 @@ pub(crate) fn substring(
                 other => other.to_string(),
             })
             .collect(),
+        SubstringMatch::LikePlain => value.to_string(),
         _ => like_pattern(value),
     };
     let name = match spec.sql.substring {
@@ -712,6 +716,30 @@ pub(crate) fn substring(
         },
         spec.quote_value(&pattern, data_type)
     )
+}
+
+const LIKE_PLAIN_REFUSAL: &str = r"Generic SQL has no LIKE escape DBDelve can write, so a value with %, _ or \ cannot be matched exactly.";
+
+fn refuses_plain_like(spec: &EngineSpec, operator: Operator, value: &str) -> bool {
+    spec.sql.substring == SubstringMatch::LikePlain
+        && matches!(
+            operator,
+            Operator::Contains | Operator::NotContains | Operator::StartsWith | Operator::EndsWith
+        )
+        && value.contains(['%', '_', '\\'])
+}
+
+/// Why a bar is refused outright, for the caller to say. A refused bar writes no
+/// predicate, which on its own is indistinguishable from a bar with no value
+/// yet, so applying the filter checks here first and leaves the tab as it was.
+pub(crate) fn refusal(engine: Engine, bars: &[FilterBar]) -> Option<&'static str> {
+    if engine.syntax() != Syntax::Sql {
+        return None;
+    }
+    bars.iter()
+        .filter(|bar| !bar.raw && bar.column.is_some())
+        .any(|bar| refuses_plain_like(engine.spec(), bar.operator, bar.value.trim()))
+        .then_some(LIKE_PLAIN_REFUSAL)
 }
 
 /// The user's text as the literal part of a `LIKE` pattern: the wildcards it
@@ -2112,5 +2140,31 @@ mod tests {
                 "{statement} was refused"
             );
         }
+    }
+
+    #[test]
+    fn plain_like_writes_no_escape_and_refuses_a_value_that_needs_one() {
+        let predicate =
+            |operator, value| bar_predicate(Engine::Generic, &bar(Some("c"), operator, value), &[]);
+        for (operator, value, expected) in [
+            (Operator::Contains, "ab", r#""c" LIKE '%ab%'"#),
+            (Operator::StartsWith, "ab", r#""c" LIKE 'ab%'"#),
+            (Operator::EndsWith, "ab", r#""c" LIKE '%ab'"#),
+            (Operator::NotContains, "ab", r#""c" NOT LIKE '%ab%'"#),
+            (Operator::Contains, "it's", r#""c" LIKE '%it''s%'"#),
+        ] {
+            let written = predicate(operator, value).expect("written");
+            assert_eq!(written, expected);
+            let sql = explorer::preview_sql(Engine::Generic, "public", "t", &written, Some(100), 0);
+            assert!(sql::is_generated_select(Engine::Generic, &sql), "{sql}");
+        }
+        for value in ["50%", "a_b", r"a\b"] {
+            let bars = [bar(Some("c"), Operator::Contains, value)];
+            assert_eq!(predicate(Operator::Contains, value), None);
+            assert_eq!(refusal(Engine::Generic, &bars), Some(LIKE_PLAIN_REFUSAL));
+            assert_eq!(refusal(Engine::Postgres, &bars), None);
+        }
+        let equals = [bar(Some("c"), Operator::Equals, "50%")];
+        assert_eq!(refusal(Engine::Generic, &equals), None);
     }
 }

@@ -122,3 +122,14 @@ source: src/sql_snapshots.rs
 [redis] only a sql server computed column => (none)
 [redis] empty => (none)
 [redis] awkward names => (none)
+[generic] ordinary => |INSERT INTO "public"."accounts" ("id", "Name", "total", "seq", "rid", "it's") VALUES (?, ?, ?, ?, ?, ?);|
+[generic] postgres generated => |INSERT INTO "public"."accounts" ("a", "b", "c") VALUES (?, ?, ?);|
+[generic] mysql generated => |INSERT INTO "public"."accounts" ("a", "b", "c", "d") VALUES (?, ?, ?, ?);|
+[generic] sql server computed => |INSERT INTO "public"."accounts" ("a", "total", "flat", "ident", "dflt") VALUES (?, ?, ?, ?, ?);|
+[generic] look-alikes => |INSERT INTO "public"."accounts" ("a", "b", "c", "d") VALUES (?, ?, ?, ?);|
+[generic] all generated, sql server => |INSERT INTO "public"."accounts" ("total", "ident", "g", "s") VALUES (?, ?, ?, ?);|
+[generic] all dropped, postgres => |INSERT INTO "public"."accounts" ("b", "c") VALUES (?, ?);|
+[generic] all dropped, mysql => |INSERT INTO "public"."accounts" ("b", "c") VALUES (?, ?);|
+[generic] only a sql server computed column => |INSERT INTO "public"."accounts" ("total") VALUES (?);|
+[generic] empty => (none)
+[generic] awkward names => |INSERT INTO "public"."accounts" ("we""ird", "back`tick", "with space", "ümlaut", "[x]", "") VALUES (?, ?, ?, ?, ?, ?);|

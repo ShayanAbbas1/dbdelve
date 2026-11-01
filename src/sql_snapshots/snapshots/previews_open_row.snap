@@ -1221,3 +1221,111 @@ source: src/sql_snapshots.rs
 
 [redis] rows=0 key=a key "q" type=unknown
   (none)
+
+[generic] rows=100 key=k type=string
+  (none)
+
+[generic] rows=100 key=k type=hash
+  (none)
+
+[generic] rows=100 key=k type=list
+  (none)
+
+[generic] rows=100 key=k type=set
+  (none)
+
+[generic] rows=100 key=k type=zset
+  (none)
+
+[generic] rows=100 key=k type=stream
+  (none)
+
+[generic] rows=100 key=k type=ReJSON-RL
+  (none)
+
+[generic] rows=100 key=k type=TSDB-TYPE
+  (none)
+
+[generic] rows=100 key=k type=unknown
+  (none)
+
+[generic] rows=100 key=a key "q" type=string
+  (none)
+
+[generic] rows=100 key=a key "q" type=hash
+  (none)
+
+[generic] rows=100 key=a key "q" type=list
+  (none)
+
+[generic] rows=100 key=a key "q" type=set
+  (none)
+
+[generic] rows=100 key=a key "q" type=zset
+  (none)
+
+[generic] rows=100 key=a key "q" type=stream
+  (none)
+
+[generic] rows=100 key=a key "q" type=ReJSON-RL
+  (none)
+
+[generic] rows=100 key=a key "q" type=TSDB-TYPE
+  (none)
+
+[generic] rows=100 key=a key "q" type=unknown
+  (none)
+
+[generic] rows=0 key=k type=string
+  (none)
+
+[generic] rows=0 key=k type=hash
+  (none)
+
+[generic] rows=0 key=k type=list
+  (none)
+
+[generic] rows=0 key=k type=set
+  (none)
+
+[generic] rows=0 key=k type=zset
+  (none)
+
+[generic] rows=0 key=k type=stream
+  (none)
+
+[generic] rows=0 key=k type=ReJSON-RL
+  (none)
+
+[generic] rows=0 key=k type=TSDB-TYPE
+  (none)
+
+[generic] rows=0 key=k type=unknown
+  (none)
+
+[generic] rows=0 key=a key "q" type=string
+  (none)
+
+[generic] rows=0 key=a key "q" type=hash
+  (none)
+
+[generic] rows=0 key=a key "q" type=list
+  (none)
+
+[generic] rows=0 key=a key "q" type=set
+  (none)
+
+[generic] rows=0 key=a key "q" type=zset
+  (none)
+
+[generic] rows=0 key=a key "q" type=stream
+  (none)
+
+[generic] rows=0 key=a key "q" type=ReJSON-RL
+  (none)
+
+[generic] rows=0 key=a key "q" type=TSDB-TYPE
+  (none)
+
+[generic] rows=0 key=a key "q" type=unknown
+  (none)
