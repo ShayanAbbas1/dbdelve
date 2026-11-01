@@ -6,7 +6,10 @@ mod run;
 
 use std::time::Duration;
 
-use gpui::{Context, KeyDownEvent, Task, Window};
+use gpui::{
+    Context, Entity, Focusable, Hsla, IntoElement, KeyDownEvent, Styled, Task, Window, canvas,
+    fill, px,
+};
 use gpui_component::input;
 
 use self::{
@@ -66,6 +69,44 @@ fn tab(workspace: &mut Workspace) -> Option<&mut QueryTab> {
         return None;
     }
     workspace.profile_mut()?.session.active_query_tab_mut()
+}
+
+/// Normal mode's block caret, painted over the editor's own: the editor draws
+/// only a one-pixel line and has no setting for another shape. Painted after
+/// the editor, so it reads the caret the editor laid out this frame.
+pub(crate) fn block_cursor(
+    editor: &Entity<input::EditorState>,
+    font_size: f32,
+    color: Hsla,
+) -> impl IntoElement {
+    let editor = editor.clone();
+    canvas(
+        |_, _, _| {},
+        move |_, _, window, cx| {
+            let editor = editor.read(cx);
+            if !editor.focus_handle(cx).is_focused(window) {
+                return;
+            }
+            let caret = match editor.prepaint_caret_geometry() {
+                None => return,
+                Some(caret) => caret,
+            };
+            // The buffer is monospace, so any character's width is the block's.
+            let text_system = window.text_system();
+            let font = text_system.resolve_font(&window.text_style().font());
+            let width = match text_system.advance(font, px(font_size), 'm') {
+                Err(_) => return,
+                Ok(size) => size.width,
+            };
+            let mut bounds = caret.cursor_bounds();
+            // The caret's bounds leave out the vertical scroll; the editor adds
+            // it when it paints.
+            bounds.origin.y += caret.scroll_offset().y;
+            bounds.size.width = width;
+            window.paint_quad(fill(bounds, color));
+        },
+    )
+    .absolute()
 }
 
 /// Bound on the buffer's bubble phase, so it is reached only once the editor
