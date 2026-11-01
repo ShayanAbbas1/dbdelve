@@ -10,6 +10,7 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "vendor/**"
+      - "plugins/**"
       - "build.rs"
       - "assets/windows/**"
       - "compose.yaml"
@@ -23,6 +24,7 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "vendor/**"
+      - "plugins/**"
       - "build.rs"
       - "assets/windows/**"
       - "compose.yaml"
@@ -129,6 +131,15 @@ jobs:
         shell: bash
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
+      # The plugin crates are workspace members outside default-members, so
+      # the plain cargo commands above never build them.
+      - &plugins
+        name: plugins
+        # bash on Windows too: pwsh fails a step only on its last command.
+        shell: bash
+        run: |
+          cargo clippy -p dbdelve-plugin-protocol --all-targets -- -D warnings
+          cargo test -p dbdelve-plugin-protocol
       - name: seed databases
         run: |
           sqlite3 dev/dbdelve_dev.db < dev/sqlite/001-dbdelve-demo.sql
@@ -198,6 +209,7 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: test
         run: cargo test
+      - *plugins
 
   windows:
     runs-on: windows-latest
@@ -210,6 +222,7 @@ jobs:
       # The storage tests are what exercise the APPDATA paths.
       - name: test
         run: cargo test
+      - *plugins
       - *vendor-changed
       # The backdrop blur's Direct3D WARP pixel tests live in the vendored
       # DirectX renderer, which isn't a workspace member, so `cargo test` alone

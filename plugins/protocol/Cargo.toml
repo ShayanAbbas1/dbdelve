@@ -1,0 +1,27 @@
+[package]
+name = "dbdelve-plugin-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The frames, messages and limits DBDelve and its plugins speak"
+publish = false
+
+# The arrow-* crates at the version duckdb already locks, so the host decodes
+# with the same copy the graph holds.
+[dependencies]
+arrow-schema = "=60.0.0"
+arrow-array = "=60.0.0"
+arrow-buffer = "=60.0.0"
+# `default-features = false` is load-bearing: `lz4` and `zstd` are what decode a
+# compressed batch, and protocol 1 forbids compression because a compressed
+# body's decoded size is not its declared size. Left out, a compressed batch
+# cannot even decode, whatever slips past the check in `arrow::decode_batch`.
+arrow-ipc = { version = "=60.0.0", default-features = false }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+
+# Both already locked through arrow-ipc. The tests hand-build the messages a
+# plugin breaking the rules would send, which arrow-ipc's writer will not.
+[dev-dependencies]
+arrow-data = "=60.0.0"
+flatbuffers = { version = "=25.12.19", default-features = false }

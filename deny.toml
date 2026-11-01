@@ -21,6 +21,7 @@ confidence-threshold = 0.8
 # Copyleft is admitted crate by crate, never by license.
 exceptions = [
     { crate = "dbdelve", allow = ["GPL-3.0-only"] },
+    { crate = "dbdelve-plugin-protocol", allow = ["GPL-3.0-only"] },
     # The fonts the app embeds.
     { crate = "guic-gpui-assets", allow = ["OFL-1.1"] },
     # MPL-2.0's copyleft covers only the crate's own files, if changed.
