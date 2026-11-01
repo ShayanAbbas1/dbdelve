@@ -9,7 +9,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufReader, Read, Write};
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
@@ -37,6 +37,11 @@ pub(super) struct Host {
     next_id: AtomicU64,
     stderr: Arc<Mutex<Ring>>,
     stderr_reader: JoinHandle<()>,
+    /// One statement or catalog call at a time, as every built-in
+    /// connection's mutex does. `stop`, `cancel` and `credit` never take it.
+    session: Mutex<()>,
+    /// A plugin said the session is gone while the process lives on.
+    lost: AtomicBool,
 }
 
 /// What the reader thread shares with the handle.
@@ -152,6 +157,8 @@ impl Host {
             next_id: AtomicU64::new(1),
             stderr: ring,
             stderr_reader,
+            session: Mutex::new(()),
+            lost: AtomicBool::new(false),
         }))
     }
 
@@ -207,8 +214,31 @@ impl Host {
         Ok(())
     }
 
+    pub(super) fn session(&self) -> MutexGuard<'_, ()> {
+        lock(&self.session)
+    }
+
     pub(super) fn is_reset(&self) -> bool {
         lock(&self.shared.routing).reset.is_some()
+    }
+
+    pub(super) fn is_lost(&self) -> bool {
+        self.is_reset() || self.lost.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn lose_session(&self) {
+        self.lost.store(true, Ordering::Relaxed);
+    }
+
+    /// Something the caller found in what the plugin sent, past what the
+    /// reader checks: data that does not decode, an answer out of place. The
+    /// plugin is ended and the reset error for the running statement returned
+    /// at once, worded for the violation rather than the kill.
+    pub(super) fn violated(&self, violation: &str) -> DbError {
+        let cause = self
+            .shared
+            .end(broke_protocol(&self.shared.name, violation));
+        reset_error(&cause, true)
     }
 
     /// `running_query`: the request that met the reset was a statement, which
@@ -331,17 +361,25 @@ impl Shared {
         });
         let name = &self.name;
         let cause = match (broke, status) {
-            (Some(violation), _) => {
-                format!("The {name} plugin broke protocol 1 ({violation}) and was stopped.")
-            }
+            (Some(violation), _) => broke_protocol(name, &violation),
             (None, Some(status)) => format!("The {name} plugin stopped ({status})."),
             (None, None) => format!("The {name} plugin stopped."),
         };
         let mut routing = lock(&self.routing);
+        // A cause given when the plugin was ended on purpose says more than
+        // the kill's exit status.
+        let cause = routing.reset.get_or_insert(cause).clone();
         for (_, pending) in routing.pending.drain() {
             let _ = pending.sender.send(Routed::Reset(cause.clone()));
         }
-        routing.reset = Some(cause);
+    }
+
+    /// Ends the plugin for `cause`, which the reset then reports; the cause
+    /// already recorded, if one was.
+    fn end(&self, cause: String) -> String {
+        let cause = lock(&self.routing).reset.get_or_insert(cause).clone();
+        self.kill();
+        cause
     }
 
     fn kill(&self) {
@@ -423,6 +461,10 @@ impl Ring {
             .trim()
             .to_owned()
     }
+}
+
+fn broke_protocol(name: &str, violation: &str) -> String {
+    format!("The {name} plugin broke protocol 1 ({violation}) and was stopped.")
 }
 
 fn reset_error(cause: &str, running_query: bool) -> DbError {

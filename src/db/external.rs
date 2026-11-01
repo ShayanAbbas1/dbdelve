@@ -14,14 +14,19 @@ mod rows;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::mpsc::RecvTimeoutError;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use arrow_schema::SchemaRef;
+use dbdelve_plugin_protocol::arrow::{decode_batch, decode_schema};
 use dbdelve_plugin_protocol::limits::{HELLO_DEADLINE, OPEN_DEADLINE};
-use dbdelve_plugin_protocol::{PROTOCOL, Password, Request, Response};
+use dbdelve_plugin_protocol::{ErrorKind, PROTOCOL, Password, Request, Response};
 
 use super::plugin::Plugin;
-use super::{DbError, Engine};
+use super::{DbError, Engine, Fetch, QueryResult, Stopped};
 use host::{Host, Routed, failure};
+use rows::Rows;
+
+pub const CANCELLED: &str = "Cancelled.";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExternalConfig {
@@ -121,7 +126,215 @@ impl Connection {
     }
 
     pub fn is_lost(&self) -> bool {
-        self.host.is_reset()
+        self.host.is_lost()
+    }
+
+    /// Whether a read stopped at the row limit can end early here, rather
+    /// than always being drained to its end by the plugin.
+    pub fn stops_at_limit(&self) -> bool {
+        self.opened.stops_early
+    }
+
+    /// Runs one statement as typed, keeping at most `fetch.limit` rows. Past
+    /// the limit the plugin is told to `stop`: it sends no more rows and
+    /// either ends the statement, when `eligible` and provably safe, or drains
+    /// it on its own side. A plugin that dies on the way is a reset, and
+    /// nothing here sends the statement again.
+    pub fn query(&self, sql: &str, fetch: Fetch) -> Result<QueryResult, DbError> {
+        let _session = self.host.session();
+        fetch.hold()?;
+        let started = Instant::now();
+        let eligible = fetch.reads_only && fetch.limit.is_some();
+        let query = Request::Query {
+            sql: sql.to_owned(),
+            eligible,
+        };
+        let (id, answers) = self.host.request(query)?;
+        let mut read = Read::new(fetch, eligible, started);
+        loop {
+            let Ok(routed) = answers.recv() else {
+                return Err(self.host.reset_error(true));
+            };
+            match routed {
+                Routed::Data(payload) => {
+                    read.data(&payload)
+                        .map_err(|violation| self.host.violated(&violation))?;
+                    if read.stop_due() {
+                        self.host.send(id, Request::Stop);
+                    }
+                    // Only now, with every kept row handed on: a feed whose
+                    // taker has stopped taking holds this back, and the plugin
+                    // stops sending without the reader ever pausing.
+                    let bytes = payload.len() as u64;
+                    self.host.send(id, Request::Credit { bytes });
+                }
+                Routed::Control(Response::End {
+                    rows,
+                    rows_affected,
+                    stopped,
+                    messages,
+                    more_sets,
+                }) => {
+                    let end = End {
+                        rows,
+                        rows_affected,
+                        stopped,
+                        messages,
+                        more_sets,
+                    };
+                    return read
+                        .finish(end)
+                        .map_err(|violation| self.host.violated(&violation));
+                }
+                Routed::Control(Response::Error {
+                    kind,
+                    message,
+                    position,
+                    lost,
+                    ..
+                }) => {
+                    if lost {
+                        self.host.lose_session();
+                    }
+                    return Err(match kind {
+                        ErrorKind::Cancelled => failure(CANCELLED.to_owned()),
+                        _ => DbError {
+                            message,
+                            position: position.and_then(|at| usize::try_from(at).ok()),
+                        },
+                    });
+                }
+                Routed::Control(_) => {
+                    return Err(self
+                        .host
+                        .violated("an answer to a query that is neither `end` nor `error`"));
+                }
+                Routed::Reset(_) => return Err(self.host.reset_error(true)),
+            }
+        }
+    }
+}
+
+/// A query's `end`, as the read takes it.
+struct End {
+    rows: u64,
+    rows_affected: Option<u64>,
+    stopped: bool,
+    messages: Vec<String>,
+    more_sets: u32,
+}
+
+/// One query's rows as they arrive, kept up to the limit.
+struct Read<'a> {
+    fetch: Fetch<'a>,
+    eligible: bool,
+    started: Instant,
+    set: Option<(SchemaRef, Rows)>,
+    result: QueryResult,
+    kept: usize,
+    /// When the kept rows reached the limit.
+    filled: Option<Duration>,
+    stop_sent: bool,
+}
+
+impl<'a> Read<'a> {
+    fn new(fetch: Fetch<'a>, eligible: bool, started: Instant) -> Self {
+        Self {
+            fetch,
+            eligible,
+            started,
+            set: None,
+            result: QueryResult::default(),
+            kept: 0,
+            filled: None,
+            stop_sent: false,
+        }
+    }
+
+    /// One data frame: the result set's schema, then its batches. `Err` is
+    /// the violation in it.
+    fn data(&mut self, payload: &[u8]) -> Result<(), String> {
+        let Some((schema, rows)) = &mut self.set else {
+            let schema = decode_schema(payload).map_err(|violation| violation.to_string())?;
+            let rows = Rows::new(&schema);
+            if let Some(feed) = self.fetch.feed {
+                feed.begin(rows.columns().to_vec());
+            }
+            self.result.columns = rows.columns().to_vec();
+            self.set = Some((schema, rows));
+            return Ok(());
+        };
+        let room = self
+            .fetch
+            .limit
+            .map_or(usize::MAX, |limit| limit.saturating_sub(self.kept));
+        // In flight when `stop` went: the plugin's `end` counts these rows,
+        // so they are dropped without decoding.
+        if room == 0 {
+            return Ok(());
+        }
+        let batch = decode_batch(schema, payload).map_err(|violation| violation.to_string())?;
+        let batch = batch.slice(0, batch.num_rows().min(room));
+        let (feed, result) = (self.fetch.feed, &mut self.result);
+        rows.push_batch(&batch, |row| {
+            result.bytes += row.text_len();
+            match feed {
+                Some(feed) => feed.push(row),
+                None => result.rows.push(row),
+            }
+        })
+        .map_err(|error| error.message)?;
+        self.kept += batch.num_rows();
+        if batch.num_rows() > 0 && self.fetch.limit == Some(self.kept) {
+            self.filled = Some(self.started.elapsed());
+            if let Some(feed) = self.fetch.feed {
+                feed.fill();
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether `stop` is to be sent now: once, for every capped query, as
+    /// soon as the limit's rows are kept.
+    fn stop_due(&mut self) -> bool {
+        let due = !self.stop_sent && self.fetch.limit.is_some_and(|limit| self.kept >= limit);
+        self.stop_sent |= due;
+        due
+    }
+
+    /// The result, timed as Postgres's is: to the last kept row when rows
+    /// past the limit came after it. `Err` is a plugin claiming to have ended
+    /// early a statement it was never allowed to.
+    fn finish(mut self, end: End) -> Result<QueryResult, String> {
+        if end.stopped && !(self.eligible && self.stop_sent) {
+            return Err("`end` saying it stopped a statement it was not asked to stop".into());
+        }
+        let capped = !end.stopped
+            && self.fetch.limit.is_some_and(|limit| self.kept >= limit)
+            && end.rows > self.kept as u64;
+        self.result.capped_from = capped.then(|| usize::try_from(end.rows).unwrap_or(usize::MAX));
+        self.result.stopped = end.stopped.then_some(Stopped::AtLimit);
+        self.result.elapsed = match self.filled {
+            Some(filled) if capped || end.stopped => filled,
+            _ => self.started.elapsed(),
+        };
+        self.result.rows_affected = end.rows_affected;
+        self.result.messages = end.messages;
+        // ponytail: only the first result set crosses protocol 1; a later
+        // protocol carries the rest as `QueryResult::rest`.
+        if end.more_sets > 0 {
+            let sets = match end.more_sets {
+                1 => "set",
+                _ => "sets",
+            };
+            self.result.messages.push(format!(
+                "{} more result {sets} followed, which DBDelve does not show through a plugin.",
+                end.more_sets
+            ));
+        }
+        self.result.read_only_reason =
+            Some("Rows read through a plugin driver are read-only.".into());
+        Ok(self.result)
     }
 }
 
@@ -162,6 +375,7 @@ mod tests {
     use dbdelve_plugin_protocol::limits::CLOSE_GRACE;
 
     use super::*;
+    use crate::db::Feed;
 
     fn config() -> ExternalConfig {
         ExternalConfig {
@@ -366,6 +580,185 @@ mod tests {
         assert!(cause.starts_with("The Echo plugin stopped ("), "{cause}");
         assert!(cause.contains('3'), "{cause}");
         assert!(connection.is_lost());
+    }
+
+    fn capped(limit: usize, reads_only: bool) -> Fetch<'static> {
+        Fetch {
+            limit: Some(limit),
+            reads_only,
+            ..Fetch::default()
+        }
+    }
+
+    fn cell(result: &QueryResult) -> Option<&str> {
+        result.rows.first()?.get(0)
+    }
+
+    #[test]
+    fn every_row_arrives_in_order_with_its_nulls() {
+        let connection = Connection::open(&config()).unwrap();
+        let result = connection.query("rows 10000", Fetch::default()).unwrap();
+        assert_eq!(result.rows.len(), 10_000);
+        for (n, row) in (1..).zip(&result.rows) {
+            assert_eq!(row.get(0), Some(n.to_string().as_str()));
+            let label = (n % 7 != 0).then(|| format!("row {n}"));
+            assert_eq!(row.get(1), label.as_deref(), "row {n}");
+        }
+        assert_eq!(
+            result
+                .columns
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>(),
+            ["n", "label"]
+        );
+        assert_eq!((result.capped_from, result.stopped), (None, None));
+        assert!(result.edit.is_none() && result.read_only_reason.is_some());
+
+        let typed = "echo SELECT 'a' -- x";
+        let result = connection.query(typed, Fetch::default()).unwrap();
+        assert_eq!(cell(&result), Some(typed));
+    }
+
+    #[test]
+    fn rows_go_to_the_feed_when_there_is_one() {
+        let connection = Connection::open(&config()).unwrap();
+        let feed = Feed::default();
+        let fetch = Fetch {
+            feed: Some(&feed),
+            ..capped(1500, false)
+        };
+        let result = connection.query("rows 3000", fetch).unwrap();
+        assert!(result.rows.is_empty());
+        let fed = feed.take();
+        assert_eq!(fed.rows.len(), 1500);
+        assert_eq!(fed.columns.len(), 2);
+        assert!(fed.filled.is_some());
+        assert_eq!(result.capped_from, Some(3000));
+    }
+
+    #[test]
+    fn the_row_limit_stops_an_eligible_read() {
+        let connection = Connection::open(&config()).unwrap();
+        assert!(connection.stops_at_limit());
+        let started = Instant::now();
+        let result = connection.query("rows 1000000", capped(100, true)).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(result.stopped, Some(Stopped::AtLimit));
+        assert_eq!(result.capped_from, None);
+        assert_eq!(result.rows.len(), 100);
+        assert_eq!(result.rows[99].get(0), Some("100"));
+    }
+
+    #[test]
+    fn an_ineligible_read_drains_without_cancelling() {
+        let connection = Connection::open(&config()).unwrap();
+        let result = connection
+            .query("rows 1000000", capped(100, false))
+            .unwrap();
+        assert_eq!(result.capped_from, Some(1_000_000));
+        assert_eq!(result.stopped, None);
+        assert_eq!(result.rows.len(), 100);
+
+        let cancels = connection.query("cancels", Fetch::default()).unwrap();
+        assert_eq!(cell(&cancels), Some("0"));
+    }
+
+    #[test]
+    fn a_capped_read_keeps_the_users_transaction() {
+        let connection = Connection::open(&config()).unwrap();
+        connection.query("begin", Fetch::default()).unwrap();
+        let result = connection.query("rows 1000000", capped(2, true)).unwrap();
+        assert_eq!(result.stopped, None, "stopping would end the transaction");
+        assert_eq!(result.capped_from, Some(1_000_000));
+        assert_eq!(result.rows.len(), 2);
+
+        connection.query("commit", Fetch::default()).unwrap();
+        let after = connection.query("rows 1000000", capped(2, true)).unwrap();
+        assert_eq!(after.stopped, Some(Stopped::AtLimit));
+    }
+
+    #[test]
+    fn a_limit_of_zero_keeps_no_rows_and_still_says_how_many_there_were() {
+        let connection = Connection::open(&config()).unwrap();
+        let result = connection.query("rows 5000", capped(0, false)).unwrap();
+        assert!(result.rows.is_empty());
+        assert_eq!(result.columns.len(), 2);
+        assert_eq!(result.capped_from, Some(5000));
+    }
+
+    #[test]
+    fn a_statement_not_held_is_never_sent() {
+        let connection = Connection::open(&config()).unwrap();
+        let held = || false;
+        let fetch = Fetch {
+            held: Some(&held),
+            ..Fetch::default()
+        };
+        let error = connection.query("begin", fetch).err().unwrap();
+        assert_eq!(error.message, "Cancelled before it was sent.");
+        connection.query("rows 3", Fetch::default()).unwrap();
+    }
+
+    #[test]
+    fn a_server_error_is_the_statements_and_lost_marks_the_connection() {
+        let connection = Connection::open(&config()).unwrap();
+        let error = connection.query("fail", Fetch::default()).err().unwrap();
+        assert_eq!(error.message, "echo failed, as asked");
+        assert!(!connection.is_lost());
+
+        connection.query("lost", Fetch::default()).err().unwrap();
+        assert!(connection.is_lost());
+    }
+
+    #[test]
+    fn result_sets_after_the_first_are_said_and_not_shown() {
+        let connection = Connection::open(&config()).unwrap();
+        let result = connection.query("sets 3", Fetch::default()).unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            result.messages,
+            ["2 more result sets followed, which DBDelve does not show through a plugin."]
+        );
+    }
+
+    #[test]
+    fn a_crash_mid_stream_is_a_reset_and_nothing_runs_again() {
+        let connection = Connection::open(&config()).unwrap();
+        let error = connection.query("crash", Fetch::default()).err().unwrap();
+        assert!(error.message.contains("stopped ("), "{}", error.message);
+        assert!(
+            error.message.contains("committed is unknown"),
+            "{}",
+            error.message
+        );
+        assert!(connection.is_lost());
+
+        let again = connection.query("rows 1", Fetch::default()).err().unwrap();
+        assert!(
+            again.message.contains("The connection was reset"),
+            "{}",
+            again.message
+        );
+        assert!(!again.message.contains("committed is unknown"));
+        assert_eq!(connection.host.pid(), None, "no process was started again");
+    }
+
+    #[test]
+    fn result_data_the_protocol_does_not_carry_is_a_reset_never_a_panic() {
+        for statement in ["compressed", "dictionary"] {
+            let connection = Connection::open(&config()).unwrap();
+            let pid = connection.host.pid().unwrap();
+            let error = connection.query(statement, Fetch::default()).err().unwrap();
+            assert!(
+                error.message.contains("broke protocol 1 ("),
+                "{statement}: {}",
+                error.message
+            );
+            assert!(error.message.contains("committed is unknown"));
+            assert!(connection.is_lost());
+            assert!(gone_within(pid, Duration::from_secs(5)), "{statement}");
+        }
     }
 
     #[test]
