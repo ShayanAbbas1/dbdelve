@@ -335,6 +335,13 @@ sqlformat = { version = "=0.5.0", default-features = false }
 # The frames and messages an engine plugin speaks, shared with the plugins so
 # the host's reading of a frame cannot drift from theirs.
 dbdelve-plugin-protocol = { path = "plugins/protocol" }
+# A plugin's Arrow batches, turned into the text the grid shows. `arrow-cast`
+# for display formatting only; all four are already in the graph through
+# duckdb, at the version it locks.
+arrow-array = "=60.0.0"
+arrow-buffer = "=60.0.0"
+arrow-cast = { version = "=60.0.0", default-features = false }
+arrow-schema = "=60.0.0"
 
 # Profile passwords live in the platform keychain, never in profiles.toml:
 # Keychain Services on macOS, Secret Service (gnome-keyring, KWallet) on Linux,

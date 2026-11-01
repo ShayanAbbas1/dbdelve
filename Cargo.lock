@@ -2108,6 +2108,10 @@ name = "dbdelve"
 version = "0.6.2"
 dependencies = [
  "aes 0.8.4",
+ "arrow-array",
+ "arrow-buffer",
+ "arrow-cast",
+ "arrow-schema",
  "base64 0.22.1",
  "calamine",
  "cbc 0.1.2",

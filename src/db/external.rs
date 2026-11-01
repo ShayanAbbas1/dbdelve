@@ -9,6 +9,7 @@
 #[cfg(test)]
 mod echo;
 mod host;
+mod rows;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
