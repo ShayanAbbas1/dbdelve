@@ -387,9 +387,9 @@ impl ConnectionForm {
     ) -> Self {
         let mut config = profile.config.clone();
         if let Some(password) = password
-            && let Some(server) = config.server_mut()
+            && let Some(slot) = config.password_mut()
         {
-            server.password = password;
+            *slot = password;
         }
         let mut form = Self::new(Some(&config), window, cx);
         form.color = profile.color;
@@ -813,6 +813,10 @@ pub(crate) fn default_profile_name(config: &ConnectionConfig) -> String {
         ConnectionConfig::Snowflake(account) => account.database.clone(),
         // A database there is a number, which names nothing.
         ConnectionConfig::Redis(server) => server.host.clone(),
+        // The string can carry a password, so none of it becomes a name.
+        ConnectionConfig::External(external) => {
+            format!("{} ({})", external.plugin.name, external.speaks.label())
+        }
     }
 }
 
@@ -855,10 +859,7 @@ pub(crate) fn password_to_persist(config: &ConnectionConfig, origin: Origin) -> 
     if origin == Origin::Environment {
         return None;
     }
-    config
-        .server()
-        .map(|server| server.password.as_str())
-        .filter(|password| !password.is_empty())
+    config.password().filter(|password| !password.is_empty())
 }
 
 #[cfg(test)]
@@ -1166,6 +1167,32 @@ mod tests {
         });
         assert_eq!(password_to_persist(&account, Origin::Form), None);
         assert_eq!(default_profile_name(&account), "ANALYTICS");
+    }
+
+    #[test]
+    fn a_plugin_profiles_password_goes_to_the_keychain_like_a_servers() {
+        let plugin = Box::leak(Box::new(crate::db::plugin::Plugin {
+            id: "odbc".into(),
+            name: "ODBC".into(),
+            version: "1".into(),
+            executable: "dbdelve-odbc".into(),
+        }));
+        let external = |password: &str| {
+            ConnectionConfig::External(crate::db::ExternalConfig {
+                plugin,
+                speaks: crate::db::Engine::Generic,
+                connection: "DRIVER=Db2;HOSTNAME=h;PORT=50000".into(),
+                user: "a@b.example".into(),
+                password: password.into(),
+                statement_timeout: 0,
+            })
+        };
+        assert_eq!(
+            password_to_persist(&external("hunter2"), Origin::Form),
+            Some("hunter2")
+        );
+        assert_eq!(password_to_persist(&external(""), Origin::Form), None);
+        assert_eq!(default_profile_name(&external("")), "ODBC (Generic SQL)");
     }
 
     #[test]

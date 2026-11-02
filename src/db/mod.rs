@@ -24,8 +24,6 @@ mod clickhouse;
 #[cfg(test)]
 mod conformance;
 mod duckdb;
-// Only the tests open one until `Connection` has an `External` arm.
-#[cfg_attr(not(test), expect(dead_code))]
 mod external;
 mod mongo;
 mod mssql;
@@ -34,7 +32,7 @@ mod mysql;
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod odbc_string;
 #[expect(dead_code, reason = "read once plugins are discovered and persisted")]
-mod plugin;
+pub(crate) mod plugin;
 mod postgres;
 mod redis;
 mod snowflake;
@@ -46,6 +44,7 @@ mod turso;
 mod xlsx;
 
 pub use duckdb::IN_MEMORY as DUCKDB_IN_MEMORY;
+pub use external::ExternalConfig;
 
 pub use mongo::MongoConfig;
 pub use snowflake::{SnowflakeConfig, account_identifier, normalize_host};
@@ -57,7 +56,7 @@ pub use spec::{
     Truncate, TypedExplain,
 };
 pub use spec::{IdentityInsert, ReadOnlySession, UnreadableFloor};
-pub use target::{Target, cancel_cost, is_cancel};
+pub use target::{Driver, Target, cancel_cost, is_cancel};
 
 /// One run's claim on Cancel: [`Connection::query`] runs under it, and
 /// [`Connection::cancel`] stops only what ran under it.
@@ -256,6 +255,15 @@ impl Engine {
     /// pickers that make a profile list it by.
     pub fn has_built_in_driver(self) -> bool {
         self.spec().built_in_driver
+    }
+
+    /// Whether a plugin driver may carry this dialect: SQL whose Read-only
+    /// hold, where it has one, is a statement the plugin can run on its one
+    /// session. ClickHouse's hold rides on each request, which nothing a
+    /// plugin is sent can carry, so offering it would hold nothing.
+    pub fn speaks_through_plugins(self) -> bool {
+        self.syntax() == Syntax::Sql
+            && self.spec().sql.read_only_session != ReadOnlySession::PerRequest
     }
 
     /// The engine's brand logo.
@@ -982,6 +990,16 @@ pub enum ConnectionConfig {
     MongoDb(MongoConfig),
     /// `database` is the database's number, blank for 0.
     Redis(ServerConfig),
+    /// Through a plugin driver. Its host, port and database are inside its
+    /// connection string, so it has no [`ServerConfig`].
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "made once profiles restore one and the form builds one"
+        )
+    )]
+    External(ExternalConfig),
 }
 
 impl ConnectionConfig {
@@ -1008,11 +1026,18 @@ impl ConnectionConfig {
             Self::ClickHouse(_) => Engine::ClickHouse,
             Self::MongoDb(_) => Engine::MongoDb,
             Self::Redis(_) => Engine::Redis,
+            Self::External(external) => external.speaks,
         }
     }
 
     pub fn target(&self) -> Target {
-        Target::built_in(self.engine())
+        match self {
+            Self::External(external) => Target {
+                engine: external.speaks,
+                driver: Driver::Plugin(external.plugin),
+            },
+            _ => Target::built_in(self.engine()),
+        }
     }
 
     /// The server half, for the callers that only have something to say when
@@ -1026,9 +1051,11 @@ impl ConnectionConfig {
             | Self::ClickHouse(server)
             | Self::Redis(server) => Some(server),
             Self::MongoDb(mongo) => Some(&mongo.server),
-            Self::Sqlite { .. } | Self::Turso { .. } | Self::DuckDb { .. } | Self::Snowflake(_) => {
-                None
-            }
+            Self::Sqlite { .. }
+            | Self::Turso { .. }
+            | Self::DuckDb { .. }
+            | Self::Snowflake(_)
+            | Self::External(_) => None,
         }
     }
 
@@ -1043,9 +1070,28 @@ impl ConnectionConfig {
             | Self::ClickHouse(server)
             | Self::Redis(server) => Some(server),
             Self::MongoDb(mongo) => Some(&mut mongo.server),
-            Self::Sqlite { .. } | Self::Turso { .. } | Self::DuckDb { .. } | Self::Snowflake(_) => {
-                None
-            }
+            Self::Sqlite { .. }
+            | Self::Turso { .. }
+            | Self::DuckDb { .. }
+            | Self::Snowflake(_)
+            | Self::External(_) => None,
+        }
+    }
+
+    /// The password the Keychain holds for this profile, where it has one.
+    pub fn password(&self) -> Option<&str> {
+        match self {
+            Self::External(external) => Some(&external.password),
+            _ => self.server().map(|server| server.password.as_str()),
+        }
+    }
+
+    /// The same, for the callers that fill it in from the Keychain or take it
+    /// out to save there.
+    pub fn password_mut(&mut self) -> Option<&mut String> {
+        match self {
+            Self::External(external) => Some(&mut external.password),
+            _ => self.server_mut().map(|server| &mut server.password),
         }
     }
 
@@ -1073,7 +1119,7 @@ impl ConnectionConfig {
                 *database = name;
                 *schema = None;
             }
-            Self::Sqlite { .. } | Self::Turso { .. } => {}
+            Self::Sqlite { .. } | Self::Turso { .. } | Self::External(_) => {}
         }
     }
 
@@ -1185,6 +1231,7 @@ impl ConnectionConfig {
                 statement_timeout, ..
             } => *statement_timeout,
             Self::Snowflake(account) => account.statement_timeout,
+            Self::External(external) => external.statement_timeout,
         }
     }
 
@@ -1197,12 +1244,10 @@ impl ConnectionConfig {
     /// the only reason to type one.
     pub fn needs_reconnect(&self, edited: &Self) -> bool {
         let mut current = self.clone();
-        if let Some(server) = current.server_mut()
-            && edited
-                .server()
-                .is_some_and(|server| server.password.is_empty())
+        if let Some(password) = current.password_mut()
+            && edited.password().is_some_and(str::is_empty)
         {
-            server.password.clear();
+            password.clear();
         }
         current != *edited
     }
@@ -1221,6 +1266,12 @@ impl ConnectionConfig {
             Self::DuckDb { path, .. } if path == DUCKDB_IN_MEMORY => "in memory".to_string(),
             Self::DuckDb { path, .. } => path.clone(),
             Self::Snowflake(account) => account.host(),
+            // The string can carry a password of its own, so only a DSN,
+            // which is a name and nothing else, is shown.
+            Self::External(external) if !external.connection.contains('=') => {
+                external.connection.trim().to_string()
+            }
+            Self::External(_) => "an ODBC connection string".to_string(),
         }
     }
 }
@@ -1240,6 +1291,7 @@ pub enum Connection {
     ClickHouse(clickhouse::Connection),
     MongoDb(mongo::Connection),
     Redis(redis::Connection),
+    External(external::Connection),
 }
 
 impl Connection {
@@ -1283,6 +1335,9 @@ impl Connection {
             }
             ConnectionConfig::MongoDb(mongo) => mongo::Connection::open(&mongo).map(Self::MongoDb),
             ConnectionConfig::Redis(server) => redis::Connection::open(&server).map(Self::Redis),
+            ConnectionConfig::External(external) => {
+                external::Connection::open(&external).map(Self::External)
+            }
         }
     }
 
@@ -1317,6 +1372,7 @@ impl Connection {
             Self::ClickHouse(connection) => connection.query(sql, cancel, fetch),
             Self::MongoDb(connection) => connection.query(sql, cancel, fetch),
             Self::Redis(connection) => connection.query(sql, fetch),
+            Self::External(connection) => connection.query(sql, fetch),
         }
     }
 
@@ -1324,7 +1380,9 @@ impl Connection {
     /// one was (its tunnel and side session shared), so the statement runs
     /// beside whatever this one is running rather than queued behind it, and
     /// closed once it ends. Snowflake and MongoDB need no second one: they
-    /// already run statements side by side, and stop them by `cancel`.
+    /// already run statements side by side, and stop them by `cancel`. Nor
+    /// does a plugin's, which queues it on its one process rather than start
+    /// another per statement.
     ///
     /// `cancel` is made by [`CancelToken::alongside`]. `read_only` puts the
     /// profile's Read-only hold on the new session as well.
@@ -1336,7 +1394,9 @@ impl Connection {
         read_only: bool,
     ) -> Result<QueryResult, DbError> {
         let opened = match self {
-            Self::Snowflake(_) | Self::MongoDb(_) => return self.query(sql, cancel, fetch),
+            Self::Snowflake(_) | Self::MongoDb(_) | Self::External(_) => {
+                return self.query(sql, cancel, fetch);
+            }
             // Never joined to the arm above: that would put every statement
             // of a queue run at once on the session's mutex, one after another.
             Self::ClickHouse(connection) => {
@@ -1419,6 +1479,7 @@ impl Connection {
             Self::Turso(connection) => connection.alongside().map(Self::Turso),
             Self::DuckDb(connection) => connection.alongside().map(Self::DuckDb),
             Self::Redis(connection) => connection.alongside().map(Self::Redis),
+            Self::External(connection) => connection.apart().map(Self::External),
         }
     }
 
@@ -1489,7 +1550,8 @@ impl Connection {
             | Self::Sqlite(_)
             | Self::Turso(_)
             | Self::DuckDb(_)
-            | Self::MongoDb(_) => self.query(
+            | Self::MongoDb(_)
+            | Self::External(_) => self.query(
                 sql,
                 cancel,
                 Fetch {
@@ -1521,6 +1583,7 @@ impl Connection {
             Self::ClickHouse(connection) => connection.catalog(),
             Self::MongoDb(connection) => connection.catalog(),
             Self::Redis(connection) => connection.catalog(),
+            Self::External(connection) => connection.catalog(),
         }
     }
 
@@ -1537,7 +1600,7 @@ impl Connection {
             Self::Snowflake(connection) => connection.routines(),
             Self::ClickHouse(_) => Ok(Catalog::default()),
             Self::MongoDb(connection) => connection.routines(),
-            Self::Redis(_) => Ok(Catalog::default()),
+            Self::Redis(_) | Self::External(_) => Ok(Catalog::default()),
         }
     }
 
@@ -1561,7 +1624,8 @@ impl Connection {
             | Self::DuckDb(_)
             | Self::Snowflake(_)
             | Self::ClickHouse(_)
-            | Self::Redis(_) => Ok(Sizes::new()),
+            | Self::Redis(_)
+            | Self::External(_) => Ok(Sizes::new()),
         }
     }
 
@@ -1577,6 +1641,7 @@ impl Connection {
             Self::Sqlite(connection) => connection.references(schema, relation),
             Self::Turso(connection) => connection.references(schema, relation),
             Self::DuckDb(connection) => connection.references(schema, relation),
+            Self::External(connection) => connection.references(schema, relation),
             // Nothing declares one document's field a reference to another's.
             Self::Snowflake(_) | Self::ClickHouse(_) | Self::MongoDb(_) | Self::Redis(_) => {
                 Ok(Vec::new())
@@ -1596,7 +1661,7 @@ impl Connection {
             Self::Snowflake(connection) => connection.databases(),
             Self::ClickHouse(connection) => connection.databases(),
             Self::DuckDb(connection) => connection.databases(),
-            Self::Sqlite(_) | Self::Turso(_) => Ok(Databases::default()),
+            Self::Sqlite(_) | Self::Turso(_) | Self::External(_) => Ok(Databases::default()),
         }?;
         databases.system_last(engine);
         Ok(databases)
@@ -1689,6 +1754,7 @@ impl Connection {
             Self::ClickHouse(connection) => connection.structure(schema, relation),
             Self::MongoDb(connection) => connection.structure(schema, relation),
             Self::Redis(connection) => connection.structure(schema, relation),
+            Self::External(connection) => connection.structure(schema, relation),
         }
     }
 
@@ -1708,6 +1774,9 @@ impl Connection {
             Self::ClickHouse(connection) => connection.ddl(schema, relation, kind),
             Self::MongoDb(connection) => connection.ddl(schema, relation),
             Self::Redis(connection) => connection.ddl(schema, relation),
+            Self::External(_) => Err(plain_error(
+                "Copy DDL is not offered through a plugin driver.".into(),
+            )),
         }
     }
 
@@ -1735,7 +1804,7 @@ impl Connection {
         if let Some(alongside) = cancel.stop_alongside()
             && !matches!(
                 self,
-                Self::Snowflake(_) | Self::ClickHouse(_) | Self::MongoDb(_)
+                Self::Snowflake(_) | Self::ClickHouse(_) | Self::MongoDb(_) | Self::External(_)
             )
         {
             return alongside
@@ -1754,6 +1823,7 @@ impl Connection {
             Self::ClickHouse(connection) => connection.cancel(cancel),
             Self::MongoDb(connection) => connection.cancel(cancel),
             Self::Redis(connection) => connection.cancel(),
+            Self::External(connection) => connection.cancel(),
         }
     }
 
@@ -1762,11 +1832,13 @@ impl Connection {
     ///
     /// Only the engines with one long-lived session can lose it: SQL Server
     /// reconnects inside its next run, MongoDB's driver redials from its pool,
-    /// Snowflake speaks HTTP, and a SQLite file has no socket.
+    /// Snowflake speaks HTTP, and a SQLite file has no socket. A plugin's is
+    /// lost with its process, or when it says its session is.
     pub fn is_lost(&self) -> bool {
         match self {
             Self::Postgres(connection) => connection.is_lost(),
             Self::MySql(connection) => connection.is_lost(),
+            Self::External(connection) => connection.is_lost(),
             Self::SqlServer(_)
             | Self::Sqlite(_)
             | Self::Turso(_)
@@ -1787,8 +1859,10 @@ impl Connection {
     /// `sql::gate` (src/sql.rs:1268), the real boundary, is not the only thing
     /// standing between Read-only and a write reaching the server.
     pub fn set_read_only(&self, read_only: bool) -> Result<(), DbError> {
-        if let Self::ClickHouse(connection) = self {
-            return connection.set_read_only(read_only);
+        match self {
+            Self::ClickHouse(connection) => return connection.set_read_only(read_only),
+            Self::External(connection) => return connection.set_read_only(read_only),
+            _ => {}
         }
         let engine = match self {
             Self::Postgres(_) => Engine::Postgres,
@@ -1801,12 +1875,36 @@ impl Connection {
             Self::ClickHouse(_) => Engine::ClickHouse,
             Self::MongoDb(_) => Engine::MongoDb,
             Self::Redis(_) => Engine::Redis,
+            Self::External(connection) => connection.speaks(),
         };
         let Some(statement) = read_only_statement(engine, read_only) else {
             return Ok(());
         };
         self.query(statement, &CancelToken::default(), Fetch::default())
             .map(|_| ())
+    }
+
+    /// The database the driver says it reached, where a plugin driver
+    /// carries the connection: the form suggests a dialect from it.
+    #[cfg_attr(not(test), expect(dead_code, reason = "the form's Test reads it"))]
+    pub fn reported_dbms(&self) -> Option<&str> {
+        match self {
+            Self::External(connection) => Some(&connection.opened().dbms_name),
+            _ => None,
+        }
+    }
+
+    /// Whether a read stopped at the row limit can end there rather than be
+    /// drained to its end. Every built-in driver can; a plugin says.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the conformance suite reads it")
+    )]
+    pub fn stops_at_limit(&self) -> bool {
+        match self {
+            Self::External(connection) => connection.stops_at_limit(),
+            _ => true,
+        }
     }
 }
 
@@ -4820,6 +4918,25 @@ mod tests {
              CONSTRAINT \"pk\" PRIMARY KEY (id),\n    \
              CONSTRAINT \"by_note\" CHECK (note <> N'')\n);\nCREATE INDEX by_note;"
         );
+    }
+
+    #[test]
+    fn a_plugin_is_offered_only_dialects_whose_hold_it_can_carry() {
+        let offered: Vec<_> = Engine::ALL
+            .into_iter()
+            .filter(|engine| engine.speaks_through_plugins())
+            .collect();
+        for engine in &offered {
+            assert_eq!(
+                engine.holds_read_only(),
+                read_only_statement(*engine, true).is_some(),
+                "{engine:?}"
+            );
+        }
+        for engine in [Engine::ClickHouse, Engine::MongoDb, Engine::Redis] {
+            assert!(!offered.contains(&engine), "{engine:?}");
+        }
+        assert!(offered.contains(&Engine::Generic));
     }
 
     #[test]

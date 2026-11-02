@@ -23,6 +23,8 @@
 //! | `fail`         | `error {kind: server, sqlstate: "42000"}`                              |
 //! | `lost`         | `error {lost: true}`                                                   |
 //! | `echo …`, `SET …` | the statement's own text as one cell, proving nothing rewrote it    |
+//! | `last`         | the text of the statement before it, as one cell                       |
+//! | `pid`          | echo's own process id, as one cell                                     |
 //! | `sets N`       | one row, and `end {more_sets: N - 1}`                                  |
 //! | `cancels`      | how many `cancel` frames it has received, as one cell                  |
 //!
@@ -37,6 +39,7 @@
 //! `DBDELVE_ECHO_STDERR=<text>` writes the text to stderr and exits before
 //! `hello`; `DBDELVE_ECHO_PLAIN=1` leaves `references` out of `optional`;
 //! `DBDELVE_ECHO_DRAINS=1` opens with `stops_early: false`;
+//! `DBDELVE_ECHO_REFUSE_SET=1` answers every `SET …` as `fail` does;
 //! `DBDELVE_ECHO_LINGER=<ms>` only sleeps that long, which is what `orphan`
 //! starts.
 //!
@@ -297,6 +300,8 @@ struct Echo {
     drains: bool,
     transaction: bool,
     optional: Vec<String>,
+    refuses_set: bool,
+    last: String,
 }
 
 impl Echo {
@@ -307,6 +312,8 @@ impl Echo {
             out: BufWriter::new(io::stdout().lock()),
             drains: env::var("DBDELVE_ECHO_DRAINS").is_ok_and(|value| value == "1"),
             transaction: false,
+            refuses_set: env::var("DBDELVE_ECHO_REFUSE_SET").is_ok_and(|value| value == "1"),
+            last: String::new(),
             optional: match plain {
                 true => Vec::new(),
                 false => vec![REFERENCES.to_string()],
@@ -400,6 +407,7 @@ impl Echo {
     }
 
     fn query(&mut self, id: u64, sql: &str, eligible: bool) {
+        let previous = std::mem::replace(&mut self.last, sql.to_owned());
         let mut words = sql.split_whitespace();
         let command = words.next().unwrap_or_default();
         let argument = words.next().unwrap_or_default();
@@ -495,9 +503,28 @@ impl Echo {
                 true,
             ),
             "echo" => self.one_cell(id, "statement", Arc::new(StringArray::from(vec![sql])), 0),
+            set if set.eq_ignore_ascii_case("set") && self.refuses_set => self.error(
+                id,
+                ErrorKind::Server,
+                "echo refused the setting, as asked".into(),
+                Some("42000".into()),
+                false,
+            ),
             set if set.eq_ignore_ascii_case("set") => {
                 self.one_cell(id, "statement", Arc::new(StringArray::from(vec![sql])), 0);
             }
+            "pid" => self.one_cell(
+                id,
+                "pid",
+                Arc::new(Int64Array::from(vec![i64::from(process::id())])),
+                0,
+            ),
+            "last" => self.one_cell(
+                id,
+                "statement",
+                Arc::new(StringArray::from(vec![previous])),
+                0,
+            ),
             "sets" => {
                 let more = u32::try_from(number().saturating_sub(1)).unwrap_or(u32::MAX);
                 self.one_cell(id, "set", Arc::new(Int64Array::from(vec![1])), more);

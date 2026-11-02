@@ -34,7 +34,13 @@ pub(super) enum Routed {
     /// One Arrow IPC message, undecoded.
     Data(Vec<u8>),
     /// The plugin is gone, and why, worded for a sentence of its own.
-    Reset(String),
+    Reset(
+        #[cfg_attr(
+            not(test),
+            expect(dead_code, reason = "callers word it from the host's own record")
+        )]
+        String,
+    ),
 }
 
 pub(super) struct Host {

@@ -78,11 +78,48 @@ pub(super) struct Opened {
 pub struct Connection {
     host: Arc<Host>,
     opened: Arc<Opened>,
+    /// What [`Self::apart`] opens again.
+    config: Arc<ExternalConfig>,
 }
 
 impl Connection {
+    /// Refuses a dialect a plugin may not carry before any process starts,
+    /// for a config that reached here by any path, a hand-edited profile's
+    /// included.
     pub fn open(config: &ExternalConfig) -> Result<Self, DbError> {
+        if !config.speaks.speaks_through_plugins() {
+            return Err(failure(format!(
+                "{}'s SQL cannot be spoken through a plugin driver.",
+                config.speaks.label()
+            )));
+        }
         Self::handshake(Host::start(config.plugin)?, config)
+    }
+
+    /// A session of its own: a second process on the same config.
+    pub fn apart(&self) -> Result<Self, DbError> {
+        Self::open(&self.config)
+    }
+
+    pub fn speaks(&self) -> Engine {
+        self.config.speaks
+    }
+
+    /// The dialect's own session statement, run through the plugin as any
+    /// built-in runs it. A hold that fails to land loses the session for
+    /// good: the gate counts on it for a statement it cannot read, so this
+    /// session must run nothing more, and the workspace's reconnect either
+    /// lands the hold or fails the connection. A Generic session holds
+    /// nothing and sends nothing, which the gate already allows for.
+    pub fn set_read_only(&self, read_only: bool) -> Result<(), DbError> {
+        let Some(statement) = super::read_only_statement(self.config.speaks, read_only) else {
+            return Ok(());
+        };
+        let held = self.query(statement, Fetch::default());
+        if read_only && held.is_err() {
+            self.host.lose_session();
+        }
+        held.map(|_| ())
     }
 
     fn handshake(host: Arc<Host>, config: &ExternalConfig) -> Result<Self, DbError> {
@@ -139,6 +176,7 @@ impl Connection {
         Ok(Self {
             host,
             opened: Arc::new(opened),
+            config: Arc::new(config.clone()),
         })
     }
 
@@ -645,6 +683,110 @@ mod tests {
         assert!(echo::alive(pid), "a clone still holds the connection");
         drop(clone);
         assert!(gone_within(pid, CLOSE_GRACE + Duration::from_secs(1)));
+    }
+
+    fn through_the_engine_enum(config: ExternalConfig) -> crate::db::Connection {
+        crate::db::Connection::open(crate::db::ConnectionConfig::External(config)).unwrap()
+    }
+
+    fn one_cell(result: &QueryResult) -> String {
+        result.rows[0].get(0).unwrap().to_owned()
+    }
+
+    #[test]
+    fn a_plugin_connection_answers_through_the_engine_enum_and_never_edits() {
+        let connection = through_the_engine_enum(config());
+        let cancel = crate::db::CancelToken::default();
+        let read = connection
+            .query("rows 10", &cancel, Fetch::default())
+            .unwrap();
+        assert_eq!(read.rows.len(), 10);
+        let preview = connection
+            .generated("rows 10", &cancel, None, Some(3))
+            .unwrap();
+        assert_eq!(preview.rows.len(), 3);
+        assert!(!connection.catalog().unwrap().schemas.is_empty());
+        for result in [&read, &preview] {
+            assert!(result.edit.is_none());
+            assert_eq!(
+                result.read_only_reason.as_deref(),
+                Some("Rows read through a plugin driver are read-only.")
+            );
+        }
+        assert_eq!(connection.reported_dbms(), Some("Echo"));
+        assert!(connection.stops_at_limit());
+    }
+
+    #[test]
+    fn statements_alongside_share_the_process_and_a_session_apart_starts_its_own() {
+        let connection = through_the_engine_enum(config());
+        let crate::db::Connection::External(inner) = &connection else {
+            panic!("not a plugin connection");
+        };
+        let own = inner.host.pid().unwrap().to_string();
+        let alongside = connection
+            .query_alongside(
+                "pid",
+                &crate::db::CancelToken::alongside(),
+                Fetch::default(),
+                true,
+            )
+            .unwrap();
+        assert_eq!(one_cell(&alongside), own);
+        let apart = connection.apart().unwrap();
+        let theirs = apart
+            .query("pid", &crate::db::CancelToken::default(), Fetch::default())
+            .unwrap();
+        assert_ne!(one_cell(&theirs), own);
+    }
+
+    #[test]
+    fn the_read_only_hold_is_the_dialects_own_statement_as_written() {
+        for (speaks, sent) in [
+            (Engine::Postgres, "SET default_transaction_read_only = on"),
+            (Engine::MySql, "SET SESSION TRANSACTION READ ONLY"),
+            // Holds nothing, so sends nothing; the gate asks for Read-write
+            // for what it cannot read instead.
+            (Engine::Generic, ""),
+        ] {
+            let connection = through_the_engine_enum(ExternalConfig { speaks, ..config() });
+            connection.set_read_only(true).unwrap();
+            let last = connection
+                .query("last", &crate::db::CancelToken::default(), Fetch::default())
+                .unwrap();
+            assert_eq!(one_cell(&last), sent, "{speaks:?}");
+        }
+    }
+
+    #[test]
+    fn a_hold_that_fails_loses_the_session_rather_than_run_unheld() {
+        let connection = open_with(&[("DBDELVE_ECHO_REFUSE_SET", "1")]).unwrap();
+        let error = connection.set_read_only(true).err().unwrap();
+        assert_eq!(error.message, "echo refused the setting, as asked");
+        assert!(connection.is_lost());
+        assert!(connection.query("rows 1", Fetch::default()).is_err());
+
+        // Failing to let go leaves the server held tighter than asked, which
+        // costs nothing the gate relies on.
+        let connection = open_with(&[("DBDELVE_ECHO_REFUSE_SET", "1")]).unwrap();
+        assert!(connection.set_read_only(false).is_err());
+        assert!(!connection.is_lost());
+    }
+
+    #[test]
+    fn a_dialect_no_plugin_can_hold_is_refused_before_anything_starts() {
+        for speaks in [Engine::ClickHouse, Engine::MongoDb, Engine::Redis] {
+            let error = Connection::open(&ExternalConfig { speaks, ..config() })
+                .err()
+                .unwrap();
+            assert_eq!(
+                error.message,
+                format!(
+                    "{}'s SQL cannot be spoken through a plugin driver.",
+                    speaks.label()
+                )
+            );
+        }
     }
 
     #[test]

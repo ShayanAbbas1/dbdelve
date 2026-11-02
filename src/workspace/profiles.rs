@@ -374,7 +374,7 @@ impl Workspace {
                 ),
             ],
             // `from_url` refuses the scheme, so no URL arrives as one.
-            ConnectionConfig::Snowflake(_) => Vec::new(),
+            ConnectionConfig::Snowflake(_) | ConnectionConfig::External(_) => Vec::new(),
         };
         let mongo = match &config {
             ConnectionConfig::MongoDb(mongo) => Some(mongo),
@@ -751,11 +751,11 @@ impl Workspace {
             // A blank password on an existing profile means "keep the saved
             // one", which is what the connect would use.
             if let Some(id) = editing
-                && let Some(server) = config.server_mut()
-                && server.password.is_empty()
+                && let Some(slot) = config.password_mut()
+                && slot.is_empty()
                 && let Some(password) = store::password(&id)?
             {
-                server.password = password;
+                *slot = password;
             }
             let connection = Connection::open(config).map_err(|error| error.message)?;
             if mode == Mode::ReadOnly {
@@ -1505,8 +1505,8 @@ impl Workspace {
             // keychain is gone at the next launch, and has to be said.
             let mut config = imported.config.clone();
             let password = config
-                .server_mut()
-                .map(|server| std::mem::take(&mut server.password))
+                .password_mut()
+                .map(std::mem::take)
                 .filter(|password| !password.is_empty());
             let index = self.create_profile(
                 imported.name.clone(),
@@ -1524,8 +1524,8 @@ impl Workspace {
                 {
                     added.notes.push(message);
                 }
-                if let Some(server) = profile.config.server_mut() {
-                    server.password = password;
+                if let Some(slot) = profile.config.password_mut() {
+                    *slot = password;
                 }
             }
             added.imported.push(imported);
@@ -1593,11 +1593,11 @@ impl Workspace {
             async move {
                 // A file engine has nothing to authenticate to, so it never
                 // reaches the Keychain — and never triggers its prompt.
-                if let Some(server) = config.server_mut()
-                    && server.password.is_empty()
+                if let Some(slot) = config.password_mut()
+                    && slot.is_empty()
                 {
                     match store::password(&id) {
-                        Ok(Some(password)) => server.password = password,
+                        Ok(Some(password)) => *slot = password,
                         // No keychain item is not a missing password: a blank
                         // one is valid, so this connects with what it has.
                         Ok(None) => {}
