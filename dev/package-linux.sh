@@ -23,10 +23,18 @@ STAGE="$TARGET_DIR/linux/$NAME"
 TARBALL="$TARGET_DIR/linux/$NAME.tar.gz"
 
 cargo build --release
+# The ODBC bridge links the system's libodbc.so.2, which is never bundled: a
+# user needs the unixodbc package to connect through it, and the app itself
+# does not link ODBC.
+dev/plugins.sh --release
 
 rm -rf "$STAGE"
 mkdir -p "$STAGE/icons"
 install -m 755 "$TARGET_DIR/release/dbdelve" "$STAGE/dbdelve"
+# Beside the binary, where db::plugin::discover() looks. Only odbc: the staging
+# directory also holds echo after a `dev/plugins.sh --echo`, which is test code.
+mkdir -p "$STAGE/plugins"
+cp -R "$TARGET_DIR/release/plugins/odbc" "$STAGE/plugins/odbc"
 install -m 755 assets/linux/install.sh "$STAGE/install.sh"
 install -m 644 assets/linux/dbdelve.desktop "$STAGE/dbdelve.desktop"
 install -m 644 assets/linux/icons/dbdelve-*.png "$STAGE/icons/"
