@@ -182,7 +182,11 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].name, "N odbc");
         assert_eq!(found[0].version, "1.0.0");
-        assert_eq!(found[0].executable, root.join("odbc").join("bin/run"));
+        assert_eq!(
+            found[0].executable,
+            root.join("odbc")
+                .join(format!("bin/run{}", std::env::consts::EXE_SUFFIX))
+        );
     }
 
     #[test]
@@ -250,7 +254,8 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(
             found[0].executable,
-            root.join("odbc/../../../Helpers").join("run")
+            root.join("odbc/../../../Helpers")
+                .join(format!("run{}", std::env::consts::EXE_SUFFIX))
         );
     }
 }
