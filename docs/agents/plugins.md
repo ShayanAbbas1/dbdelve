@@ -299,12 +299,22 @@ Windows `odbc32`. The app itself links no ODBC.
 
 A driver is reached by `DRIVER=/abs/path/to/library` in the string, which needs
 no file at all, or through the user's own `odbcinst.ini`/`odbc.ini`. On macOS
-the static unixODBC reads `/etc` (or `$ODBCSYSINI`) and `~/.odbc.ini`, never
-Homebrew's prefix, and, read from its source, a named driver is looked up in
-the system `odbcinst.ini` first and fails without reading `~/.odbcinst.ini` when
-`/etc/odbcinst.ini` does not exist, which it does not on macOS. So the library
-path is the route the `IM002` hint names; a DSN in `~/.odbc.ini` with an
-absolute `Driver=` works too. Variables set in a shell profile do not reach an
+the static unixODBC reads `/etc` (or `$ODBCSYSINI`) and `~/.odbc.ini` (or
+`$ODBCINI`), never Homebrew's prefix. Run on macOS against Db2 and psqlODBC,
+with no `/etc/odbcinst.ini`, which macOS does not have:
+
+- A driver named in the string, `DRIVER={Db2}` or `DRIVER=Db2`, fails with
+  `01000`, "Can't open lib 'Db2'": unixODBC tries the name as a library path.
+  That is not `IM002`, so the hint does not appear.
+- The same string connects once `ODBCSYSINI` names a directory whose
+  `odbcinst.ini` has that section.
+- A DSN with an absolute `Driver=` connects with no `ODBCSYSINI`, as `DSN=name`
+  or a bare `name`; the run read the file through `$ODBCINI`.
+- A bare name no file defines gets `IM002` and the hint.
+
+From unixODBC's source, not run: when the system `odbcinst.ini` cannot be
+opened, the lookup fails without reading `~/.odbcinst.ini`. So the library path
+is the route to give users. Variables set in a shell profile do not reach an
 app launched from Finder, and the bridge inherits only the app's environment.
 
 ## Connection strings in the app
