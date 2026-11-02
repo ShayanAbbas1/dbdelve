@@ -19,7 +19,9 @@ for arg in "$@"; do
   esac
 done
 
-stage="$ROOT/target/$profile/plugins"
+target_dir="${CARGO_TARGET_DIR:-$ROOT/target}"
+stage="$target_dir/$profile/plugins"
+case "$(uname -s)" in MINGW* | MSYS* | CYGWIN*) suffix=.exe ;; *) suffix= ;; esac
 
 # Before the build: overwriting the executable of a running bridge breaks it.
 if pgrep -f "$stage/" >/dev/null; then
@@ -43,6 +45,6 @@ for id in "${plugins[@]}"; do
   rm -rf "$dest"
   mkdir -p "$dest/$(dirname "$exe")"
   cp "plugins/$id/dbdelve-plugin.toml" "$dest/"
-  cp "target/$profile/$(basename "$exe")" "$dest/$exe"
+  cp "$target_dir/$profile/$(basename "$exe")$suffix" "$dest/$exe$suffix"
   echo "staged $dest"
 done
