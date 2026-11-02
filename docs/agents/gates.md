@@ -24,7 +24,9 @@ response and `KILL QUERY`s it by its `query_id`; SQL Server
 sends `SET ROWCOUNT limit+1` as a batch of its own ahead of it and always
 `SET ROWCOUNT 0` after, reconnecting if that reset fails, unless a
 `SET ROWCOUNT` of the user's own is in force, which that reset would erase.
-Anything else is drained. Either way the limit is visible in the UI, and a capped
+A plugin is sent `stop` and stops sending rows, then ends the statement only
+where it can prove that safe; the ODBC bridge never can, so it drains on its
+own side (`plugins.md`). Anything else is drained. Either way the limit is visible in the UI, and a capped
 result says how many rows the statement returned, or that it was stopped.
 
 **Export fetches past the limit only on an explicit ask.** Export writes the rows a grid holds when they are its whole
@@ -198,6 +200,14 @@ The core of the mode check is in `AGENTS.md`, "Connection modes". The detail:
   confirmation, writes need Read-write, DDL, server control and `BACKUP` and
   `RESTORE` need Full, and anything it does not know fails closed to
   Read-write.
+- **Generic SQL reads as unreadable what a server it does not know could lex
+  otherwise** (`lexes_apart`): a `/*` inside a block comment, which
+  sqlparser's tokenizer nests and a server may not (Db2 does, the tree-sitter
+  split does not), so `/* /* */ DELETE FROM t -- */` is a comment to one and a
+  `DELETE` to the other; MySQL's `/*! … */`, which it runs; and a backslash in a
+  literal or quoted name, which ends it a byte later where it escapes. An
+  unreadable verdict asks; a wrong read verdict on Generic would run a write in
+  Read-only with nothing on the server to stop it.
 - **`IF` conditions.** T-SQL's `IF … ELSE` and the `IF … END IF` Postgres, MySQL
   and Snowflake parse to the same variant. `condition_verdict` reads a plain
   name, value, comparison or `IS …` test as a read, and a subquery (`EXISTS`,
@@ -209,3 +219,18 @@ The core of the mode check is in `AGENTS.md`, "Connection modes". The detail:
 - **`Connection::set_read_only`** holds a Read-only session to reads on Postgres
   and MySQL, and on ClickHouse flags every request to carry `readonly=2`; SQLite has no such setting, Snowflake no session to hold it in,
   and SQL Server no session-level switch.
+- **Through a plugin the hold is the dialect's own session statement**
+  (`read_only_statement`), sent through the plugin as an ordinary query on its
+  one session, so `holds_read_only` means the same over a plugin as built in.
+  A dialect whose hold is not a session statement (ClickHouse's per-request
+  `readonly`) is never offered (`Engine::speaks_through_plugins`). A hold that
+  fails to land loses the session for good, with the session held across the
+  loss so nothing queued runs in between, and a session the plugin reports lost
+  takes no further request, since a driver that reconnected quietly would run
+  it unheld; a string turning on MySQL's `AUTO_RECONNECT` is refused on a
+  dialect that holds. Generic holds nothing.
+- **A connect re-checks the mode as it lands.** A mode picked while a connect
+  is under way finds no connection to hold (`set_mode`), so a session landing
+  held one way with the other mode on screen is opened again under the mode now
+  picked (`begin_connect`), on every engine, since the gate runs a statement
+  it cannot read in Read-only on the strength of that hold.
