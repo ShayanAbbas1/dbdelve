@@ -191,7 +191,9 @@ cargo run
 Linux needs the system packages listed in `README.md` first. **Plain `cargo
 run` is the release variant**: with `DBDELVE_VARIANT` unset it reads and
 writes the installed app's profiles and keychain passwords. Run
-`DBDELVE_VARIANT=dev cargo run` to share the dev bundle's instead. The
+`DBDELVE_VARIANT=dev cargo run` to share the dev bundle's instead. For plugin
+work (the ODBC tile) run `dev/plugins.sh && DBDELVE_VARIANT=dev cargo run`: the
+script stages the bridge where `cargo run` discovers it. The
 development databases accept:
 
 ```text

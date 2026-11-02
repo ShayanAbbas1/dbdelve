@@ -34,6 +34,9 @@ docker compose up -d
 cargo run
 ```
 
+To see the ODBC tile, stage the bridge first with `dev/plugins.sh` (`--release` for the
+release profile, `--echo` to add the test plugin).
+
 `docker compose up -d` starts the Postgres, MySQL, MariaDB, SQL Server, MongoDB, Redis and ClickHouse dev databases (see
 `compose.yaml`). It also starts two SSH bastions for testing tunnels;
 `dev/ssh/setup.sh` generates a key and an `ssh_config` for them into
