@@ -7,7 +7,8 @@
 //! credentials that names the driver by path (`DRIVER=/abs/path/psqlodbcw.so`)
 //! or by the name `/etc/odbcinst.ini` registers, and `dbdelve_ODBC_POSTGRES_USER`
 //! and `dbdelve_ODBC_POSTGRES_PASSWORD`. The bridge's own unixODBC reads no
-//! Homebrew configuration, so on macOS the path is the only route.
+//! Homebrew configuration, so on macOS use the path, or point `ODBCSYSINI` at a
+//! directory that registers the name.
 
 use std::env;
 use std::sync::OnceLock;
@@ -247,14 +248,23 @@ fn live_psqlodbc_a_killed_bridge_is_a_reset_and_the_statement_is_not_replayed() 
 }
 
 /// The compose database as the bastion sees it, by service name and the port
-/// inside the network: a host this machine cannot resolve, so only a string
-/// the tunnel rewrote to its forward connects.
+/// inside the network. The direct attempt proves this machine cannot reach it,
+/// so only a string the tunnel rewrote to its forward connects.
 #[test]
 #[ignore = "needs psqlODBC and the dev bastion: set dbdelve_ODBC_POSTGRES, _USER, _PASSWORD and dbdelve_SSH_CONFIG"]
 fn live_external_through_a_tunnel() {
     let base = config();
+    let connection = echo::with_endpoint(&base.connection, "Server=postgres;Port=5432");
+    let direct = ConnectionConfig::External(ExternalConfig {
+        connection: connection.clone(),
+        ..config()
+    });
+    assert!(
+        Connection::open(direct).is_err(),
+        "the endpoint must be out of reach without the tunnel"
+    );
     let connection = open_as(ExternalConfig {
-        connection: echo::with_endpoint(&base.connection, "Server=postgres;Port=5432"),
+        connection,
         ssh: crate::db::ssh::live_bastion("dbdelve-bastion"),
         ..base
     });

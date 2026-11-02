@@ -412,14 +412,23 @@ fn live_db2_reads_a_backslash_in_like_as_itself_so_plain_like_refuses_one() {
 }
 
 /// Db2's own `HOSTNAME` and `PORT` keys through the tunnel rewrite, to the
-/// compose service as the bastion sees it, a host this machine cannot
-/// resolve. Local only: CI's Db2 job runs no bastion.
+/// compose service as the bastion sees it. The direct attempt proves this
+/// machine cannot reach it. Local only: CI's Db2 job runs no bastion.
 #[test]
 #[ignore = "needs a Db2, IBM's driver and the dev bastion: set dbdelve_ODBC_DB2, _USER, _PASSWORD and dbdelve_SSH_CONFIG"]
 fn live_db2_through_a_tunnel() {
     let base = config();
+    let connection = echo::with_endpoint(&base.connection, "HOSTNAME=db2;PORT=50000");
+    let direct = ConnectionConfig::External(ExternalConfig {
+        connection: connection.clone(),
+        ..config()
+    });
+    assert!(
+        Connection::open(direct).is_err(),
+        "the endpoint must be out of reach without the tunnel"
+    );
     let connection = open_as(ExternalConfig {
-        connection: echo::with_endpoint(&base.connection, "HOSTNAME=db2;PORT=50000"),
+        connection,
         ssh: crate::db::ssh::live_bastion("dbdelve-bastion"),
         ..base
     });
