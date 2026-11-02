@@ -12,7 +12,9 @@ use arrow_array::builder::StringBuilder;
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use dbdelve_plugin_protocol::arrow::{encode_batch, encode_schema};
-use dbdelve_plugin_protocol::limits::{BATCH_AGE, BATCH_ROWS, BATCH_TARGET, WINDOW};
+use dbdelve_plugin_protocol::limits::{
+    BATCH_AGE, BATCH_ROWS, BATCH_TARGET, MAX_BATCH_CELLS, WINDOW, credit_cost,
+};
 use dbdelve_plugin_protocol::{ErrorKind, Kind, MAX_PAYLOAD, Response, write_frame};
 use odbc_api::handles::{Statement as _, StatementImpl};
 use odbc_api::sys::{HStmt, SqlDataType, SqlReturn};
@@ -169,10 +171,11 @@ impl Control {
         }
     }
 
-    /// The host's rule exactly: a frame goes when it fits in what is left, or
-    /// alone when nothing is outstanding.
-    fn take_credit(&self, size: usize) -> Result<(), Interrupt> {
-        let size = i64::try_from(size).unwrap_or(i64::MAX);
+    /// The host's rule exactly: a frame goes when its cost (`credit_cost`, the
+    /// payload and a flat per-frame charge) fits in what is left, or alone
+    /// when nothing is outstanding.
+    fn take_credit(&self, payload: usize) -> Result<(), Interrupt> {
+        let cost = i64::try_from(credit_cost(payload)).unwrap_or(i64::MAX);
         let mut running = self.query.lock().unwrap();
         loop {
             if running.cancel {
@@ -181,8 +184,8 @@ impl Control {
             if running.stop {
                 return Err(Interrupt::Stop);
             }
-            if size <= running.left || running.left == WINDOW as i64 {
-                running.left -= size;
+            if cost <= running.left || running.left == WINDOW as i64 {
+                running.left -= cost;
                 return Ok(());
             }
             running = self.wake.wait(running).unwrap();
@@ -344,7 +347,7 @@ impl<W: Write> Run<'_, W> {
         let mut draining = self.send(&encode_schema(&schema))?;
 
         let mut total = 0;
-        let mut batcher = Batcher::default();
+        let mut batcher = Batcher::new(fetched.len());
         let mut scratch = vec![0; CHUNK];
         loop {
             match self.control.interrupted() {
@@ -569,18 +572,29 @@ pub fn write_or_exit(out: &mut impl Write, kind: Kind, id: u64, payload: &[u8]) 
 /// `BATCH_ROWS` rows, `BATCH_TARGET` bytes, or `BATCH_AGE` after its first row,
 /// so first rows show quickly. A row that would take a batch past the byte
 /// target starts the next one, so a row larger than the target travels alone.
+/// A wide result closes sooner, at the rows `MAX_BATCH_CELLS` allows, which
+/// the protocol enforces.
 ///
 /// ponytail: the age is checked as each row arrives, so a fetch that blocks
 /// holds the rows before it until it returns; a timer thread lifts that if a
 /// driver trickles rows.
-#[derive(Default)]
 struct Batcher {
+    most_rows: usize,
     rows: Vec<Vec<Option<String>>>,
     bytes: usize,
     since: Option<Instant>,
 }
 
 impl Batcher {
+    fn new(columns: usize) -> Self {
+        Self {
+            most_rows: BATCH_ROWS.min(MAX_BATCH_CELLS / columns.max(1)),
+            rows: Vec::new(),
+            bytes: 0,
+            since: None,
+        }
+    }
+
     fn push(&mut self, row: Vec<Option<String>>, now: Instant) -> Vec<Vec<Vec<Option<String>>>> {
         let size: usize = row.iter().flatten().map(String::len).sum();
         let mut closed = Vec::new();
@@ -593,7 +607,7 @@ impl Batcher {
         let aged = self
             .since
             .is_some_and(|since| now.duration_since(since) >= BATCH_AGE);
-        if self.rows.len() >= BATCH_ROWS || self.bytes >= BATCH_TARGET || aged {
+        if self.rows.len() >= self.most_rows || self.bytes >= BATCH_TARGET || aged {
             closed.extend(self.finish());
         }
         closed
@@ -612,6 +626,7 @@ impl Batcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dbdelve_plugin_protocol::limits::FRAME_COST;
     use std::time::Duration;
 
     fn row(value: &str) -> Vec<Option<String>> {
@@ -620,7 +635,7 @@ mod tests {
 
     #[test]
     fn a_batch_closes_at_its_row_limit() {
-        let mut batcher = Batcher::default();
+        let mut batcher = Batcher::new(1);
         let now = Instant::now();
         for _ in 0..BATCH_ROWS - 1 {
             assert!(batcher.push(row("x"), now).is_empty());
@@ -632,8 +647,20 @@ mod tests {
     }
 
     #[test]
+    fn a_wide_result_closes_its_batches_within_the_cell_budget() {
+        let columns = 4096;
+        let mut batcher = Batcher::new(columns);
+        let now = Instant::now();
+        let most = MAX_BATCH_CELLS / columns;
+        for _ in 0..most - 1 {
+            assert!(batcher.push(row("x"), now).is_empty());
+        }
+        assert_eq!(batcher.push(row("x"), now)[0].len(), most);
+    }
+
+    #[test]
     fn a_batch_closes_at_its_byte_target_and_a_large_row_travels_alone() {
-        let mut batcher = Batcher::default();
+        let mut batcher = Batcher::new(1);
         let now = Instant::now();
         assert!(batcher.push(row("small"), now).is_empty());
         let large = "x".repeat(BATCH_TARGET);
@@ -645,7 +672,7 @@ mod tests {
 
     #[test]
     fn a_batch_closes_once_its_first_row_has_waited_long_enough() {
-        let mut batcher = Batcher::default();
+        let mut batcher = Batcher::new(1);
         let start = Instant::now();
         assert!(batcher.push(row("a"), start).is_empty());
         let closed = batcher.push(row("b"), start + BATCH_AGE + Duration::from_millis(1));
@@ -656,11 +683,11 @@ mod tests {
     fn credit_follows_the_hosts_rule_and_goes_below_zero_for_one_large_frame() {
         let control = Control::default();
         control.start(7);
-        let window = WINDOW as usize;
+        let (window, frame) = (WINDOW as usize, FRAME_COST as usize);
         assert_eq!(control.take_credit(window + 1), Ok(()));
-        control.credit(7, window as u64 + 1);
-        assert_eq!(control.take_credit(window - 1), Ok(()));
-        // One byte left: only a one-byte frame fits now.
+        control.credit(7, credit_cost(window + 1));
+        assert_eq!(control.take_credit(window - 2 * frame - 1), Ok(()));
+        // A one-byte frame costs exactly what is left.
         assert_eq!(control.take_credit(1), Ok(()));
         control.stop(7);
         assert_eq!(control.take_credit(1), Err(Interrupt::Stop));

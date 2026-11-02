@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use arrow_array::{Array, StringArray};
 use arrow_schema::SchemaRef;
 use dbdelve_plugin_protocol::arrow::{decode_batch, decode_schema};
-use dbdelve_plugin_protocol::limits::CANCEL_DEADLINE;
+use dbdelve_plugin_protocol::limits::{CANCEL_DEADLINE, credit_cost};
 use dbdelve_plugin_protocol::{
     ErrorKind, Frame, Kind, PROTOCOL, Password, Reference, RelationKind, Request, Response,
     read_frame, write_frame,
@@ -149,7 +149,8 @@ impl Bridge {
                     }
                 }
             }
-            let bytes = frame.payload.len() as u64;
+            assert!(!frame.payload.is_empty(), "an empty data frame");
+            let bytes = credit_cost(frame.payload.len());
             self.send(id, Request::Credit { bytes });
             if !interrupted && let Some(request) = interrupt(rows.len()) {
                 interrupted = true;
