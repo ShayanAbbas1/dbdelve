@@ -7,6 +7,8 @@
 //! anything else runs on it.
 
 #[cfg(test)]
+mod db2;
+#[cfg(test)]
 pub(crate) mod echo;
 mod host;
 mod rows;

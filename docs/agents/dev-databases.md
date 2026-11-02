@@ -117,7 +117,10 @@ redistributed. The route is a `DRIVER=/abs/path` in the connection string, with
 no `odbcinst.ini`, because the bridge's unixODBC on macOS reads none of
 Homebrew's configuration: `dbdelve_ODBC_DB2="$(dev/db2/driver.sh);HOSTNAME=127.0.0.1;PORT=55000;DATABASE=dbdelve;PROTOCOL=TCPIP"`
 with `dbdelve_ODBC_DB2_USER` and `_PASSWORD`, then `cargo test -p
-dbdelve-plugin-odbc --test bridge -- --include-ignored`. For a driver manager
+dbdelve-plugin-odbc --test bridge -- --include-ignored`. The same variables
+run Db2 as a conformance subject through the host, which builds the bridge
+itself: `cargo test --bin dbdelve db::external::db2 -- --include-ignored`. It
+creates its own `DBDELVE_HOST_*` tables. For a driver manager
 that wants the files (Homebrew's `isql` as a probe), `eval "$(dev/db2/driver.sh
 --env)"` exports `ODBCSYSINI` and `ODBCINI` at generated files under the cache
 and changes no global file; the driver is then `DRIVER=Db2`.

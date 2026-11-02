@@ -13,8 +13,10 @@ use std::time::{Duration, Instant};
 use crate::db::{
     CancelToken, Connection, Engine, Fetch, QueryResult, RelationKind, Stopped, Target, is_cancel,
 };
+use crate::explorer;
+use crate::filter::{self, Operator};
 use crate::result_grid::{NewValue, PendingRow};
-use crate::sql;
+use crate::sql::{self, SortKey};
 
 pub(super) struct Subject {
     pub connection: Connection,
@@ -346,10 +348,22 @@ pub(super) fn row_limit_stops_an_eligible_read(subject: &Subject) {
             ..Fetch::default()
         },
     );
-    assert_eq!(result.stopped, Some(Stopped::AtLimit), "{at}");
-    assert_eq!(result.capped_from, None, "{at}");
     assert_eq!(result.rows.len(), 3, "{at}");
-    assert!(started.elapsed() < WITHIN, "{at}");
+    if subject.connection.stops_at_limit() {
+        assert_eq!(result.stopped, Some(Stopped::AtLimit), "{at}");
+        assert_eq!(result.capped_from, None, "{at}");
+        assert!(started.elapsed() < WITHIN, "{at}");
+    } else {
+        // A driver that cannot prove ending early keeps the user's
+        // transaction drains the statement to its end instead, so the
+        // subject's `endless` is finite there and counted whole.
+        assert_eq!(result.stopped, None, "{at}");
+        assert!(
+            result.capped_from.is_some_and(|total| total > 3),
+            "{at}: capped_from {:?}",
+            result.capped_from
+        );
+    }
 }
 
 pub(super) fn row_limit_drains_an_ineligible_read(subject: &Subject) {
@@ -604,4 +618,115 @@ pub(super) fn generated_writes_round_trip(subject: &Subject) {
     );
     generated(&delete);
     assert!(subject.label_of(scenario, "901").is_empty(), "{at}");
+}
+
+/// What DBDelve writes for a browsing surface, run on the subject: a paged
+/// preview, a header sort spliced into it, a count, and every filter operator
+/// the engine offers, each passing the gate and narrowing the fixture to the
+/// rows it should.
+pub(super) fn generated_reads_run(subject: &Subject) {
+    let scenario = "generated_reads_run";
+    let at = format!("{scenario} on {:?}", subject.target.engine);
+    let engine = subject.target.engine;
+    let (schema, relation, key) = (subject.schema, subject.relation, subject.key);
+    let (label, whole) = (subject.columns[1], subject.columns[2]);
+    let structure = subject
+        .connection
+        .structure(schema, relation)
+        .unwrap_or_else(|error| panic!("{at}: {error}"));
+    let type_of = |column: &str| {
+        structure
+            .columns
+            .iter()
+            .find(|candidate| candidate.name == column)
+            .map(|candidate| candidate.data_type.clone())
+    };
+    let run = |sql: &str| {
+        assert!(
+            sql::is_generated_select(engine, sql),
+            "{at}: the gate refuses `{sql}`"
+        );
+        subject
+            .connection
+            .generated(sql, &CancelToken::default(), None, None)
+            .unwrap_or_else(|error| panic!("{at}: `{sql}` failed: {error}"))
+    };
+    let predicate = |column: &str, operator: Operator, value: &str| {
+        filter::filter_predicate(engine, column, type_of(column).as_deref(), operator, value)
+            .unwrap_or_else(|| panic!("{at}: no predicate for {operator:?} `{value}`"))
+    };
+    let ids = |result: &QueryResult| -> Vec<String> {
+        let column = result
+            .columns
+            .iter()
+            .position(|column| column.name == key)
+            .unwrap_or_else(|| panic!("{at}: no key column in the preview"));
+        result
+            .rows
+            .iter()
+            .map(|row| row.get(column).unwrap_or_default().to_string())
+            .collect()
+    };
+    let fixture_only = predicate(key, Operator::Less, "900");
+
+    let cases = [
+        (label, Operator::Equals, "alpha", &["1"][..]),
+        (label, Operator::NotEquals, "alpha", &["2", "3"]),
+        (label, Operator::Contains, "lph", &["1"]),
+        (label, Operator::NotContains, "lph", &["2", "3"]),
+        (label, Operator::StartsWith, "nul", &["3"]),
+        (label, Operator::EndsWith, "pha", &["1"]),
+        (key, Operator::Greater, "1", &["2", "3"]),
+        (key, Operator::GreaterOrEqual, "2", &["2", "3"]),
+        (key, Operator::Less, "2", &["1"]),
+        (key, Operator::LessOrEqual, "2", &["1", "2"]),
+        (whole, Operator::IsNull, "", &["3"]),
+        (whole, Operator::IsNotNull, "", &["1", "2"]),
+        (label, Operator::IsEmpty, "", &[]),
+        (label, Operator::IsNotEmpty, "", &["1", "2", "3"]),
+        (key, Operator::InList, "1, 3", &["1", "3"]),
+        (key, Operator::NotInList, "1, 3", &["2"]),
+        (key, Operator::Between, "1 .. 2", &["1", "2"]),
+        (label, Operator::Regex, "^al", &["1"]),
+    ];
+    for operator in Operator::ALL
+        .into_iter()
+        .filter(|operator| operator.on(engine))
+    {
+        let (column, _, value, wanted) = cases
+            .iter()
+            .find(|case| case.1 == operator)
+            .unwrap_or_else(|| panic!("{at}: no case for {operator:?}"));
+        let filter = format!("{fixture_only} AND {}", predicate(column, operator, value));
+        let sql = format!(
+            "{} ORDER BY {}",
+            explorer::preview_sql(engine, schema, relation, &filter, None, 0),
+            engine.quote_identifier(key)
+        );
+        assert_eq!(
+            ids(&run(&sql)),
+            *wanted,
+            "{at}: {operator:?} `{value}`: {sql}"
+        );
+    }
+
+    let count = run(&explorer::count_sql(
+        engine,
+        schema,
+        relation,
+        &fixture_only,
+    ));
+    assert_eq!(count.rows[0].get(0), Some("3"), "{at}: count");
+
+    let page = explorer::preview_sql(engine, schema, relation, &fixture_only, Some(2), 1);
+    let sorted = sql::with_order_by(
+        engine,
+        &page,
+        &[SortKey {
+            expression: engine.quote_identifier(key),
+            ascending: false,
+        }],
+    )
+    .unwrap_or_else(|| panic!("{at}: no ORDER BY spliced into `{page}`"));
+    assert_eq!(ids(&run(&sorted)), ["2", "1"], "{at}: {sorted}");
 }
