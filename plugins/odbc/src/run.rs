@@ -502,8 +502,10 @@ pub fn rendered(fetched: Fetched, bytes: &[u8]) -> String {
     match fetched {
         Fetched::Text => {
             let units: Vec<u16> = bytes
-                .chunks_exact(2)
-                .map(|unit| u16::from_ne_bytes([unit[0], unit[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&unit| u16::from_ne_bytes(unit))
                 .collect();
             String::from_utf16_lossy(&units)
         }

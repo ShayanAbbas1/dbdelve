@@ -434,8 +434,10 @@ fn chunk_length(
         (true, _) => Some(full),
         (false, Ok(length)) => Some(length.min(full)),
         (false, Err(_)) if indicator == NO_TOTAL && fetched == Fetched::Text => chunk
-            .chunks_exact(2)
-            .position(|unit| unit == [0, 0])
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .position(|unit| *unit == [0, 0])
             .map(|units| units * 2),
         (false, Err(_)) => None,
     }
