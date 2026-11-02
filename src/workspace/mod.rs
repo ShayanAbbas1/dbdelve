@@ -206,6 +206,8 @@ pub(crate) struct Workspace {
     /// Profiles on an engine this build cannot open, held as they were read
     /// and written back by `remember_profiles`; never restored.
     pub(crate) unavailable: Vec<store::UnavailableProfile>,
+    /// Discovered once in `main`, before the profiles that name them load.
+    pub(crate) plugins: Vec<&'static crate::db::Plugin>,
     pub(crate) settings: Settings,
     pub(crate) active: usize,
     pub(crate) form: Option<ConnectionForm>,
@@ -357,7 +359,11 @@ pub(crate) struct Workspace {
 }
 
 impl Workspace {
-    pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        plugins: Vec<&'static crate::db::Plugin>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let row_panel_search = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Filter columns and values…")
@@ -421,6 +427,7 @@ impl Workspace {
         let mut workspace = Self {
             profiles: Vec::new(),
             unavailable: Vec::new(),
+            plugins,
             settings: Settings::default(),
             active: 0,
             form: None,
@@ -494,7 +501,7 @@ impl Workspace {
         };
 
         let mut load_failure = None;
-        match store::load_profiles() {
+        match store::load_profiles(&workspace.plugins) {
             Ok(store::ProfileList {
                 profiles,
                 active,

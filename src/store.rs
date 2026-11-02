@@ -7,7 +7,8 @@ use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::db::{
-    DbError, EditTarget, Engine, ExplainMode, QueryResult, RelationKind, Row, SshTunnel, Stopped,
+    DbError, EditTarget, Engine, ExplainMode, Plugin, QueryResult, RelationKind, Row, SshTunnel,
+    Stopped, odbc_string,
 };
 
 const PROFILES_FILE: &str = "profiles.toml";
@@ -58,6 +59,13 @@ pub struct StoredProfile {
     /// connecting as.
     #[serde(default)]
     pub engine: Option<String>,
+    /// The built-in dialect a profile on a plugin speaks (`Engine::as_str()`),
+    /// and its connection string as typed: a DSN or `key=value;` pairs. Both
+    /// absent for every built-in engine.
+    #[serde(default)]
+    pub speaks: Option<String>,
+    #[serde(default)]
+    pub connection: Option<String>,
     /// The database file, for SQLite. Absent for a server engine.
     #[serde(default)]
     pub path: Option<String>,
@@ -535,6 +543,9 @@ pub struct UnavailableProfile {
     pub name: String,
     /// The tag as written, or a tag that is not a string as TOML writes it.
     pub engine: String,
+    /// What a `plugin:` profile's reason is read from.
+    pub speaks: Option<String>,
+    pub connection: Option<String>,
     /// The supported profiles above it in the file, nearest last, each as its
     /// id and how many above it share that id: what [`interleaved`] puts it
     /// back after.
@@ -562,9 +573,23 @@ impl UnavailableProfile {
             id,
             name,
             engine,
+            speaks: text("speaks"),
+            connection: text("connection"),
             follows,
             table,
         })
+    }
+
+    /// A profile the restore cannot open after all, which only a file the
+    /// mixed reader fell back on reaches: held back as it was decoded, after
+    /// the supported profiles `above` it. Keys the decode did not know are
+    /// already gone by then; that is the fallback's ceiling, not this one's.
+    pub fn held_back<'a>(
+        stored: &StoredProfile,
+        above: impl Iterator<Item = &'a str>,
+    ) -> Result<Self, String> {
+        let table = toml::Table::try_from(stored).map_err(|error| error.to_string())?;
+        Self::from_table(table, follows(above))
     }
 
     /// The SSH key its tunnel names, which removing another profile must not
@@ -612,14 +637,14 @@ pub struct LoadFailure {
 /// file is the first run, and reads as an empty list. Every other failure is
 /// reported, an unreachable data directory included -- `save_profiles` refuses
 /// on that too, and an empty list here is what the next save writes back.
-pub fn load_profiles() -> Result<ProfileList, LoadFailure> {
+pub fn load_profiles(plugins: &[&'static Plugin]) -> Result<ProfileList, LoadFailure> {
     let path = dbdelve_directory()
         .map_err(|message| LoadFailure {
             message,
             moved_aside: false,
         })?
         .join(PROFILES_FILE);
-    let (what, error) = match read_profiles(&path) {
+    let (what, error) = match read_profiles(&path, plugins) {
         Ok(restored) => return Ok(restored),
         Err(failure) => failure,
     };
@@ -648,15 +673,18 @@ pub fn load_profiles() -> Result<ProfileList, LoadFailure> {
 
 /// The profile file without `load_profiles`' moving it aside on a failure,
 /// for a read that only peeks, ahead of the one that reports.
-pub fn peek_profiles() -> Option<ProfileList> {
-    read_profiles(&dbdelve_directory().ok()?.join(PROFILES_FILE)).ok()
+pub fn peek_profiles(plugins: &[&'static Plugin]) -> Option<ProfileList> {
+    read_profiles(&dbdelve_directory().ok()?.join(PROFILES_FILE), plugins).ok()
 }
 
 /// A failure is what could not be read -- `" as TOML"` for a file that could
 /// -- and why.
-fn read_profiles(path: &Path) -> Result<ProfileList, (&'static str, String)> {
+fn read_profiles(
+    path: &Path,
+    plugins: &[&'static Plugin],
+) -> Result<ProfileList, (&'static str, String)> {
     match fs::read_to_string(path) {
-        Ok(text) => decode_profiles(&text).map_err(|error| (" as TOML", error)),
+        Ok(text) => decode_profiles(&text, plugins).map_err(|error| (" as TOML", error)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(ProfileList {
             profiles: Vec::new(),
             active: None,
@@ -669,14 +697,17 @@ fn read_profiles(path: &Path) -> Result<ProfileList, (&'static str, String)> {
     }
 }
 
-pub(crate) fn decode_profiles(text: &str) -> Result<ProfileList, String> {
+pub(crate) fn decode_profiles(
+    text: &str,
+    plugins: &[&'static Plugin],
+) -> Result<ProfileList, String> {
     // Only the engine tags: a file this pass cannot read goes to the plain
     // decode below, which reports it in its own words.
     let unavailable: Vec<bool> = toml::from_str::<Tags>(text)
         .map(|tags| {
             tags.profiles
                 .iter()
-                .map(|tag| !readable(tag.engine.as_ref()))
+                .map(|tag| !readable(tag, plugins))
                 .collect()
         })
         .unwrap_or_default();
@@ -702,6 +733,16 @@ pub(crate) fn decode_profiles(text: &str) -> Result<ProfileList, String> {
 }
 
 pub(crate) fn encode_profiles(list: &ProfileList) -> Result<String, String> {
+    // The form refuses such a string before it is ever saved; this is the last
+    // gate before the disk, for any path that reaches here without the form.
+    for profile in &list.profiles {
+        if let Some(Err(refusal)) = profile.connection.as_deref().map(odbc_string::storable) {
+            return Err(format!(
+                "Could not save the profile list: {}'s connection string cannot be stored. {}",
+                profile.name, refusal.0
+            ));
+        }
+    }
     if list.unavailable.is_empty() {
         toml::to_string_pretty(&ProfileFile {
             active: list.active.clone(),
@@ -744,8 +785,8 @@ fn names_a_private_key(text: &str) -> bool {
     toml::de::DeTable::parse(text).map_or(true, |document| in_table(document.get_ref()))
 }
 
-/// Each profile's engine tag and nothing else; every other key is skipped
-/// unread.
+/// Each profile's engine tag, and what a plugin profile is read by; every
+/// other key is skipped unread.
 #[derive(Deserialize)]
 struct Tags {
     #[serde(default)]
@@ -756,19 +797,67 @@ struct Tags {
 struct Tag {
     #[serde(default)]
     engine: Option<toml::Value>,
+    #[serde(default)]
+    speaks: Option<toml::Value>,
+    #[serde(default)]
+    connection: Option<toml::Value>,
 }
+
+/// What precedes a plugin's id in a profile's `engine`. An older build reads
+/// the whole tag as an engine it does not have, and holds the profile back.
+pub(crate) const PLUGIN_TAG: &str = "plugin:";
 
 /// No tag is a profile written before there was a second engine, and reads as
 /// Postgres; a tag that is not a string is not one any build wrote for an
 /// engine this one has.
-fn readable(tag: Option<&toml::Value>) -> bool {
-    match tag {
-        None => true,
-        Some(toml::Value::String(engine)) => {
-            Engine::parse(engine).is_ok_and(Engine::has_built_in_driver)
+fn readable(tag: &Tag, plugins: &[&'static Plugin]) -> bool {
+    fn text(value: &Option<toml::Value>) -> Result<Option<&str>, ()> {
+        match value {
+            None => Ok(None),
+            Some(toml::Value::String(text)) => Ok(Some(text)),
+            Some(_) => Err(()),
         }
+    }
+    match &tag.engine {
+        None => true,
+        Some(toml::Value::String(engine)) => match engine.strip_prefix(PLUGIN_TAG) {
+            Some(id) => match (text(&tag.speaks), text(&tag.connection)) {
+                (Ok(speaks), Ok(connection)) => {
+                    through_plugin(id, speaks, connection, plugins).is_ok()
+                }
+                _ => false,
+            },
+            None => Engine::parse(engine).is_ok_and(Engine::has_built_in_driver),
+        },
         Some(_) => false,
     }
+}
+
+/// The plugin and dialect a profile tagged `plugin:<id>` connects through, or
+/// why it cannot, in the words the palette shows. A dialect no plugin may
+/// carry and a string that may not be stored are refused here, as `open` and
+/// the form refuse them, so a hand-edited file reaches neither.
+pub(crate) fn through_plugin(
+    id: &str,
+    speaks: Option<&str>,
+    connection: Option<&str>,
+    plugins: &[&'static Plugin],
+) -> Result<(&'static Plugin, Engine), String> {
+    let plugin = plugins
+        .iter()
+        .find(|plugin| plugin.id == id)
+        .ok_or_else(|| format!("Needs the {id} plugin"))?;
+    let speaks = speaks.ok_or("Names no SQL dialect")?;
+    let engine = Engine::parse(speaks)
+        .map_err(|_| format!("Made by a newer DBDelve (dialect `{speaks}`)"))?;
+    if !engine.speaks_through_plugins() {
+        return Err(format!(
+            "{}'s SQL cannot be spoken through a plugin driver",
+            engine.label()
+        ));
+    }
+    odbc_string::storable(connection.unwrap_or_default()).map_err(|refusal| refusal.0)?;
+    Ok((plugin, engine))
 }
 
 enum Entry {
@@ -792,24 +881,26 @@ fn decode_mixed(text: &str, unavailable: &[bool]) -> Result<ProfileList, String>
         match entry {
             Entry::Supported(profile) => list.profiles.push(*profile),
             Entry::Unavailable(table) => {
-                let follows = list
-                    .profiles
-                    .iter()
-                    .enumerate()
-                    .map(|(at, profile)| {
-                        let before = list.profiles[..at]
-                            .iter()
-                            .filter(|earlier| earlier.id == profile.id)
-                            .count();
-                        (profile.id.clone(), before)
-                    })
-                    .collect();
+                let follows = follows(list.profiles.iter().map(|profile| profile.id.as_str()));
                 list.unavailable
                     .push(UnavailableProfile::from_table(table, follows)?);
             }
         }
     }
     Ok(list)
+}
+
+/// Each supported profile above an unavailable one, as its id and how many
+/// above it share that id: where [`interleaved`] puts it back.
+fn follows<'a>(ids: impl Iterator<Item = &'a str>) -> Vec<(String, usize)> {
+    let ids = ids.collect::<Vec<_>>();
+    ids.iter()
+        .enumerate()
+        .map(|(at, id)| {
+            let before = ids[..at].iter().filter(|earlier| *earlier == id).count();
+            (id.to_string(), before)
+        })
+        .collect()
 }
 
 /// The profile file the way `ProfileFile`'s derive reads it, but with its
@@ -1877,7 +1968,7 @@ pub(crate) mod tests {
 
     /// The save path's own decode-then-encode, so the golden is what it writes.
     fn resaved(text: &str) -> String {
-        encode_profiles(&decode_profiles(text).expect("the fixture loads"))
+        encode_profiles(&decode_profiles(text, &[]).expect("the fixture loads"))
             .expect("the fixture encodes")
     }
 
@@ -1924,7 +2015,7 @@ pub(crate) mod tests {
         }
         for engine in engines {
             let text = supported_stub(engine.as_deref(), "");
-            let now = decode_profiles(&text);
+            let now = decode_profiles(&text, &[]);
             assert_eq!(now, decoded_as_before(&text), "{text}");
             assert_eq!(
                 now.expect("a supported profile loads").profiles.len(),
@@ -1936,7 +2027,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_profile_on_generic_sql_is_held_back_whole() {
-        let list = decode_profiles(&supported_stub(Some("generic"), "")).expect("loads");
+        let list = decode_profiles(&supported_stub(Some("generic"), ""), &[]).expect("loads");
         assert!(list.profiles.is_empty());
         assert_eq!(list.unavailable.len(), 1);
     }
@@ -1961,7 +2052,11 @@ pub(crate) mod tests {
             "srv = 1",
         ] {
             let text = supported_stub(Some("postgres"), extra);
-            assert_eq!(decode_profiles(&text), decoded_as_before(&text), "{text}");
+            assert_eq!(
+                decode_profiles(&text, &[]),
+                decoded_as_before(&text),
+                "{text}"
+            );
         }
         // Today reads a u64 above i64::MAX, which a detour through toml::Value
         // would refuse ("u64 value was too large"): the new reader must not take one.
@@ -1984,12 +2079,12 @@ pub(crate) mod tests {
             include_str!("testdata/every-engine.toml"),
             include_str!("testdata/every-engine.resaved.toml"),
         ] {
-            assert_eq!(decode_profiles(text), decoded_as_before(text));
+            assert_eq!(decode_profiles(text, &[]), decoded_as_before(text));
         }
         // Ids were never checked for uniqueness, and a repeated one still loads.
         let twice = supported_stub(Some("postgres"), "") + &supported_stub(Some("sqlite"), "");
-        assert_eq!(decode_profiles(&twice), decoded_as_before(&twice));
-        assert_eq!(decode_profiles(&twice).unwrap().profiles.len(), 2);
+        assert_eq!(decode_profiles(&twice, &[]), decoded_as_before(&twice));
+        assert_eq!(decode_profiles(&twice, &[]).unwrap().profiles.len(), 2);
         // And what fails today fails with today's words.
         for broken in [
             "host = ",
@@ -1998,11 +2093,11 @@ pub(crate) mod tests {
             "[[profiles]]\nport = 'x'\n",
         ] {
             assert_eq!(
-                decode_profiles(broken),
+                decode_profiles(broken, &[]),
                 decoded_as_before(broken),
                 "{broken}"
             );
-            assert!(decode_profiles(broken).is_err(), "{broken}");
+            assert!(decode_profiles(broken, &[]).is_err(), "{broken}");
         }
     }
 
@@ -2038,7 +2133,8 @@ later = "kept"
 
     #[test]
     fn a_profile_on_an_engine_this_build_lacks_comes_back_whole() {
-        let list = decode_profiles(PLUGIN).expect("one unreadable engine must not fail the file");
+        let list =
+            decode_profiles(PLUGIN, &[]).expect("one unreadable engine must not fail the file");
         assert!(
             list.profiles.is_empty(),
             "never decoded as a profile, so never restored"
@@ -2096,7 +2192,7 @@ id = 0
                 "[profiles.fields]\nodd = { \"$__toml_private_datetime\" = \"2026-10-01T09:00:00Z\", keep = \"lost\" }\n",
             );
         assert!(marked.contains("keep = \"lost\""));
-        assert_eq!(decode_profiles(&marked), decoded_as_before(&marked));
+        assert_eq!(decode_profiles(&marked, &[]), decoded_as_before(&marked));
         // Spelled with escapes, with either string kind for the key, in any
         // place, nested in an array of tables, or after another key.
         for key in [
@@ -2115,13 +2211,17 @@ id = 0
                 let text = stub("a", "postgres")
                     + &stub("x", "y").replace("engine = 'y'\n", &format!("engine = true\n{place}"));
                 assert!(decoded_as_before(&text).is_err(), "{text}");
-                assert_eq!(decode_profiles(&text), decoded_as_before(&text), "{text}");
+                assert_eq!(
+                    decode_profiles(&text, &[]),
+                    decoded_as_before(&text),
+                    "{text}"
+                );
             }
         }
         // In a value it is only text: the profile is held back, and kept.
         let quoted =
             stub("a", "postgres") + &stub("x", "plugin:t") + "note = '$__toml_private_datetime'\n";
-        let list = decode_profiles(&quoted).unwrap();
+        let list = decode_profiles(&quoted, &[]).unwrap();
         assert_eq!(list.unavailable.len(), 1);
         assert!(
             encode_profiles(&list)
@@ -2139,7 +2239,7 @@ id = 0
                      time = 07:32:00\n\
                      [profiles.nested]\nat = [1979-05-27, 07:32:00]\n";
         let text = stub("a", "postgres") + &stub("x", "plugin:t") + kinds;
-        let list = decode_profiles(&text).unwrap();
+        let list = decode_profiles(&text, &[]).unwrap();
         assert_eq!(list.unavailable.len(), 1);
         let saved = encode_profiles(&list).unwrap();
         for line in [
@@ -2152,7 +2252,7 @@ id = 0
         ] {
             assert!(saved.contains(line), "{line} in {saved}");
         }
-        assert_eq!(decode_profiles(&saved).unwrap(), list);
+        assert_eq!(decode_profiles(&saved, &[]).unwrap(), list);
     }
 
     #[test]
@@ -2167,14 +2267,14 @@ id = 0
                 + &stub("x", "y").replace("engine = 'y'", &format!("engine = {tag}"));
             // Before, the file would not load at all and was moved aside.
             assert!(decoded_as_before(&text).is_err(), "{tag}");
-            let list = decode_profiles(&text).expect("held back, not failed");
+            let list = decode_profiles(&text, &[]).expect("held back, not failed");
             assert_eq!(
                 (list.profiles.len(), list.unavailable.len()),
                 (1, 1),
                 "{tag}"
             );
             assert_eq!(list.unavailable[0].engine, written, "{tag}");
-            let again = decode_profiles(&encode_profiles(&list).unwrap()).unwrap();
+            let again = decode_profiles(&encode_profiles(&list).unwrap(), &[]).unwrap();
             assert_eq!(again, list, "{tag}");
         }
     }
@@ -2194,12 +2294,16 @@ id = 0
             "unknown = 1\n".to_string() + &supported_stub(Some("postgres"), ""),
             "[elsewhere]\nengine = 'plugin:t'\n".to_string() + &supported_stub(None, ""),
         ] {
-            assert_eq!(decode_profiles(&text), decoded_as_before(&text), "{text}");
+            assert_eq!(
+                decode_profiles(&text, &[]),
+                decoded_as_before(&text),
+                "{text}"
+            );
         }
         // An unknown top-level key beside an unavailable profile is skipped,
         // as it is beside supported ones, and not written back.
         let extra = "unknown = 1\n".to_string() + &stub("a", "postgres") + &stub("x", "plugin:t");
-        let list = decode_profiles(&extra).unwrap();
+        let list = decode_profiles(&extra, &[]).unwrap();
         assert_eq!(list.unavailable.len(), 1);
         assert!(!encode_profiles(&list).unwrap().contains("unknown"));
     }
@@ -2216,7 +2320,7 @@ id = 0
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(&path, &text).unwrap();
 
-            let list = load_profiles().expect("a mixed file loads");
+            let list = load_profiles(&[]).expect("a mixed file loads");
             assert!(
                 !path
                     .with_file_name(format!("{PROFILES_FILE}.broken"))
@@ -2264,8 +2368,10 @@ id = 0
         ]
         .map(|(id, engine)| stub(id, engine))
         .concat();
-        let list = decode_profiles(&file).unwrap();
-        let c = decode_profiles(&stub("c", "postgres")).unwrap().profiles;
+        let list = decode_profiles(&file, &[]).unwrap();
+        let c = decode_profiles(&stub("c", "postgres"), &[])
+            .unwrap()
+            .profiles;
         let order = |keep: &[&str]| {
             let profiles: Vec<_> = list
                 .profiles
@@ -2296,7 +2402,7 @@ id = 0
         ]
         .map(|(id, engine)| stub(id, engine))
         .concat();
-        let list = decode_profiles(&file).expect("repeated ids load, as they do today");
+        let list = decode_profiles(&file, &[]).expect("repeated ids load, as they do today");
         assert_eq!((list.profiles.len(), list.unavailable.len()), (2, 2));
         // Each goes after the same occurrence of its nearest id, and only once.
         assert_eq!(
@@ -2330,10 +2436,10 @@ id = 0
                 .map(|entry| entry["id"].as_str().unwrap().to_string())
                 .collect()
         };
-        let list = decode_profiles(&file).unwrap();
+        let list = decode_profiles(&file, &[]).unwrap();
         let saved = encode_profiles(&list).unwrap();
         assert_eq!(ids(&saved), ["a", "b", "x", "a", "y"]);
-        let again = decode_profiles(&saved).unwrap();
+        let again = decode_profiles(&saved, &[]).unwrap();
         assert_eq!(again, list);
         assert_eq!(encode_profiles(&again).unwrap(), saved);
     }
@@ -2343,22 +2449,23 @@ id = 0
         let file = stub("a", "postgresql")
             + &stub("b", " MySQL ")
             + &stub("c", "x").replace("engine = 'x'\n", "");
-        let list = decode_profiles(&file).unwrap();
+        let list = decode_profiles(&file, &[]).unwrap();
         assert_eq!((list.profiles.len(), list.unavailable.len()), (3, 0));
     }
 
     #[test]
     fn an_engine_tag_that_is_not_a_string_is_an_unavailable_profile() {
-        let list = decode_profiles(&stub("a", "x").replace("engine = 'x'", "engine = 3")).unwrap();
+        let list =
+            decode_profiles(&stub("a", "x").replace("engine = 'x'", "engine = 3"), &[]).unwrap();
         assert_eq!(list.unavailable[0].engine, "3");
     }
 
     #[test]
     fn a_supported_profile_that_will_not_decode_still_fails_the_file() {
         let text = stub("a", "postgres") + "port = 'x'\n" + &stub("x", "plugin:t");
-        assert!(decode_profiles(&text).is_err());
+        assert!(decode_profiles(&text, &[]).is_err());
         assert_eq!(
-            decode_profiles(&text),
+            decode_profiles(&text, &[]),
             decoded_as_before(&text),
             "today's words"
         );
@@ -2366,8 +2473,8 @@ id = 0
 
     #[test]
     fn an_unavailable_profile_needs_an_id_and_a_name() {
-        assert!(decode_profiles(&PLUGIN.replace("id = \"ch\"\n", "")).is_err());
-        assert!(decode_profiles(&PLUGIN.replace("name = \"Oracle prod\"\n", "")).is_err());
+        assert!(decode_profiles(&PLUGIN.replace("id = \"ch\"\n", ""), &[]).is_err());
+        assert!(decode_profiles(&PLUGIN.replace("name = \"Oracle prod\"\n", ""), &[]).is_err());
     }
 
     #[test]
@@ -2376,7 +2483,7 @@ id = 0
             .replace("next_query_id = 3", "next_query_id = 18446744073709551615");
         let mixed = format!("{alone}\n{PLUGIN}");
         let (now, before) = (
-            decode_profiles(&mixed).unwrap(),
+            decode_profiles(&mixed, &[]).unwrap(),
             decoded_as_before(&alone).unwrap(),
         );
         assert_eq!(now.profiles, before.profiles);
@@ -2396,7 +2503,8 @@ id = 0
     fn a_mixed_file_saves_its_supported_profiles_as_a_plain_file_would() {
         let mixed = format!("{}\n{PLUGIN}", include_str!("testdata/every-engine.toml"));
         let mut saved: toml::Table =
-            toml::from_str(&encode_profiles(&decode_profiles(&mixed).unwrap()).unwrap()).unwrap();
+            toml::from_str(&encode_profiles(&decode_profiles(&mixed, &[]).unwrap()).unwrap())
+                .unwrap();
         saved["profiles"]
             .as_array_mut()
             .unwrap()
@@ -2416,21 +2524,108 @@ id = 0
         let text = stub("a", "postgres")
             + &stub("c", "zz-unknown")
             + "next_query_id = 18446744073709551615\n";
-        assert_eq!(decode_profiles(&text), decoded_as_before(&text));
-        assert!(decode_profiles(&text).unwrap().unavailable.is_empty());
+        assert_eq!(decode_profiles(&text, &[]), decoded_as_before(&text));
+        assert!(decode_profiles(&text, &[]).unwrap().unavailable.is_empty());
     }
 
     #[test]
     fn an_unavailable_profiles_identity_file_is_read_from_its_tunnel() {
         let tunnel = format!("{PLUGIN}\n[profiles.ssh]\nhost = 'j'\nidentity_file = '/k/key'\n");
         assert_eq!(
-            decode_profiles(&tunnel).unwrap().unavailable[0].identity_file(),
+            decode_profiles(&tunnel, &[]).unwrap().unavailable[0].identity_file(),
             Some("/k/key")
         );
         assert_eq!(
-            decode_profiles(PLUGIN).unwrap().unavailable[0].identity_file(),
+            decode_profiles(PLUGIN, &[]).unwrap().unavailable[0].identity_file(),
             None
         );
+    }
+
+    pub(crate) fn odbc_plugin() -> &'static Plugin {
+        Box::leak(Box::new(Plugin {
+            id: "odbc".into(),
+            name: "ODBC".into(),
+            version: "0.0.0".into(),
+            executable: PathBuf::from("/nonexistent/dbdelve-odbc"),
+        }))
+    }
+
+    /// One profile on the ODBC plugin, as `Profile::stored` writes it.
+    const ODBC: &str = r#"[[profiles]]
+id = "db2"
+name = "Db2"
+host = ""
+database = ""
+user = "a@b.example"
+engine = "plugin:odbc"
+speaks = "generic"
+connection = "DRIVER={IBM DB2 ODBC DRIVER};HOSTNAME=db.example;PORT=50000;DATABASE=x"
+statement_timeout = 30
+next_query_id = 1
+mode = "read-only"
+confirmed = []
+open_queries = []
+open_objects = []
+
+[profiles.ssh]
+host = "bastion.example"
+user = ""
+"#;
+
+    #[test]
+    fn a_plugin_profile_round_trips_while_its_plugin_is_installed() {
+        let list = decode_profiles(ODBC, &[odbc_plugin()]).expect("loads");
+        assert!(list.unavailable.is_empty());
+        let stored = &list.profiles[0];
+        assert_eq!(stored.engine.as_deref(), Some("plugin:odbc"));
+        assert_eq!(stored.speaks.as_deref(), Some("generic"));
+        assert_eq!(
+            stored.connection.as_deref(),
+            Some("DRIVER={IBM DB2 ODBC DRIVER};HOSTNAME=db.example;PORT=50000;DATABASE=x")
+        );
+        let written = encode_profiles(&list).unwrap();
+        assert!(written.ends_with(ODBC), "{written}");
+        assert_eq!(decode_profiles(&written, &[odbc_plugin()]).unwrap(), list);
+    }
+
+    #[test]
+    fn a_plugin_profile_without_its_plugin_is_held_back_and_written_back_unchanged() {
+        let list = decode_profiles(ODBC, &[]).expect("held back, not failed");
+        assert!(list.profiles.is_empty());
+        assert_eq!(list.unavailable[0].engine, "plugin:odbc");
+        let before: toml::Table = toml::from_str(ODBC).unwrap();
+        let after: toml::Table = toml::from_str(&encode_profiles(&list).unwrap()).unwrap();
+        assert_eq!(after["profiles"], before["profiles"]);
+    }
+
+    #[test]
+    fn a_plugin_profile_it_cannot_carry_is_held_back_whole() {
+        for (from, to) in [
+            ("speaks = \"generic\"", "speaks = \"clickhouse\""),
+            ("speaks = \"generic\"", "speaks = \"mongodb\""),
+            ("speaks = \"generic\"", "speaks = \"nope\""),
+            ("speaks = \"generic\"\n", ""),
+            ("speaks = \"generic\"", "speaks = 3"),
+            ("DATABASE=x", "DATABASE=x;PWD=hunter2"),
+            ("engine = \"plugin:odbc\"", "engine = \"generic\""),
+            ("engine = \"plugin:odbc\"", "engine = \"plugin:\""),
+        ] {
+            let text = ODBC.replace(from, to);
+            let list = decode_profiles(&text, &[odbc_plugin()]).expect("held back, not failed");
+            assert!(list.profiles.is_empty(), "{to}");
+            let before: toml::Table = toml::from_str(&text).unwrap();
+            let after: toml::Table = toml::from_str(&encode_profiles(&list).unwrap()).unwrap();
+            assert_eq!(after["profiles"], before["profiles"], "{to}");
+        }
+    }
+
+    #[test]
+    fn a_connection_string_holding_a_password_is_never_written() {
+        let mut list = decode_profiles(ODBC, &[odbc_plugin()]).unwrap();
+        list.profiles[0].connection = Some("DSN=x;PWD=hunter2".into());
+        let refused = encode_profiles(&list).unwrap_err();
+        assert!(!refused.contains("hunter2"), "{refused}");
+        assert!(refused.contains("Password field"), "{refused}");
     }
 
     #[test]
@@ -2556,7 +2751,7 @@ user = "shayan"
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(&path, toml).unwrap();
 
-            let ProfileList { profiles, .. } = load_profiles().unwrap();
+            let ProfileList { profiles, .. } = load_profiles(&[]).unwrap();
             let profile = &profiles[0];
             assert_eq!(profile.mode, None);
             assert!(profile.confirmed.is_empty());
@@ -2593,7 +2788,7 @@ user = "shayan"
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(&path, toml).unwrap();
 
-            let ProfileList { profiles, .. } = load_profiles().unwrap();
+            let ProfileList { profiles, .. } = load_profiles(&[]).unwrap();
             assert_eq!(profiles.len(), 2);
             // Kept raw here; `restore_profile` is where an unreadable slug
             // becomes a mode, and where it decides which way to fail.
@@ -2615,6 +2810,8 @@ user = "shayan"
                 sslmode: Some("verify-full".into()),
                 root_certificate: None,
                 engine: Some("postgres".into()),
+                speaks: None,
+                connection: None,
                 path: None,
                 account: None,
                 private_key: None,
@@ -2648,7 +2845,7 @@ user = "shayan"
             })
             .unwrap();
 
-            let ProfileList { profiles, .. } = load_profiles().unwrap();
+            let ProfileList { profiles, .. } = load_profiles(&[]).unwrap();
             assert_eq!(profiles[0], stored);
         });
     }
@@ -2667,6 +2864,8 @@ user = "shayan"
             sslmode: Some("verify-full".into()),
             root_certificate: Some("/etc/ssl/rds.pem".into()),
             engine: Some("postgres".into()),
+            speaks: None,
+            connection: None,
             path: None,
             account: None,
             private_key: None,
@@ -2766,6 +2965,7 @@ user = \"dbdelve\"
 sslmode = \"prefer\"
 open_objects = []
 ",
+            &[],
         )
         .expect("a profile predating the optional fields must load");
 
@@ -2797,6 +2997,8 @@ open_objects = []
             sslmode: None,
             root_certificate: None,
             engine: Some("postgres".into()),
+            speaks: None,
+            connection: None,
             path: None,
             account: None,
             private_key: None,
@@ -2842,7 +3044,7 @@ open_objects = []
         );
         // And a file from before they existed reads back and writes the same.
         assert_eq!(
-            written_alone(decode_profiles(&text).unwrap().profiles.remove(0)),
+            written_alone(decode_profiles(&text, &[]).unwrap().profiles.remove(0)),
             text
         );
     }
@@ -2902,7 +3104,7 @@ open_objects = []
             text.find("[[profiles.open_objects]]") < text.find("[[profiles.folders]]"),
             "{text}"
         );
-        assert_eq!(decode_profiles(&text).unwrap().profiles, [profile]);
+        assert_eq!(decode_profiles(&text, &[]).unwrap().profiles, [profile]);
     }
 
     #[test]
@@ -2933,7 +3135,7 @@ query = 123
 [[profiles.pins]]
 folder = "Hot"
 "#;
-        let profile = decode_profiles(text).unwrap().profiles.remove(0);
+        let profile = decode_profiles(text, &[]).unwrap().profiles.remove(0);
         let daily = StoredShortcut {
             query: Some("daily".into()),
             ..StoredShortcut::default()
@@ -2962,13 +3164,13 @@ folder = "Hot"
              [[profiles.pins]]\nfolder = \"Hot\"\n",
             PLUGIN.trim_end()
         );
-        let list = decode_profiles(&text).unwrap();
+        let list = decode_profiles(&text, &[]).unwrap();
         assert_eq!(list.unavailable.len(), 1);
         let written = encode_profiles(&list).unwrap();
         for line in ["name = \"Hot\"", "kind = \"sequence\"", "folder = \"Hot\""] {
             assert!(written.contains(line), "{line} in:\n{written}");
         }
-        assert_eq!(decode_profiles(&written).unwrap(), list);
+        assert_eq!(decode_profiles(&written, &[]).unwrap(), list);
     }
 
     #[test]
@@ -3074,6 +3276,8 @@ folder = "Hot"
             sslmode: None,
             root_certificate: None,
             engine: Some("postgres".into()),
+            speaks: None,
+            connection: None,
             path: None,
             account: None,
             private_key: None,
@@ -3150,6 +3354,8 @@ folder = "Hot"
             sslmode: None,
             root_certificate: None,
             engine: Some("sqlite".into()),
+            speaks: None,
+            connection: None,
             path: Some("/Users/dev/dbdelve_dev.db".into()),
             account: None,
             private_key: None,
@@ -3212,6 +3418,8 @@ folder = "Hot"
             sslmode: None,
             root_certificate: None,
             engine: Some("snowflake".into()),
+            speaks: None,
+            connection: None,
             path: None,
             account: Some("myorg-myaccount".into()),
             private_key: Some("/Users/dev/.ssh/snowflake.p8".into()),
@@ -3266,6 +3474,7 @@ schema = \"public\"
 name = \"accounts\"
 active = true
 ",
+            &[],
         )
         .expect("a profile predating the object kind must load");
 
@@ -3296,6 +3505,7 @@ user = \"dbdelve\"
 sslmode = \"prefer\"
 open_objects = []
 ",
+            &[],
         )
         .expect("a profile predating engine must load");
 
@@ -3321,6 +3531,8 @@ open_objects = []
             sslmode: None,
             root_certificate: None,
             engine: Some("sqlite".into()),
+            speaks: None,
+            connection: None,
             path: Some("/tmp/dev.sqlite".into()),
             account: None,
             private_key: None,
@@ -3443,6 +3655,8 @@ open_objects = []
                     sslmode: Some("prefer".into()),
                     root_certificate: None,
                     engine: Some("postgres".into()),
+                    speaks: None,
+                    connection: None,
                     path: None,
                     account: None,
                     private_key: None,
@@ -3475,6 +3689,8 @@ open_objects = []
                     sslmode: None,
                     root_certificate: None,
                     engine: Some("sqlite".into()),
+                    speaks: None,
+                    connection: None,
                     path: Some("/tmp/dev.sqlite".into()),
                     account: None,
                     private_key: None,
@@ -3510,7 +3726,7 @@ open_objects = []
         // A file written before `settings` existed has no `[settings]` table
         // at all, and that is what is on disk for everyone running dbdelve
         // today -- it has to keep reading as `None`, not as the defaults.
-        let missing = decode_profiles("active = \"dev\"\n")
+        let missing = decode_profiles("active = \"dev\"\n", &[])
             .expect("a file predating settings must load")
             .settings;
         assert_eq!(missing, None);
@@ -3520,9 +3736,9 @@ open_objects = []
     fn an_unparsable_profile_file_is_an_error_rather_than_an_empty_list() {
         // The empty list is what the next save writes back, so a parse error
         // that reads as "no profiles" is a parse error that deletes them.
-        assert!(decode_profiles("host = ").is_err());
+        assert!(decode_profiles("host = ", &[]).is_err());
         assert_eq!(
-            decode_profiles(""),
+            decode_profiles("", &[]),
             Ok(ProfileList {
                 profiles: Vec::new(),
                 active: None,
@@ -4080,6 +4296,7 @@ sslmode = \"prefer\"
 open_query = \"daily\"
 open_objects = []
 ",
+            &[],
         )
         .expect("a profile predating open_queries must load");
 
@@ -4104,6 +4321,8 @@ open_objects = []
             sslmode: None,
             root_certificate: None,
             engine: Some("postgres".into()),
+            speaks: None,
+            connection: None,
             path: None,
             account: None,
             private_key: None,
@@ -4409,6 +4628,7 @@ user = \"dbdelve\"
 schema = \"public\"
 name = \"accounts\"
 ",
+            &[],
         )
         .expect("a profile predating the filter must load");
 
@@ -4465,6 +4685,8 @@ name = \"accounts\"
             sslmode: None,
             root_certificate: None,
             engine: Some("postgres".into()),
+            speaks: None,
+            connection: None,
             path: None,
             account: None,
             private_key: None,
@@ -4577,6 +4799,8 @@ name = \"accounts\"
             sslmode: None,
             root_certificate: None,
             engine: Some("postgres".into()),
+            speaks: None,
+            connection: None,
             path: None,
             account: None,
             private_key: None,

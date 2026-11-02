@@ -2427,7 +2427,10 @@ fn connection_items(workspace: &Workspace) -> Vec<Item> {
                     endpoint: String::new(),
                     logo: icon::DATABASE,
                     color: None,
-                    unavailable: Some((at, crate::workspace::unavailable_reason(&gone.engine))),
+                    unavailable: Some((
+                        at,
+                        crate::workspace::unavailable_reason(gone, &workspace.plugins),
+                    )),
                 }),
         )
         .collect();

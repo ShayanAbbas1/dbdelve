@@ -31,7 +31,6 @@ mod mysql;
 // `secrets` and `storable` are the connection form's, which is not built yet.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod odbc_string;
-#[expect(dead_code, reason = "read once plugins are discovered and persisted")]
 pub(crate) mod plugin;
 mod postgres;
 mod redis;
@@ -45,6 +44,7 @@ mod xlsx;
 
 pub use duckdb::IN_MEMORY as DUCKDB_IN_MEMORY;
 pub use external::ExternalConfig;
+pub use plugin::Plugin;
 
 pub use mongo::MongoConfig;
 pub use snowflake::{SnowflakeConfig, account_identifier, normalize_host};
@@ -992,13 +992,6 @@ pub enum ConnectionConfig {
     Redis(ServerConfig),
     /// Through a plugin driver. Its host, port and database are inside its
     /// connection string, so it has no [`ServerConfig`].
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "made once profiles restore one and the form builds one"
-        )
-    )]
     External(ExternalConfig),
 }
 

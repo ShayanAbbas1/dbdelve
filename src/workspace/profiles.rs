@@ -7,6 +7,7 @@ use super::*;
 use gpui_component::menu::PopupMenuItem;
 
 use crate::connection_form::{ConnectionTest, duplicate_profile_name, keep_schema};
+use crate::db::{ExternalConfig, Plugin};
 use crate::explorer::Shortcuts;
 use crate::import::{self, Source};
 use crate::session::{STALE_ROWS, restored_shortcuts};
@@ -97,24 +98,25 @@ impl Workspace {
                 Err(message) => (SslMode::VerifyFull, Some(message)),
             },
         };
-        // No engine at all is a profile written before dbdelve had a second one,
-        // and Postgres is what it was. An engine this build cannot read is held
-        // back by `decode_profiles` as an `UnavailableProfile`, so the `Err` arm
-        // is reached only by a file the mixed reader fell back on: it is read
-        // as Postgres and says so rather than connecting somewhere the user did
-        // not ask for without mentioning it.
-        let (engine, unreadable_engine) = match stored.engine.as_deref() {
-            None => (Engine::Postgres, None),
-            Some(stored) => match Engine::parse(stored) {
-                Ok(engine) if engine.has_built_in_driver() => (engine, None),
-                Ok(_) => (
-                    Engine::Postgres,
-                    Some(crate::db::GENERIC_REFUSAL.to_string()),
-                ),
-                Err(message) => (Engine::Postgres, Some(message)),
-            },
+        let (config, unreadable_engine) = match restored_config(&stored, sslmode, &self.plugins) {
+            Ok(restored) => restored,
+            Err(_) => {
+                let above = self.profiles.iter().map(|profile| profile.id.as_str());
+                match store::UnavailableProfile::held_back(&stored, above) {
+                    Ok(gone) => self.unavailable.push(gone),
+                    // Dropping it would lose it on the next save, so nothing
+                    // is saved this run instead.
+                    Err(message) => {
+                        self.store_unreadable = true;
+                        self.note(
+                            format!("Could not hold back {}: {message}", stored.name),
+                            cx,
+                        );
+                    }
+                }
+                return;
+            }
         };
-        let config = stored_config(&stored, engine, sslmode);
         let stored_queries = stored_buffers(
             stored.open_queries,
             stored.next_query_id,
@@ -2182,8 +2184,58 @@ enum ProjectChoice {
     New,
 }
 
-/// The connection a stored profile describes, on `engine` and `sslmode` as
-/// [`Workspace::restore_profile`] read them.
+/// The connection a stored profile describes and any notice it opens with, or,
+/// for one on a plugin it cannot open, why. No engine at all is a profile
+/// written before dbdelve had a second one, and Postgres is what it was. A
+/// profile this build cannot open is held back by `decode_profiles` as an
+/// `UnavailableProfile`, so the rest is reached only by a file the mixed
+/// reader fell back on: a built-in engine it cannot read is read as Postgres
+/// and says so, rather than connecting somewhere the user did not ask for
+/// without mentioning it; a plugin profile is held back here instead, because
+/// read as Postgres it would be saved as one.
+fn restored_config(
+    stored: &store::StoredProfile,
+    sslmode: SslMode,
+    plugins: &[&'static Plugin],
+) -> Result<(ConnectionConfig, Option<String>), String> {
+    let Some(tag) = stored.engine.as_deref() else {
+        return Ok((stored_config(stored, Engine::Postgres, sslmode), None));
+    };
+    if let Some(id) = tag.strip_prefix(store::PLUGIN_TAG) {
+        let connection = stored.connection.as_deref();
+        let (plugin, speaks) =
+            store::through_plugin(id, stored.speaks.as_deref(), connection, plugins)?;
+        return Ok((
+            ConnectionConfig::External(ExternalConfig {
+                plugin,
+                speaks,
+                connection: connection.unwrap_or_default().to_string(),
+                user: stored.user.clone(),
+                // Never on disk. Read from the Keychain when connecting.
+                password: String::new(),
+                statement_timeout: stored.statement_timeout.unwrap_or_default(),
+                ssh: stored.ssh.clone(),
+            }),
+            None,
+        ));
+    }
+    Ok(match Engine::parse(tag) {
+        Ok(engine) if engine.has_built_in_driver() => {
+            (stored_config(stored, engine, sslmode), None)
+        }
+        Ok(_) => (
+            stored_config(stored, Engine::Postgres, sslmode),
+            Some(crate::db::GENERIC_REFUSAL.to_string()),
+        ),
+        Err(message) => (
+            stored_config(stored, Engine::Postgres, sslmode),
+            Some(message),
+        ),
+    })
+}
+
+/// The connection a stored profile on a built-in `engine` describes, with
+/// `sslmode` as [`Workspace::restore_profile`] read it.
 fn stored_config(
     stored: &store::StoredProfile,
     engine: Engine,
@@ -2239,8 +2291,8 @@ fn stored_config(
                 _ => ConnectionConfig::Postgres(server),
             }
         }
-        // `restore_profile` and `decode_profiles` hold such a profile back before
-        // it reaches here.
+        // `restored_config` and `decode_profiles` hold such a profile back
+        // before it reaches here.
         Engine::Generic => unreachable!("{}", crate::db::GENERIC_REFUSAL),
         Engine::Snowflake => ConnectionConfig::Snowflake(SnowflakeConfig {
             account: stored.account.clone().unwrap_or_default(),
@@ -2297,12 +2349,27 @@ pub(crate) fn is_unshared_imported_key<'a>(
         && !others.into_iter().any(|other| other == key)
 }
 
-/// Why a profile on `engine` cannot be opened: a plugin it names that is not
-/// installed, or an engine only a newer build has.
-pub(crate) fn unavailable_reason(engine: &str) -> String {
-    match engine.strip_prefix("plugin:") {
-        Some(plugin) if !plugin.is_empty() => format!("Needs the {plugin} plugin"),
-        _ => format!("Made by a newer DBDelve (engine `{engine}`)"),
+/// Why a profile cannot be opened: a plugin it names that is not installed, or
+/// what that plugin cannot carry, or an engine only a newer build has.
+pub(crate) fn unavailable_reason(
+    gone: &store::UnavailableProfile,
+    plugins: &[&'static Plugin],
+) -> String {
+    let newer = || format!("Made by a newer DBDelve (engine `{}`)", gone.engine);
+    match gone.engine.strip_prefix(store::PLUGIN_TAG) {
+        Some(id) if !id.is_empty() => store::through_plugin(
+            id,
+            gone.speaks.as_deref(),
+            gone.connection.as_deref(),
+            plugins,
+        )
+        .err()
+        .unwrap_or_else(newer),
+        Some(_) => newer(),
+        None => match Engine::parse(&gone.engine) {
+            Ok(_) => crate::db::GENERIC_REFUSAL.to_string(),
+            Err(_) => newer(),
+        },
     }
 }
 
@@ -2389,7 +2456,7 @@ mod tests {
 
     fn restored(text: &str) -> Vec<(String, ConnectionConfig)> {
         let store::ProfileList { profiles, .. } =
-            store::decode_profiles(text).expect("the fixture loads");
+            store::decode_profiles(text, &[]).expect("the fixture loads");
         profiles
             .iter()
             .map(|stored| {
@@ -2442,25 +2509,81 @@ mod tests {
 
     #[test]
     fn an_unavailable_profile_says_what_it_is_missing() {
-        assert_eq!(unavailable_reason("plugin:odbc"), "Needs the odbc plugin");
+        let odbc = store::tests::odbc_plugin();
+        let reason = |engine: &str, extra: &str, plugins: &[&'static Plugin]| {
+            let file = format!("[[profiles]]\nid = 'a'\nname = 'A'\nengine = '{engine}'\n{extra}");
+            let list = store::decode_profiles(&file, plugins).expect("held back, not failed");
+            assert!(list.profiles.is_empty(), "{file}");
+            unavailable_reason(&list.unavailable[0], plugins)
+        };
+        let generic = "speaks = 'generic'";
+        assert_eq!(reason("plugin:odbc", generic, &[]), "Needs the odbc plugin");
         assert_eq!(
-            unavailable_reason("zz-unknown"),
+            reason("plugin:odbc", "speaks = 'clickhouse'", &[odbc]),
+            format!(
+                "{}'s SQL cannot be spoken through a plugin driver",
+                Engine::ClickHouse.label()
+            )
+        );
+        assert_eq!(
+            reason("plugin:odbc", "speaks = 'nope'", &[odbc]),
+            "Made by a newer DBDelve (dialect `nope`)"
+        );
+        assert_eq!(reason("plugin:odbc", "", &[odbc]), "Names no SQL dialect");
+        assert_eq!(
+            reason(
+                "plugin:odbc",
+                &format!("{generic}\nconnection = 'DRIVER=x;PWD=y'"),
+                &[odbc]
+            ),
+            "Put the password in the Password field, which is kept in the Keychain."
+        );
+        assert_eq!(
+            reason("zz-unknown", "", &[odbc]),
             "Made by a newer DBDelve (engine `zz-unknown`)"
         );
         // No id to name: not a plugin anyone could install.
         assert_eq!(
-            unavailable_reason("plugin:"),
+            reason("plugin:", generic, &[odbc]),
             "Made by a newer DBDelve (engine `plugin:`)"
         );
+        assert_eq!(reason("generic", "", &[odbc]), crate::db::GENERIC_REFUSAL);
+    }
+
+    /// A file the mixed reader falls back on decodes every profile, so the
+    /// restore is what holds a plugin profile back, rather than reading it as
+    /// Postgres and saving it as one.
+    #[test]
+    fn the_restore_holds_back_a_plugin_profile_it_cannot_open() {
+        let odbc = store::tests::odbc_plugin();
+        let stored: store::StoredProfile = toml::from_str(
+            "id = 'o'\nname = 'O'\nhost = ''\ndatabase = ''\nuser = 'a@b.example'\n\
+             engine = 'plugin:odbc'\nspeaks = 'postgres'\nconnection = 'DSN=x'\n",
+        )
+        .unwrap();
+        let (config, notice) = restored_config(&stored, SslMode::default(), &[odbc]).unwrap();
+        assert_eq!(notice, None);
+        assert!(matches!(config, ConnectionConfig::External(_)));
+        assert_eq!(
+            restored_config(&stored, SslMode::default(), &[]).unwrap_err(),
+            "Needs the odbc plugin"
+        );
+        let gone = store::UnavailableProfile::held_back(&stored, ["x", "o"].into_iter()).unwrap();
+        assert_eq!(
+            (gone.id.as_str(), gone.engine.as_str()),
+            ("o", "plugin:odbc")
+        );
+        assert_eq!(gone.speaks.as_deref(), Some("postgres"));
     }
 
     #[test]
     fn a_restore_prunes_no_grids_while_an_unavailable_profile_holds_the_id() {
-        let list = store::decode_profiles(SHARED_ID).expect("a mixed file loads");
+        let list = store::decode_profiles(SHARED_ID, &[]).expect("a mixed file loads");
         assert_eq!((list.profiles.len(), list.unavailable.len()), (1, 1));
         assert!(held_by_unavailable(&list.profiles[0].id, &list.unavailable));
         // A file with no unavailable profile prunes every profile's grids, as before.
-        let alone = store::decode_profiles(include_str!("../testdata/every-engine.toml")).unwrap();
+        let alone =
+            store::decode_profiles(include_str!("../testdata/every-engine.toml"), &[]).unwrap();
         assert!(alone.unavailable.is_empty());
         assert!(
             alone
@@ -2472,7 +2595,7 @@ mod tests {
 
     #[test]
     fn removing_a_profile_keeps_what_an_unavailable_one_under_its_id_still_owns() {
-        let list = store::decode_profiles(SHARED_ID).expect("a mixed file loads");
+        let list = store::decode_profiles(SHARED_ID, &[]).expect("a mixed file loads");
         assert!(held_by_unavailable("pg", &list.unavailable));
         // Only the id decides: another id's keychain entry, queries, grids and
         // project membership go with it as before.

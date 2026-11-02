@@ -12,7 +12,7 @@ use gpui_component::Root;
 use super::Workspace;
 use crate::{
     actions::CancelQuery,
-    db::{CancelToken, Engine, Fetch},
+    db::{CancelToken, ConnectionConfig, Engine, ExternalConfig, Fetch, SshTunnel},
     explorer, keybindings,
     palette::{Mode as PaletteMode, Scope},
     session::{CatalogState, ObjectBody, QueryState, QueryTab},
@@ -23,6 +23,14 @@ use crate::{
 /// What `main` sets up before the window opens, minus the menu bar and the
 /// panic log, which the test platform has no use for.
 fn launch(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext) {
+    launch_with(cx, Vec::new())
+}
+
+/// `launch` with these plugins discovered.
+fn launch_with<'a>(
+    cx: &'a mut TestAppContext,
+    plugins: Vec<&'static crate::db::Plugin>,
+) -> (Entity<Workspace>, &'a mut VisualTestContext) {
     cx.update(|cx| {
         cx.text_system()
             .add_fonts(
@@ -38,7 +46,7 @@ fn launch(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext
         let theme = theme::starting_theme(theme::Appearance::of_system(cx.window_appearance()));
         theme.apply_to_components(cx);
         cx.set_global(theme);
-        let overrides = store::peek_profiles()
+        let overrides = store::peek_profiles(&plugins)
             .and_then(|list| list.settings)
             .and_then(|settings| settings.custom_keybindings)
             .unwrap_or_default();
@@ -46,7 +54,7 @@ fn launch(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext
     });
     let mut workspace = None;
     let (_, cx) = cx.add_window_view(|window, cx| {
-        let entity = cx.new(|cx| Workspace::new(window, cx));
+        let entity = cx.new(|cx| Workspace::new(plugins, window, cx));
         workspace = Some(entity.clone());
         Root::new(entity, window, cx)
     });
@@ -1754,6 +1762,128 @@ fn a_pin_dropped_on_the_top_half_of_another_goes_before_it(cx: &mut TestAppConte
             pins,
             [explorer::Pin::Member(fish), explorer::Pin::Member(birds)]
         );
+
+        quit(workspace, cx);
+    });
+}
+
+/// Through the real restore and the real save: what `Profile::stored` writes
+/// for a plugin profile is the user's string, never its password, and it
+/// restores to the same connection.
+#[gpui::test]
+fn an_odbc_profile_saves_and_restores_as_it_was(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let odbc = store::tests::odbc_plugin();
+        let directory = store::dbdelve_directory().unwrap();
+        std::fs::create_dir_all(&directory).unwrap();
+        // A SQLite profile in front, since launching connects the active one
+        // and a plugin profile would reach for the keychain.
+        let database = directory.join("e2e.db");
+        std::fs::write(&database, b"").unwrap();
+        let strings = [
+            "Db2Dev",
+            "DRIVER={PostgreSQL Unicode}; Server = pg.internal ;Port=5432;Opts={a;b}}c}",
+        ];
+        std::fs::write(
+            directory.join("profiles.toml"),
+            format!(
+                "active = \"e2e\"\n\
+                 [settings]\ncheck_for_updates = false\n\
+                 [[profiles]]\nid = \"e2e\"\nname = \"E2E\"\nhost = \"\"\ndatabase = \"\"\n\
+                 user = \"\"\nengine = \"sqlite\"\npath = {:?}\n\
+                 [[profiles]]\nid = \"dsn\"\nname = \"DSN\"\nhost = \"\"\ndatabase = \"\"\n\
+                 user = \"a@b.example\"\nengine = \"plugin:odbc\"\nspeaks = \"generic\"\n\
+                 connection = {:?}\nstatement_timeout = 30\n\
+                 [[profiles]]\nid = \"tunnel\"\nname = \"Tunnel\"\nhost = \"\"\ndatabase = \"\"\n\
+                 user = \"u\"\nengine = \"plugin:odbc\"\nspeaks = \"postgres\"\n\
+                 connection = {:?}\n\
+                 [profiles.ssh]\nhost = \"bastion.example\"\nport = 2222\nuser = \"me\"\n",
+                database.display().to_string(),
+                strings[0],
+                strings[1],
+            ),
+        )
+        .unwrap();
+
+        let (workspace, cx) = launch_with(cx, vec![odbc]);
+        let external = |workspace: &Workspace| {
+            workspace
+                .profiles
+                .iter()
+                .filter(|profile| matches!(profile.config, ConnectionConfig::External(_)))
+                .map(|profile| profile.config.clone())
+                .collect::<Vec<_>>()
+        };
+        let restored = cx.update(|_, cx| external(workspace.read(cx)));
+        let expected = |connection: &str, speaks, user: &str, timeout, ssh| {
+            ConnectionConfig::External(ExternalConfig {
+                plugin: odbc,
+                speaks,
+                connection: connection.into(),
+                user: user.into(),
+                password: String::new(),
+                statement_timeout: timeout,
+                ssh,
+            })
+        };
+        assert_eq!(
+            restored,
+            [
+                expected(strings[0], Engine::Generic, "a@b.example", 30, None),
+                expected(
+                    strings[1],
+                    Engine::Postgres,
+                    "u",
+                    0,
+                    Some(SshTunnel {
+                        host: "bastion.example".into(),
+                        port: Some(2222),
+                        user: "me".into(),
+                        identity_file: None,
+                    })
+                ),
+            ]
+        );
+
+        workspace.update(cx, |workspace, cx| {
+            for profile in &mut workspace.profiles {
+                if let ConnectionConfig::External(config) = &mut profile.config {
+                    config.password = "hunter2".into();
+                }
+            }
+            workspace.remember_profiles(cx);
+        });
+        let saved = std::fs::read_to_string(directory.join("profiles.toml")).unwrap();
+        assert!(!saved.contains("hunter2"), "{saved}");
+        let list = store::decode_profiles(&saved, &[odbc]).unwrap();
+        let written = list
+            .profiles
+            .iter()
+            .filter_map(|stored| {
+                Some((
+                    stored.engine.as_deref()?,
+                    stored.speaks.as_deref()?,
+                    stored.connection.as_deref()?,
+                ))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            written,
+            [
+                ("plugin:odbc", "generic", strings[0]),
+                ("plugin:odbc", "postgres", strings[1]),
+            ]
+        );
+
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.profiles.clear();
+                for stored in list.profiles {
+                    workspace.restore_profile(stored, window, cx);
+                }
+            });
+        });
+        assert_eq!(cx.update(|_, cx| external(workspace.read(cx))), restored);
 
         quit(workspace, cx);
     });

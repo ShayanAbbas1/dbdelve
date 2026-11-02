@@ -203,6 +203,10 @@ impl Profile {
             ConnectionConfig::MongoDb(mongo) => Some(mongo),
             _ => None,
         };
+        let external = match &self.config {
+            ConnectionConfig::External(external) => Some(external),
+            _ => None,
+        };
         store::StoredProfile {
             id: self.id.clone(),
             name: self.name.clone(),
@@ -215,10 +219,18 @@ impl Profile {
             user: server
                 .map(|server| server.user.clone())
                 .or_else(|| snowflake.map(|account| account.user.clone()))
+                .or_else(|| external.map(|external| external.user.clone()))
                 .unwrap_or_default(),
             sslmode: server.map(|server| server.sslmode.as_str().to_string()),
             root_certificate: server.and_then(|server| server.root_certificate.clone()),
-            engine: Some(self.config.engine().as_str().to_string()),
+            // A plugin profile's engine is the plugin, and its dialect is
+            // `speaks`: `engine()` answers with the dialect.
+            engine: Some(match external {
+                Some(external) => format!("{}{}", store::PLUGIN_TAG, external.plugin.id),
+                None => engine.as_str().to_string(),
+            }),
+            speaks: external.map(|external| external.speaks.as_str().to_string()),
+            connection: external.map(|external| external.connection.clone()),
             path: match &self.config {
                 ConnectionConfig::Sqlite { path, .. }
                 | ConnectionConfig::Turso { path, .. }
