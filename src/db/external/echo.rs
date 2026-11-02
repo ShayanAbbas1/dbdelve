@@ -48,6 +48,25 @@ pub(crate) fn built(package: &str, binary: &str, id: &str, name: &str) -> &'stat
     }))
 }
 
+/// A live test's connection string with `endpoint`'s attributes in place of
+/// its own of the same keys: the same driver and database, dialled elsewhere.
+pub(super) fn with_endpoint(connection: &str, endpoint: &str) -> String {
+    let key = |attribute: &str| {
+        attribute
+            .split('=')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_lowercase()
+    };
+    let replaced: Vec<String> = endpoint.split(';').map(key).collect();
+    let kept: Vec<&str> = connection
+        .split(';')
+        .filter(|attribute| !replaced.contains(&key(attribute)))
+        .collect();
+    format!("{};{endpoint}", kept.join(";"))
+}
+
 /// Whether a process with this id exists. On Unix that counts one exited but
 /// not yet reaped, so gone also proves the host reaped it.
 #[cfg(unix)]

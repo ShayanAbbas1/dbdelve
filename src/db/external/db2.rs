@@ -55,8 +55,8 @@ fn schema() -> &'static str {
     SCHEMA.get_or_init(|| user().to_uppercase())
 }
 
-fn open() -> Connection {
-    let config = ExternalConfig {
+fn config() -> ExternalConfig {
+    ExternalConfig {
         plugin: bridge(),
         speaks: Engine::Generic,
         connection: env::var("dbdelve_ODBC_DB2").expect("dbdelve_ODBC_DB2"),
@@ -64,8 +64,15 @@ fn open() -> Connection {
         password: env::var("dbdelve_ODBC_DB2_PASSWORD").unwrap_or_default(),
         statement_timeout: 0,
         ssh: None,
-    };
+    }
+}
+
+fn open_as(config: ExternalConfig) -> Connection {
     Connection::open(ConnectionConfig::External(config)).expect("the bridge opens on Db2")
+}
+
+fn open() -> Connection {
+    open_as(config())
 }
 
 fn quoted(name: &str) -> String {
@@ -393,4 +400,20 @@ fn live_db2_reads_a_backslash_in_like_as_itself_so_plain_like_refuses_one() {
             );
         }
     }
+}
+
+/// Db2's own `HOSTNAME` and `PORT` keys through the tunnel rewrite, to the
+/// compose service as the bastion sees it, a host this machine cannot
+/// resolve. Local only: CI's Db2 job runs no bastion.
+#[test]
+#[ignore = "needs a Db2, IBM's driver and the dev bastion: set dbdelve_ODBC_DB2, _USER, _PASSWORD and dbdelve_SSH_CONFIG"]
+fn live_db2_through_a_tunnel() {
+    let base = config();
+    let connection = open_as(ExternalConfig {
+        connection: echo::with_endpoint(&base.connection, "HOSTNAME=db2;PORT=50000"),
+        ssh: crate::db::ssh::live_bastion("dbdelve-bastion"),
+        ..base
+    });
+    let result = run(&connection, "SELECT 7 FROM SYSIBM.SYSDUMMY1");
+    assert_eq!(cell(&result), Some("7"));
 }

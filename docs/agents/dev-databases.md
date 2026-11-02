@@ -107,7 +107,8 @@ configuration. On macOS, `brew install psqlodbc`, then
 `DRIVER=/opt/homebrew/lib/psqlodbcw.so;Server=127.0.0.1;Port=55432;Database=dbdelve_dev`.
 On Ubuntu the `odbc-postgresql` package puts it at
 `/usr/lib/x86_64-linux-gnu/odbc/psqlodbcw.so`. Run
-`cargo test --bin dbdelve db::external::psqlodbc -- --include-ignored`.
+`cargo test --bin dbdelve db::external::psqlodbc -- --include-ignored`, with
+`dbdelve_SSH_CONFIG` set and the bastion up for `live_external_through_a_tunnel`.
 
 ## Db2
 
@@ -133,7 +134,9 @@ with `dbdelve_ODBC_DB2_USER` and `_PASSWORD`, then `cargo test -p
 dbdelve-plugin-odbc --test bridge -- --include-ignored`. The same variables
 run Db2 as a conformance subject through the host, which builds the bridge
 itself: `cargo test --bin dbdelve db::external::db2 -- --include-ignored`. It
-creates its own `DBDELVE_HOST_*` tables. For a driver manager
+creates its own `DBDELVE_HOST_*` tables, and its `live_db2_through_a_tunnel`
+also wants `dbdelve_SSH_CONFIG` and the bastion, which CI's Db2 job does not
+run. For a driver manager
 that wants the files (Homebrew's `isql` as a probe), `eval "$(dev/db2/driver.sh
 --env)"` exports `ODBCSYSINI` and `ODBCINI` at generated files under the cache
 and changes no global file; the driver is then `DRIVER=Db2`.

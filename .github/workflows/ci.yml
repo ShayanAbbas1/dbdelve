@@ -263,7 +263,8 @@ jobs:
           export dbdelve_ODBC_DB2="$driver;HOSTNAME=127.0.0.1;PORT=55000;DATABASE=dbdelve;PROTOCOL=TCPIP"
           cargo test -p dbdelve-plugin-odbc --test bridge -- --include-ignored
           # The host's side: the conformance subject builds the bridge itself.
-          cargo test --bin dbdelve db::external::db2 -- --include-ignored
+          # No bastion in this job, so the tunnel test runs locally only.
+          cargo test --bin dbdelve db::external::db2 -- --include-ignored --skip live_db2_through_a_tunnel
 
   macos:
     runs-on: macos-latest

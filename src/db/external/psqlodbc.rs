@@ -36,8 +36,8 @@ fn target() -> Target {
     }
 }
 
-fn open() -> Connection {
-    let config = ExternalConfig {
+fn config() -> ExternalConfig {
+    ExternalConfig {
         plugin: bridge(),
         speaks: Engine::Postgres,
         // Pinned so the scenarios see the server's behaviour: a result is read
@@ -51,8 +51,15 @@ fn open() -> Connection {
         password: env::var("dbdelve_ODBC_POSTGRES_PASSWORD").unwrap_or_default(),
         statement_timeout: 0,
         ssh: None,
-    };
+    }
+}
+
+fn open_as(config: ExternalConfig) -> Connection {
     Connection::open(ConnectionConfig::External(config)).expect("the bridge opens on Postgres")
+}
+
+fn open() -> Connection {
+    open_as(config())
 }
 
 fn run(connection: &Connection, sql: &str) -> QueryResult {
@@ -130,4 +137,20 @@ fn live_psqlodbc_read_only_hold_is_the_servers() {
     assert!(message.contains("read-only transaction"), "{message}");
     run(&connection, "INSERT INTO dbdelve_odbc_hold VALUES (1)");
     run(&connection, "DROP TABLE dbdelve_odbc_hold");
+}
+
+/// The compose database as the bastion sees it, by service name and the port
+/// inside the network: a host this machine cannot resolve, so only a string
+/// the tunnel rewrote to its forward connects.
+#[test]
+#[ignore = "needs psqlODBC and the dev bastion: set dbdelve_ODBC_POSTGRES, _USER, _PASSWORD and dbdelve_SSH_CONFIG"]
+fn live_external_through_a_tunnel() {
+    let base = config();
+    let connection = open_as(ExternalConfig {
+        connection: echo::with_endpoint(&base.connection, "Server=postgres;Port=5432"),
+        ssh: crate::db::ssh::live_bastion("dbdelve-bastion"),
+        ..base
+    });
+    let result = run(&connection, "SELECT 1 AS one");
+    assert_eq!(result.rows[0].get(0), Some("1"));
 }
