@@ -80,6 +80,12 @@ impl Workspace {
             // The grid's own columns, where its rows are written back to: one
             // table, which is never so for a join or a computed result.
             Tab::Query(_) => {
+                // The grid's `edit` was set by whichever driver read its rows,
+                // and the profile may have moved to a plugin's since.
+                if !self.target().takes_inserts(db::RelationKind::Table) {
+                    self.note("These rows take no new row.".into(), cx);
+                    return;
+                }
                 let Some(target) = profile.session.query_insert_target(cx) else {
                     self.note("These rows take no new row.".into(), cx);
                     return;
@@ -1540,6 +1546,16 @@ impl Workspace {
         let Some(results) = profile.session.active_results().cloned() else {
             return;
         };
+        // Asked of the profile as it is now, not of the grid: its rows, and the
+        // `edit` that opened its cells, may have been read through a driver
+        // the profile has since left.
+        if !self.target().edits_rows() {
+            self.note(
+                "Rows read through a plugin driver are read-only.".into(),
+                cx,
+            );
+            return;
+        }
         let own_review = profile.session.apply_review_covers(tab);
         let pending = results.read(cx).delegate().pending_updates();
         // Nothing partial runs: a batch missing one of its rows is not the

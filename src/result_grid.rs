@@ -1824,7 +1824,9 @@ impl ResultGrid {
     pub fn insert_target(&self) -> Option<InsertTarget> {
         let edit = self.result.edit.as_ref()?;
         // Only a built-in driver's result carries `edit`: one read through a
-        // plugin never does, so the grid caches the engine alone.
+        // plugin never does, so the grid caches the engine alone. A grid that
+        // outlives its profile's move to a plugin driver keeps its `edit`, so
+        // the workspace asks the profile's own Target before New row or Apply.
         if !db::Target::built_in(self.engine).takes_inserts(db::RelationKind::Table) {
             return None;
         }
