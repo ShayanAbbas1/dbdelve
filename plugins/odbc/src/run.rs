@@ -340,7 +340,7 @@ impl<W: Write> Run<'_, W> {
             let Some(type_name) = raw::type_name(self.statement, column) else {
                 return Err(self.failure("SQLColAttribute"));
             };
-            fetched.push(fetched_as(data_type));
+            fetched.push(fetched_as(data_type, &type_name));
             fields.push(column_field(name, type_name));
         }
         let schema: SchemaRef = Arc::new(Schema::new(fields));
@@ -480,17 +480,34 @@ impl<W: Write> Run<'_, W> {
 }
 
 /// Binary types are read as bytes and shown as `0x…`; every other type as wide
-/// text, converted by the driver, so a client code page cannot mangle it. Only
-/// ODBC's own binary codes count: a driver's extension code means nothing to
-/// another driver, so Db2's `BLOB` (IBM's -98) arrives in the driver's own
-/// character form, hex without the `0x`.
-fn fetched_as(data_type: i16) -> Fetched {
+/// text, converted by the driver, so a client code page cannot mangle it.
+///
+/// A code ODBC does not define is the driver's own and means nothing to any
+/// other driver, so its type name is all there is to go on: a driver's own
+/// type named `BLOB` or `BINARY` is read as bytes too. Otherwise Db2's `BLOB`
+/// (IBM's code -98) arrives in the driver's own character form, hex without
+/// the `0x`, unlike every other binary column. The name is asked only of a
+/// driver's own code, never of ODBC's: those already say what they are, and a
+/// name like Oracle's `BINARY_DOUBLE` belongs to a float reported as one.
+fn fetched_as(data_type: i16, type_name: &str) -> Fetched {
     match SqlDataType(data_type) {
         SqlDataType::EXT_BINARY
         | SqlDataType::EXT_VAR_BINARY
         | SqlDataType::EXT_LONG_VAR_BINARY => Fetched::Binary,
+        _ if !odbc_defines(data_type) && names_binary(type_name) => Fetched::Binary,
         _ => Fetched::Text,
     }
+}
+
+/// ODBC 3.8's own SQL type codes: `SQL_GUID` (-11) to `SQL_VARCHAR` (12), the
+/// datetime codes and the intervals.
+fn odbc_defines(data_type: i16) -> bool {
+    matches!(data_type, -11..=12 | 91..=95 | 101..=113)
+}
+
+fn names_binary(type_name: &str) -> bool {
+    let name = type_name.to_ascii_uppercase();
+    name.contains("BLOB") || name.contains("BINARY")
 }
 
 fn column_field(name: String, type_name: String) -> Field {
@@ -704,6 +721,16 @@ mod tests {
         assert_eq!(control.interrupted(), None);
         control.cancel(2);
         assert_eq!(control.interrupted(), Some(Interrupt::Cancel));
+    }
+
+    #[test]
+    fn a_drivers_own_type_is_read_as_bytes_only_when_its_name_says_binary() {
+        assert_eq!(fetched_as(-3, "VARBINARY"), Fetched::Binary);
+        assert_eq!(fetched_as(-98, "BLOB"), Fetched::Binary);
+        assert_eq!(fetched_as(-99, "CLOB"), Fetched::Text);
+        assert_eq!(fetched_as(-370, "XML"), Fetched::Text);
+        assert_eq!(fetched_as(8, "BINARY_DOUBLE"), Fetched::Text);
+        assert_eq!(fetched_as(12, "VARCHAR"), Fetched::Text);
     }
 
     #[test]

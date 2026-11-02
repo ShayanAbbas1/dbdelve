@@ -327,7 +327,7 @@ pub fn type_name(statement: &StatementImpl, column: u16) -> Option<String> {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fetched {
     /// UTF-16 code units, as native-endian bytes.
     Text,

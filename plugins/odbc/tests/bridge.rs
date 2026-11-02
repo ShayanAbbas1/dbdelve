@@ -313,8 +313,7 @@ fn live_values_arrive_as_the_server_holds_them() {
             None,
             Some("Zoë 李 🐉".to_string()),
             Some("0x00FF".to_string()),
-            // IBM's own LOB type code, so the driver's own hex.
-            Some("00FF".to_string()),
+            Some("0x00FF".to_string()),
             Some("{fn UCASE('a')}".to_string()),
             Some("42".to_string()),
         ]]
