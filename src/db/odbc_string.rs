@@ -38,15 +38,32 @@ const HOST_KEYS: &[&str] = &[
 const COMMA_PORT_KEYS: &[&str] = &["SERVER", "ADDRESS", "ADDR"];
 const PORT_KEYS: &[&str] = &["PORT"]; // Db2, psqlODBC, MySQL
 const DSN_KEYS: &[&str] = &["DSN", "FILEDSN"];
-// Other addresses the rewrite would not touch, so the driver could dial them.
+const SECRET_KEYS: &[&str] = &["PWD", "PASSWORD"];
+// Other addresses the rewrite would not touch, so the driver could dial them,
+// matched after `normalized`. A denylist, so it leans wide: a key read as an
+// address that is not one costs a refusal, never a dial past the tunnel.
 const OTHER_ADDRESS_KEYS: &[&str] = &[
-    "DBQ",              // Oracle's TNS alias or descriptor
-    "SERVICENAME",      // Db2's port alias
-    "SOCKET",           // MySQL's Unix socket
-    "FAILOVER_PARTNER", // SQL Server's mirror
-    "FAILOVERPARTNER",  // the same, spelled without the underscore
-    "ALTERNATESERVERS", // a list of further servers
+    "DBQ",          // Oracle's TNS alias or descriptor
+    "SERVICENAME",  // Db2's port alias
+    "SOCKET",       // MySQL's and psqlODBC's Unix socket
+    "A8",           // psqlODBC's abbreviation of Socket
+    "PQOPT",        // psqlODBC's libpq options, which can carry host, hostaddr and port
+    "D5",           // psqlODBC's abbreviation of Pqopt
+    "MULTIHOST",    // MySQL's: Server becomes a list of hosts
+    "ENABLEDNSSRV", // MySQL's: Server becomes a DNS SRV name
     "URL",
+];
+/// A key holding any of these names another server by its spelling alone, in
+/// whichever vendor's variant: SQL Server's failover partner, Db2's alternate
+/// servers and client reroute, Db2's LDAP server, and the proxies of
+/// Snowflake's and Simba's drivers.
+const OTHER_ADDRESS_PARTS: &[&str] = &[
+    "FAILOVERPARTNER",
+    "ALTERNATE",
+    "REROUTE",
+    "LDAP",
+    "PROXY",
+    "SERVERLIST",
 ];
 
 const DSN: &str = "A DSN keeps its server's address in odbc.ini, where DBDelve cannot route it through a tunnel. Write the connection string out to use one.";
@@ -62,6 +79,9 @@ const AFTER_BRACE: &str = "The connection string has text after a closing } befo
 const BARE: &str = "The connection string has an entry that is not key=value.";
 const EMPTY_KEY: &str = "The connection string has an entry with no key before the =.";
 const ROUTE: &str = "This connection string could not be routed through the tunnel.";
+const CONTROL: &str = "The connection string holds a control character, which drivers read differently, so DBDelve cannot be sure where the tunnel should go.";
+const AMBIGUOUS_BRACE: &str = "The connection string has a braced value holding ;, = or }}, or a { after a space, which drivers read differently, so DBDelve cannot be sure where the tunnel should go.";
+const SECRET: &str = "Put the password in the Password field, which is kept in the Keychain.";
 
 struct Attribute {
     key: Range<usize>,
@@ -69,6 +89,9 @@ struct Attribute {
     span: Range<usize>,
     text: String,
     braced: bool,
+    /// Whitespace stood between `=` and `{`: a driver that opens a brace only
+    /// right after `=` reads what is inside as attributes of their own.
+    spaced: bool,
 }
 
 impl Attribute {
@@ -76,98 +99,170 @@ impl Attribute {
         keys.iter()
             .any(|key| source[self.key.clone()].eq_ignore_ascii_case(key))
     }
+
+    /// Whether this reads as another address once spaces and underscores
+    /// are dropped, so `Failover Partner` is `Failover_Partner`.
+    fn names_another_address(&self, source: &str) -> bool {
+        let key: String = source[self.key.clone()]
+            .chars()
+            .filter(|c| !matches!(c, ' ' | '_'))
+            .collect::<String>()
+            .to_ascii_uppercase();
+        OTHER_ADDRESS_KEYS.contains(&key.as_str())
+            || OTHER_ADDRESS_PARTS.iter().any(|part| key.contains(part))
+    }
+
+    /// What a driver that closes a brace at its first `}` could read
+    /// differently: `;`, `=` and `}}` inside, or a brace after a space.
+    fn ambiguous(&self, source: &str) -> bool {
+        let raw = &source[self.span.clone()];
+        let inner = raw.strip_prefix('{').unwrap_or(raw);
+        let inner = inner.strip_suffix('}').unwrap_or(inner);
+        self.braced && (self.spaced || inner.contains([';', '=']) || inner.contains("}}"))
+    }
 }
 
-/// The attributes read before the first error, and the error, if any. Every
-/// delimiter is ASCII, so each slice lands on a character boundary.
+/// The attributes, and the first error, if any. Reading goes on past an error
+/// from the next `;`, as a driver that skips what it cannot read would, so a
+/// `PWD` after a broken entry is still found; only [`secrets`] uses what is
+/// read after one. Every delimiter is ASCII, so each slice lands on a
+/// character boundary.
 fn scan(source: &str) -> (Vec<Attribute>, Option<&'static str>) {
     let bytes = source.as_bytes();
+    let to_semicolon = |from: usize| {
+        bytes[from..]
+            .iter()
+            .position(|&byte| byte == b';')
+            .map_or(bytes.len(), |offset| from + offset)
+    };
     let mut attributes = Vec::new();
+    let mut error = None;
     let mut at = 0;
     loop {
         while at < bytes.len() && (bytes[at].is_ascii_whitespace() || bytes[at] == b';') {
             at += 1;
         }
         if at >= bytes.len() {
-            return (attributes, None);
+            return (attributes, error);
         }
         let key_start = at;
         while at < bytes.len() && bytes[at] != b'=' && bytes[at] != b';' {
             at += 1;
         }
         if at >= bytes.len() || bytes[at] == b';' {
-            return (attributes, Some(BARE));
+            error.get_or_insert(BARE);
+            continue;
         }
         let mut key_end = at;
         while key_end > key_start && bytes[key_end - 1].is_ascii_whitespace() {
             key_end -= 1;
         }
         if key_end == key_start {
-            return (attributes, Some(EMPTY_KEY));
+            error.get_or_insert(EMPTY_KEY);
+            at = to_semicolon(at);
+            continue;
         }
+        let equals = at;
         at += 1;
         while at < bytes.len() && bytes[at].is_ascii_whitespace() {
             at += 1;
         }
         let start = at;
-        let (end, text, braced) = if bytes.get(at) == Some(&b'{') {
-            at += 1;
-            let mut text = Vec::new();
-            loop {
-                match bytes.get(at) {
-                    None => return (attributes, Some(UNTERMINATED)),
-                    Some(b'}') if bytes.get(at + 1) == Some(&b'}') => {
-                        text.push(b'}');
-                        at += 2;
-                    }
-                    Some(b'}') => {
-                        at += 1;
-                        break;
-                    }
-                    Some(byte) => {
-                        text.push(*byte);
-                        at += 1;
-                    }
-                }
-            }
-            let end = at;
-            while at < bytes.len() && bytes[at].is_ascii_whitespace() {
-                at += 1;
-            }
-            if at < bytes.len() && bytes[at] != b';' {
-                return (attributes, Some(AFTER_BRACE));
-            }
-            let text = String::from_utf8(text).expect("copied from a str, between ASCII braces");
-            (end, text, true)
-        } else {
-            while at < bytes.len() && bytes[at] != b';' {
-                at += 1;
-            }
+        let spaced = start > equals + 1;
+        if bytes.get(at) != Some(&b'{') {
+            at = to_semicolon(at);
             let mut end = at;
             while end > start && bytes[end - 1].is_ascii_whitespace() {
                 end -= 1;
             }
-            (end, source[start..end].to_string(), false)
+            attributes.push(Attribute {
+                key: key_start..key_end,
+                span: start..end,
+                text: source[start..end].to_string(),
+                braced: false,
+                spaced,
+            });
+            continue;
+        }
+        at += 1;
+        let mut text = Vec::new();
+        let closed = loop {
+            match bytes.get(at) {
+                None => break false,
+                Some(b'}') if bytes.get(at + 1) == Some(&b'}') => {
+                    text.push(b'}');
+                    at += 2;
+                }
+                Some(b'}') => {
+                    at += 1;
+                    break true;
+                }
+                Some(&byte) => {
+                    text.push(byte);
+                    at += 1;
+                }
+            }
         };
         attributes.push(Attribute {
             key: key_start..key_end,
-            span: start..end,
-            text,
-            braced,
+            span: start..at,
+            text: String::from_utf8(text).expect("copied from a str, between ASCII braces"),
+            braced: true,
+            spaced,
         });
+        if !closed {
+            error.get_or_insert(UNTERMINATED);
+            at = to_semicolon(start + 1);
+            continue;
+        }
+        while at < bytes.len() && bytes[at].is_ascii_whitespace() {
+            at += 1;
+        }
+        if at < bytes.len() && bytes[at] != b';' {
+            error.get_or_insert(AFTER_BRACE);
+            at = to_semicolon(at);
+        }
     }
 }
 
-/// The `PWD` / `PASSWORD` keys outside braces, as spelled, so the form can
-/// refuse to save a string with a secret in it. Reads as far as the string
-/// parses: a string that breaks later still has its earlier secrets named.
+/// The `PWD` / `PASSWORD` keys outside braces, as spelled, past any entry
+/// that does not parse.
 pub fn secrets(source: &str) -> Vec<&str> {
     scan(source)
         .0
         .into_iter()
-        .filter(|attribute| attribute.is(source, &["PWD", "PASSWORD"]))
+        .filter(|attribute| attribute.is(source, SECRET_KEYS))
         .map(|attribute| &source[attribute.key])
         .collect()
+}
+
+/// Whether the string may be written to `profiles.toml`: not when it names a
+/// password, and not when it does not parse cleanly, since what this parser
+/// cannot read is where a driver could find one. A password-shaped
+/// `key=` inside braces is refused too, as a driver that reads braces
+/// differently, or libpq inside psqlODBC's `pqopt`, would take it as one. A
+/// DSN, a name with no `=`, holds nothing.
+pub fn storable(source: &str) -> Result<(), Refusal> {
+    if !source.contains('=') {
+        return Ok(());
+    }
+    let (attributes, error) = scan(source);
+    let hidden = attributes
+        .iter()
+        .any(|attribute| attribute.braced && names_password(&attribute.text));
+    if hidden || !secrets(source).is_empty() {
+        return Err(Refusal(SECRET.to_string()));
+    }
+    error.map_or(Ok(()), |error| Err(Refusal(error.to_string())))
+}
+
+fn names_password(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    SECRET_KEYS.iter().any(|key| {
+        let key = key.to_ascii_lowercase();
+        text.match_indices(&key)
+            .any(|(at, _)| text[at + key.len()..].trim_start().starts_with('='))
+    })
 }
 
 /// Where in the string the driver's host and port are.
@@ -185,6 +280,9 @@ fn locate(source: &str) -> Result<(Vec<Attribute>, Located), Refusal> {
     if !source.contains('=') {
         return Err(refuse(DSN));
     }
+    if source.bytes().any(|byte| byte.is_ascii_control()) {
+        return Err(refuse(CONTROL));
+    }
     let (attributes, error) = scan(source);
     if let Some(error) = error {
         return Err(refuse(error));
@@ -192,7 +290,10 @@ fn locate(source: &str) -> Result<(Vec<Attribute>, Located), Refusal> {
     if attributes.iter().any(|a| a.is(source, DSN_KEYS)) {
         return Err(refuse(DSN));
     }
-    if let Some(other) = attributes.iter().find(|a| a.is(source, OTHER_ADDRESS_KEYS)) {
+    if attributes.iter().any(|a| a.ambiguous(source)) {
+        return Err(refuse(AMBIGUOUS_BRACE));
+    }
+    if let Some(other) = attributes.iter().find(|a| a.names_another_address(source)) {
         return Err(Refusal(format!(
             "{} names another address that the tunnel would not carry, so the driver could dial it directly. Remove it to use a tunnel.",
             source[other.key.clone()].to_ascii_uppercase()
@@ -377,10 +478,22 @@ mod tests {
                 keys(&["HOSTNAME", "PORT"]),
             ),
             (
-                "Driver={a}}b;c};Host=h;Port=1",
+                "DRIVER={IBM DB2 ODBC DRIVER};HOSTNAME=h;PORT=50000",
+                "h",
+                50000,
+                keys(&["HOSTNAME", "PORT"]),
+            ),
+            (
+                "Driver={ODBC Driver 18 for SQL Server};Server=tcp:h,1433;Encrypt=yes",
+                "h",
+                1433,
+                keys(&["Server"]),
+            ),
+            (
+                "DRIVER={/opt/ibm/clidriver/lib/libdb2.dylib};HOSTNAME=h;PORT=1",
                 "h",
                 1,
-                keys(&["Host", "Port"]),
+                keys(&["HOSTNAME", "PORT"]),
             ),
         ] {
             assert_eq!(found(source), (host.to_string(), port, spelled), "{source}");
@@ -423,6 +536,40 @@ mod tests {
             ("Server=h,1;FailoverPartner=b", other("FAILOVERPARTNER")),
             ("Server=h,1;AlternateServers=b", other("ALTERNATESERVERS")),
             ("Server=h,1;Url=b", other("URL")),
+            ("Server=h,1;Failover Partner=b", other("FAILOVER PARTNER")),
+            ("Servername=h;Port=1;pqopt=host=evil", other("PQOPT")),
+            ("Servername=h;Port=1;D5=host=evil", other("D5")),
+            ("Servername=h;Port=1;A8=/tmp", other("A8")),
+            ("Server=h;Port=1;MULTI_HOST=1", other("MULTI_HOST")),
+            ("Server=h;Port=1;ENABLE_DNS_SRV=1", other("ENABLE_DNS_SRV")),
+            (
+                "HOSTNAME=h;PORT=1;alternateServerName=b",
+                other("ALTERNATESERVERNAME"),
+            ),
+            (
+                "HOSTNAME=h;PORT=1;ClientRerouteAlternateServerName=b",
+                other("CLIENTREROUTEALTERNATESERVERNAME"),
+            ),
+            (
+                "HOSTNAME=h;PORT=1;LDAPServerHost=l",
+                other("LDAPSERVERHOST"),
+            ),
+            ("Server=h;Port=1;proxy=p:8080", other("PROXY")),
+            ("Server=h;Port=1;Proxy Host=p", other("PROXY HOST")),
+            ("Driver={a}}b;c};Host=h;Port=1", AMBIGUOUS_BRACE.to_string()),
+            (
+                "Note={a}};HOST=evil;b};HOST=db;PORT=1",
+                AMBIGUOUS_BRACE.to_string(),
+            ),
+            (
+                "Note= {a;HOST=evil;};HOST=db;PORT=1",
+                AMBIGUOUS_BRACE.to_string(),
+            ),
+            ("Driver={a=b};HOST=h;PORT=1", AMBIGUOUS_BRACE.to_string()),
+            ("Driver={a;b};HOST=h;PORT=1", AMBIGUOUS_BRACE.to_string()),
+            ("\x0BHOST=evil;HOST=db;PORT=1", CONTROL.to_string()),
+            ("HOST=db;PORT=1\0;HOST=evil", CONTROL.to_string()),
+            ("HOST=db;\tPORT=1", CONTROL.to_string()),
             ("HOST=h;PORT=0", BAD_PORT.to_string()),
             ("HOST=h;PORT=70000", BAD_PORT.to_string()),
             ("HOST=h;PORT=x", BAD_PORT.to_string()),
@@ -451,8 +598,8 @@ mod tests {
                 "HOSTNAME={127.0.0.1};PORT={61234}",
             ),
             (
-                " driver = {x;y} ;  Host =  h ;Port= 5 ;;PWD=",
-                " driver = {x;y} ;  Host =  127.0.0.1 ;Port= 61234 ;;PWD=",
+                " driver ={x y} ;  Host =  h ;Port= 5 ;;PWD=",
+                " driver ={x y} ;  Host =  127.0.0.1 ;Port= 61234 ;;PWD=",
             ),
             ("PORT=1;HOST=h", "PORT=61234;HOST=127.0.0.1"),
         ] {
@@ -505,5 +652,41 @@ mod tests {
         assert!(secrets("Driver={a;PWD=b};UID=u").is_empty());
         assert_eq!(secrets("uid=u; Password =p;pwd=q"), ["Password", "pwd"]);
         assert_eq!(secrets("PWD=y;Driver={broken"), ["PWD"]);
+        // Past an entry that does not parse, as a driver skipping it reads on.
+        for source in [
+            "Driver=x;junk;PWD=hunter2",
+            "Driver={broken;PWD=hunter2",
+            "=x;PWD=hunter2",
+            "Driver={x}y;PWD=hunter2",
+        ] {
+            assert_eq!(secrets(source), ["PWD"], "{source}");
+        }
+    }
+
+    #[test]
+    fn only_a_string_that_parses_cleanly_and_names_no_password_is_stored() {
+        for source in [
+            "Db2Dev",
+            "DRIVER={IBM DB2 ODBC DRIVER};HOSTNAME=h;PORT=50000;UID=a@b.example",
+            "Servername=h;pqopt={sslcert=/x sslkey=/y}",
+        ] {
+            assert_eq!(storable(source), Ok(()), "{source}");
+        }
+        for (source, sentence) in [
+            ("DSN=x;PWD=y", SECRET),
+            ("Driver=x;junk;PWD=hunter2", SECRET),
+            ("Note= {a;PWD=x}", SECRET),
+            ("Driver={a;PWD=b};UID=u", SECRET),
+            ("Servername=h;pqopt={password = x}", SECRET),
+            ("Driver=x;junk", BARE),
+            ("Driver={x", UNTERMINATED),
+            ("Driver={x}y", AFTER_BRACE),
+        ] {
+            assert_eq!(
+                storable(source),
+                Err(Refusal(sentence.to_string())),
+                "{source}"
+            );
+        }
     }
 }

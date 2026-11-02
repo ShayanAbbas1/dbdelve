@@ -252,7 +252,7 @@ impl Profile {
             // property of its tab now. Kept on the stored shape only so a
             // profile written by an older build still loads with its buffer.
             open_query: None,
-            ssh: server.and_then(|server| server.ssh.clone()),
+            ssh: self.config.ssh().cloned(),
             open_queries: self
                 .session
                 .queries

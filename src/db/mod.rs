@@ -28,7 +28,7 @@ mod external;
 mod mongo;
 mod mssql;
 mod mysql;
-// Read by the connection form and the tunnelled open, which come with the plugin host.
+// `secrets` and `storable` are the connection form's, which is not built yet.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod odbc_string;
 #[expect(dead_code, reason = "read once plugins are discovered and persisted")]
@@ -1075,6 +1075,14 @@ impl ConnectionConfig {
             | Self::DuckDb { .. }
             | Self::Snowflake(_)
             | Self::External(_) => None,
+        }
+    }
+
+    /// The tunnel the profile connects through, where it has one.
+    pub fn ssh(&self) -> Option<&SshTunnel> {
+        match self {
+            Self::External(external) => external.ssh.as_ref(),
+            _ => self.server()?.ssh.as_ref(),
         }
     }
 

@@ -2273,7 +2273,7 @@ pub(crate) fn active_after_removal(active: usize, removed: usize, remaining: usi
 }
 
 fn identity_file(config: &ConnectionConfig) -> Option<&str> {
-    config.server()?.ssh.as_ref()?.identity_file.as_deref()
+    config.ssh()?.identity_file.as_deref()
 }
 
 /// A key the importer wrote goes with the last profile naming it; Duplicate
@@ -2387,7 +2387,7 @@ pub(crate) fn pasted_url(before: &str, after: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn restored_configs(text: &str) -> String {
+    fn restored(text: &str) -> Vec<(String, ConnectionConfig)> {
         let store::ProfileList { profiles, .. } =
             store::decode_profiles(text).expect("the fixture loads");
         profiles
@@ -2400,13 +2400,31 @@ mod tests {
                     .as_deref()
                     .map_or(Ok(SslMode::default()), SslMode::parse)
                     .expect("a known sslmode");
-                format!(
-                    "{} {:#?}\n",
-                    stored.id,
-                    stored_config(stored, engine, sslmode)
-                )
+                (stored.id.clone(), stored_config(stored, engine, sslmode))
             })
             .collect()
+    }
+
+    fn restored_configs(text: &str) -> String {
+        restored(text)
+            .into_iter()
+            .map(|(id, config)| format!("{id} {config:#?}\n"))
+            .collect()
+    }
+
+    #[test]
+    fn the_tunnel_is_read_where_each_built_in_engine_keeps_it() {
+        let configs = restored(include_str!("../testdata/every-engine.toml"));
+        for (id, config) in &configs {
+            let server = config.server().and_then(|server| server.ssh.as_ref());
+            assert_eq!(config.ssh(), server, "{id}");
+        }
+        assert!(configs.iter().any(|(_, config)| config.ssh().is_some()));
+        let sqlite = configs
+            .iter()
+            .find(|(_, config)| config.engine() == Engine::Sqlite)
+            .expect("the fixture has a SQLite profile");
+        assert_eq!(sqlite.1.ssh(), None);
     }
 
     #[test]

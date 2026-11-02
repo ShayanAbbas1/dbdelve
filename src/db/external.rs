@@ -13,6 +13,7 @@ mod rows;
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::net::SocketAddr;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -26,10 +27,13 @@ use dbdelve_plugin_protocol::{
     Structure as WireStructure,
 };
 
+use super::odbc_string::{self, Refusal};
 use super::plugin::Plugin;
+use super::ssh::Tunnel;
 use super::{
     Catalog, ColumnDefinition, DbError, Engine, Fetch, ForeignKey, Index, IndexKind,
-    NamedDefinition, QueryResult, Reference, Relation, RelationKind, Schema, Stopped, Structure,
+    NamedDefinition, QueryResult, Reference, Relation, RelationKind, Schema, SshTunnel, Stopped,
+    Structure,
 };
 use host::{Host, Routed, failure};
 use rows::Rows;
@@ -41,12 +45,15 @@ pub struct ExternalConfig {
     pub plugin: &'static Plugin,
     /// The built-in dialect DBDelve writes SQL in for this connection.
     pub speaks: Engine,
-    /// As the user typed it; the plugin dials it.
+    /// As the user typed it, and as it is stored. Through a tunnel the
+    /// plugin is handed a copy naming the forward instead, which exists only
+    /// in the `open` request.
     pub connection: String,
     pub user: String,
     pub password: String,
     /// Seconds, 0 for none.
     pub statement_timeout: u32,
+    pub ssh: Option<SshTunnel>,
 }
 
 /// By hand, so no `{:?}` prints the password, nor the connection string, which
@@ -58,6 +65,7 @@ impl fmt::Debug for ExternalConfig {
             .field("speaks", &self.speaks)
             .field("user", &self.user)
             .field("statement_timeout", &self.statement_timeout)
+            .field("ssh", &self.ssh)
             .finish_non_exhaustive()
     }
 }
@@ -80,12 +88,14 @@ pub struct Connection {
     opened: Arc<Opened>,
     /// What [`Self::apart`] opens again.
     config: Arc<ExternalConfig>,
+    /// Lives while any clone does; [`Self::apart`] dials it again.
+    tunnel: Option<Arc<Tunnel>>,
 }
 
 impl Connection {
-    /// Refuses a dialect a plugin may not carry before any process starts,
-    /// for a config that reached here by any path, a hand-edited profile's
-    /// included.
+    /// Refuses a dialect a plugin may not carry, and a string a tunnel cannot
+    /// be sure of, before ssh or the plugin starts, for a config that reached
+    /// here by any path, a hand-edited profile's included.
     pub fn open(config: &ExternalConfig) -> Result<Self, DbError> {
         if !config.speaks.speaks_through_plugins() {
             return Err(failure(format!(
@@ -93,12 +103,28 @@ impl Connection {
                 config.speaks.label()
             )));
         }
-        Self::handshake(Host::start(config.plugin)?, config)
+        let forward = match &config.ssh {
+            Some(ssh) => Some((
+                ssh,
+                odbc_string::endpoint(&config.connection).map_err(refused)?,
+            )),
+            None => None,
+        };
+        let tunnel = || {
+            forward
+                .map(|(ssh, endpoint)| {
+                    Tunnel::open(ssh, &endpoint.host, endpoint.port).map(Arc::new)
+                })
+                .transpose()
+        };
+        Self::handshake(Host::start(config.plugin)?, config, tunnel)
     }
 
-    /// A session of its own: a second process on the same config.
+    /// A session of its own: a second process on the same config, through
+    /// this one's tunnel.
     pub fn apart(&self) -> Result<Self, DbError> {
-        Self::open(&self.config)
+        let tunnel = || Ok(self.tunnel.clone());
+        Self::handshake(Host::start(self.config.plugin)?, &self.config, tunnel)
     }
 
     pub fn speaks(&self) -> Engine {
@@ -122,7 +148,13 @@ impl Connection {
         held.map(|_| ())
     }
 
-    fn handshake(host: Arc<Host>, config: &ExternalConfig) -> Result<Self, DbError> {
+    /// `tunnel` is opened only once the plugin has answered `prepare`, so a
+    /// plugin that cannot start fails without an ssh session first.
+    fn handshake(
+        host: Arc<Host>,
+        config: &ExternalConfig,
+        tunnel: impl FnOnce() -> Result<Option<Arc<Tunnel>>, DbError>,
+    ) -> Result<Self, DbError> {
         let name = &host.plugin.name;
         let hello = Request::Hello { protocol: PROTOCOL };
         let Response::Hello {
@@ -148,10 +180,21 @@ impl Connection {
             return Err(unexpected(&host, "prepare"));
         };
 
-        let open = Request::Open {
-            fields,
-            password: Password(config.password.clone()),
-            statement_timeout: config.statement_timeout,
+        let tunnel = tunnel()?;
+        let opened = || {
+            let forward = tunnel.as_deref().map(Tunnel::dial).transpose()?;
+            let mut fields = fields;
+            fields.insert("connection".to_owned(), dialled(config, forward)?);
+            let open = Request::Open {
+                fields,
+                password: Password(config.password.clone()),
+                statement_timeout: config.statement_timeout,
+            };
+            ask(&host, open, "open", OPEN_DEADLINE)
+        };
+        let answer = match &tunnel {
+            Some(tunnel) => opened().map_err(|error| tunnel.explain(error)),
+            None => opened(),
         };
         let Response::Opened {
             dbms_name,
@@ -159,7 +202,7 @@ impl Connection {
             driver,
             stops_early,
             optional: offered,
-        } = ask(&host, open, "open", OPEN_DEADLINE)?
+        } = answer?
         else {
             return Err(unexpected(&host, "open"));
         };
@@ -177,6 +220,7 @@ impl Connection {
             host,
             opened: Arc::new(opened),
             config: Arc::new(config.clone()),
+            tunnel,
         })
     }
 
@@ -393,6 +437,19 @@ impl Connection {
             }
         }
     }
+}
+
+/// The string the plugin is to dial: the user's own without a tunnel, and with
+/// one the same string pointed at `forward`, checked to name nothing else.
+fn dialled(config: &ExternalConfig, forward: Option<SocketAddr>) -> Result<String, DbError> {
+    match forward {
+        None => Ok(config.connection.clone()),
+        Some(local) => odbc_string::through_tunnel(&config.connection, local).map_err(refused),
+    }
+}
+
+fn refused(Refusal(sentence): Refusal) -> DbError {
+    failure(sentence)
 }
 
 /// The key goes into `constraints` in the `PRIMARY KEY (a, b)` rendering
@@ -641,6 +698,7 @@ mod tests {
             user: "someone@example.com".to_owned(),
             password: String::new(),
             statement_timeout: 0,
+            ssh: None,
         }
     }
 
@@ -648,7 +706,7 @@ mod tests {
         let plugin = echo::plugin();
         let mut command = Command::new(&plugin.executable);
         command.envs(env.iter().copied());
-        Connection::handshake(Host::spawn(plugin, command)?, &config())
+        Connection::handshake(Host::spawn(plugin, command)?, &config(), || Ok(None))
     }
 
     fn gone_within(pid: u32, deadline: Duration) -> bool {
@@ -787,6 +845,67 @@ mod tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn the_plugin_dials_the_stored_string_or_its_rewrite_through_the_tunnel() {
+        let config = ExternalConfig {
+            connection: "DRIVER=Db2;HOSTNAME=db.example;PORT=50000;UID=a".into(),
+            ..config()
+        };
+        let local = "127.0.0.1:61234".parse().unwrap();
+        assert_eq!(dialled(&config, None).unwrap(), config.connection);
+        assert_eq!(
+            dialled(&config, Some(local)).unwrap(),
+            "DRIVER=Db2;HOSTNAME=127.0.0.1;PORT=61234;UID=a"
+        );
+        let dsn = ExternalConfig {
+            connection: "Db2Dev".into(),
+            ..config
+        };
+        assert_eq!(dialled(&dsn, None).unwrap(), "Db2Dev");
+        let refused = dialled(&dsn, Some(local)).err().unwrap();
+        assert!(
+            refused.message.starts_with("A DSN keeps"),
+            "{}",
+            refused.message
+        );
+    }
+
+    /// Neither the SSH host nor the plugin's executable exists, so any error
+    /// but the refusal would mean one of them was started first.
+    #[test]
+    fn a_string_the_tunnel_cannot_route_is_refused_before_ssh_or_the_plugin_starts() {
+        let plugin = Box::leak(Box::new(Plugin {
+            id: "echo".to_owned(),
+            name: "Echo".to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            executable: echo::plugin().executable.with_file_name("dbdelve-nowhere"),
+        }));
+        let config = ExternalConfig {
+            plugin,
+            connection: "Db2Dev".into(),
+            ssh: Some(SshTunnel {
+                host: "unreachable.invalid".into(),
+                ..SshTunnel::default()
+            }),
+            ..config()
+        };
+        let error = Connection::open(&config).err().unwrap();
+        assert!(
+            error
+                .message
+                .starts_with("A DSN keeps its server's address"),
+            "{}",
+            error.message
+        );
+        assert_eq!(
+            crate::db::ConnectionConfig::External(config).ssh(),
+            Some(&SshTunnel {
+                host: "unreachable.invalid".into(),
+                ..SshTunnel::default()
+            })
+        );
     }
 
     #[test]

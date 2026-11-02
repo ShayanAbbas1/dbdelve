@@ -216,7 +216,7 @@ impl ConnectionForm {
                     server.and_then(|server| server.root_certificate.as_deref()),
                 ))
         });
-        let ssh = server.and_then(|server| server.ssh.as_ref());
+        let ssh = config.and_then(ConnectionConfig::ssh);
         let [ssh_host, ssh_port, ssh_user, ssh_identity_file] = ssh_fields(ssh);
         let mut input = |placeholder: &'static str, value: String| {
             cx.new(|cx| {
@@ -1185,6 +1185,7 @@ mod tests {
                 user: "a@b.example".into(),
                 password: password.into(),
                 statement_timeout: 0,
+                ssh: None,
             })
         };
         assert_eq!(
