@@ -668,6 +668,15 @@ pub(super) fn generated_reads_run(subject: &Subject) {
             .collect()
     };
     let fixture_only = predicate(key, Operator::Less, "900");
+    let filtered = |column: &str, operator: Operator, value: &str| {
+        let filter = format!("{fixture_only} AND {}", predicate(column, operator, value));
+        let sql = format!(
+            "{} ORDER BY {}",
+            explorer::preview_sql(engine, schema, relation, &filter, None, 0),
+            engine.quote_identifier(key)
+        );
+        (ids(&run(&sql)), sql)
+    };
 
     let cases = [
         (label, Operator::Equals, "alpha", &["1"][..]),
@@ -697,17 +706,18 @@ pub(super) fn generated_reads_run(subject: &Subject) {
             .iter()
             .find(|case| case.1 == operator)
             .unwrap_or_else(|| panic!("{at}: no case for {operator:?}"));
-        let filter = format!("{fixture_only} AND {}", predicate(column, operator, value));
-        let sql = format!(
-            "{} ORDER BY {}",
-            explorer::preview_sql(engine, schema, relation, &filter, None, 0),
-            engine.quote_identifier(key)
-        );
-        assert_eq!(
-            ids(&run(&sql)),
-            *wanted,
-            "{at}: {operator:?} `{value}`: {sql}"
-        );
+        let (found, sql) = filtered(column, operator, value);
+        assert_eq!(found, *wanted, "{at}: {operator:?} `{value}`: {sql}");
+    }
+
+    // The cells of the fixture's first two rows as the grid shows them, so
+    // each column type's literal has to reach the server and match.
+    for column in [3, 5, 6, 7] {
+        for (row, id) in [(0, "1"), (1, "2")] {
+            let value = EXPECTED[row][column].expect("the first two rows hold no NULL");
+            let (found, sql) = filtered(subject.columns[column], Operator::Equals, value);
+            assert_eq!(found, [id], "{at}: `{value}`: {sql}");
+        }
     }
 
     let count = run(&explorer::count_sql(
