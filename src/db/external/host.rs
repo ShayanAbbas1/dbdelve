@@ -315,10 +315,13 @@ impl Host {
     /// plugin is ended and the reset error returned at once, worded for the
     /// violation rather than the kill.
     pub(super) fn violated(&self, violation: &str, running_query: bool) -> DbError {
-        let cause = self
-            .shared
-            .end(broke_protocol(&self.shared.name, violation));
-        reset_error(&cause, running_query)
+        self.end(broke_protocol(&self.shared.name, violation), running_query)
+    }
+
+    /// Ends the plugin for `cause` and returns the reset error at once,
+    /// worded for the cause rather than the kill.
+    pub(super) fn end(&self, cause: String, running_query: bool) -> DbError {
+        reset_error(&self.shared.end(cause), running_query)
     }
 
     /// `running_query`: the request that met the reset was a statement, which

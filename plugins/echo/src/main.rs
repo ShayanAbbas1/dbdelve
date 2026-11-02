@@ -40,6 +40,8 @@
 //! `hello`; `DBDELVE_ECHO_PLAIN=1` leaves `references` out of `optional`;
 //! `DBDELVE_ECHO_DRAINS=1` opens with `stops_early: false`;
 //! `DBDELVE_ECHO_REFUSE_SET=1` answers every `SET …` as `fail` does;
+//! `DBDELVE_ECHO_WEDGED=1` never answers `catalog`, `structure` or
+//! `references` while reading stdin on, as a driver stuck in a catalog call;
 //! `DBDELVE_ECHO_LINGER=<ms>` only sleeps that long, which is what `orphan`
 //! starts; `DBDELVE_ECHO_CLOSED=<path>` takes [`CLOSING`] over `close`, as a
 //! driver's disconnect does, and writes the path once `closed` is sent, so a
@@ -305,6 +307,7 @@ struct Echo {
     transaction: bool,
     optional: Vec<String>,
     refuses_set: bool,
+    wedged: bool,
     last: String,
 }
 
@@ -317,6 +320,7 @@ impl Echo {
             drains: env::var("DBDELVE_ECHO_DRAINS").is_ok_and(|value| value == "1"),
             transaction: false,
             refuses_set: env::var("DBDELVE_ECHO_REFUSE_SET").is_ok_and(|value| value == "1"),
+            wedged: env::var("DBDELVE_ECHO_WEDGED").is_ok_and(|value| value == "1"),
             last: String::new(),
             optional: match plain {
                 true => Vec::new(),
@@ -335,6 +339,16 @@ impl Echo {
     }
 
     fn run(&mut self, id: u64, request: Request) {
+        if self.wedged
+            && matches!(
+                request,
+                Request::Catalog | Request::Structure { .. } | Request::References { .. }
+            )
+        {
+            loop {
+                thread::park();
+            }
+        }
         match request {
             Request::Hello { .. } => {
                 let protocol = env::var("DBDELVE_ECHO_PROTOCOL")

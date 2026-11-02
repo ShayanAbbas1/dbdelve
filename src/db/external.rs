@@ -21,7 +21,9 @@ use std::time::{Duration, Instant};
 
 use arrow_schema::SchemaRef;
 use dbdelve_plugin_protocol::arrow::{decode_batch, decode_schema};
-use dbdelve_plugin_protocol::limits::{HELLO_DEADLINE, OPEN_DEADLINE, credit_cost};
+use dbdelve_plugin_protocol::limits::{
+    CANCEL_DEADLINE, HELLO_DEADLINE, OPEN_DEADLINE, credit_cost,
+};
 use dbdelve_plugin_protocol::{
     ErrorKind, PROTOCOL, Password, REFERENCES, RelationKind as WireKind, Request, Response,
     Structure as WireStructure,
@@ -388,11 +390,19 @@ impl Connection {
         }
     }
 
-    /// One non-query request, under the session like a statement.
+    /// One non-query request, under the session like a statement, and
+    /// bounded by [`catalog_deadline`], since no Cancel reaches it.
     fn call(&self, request: Request) -> Result<Response, DbError> {
+        let what = match &request {
+            Request::Catalog => "catalog",
+            Request::Structure { .. } => "structure",
+            Request::References { .. } => "references",
+            _ => "a request",
+        };
+        let deadline = catalog_deadline(self.config.statement_timeout);
         let _session = self.host.session();
         let (_in_flight, answers) = self.host.request(request)?;
-        match answers.recv() {
+        match answers.recv_timeout(deadline) {
             Ok(Routed::Control(Response::Error {
                 kind,
                 message,
@@ -404,7 +414,17 @@ impl Connection {
             Ok(Routed::Data(_)) => Err(self
                 .host
                 .violated("data in answer to a catalog request", false)),
-            Ok(Routed::Reset(_)) | Err(_) => Err(self.host.reset_error(false)),
+            Ok(Routed::Reset(_)) | Err(RecvTimeoutError::Disconnected) => {
+                Err(self.host.reset_error(false))
+            }
+            Err(RecvTimeoutError::Timeout) => Err(self.host.end(
+                format!(
+                    "The {} plugin did not answer `{what}` within {} s and was stopped.",
+                    self.host.plugin.name,
+                    deadline.as_secs()
+                ),
+                false,
+            )),
         }
     }
 
@@ -720,6 +740,21 @@ impl<'a> Read<'a> {
     }
 }
 
+/// How long a catalog, structure or references request may take before the
+/// plugin is ended. These are no run's, so no Cancel reaches them, and a
+/// driver wedged in one would hold the session until disconnect. A plugin is
+/// handed the statement timeout for its catalog calls too, so past it the
+/// grace covers only a driver that ignores it; with no timeout the bound is
+/// generous, because listing a large catalog is slow without being stuck.
+fn catalog_deadline(statement_timeout: u32) -> Duration {
+    match statement_timeout {
+        0 => CATALOG_BOUND,
+        seconds => Duration::from_secs(seconds.into()) + CANCEL_DEADLINE,
+    }
+}
+
+const CATALOG_BOUND: Duration = Duration::from_secs(300);
+
 /// One step of opening: its answer, or the error that ends the open. A plugin
 /// that dies on the way is reported with its stderr, since a missing driver
 /// library says why there and nowhere else.
@@ -754,7 +789,7 @@ mod tests {
     use std::process::{Command, Stdio};
     use std::time::Instant;
 
-    use dbdelve_plugin_protocol::limits::{CANCEL_DEADLINE, CLOSE_GRACE};
+    use dbdelve_plugin_protocol::limits::CLOSE_GRACE;
 
     use super::*;
     use crate::db::Feed;
@@ -772,10 +807,14 @@ mod tests {
     }
 
     fn open_with(env: &[(&str, &str)]) -> Result<Connection, DbError> {
+        open_as(&config(), env)
+    }
+
+    fn open_as(config: &ExternalConfig, env: &[(&str, &str)]) -> Result<Connection, DbError> {
         let plugin = echo::plugin();
         let mut command = Command::new(&plugin.executable);
         command.envs(env.iter().copied());
-        Connection::handshake(Host::spawn(plugin, command)?, &config(), || Ok(None))
+        Connection::handshake(Host::spawn(plugin, command)?, config, || Ok(None))
     }
 
     fn gone_within(pid: u32, deadline: Duration) -> bool {
@@ -1744,6 +1783,35 @@ mod tests {
             "{}",
             error.message
         );
+    }
+
+    #[test]
+    fn a_catalog_call_past_its_deadline_ends_the_plugin_and_names_the_call() {
+        let config = ExternalConfig {
+            statement_timeout: 1,
+            ..config()
+        };
+        let connection = open_as(&config, &[("DBDELVE_ECHO_WEDGED", "1")]).unwrap();
+        let pid = connection.host.pid().unwrap();
+        let started = Instant::now();
+        let error = connection.structure("main", "accounts").unwrap_err();
+        let took = started.elapsed();
+        let deadline = catalog_deadline(1);
+        assert!(
+            took >= deadline && took < deadline + Duration::from_secs(1),
+            "{took:?}"
+        );
+        assert!(
+            error.message.starts_with(
+                "The Echo plugin did not answer `structure` within 6 s and was stopped. The \
+                 connection was reset"
+            ),
+            "{}",
+            error.message
+        );
+        assert!(connection.is_lost());
+        assert!(gone_within(pid, Duration::from_secs(1)));
+        assert_eq!(catalog_deadline(0), CATALOG_BOUND);
     }
 
     #[test]
