@@ -6,7 +6,8 @@
 use super::plugin::Plugin;
 use super::spec::Abilities;
 use super::{
-    DbError, Engine, RelationKind, Syntax, clickhouse, duckdb, external, mssql, redis, turso,
+    DbError, Engine, Fields, RelationKind, Syntax, clickhouse, duckdb, external, mssql, redis,
+    turso,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,6 +50,25 @@ impl Target {
         match self.driver {
             Driver::BuiltIn => self.engine.spec().abilities,
             Driver::Plugin(_) => Abilities::NONE,
+        }
+    }
+
+    /// Which fields make a profile for this target: a plugin's address is in
+    /// its connection string, whatever dialect it speaks.
+    pub fn fields(self) -> Fields {
+        match self.driver {
+            Driver::BuiltIn => self.engine.fields(),
+            Driver::Plugin(_) => Fields::ConnectionString,
+        }
+    }
+
+    /// ponytail: every plugin wears one generic plug, since no manifest names
+    /// artwork. A `logo.svg` beside the manifest arrives with the first
+    /// third-party plugin.
+    pub fn logo(self) -> &'static str {
+        match self.driver {
+            Driver::BuiltIn => self.engine.logo(),
+            Driver::Plugin(_) => "icons/plugin.svg",
         }
     }
 
@@ -312,5 +332,22 @@ mod tests {
         assert!(built_ins.iter().all(|tile| tile.driver == Driver::BuiltIn));
         assert_eq!(last.engine, Engine::Generic);
         assert_eq!(last.label(), "Generic SQL via ODBC");
+    }
+
+    #[test]
+    fn a_plugin_is_reached_through_its_connection_string_whatever_it_speaks() {
+        let plugin = odbc();
+        for engine in Engine::ALL {
+            let target = Target {
+                engine,
+                driver: Driver::Plugin(plugin),
+            };
+            assert_eq!(target.fields(), Fields::ConnectionString, "{engine:?}");
+            assert_eq!(target.logo(), "icons/plugin.svg", "{engine:?}");
+            if engine.has_built_in_driver() {
+                assert_eq!(Target::built_in(engine).fields(), engine.fields());
+                assert_ne!(engine.fields(), Fields::ConnectionString, "{engine:?}");
+            }
+        }
     }
 }

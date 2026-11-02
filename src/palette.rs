@@ -43,7 +43,7 @@ use crate::{
         PaletteHistoryFilter, PaletteHistorySort, PaletteNext, PaletteNextScope, PalettePrevious,
         PalettePreviousScope, PaletteRowActions, PaletteScopeLeft, PaletteScopeRight,
     },
-    db::{ConnectionConfig, Engine, ExplainMode, RelationKind, RoutineKind, Syntax},
+    db::{ConnectionConfig, Driver, ExplainMode, RelationKind, RoutineKind, Syntax},
     explorer::ROW_LIMITS,
     explorer::{ExplorerTarget, ObjectKind},
     export::{FileAs, Format, RowsAs},
@@ -292,7 +292,7 @@ impl Mode {
 pub enum Command {
     OpenObject(ExplorerTarget),
     OpenQuery(String),
-    SetEngine(Engine),
+    SetTarget(crate::db::Target),
     OpenScratch,
     NewQuery,
     RunQuery,
@@ -2395,6 +2395,21 @@ struct Listed<'a> {
     unavailable: Option<(usize, String)>,
 }
 
+/// Where a connection points, and for one through a plugin what carries it,
+/// which its logo, one plug for every plugin, cannot say.
+fn listed_endpoint(config: &ConnectionConfig) -> String {
+    let target = config.target();
+    match (target.driver, config) {
+        (Driver::BuiltIn, _) => config.endpoint(),
+        (Driver::Plugin(_), ConnectionConfig::External(external))
+            if !external.connection.contains('=') =>
+        {
+            format!("{} · {}", config.endpoint(), target.label())
+        }
+        (Driver::Plugin(_), _) => target.label(),
+    }
+}
+
 /// Every connection, by project, then the ways to add one or a project.
 fn connection_items(workspace: &Workspace) -> Vec<Item> {
     let listed: Vec<Listed> = workspace
@@ -2410,8 +2425,8 @@ fn connection_items(workspace: &Workspace) -> Vec<Item> {
                     .map(|server| server.host.clone())
                     .unwrap_or_default(),
             },
-            endpoint: profile.config.endpoint(),
-            logo: profile.config.engine().logo(),
+            endpoint: listed_endpoint(&profile.config),
+            logo: profile.config.target().logo(),
             color: profile.color,
             unavailable: None,
         })
@@ -2573,7 +2588,7 @@ fn connection_action_items(workspace: &Workspace, index: usize) -> Vec<Item> {
         items.push(
             row(
                 format!("Switch to {name}"),
-                profile.config.engine().logo(),
+                profile.config.target().logo(),
                 Command::SwitchProfile(index),
                 CONNECTION,
             )
@@ -3127,18 +3142,18 @@ fn database_items(profile: &Profile) -> Vec<Item> {
         .collect()
 }
 
-/// Every engine, the one the connection form is set to marked as current.
+/// Every engine, then every plugin, the one the connection form is set to
+/// marked as current: a plugin's tile whatever dialect the form picked under it.
 fn engine_items(workspace: &Workspace) -> Vec<Item> {
-    let current = workspace.form.as_ref().map(|form| form.engine);
-    crate::db::Target::tiles(&[])
+    let current = workspace.form.as_ref().map(|form| form.target());
+    crate::db::Target::tiles(&workspace.plugins)
         .map(|target| {
-            let engine = target.engine;
-            let hint = if current == Some(engine) {
-                "current"
-            } else {
-                ""
-            };
-            Item::new(target.label(), engine.logo(), Command::SetEngine(engine)).hint(hint)
+            let picked = current.is_some_and(|current| match target.driver {
+                Driver::BuiltIn => current == target,
+                Driver::Plugin(_) => current.driver == target.driver,
+            });
+            let hint = if picked { "current" } else { "" };
+            Item::new(target.label(), target.logo(), Command::SetTarget(target)).hint(hint)
         })
         .collect()
 }
@@ -4282,6 +4297,7 @@ fn kind_label(kind: ObjectKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Engine;
 
     fn item(label: &str, scope: Scope, group: &'static str) -> Item {
         Item::new(label, icon::TABLE, Command::NewQuery)

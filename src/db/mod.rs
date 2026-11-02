@@ -28,8 +28,6 @@ mod external;
 mod mongo;
 mod mssql;
 mod mysql;
-// `secrets` and `storable` are the connection form's, which is not built yet.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod odbc_string;
 pub(crate) mod plugin;
 mod postgres;
@@ -151,6 +149,9 @@ pub enum Fields {
     File,
     /// An account reached over HTTPS with a private key.
     Account,
+    /// A plugin driver's own connection string, a user and a password: the
+    /// address is in the string, in keys only the driver knows.
+    ConnectionString,
 }
 
 /// What a query buffer is written in: what the editor highlights it as, what
@@ -331,8 +332,7 @@ impl Engine {
 
     /// The engine a driver's reported DBMS name (`SQL_DBMS_NAME`) belongs to,
     /// by prefix and whatever its case. Read only by the connection form's
-    /// dialect suggestion, which Task 12 adds.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// dialect suggestion.
     pub fn from_dbms_name(name: &str) -> Option<Self> {
         let name = name.trim().to_ascii_lowercase();
         Self::ALL.into_iter().find(|engine| {
@@ -1891,10 +1891,17 @@ impl Connection {
 
     /// The database the driver says it reached, where a plugin driver
     /// carries the connection: the form suggests a dialect from it.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the form's Test reads it"))]
     pub fn reported_dbms(&self) -> Option<&str> {
         match self {
             Self::External(connection) => Some(&connection.opened().dbms_name),
+            _ => None,
+        }
+    }
+
+    /// The plugin's driver by its own name, beside [`Self::reported_dbms`].
+    pub fn reported_driver(&self) -> Option<&str> {
+        match self {
+            Self::External(connection) => Some(&connection.opened().driver),
             _ => None,
         }
     }
@@ -4061,7 +4068,7 @@ mod tests {
         assert_eq!(Engine::ClickHouse.fields(), Fields::Server);
         assert_eq!(Engine::ClickHouse.default_port(), Some(8123));
         assert_eq!(
-            crate::connection_form::placeholders(Engine::ClickHouse).port,
+            crate::connection_form::placeholders(Target::built_in(Engine::ClickHouse)).port,
             "8123"
         );
         assert!(Engine::ClickHouse.holds_read_only());

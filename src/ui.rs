@@ -22,7 +22,7 @@ use std::{cell::RefCell, collections::HashMap, ops::Range};
 
 use crate::{
     actions::RefreshConnection,
-    db::{Engine, RelationKind, RoutineKind, Syntax},
+    db::{Engine, RelationKind, RoutineKind, Syntax, Target},
     explorer::ObjectKind,
     icons::icon,
     keybindings,
@@ -197,12 +197,12 @@ pub(crate) fn row_icon_tinted(
         .text_color(color.map_or_else(brand, ConnectionColor::swatch))
 }
 
-/// An engine's logo in its brand hue, at a lightness that stands off every
-/// one of `planes`: for a surface whose colour is not the theme's own.
-pub(crate) fn engine_logo(t: Theme, engine: Engine, planes: &[Srgb]) -> impl IntoElement {
-    icon(engine.logo())
+/// A target's logo in its engine's brand hue, at a lightness that stands off
+/// every one of `planes`: for a surface whose colour is not the theme's own.
+pub(crate) fn engine_logo(t: Theme, target: Target, planes: &[Srgb]) -> impl IntoElement {
+    icon(target.logo())
         .size(px(layout::chrome(layout::ICON_SIZE)))
-        .text_color(theme::engine_brand(engine, t, planes))
+        .text_color(theme::engine_brand(target.engine, t, planes))
 }
 
 /// A connection's state, apart from the connection itself, for a list built

@@ -6,7 +6,7 @@
 use super::*;
 use gpui_component::menu::PopupMenuItem;
 
-use crate::connection_form::{ConnectionTest, duplicate_profile_name, keep_schema};
+use crate::connection_form::{ConnectionTest, Reported, duplicate_profile_name, keep_schema};
 use crate::db::{ExternalConfig, Plugin};
 use crate::explorer::Shortcuts;
 use crate::import::{self, Source};
@@ -395,8 +395,8 @@ impl Workspace {
         let srv = mongo.is_some_and(|mongo| mongo.srv);
         if let Some(form) = &mut self.form {
             // A URL for another kind of engine unmounts the field it was
-            // pasted into, and `set_engine` hands focus on.
-            form.set_engine(engine);
+            // pasted into, and `set_target` hands focus on.
+            form.set_target(crate::db::Target::built_in(engine));
             form.srv = srv;
             if let Some(sslmode) = sslmode {
                 // The URL's own mode, so pasting one that demands verification
@@ -765,7 +765,7 @@ impl Workspace {
                     .set_read_only(true)
                     .map_err(|error| error.message)?;
             }
-            Ok::<_, String>(())
+            Ok::<_, String>(Reported::of(&connection))
         });
         let task = cx.spawn(async move |workspace, cx| {
             let result = probe.await;
@@ -774,7 +774,7 @@ impl Workspace {
                     return;
                 };
                 let finished = match result {
-                    Ok(()) => ConnectionTest::Passed,
+                    Ok(reported) => ConnectionTest::Passed(reported),
                     Err(message) => ConnectionTest::Failed(message),
                 };
                 if let Some(ConnectionTest::Running(task)) = form.test.replace(finished) {
@@ -1656,10 +1656,20 @@ impl Workspace {
                         }
                         profile.session.notice = Some(unpicked.message.clone());
                     }
+                    let reported = result.as_ref().ok().and_then(Reported::of);
                     profile.state = match result {
                         Ok(connection) => ProfileState::Connected(Box::new(connection)),
                         Err(message) => ProfileState::Failed(message),
                     };
+                    // A plugin's driver is the user's own, so what it reached
+                    // is news; what a built-in reached is the profile.
+                    if let Some(reported) = reported
+                        && profile.session.notice.is_none()
+                    {
+                        let sentence = reported.sentence();
+                        profile.session.notice = Some(sentence.clone());
+                        workspace.clear_notice_later(id.clone(), generation, sentence, cx);
+                    }
                     if unpicked.is_some() {
                         workspace.remember_profiles(cx);
                     }

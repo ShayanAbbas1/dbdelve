@@ -372,8 +372,8 @@ fn engine_answers_per_engine() {
 fn form_placeholders_per_engine() {
     let mut out = String::new();
     for engine in Engine::ALL {
-        let placeholders = connection_form::placeholders(engine);
-        fragment(&mut out, engine, "name", Some(placeholders.name));
+        let placeholders = connection_form::placeholders(crate::db::Target::built_in(engine));
+        fragment(&mut out, engine, "name", Some(placeholders.name.as_str()));
         fragment(&mut out, engine, "host", Some(placeholders.host));
         fragment(&mut out, engine, "port", Some(&placeholders.port));
         fragment(&mut out, engine, "database", Some(placeholders.database));

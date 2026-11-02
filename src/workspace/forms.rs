@@ -16,7 +16,7 @@ use super::folders::{DragLabel, DragShortcut};
 use super::welcome::{self, Part, Pose};
 use super::*;
 use crate::actions::{ConfirmDialog, NextDialogButton, PreviousDialogButton, TickDialogBox};
-use crate::connection_form::ConnectionTest;
+use crate::connection_form::{ConnectionTest, Reported, dialects, suggested_dialect};
 use crate::explorer::{
     Landing, Member, PINNED_GROUP, Pin, QUERIES_GROUP, Shortcut, ShortcutDatabase, Shortcuts,
     is_schema_row, landing, relation_copies, saved_query,
@@ -116,8 +116,8 @@ impl Workspace {
     /// the way to another engine or out.
     fn render_form_header(&self, t: Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let form = self.form.as_ref().expect("drawn only on the form");
-        let engine = form.engine;
-        let brand = theme::engine_brand(engine, t, &t.logo_planes());
+        let target = form.target();
+        let brand = theme::engine_brand(target.engine, t, &t.logo_planes());
         let title = match form.name.read(cx).value().trim() {
             "" if form.editing.is_some() => "Edit connection".to_string(),
             "" => "New connection".to_string(),
@@ -146,7 +146,7 @@ impl Workspace {
                     .items_center()
                     .justify_center()
                     .child(
-                        icon(engine.logo())
+                        icon(target.logo())
                             .size(px(layout::chrome(layout::FORM_LOGO_SIZE)))
                             .text_color(brand),
                     ),
@@ -196,11 +196,11 @@ impl Workspace {
                             .font_weight(FontWeight::NORMAL)
                             .text_color(t.text)
                             .child(
-                                icon(engine.logo())
+                                icon(target.logo())
                                     .size(px(layout::chrome(layout::ICON_SIZE)))
                                     .text_color(brand),
                             )
-                            .child(engine.label())
+                            .child(target.label())
                             .child(
                                 icon(icon::CHOOSE)
                                     .size(px(layout::chrome(layout::ICON_SIZE)))
@@ -224,12 +224,13 @@ impl Workspace {
         let form = self.form.as_ref().expect("drawn only on the form");
         let mono = fonts(cx).family(FontSlot::Editor).clone();
         let mono_field = |input: &Entity<InputState>| bare(input).font_family(mono.clone());
+        let fields = form.target().fields();
 
         let mut connection = Vec::new();
         // Snowflake has no connection URL, and a file is its own field:
-        // `Engine::fields()` is where that is decided, not a match on the
+        // `Target::fields()` is where that is decided, not a match on the
         // engine here.
-        if form.engine.fields() == Fields::Server {
+        if fields == Fields::Server {
             connection.push(
                 div()
                     .flex()
@@ -248,7 +249,7 @@ impl Workspace {
         }
         connection
             .push(field_row("name", "Name", &form.name, bare(&form.name), t).into_any_element());
-        match form.engine.fields() {
+        match fields {
             // An engine that is a file has no host, no credentials and no
             // transport, so those fields are absent rather than present and
             // inert. A disabled field still reads as something the
@@ -358,10 +359,68 @@ impl Workspace {
                     );
                 }
             }
+            // The address is the driver's, inside the string, so there is no
+            // host or database of DBDelve's to draw, and no URL to fill them.
+            Fields::ConnectionString => {
+                connection.push(
+                    field_row(
+                        "connection",
+                        "Connection",
+                        &form.connection,
+                        mono_field(&form.connection),
+                        t,
+                    )
+                    .into_any_element(),
+                );
+                // Under the string it reads, since an edit there is what
+                // changes it; the switch is further down.
+                if let Some(line) = form.tunnel_line(cx) {
+                    let (text, color) = match line {
+                        Ok(text) => (text, t.text_muted),
+                        Err(text) => (text, t.danger),
+                    };
+                    connection.push(
+                        div()
+                            .px(px(layout::SPACE_LG))
+                            .py(px(layout::SPACE_SM))
+                            .text_size(px(layout::chrome(layout::TEXT_SM)))
+                            .text_color(color)
+                            .child(text)
+                            .into_any_element(),
+                    );
+                }
+                connection.extend(
+                    [
+                        field_row("user", "User", &form.user, bare(&form.user), t),
+                        field_row(
+                            "password",
+                            "Password",
+                            &form.password,
+                            bare(&form.password).mask_toggle(),
+                            t,
+                        ),
+                    ]
+                    .map(IntoElement::into_any_element),
+                );
+                connection.push(
+                    ui::option_row(
+                        "SQL dialect",
+                        Some(
+                            "How DBDelve writes SQL for this connection: quoting, paging and the \
+                             Read-only hold."
+                                .into(),
+                        ),
+                        self.dialect_dropdown(cx),
+                        t,
+                    )
+                    .into_any_element(),
+                );
+                connection.extend(self.dialect_suggestion(t, cx));
+            }
         }
 
         let mut security = Vec::new();
-        if form.engine.fields() == Fields::Server {
+        if fields == Fields::Server {
             security.push(
                 ui::option_row(
                     "Encryption",
@@ -394,6 +453,10 @@ impl Workspace {
                     .into_any_element(),
                 );
             }
+        }
+        // A connection string's TLS is the driver's, in its own keys, so it
+        // has the tunnel and no Encryption row.
+        if matches!(fields, Fields::Server | Fields::ConnectionString) {
             // Host and Port are the far end of the forward, which is easy to
             // read as this machine's view of the network.
             security.push(
@@ -562,9 +625,12 @@ impl Workspace {
             (None, Some(ConnectionTest::Running(_))) => {
                 Some((Status::Connecting, "Testing connection…".to_string()))
             }
-            (None, Some(ConnectionTest::Passed)) => {
-                Some((Status::Connected, "Connection succeeded.".to_string()))
-            }
+            (None, Some(ConnectionTest::Passed(reported))) => Some((
+                Status::Connected,
+                reported
+                    .as_ref()
+                    .map_or_else(|| "Connection succeeded.".to_string(), Reported::sentence),
+            )),
             (None, Some(ConnectionTest::Failed(message))) => {
                 Some((Status::Failed, one_line(message)))
             }
@@ -648,6 +714,64 @@ impl Workspace {
                 form.sslmode = mode;
             },
             cx,
+        )
+    }
+
+    fn dialect_dropdown(&self, cx: &mut Context<Self>) -> AnyElement {
+        let form = self.form.as_ref().expect("drawn only on the form");
+        Self::form_dropdown(
+            "dialect",
+            form.engine,
+            vec![dialects()],
+            |engine| engine.label().into(),
+            |_| None,
+            |form, engine| form.set_dialect(engine),
+            cx,
+        )
+    }
+
+    /// The dialect the driver's last Test said the server speaks, when it is
+    /// not the one picked: one click to take it, never taken without one.
+    fn dialect_suggestion(&self, t: Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let form = self.form.as_ref()?;
+        let Some(ConnectionTest::Passed(Some(reported))) = &form.test else {
+            return None;
+        };
+        let engine = suggested_dialect(form.engine, reported)?;
+        // Only the overlap with a built-in is worth a sentence: the built-in
+        // can edit rows, which nothing through a plugin can.
+        let built_in = engine.has_built_in_driver().then(|| {
+            format!(
+                "DBDelve also has a built-in {} driver, which can edit rows.",
+                engine.label()
+            )
+            .into()
+        });
+        let take = engine.speaks_through_plugins().then(|| {
+            button(
+                "use-dialect",
+                format!("Use {}'s SQL", engine.label()),
+                Tone::Quiet,
+                Control::Standard,
+                t,
+            )
+            .border_1()
+            .border_color(t.border)
+            .on_click(cx.listener(move |workspace, _, _, cx| {
+                if let Some(form) = &mut workspace.form {
+                    form.set_dialect(engine);
+                }
+                cx.notify();
+            }))
+        });
+        Some(
+            ui::option_row(
+                format!("The driver reports {}", reported.dbms),
+                built_in,
+                div().children(take),
+                t,
+            )
+            .into_any_element(),
         )
     }
 
@@ -2082,7 +2206,7 @@ impl Workspace {
         };
         let active_logo = match self.profile() {
             Some(profile) => {
-                engine_logo(t, profile.config.engine(), &[behind_logo]).into_any_element()
+                engine_logo(t, profile.config.target(), &[behind_logo]).into_any_element()
             }
             None => row_icon(t, icon::DATABASE).into_any_element(),
         };
@@ -3254,12 +3378,13 @@ fn bare(input: &Entity<InputState>) -> Input {
 
 /// The path fields the form is drawing, each with a [`browse_button`].
 fn shown_file_fields(form: &ConnectionForm) -> Vec<&Entity<InputState>> {
-    match form.engine.fields() {
+    let fields = form.target().fields();
+    match fields {
         Fields::File => vec![&form.path],
         Fields::Account => vec![&form.private_key],
-        Fields::Server => {
+        Fields::Server | Fields::ConnectionString => {
             let mut shown = Vec::new();
-            if form.sslmode.checks_certificate() {
+            if fields == Fields::Server && form.sslmode.checks_certificate() {
                 shown.push(&form.root_certificate);
             }
             if form.ssh {
