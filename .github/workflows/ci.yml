@@ -112,7 +112,7 @@ jobs:
           sudo apt-get update -o Acquire::Retries=3
           sudo apt-get install -y build-essential pkg-config cmake \
             libfontconfig-dev libxkbcommon-dev libxkbcommon-x11-dev \
-            libwayland-dev libdbus-1-dev sqlite3 unixodbc-dev \
+            libwayland-dev libdbus-1-dev sqlite3 unixodbc-dev odbc-postgresql \
             mesa-vulkan-drivers libvulkan1 libegl1 libgles2 libgl1-mesa-dri
       # Before rust-cache, which saves only the binaries that appear after it
       # runs: the prebuilt download is quicker than carrying it in the cache.
@@ -154,7 +154,8 @@ jobs:
       - name: test
         run: >-
           cargo nextest run --run-ignored all -E 'not (test(snowflake::tests::live_)
-          | test(turso::tests::live_) | test(reads_run_at_once) | test(conformance))'
+          | test(turso::tests::live_) | test(reads_run_at_once) | test(conformance)
+          | test(external::db2::) | test(external::psqlodbc::))'
       # These time two reads run at once against the same two in turn. With
       # the rest of the suite sharing the runner's cores, a CPU-bound engine
       # like SQLite misses the margin by chance, so they run alone.
@@ -167,7 +168,19 @@ jobs:
       - name: conformance
         run: >-
           cargo nextest run --run-ignored all --test-threads 4
-          -E 'test(live_conformance) - test(turso::tests::live_)'
+          -E 'test(live_conformance) - test(turso::tests::live_) - test(external::)'
+      # Postgres through psqlODBC and the ODBC bridge, which the test builds
+      # itself. The driver is named by path: the package registers it in
+      # /etc/odbcinst.ini, but the path is what a bridge with its own unixODBC
+      # reads on every platform.
+      - name: psqlodbc conformance
+        env:
+          dbdelve_ODBC_POSTGRES: DRIVER=/usr/lib/x86_64-linux-gnu/odbc/psqlodbcw.so;Server=127.0.0.1;Port=55432;Database=dbdelve_dev
+          dbdelve_ODBC_POSTGRES_USER: dbdelve
+          dbdelve_ODBC_POSTGRES_PASSWORD: dbdelve
+        run: >-
+          cargo nextest run --run-ignored all --test-threads 4
+          -E 'test(external::psqlodbc::)'
       # The one live Snowflake test that needs no account: it is what proves
       # the TLS provider is linked at run time.
       - name: snowflake tls
@@ -218,7 +231,9 @@ jobs:
         run: |
           { grep -rl packages.microsoft.com /etc/apt/sources.list.d || true; } | xargs -r sudo rm -f
           sudo apt-get update -o Acquire::Retries=3
-          sudo apt-get install -y build-essential pkg-config unixodbc unixodbc-dev
+          sudo apt-get install -y build-essential pkg-config cmake \
+            libfontconfig-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libdbus-1-dev unixodbc unixodbc-dev
       - name: cache IBM driver
         uses: actions/cache@v4
         with:
@@ -247,6 +262,8 @@ jobs:
           driver="$(dev/db2/driver.sh)"
           export dbdelve_ODBC_DB2="$driver;HOSTNAME=127.0.0.1;PORT=55000;DATABASE=dbdelve;PROTOCOL=TCPIP"
           cargo test -p dbdelve-plugin-odbc --test bridge -- --include-ignored
+          # The host's side: the conformance subject builds the bridge itself.
+          cargo test --bin dbdelve db::external::db2 -- --include-ignored
 
   macos:
     runs-on: macos-latest
