@@ -189,9 +189,10 @@ fn live_db2_a_capped_read_drains_the_whole_statement() {
     assert_eq!(cell(&after), Some("7"));
 }
 
-/// Escape scanning is off, so an ODBC escape inside the text reaches Db2 as
-/// typed rather than as the driver's rewrite of it; and the DBMS name the
-/// driver reports suggests no built-in dialect.
+/// Escape scanning is off, so an ODBC escape reaches Db2 as typed rather than
+/// as the driver's rewrite of it: unchanged inside a literal, and outside one
+/// a syntax error, where a scanning driver would answer `A`. And the DBMS name
+/// the driver reports suggests no built-in dialect.
 #[test]
 #[ignore = "needs a Db2 and IBM's driver: set dbdelve_ODBC_DB2, _USER and _PASSWORD"]
 fn live_db2_statements_reach_the_server_as_typed() {
@@ -201,6 +202,13 @@ fn live_db2_statements_reach_the_server_as_typed() {
         "SELECT '{fn UCASE(''a'')}' AS ESCAPED FROM SYSIBM.SYSDUMMY1",
     );
     assert_eq!(cell(&echoed), Some("{fn UCASE('a')}"));
+    let refused = connection.query(
+        "SELECT {fn UCASE('a')} FROM SYSIBM.SYSDUMMY1",
+        &CancelToken::default(),
+        Fetch::default(),
+    );
+    let message = refused.expect_err("the driver rewrote the escape").message;
+    assert!(message.contains("SQL0104N"), "{message}");
     let dbms = connection.reported_dbms().unwrap();
     assert!(dbms.starts_with("DB2/"), "{dbms}");
     assert_eq!(Engine::from_dbms_name(dbms), None);

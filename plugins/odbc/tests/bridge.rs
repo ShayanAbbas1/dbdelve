@@ -283,7 +283,7 @@ fn live_a_semicolon_in_a_password_is_refused_before_the_driver() {
 }
 
 /// NULL through the SQLLEN normalisation, wide text, binary, and an escape
-/// sequence the driver would rewrite if escape scanning were on.
+/// sequence left alone inside a literal.
 #[test]
 #[ignore = "needs a Db2 and IBM's driver: set dbdelve_ODBC_DB2, _USER and _PASSWORD"]
 fn live_values_arrive_as_the_server_holds_them() {
@@ -319,6 +319,19 @@ fn live_values_arrive_as_the_server_holds_them() {
         ]]
     );
     assert_eq!(ended(&outcome), (1, None, false));
+}
+
+/// Outside a literal a scanning driver would rewrite the escape and answer
+/// `A`, so the server's syntax error is what shows scanning is off.
+#[test]
+#[ignore = "needs a Db2 and IBM's driver: set dbdelve_ODBC_DB2, _USER and _PASSWORD"]
+fn live_an_escape_reaches_the_server_as_typed() {
+    let mut bridge = Bridge::open(0);
+    let outcome = bridge.query("SELECT {fn UCASE('a')} FROM SYSIBM.SYSDUMMY1");
+    assert_eq!(
+        error_of(&outcome),
+        (ErrorKind::Server, Some("42601".to_string()))
+    );
 }
 
 #[test]
