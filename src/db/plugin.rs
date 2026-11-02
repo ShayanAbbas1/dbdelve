@@ -44,10 +44,15 @@ pub fn discover() -> Vec<&'static Plugin> {
         .and_then(|exe| exe.parent().map(PathBuf::from))
     {
         dirs.push((exe_dir.join("plugins"), Layout::Plain));
-        dirs.push((
-            exe_dir.join("../Resources/plugins"),
-            Layout::MacBundleResources,
-        ));
+        // Only a bundle has a Resources directory beside its executable;
+        // elsewhere the same path is the executable's sibling, a Downloads
+        // folder's, say, and anyone could put plugins there.
+        if cfg!(target_os = "macos") {
+            dirs.push((
+                exe_dir.join("../Resources/plugins"),
+                Layout::MacBundleResources,
+            ));
+        }
     }
     if let Ok(user) = crate::store::dbdelve_directory() {
         dirs.push((user.join("plugins"), Layout::Plain));
