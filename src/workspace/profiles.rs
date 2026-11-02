@@ -2553,6 +2553,10 @@ mod tests {
         );
         assert_eq!(reason("plugin:odbc", "", &[odbc]), "Names no SQL dialect");
         assert_eq!(
+            reason("plugin:odbc", generic, &[odbc]),
+            "Names no connection string"
+        );
+        assert_eq!(
             reason(
                 "plugin:odbc",
                 &format!("{generic}\nconnection = 'DRIVER=x;PWD=y'"),

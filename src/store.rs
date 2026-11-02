@@ -856,7 +856,8 @@ pub(crate) fn through_plugin(
             engine.label()
         ));
     }
-    odbc_string::storable(connection.unwrap_or_default()).map_err(|refusal| refusal.0)?;
+    let connection = connection.ok_or("Names no connection string")?;
+    odbc_string::storable(connection).map_err(|refusal| refusal.0)?;
     Ok((plugin, engine))
 }
 
@@ -2607,6 +2608,10 @@ user = ""
             ("speaks = \"generic\"\n", ""),
             ("speaks = \"generic\"", "speaks = 3"),
             ("DATABASE=x", "DATABASE=x;PWD=hunter2"),
+            (
+                "connection = \"DRIVER={IBM DB2 ODBC DRIVER};HOSTNAME=db.example;PORT=50000;DATABASE=x\"\n",
+                "",
+            ),
             ("engine = \"plugin:odbc\"", "engine = \"generic\""),
             ("engine = \"plugin:odbc\"", "engine = \"plugin:\""),
         ] {
