@@ -14,7 +14,7 @@ use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use dbdelve_plugin_protocol::arrow::{encode_batch, encode_schema};
 use dbdelve_plugin_protocol::limits::{BATCH_AGE, BATCH_ROWS, BATCH_TARGET, WINDOW};
 use dbdelve_plugin_protocol::{ErrorKind, Kind, MAX_PAYLOAD, Response, write_frame};
-use odbc_api::handles::{Statement, StatementImpl};
+use odbc_api::handles::{Statement as _, StatementImpl};
 use odbc_api::sys::{HStmt, SqlDataType, SqlReturn};
 
 use crate::connect::Session;
@@ -105,21 +105,60 @@ impl Control {
         }
     }
 
-    /// `false` when the query was cancelled before its statement could start,
-    /// so it never does.
+    /// Runs `call`, one that may wait on the server, with `statement`
+    /// published for `cancel` to interrupt. `None` when the request was
+    /// cancelled before the call could start, so it never does.
     ///
-    /// ponytail: a `cancel` landing between this and `SQLExecDirect` entering
-    /// the driver finds nothing running, and the statement then runs to its
-    /// end, unless the host's cancel deadline kills the bridge first. Closing
-    /// that window needs the driver's async mode.
-    fn publish(&self, statement: HStmt) -> bool {
-        let mut running = self.query.lock().unwrap();
-        running.statement = Some(Published(statement));
-        !running.cancel
+    /// Only these calls are published. unixODBC frees a statement's diagnostic
+    /// records on entry to every call, `SQLCancel`'s included, with no lock, so
+    /// two threads in calls on one statement can free the same records twice.
+    /// So the records are emptied here first, while nothing else can reach the
+    /// handle, and they are read only after `call` returns and the handle is
+    /// unpublished, which `cancel`'s lock makes the same as reading them under
+    /// it.
+    ///
+    /// ponytail: two races are left. A `cancel` landing as `call` returns,
+    /// while the driver manager records its diagnostics, races those records,
+    /// a window of the driver manager's own bookkeeping. One landing before
+    /// `call` enters the driver finds nothing running, and the statement runs
+    /// to its end unless the host's cancel deadline kills the bridge first.
+    /// Closing both needs the driver's async mode.
+    pub fn published<T>(&self, statement: &StatementImpl, call: impl FnOnce() -> T) -> Option<T> {
+        raw::clear_diagnostics(statement);
+        {
+            let mut running = self.query.lock().unwrap();
+            if running.cancel {
+                return None;
+            }
+            running.statement = Some(Published(statement.as_sys()));
+        }
+        let result = call();
+        self.query.lock().unwrap().statement = None;
+        Some(result)
     }
 
-    fn unpublish(&self) {
-        self.query.lock().unwrap().statement = None;
+    /// Interrupts the server's side of a cancelled request whose Cancel found
+    /// the statement unpublished, so freeing it does not wait for the server
+    /// to finish. Called on the worker, the handle's only user by then.
+    pub fn settle(&self, statement: &StatementImpl) {
+        if self.cancelled() {
+            // SAFETY: the statement is live, borrowed for the call, and
+            // unpublished, so no other thread uses it.
+            unsafe { raw::cancel(statement.as_sys()) }
+        }
+    }
+
+    /// The last call's error, as cancelled when the user's Cancel arrived. The
+    /// flag decides, not the SQLSTATE: a driver may word a cancel its own way,
+    /// and Db2 reports its query timeout as the same `HY008` a cancel gets.
+    pub fn failure(&self, statement: &StatementImpl, function: &str) -> Response {
+        let mut response = failure::from(statement, function);
+        if self.cancelled()
+            && let Response::Error { kind, .. } = &mut response
+        {
+            *kind = ErrorKind::Cancelled;
+        }
+        response
     }
 
     fn update(&self, id: u64, change: impl FnOnce(&mut Running)) {
@@ -159,7 +198,7 @@ impl Control {
         }
     }
 
-    fn cancelled(&self) -> bool {
+    pub fn cancelled(&self) -> bool {
         self.query.lock().unwrap().cancel
     }
 }
@@ -177,26 +216,15 @@ pub fn query(
         Ok(statement) => statement,
         Err(error) => return error,
     };
-    if !raw::set_noscan(&statement) {
-        return failure::from(&statement, "SQLSetStmtAttr");
+    let response = Run {
+        statement: &statement,
+        control,
+        out,
+        id,
+        messages: Vec::new(),
     }
-    // A driver that cannot time a statement out still runs it, and the user's
-    // Cancel still reaches it.
-    if session.statement_timeout() > 0 {
-        let _ = raw::set_query_timeout(&statement, session.statement_timeout());
-    }
-    let response = match control.publish(statement.as_sys()) {
-        true => Run {
-            statement: &statement,
-            control,
-            out,
-            id,
-            messages: Vec::new(),
-        }
-        .run(sql),
-        false => cancelled(),
-    };
-    control.unpublish();
+    .run(sql);
+    control.settle(&statement);
     response
 }
 
@@ -208,43 +236,91 @@ struct Run<'a, W: Write> {
     messages: Vec<String>,
 }
 
+/// What a statement's results add up to: the first result set's rows, the
+/// counts of every statement that returned none, and the sets protocol 1
+/// does not carry.
+#[derive(Default)]
+struct Tally {
+    rows: Option<u64>,
+    affected: Option<u64>,
+    more_sets: u32,
+}
+
+impl Tally {
+    /// A count the driver could not give (`-1`, as DDL reports) adds nothing.
+    fn count(&mut self, affected: Option<u64>) {
+        if let Some(affected) = affected {
+            self.affected = Some(self.affected.unwrap_or(0).saturating_add(affected));
+        }
+    }
+}
+
 impl<W: Write> Run<'_, W> {
     fn run(mut self, sql: &str) -> Response {
-        match raw::exec_direct(self.statement, sql) {
-            SqlReturn::SUCCESS => {}
-            SqlReturn::SUCCESS_WITH_INFO => self.note(),
-            SqlReturn::NO_DATA => return self.end(0, Some(0), 0),
-            _ => return self.failure("SQLExecDirect"),
-        }
-        let mut rows = None;
-        let mut rows_affected = None;
-        let mut more_sets = 0;
-        loop {
-            let Some(columns) = raw::num_result_cols(self.statement) else {
-                return self.failure("SQLNumResultCols");
-            };
-            match (columns, rows) {
-                (0, None) if rows_affected.is_none() => {
-                    rows_affected = raw::row_count(self.statement);
-                }
-                (0, _) => {}
-                (_, None) => match self.stream(columns) {
-                    Ok(total) => rows = Some(total),
-                    Err(response) => return response,
-                },
-                (_, Some(_)) => more_sets += 1,
+        let statement = self.statement;
+        let Some(executed) = self
+            .control
+            .published(statement, || raw::exec_direct(statement, sql))
+        else {
+            return cancelled();
+        };
+        let mut has_result = match executed {
+            SqlReturn::SUCCESS => true,
+            SqlReturn::SUCCESS_WITH_INFO => {
+                self.note();
+                true
             }
-            match raw::more_results(self.statement) {
-                SqlReturn::SUCCESS => {}
-                SqlReturn::SUCCESS_WITH_INFO => self.note(),
+            // A driver may answer a statement that touched no rows this way,
+            // and the statements after it still wait behind `SQLMoreResults`.
+            SqlReturn::NO_DATA => false,
+            _ => return self.failure("SQLExecDirect"),
+        };
+        let mut tally = Tally::default();
+        loop {
+            match has_result {
+                true => {
+                    if let Err(response) = self.result(&mut tally) {
+                        return response;
+                    }
+                }
+                false => tally.count(Some(0)),
+            }
+            let Some(next) = self
+                .control
+                .published(statement, || raw::more_results(statement))
+            else {
+                return cancelled();
+            };
+            has_result = match next {
+                SqlReturn::SUCCESS => true,
+                SqlReturn::SUCCESS_WITH_INFO => {
+                    self.note();
+                    true
+                }
+                // A cancel between statements leaves unixODBC answering
+                // NO_DATA for the ones it never ran.
+                SqlReturn::NO_DATA if self.control.cancelled() => return cancelled(),
                 SqlReturn::NO_DATA => break,
                 _ => return self.failure("SQLMoreResults"),
-            }
+            };
         }
-        if rows.is_some() {
-            rows_affected = None;
+        let affected = match tally.rows {
+            Some(_) => None,
+            None => tally.affected,
+        };
+        self.end(tally.rows.unwrap_or(0), affected, tally.more_sets)
+    }
+
+    fn result(&mut self, tally: &mut Tally) -> Result<(), Response> {
+        let Some(columns) = raw::num_result_cols(self.statement) else {
+            return Err(self.failure("SQLNumResultCols"));
+        };
+        match (columns, tally.rows) {
+            (0, _) => tally.count(raw::row_count(self.statement)),
+            (_, None) => tally.rows = Some(self.stream(columns)?),
+            (_, Some(_)) => tally.more_sets += 1,
         }
-        self.end(rows.unwrap_or(0), rows_affected, more_sets)
+        Ok(())
     }
 
     /// Streams one result set and answers how many rows it produced. On `stop`
@@ -276,7 +352,12 @@ impl<W: Write> Run<'_, W> {
                 Some(Interrupt::Stop) => draining = true,
                 None => {}
             }
-            match raw::fetch(self.statement) {
+            let statement = self.statement;
+            let Some(fetched_row) = self.control.published(statement, || raw::fetch(statement))
+            else {
+                return Err(cancelled());
+            };
+            match fetched_row {
                 SqlReturn::SUCCESS => {}
                 SqlReturn::SUCCESS_WITH_INFO => self.note(),
                 SqlReturn::NO_DATA => break,
@@ -313,10 +394,22 @@ impl<W: Write> Run<'_, W> {
                 Fetched::Text => 2 * MAX_PAYLOAD,
                 Fetched::Binary => (MAX_PAYLOAD - 2) / 2,
             };
-            let value = match raw::get_data(self.statement, column, as_fetched, limit, scratch) {
+            let control = self.control;
+            let cancelled_now = || control.cancelled();
+            let read = raw::get_data(
+                self.statement,
+                column,
+                as_fetched,
+                limit,
+                scratch,
+                &cancelled_now,
+            );
+            let value = match read {
                 Ok(value) => value.map(|bytes| rendered(as_fetched, &bytes)),
                 Err(DataError::Odbc) => return Err(self.failure("SQLGetData")),
                 Err(DataError::TooLarge) => return Err(too_large(schema, index)),
+                Err(DataError::Cancelled) => return Err(cancelled()),
+                Err(DataError::Unmeasured) => return Err(unmeasured(schema, index)),
             };
             if value
                 .as_ref()
@@ -368,17 +461,8 @@ impl<W: Write> Run<'_, W> {
         }
     }
 
-    /// The last call's error, as cancelled when the user's Cancel arrived. The
-    /// flag decides, not the SQLSTATE: a driver may word a cancel its own way,
-    /// and Db2 reports its query timeout as the same `HY008` a cancel gets.
     fn failure(&self, function: &str) -> Response {
-        let mut response = failure::from(self.statement, function);
-        if self.control.cancelled()
-            && let Response::Error { kind, .. } = &mut response
-        {
-            *kind = ErrorKind::Cancelled;
-        }
-        response
+        self.control.failure(self.statement, function)
     }
 
     fn end(&mut self, rows: u64, rows_affected: Option<u64>, more_sets: u32) -> Response {
@@ -431,7 +515,7 @@ pub fn rendered(fetched: Fetched, bytes: &[u8]) -> String {
     }
 }
 
-fn cancelled() -> Response {
+pub fn cancelled() -> Response {
     Response::Error {
         kind: ErrorKind::Cancelled,
         message: "The statement was cancelled.".to_string(),
@@ -444,6 +528,13 @@ fn cancelled() -> Response {
 fn too_large(schema: &Schema, index: usize) -> Response {
     failure::plain(&format!(
         "A value in column {} is larger than 64 MiB, which protocol 1 cannot carry.",
+        schema.field(index).name()
+    ))
+}
+
+fn unmeasured(schema: &Schema, index: usize) -> Response {
+    failure::plain(&format!(
+        "The ODBC driver did not say how long a value in column {} is, so the bridge cannot tell where it ends.",
         schema.field(index).name()
     ))
 }
@@ -584,17 +675,6 @@ mod tests {
         assert_eq!(control.interrupted(), None);
         control.cancel(2);
         assert_eq!(control.interrupted(), Some(Interrupt::Cancel));
-    }
-
-    #[test]
-    fn a_query_cancelled_before_its_statement_is_published_never_runs() {
-        let control = Control::default();
-        control.start(3);
-        assert!(control.publish(HStmt(std::ptr::null_mut())));
-        control.unpublish();
-        control.start(4);
-        control.cancel(4);
-        assert!(!control.publish(HStmt(std::ptr::null_mut())));
     }
 
     #[test]

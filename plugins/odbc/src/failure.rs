@@ -1,7 +1,9 @@
 //! ODBC diagnostics as the protocol's `error`.
 
 use dbdelve_plugin_protocol::{ErrorKind, Response};
-use odbc_api::handles::{Diagnostics, Record, slice_to_cow_utf8};
+use odbc_api::handles::AnyHandle;
+
+use crate::raw;
 
 /// IM002 is the driver manager finding no DSN by that name and no default
 /// driver. A `DRIVER=` name it has no entry for is not IM002: unixODBC then
@@ -13,21 +15,40 @@ const NO_DRIVER_HINT: &str = "Name the driver by its library path (DRIVER=/path/
 const MOST_RECORDS: i16 = 16;
 
 /// Every diagnostic record the last call on `handle` left, as one `error`.
-pub fn from(handle: &impl Diagnostics, function: &str) -> Response {
+pub fn from(handle: &impl AnyHandle, function: &str) -> Response {
     error(&records(handle), function)
 }
 
 /// The (SQLSTATE, message) pairs the last call on `handle` left, first first.
-pub fn records(handle: &impl Diagnostics) -> Vec<(String, String)> {
-    let mut record = Record::with_capacity(512);
-    let mut records = Vec::new();
-    let mut number = 1;
-    while number <= MOST_RECORDS && record.fill_from(handle, number) {
-        let message = slice_to_cow_utf8(&record.message).into_owned();
-        records.push((record.state.as_str().to_string(), message));
-        number += 1;
+pub fn records(handle: &impl AnyHandle) -> Vec<(String, String)> {
+    raw::diagnostics(handle, MOST_RECORDS)
+}
+
+/// `response` with every spelling of `secret` the connection string could
+/// carry blanked, for a driver that quotes the string in its error. A short
+/// secret may blank ordinary words too, which beats showing it.
+pub fn scrubbed(response: Response, secret: &str, spellings: &[String]) -> Response {
+    match response {
+        Response::Error {
+            kind,
+            mut message,
+            sqlstate,
+            position,
+            lost,
+        } if !secret.is_empty() => {
+            for spelling in spellings.iter().map(String::as_str).chain([secret]) {
+                message = message.replace(spelling, "********");
+            }
+            Response::Error {
+                kind,
+                message,
+                sqlstate,
+                position,
+                lost,
+            }
+        }
+        other => other,
     }
-    records
 }
 
 pub fn plain(message: &str) -> Response {
@@ -75,6 +96,19 @@ mod tests {
             .iter()
             .map(|(state, message)| (state.to_string(), message.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn a_quoted_password_is_blanked_in_every_spelling() {
+        let quoted = error(
+            &records(&[("08001", "bad string UID=u;PWD={p}}w} near p}w")]),
+            "f",
+        );
+        let Response::Error { message, .. } = scrubbed(quoted, "p}w", &["{p}}w}".to_string()])
+        else {
+            panic!("an error");
+        };
+        assert_eq!(message, "bad string UID=u;PWD=******** near ********");
     }
 
     #[test]

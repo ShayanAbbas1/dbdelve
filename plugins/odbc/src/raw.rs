@@ -10,17 +10,71 @@
 //! read through them, and why nothing binds columns: a bound array's indicator
 //! stride would carry the same bug where no wrapper could fix it.
 
-use odbc_api::handles::{self, Statement, StatementImpl};
+use odbc_api::handles::{self, AnyHandle, Statement, StatementImpl};
 use odbc_api::sys::{
-    CDataType, Desc, HDbc, HStmt, InfoType, Len, Nullability, Pointer, SQLCancel, SQLColAttributeW,
-    SQLColumnsW, SQLDescribeColW, SQLExecDirectW, SQLFetch, SQLForeignKeysW, SQLGetData,
-    SQLGetInfoW, SQLMoreResults, SQLNumResultCols, SQLPrimaryKeysW, SQLRowCount, SQLSetStmtAttrW,
-    SQLTablesW, SqlDataType, SqlReturn, StatementAttribute, ULen,
+    CDataType, Desc, HDbc, HStmt, InfoType, Len, NO_TOTAL, Nullability, Pointer, SQLCancel,
+    SQLColAttributeW, SQLColumnsW, SQLDescribeColW, SQLExecDirectW, SQLFetch, SQLForeignKeysW,
+    SQLFreeHandle, SQLGetData, SQLGetDiagRecW, SQLGetInfoW, SQLGetStmtAttrW, SQLMoreResults,
+    SQLNumResultCols, SQLPrimaryKeysW, SQLRowCount, SQLSetStmtAttrW, SQLTablesW, SqlDataType,
+    SqlReturn, StatementAttribute, ULen,
 };
 
-use crate::failure;
-
 pub const NULL_DATA: isize = -1;
+
+/// Every (SQLSTATE, message) record the last call on `handle` left, first
+/// first, up to `most`. Read here rather than through odbc-api's `Record`,
+/// which panics on a SQLSTATE that is not UTF-8 or a negative length.
+pub fn diagnostics(handle: &impl AnyHandle, most: i16) -> Vec<(String, String)> {
+    let mut records = Vec::new();
+    for number in 1..=most {
+        let mut state = [0u16; 6];
+        let mut message = vec![0u16; 512];
+        loop {
+            let capacity = i16::try_from(message.len()).unwrap_or(i16::MAX);
+            let mut native: i32 = 0;
+            let mut length: i16 = 0;
+            // SAFETY: a live handle the caller borrows; the driver manager
+            // writes a five-character state and its NUL into `state`, and at
+            // most `capacity` characters into `message`, which holds that many.
+            let result = unsafe {
+                SQLGetDiagRecW(
+                    handle.handle_type(),
+                    handle.as_handle(),
+                    number,
+                    state.as_mut_ptr(),
+                    &mut native,
+                    message.as_mut_ptr(),
+                    capacity,
+                    &mut length,
+                )
+            };
+            if !succeeded(result) {
+                return records;
+            }
+            let length = usize::try_from(length).unwrap_or(0);
+            if length >= message.len() && message.len() < i16::MAX as usize {
+                message = vec![0u16; (length + 1).min(i16::MAX as usize)];
+                continue;
+            }
+            let state = String::from_utf16_lossy(&state[..5]);
+            let message = String::from_utf16_lossy(&message[..length.min(message.len() - 1)]);
+            records.push((state.trim_end_matches('\0').to_string(), message));
+            break;
+        }
+    }
+    records
+}
+
+/// Frees a handle whatever `SQLFreeHandle` answers. odbc-api's own drop panics
+/// on anything but `SUCCESS`, and a driver may free with a warning.
+///
+/// # Safety
+///
+/// The handle is not used again, and its odbc-api wrapper is never dropped.
+pub unsafe fn free(handle: &impl AnyHandle) {
+    // SAFETY: the caller gives the handle up for good.
+    let _ = unsafe { SQLFreeHandle(handle.handle_type(), handle.as_handle()) };
+}
 
 /// An SQLLEN as the driver meant it. A value whose upper 32 bits are zero is
 /// the sign-extended `i32` of its low half; anything else is used as is, so a
@@ -102,9 +156,37 @@ fn get_info(handle: HDbc, info: InfoType, buffer: &mut [u16]) -> Option<usize> {
 
 /// Turns ODBC escape scanning off, so `{fn …}`, `{d '…'}` and `{call …}` reach
 /// the server as the user typed them rather than rewritten by the driver.
+/// Read back rather than trusted: a driver may accept the call with `01S02`
+/// and keep a value of its own.
 pub fn set_noscan(statement: &StatementImpl) -> bool {
     const SQL_NOSCAN_ON: usize = 1;
     set_attribute(statement, StatementAttribute::NoScan, SQL_NOSCAN_ON)
+        && attribute(statement, StatementAttribute::NoScan) == Some(SQL_NOSCAN_ON)
+}
+
+/// Empties the driver manager's diagnostic records for `statement`, which
+/// unixODBC does on entry to any call; reading an attribute is one that every
+/// state allows and that posts nothing of its own.
+pub fn clear_diagnostics(statement: &StatementImpl) {
+    let _ = attribute(statement, StatementAttribute::NoScan);
+}
+
+fn attribute(statement: &StatementImpl, attribute: StatementAttribute) -> Option<usize> {
+    let mut value: usize = 0;
+    let mut length: i32 = 0;
+    // SAFETY: a live statement handle; both attributes read here are an
+    // SQLULEN, written into a zeroed `usize` of that size, so a driver writing
+    // only the low half still leaves the small value it meant.
+    let result = unsafe {
+        SQLGetStmtAttrW(
+            statement.as_sys(),
+            attribute,
+            &mut value as *mut usize as Pointer,
+            0,
+            &mut length,
+        )
+    };
+    succeeded(result).then_some(value)
 }
 
 pub fn set_query_timeout(statement: &StatementImpl, seconds: u32) -> bool {
@@ -257,6 +339,10 @@ pub enum DataError {
     Odbc,
     /// The value is longer than `limit` bytes, read so far and no further.
     TooLarge,
+    /// The user's Cancel arrived between two chunks.
+    Cancelled,
+    /// The driver gave no length for a chunk, and nothing else tells it.
+    Unmeasured,
 }
 
 /// One whole value of the current row's `column`, `None` for NULL.
@@ -265,12 +351,15 @@ pub enum DataError {
 /// gathered, never by the indicator's total, which a 32-bit driver cannot
 /// report past 2^31: `01004` means the chunk was full and more follows. Only a
 /// chunk that fit trusts its indicator, and then for no more than the chunk.
+/// `cancelled` is asked before each chunk after the first, since a long value
+/// is read with the statement unpublished, out of `SQLCancel`'s reach.
 pub fn get_data(
     statement: &StatementImpl,
     column: u16,
     fetched: Fetched,
     limit: usize,
     scratch: &mut [u8],
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<Option<Vec<u8>>, DataError> {
     let (target, terminator) = match fetched {
         Fetched::Text => (CDataType::WChar, 2),
@@ -281,6 +370,9 @@ pub fn get_data(
     let mut value = Vec::new();
     let mut first = true;
     loop {
+        if !first && cancelled() {
+            return Err(DataError::Cancelled);
+        }
         let mut indicator: Len = 0;
         // SAFETY: a live statement handle positioned on a row; the driver
         // writes at most `capacity` bytes into `scratch`, which holds that
@@ -306,10 +398,10 @@ pub fn get_data(
             }
             _ => return Err(DataError::Odbc),
         };
-        let full = capacity - terminator;
-        let written = match more {
-            true => full,
-            false => usize::try_from(indicator).map_or(full, |length| length.min(full)),
+        let Some(written) =
+            chunk_length(fetched, more, indicator, &scratch[..capacity], terminator)
+        else {
+            return Err(DataError::Unmeasured);
         };
         value.extend_from_slice(&scratch[..written]);
         if value.len() > limit {
@@ -319,6 +411,33 @@ pub fn get_data(
             return Ok(Some(value));
         }
         first = false;
+    }
+}
+
+/// The bytes of one chunk `SQLGetData` wrote into `chunk`. A truncated binary
+/// chunk is full; a truncated wide one is full unless the driver stopped a
+/// unit short rather than split a surrogate pair, which leaves its terminator
+/// in the last unit's place (a text holding U+0000 exactly there loses it). A
+/// chunk that fit trusts its indicator, unless that is `SQL_NO_TOTAL`, where
+/// text ends at its terminator and binary has no end to find.
+fn chunk_length(
+    fetched: Fetched,
+    more: bool,
+    indicator: isize,
+    chunk: &[u8],
+    terminator: usize,
+) -> Option<usize> {
+    let full = chunk.len() - terminator;
+    let unit_short = fetched == Fetched::Text && full >= 2 && chunk[full - 2..full] == [0, 0];
+    match (more, usize::try_from(indicator)) {
+        (true, _) if unit_short => Some(full - 2),
+        (true, _) => Some(full),
+        (false, Ok(length)) => Some(length.min(full)),
+        (false, Err(_)) if indicator == NO_TOTAL && fetched == Fetched::Text => chunk
+            .chunks_exact(2)
+            .position(|unit| unit == [0, 0])
+            .map(|units| units * 2),
+        (false, Err(_)) => None,
     }
 }
 
@@ -357,9 +476,8 @@ fn arguments<const N: usize>(texts: [Option<&str>; N]) -> Option<[Argument; N]> 
     arguments.try_into().ok()
 }
 
-pub fn tables(statement: &StatementImpl, schema: &str, table: &str) -> SqlReturn {
-    let Some([catalog, schema, table, kinds]) = arguments([None, Some(schema), Some(table), None])
-    else {
+pub fn tables(statement: &StatementImpl, schema: Option<&str>, table: &str) -> SqlReturn {
+    let Some([catalog, schema, table, kinds]) = arguments([None, schema, Some(table), None]) else {
         return SqlReturn::ERROR;
     };
     // SAFETY: a live statement handle; each argument is NULL or holds exactly
@@ -508,7 +626,7 @@ pub fn statistics(
 }
 
 fn truncated(statement: &StatementImpl) -> bool {
-    failure::records(statement)
+    diagnostics(statement, 16)
         .iter()
         .any(|(state, _)| state == "01004")
 }
@@ -549,5 +667,20 @@ mod tests {
     #[test]
     fn a_length_in_the_upper_half_of_32_bits_reads_negative() {
         assert_eq!(sqllen(0x0000_0000_8000_0000), i32::MIN as isize);
+    }
+
+    #[test]
+    fn a_chunk_is_measured_without_stale_bytes() {
+        let (text, binary) = (Fetched::Text, Fetched::Binary);
+        // Eight bytes: three wide units and the terminator's place.
+        let full = [b'a', 0, b'b', 0, b'c', 0, 0, 0];
+        let unit_short = [b'a', 0, b'b', 0, 0, 0, b'x', 0];
+        let ended = [b'a', 0, 0, 0, b'x', 0, b'x', 0];
+        assert_eq!(chunk_length(text, true, NO_TOTAL, &full, 2), Some(6));
+        assert_eq!(chunk_length(text, true, NO_TOTAL, &unit_short, 2), Some(4));
+        assert_eq!(chunk_length(text, false, 2, &ended, 2), Some(2));
+        assert_eq!(chunk_length(text, false, NO_TOTAL, &ended, 2), Some(2));
+        assert_eq!(chunk_length(binary, true, NO_TOTAL, &ended, 0), Some(8));
+        assert_eq!(chunk_length(binary, false, NO_TOTAL, &ended, 0), None);
     }
 }

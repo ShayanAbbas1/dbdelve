@@ -244,7 +244,7 @@ fn live_open_names_the_dbms_and_close_ends_the_process() {
 #[ignore = "needs a Db2 and IBM's driver: set dbdelve_ODBC_DB2"]
 fn live_a_wrong_password_is_the_drivers_error() {
     let mut bridge = Bridge::spawn();
-    let password = "not-the-password;}".to_string();
+    let password = "not-the-password}".to_string();
     let refused = bridge.request(Request::Open {
         fields: live_fields(),
         password: Password(password.clone()),
@@ -258,6 +258,27 @@ fn live_a_wrong_password_is_the_drivers_error() {
     };
     assert!(sqlstate.is_some());
     assert!(!message.contains(&password));
+}
+
+/// Db2 splits on `;` even inside braces: this password, sent, would have
+/// turned TLS on, so it never reaches the driver.
+#[test]
+#[ignore = "needs a Db2 and IBM's driver: set dbdelve_ODBC_DB2"]
+fn live_a_semicolon_in_a_password_is_refused_before_the_driver() {
+    let mut bridge = Bridge::spawn();
+    let refused = bridge.request(Request::Open {
+        fields: live_fields(),
+        password: Password("a;SECURITY=SSL;b".to_string()),
+        statement_timeout: 0,
+    });
+    let Response::Error {
+        message, sqlstate, ..
+    } = refused
+    else {
+        panic!("an error, got {refused:?}");
+    };
+    assert_eq!(sqlstate, None);
+    assert!(message.starts_with("The password holds a `;`"), "{message}");
 }
 
 /// NULL through the SQLLEN normalisation, wide text, binary, and an escape

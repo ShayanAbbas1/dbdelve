@@ -15,6 +15,7 @@ mod run;
 
 use std::collections::BTreeMap;
 use std::io::{self, BufWriter, Read, Write};
+use std::panic;
 use std::process;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -30,15 +31,28 @@ use crate::connect::Session;
 use crate::run::Control;
 
 fn main() {
+    // A panic would end only its thread: the worker's leaves its request with
+    // no answer and the host waiting on it, so any panic ends the process,
+    // which the host reports as a reset with this on stderr.
+    panic::set_hook(Box::new(|info| {
+        eprintln!("dbdelve-odbc: {info}");
+        process::abort();
+    }));
+    let out = protocol_out();
     let control = Arc::new(Control::default());
     let (jobs, inbox) = mpsc::channel();
     let worker = Arc::clone(&control);
     thread::spawn(move || {
-        Bridge::new(BufWriter::new(io::stdout().lock()), worker).work(inbox);
+        Bridge::new(BufWriter::new(out), worker).work(inbox);
         process::exit(0);
     });
     match serve(&mut io::stdin().lock(), &jobs, &control) {
-        Ok(()) => process::exit(0),
+        // The worker disconnects and answers `closed`, then exits; the host's
+        // close grace bounds a worker stuck in a driver.
+        Ok(true) => loop {
+            thread::park();
+        },
+        Ok(false) => process::exit(0),
         Err(violation) => {
             eprintln!("dbdelve-odbc: {violation}");
             process::exit(2);
@@ -46,13 +60,48 @@ fn main() {
     }
 }
 
+/// The protocol's stdout. A driver that prints to fd 1 would corrupt the
+/// frames, so the frames go to a copy of it and fd 1 is pointed at stderr.
+#[cfg(unix)]
+fn protocol_out() -> Box<dyn Write + Send> {
+    use std::fs::File;
+    use std::os::fd::FromRawFd;
+    use std::os::raw::c_int;
+
+    unsafe extern "C" {
+        fn dup(fd: c_int) -> c_int;
+        fn dup2(from: c_int, to: c_int) -> c_int;
+    }
+    // SAFETY: plain descriptor calls on the process's own fds 1 and 2, made
+    // before any other thread exists.
+    let copy = unsafe { dup(1) };
+    if copy < 0 {
+        return Box::new(io::stdout());
+    }
+    // SAFETY: as above; on failure fd 1 is left as it was, the protocol's.
+    unsafe { dup2(2, 1) };
+    // SAFETY: `copy` is a fresh descriptor this process owns and nothing else
+    // holds.
+    Box::new(unsafe { File::from_raw_fd(copy) })
+}
+
+/// ponytail: on Windows a driver printing to stdout still reaches the
+/// protocol's pipe; redirecting it needs the CRT's `_dup2` and
+/// `SetStdHandle`, worth it when a Windows driver is seen doing it.
+#[cfg(not(unix))]
+fn protocol_out() -> Box<dyn Write + Send> {
+    Box::new(io::stdout())
+}
+
 enum Job {
     Run(u64, Request),
     Refuse(u64, ErrorKind, String),
 }
 
-/// Reads frames until EOF, or until the worker has answered `close`.
-fn serve(input: &mut impl Read, jobs: &Sender<Job>, control: &Control) -> Result<(), Violation> {
+/// Reads frames until EOF, or until the worker is gone, and answers whether a
+/// `close` was passed on, which the worker then answers and exits after.
+fn serve(input: &mut impl Read, jobs: &Sender<Job>, control: &Control) -> Result<bool, Violation> {
+    let mut closing = false;
     while let Some(frame) = read_frame(input)? {
         let id = frame.request;
         let job = match frame.kind {
@@ -75,9 +124,16 @@ fn serve(input: &mut impl Read, jobs: &Sender<Job>, control: &Control) -> Result
                     continue;
                 }
                 Ok(request) => {
-                    if matches!(request, Request::Query { .. }) {
+                    if matches!(
+                        request,
+                        Request::Query { .. }
+                            | Request::Catalog
+                            | Request::Structure { .. }
+                            | Request::References { .. }
+                    ) {
                         control.start(id);
                     }
+                    closing |= matches!(request, Request::Close);
                     Job::Run(id, request)
                 }
                 Err(violation) => Job::Refuse(id, ErrorKind::Unsupported, violation.to_string()),
@@ -87,7 +143,7 @@ fn serve(input: &mut impl Read, jobs: &Sender<Job>, control: &Control) -> Result
             break;
         }
     }
-    Ok(())
+    Ok(closing)
 }
 
 struct Bridge<W: Write> {
@@ -156,12 +212,12 @@ impl<W: Write> Bridge<W> {
                 None => not_open(),
             },
             Request::Catalog => self.catalog(catalog::catalog),
-            Request::Structure { schema, relation } => {
-                self.catalog(|session| catalog::structure(session, &schema, &relation))
-            }
-            Request::References { schema, relation } => {
-                self.catalog(|session| catalog::references(session, &schema, &relation))
-            }
+            Request::Structure { schema, relation } => self.catalog(|session, control| {
+                catalog::structure(session, control, &schema, &relation)
+            }),
+            Request::References { schema, relation } => self.catalog(|session, control| {
+                catalog::references(session, control, &schema, &relation)
+            }),
             _ => refusal(
                 ErrorKind::Unsupported,
                 "The ODBC bridge does not answer this request.".to_string(),
@@ -194,9 +250,12 @@ impl<W: Write> Bridge<W> {
         Ok(opened)
     }
 
-    fn catalog(&self, read: impl FnOnce(&Session) -> Result<Response, Response>) -> Response {
+    fn catalog(
+        &self,
+        read: impl FnOnce(&Session, &Control) -> Result<Response, Response>,
+    ) -> Response {
         match &self.session {
-            Some(session) => read(session).unwrap_or_else(|error| error),
+            Some(session) => read(session, &self.control).unwrap_or_else(|error| error),
             None => not_open(),
         }
     }

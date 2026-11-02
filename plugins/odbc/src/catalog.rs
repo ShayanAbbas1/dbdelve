@@ -11,8 +11,9 @@ use odbc_api::handles::StatementImpl;
 use odbc_api::sys::{InfoType, SqlReturn};
 
 use crate::connect::Session;
+use crate::failure;
 use crate::raw::{self, DataError, Fetched};
-use crate::{failure, run};
+use crate::run::{self, Control};
 
 type Row = Vec<Option<String>>;
 
@@ -31,74 +32,72 @@ const SQL_WVARCHAR: i16 = -9;
 const SQL_NO_NULLS: &str = "0";
 const SQL_TABLE_STAT: &str = "0";
 
-pub fn catalog(session: &Session) -> Result<Response, Response> {
-    let statement = session.statement()?;
-    let called = raw::tables(&statement, "%", "%");
-    let rows = rows(&statement, called, "SQLTables", 4)?;
+pub fn catalog(session: &Session, control: &Control) -> Result<Response, Response> {
+    // A driver without schemas (MySQL's) may refuse any schema argument at all.
+    let schema = has_schemas(session).then_some("%");
+    let rows = read(session, control, "SQLTables", 4, |statement| {
+        raw::tables(statement, schema, "%")
+    })?;
     Ok(Response::Catalog {
         schemas: schemas_from(&rows),
     })
 }
 
-pub fn structure(session: &Session, schema: &str, relation: &str) -> Result<Response, Response> {
+pub fn structure(
+    session: &Session,
+    control: &Control,
+    schema: &str,
+    relation: &str,
+) -> Result<Response, Response> {
     let scope = Scope::of(session, schema);
     // A driver without an escape leaves `_` and `%` as wildcards; the
     // exact-name filter below still keeps only the relation asked about.
     let escape =
         raw::info_string(session.handle(), InfoType::SearchPatternEscape).unwrap_or_default();
-    let columns = {
-        let statement = session.statement()?;
-        let schema = scope.schema.map(|schema| escape_pattern(schema, &escape));
-        let called = raw::columns(
-            &statement,
-            scope.catalog,
-            schema.as_deref(),
-            &escape_pattern(relation, &escape),
-        );
-        rows(&statement, called, "SQLColumns", 13)?
-    };
-    let keys = {
-        let statement = session.statement()?;
-        let called = raw::primary_keys(&statement, scope.catalog, scope.schema, relation);
-        rows(&statement, called, "SQLPrimaryKeys", 5)?
-    };
+    let pattern = scope.schema.map(|schema| escape_pattern(schema, &escape));
+    let columns = read(session, control, "SQLColumns", 13, |statement| {
+        let relation = escape_pattern(relation, &escape);
+        raw::columns(statement, scope.catalog, pattern.as_deref(), &relation)
+    })?;
+    let keys = read(session, control, "SQLPrimaryKeys", 6, |statement| {
+        raw::primary_keys(statement, scope.catalog, scope.schema, relation)
+    })?;
     // `SQLStatistics` takes ordinary arguments, not patterns: an escaped name
     // would be looked up with its escape characters in it.
-    let statistics = {
-        let statement = session.statement()?;
-        let called = raw::statistics(&statement, scope.catalog, scope.schema, relation);
-        rows(&statement, called, "SQLStatistics", 9)?
-    };
-    let foreign = {
-        let statement = session.statement()?;
-        let called = raw::foreign_keys(
-            &statement,
-            [None, None, None],
-            [scope.catalog, scope.schema, Some(relation)],
-        );
-        rows(&statement, called, "SQLForeignKeys", 12)?
-    };
-    let primary_key = primary_key_from(&keys, schema, relation);
+    let statistics = read(session, control, "SQLStatistics", 9, |statement| {
+        raw::statistics(statement, scope.catalog, scope.schema, relation)
+    })?;
+    let foreign = read(session, control, "SQLForeignKeys", 12, |statement| {
+        let foreign = [scope.catalog, scope.schema, Some(relation)];
+        raw::foreign_keys(statement, [None, None, None], foreign)
+    })?;
+    let (primary_key, key_name) = primary_key_from(&keys, schema, relation);
     Ok(Response::Structure(Structure {
         columns: columns_from(&columns, schema, relation),
-        indexes: indexes_from(&statistics, schema, relation, &primary_key),
+        indexes: indexes_from(&statistics, schema, relation, &primary_key, &key_name),
         primary_key,
         foreign_keys: foreign_keys_from(&foreign, schema, relation),
     }))
 }
 
-pub fn references(session: &Session, schema: &str, relation: &str) -> Result<Response, Response> {
+pub fn references(
+    session: &Session,
+    control: &Control,
+    schema: &str,
+    relation: &str,
+) -> Result<Response, Response> {
     let scope = Scope::of(session, schema);
-    let statement = session.statement()?;
-    let called = raw::foreign_keys(
-        &statement,
-        [scope.catalog, scope.schema, Some(relation)],
-        [None, None, None],
-    );
-    let rows = rows(&statement, called, "SQLForeignKeys", 12)?;
+    let rows = read(session, control, "SQLForeignKeys", 12, |statement| {
+        let primary = [scope.catalog, scope.schema, Some(relation)];
+        raw::foreign_keys(statement, primary, [None, None, None])
+    })?;
     Ok(Response::References {
         references: references_from(&rows, schema, relation),
     })
+}
+
+fn has_schemas(session: &Session) -> bool {
+    raw::info_u32(session.handle(), InfoType::SchemaUsage) != Some(0)
 }
 
 /// Where the name the host sends back as a schema goes. The catalog lists a
@@ -114,13 +113,13 @@ impl<'a> Scope<'a> {
             catalog: None,
             schema: None,
         };
-        match raw::info_u32(session.handle(), InfoType::SchemaUsage) {
+        match has_schemas(session) {
             _ if schema.is_empty() => none,
-            Some(0) => Self {
+            false => Self {
                 catalog: Some(schema),
                 ..none
             },
-            _ => Self {
+            true => Self {
                 schema: Some(schema),
                 ..none
             },
@@ -128,32 +127,65 @@ impl<'a> Scope<'a> {
     }
 }
 
-/// Columns `1..=last` of every row the catalog call left, as text.
-fn rows(
-    statement: &StatementImpl,
-    called: SqlReturn,
+/// Columns `1..=last` of every row the catalog function `call` leaves, as
+/// text, with the call and each fetch where `cancel` can reach them.
+fn read(
+    session: &Session,
+    control: &Control,
     function: &str,
     last: u16,
+    call: impl FnOnce(&StatementImpl) -> SqlReturn,
 ) -> Result<Vec<Row>, Response> {
+    let statement = session.statement()?;
+    let rows = rows(&statement, control, function, last, call);
+    control.settle(&statement);
+    rows
+}
+
+fn rows(
+    statement: &StatementImpl,
+    control: &Control,
+    function: &str,
+    last: u16,
+    call: impl FnOnce(&StatementImpl) -> SqlReturn,
+) -> Result<Vec<Row>, Response> {
+    let Some(called) = control.published(statement, || call(statement)) else {
+        return Err(run::cancelled());
+    };
     if !matches!(called, SqlReturn::SUCCESS | SqlReturn::SUCCESS_WITH_INFO) {
-        return Err(failure::from(statement, function));
+        return Err(control.failure(statement, function));
     }
+    let cancelled = || control.cancelled();
     let mut scratch = vec![0; SCRATCH];
     let mut rows = Vec::new();
     loop {
-        match raw::fetch(statement) {
+        let Some(fetched) = control.published(statement, || raw::fetch(statement)) else {
+            return Err(run::cancelled());
+        };
+        match fetched {
             SqlReturn::NO_DATA => return Ok(rows),
             SqlReturn::SUCCESS | SqlReturn::SUCCESS_WITH_INFO => {}
-            _ => return Err(failure::from(statement, "SQLFetch")),
+            _ => return Err(control.failure(statement, "SQLFetch")),
         }
         let row = (1..=last)
             .map(|column| {
-                match raw::get_data(statement, column, Fetched::Text, MOST_VALUE, &mut scratch) {
+                let value = raw::get_data(
+                    statement,
+                    column,
+                    Fetched::Text,
+                    MOST_VALUE,
+                    &mut scratch,
+                    &cancelled,
+                );
+                match value {
                     Ok(value) => Ok(value.map(|bytes| run::rendered(Fetched::Text, &bytes))),
-                    Err(DataError::Odbc) => Err(failure::from(statement, "SQLGetData")),
-                    Err(DataError::TooLarge) => Err(failure::plain(&format!(
-                        "{function} returned a value over {MOST_VALUE} bytes."
-                    ))),
+                    Err(DataError::Odbc) => Err(control.failure(statement, "SQLGetData")),
+                    Err(DataError::Cancelled) => Err(run::cancelled()),
+                    Err(DataError::TooLarge | DataError::Unmeasured) => {
+                        Err(failure::plain(&format!(
+                            "{function} returned a value over {MOST_VALUE} bytes, or one whose length the driver did not give."
+                        )))
+                    }
                 }
             })
             .collect::<Result<Row, Response>>()?;
@@ -300,19 +332,35 @@ fn columns_from(rows: &[Row], schema: &str, relation: &str) -> Vec<Column> {
         .collect()
 }
 
-fn primary_key_from(rows: &[Row], schema: &str, relation: &str) -> Vec<String> {
-    let mut key: Vec<(u32, String)> = rows
+/// The key's columns in `KEY_SEQ` order, and its `PK_NAME`, empty when the
+/// driver gives none.
+fn primary_key_from(rows: &[Row], schema: &str, relation: &str) -> (Vec<String>, String) {
+    let rows: Vec<&Row> = rows
         .iter()
         .filter(|row| names(row, 0, schema, relation))
+        .collect();
+    let mut key: Vec<(u32, String)> = rows
+        .iter()
         .map(|row| (number(row, 4), name(row, 3)))
         .collect();
     key.sort_by_key(|(sequence, _)| *sequence);
-    key.into_iter().map(|(_, column)| column).collect()
+    let key_name = rows.first().map(|row| name(row, 5)).unwrap_or_default();
+    (
+        key.into_iter().map(|(_, column)| column).collect(),
+        key_name,
+    )
 }
 
-/// ODBC does not say which index backs the primary key; a unique index on
-/// exactly its columns, in its order, is taken as the one.
-fn indexes_from(rows: &[Row], schema: &str, relation: &str, primary_key: &[String]) -> Vec<Index> {
+/// The index named as the key, where a driver names the key's index after it;
+/// otherwise the first unique index on exactly the key's columns, in its
+/// order, since ODBC does not say which index backs it.
+fn indexes_from(
+    rows: &[Row],
+    schema: &str,
+    relation: &str,
+    primary_key: &[String],
+    key_name: &str,
+) -> Vec<Index> {
     let mut indexes: Vec<Gathered> = Vec::new();
     for row in rows {
         if !names(row, 0, schema, relation) || cell(row, 6).map(str::trim) == Some(SQL_TABLE_STAT) {
@@ -336,23 +384,34 @@ fn indexes_from(rows: &[Row], schema: &str, relation: &str, primary_key: &[Strin
             }),
         }
     }
-    indexes
+    let mut indexes: Vec<Index> = indexes
         .into_iter()
         .map(|mut gathered| {
             gathered.columns.sort_by_key(|(position, _)| *position);
-            let columns: Vec<String> = gathered
-                .columns
-                .into_iter()
-                .map(|(_, column)| column)
-                .collect();
             Index {
-                primary: gathered.unique && !primary_key.is_empty() && columns == primary_key,
                 name: gathered.name,
-                columns,
+                columns: gathered
+                    .columns
+                    .into_iter()
+                    .map(|(_, column)| column)
+                    .collect(),
                 unique: gathered.unique,
+                primary: false,
             }
         })
-        .collect()
+        .collect();
+    let named = indexes
+        .iter()
+        .position(|index| !key_name.is_empty() && index.name == key_name);
+    let backing = named.or_else(|| {
+        indexes.iter().position(|index| {
+            index.unique && !primary_key.is_empty() && index.columns == primary_key
+        })
+    });
+    if let Some(backing) = backing {
+        indexes[backing].primary = true;
+    }
+    indexes
 }
 
 /// One index's rows, its columns still with their positions.
@@ -386,20 +445,37 @@ fn foreign_keys_from(rows: &[Row], schema: &str, relation: &str) -> Vec<ForeignK
 /// `SQLForeignKeys` asked from the primary-key side, single-column keys only:
 /// a filter on one column of a composite key matches rows that do not
 /// reference the row it was asked from.
+///
+/// A driver may leave `FK_NAME` NULL. Each unnamed `KEY_SEQ` 1 row then starts
+/// a key of its own, unless its table also has an unnamed `KEY_SEQ` 2 or more,
+/// when which rows pair up cannot be told and none of that table's unnamed
+/// keys is offered.
 fn references_from(rows: &[Row], schema: &str, relation: &str) -> Vec<Reference> {
+    let rows: Vec<&Row> = rows
+        .iter()
+        .filter(|row| names(row, 0, schema, relation))
+        .collect();
+    let source = |row: &Row| (schema_of(row, 4), name(row, 6));
+    let unnamed_composite: Vec<(String, String)> = rows
+        .iter()
+        .filter(|row| name(row, 11).is_empty() && number(row, 8) > 1)
+        .map(|row| source(row))
+        .collect();
     let mut keys: Vec<((String, String, String), Vec<Reference>)> = Vec::new();
-    for row in rows.iter().filter(|row| names(row, 0, schema, relation)) {
+    for (index, row) in rows.iter().enumerate() {
         let reference = Reference {
             schema: schema_of(row, 4),
             table: name(row, 6),
             column: name(row, 7),
             referenced_column: name(row, 3),
         };
-        let key = (
-            reference.schema.clone(),
-            reference.table.clone(),
-            name(row, 11),
-        );
+        let key_name = match name(row, 11) {
+            key_name if !key_name.is_empty() => key_name,
+            _ if unnamed_composite.contains(&source(row)) => continue,
+            // Not a name any driver gives, so it cannot meet a named key.
+            _ => format!("\0{index}"),
+        };
+        let key = (reference.schema.clone(), reference.table.clone(), key_name);
         match keys.iter_mut().find(|(name, _)| *name == key) {
             Some((_, columns)) => columns.push(reference),
             None => keys.push((key, vec![reference])),
@@ -481,12 +557,22 @@ mod tests {
     #[test]
     fn the_key_follows_key_seq_and_names_its_index() {
         let keys = [
-            row(&[None, Some("S"), Some("T"), Some("A"), Some("2")]),
-            row(&[None, Some("S"), Some("T"), Some("B"), Some("1")]),
-            row(&[None, Some("S"), Some("TX"), Some("C"), Some("1")]),
+            row(&[None, Some("S"), Some("T"), Some("A"), Some("2"), Some("PK")]),
+            row(&[None, Some("S"), Some("T"), Some("B"), Some("1"), Some("PK")]),
+            row(&[
+                None,
+                Some("S"),
+                Some("TX"),
+                Some("C"),
+                Some("1"),
+                Some("PX"),
+            ]),
         ];
-        let key = primary_key_from(&keys, "S", "T");
-        assert_eq!(key, ["B", "A"]);
+        let (key, key_name) = primary_key_from(&keys, "S", "T");
+        assert_eq!(
+            (key.clone(), key_name.as_str()),
+            (vec!["B".to_string(), "A".to_string()], "PK")
+        );
         let index = |non_unique, name, position, column| {
             let head = [None, Some("S"), Some("T")];
             let tail = [non_unique, Some("S"), name, Some("3"), position, column];
@@ -494,63 +580,60 @@ mod tests {
         };
         let statistics = [
             row(&[None, Some("S"), Some("T"), None, None, None, Some("0")]),
+            index(Some("0"), Some("DUP"), Some("1"), Some("B")),
+            index(Some("0"), Some("DUP"), Some("2"), Some("A")),
             index(Some("0"), Some("PK"), Some("2"), Some("A")),
             index(Some("0"), Some("PK"), Some("1"), Some("B")),
             index(Some("1"), Some("BY_A"), Some("1"), Some("A")),
         ];
-        let indexes = indexes_from(&statistics, "S", "T", &key);
-        let read: Vec<_> = indexes
-            .iter()
-            .map(|index| {
-                (
-                    index.name.as_str(),
-                    index.columns.join(","),
-                    index.unique,
-                    index.primary,
-                )
-            })
-            .collect();
+        let read = |key_name: &str| -> Vec<(String, String, bool, bool)> {
+            indexes_from(&statistics, "S", "T", &key, key_name)
+                .into_iter()
+                .map(|index| {
+                    (
+                        index.name,
+                        index.columns.join(","),
+                        index.unique,
+                        index.primary,
+                    )
+                })
+                .collect()
+        };
+        let owned = |name: &str, columns: &str, unique, primary| {
+            (name.to_string(), columns.to_string(), unique, primary)
+        };
         assert_eq!(
-            read,
+            read("PK"),
             [
-                ("PK", "B,A".to_string(), true, true),
-                ("BY_A", "A".to_string(), false, false)
+                owned("DUP", "B,A", true, false),
+                owned("PK", "B,A", true, true),
+                owned("BY_A", "A", false, false),
             ]
         );
+        let unnamed: Vec<_> = read("").into_iter().map(|index| index.3).collect();
+        assert_eq!(unnamed, [true, false, false]);
     }
 
     #[test]
     fn only_single_column_keys_are_references() {
-        let fk = |table: &str, column: &str, referenced: &str, name: &str| {
-            row(&[
-                None,
-                Some("S"),
-                Some("P"),
-                Some(referenced),
-                None,
-                Some("S"),
-                Some(table),
-                Some(column),
-                Some("1"),
-                None,
-                None,
-                Some(name),
-            ])
+        let fk = |table: &str, column: &str, sequence: &str, name: Option<&str>| {
+            let primary = [None, Some("S"), Some("P"), Some("ID")];
+            let foreign = [None, Some("S"), Some(table), Some(column), Some(sequence)];
+            row(&[&primary[..], &foreign[..], &[None, None, name]].concat())
         };
         let rows = [
-            fk("ONE", "P_ID", "ID", "FK1"),
-            fk("TWO", "PA", "A", "FK2"),
-            fk("TWO", "PB", "B", "FK2"),
+            fk("ONE", "P_ID", "1", Some("FK1")),
+            fk("TWO", "PA", "1", Some("FK2")),
+            fk("TWO", "PB", "2", Some("FK2")),
+            fk("THREE", "X", "1", None),
+            fk("THREE", "Y", "1", None),
+            fk("FOUR", "M", "1", None),
+            fk("FOUR", "N", "2", None),
         ];
-        let references = references_from(&rows, "S", "P");
-        assert_eq!(
-            references,
-            [Reference {
-                schema: "S".into(),
-                table: "ONE".into(),
-                column: "P_ID".into(),
-                referenced_column: "ID".into(),
-            }]
-        );
+        let references: Vec<_> = references_from(&rows, "S", "P")
+            .into_iter()
+            .map(|reference| format!("{}.{}", reference.table, reference.column))
+            .collect();
+        assert_eq!(references, ["ONE.P_ID", "THREE.X", "THREE.Y"]);
     }
 }
