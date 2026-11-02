@@ -41,7 +41,9 @@
 //! `DBDELVE_ECHO_DRAINS=1` opens with `stops_early: false`;
 //! `DBDELVE_ECHO_REFUSE_SET=1` answers every `SET …` as `fail` does;
 //! `DBDELVE_ECHO_LINGER=<ms>` only sleeps that long, which is what `orphan`
-//! starts.
+//! starts; `DBDELVE_ECHO_CLOSED=<path>` takes [`CLOSING`] over `close`, as a
+//! driver's disconnect does, and writes the path once `closed` is sent, so a
+//! host that ends stdin first finds no file.
 //!
 //! It exits on stdin EOF, as every plugin must.
 
@@ -72,6 +74,8 @@ use dbdelve_plugin_protocol::limits::{BATCH_ROWS, MAX_FRAME, WINDOW, credit_cost
 use dbdelve_plugin_protocol::{
     ErrorKind, Kind, PROTOCOL, REFERENCES, Request, Response, Tls, read_frame, write_frame,
 };
+
+const CLOSING: Duration = Duration::from_millis(200);
 
 fn main() {
     if let Ok(text) = env::var("DBDELVE_ECHO_STDERR") {
@@ -393,7 +397,15 @@ impl Echo {
                 },
             ),
             Request::Close => {
+                let marker = env::var_os("DBDELVE_ECHO_CLOSED");
+                if marker.is_some() {
+                    thread::sleep(CLOSING);
+                }
                 self.reply(id, Response::Closed);
+                let _ = self.out.flush();
+                if let Some(marker) = marker {
+                    let _ = std::fs::write(marker, b"closed");
+                }
                 process::exit(0);
             }
             other => self.error(

@@ -15,7 +15,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufReader, Read, Write};
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -396,17 +396,34 @@ impl Drop for InFlight<'_> {
     }
 }
 
-/// A plugin exits on stdin EOF, which the writer's end gives it once the
-/// fields drop after this; `close` first lets it say goodbye to its server.
-/// The reaper is the backstop for one that does neither.
+/// `close` lets the plugin say goodbye to its server, and stdin stays open
+/// until it answers or [`CLOSE_GRACE`] passes: a plugin exits on stdin EOF,
+/// and one that read EOF straight after `close` would go before its driver
+/// had disconnected or rolled back. Then EOF, and the kill for a plugin that
+/// has not gone by the end of the grace.
 impl Drop for Host {
     fn drop(&mut self) {
         // Registered so its `closed` answer is routed rather than read as a
         // frame for a request nobody sent.
-        let _ = self.request(Request::Close);
-        if let Some(process) = lock(&self.shared.process).take() {
-            thread::spawn(move || process.reap(CLOSE_GRACE));
-        }
+        let closing = self
+            .request(Request::Close)
+            .ok()
+            .map(|(_, answers)| answers);
+        let Some(mut process) = lock(&self.shared.process).take() else {
+            return;
+        };
+        let writer = self.writer.clone();
+        thread::spawn(move || {
+            let deadline = Instant::now() + CLOSE_GRACE;
+            if let Some(answers) = closing {
+                while Instant::now() < deadline
+                    && matches!(answers.recv_timeout(POLL), Err(RecvTimeoutError::Timeout))
+                    && matches!(process.child.try_wait(), Ok(None))
+                {}
+            }
+            drop(writer);
+            process.reap(deadline.saturating_duration_since(Instant::now()));
+        });
     }
 }
 

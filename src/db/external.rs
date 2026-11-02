@@ -812,6 +812,22 @@ mod tests {
         assert!(gone_within(pid, CLOSE_GRACE + Duration::from_secs(1)));
     }
 
+    /// Echo takes a moment over `close` and exits on EOF, so it writes its
+    /// marker only if stdin stayed open until it had answered.
+    #[test]
+    fn a_close_is_answered_before_the_plugin_reads_the_end_of_its_stdin() {
+        let marker =
+            std::env::temp_dir().join(format!("dbdelve-echo-closed-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let connection = open_with(&[("DBDELVE_ECHO_CLOSED", marker.to_str().unwrap())]).unwrap();
+        let pid = connection.host.pid().unwrap();
+        drop(connection);
+        assert!(gone_within(pid, CLOSE_GRACE + Duration::from_secs(1)));
+        let answered = marker.exists();
+        let _ = std::fs::remove_file(&marker);
+        assert!(answered, "echo read EOF before it had answered `close`");
+    }
+
     fn through_the_engine_enum(config: ExternalConfig) -> crate::db::Connection {
         crate::db::Connection::open(crate::db::ConnectionConfig::External(config)).unwrap()
     }
