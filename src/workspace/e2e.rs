@@ -1922,7 +1922,7 @@ fn duplicating_an_odbc_profile_keeps_its_password(cx: &mut TestAppContext) {
                     .find(|profile| profile.id == "dsn")
                     .unwrap();
                 let form = ConnectionForm::duplicating(
-                    &profile,
+                    profile,
                     "DSN copy".into(),
                     Some("hunter2".into()),
                     window,
