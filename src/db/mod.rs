@@ -66,7 +66,9 @@ pub use target::{Driver, Target, cancel_cost, is_cancel};
 /// Snowflake is why it exists. Every tab and every catalog load there is a
 /// statement of its own in flight on the one connection at once, so a cancel
 /// has to know whose to stop. Postgres, MySQL and SQLite run one statement at
-/// a time behind their mutex and stop that one, whoever's it is.
+/// a time behind their mutex and stop that one, whoever's it is. A plugin
+/// runs one at a time too, but every lane of a queue run at once waits on its
+/// one process, so it stops only the request its run sent.
 #[derive(Clone, Default)]
 pub struct CancelToken(Arc<Mutex<Cancelling>>);
 
@@ -1375,7 +1377,7 @@ impl Connection {
             Self::ClickHouse(connection) => connection.query(sql, cancel, fetch),
             Self::MongoDb(connection) => connection.query(sql, cancel, fetch),
             Self::Redis(connection) => connection.query(sql, fetch),
-            Self::External(connection) => connection.query(sql, fetch),
+            Self::External(connection) => connection.query(sql, cancel, fetch),
         }
     }
 
@@ -1826,7 +1828,7 @@ impl Connection {
             Self::ClickHouse(connection) => connection.cancel(cancel),
             Self::MongoDb(connection) => connection.cancel(cancel),
             Self::Redis(connection) => connection.cancel(),
-            Self::External(connection) => connection.cancel(),
+            Self::External(connection) => connection.cancel(cancel),
         }
     }
 

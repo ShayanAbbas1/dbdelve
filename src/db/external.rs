@@ -15,8 +15,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::net::SocketAddr;
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::{Arc, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use arrow_schema::SchemaRef;
@@ -31,9 +31,9 @@ use super::odbc_string::{self, Refusal};
 use super::plugin::Plugin;
 use super::ssh::Tunnel;
 use super::{
-    Catalog, ColumnDefinition, DbError, Engine, Fetch, ForeignKey, Index, IndexKind,
-    NamedDefinition, QueryResult, Reference, Relation, RelationKind, Schema, SshTunnel, Stopped,
-    Structure,
+    CancelToken, Cancelling, Catalog, ColumnDefinition, DbError, Engine, Fetch, ForeignKey, Index,
+    IndexKind, NamedDefinition, QueryResult, Reference, Relation, RelationKind, Schema, SshTunnel,
+    Stopped, Structure,
 };
 use host::{Host, Routed, failure};
 use rows::Rows;
@@ -141,7 +141,7 @@ impl Connection {
         let Some(statement) = super::read_only_statement(self.config.speaks, read_only) else {
             return Ok(());
         };
-        let held = self.query(statement, Fetch::default());
+        let held = self.query(statement, &CancelToken::default(), Fetch::default());
         if read_only && held.is_err() {
             self.host.lose_session();
         }
@@ -243,7 +243,17 @@ impl Connection {
     /// either ends the statement, when `eligible` and provably safe, or drains
     /// it on its own side. A plugin that dies on the way is a reset, and
     /// nothing here sends the statement again.
-    pub fn query(&self, sql: &str, fetch: Fetch) -> Result<QueryResult, DbError> {
+    ///
+    /// Every statement queues on the one process, so `cancel` is what tells
+    /// this statement from the ones beside it: a Cancel under it that came
+    /// while it waited for the session drops it unsent, and one that comes
+    /// once it is sent stops it and nothing else.
+    pub fn query(
+        &self,
+        sql: &str,
+        cancel: &CancelToken,
+        fetch: Fetch,
+    ) -> Result<QueryResult, DbError> {
         let _session = self.host.session();
         fetch.hold()?;
         let started = Instant::now();
@@ -252,16 +262,35 @@ impl Connection {
             sql: sql.to_owned(),
             eligible,
         };
-        let (in_flight, answers) = self.host.request(query)?;
+        // Sent and claimed under the run's lock, so a Cancel either finds the
+        // run asked before anything went out, or finds the id with its request
+        // already queued ahead of the cancel's frame.
+        let (in_flight, answers) = {
+            let mut run = claims(cancel);
+            if run.asked {
+                return Err(failure("Cancelled before it was sent.".into()));
+            }
+            let sent = self.host.request(query)?;
+            run.handles.push(sent.0.id.to_string());
+            sent
+        };
+        let _claim = Claim {
+            cancel,
+            handle: in_flight.id.to_string(),
+        };
         self.read(in_flight.id, &answers, Read::new(fetch, eligible, started))
     }
 
     /// The user's Cancel, which may abort an open transaction, as cancelling
-    /// a built-in's statement does. It reaches a catalog request too, which
-    /// a wedged driver could otherwise hold the session with for good. With
-    /// nothing running it does nothing, as on Postgres.
-    pub fn cancel(&self) -> Result<(), DbError> {
-        self.host.cancel();
+    /// a built-in's statement does. It stops only the statements `cancel`
+    /// sent; one still waiting for the session is dropped when its turn
+    /// comes. A catalog request is no run's, so no Cancel reaches it.
+    pub fn cancel(&self, cancel: &CancelToken) -> Result<(), DbError> {
+        let mut run = claims(cancel);
+        run.asked = true;
+        for id in run.handles.iter().filter_map(|handle| handle.parse().ok()) {
+            self.host.cancel(id);
+        }
         Ok(())
     }
 
@@ -450,6 +479,25 @@ fn dialled(config: &ExternalConfig, forward: Option<SocketAddr>) -> Result<Strin
 
 fn refused(Refusal(sentence): Refusal) -> DbError {
     failure(sentence)
+}
+
+fn claims(cancel: &CancelToken) -> MutexGuard<'_, Cancelling> {
+    cancel.0.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// A statement's request id on its run's token until it returns, unwinding
+/// included.
+struct Claim<'a> {
+    cancel: &'a CancelToken,
+    handle: String,
+}
+
+impl Drop for Claim<'_> {
+    fn drop(&mut self) {
+        claims(self.cancel)
+            .handles
+            .retain(|handle| *handle != self.handle);
+    }
 }
 
 /// The key goes into `constraints` in the `PRIMARY KEY (a, b)` rendering
@@ -822,7 +870,11 @@ mod tests {
         let error = connection.set_read_only(true).err().unwrap();
         assert_eq!(error.message, "echo refused the setting, as asked");
         assert!(connection.is_lost());
-        assert!(connection.query("rows 1", Fetch::default()).is_err());
+        assert!(
+            connection
+                .query("rows 1", &CancelToken::default(), Fetch::default())
+                .is_err()
+        );
 
         // Failing to let go leaves the server held tighter than asked, which
         // costs nothing the gate relies on.
@@ -1062,7 +1114,10 @@ mod tests {
     fn a_plugin_that_exits_is_a_reset_even_while_its_stdout_stays_open() {
         let connection = Connection::open(&config()).unwrap();
         let started = Instant::now();
-        let error = connection.query("orphan", Fetch::default()).err().unwrap();
+        let error = connection
+            .query("orphan", &CancelToken::default(), Fetch::default())
+            .err()
+            .unwrap();
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "{:?}",
@@ -1082,7 +1137,10 @@ mod tests {
     #[test]
     fn a_crash_mid_frame_is_a_stop_with_its_status_not_a_violation() {
         let connection = Connection::open(&config()).unwrap();
-        let error = connection.query("cut", Fetch::default()).err().unwrap();
+        let error = connection
+            .query("cut", &CancelToken::default(), Fetch::default())
+            .err()
+            .unwrap();
         assert!(
             error.message.starts_with("The Echo plugin stopped ("),
             "{}",
@@ -1135,7 +1193,9 @@ mod tests {
     #[test]
     fn every_row_arrives_in_order_with_its_nulls() {
         let connection = Connection::open(&config()).unwrap();
-        let result = connection.query("rows 10000", Fetch::default()).unwrap();
+        let result = connection
+            .query("rows 10000", &CancelToken::default(), Fetch::default())
+            .unwrap();
         assert_eq!(result.rows.len(), 10_000);
         for (n, row) in (1..).zip(&result.rows) {
             assert_eq!(row.get(0), Some(n.to_string().as_str()));
@@ -1154,7 +1214,9 @@ mod tests {
         assert!(result.edit.is_none() && result.read_only_reason.is_some());
 
         let typed = "echo SELECT 'a' -- x";
-        let result = connection.query(typed, Fetch::default()).unwrap();
+        let result = connection
+            .query(typed, &CancelToken::default(), Fetch::default())
+            .unwrap();
         assert_eq!(cell(&result), Some(typed));
     }
 
@@ -1166,7 +1228,9 @@ mod tests {
             feed: Some(&feed),
             ..capped(1500, false)
         };
-        let result = connection.query("rows 3000", fetch).unwrap();
+        let result = connection
+            .query("rows 3000", &CancelToken::default(), fetch)
+            .unwrap();
         assert!(result.rows.is_empty());
         let fed = feed.take();
         assert_eq!(fed.rows.len(), 1500);
@@ -1180,7 +1244,9 @@ mod tests {
         let connection = Connection::open(&config()).unwrap();
         assert!(connection.stops_at_limit());
         let started = Instant::now();
-        let result = connection.query("rows 1000000", capped(100, true)).unwrap();
+        let result = connection
+            .query("rows 1000000", &CancelToken::default(), capped(100, true))
+            .unwrap();
         assert!(started.elapsed() < Duration::from_secs(1));
         assert_eq!(result.stopped, Some(Stopped::AtLimit));
         assert_eq!(result.capped_from, None);
@@ -1192,13 +1258,15 @@ mod tests {
     fn an_ineligible_read_drains_without_cancelling() {
         let connection = Connection::open(&config()).unwrap();
         let result = connection
-            .query("rows 1000000", capped(100, false))
+            .query("rows 1000000", &CancelToken::default(), capped(100, false))
             .unwrap();
         assert_eq!(result.capped_from, Some(1_000_000));
         assert_eq!(result.stopped, None);
         assert_eq!(result.rows.len(), 100);
 
-        let cancels = connection.query("cancels", Fetch::default()).unwrap();
+        let cancels = connection
+            .query("cancels", &CancelToken::default(), Fetch::default())
+            .unwrap();
         assert_eq!(cell(&cancels), Some("0"));
     }
 
@@ -1206,7 +1274,9 @@ mod tests {
     fn a_plugin_that_cannot_stop_early_is_never_told_it_may() {
         let connection = open_with(&[("DBDELVE_ECHO_DRAINS", "1")]).unwrap();
         assert!(!connection.stops_at_limit());
-        let result = connection.query("rows 1000000", capped(100, true)).unwrap();
+        let result = connection
+            .query("rows 1000000", &CancelToken::default(), capped(100, true))
+            .unwrap();
         assert_eq!(result.stopped, None);
         assert_eq!(result.capped_from, Some(1_000_000));
     }
@@ -1223,7 +1293,9 @@ mod tests {
                 limit,
                 ..Fetch::default()
             };
-            let error = connection.query(statement, fetch).unwrap_err();
+            let error = connection
+                .query(statement, &CancelToken::default(), fetch)
+                .unwrap_err();
             assert!(
                 error.message.contains("broke protocol 1 (`end` counting"),
                 "{statement}: {}",
@@ -1235,21 +1307,31 @@ mod tests {
     #[test]
     fn a_capped_read_keeps_the_users_transaction() {
         let connection = Connection::open(&config()).unwrap();
-        connection.query("begin", Fetch::default()).unwrap();
-        let result = connection.query("rows 1000000", capped(2, true)).unwrap();
+        connection
+            .query("begin", &CancelToken::default(), Fetch::default())
+            .unwrap();
+        let result = connection
+            .query("rows 1000000", &CancelToken::default(), capped(2, true))
+            .unwrap();
         assert_eq!(result.stopped, None, "stopping would end the transaction");
         assert_eq!(result.capped_from, Some(1_000_000));
         assert_eq!(result.rows.len(), 2);
 
-        connection.query("commit", Fetch::default()).unwrap();
-        let after = connection.query("rows 1000000", capped(2, true)).unwrap();
+        connection
+            .query("commit", &CancelToken::default(), Fetch::default())
+            .unwrap();
+        let after = connection
+            .query("rows 1000000", &CancelToken::default(), capped(2, true))
+            .unwrap();
         assert_eq!(after.stopped, Some(Stopped::AtLimit));
     }
 
     #[test]
     fn a_limit_of_zero_keeps_no_rows_and_still_says_how_many_there_were() {
         let connection = Connection::open(&config()).unwrap();
-        let result = connection.query("rows 5000", capped(0, false)).unwrap();
+        let result = connection
+            .query("rows 5000", &CancelToken::default(), capped(0, false))
+            .unwrap();
         assert!(result.rows.is_empty());
         assert_eq!(result.columns.len(), 2);
         assert_eq!(result.capped_from, Some(5000));
@@ -1263,22 +1345,35 @@ mod tests {
             held: Some(&held),
             ..Fetch::default()
         };
-        let error = connection.query("begin", fetch).err().unwrap();
+        let error = connection
+            .query("begin", &CancelToken::default(), fetch)
+            .err()
+            .unwrap();
         assert_eq!(error.message, "Cancelled before it was sent.");
-        connection.query("rows 3", Fetch::default()).unwrap();
+        connection
+            .query("rows 3", &CancelToken::default(), Fetch::default())
+            .unwrap();
     }
 
     #[test]
     fn a_server_error_is_the_statements_and_lost_marks_the_connection() {
         let connection = Connection::open(&config()).unwrap();
-        let error = connection.query("fail", Fetch::default()).err().unwrap();
+        let error = connection
+            .query("fail", &CancelToken::default(), Fetch::default())
+            .err()
+            .unwrap();
         assert_eq!(error.message, "echo failed, as asked");
         assert!(!connection.is_lost());
 
-        connection.query("lost", Fetch::default()).err().unwrap();
+        connection
+            .query("lost", &CancelToken::default(), Fetch::default())
+            .err()
+            .unwrap();
         assert!(connection.is_lost());
         for refused in [
-            connection.query("rows 1", Fetch::default()).unwrap_err(),
+            connection
+                .query("rows 1", &CancelToken::default(), Fetch::default())
+                .unwrap_err(),
             connection.catalog().unwrap_err(),
         ] {
             assert!(
@@ -1294,7 +1389,9 @@ mod tests {
     #[test]
     fn result_sets_after_the_first_are_said_and_not_shown() {
         let connection = Connection::open(&config()).unwrap();
-        let result = connection.query("sets 3", Fetch::default()).unwrap();
+        let result = connection
+            .query("sets 3", &CancelToken::default(), Fetch::default())
+            .unwrap();
         assert_eq!(result.rows.len(), 1);
         assert_eq!(
             result.messages,
@@ -1305,7 +1402,10 @@ mod tests {
     #[test]
     fn a_crash_mid_stream_is_a_reset_and_nothing_runs_again() {
         let connection = Connection::open(&config()).unwrap();
-        let error = connection.query("crash", Fetch::default()).err().unwrap();
+        let error = connection
+            .query("crash", &CancelToken::default(), Fetch::default())
+            .err()
+            .unwrap();
         assert!(error.message.contains("stopped ("), "{}", error.message);
         assert!(
             error.message.contains("committed is unknown"),
@@ -1314,7 +1414,10 @@ mod tests {
         );
         assert!(connection.is_lost());
 
-        let again = connection.query("rows 1", Fetch::default()).err().unwrap();
+        let again = connection
+            .query("rows 1", &CancelToken::default(), Fetch::default())
+            .err()
+            .unwrap();
         assert!(
             again.message.contains("The connection was reset"),
             "{}",
@@ -1329,7 +1432,10 @@ mod tests {
         for statement in ["compressed", "dictionary"] {
             let connection = Connection::open(&config()).unwrap();
             let pid = connection.host.pid().unwrap();
-            let error = connection.query(statement, Fetch::default()).err().unwrap();
+            let error = connection
+                .query(statement, &CancelToken::default(), Fetch::default())
+                .err()
+                .unwrap();
             assert!(
                 error.message.contains("broke protocol 1 ("),
                 "{statement}: {}",
@@ -1341,15 +1447,17 @@ mod tests {
         }
     }
 
-    /// `sql` on its own thread, cancelled after `after`: the result, and how
-    /// long it took to come back once cancelled.
+    /// `sql` on its own thread under a run of its own, cancelled after
+    /// `after`: the result, and how long it took to come back once cancelled.
     fn cancelled(connection: &Connection, sql: &str, after: Duration) -> (DbError, Duration) {
-        let running = connection.clone();
-        let sql = sql.to_owned();
-        let worker = std::thread::spawn(move || running.query(&sql, Fetch::default()));
+        let run = CancelToken::default();
+        let worker = {
+            let (running, sql, run) = (connection.clone(), sql.to_owned(), run.clone());
+            std::thread::spawn(move || running.query(&sql, &run, Fetch::default()))
+        };
         std::thread::sleep(after);
         let cancelled = Instant::now();
-        connection.cancel().unwrap();
+        connection.cancel(&run).unwrap();
         let error = worker.join().unwrap().err().unwrap();
         (error, cancelled.elapsed())
     }
@@ -1362,55 +1470,63 @@ mod tests {
         assert!(took < CANCEL_DEADLINE / 2, "{took:?}");
         assert!(!connection.is_lost());
 
-        let cancels = connection.query("cancels", Fetch::default()).unwrap();
+        let cancels = connection
+            .query("cancels", &CancelToken::default(), Fetch::default())
+            .unwrap();
         assert_eq!(cell(&cancels), Some("1"));
-    }
-
-    #[test]
-    fn a_cancel_reaches_a_catalog_call() {
-        let connection = Connection::open(&config()).unwrap();
-        let running = connection.clone();
-        let worker = std::thread::spawn(move || running.structure("main", "sleep"));
-        std::thread::sleep(Duration::from_millis(200));
-        let cancelled = Instant::now();
-        connection.cancel().unwrap();
-        let error = worker.join().unwrap().unwrap_err();
-        assert_eq!(error.message, CANCELLED);
-        assert!(cancelled.elapsed() < CANCEL_DEADLINE / 2);
-        assert!(!connection.is_lost());
-        connection.catalog().unwrap();
-    }
-
-    #[test]
-    fn a_catalog_call_that_does_not_answer_a_cancel_is_killed_at_the_deadline() {
-        let connection = Connection::open(&config()).unwrap();
-        let running = connection.clone();
-        let worker = std::thread::spawn(move || running.structure("main", "hang"));
-        std::thread::sleep(Duration::from_millis(200));
-        let cancelled = Instant::now();
-        connection.cancel().unwrap();
-        let error = worker.join().unwrap().unwrap_err();
-        let took = cancelled.elapsed();
-        assert!(took < CANCEL_DEADLINE + Duration::from_secs(1), "{took:?}");
-        assert!(
-            error
-                .message
-                .starts_with("The Echo plugin did not answer a cancel within 5 s"),
-            "{}",
-            error.message
-        );
-        assert!(!error.message.contains("committed is unknown"));
-        assert!(connection.is_lost());
     }
 
     #[test]
     fn a_cancel_with_nothing_running_sends_nothing() {
         let connection = Connection::open(&config()).unwrap();
-        connection.cancel().unwrap();
-        connection.query("rows 1", Fetch::default()).unwrap();
-        connection.cancel().unwrap();
-        let cancels = connection.query("cancels", Fetch::default()).unwrap();
+        connection.cancel(&CancelToken::default()).unwrap();
+        let run = CancelToken::default();
+        connection.query("rows 1", &run, Fetch::default()).unwrap();
+        connection.cancel(&run).unwrap();
+        let cancels = connection
+            .query("cancels", &CancelToken::default(), Fetch::default())
+            .unwrap();
         assert_eq!(cell(&cancels), Some("0"));
+    }
+
+    /// Two lanes of a queue run at once, queued on the one process: a Cancel
+    /// under the waiting lane's token drops it unsent and leaves the running
+    /// one be, and one under the running lane's stops it and not the lane
+    /// waiting behind it.
+    #[test]
+    fn a_cancel_stops_only_what_its_own_run_sent() {
+        let connection = Connection::open(&config()).unwrap();
+        let lane = |run: &CancelToken, sql: &'static str| {
+            let (connection, run) = (connection.clone(), run.clone());
+            let lane = std::thread::spawn(move || connection.query(sql, &run, Fetch::default()));
+            std::thread::sleep(Duration::from_millis(200));
+            lane
+        };
+        let take = |run: &CancelToken, sql| {
+            let result = connection.query(sql, run, Fetch::default()).unwrap();
+            cell(&result).map(str::to_owned)
+        };
+
+        let (running, waiting) = (CancelToken::alongside(), CancelToken::alongside());
+        let ran = lane(&running, "sleep 1000");
+        let dropped = lane(&waiting, "echo waiting");
+        connection.cancel(&waiting).unwrap();
+        ran.join().unwrap().unwrap();
+        let error = dropped.join().unwrap().unwrap_err();
+        assert_eq!(error.message, "Cancelled before it was sent.");
+        let idle = CancelToken::default();
+        assert_eq!(take(&idle, "last").as_deref(), Some("sleep 1000"));
+        assert_eq!(take(&idle, "cancels").as_deref(), Some("0"));
+
+        let (running, waiting) = (CancelToken::alongside(), CancelToken::alongside());
+        let stopped = lane(&running, "sleep 60000");
+        let behind = lane(&waiting, "echo behind");
+        connection.cancel(&running).unwrap();
+        let error = stopped.join().unwrap().unwrap_err();
+        assert!(error.message.starts_with(CANCELLED), "{}", error.message);
+        let behind = behind.join().unwrap().unwrap();
+        assert_eq!(cell(&behind), Some("echo behind"));
+        assert_eq!(take(&idle, "cancels").as_deref(), Some("1"));
     }
 
     #[test]
@@ -1442,14 +1558,15 @@ mod tests {
         let connection = Connection::open(&config()).unwrap();
         let pid = connection.host.pid().unwrap();
         let feed = Feed::bounded(10);
+        let run = CancelToken::default();
         let worker = {
-            let (connection, feed) = (connection.clone(), feed.clone());
+            let (connection, feed, run) = (connection.clone(), feed.clone(), run.clone());
             std::thread::spawn(move || {
                 let fetch = Fetch {
                     feed: Some(&feed),
                     ..Fetch::default()
                 };
-                connection.query("rows 10000000", fetch)
+                connection.query("rows 10000000", &run, fetch)
             })
         };
 
@@ -1462,7 +1579,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         let id = connection.host.running().unwrap();
-        connection.cancel().unwrap();
+        connection.cancel(&run).unwrap();
         let cancelled = Instant::now();
         while connection.host.is_pending(id) && echo::alive(pid) {
             assert!(cancelled.elapsed() < CANCEL_DEADLINE + Duration::from_secs(1));
@@ -1565,7 +1682,7 @@ mod tests {
     #[test]
     fn a_catalog_call_after_a_reset_is_the_reset() {
         let connection = open_with(&[]).unwrap();
-        let _ = connection.query("exit 3", capped(10, false));
+        let _ = connection.query("exit 3", &CancelToken::default(), capped(10, false));
         let error = connection.catalog().unwrap_err();
         assert!(
             error.message.contains("connection was reset"),
