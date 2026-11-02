@@ -143,6 +143,39 @@ services:
       timeout: 5s
       retries: 90
 
+  # Opt-in (`docker compose --profile db2 up -d db2`): the image is amd64-only,
+  # 7 GB and takes minutes to boot emulated, so plain `up -d` leaves it out.
+  db2:
+    profiles: [db2]
+    # Pinned to the 12.1 build the ODBC spike ran, not `latest`.
+    image: icr.io/db2_community/db2:12.1.5.0
+    platform: linux/amd64
+    privileged: true
+    environment:
+      LICENSE: accept
+      DB2INSTANCE: db2inst1
+      DB2INST1_PASSWORD: dbdelve
+      # Db2 database names are at most 8 characters.
+      DBNAME: dbdelve
+      ARCHIVE_LOGS: "false"
+      AUTOCONFIG: "false"
+    ports:
+      - "${DBDELVE_DB2_PORT:-55000}:50000"
+    volumes:
+      - dbdelve-db2-data:/database
+      - ./dev/db2/init:/dbdelve-init:ro
+      # The image runs every script in /var/custom after it prints "Setup has
+      # completed", so that line says nothing about the seed.
+      - ./dev/db2/seed.sh:/var/custom/seed.sh:ro
+    healthcheck:
+      # The marker is created last: the instance answers long before the seed
+      # has run.
+      test: ["CMD-SHELL", "su - db2inst1 -c 'db2 connect to dbdelve >/dev/null && db2 -x \"SELECT COUNT(*) FROM dbdelve_seeded\"' | grep -q 1"]
+      interval: 10s
+      timeout: 30s
+      retries: 90
+      start_period: 120s
+
   # Dev SSH bastions for the tunnel feature: `bastion` is reachable from the
   # host, `bastion2` only through it (no published port), so a tunnel through
   # either can be exercised against `postgres`/`mysql`/`mssql` by name. Regular
@@ -178,3 +211,4 @@ volumes:
   dbdelve-mssql-data:
   dbdelve-mongo-data:
   dbdelve-clickhouse-data:
+  dbdelve-db2-data:

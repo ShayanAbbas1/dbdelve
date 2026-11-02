@@ -15,6 +15,9 @@ dev/dbdelve_dev.db
 dev/dbdelve_dev.duckdb
 dev/dbdelve_dev.duckdb.wal
 
+# IBM's ODBC driver, downloaded by dev/db2/driver.sh. Licensed, never committed.
+dev/db2/.cache/
+
 # Camera-roll originals of the README media. HEIC renders in no browser, so the
 # screenshot is committed as the converted PNG beside it. The video isn't
 # committed at all: GitHub only plays a video it hosts itself, so the README
