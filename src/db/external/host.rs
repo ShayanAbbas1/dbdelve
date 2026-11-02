@@ -690,6 +690,8 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn restores_the_original_ld_library_path_only_under_the_appimage() {
         use std::ffi::OsString;
@@ -711,8 +713,6 @@ mod tests {
             Some(None)
         );
     }
-
-    use super::*;
 
     #[test]
     fn the_stderr_ring_keeps_only_the_tail() {
