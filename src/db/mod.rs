@@ -44,6 +44,8 @@ mod xlsx;
 
 pub use duckdb::IN_MEMORY as DUCKDB_IN_MEMORY;
 pub use external::ExternalConfig;
+#[cfg(test)]
+pub(crate) use external::echo;
 pub use plugin::Plugin;
 
 pub use mongo::MongoConfig;

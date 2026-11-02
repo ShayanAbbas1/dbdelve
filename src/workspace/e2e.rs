@@ -1888,3 +1888,66 @@ fn an_odbc_profile_saves_and_restores_as_it_was(cx: &mut TestAppContext) {
         quit(workspace, cx);
     });
 }
+
+/// Read-only picked while a connect is under way finds no connection to hold
+/// (`set_mode`), so the session that lands is opened again under it rather
+/// than left as the Read-write it set out as, with Read-only on screen.
+#[gpui::test]
+fn a_mode_picked_while_connecting_is_the_one_the_session_holds(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let echo = crate::db::echo::plugin();
+        let directory = store::dbdelve_directory().unwrap();
+        std::fs::create_dir_all(&directory).unwrap();
+        let database = directory.join("e2e.db");
+        std::fs::write(&database, b"").unwrap();
+        std::fs::write(
+            directory.join("profiles.toml"),
+            format!(
+                "active = \"e2e\"\n\
+                 [settings]\ncheck_for_updates = false\n\
+                 [[profiles]]\nid = \"e2e\"\nname = \"E2E\"\nhost = \"\"\ndatabase = \"\"\n\
+                 user = \"\"\nengine = \"sqlite\"\npath = {:?}\n\
+                 [[profiles]]\nid = \"echo\"\nname = \"Echo\"\nhost = \"\"\ndatabase = \"\"\n\
+                 user = \"\"\nengine = \"plugin:echo\"\nspeaks = \"postgres\"\n\
+                 connection = \"DSN=echo\"\n",
+                database.display().to_string(),
+            ),
+        )
+        .unwrap();
+
+        let (workspace, cx) = launch_with(cx, vec![echo]);
+        workspace.update(cx, |workspace, cx| {
+            let index = workspace
+                .profiles
+                .iter()
+                .position(|profile| matches!(profile.config, ConnectionConfig::External(_)))
+                .expect("the echo profile is restored");
+            assert_eq!(workspace.profiles[index].mode, crate::sql::Mode::ReadWrite);
+            // Set so the connect never reaches for the keychain.
+            if let ConnectionConfig::External(config) = &mut workspace.profiles[index].config {
+                config.password = "x".into();
+            }
+            workspace.activate(index, cx);
+            workspace.set_mode(crate::sql::Mode::ReadOnly, cx);
+        });
+        cx.run_until_parked();
+
+        let connection = cx
+            .update(|_, cx| {
+                workspace
+                    .read(cx)
+                    .profile()
+                    .and_then(|profile| profile.connection())
+            })
+            .expect("the echo profile connects");
+        let last = connection
+            .query("last", &CancelToken::default(), Fetch::default())
+            .unwrap();
+        assert_eq!(
+            last.rows[0].get(0),
+            Some("SET default_transaction_read_only = on")
+        );
+
+        quit(workspace, cx);
+    });
+}

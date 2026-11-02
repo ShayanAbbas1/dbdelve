@@ -33,10 +33,12 @@ impl Workspace {
         //
         // ponytail: nothing orders these tasks against each other, so flipping
         // modes faster than a round trip can land them out of order and leave
-        // the session held the opposite way to the mode on screen. Survivable
-        // because `sql::gate` is the boundary and is unaffected -- what goes
-        // stale is the backstop, not the protection. Stamp each task with a
-        // per-profile counter and drop the stale ones if it ever matters.
+        // the session held the opposite way to the mode on screen. Not only a
+        // stale backstop: where `Engine::holds_read_only`, the gate runs a
+        // statement it cannot read in Read-only on the strength of this hold.
+        // Stamp each task with a per-profile counter and drop the stale ones.
+        // A connect under way has no connection here at all; its landing
+        // checks the mode again (`begin_connect`).
         let Some(connection) = self.profile().and_then(Profile::connection) else {
             return;
         };

@@ -1631,6 +1631,18 @@ impl Workspace {
                     let Some(profile) = workspace.issued_to(&id, generation) else {
                         return;
                     };
+                    // A mode picked while this was connecting found no
+                    // connection to hold (`set_mode`), so this one is held as
+                    // the mode it set out under was, and the gate runs what it
+                    // cannot read in Read-only on the strength of that hold.
+                    let held_otherwise =
+                        (profile.mode == Mode::ReadOnly) != (mode == Mode::ReadOnly);
+                    if held_otherwise && result.is_ok() {
+                        if let Some(index) = workspace.profiles.iter().position(|p| p.id == id) {
+                            workspace.begin_connect(index, cx);
+                        }
+                        return;
+                    }
                     // A picked database or schema that is gone opens where
                     // nothing is picked, and the profile follows it there.
                     let unpicked = result.as_ref().ok().and_then(Connection::unpicked).cloned();

@@ -11,7 +11,7 @@ use crate::db::plugin::Plugin;
 /// echo into this test binary's own target directory and profile: plain
 /// `cargo test` stays self-contained on a fresh checkout, and cargo's build
 /// lock serializes nextest's parallel processes.
-pub(super) fn plugin() -> &'static Plugin {
+pub(crate) fn plugin() -> &'static Plugin {
     static PLUGIN: OnceLock<&'static Plugin> = OnceLock::new();
     PLUGIN.get_or_init(|| {
         let test = std::env::current_exe().expect("the test binary has a path");

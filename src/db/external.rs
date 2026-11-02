@@ -7,7 +7,7 @@
 //! anything else runs on it.
 
 #[cfg(test)]
-mod echo;
+pub(crate) mod echo;
 mod host;
 mod rows;
 
