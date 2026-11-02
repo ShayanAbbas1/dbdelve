@@ -40,12 +40,22 @@ $Zip = Join-Path $OutDir "$Name.zip"
 
 cargo build --release
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+# The ODBC bridge: built here, never run -- the Windows build of it is untested.
+# It uses the system's odbc32, so nothing else travels with it.
+cargo build --release -p dbdelve-plugin-odbc
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 if (Test-Path $Stage) { Remove-Item -Recurse -Force $Stage }
 if (Test-Path $Zip) { Remove-Item -Force $Zip }
 New-Item -ItemType Directory -Path $Stage | Out-Null
 
 Copy-Item (Join-Path $TargetDir "release\dbdelve.exe") (Join-Path $Stage "dbdelve.exe")
+# Beside the executable, where db::plugin::discover() looks: the manifest names
+# bin/dbdelve-odbc, and the host appends .exe on Windows.
+$Plugin = Join-Path $Stage "plugins\odbc"
+New-Item -ItemType Directory -Path (Join-Path $Plugin "bin") | Out-Null
+Copy-Item plugins\odbc\dbdelve-plugin.toml $Plugin
+Copy-Item (Join-Path $TargetDir "release\dbdelve-odbc.exe") (Join-Path $Plugin "bin\dbdelve-odbc.exe")
 Copy-Item LICENSE, NOTICES.md $Stage
 Copy-Item -Recurse licenses (Join-Path $Stage "licenses")
 
