@@ -760,6 +760,9 @@ impl Workspace {
             .on_click(cx.listener(move |workspace, _, _, cx| {
                 if let Some(form) = &mut workspace.form {
                     form.set_dialect(engine);
+                    // The chip unmounts once the dialect matches; a keyboard
+                    // activation would leave focus on it.
+                    form.needs_focus = Some(form.connection.clone());
                 }
                 cx.notify();
             }))
