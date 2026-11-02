@@ -30,6 +30,16 @@ impl Target {
         }
     }
 
+    /// Whether `self`, a tile, is the one `current` was picked under: a built-in
+    /// tile is its engine alone, a plugin's tile is the plugin whatever dialect
+    /// the form picked under it.
+    pub fn is_tile_of(self, current: Self) -> bool {
+        match self.driver {
+            Driver::BuiltIn => current == self,
+            Driver::Plugin(_) => current.driver == self.driver,
+        }
+    }
+
     /// What a profile can be started for: every engine DBDelve has a driver
     /// for, then each plugin speaking Generic SQL until its form picks another
     /// dialect.

@@ -1279,6 +1279,19 @@ impl ConnectionConfig {
             Self::External(_) => "an ODBC connection string".to_string(),
         }
     }
+
+    /// Where a connection points, and for one through a plugin what carries it,
+    /// which its logo, one plug for every plugin, cannot say.
+    pub fn listed_endpoint(&self) -> String {
+        let target = self.target();
+        match (target.driver, self) {
+            (Driver::BuiltIn, _) => self.endpoint(),
+            (Driver::Plugin(_), Self::External(external)) if !external.connection.contains('=') => {
+                format!("{} · {}", self.endpoint(), target.label())
+            }
+            (Driver::Plugin(_), _) => target.label(),
+        }
+    }
 }
 
 /// A live connection. Cloneable so a background task can take one without

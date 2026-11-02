@@ -43,7 +43,7 @@ use crate::{
         PaletteHistoryFilter, PaletteHistorySort, PaletteNext, PaletteNextScope, PalettePrevious,
         PalettePreviousScope, PaletteRowActions, PaletteScopeLeft, PaletteScopeRight,
     },
-    db::{ConnectionConfig, Driver, ExplainMode, RelationKind, RoutineKind, Syntax},
+    db::{ConnectionConfig, ExplainMode, RelationKind, RoutineKind, Syntax},
     explorer::ROW_LIMITS,
     explorer::{ExplorerTarget, ObjectKind},
     export::{FileAs, Format, RowsAs},
@@ -2395,21 +2395,6 @@ struct Listed<'a> {
     unavailable: Option<(usize, String)>,
 }
 
-/// Where a connection points, and for one through a plugin what carries it,
-/// which its logo, one plug for every plugin, cannot say.
-fn listed_endpoint(config: &ConnectionConfig) -> String {
-    let target = config.target();
-    match (target.driver, config) {
-        (Driver::BuiltIn, _) => config.endpoint(),
-        (Driver::Plugin(_), ConnectionConfig::External(external))
-            if !external.connection.contains('=') =>
-        {
-            format!("{} · {}", config.endpoint(), target.label())
-        }
-        (Driver::Plugin(_), _) => target.label(),
-    }
-}
-
 /// Every connection, by project, then the ways to add one or a project.
 fn connection_items(workspace: &Workspace) -> Vec<Item> {
     let listed: Vec<Listed> = workspace
@@ -2425,7 +2410,7 @@ fn connection_items(workspace: &Workspace) -> Vec<Item> {
                     .map(|server| server.host.clone())
                     .unwrap_or_default(),
             },
-            endpoint: listed_endpoint(&profile.config),
+            endpoint: profile.config.listed_endpoint(),
             logo: profile.config.target().logo(),
             color: profile.color,
             unavailable: None,
@@ -3148,10 +3133,7 @@ fn engine_items(workspace: &Workspace) -> Vec<Item> {
     let current = workspace.form.as_ref().map(|form| form.target());
     crate::db::Target::tiles(&workspace.plugins)
         .map(|target| {
-            let picked = current.is_some_and(|current| match target.driver {
-                Driver::BuiltIn => current == target,
-                Driver::Plugin(_) => current.driver == target.driver,
-            });
+            let picked = current.is_some_and(|current| target.is_tile_of(current));
             let hint = if picked { "current" } else { "" };
             Item::new(target.label(), target.logo(), Command::SetTarget(target)).hint(hint)
         })
