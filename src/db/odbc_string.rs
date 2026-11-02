@@ -70,7 +70,19 @@ const DSN_KEYS: &[&str] = &["DSN", "FILEDSN"];
 /// `sslpassword`, `priv_key_file_pwd`, `KeystoreSecret`, `AccessToken`,
 /// `passcode`. Wide on purpose: a key read as a secret that is not one costs
 /// a refusal, never a password on disk.
-const SECRET_PARTS: &[&str] = &["PWD", "PASSW", "SECRET", "TOKEN", "PASSCODE"];
+const SECRET_PARTS: &[&str] = &[
+    "PWD",
+    "PASSW",
+    "SECRET",
+    "TOKEN",
+    "PASSCODE",
+    "ACCESSKEY",
+    "APIKEY",
+    "ACCOUNTKEY",
+    "SHAREDKEY",
+    "PRIVATEKEY",
+    "CREDENTIAL",
+];
 // Other addresses the rewrite would not touch, so the driver could dial them,
 // matched after `normalized`. A denylist, so it leans wide: a key read as an
 // address that is not one costs a refusal, never a dial past the tunnel.
@@ -138,6 +150,7 @@ const EMPTY_KEY: &str = "The connection string has an entry with no key before t
 const ROUTE: &str = "This connection string could not be routed through the tunnel.";
 const CONTROL: &str = "The connection string holds a control character, which drivers read differently, so DBDelve cannot be sure what it says.";
 const AMBIGUOUS_BRACE: &str = "The connection string has a braced value holding ;, = or }}, or a { after a space, which drivers read differently, so DBDelve cannot be sure where the tunnel should go.";
+const NOT_ODBC: &str = "This looks like a connection URL or another value that is not an ODBC connection string, and it could hold a password, which would be stored in plain text. Enter a DSN name or KEY=value pairs, and put the password in the Password field.";
 const SECRET: &str = "The connection string holds a password or another secret, which would be stored in plain text. Put the password in the Password field, which is kept in the Keychain.";
 
 struct Attribute {
@@ -312,9 +325,21 @@ pub fn storable(source: &str) -> Result<(), Refusal> {
         return Err(Refusal(CONTROL.to_string()));
     }
     if !source.contains('=') {
-        return Ok(());
+        let is_dsn =
+            !source.contains("://") && !source.chars().any(|c| "[]{}(),;?*=!@".contains(c));
+        return if is_dsn {
+            Ok(())
+        } else {
+            Err(Refusal(NOT_ODBC.to_string()))
+        };
     }
     let (attributes, error) = scan(source);
+    if attributes.iter().any(|attribute| {
+        let key = &source[attribute.key.clone()];
+        key.contains("://") || key.contains('@')
+    }) {
+        return Err(Refusal(NOT_ODBC.to_string()));
+    }
     let hidden = attributes
         .iter()
         .any(|attribute| names_secret_inside(&attribute.text));
@@ -885,6 +910,7 @@ mod tests {
             "Db2Dev",
             "DRIVER={IBM DB2 ODBC DRIVER};HOSTNAME=h;PORT=50000;UID=a@b.example",
             "Servername=h;pqopt={sslcert=/x sslkey=/y}",
+            "Driver=x;KeyFilePath=/k",
         ] {
             assert_eq!(storable(source), Ok(()), "{source}");
         }
@@ -903,6 +929,15 @@ mod tests {
             ("Driver=x;AccessToken=x", SECRET),
             ("Driver=x;token=x", SECRET),
             ("Driver=x;passcode=x", SECRET),
+            ("Driver=x;AccessKey=x", SECRET),
+            ("Driver=x;ApiKey=x", SECRET),
+            ("Driver=x;AccountKey=x", SECRET),
+            ("Driver=x;SharedAccessKey=x", SECRET),
+            ("Driver=x;PrivateKey=x", SECRET),
+            ("Driver=x;Credential=x", SECRET),
+            ("postgresql://app:hunter2@db/app", NOT_ODBC),
+            ("postgresql://app:hunter2@db/app?sslmode=require", NOT_ODBC),
+            ("Driver=x;a@b=c", NOT_ODBC),
             ("\x0BPWD=x", CONTROL),
             ("Driver=x;\tUID=u", CONTROL),
             ("Driver=x;junk", BARE),
