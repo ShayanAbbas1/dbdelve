@@ -11,6 +11,8 @@ mod db2;
 #[cfg(test)]
 pub(crate) mod echo;
 mod host;
+#[cfg(test)]
+mod psqlodbc;
 mod rows;
 
 use std::collections::BTreeMap;
