@@ -92,6 +92,18 @@ struct Pending {
     credit: Option<i64>,
 }
 
+/// What AppRun saved of `LD_LIBRARY_PATH` before pointing it at the bundled
+/// libraries: `Some(Some(v))` restores `v`, `Some(None)` removes the variable,
+/// `None` means not an AppImage run.
+fn original_ld_library_path(
+    get: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Option<Option<std::ffi::OsString>> {
+    match get("DBDELVE_ORIGINAL_LD_LIBRARY_PATH") {
+        Some(value) => Some(Some(value)),
+        None => get("DBDELVE_ORIGINAL_LD_LIBRARY_PATH_UNSET").map(|_| None),
+    }
+}
+
 struct Process {
     child: Child,
     /// Closing it kills the plugin, so it lives exactly as long as the child
@@ -102,7 +114,19 @@ struct Process {
 
 impl Host {
     pub(super) fn start(plugin: &'static Plugin) -> Result<Arc<Self>, DbError> {
-        Self::spawn(plugin, Command::new(&plugin.executable))
+        let mut command = Command::new(&plugin.executable);
+        // The AppImage's bundled libstdc++ would otherwise shadow the one a vendor's
+        // C++ driver was built against.
+        match original_ld_library_path(|name| std::env::var_os(name)) {
+            Some(Some(value)) => {
+                command.env("LD_LIBRARY_PATH", value);
+            }
+            Some(None) => {
+                command.env_remove("LD_LIBRARY_PATH");
+            }
+            None => {}
+        }
+        Self::spawn(plugin, command)
     }
 
     /// `command` runs the plugin's executable; the tests add to its
@@ -666,6 +690,28 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn restores_the_original_ld_library_path_only_under_the_appimage() {
+        use std::ffi::OsString;
+        let env = |pairs: &'static [(&str, &str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| OsString::from(value))
+            }
+        };
+        assert_eq!(original_ld_library_path(env(&[])), None);
+        assert_eq!(
+            original_ld_library_path(env(&[("DBDELVE_ORIGINAL_LD_LIBRARY_PATH", "/a")])),
+            Some(Some(OsString::from("/a")))
+        );
+        assert_eq!(
+            original_ld_library_path(env(&[("DBDELVE_ORIGINAL_LD_LIBRARY_PATH_UNSET", "1")])),
+            Some(None)
+        );
+    }
+
     use super::*;
 
     #[test]

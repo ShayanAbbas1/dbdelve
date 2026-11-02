@@ -129,6 +129,12 @@ cat > "$APPDIR/AppRun" <<'APPRUN'
 # for the names we ship and the host supplies every other name, which is the
 # split package-appimage.sh made.
 HERE="$(dirname "$(readlink -f "$0")")"
+# Saved for the ODBC bridge, whose vendor drivers must not see the bundled libraries.
+if [ -n "${LD_LIBRARY_PATH+x}" ]; then
+  export DBDELVE_ORIGINAL_LD_LIBRARY_PATH="$LD_LIBRARY_PATH"
+else
+  export DBDELVE_ORIGINAL_LD_LIBRARY_PATH_UNSET=1
+fi
 export LD_LIBRARY_PATH="$HERE/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 exec "$HERE/usr/bin/dbdelve" "$@"
 APPRUN
