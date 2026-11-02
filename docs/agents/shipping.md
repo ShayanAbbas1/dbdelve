@@ -52,8 +52,9 @@ Four things in the script are load-bearing:
 
 Every artifact carries `plugins/odbc` (never echo, which is test code), laid
 out where `db::plugin::discover()` looks. `dev/plugins.sh --release` builds it
-(`cargo build --release -p dbdelve-plugin-odbc`) and stages it; each packaging
-script copies from that stage. The driver manager differs per platform:
+(`cargo build --release -p dbdelve-plugin-odbc`) and stages it; `bundle.sh`,
+`package-linux.sh` and `package-appimage.sh` copy from that stage, while
+`package-windows.ps1` builds the bridge itself and copies from `target`. The driver manager differs per platform:
 
 | artifact | where | driver manager |
 | --- | --- | --- |

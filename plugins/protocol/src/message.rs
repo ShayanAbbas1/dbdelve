@@ -42,8 +42,9 @@ pub enum Request {
     /// The row limit is reached: send no more rows, then end the statement
     /// early if that is provably safe, or fetch it to the end without sending.
     Stop,
-    /// The user's Cancel, which may abort their transaction. It targets a
-    /// `query`, `catalog`, `structure` or `references`, and is answered within
+    /// The user's Cancel, which may abort their transaction. The host
+    /// cancels only a `query`; a `catalog`, `structure` or `references` request
+    /// is bounded by a deadline instead. A cancel is answered within
     /// [`crate::limits::CANCEL_DEADLINE`] by that request's own answer or an
     /// `error { kind: cancelled }`; a plugin that does neither is killed.
     Cancel,

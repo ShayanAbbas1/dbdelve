@@ -841,7 +841,7 @@ Decided, and not to be re-litigated:
   and none widens a pattern holding no wildcard of the user's, so refusing the
   values that hold one is exact everywhere.
 - **Db2 edges Generic leaves documented, not handled.** Block comments nest on
-  Db2, and the tree-sitter split and sqlparser do not: the gate reads any `/*`
+  Db2 and in sqlparser's `GenericDialect`, and the tree-sitter split does not: the gate reads any `/*`
   inside a comment as unreadable (`gates.md`). Compound `BEGIN … END`
   statements split on their inner `;`. `WITH UR` and other Db2-only syntax is
   unreadable to sqlparser, so in Read-only it asks for Read-write. Db2 for z/OS

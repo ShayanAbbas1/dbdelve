@@ -68,7 +68,8 @@ unsupported }` from a plugin.
 
 **Limits** are `plugins/protocol/src/limits.rs`. The ones with a reason:
 
-- `MAX_FRAME` (64 MiB) is also the largest cell a result can carry. A larger
+- `MAX_FRAME` (64 MiB) bounds the largest cell a result can carry: a text
+  cell up to that size, a binary cell near 32 MiB, since it doubles as hex. A larger
   value is an `error` naming its column, never a truncation. `ponytail:`
   chunked values lift it.
 - **Credit.** A query starts with `WINDOW` (8 MiB) of credit. A data frame of
@@ -319,7 +320,8 @@ process) and the tunnel rewrite happens where the tunnel is.
   psqlODBC's `pqopt`, would take it as one), a control character, a string that
   does not parse cleanly, and a URL-shaped or non-DSN value, since each could
   hold a password stored in plain text. Wide on purpose: a refusal costs less
-  than a password on disk. The form, `open` and profile restore all refuse.
+  than a password on disk. Only the form and profile restore call it; `open` does not, so an importer
+  that builds an `ExternalConfig` itself must call it too.
 - **`AUTO_RECONNECT` is refused** on a dialect that holds Read-only: MySQL's
   driver would open a new session behind a lost one without the hold.
 - The tunnel's endpoint and rewrite are in `ssh-tunnels.md`.
