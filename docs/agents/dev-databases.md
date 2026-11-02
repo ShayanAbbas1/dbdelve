@@ -96,6 +96,19 @@ to main. `compose.yaml` and `dev/**` are in the
 workflow's own path filters, so a change to a dev container or a seed script
 runs CI too, not only a change under `src/`.
 
+## Postgres through psqlODBC
+
+The dev Postgres also runs as a conformance subject through the ODBC bridge,
+which gives the plugin path a dialect whose `BEGIN` opens a transaction and
+whose Read-only hold is a session statement. The route is a `DRIVER=/abs/path`
+in `dbdelve_ODBC_POSTGRES` (credentials in `dbdelve_ODBC_POSTGRES_USER` and
+`_PASSWORD`), because the bridge's unixODBC reads none of Homebrew's
+configuration. On macOS, `brew install psqlodbc`, then
+`DRIVER=/opt/homebrew/lib/psqlodbcw.so;Server=127.0.0.1;Port=55432;Database=dbdelve_dev`.
+On Ubuntu the `odbc-postgresql` package puts it at
+`/usr/lib/x86_64-linux-gnu/odbc/psqlodbcw.so`. Run
+`cargo test --bin dbdelve db::external::psqlodbc -- --include-ignored`.
+
 ## Db2
 
 Db2 is opt-in, because the image (`icr.io/db2_community/db2:12.1.5.0`) is
