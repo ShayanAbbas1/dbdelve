@@ -72,8 +72,21 @@ cp target/release/plugins/odbc/bin/dbdelve-odbc "$BRIDGE"
 
 # unixODBC is compiled into the bridge: one linked to a Homebrew libodbc runs
 # here and fails on every machine without it.
-if otool -L "$BRIDGE" | tail -n +2 | grep -E 'odbc|/opt/homebrew|/usr/local'; then
+#
+# otool's output is captured first so its failure fails the guard rather than
+# reading as an empty, clean list. `strings` catches a Homebrew search path
+# that otool cannot see on a statically linked library. A bare /usr/local/lib is
+# not matched: unixODBC's own default search path spells it, in a clean build.
+linked="$(otool -L "$BRIDGE")" || {
+  echo "otool could not read the bridge" >&2
+  exit 1
+}
+if printf '%s\n' "$linked" | tail -n +2 | grep -E 'odbc|/opt/homebrew|/usr/local'; then
   echo "the bridge links a library outside the system: unixODBC must be static" >&2
+  exit 1
+fi
+if strings "$BRIDGE" | grep -E '/opt/homebrew|/usr/local/(Cellar|opt)'; then
+  echo "the bridge holds a Homebrew path: unixODBC must come from the crate" >&2
   exit 1
 fi
 
