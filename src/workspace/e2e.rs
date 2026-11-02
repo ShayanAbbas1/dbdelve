@@ -1890,6 +1890,52 @@ fn an_odbc_profile_saves_and_restores_as_it_was(cx: &mut TestAppContext) {
     });
 }
 
+/// A duplicate has no Keychain entry of its own, so its Password field carries
+/// the original's, for an ODBC profile as for a server.
+#[gpui::test]
+fn duplicating_an_odbc_profile_keeps_its_password(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let directory = store::dbdelve_directory().unwrap();
+        std::fs::create_dir_all(&directory).unwrap();
+        let database = directory.join("e2e.db");
+        std::fs::write(&database, b"").unwrap();
+        std::fs::write(
+            directory.join("profiles.toml"),
+            format!(
+                "active = \"e2e\"\n\
+                 [settings]\ncheck_for_updates = false\n\
+                 [[profiles]]\nid = \"e2e\"\nname = \"E2E\"\nhost = \"\"\ndatabase = \"\"\n\
+                 user = \"\"\nengine = \"sqlite\"\npath = {:?}\n\
+                 [[profiles]]\nid = \"dsn\"\nname = \"DSN\"\nhost = \"\"\ndatabase = \"\"\n\
+                 user = \"a@b.example\"\nengine = \"plugin:odbc\"\nspeaks = \"generic\"\n\
+                 connection = \"Db2Dev\"\n",
+                database.display().to_string(),
+            ),
+        )
+        .unwrap();
+        let (workspace, cx) = launch_with(cx, vec![store::tests::odbc_plugin()]);
+        let password = cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                let profile = workspace
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.id == "dsn")
+                    .unwrap();
+                let form = ConnectionForm::duplicating(
+                    &profile,
+                    "DSN copy".into(),
+                    Some("hunter2".into()),
+                    window,
+                    cx,
+                );
+                form.password.read(cx).unmask_value().to_string()
+            })
+        });
+        assert_eq!(password, "hunter2");
+        quit(workspace, cx);
+    });
+}
+
 /// The ODBC tile is picked from the engine picker by keyboard, and the
 /// keyboard goes on working through both field-set changes: the Connection
 /// field takes it, and Host takes it back once Postgres unmounts that field.

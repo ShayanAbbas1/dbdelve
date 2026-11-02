@@ -243,7 +243,11 @@ impl ConnectionForm {
         let password = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Optional")
-                .default_value(value(server.map(|server| server.password.as_str())))
+                .default_value(value(
+                    server
+                        .map(|server| server.password.as_str())
+                        .or_else(|| external.map(|external| external.password.as_str())),
+                ))
                 .masked(true)
         });
 
