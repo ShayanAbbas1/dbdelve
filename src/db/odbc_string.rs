@@ -479,6 +479,23 @@ fn port_spelling(source: &str, attributes: &[Attribute]) -> Result<PortSpelling,
     }
 }
 
+/// Whether the string turns on MySQL Connector/ODBC's `AUTO_RECONNECT`, which
+/// opens a new session behind a lost one without a word, and a Read-only hold
+/// set on the old one is not on the new. Anything but a plain off is read as
+/// on, since the driver's own reading of the value is not known here.
+pub fn reconnects_silently(source: &str) -> bool {
+    scan(source).0.iter().any(|attribute| {
+        let key: String = source[attribute.key.clone()]
+            .chars()
+            .filter(|c| !matches!(c, ' ' | '_'))
+            .collect();
+        let off = ["0", "no", "false", "off", ""]
+            .iter()
+            .any(|off| attribute.text.trim().eq_ignore_ascii_case(off));
+        key.eq_ignore_ascii_case("AUTORECONNECT") && !off
+    })
+}
+
 /// The one host and port the string makes the driver dial, or why it cannot be
 /// said for certain.
 pub fn endpoint(source: &str) -> Result<Endpoint, Refusal> {
@@ -780,6 +797,25 @@ mod tests {
             ),
         ] {
             assert_eq!(through_tunnel(source, local()).as_deref(), Ok(expected));
+        }
+    }
+
+    #[test]
+    fn auto_reconnect_is_on_unless_it_is_plainly_off() {
+        for on in [
+            "DRIVER=x;AUTO_RECONNECT=1",
+            "auto_reconnect = yes",
+            "AutoReconnect=TRUE",
+            "AUTO_RECONNECT={2}",
+        ] {
+            assert!(reconnects_silently(on), "{on}");
+        }
+        for off in [
+            "DRIVER=x;AUTO_RECONNECT=0",
+            "AUTO_RECONNECT=off",
+            "DRIVER=x",
+        ] {
+            assert!(!reconnects_silently(off), "{off}");
         }
     }
 

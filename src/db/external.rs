@@ -103,6 +103,14 @@ impl Connection {
                 config.speaks.label()
             )));
         }
+        // Refused whatever the mode, since the mode can change once connected.
+        if config.speaks.holds_read_only() && odbc_string::reconnects_silently(&config.connection) {
+            return Err(failure(format!(
+                "AUTO_RECONNECT lets the driver open a new session without saying so, which would \
+                 drop the Read-only hold DBDelve puts on a {} session. Remove it to connect.",
+                config.speaks.label()
+            )));
+        }
         let forward = match &config.ssh {
             Some(ssh) => Some((
                 ssh,
@@ -141,7 +149,10 @@ impl Connection {
         let Some(statement) = super::read_only_statement(self.config.speaks, read_only) else {
             return Ok(());
         };
-        let held = self.query(statement, &CancelToken::default(), Fetch::default());
+        // Held across the loss too, so no statement waiting on the session
+        // runs between a hold that failed and the session being given up.
+        let _session = self.host.session();
+        let held = self.query_held(statement, &CancelToken::default(), Fetch::default());
         if read_only && held.is_err() {
             self.host.lose_session();
         }
@@ -255,6 +266,16 @@ impl Connection {
         fetch: Fetch,
     ) -> Result<QueryResult, DbError> {
         let _session = self.host.session();
+        self.query_held(sql, cancel, fetch)
+    }
+
+    /// [`Self::query`] with the session already held.
+    fn query_held(
+        &self,
+        sql: &str,
+        cancel: &CancelToken,
+        fetch: Fetch,
+    ) -> Result<QueryResult, DbError> {
         fetch.hold()?;
         let started = Instant::now();
         let eligible = fetch.reads_only && fetch.limit.is_some() && self.opened.stops_early;
@@ -897,6 +918,24 @@ mod tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn a_silent_reconnect_is_refused_only_where_a_hold_would_be_dropped() {
+        let reconnecting = |speaks| ExternalConfig {
+            speaks,
+            connection: "DSN=echo;AUTO_RECONNECT=1".into(),
+            ..config()
+        };
+        for speaks in [Engine::MySql, Engine::Postgres] {
+            let error = Connection::open(&reconnecting(speaks)).err().unwrap();
+            assert!(
+                error.message.starts_with("AUTO_RECONNECT"),
+                "{}",
+                error.message
+            );
+        }
+        Connection::open(&reconnecting(Engine::Generic)).unwrap();
     }
 
     #[test]
