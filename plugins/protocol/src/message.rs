@@ -306,7 +306,7 @@ mod tests {
             Response::Opened {
                 dbms_name: "DB2/LINUXX8664".to_string(),
                 dbms_version: "11.05.0900".to_string(),
-                driver: "libdb2o.so".to_string(),
+                driver: "libdb2.so".to_string(),
                 stops_early: false,
                 optional: Vec::new(),
             },

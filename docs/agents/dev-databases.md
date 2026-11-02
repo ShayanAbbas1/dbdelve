@@ -126,6 +126,6 @@ On macOS the driver is `libdb2.dylib`, which writes 32-bit `SQLLEN` values
 into the 64-bit slots unixODBC hands it (a `SQLRowCount` of `-1` or a NULL
 indicator reads as garbage in the high half); the bridge zero-initialises and
 sign-extends them. That is also why
-`isql` shows stale values in NULL cells. Linux uses `libdb2o.so`, the
-64-bit build. CI runs the `db2` job with `continue-on-error` until it has
+`isql` shows stale values in NULL cells. Linux uses `libdb2.so`; the
+bridge handles either `SQLLEN` width. CI runs the `db2` job with `continue-on-error` until it has
 proven stable.

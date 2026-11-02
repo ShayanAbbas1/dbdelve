@@ -20,8 +20,8 @@ case "$(uname -s)-$(uname -m)" in
   Linux-x86_64)
     archive=linuxx64_odbc_cli.tar.gz
     sha256=77b754d19be2cd5c55f6feb8bd951c2b17aa6646289944855612c5a2ac555f55
-    # libdb2o is the build with a 64-bit SQLLEN, the one unixODBC expects.
-    library=libdb2o.so ;;
+    # The Linux tarball ships only libdb2.so (and libdb2.so.1); there is no libdb2o.so.
+    library=libdb2.so ;;
   *) echo "no IBM ODBC driver is staged for $(uname -s) $(uname -m)" >&2; exit 1 ;;
 esac
 
