@@ -51,8 +51,9 @@ data lives are all in [docs/install.md](docs/install.md).
 Postgres, MySQL, MariaDB, SQLite, Turso, DuckDB, Snowflake, SQL Server, MongoDB,
 Redis (and Valkey, KeyDB, Dragonfly) and ClickHouse.
 
-Other databases, such as IBM Db2, are reachable read-only through the bundled
-ODBC bridge, with the database's own ODBC driver installed.
+Other databases, such as IBM Db2, are reachable through the bundled ODBC
+bridge, with the database's own ODBC driver installed. Grid editing is off, and
+statements you type run under the connection's mode.
 
 More engines are planned.
 
