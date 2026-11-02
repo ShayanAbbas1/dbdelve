@@ -116,7 +116,8 @@ jobs:
             mesa-vulkan-drivers libvulkan1 libegl1 libgles2 libgl1-mesa-dri
       # Before rust-cache, which saves only the binaries that appear after it
       # runs: the prebuilt download is quicker than carrying it in the cache.
-      - name: install nextest
+      - &install-nextest
+        name: install nextest
         uses: taiki-e/install-action@v2.88.0
         with:
           tool: cargo-nextest@0.9.150
@@ -241,6 +242,7 @@ jobs:
           key: ibm-clidriver-${{ hashFiles('dev/db2/driver.sh') }}
       - name: IBM driver
         run: dev/db2/driver.sh
+      - *install-nextest
       - *rust-cache
       - *dependencies-unoptimized
       - name: wait for db2
@@ -263,8 +265,11 @@ jobs:
           export dbdelve_ODBC_DB2="$driver;HOSTNAME=127.0.0.1;PORT=55000;DATABASE=dbdelve;PROTOCOL=TCPIP"
           cargo test -p dbdelve-plugin-odbc --test bridge -- --include-ignored
           # The host's side: the conformance subject builds the bridge itself.
-          # No bastion in this job, so the tunnel test runs locally only.
-          cargo test --bin dbdelve db::external::db2 -- --include-ignored --skip live_db2_through_a_tunnel
+          # No bastion in this job, so the tunnel test runs locally only. nextest
+          # because it fails when the filter matches nothing, as a renamed
+          # module would.
+          cargo nextest run --bin dbdelve --run-ignored all \
+            -E 'test(external::db2::) - test(live_db2_through_a_tunnel)'
 
   macos:
     runs-on: macos-latest
