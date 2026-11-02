@@ -2536,7 +2536,8 @@ mod tests {
                 &format!("{generic}\nconnection = 'DRIVER=x;PWD=y'"),
                 &[odbc]
             ),
-            "Put the password in the Password field, which is kept in the Keychain."
+            "The connection string holds a password or another secret, which would be stored in \
+             plain text. Put the password in the Password field, which is kept in the Keychain."
         );
         assert_eq!(
             reason("zz-unknown", "", &[odbc]),

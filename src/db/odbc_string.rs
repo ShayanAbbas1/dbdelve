@@ -38,7 +38,11 @@ const HOST_KEYS: &[&str] = &[
 const COMMA_PORT_KEYS: &[&str] = &["SERVER", "ADDRESS", "ADDR"];
 const PORT_KEYS: &[&str] = &["PORT"]; // Db2, psqlODBC, MySQL
 const DSN_KEYS: &[&str] = &["DSN", "FILEDSN"];
-const SECRET_KEYS: &[&str] = &["PWD", "PASSWORD"];
+/// A key holding any of these is a secret: `PWD1` (MySQL's second factor),
+/// `sslpassword`, `priv_key_file_pwd`, `KeystoreSecret`, `AccessToken`,
+/// `passcode`. Wide on purpose: a key read as a secret that is not one costs
+/// a refusal, never a password on disk.
+const SECRET_PARTS: &[&str] = &["PWD", "PASSW", "SECRET", "TOKEN", "PASSCODE"];
 // Other addresses the rewrite would not touch, so the driver could dial them,
 // matched after `normalized`. A denylist, so it leans wide: a key read as an
 // address that is not one costs a refusal, never a dial past the tunnel.
@@ -79,9 +83,9 @@ const AFTER_BRACE: &str = "The connection string has text after a closing } befo
 const BARE: &str = "The connection string has an entry that is not key=value.";
 const EMPTY_KEY: &str = "The connection string has an entry with no key before the =.";
 const ROUTE: &str = "This connection string could not be routed through the tunnel.";
-const CONTROL: &str = "The connection string holds a control character, which drivers read differently, so DBDelve cannot be sure where the tunnel should go.";
+const CONTROL: &str = "The connection string holds a control character, which drivers read differently, so DBDelve cannot be sure what it says.";
 const AMBIGUOUS_BRACE: &str = "The connection string has a braced value holding ;, = or }}, or a { after a space, which drivers read differently, so DBDelve cannot be sure where the tunnel should go.";
-const SECRET: &str = "Put the password in the Password field, which is kept in the Keychain.";
+const SECRET: &str = "The connection string holds a password or another secret, which would be stored in plain text. Put the password in the Password field, which is kept in the Keychain.";
 
 struct Attribute {
     key: Range<usize>,
@@ -98,6 +102,10 @@ impl Attribute {
     fn is(&self, source: &str, keys: &[&str]) -> bool {
         keys.iter()
             .any(|key| source[self.key.clone()].eq_ignore_ascii_case(key))
+    }
+
+    fn is_secret(&self, source: &str) -> bool {
+        names_secret(&source[self.key.clone()])
     }
 
     /// Whether this reads as another address once spaces and underscores
@@ -225,43 +233,55 @@ fn scan(source: &str) -> (Vec<Attribute>, Option<&'static str>) {
     }
 }
 
-/// The `PWD` / `PASSWORD` keys outside braces, as spelled, past any entry
-/// that does not parse.
+/// The secret keys outside braces, as spelled, past any entry that does not
+/// parse.
 pub fn secrets(source: &str) -> Vec<&str> {
     scan(source)
         .0
         .into_iter()
-        .filter(|attribute| attribute.is(source, SECRET_KEYS))
+        .filter(|attribute| attribute.is_secret(source))
         .map(|attribute| &source[attribute.key])
         .collect()
 }
 
 /// Whether the string may be written to `profiles.toml`: not when it names a
-/// password, and not when it does not parse cleanly, since what this parser
-/// cannot read is where a driver could find one. A password-shaped
-/// `key=` inside braces is refused too, as a driver that reads braces
-/// differently, or libpq inside psqlODBC's `pqopt`, would take it as one. A
-/// DSN, a name with no `=`, holds nothing.
+/// secret, and not when it does not parse cleanly or holds a control
+/// character, since what this parser cannot read is where a driver could find
+/// one. A secret-shaped `key=` inside a value is refused too, braced or not,
+/// as a driver that reads braces differently, or libpq inside psqlODBC's
+/// `pqopt`, would take it as one. A DSN, a name with no `=`, holds nothing.
 pub fn storable(source: &str) -> Result<(), Refusal> {
+    if source.bytes().any(|byte| byte.is_ascii_control()) {
+        return Err(Refusal(CONTROL.to_string()));
+    }
     if !source.contains('=') {
         return Ok(());
     }
     let (attributes, error) = scan(source);
     let hidden = attributes
         .iter()
-        .any(|attribute| attribute.braced && names_password(&attribute.text));
+        .any(|attribute| names_secret_inside(&attribute.text));
     if hidden || !secrets(source).is_empty() {
         return Err(Refusal(SECRET.to_string()));
     }
     error.map_or(Ok(()), |error| Err(Refusal(error.to_string())))
 }
 
-fn names_password(text: &str) -> bool {
-    let text = text.to_ascii_lowercase();
-    SECRET_KEYS.iter().any(|key| {
-        let key = key.to_ascii_lowercase();
-        text.match_indices(&key)
-            .any(|(at, _)| text[at + key.len()..].trim_start().starts_with('='))
+fn names_secret(key: &str) -> bool {
+    let key = key.to_ascii_uppercase();
+    SECRET_PARTS.iter().any(|part| key.contains(part))
+}
+
+/// Whether `text` holds a `key=` whose key, the word just before the `=`, is a
+/// secret's.
+fn names_secret_inside(text: &str) -> bool {
+    text.match_indices('=').any(|(at, _)| {
+        let word = text[..at]
+            .trim_end()
+            .rsplit(|c: char| c.is_ascii_whitespace() || matches!(c, ';' | '{' | '}' | '=' | ','))
+            .next()
+            .unwrap_or_default();
+        names_secret(word)
     })
 }
 
@@ -647,8 +667,12 @@ mod tests {
     }
 
     #[test]
-    fn secrets_are_the_password_keys_outside_braces() {
+    fn secrets_are_the_secret_shaped_keys_outside_braces() {
         assert_eq!(secrets("DSN=x;PWD=y"), ["PWD"]);
+        assert_eq!(
+            secrets("PWD1=a;UID=u;sslpassword=b;AccessToken=c"),
+            ["PWD1", "sslpassword", "AccessToken"]
+        );
         assert!(secrets("Driver={a;PWD=b};UID=u").is_empty());
         assert_eq!(secrets("uid=u; Password =p;pwd=q"), ["Password", "pwd"]);
         assert_eq!(secrets("PWD=y;Driver={broken"), ["PWD"]);
@@ -678,6 +702,17 @@ mod tests {
             ("Note= {a;PWD=x}", SECRET),
             ("Driver={a;PWD=b};UID=u", SECRET),
             ("Servername=h;pqopt={password = x}", SECRET),
+            ("Servername=h;pqopt=password=hunter2", SECRET),
+            ("Servername=h;pqopt={sslpassword=x}", SECRET),
+            ("Driver=x;PWD1=x", SECRET),
+            ("Driver=x;sslpassword=x", SECRET),
+            ("Driver=x;priv_key_file_pwd=x", SECRET),
+            ("Driver=x;KeystoreSecret=x", SECRET),
+            ("Driver=x;AccessToken=x", SECRET),
+            ("Driver=x;token=x", SECRET),
+            ("Driver=x;passcode=x", SECRET),
+            ("\x0BPWD=x", CONTROL),
+            ("Driver=x;\tUID=u", CONTROL),
             ("Driver=x;junk", BARE),
             ("Driver={x", UNTERMINATED),
             ("Driver={x}y", AFTER_BRACE),
