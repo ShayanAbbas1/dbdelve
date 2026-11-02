@@ -37,6 +37,34 @@ const HOST_KEYS: &[&str] = &[
 /// Microsoft's drivers carry the port inside the host value, `host,port`.
 const COMMA_PORT_KEYS: &[&str] = &["SERVER", "ADDRESS", "ADDR"];
 const PORT_KEYS: &[&str] = &["PORT"]; // Db2, psqlODBC, MySQL
+
+/// Where a driver reads the port it dials.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PortSpelling {
+    /// Microsoft's SQL Server drivers: `Server=host,port`. They have no port
+    /// key, so `Port=` beside `Server=` leaves them dialling 1433.
+    InHost,
+    /// psqlODBC, MySQL's and MariaDB's connectors and Db2's CLI driver: a
+    /// `PORT` key. A `,` in the host is a list of hosts to libpq, dialled on
+    /// the default port.
+    Key,
+}
+
+/// Matched, lowercased, in the `DRIVER` value: the registered name, or the
+/// file name of a library path. The drivers whose host and port keys are
+/// written above; any other is refused, since a wrong guess at where it reads
+/// its port sends it, and the password, past the tunnel.
+const DRIVERS: &[(&str, PortSpelling)] = &[
+    ("sql server", PortSpelling::InHost), // ODBC Driver 18 for SQL Server, SQL Server Native Client
+    ("msodbcsql", PortSpelling::InHost),  // libmsodbcsql-18.so, msodbcsql18.dll
+    ("postgres", PortSpelling::Key),      // PostgreSQL Unicode, PostgreSQL ANSI
+    ("psqlodbc", PortSpelling::Key),      // psqlodbcw.so
+    ("mysql", PortSpelling::Key),         // MySQL ODBC 8.0 Unicode Driver
+    ("myodbc", PortSpelling::Key),        // libmyodbc8w.so
+    ("mariadb", PortSpelling::Key),       // MariaDB ODBC 3.1 Driver
+    ("maodbc", PortSpelling::Key),        // libmaodbc.so
+    ("db2", PortSpelling::Key),           // IBM DB2 ODBC DRIVER, libdb2.dylib, db2cli64.dll
+];
 const DSN_KEYS: &[&str] = &["DSN", "FILEDSN"];
 /// A key holding any of these is a secret: `PWD1` (MySQL's second factor),
 /// `sslpassword`, `priv_key_file_pwd`, `KeystoreSecret`, `AccessToken`,
@@ -53,21 +81,41 @@ const OTHER_ADDRESS_KEYS: &[&str] = &[
     "A8",           // psqlODBC's abbreviation of Socket
     "PQOPT",        // psqlODBC's libpq options, which can carry host, hostaddr and port
     "D5",           // psqlODBC's abbreviation of Pqopt
-    "MULTIHOST",    // MySQL's: Server becomes a list of hosts
     "ENABLEDNSSRV", // MySQL's: Server becomes a DNS SRV name
-    "URL",
 ];
-/// A key holding any of these names another server by its spelling alone, in
-/// whichever vendor's variant: SQL Server's failover partner, Db2's alternate
-/// servers and client reroute, Db2's LDAP server, and the proxies of
-/// Snowflake's and Simba's drivers.
+/// A key holding any of these, other than the host and port keys themselves,
+/// may name another server or port by its spelling alone, in whichever
+/// vendor's variant: `hostaddr`, `Host2`, `PortNumber`, Vertica's
+/// `BackupServerNode`, SQL Server's failover partner, Db2's alternate servers,
+/// client reroute and LDAP server, and the proxies of Snowflake's and Simba's
+/// drivers.
 const OTHER_ADDRESS_PARTS: &[&str] = &[
+    "HOST",
+    "SERVER",
+    "ADDR",
+    "PORT",
+    "URL",
+    "URI",
+    "ENDPOINT",
     "FAILOVERPARTNER",
     "ALTERNATE",
     "REROUTE",
     "LDAP",
     "PROXY",
-    "SERVERLIST",
+];
+/// Keys that hold an address part and name no address: how SQL Server's
+/// driver checks the certificate and the SPN (`TrustServerCertificate`,
+/// `HostNameInCertificate`, `ServerSPN`, `ServerCertificate`), Db2's
+/// certificate file and TLS switch (`SSLServerCertificate`, and `Security`,
+/// which holds `URI`), and psqlODBC's prepare switch (`UseServerSidePrepare`).
+const NOT_ADDRESSES: &[&str] = &[
+    "TRUSTSERVERCERTIFICATE",
+    "HOSTNAMEINCERTIFICATE",
+    "SERVERSPN",
+    "SERVERCERTIFICATE",
+    "SSLSERVERCERTIFICATE",
+    "SECURITY",
+    "USESERVERSIDEPREPARE",
 ];
 
 const DSN: &str = "A DSN keeps its server's address in odbc.ini, where DBDelve cannot route it through a tunnel. Write the connection string out to use one.";
@@ -78,6 +126,11 @@ const NO_PORT: &str =
     "Name the port (PORT=…, or Server=host,port) so the tunnel knows where to forward.";
 const BAD_HOST: &str = "The host in the connection string is not one plain host name or address, which is all a tunnel can forward to.";
 const BAD_PORT: &str = "The port in the connection string is not a number from 1 to 65535.";
+const NO_DRIVER: &str = "Name the driver once (DRIVER=…), since where a driver reads its port decides where the tunnel's port goes.";
+const UNKNOWN_DRIVER: &str = "DBDelve knows where the SQL Server, PostgreSQL, MySQL, MariaDB and Db2 drivers read their port, and not this DRIVER, so it cannot be sure the driver would dial the tunnel.";
+const PORT_IN_HOST: &str = "Microsoft's SQL Server driver reads its port only after a comma in Server or Address (Server=host,port), so write it there.";
+const PORT_AS_KEY: &str =
+    "This driver reads no port after a comma in its host, so write the port as PORT=….";
 const UNTERMINATED: &str = "The connection string has a { with no closing }.";
 const AFTER_BRACE: &str = "The connection string has text after a closing } before the next ;.";
 const BARE: &str = "The connection string has an entry that is not key=value.";
@@ -111,13 +164,17 @@ impl Attribute {
     /// Whether this reads as another address once spaces and underscores
     /// are dropped, so `Failover Partner` is `Failover_Partner`.
     fn names_another_address(&self, source: &str) -> bool {
+        if self.is(source, HOST_KEYS) || self.is(source, PORT_KEYS) {
+            return false;
+        }
         let key: String = source[self.key.clone()]
             .chars()
             .filter(|c| !matches!(c, ' ' | '_'))
             .collect::<String>()
             .to_ascii_uppercase();
-        OTHER_ADDRESS_KEYS.contains(&key.as_str())
-            || OTHER_ADDRESS_PARTS.iter().any(|part| key.contains(part))
+        !NOT_ADDRESSES.contains(&key.as_str())
+            && (OTHER_ADDRESS_KEYS.contains(&key.as_str())
+                || OTHER_ADDRESS_PARTS.iter().any(|part| key.contains(part)))
     }
 
     /// What a driver that closes a brace at its first `}` could read
@@ -334,14 +391,24 @@ fn locate(source: &str) -> Result<(Vec<Attribute>, Located), Refusal> {
     let &[host] = hosts.as_slice() else {
         return Err(refuse(NO_HOST));
     };
+    let spelling = port_spelling(source, &attributes)?;
     let value = attributes[host].text.as_str();
+    match spelling {
+        PortSpelling::InHost
+            if !ports.is_empty() || !attributes[host].is(source, COMMA_PORT_KEYS) =>
+        {
+            return Err(refuse(PORT_IN_HOST));
+        }
+        PortSpelling::Key if value.contains(',') => return Err(refuse(PORT_AS_KEY)),
+        _ => {}
+    }
     let prefix = match value.get(..4) {
-        Some(head) if head.eq_ignore_ascii_case("tcp:") => 4,
+        Some(head) if spelling == PortSpelling::InHost && head.eq_ignore_ascii_case("tcp:") => 4,
         _ => 0,
     };
     let rest = &value[prefix..];
     let (name, comma_port) = match rest.split_once(',') {
-        Some((name, port)) if attributes[host].is(source, COMMA_PORT_KEYS) => {
+        Some((name, port)) if spelling == PortSpelling::InHost => {
             if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
                 return Err(refuse(BAD_HOST));
             }
@@ -358,9 +425,6 @@ fn locate(source: &str) -> Result<(Vec<Attribute>, Located), Refusal> {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'));
     if !plain {
         return Err(refuse(BAD_HOST));
-    }
-    if comma_port.is_some() && !ports.is_empty() {
-        return Err(refuse(MANY_PORTS));
     }
     let (port_text, port_index) = match (comma_port, ports.first()) {
         (Some(text), None) => (text, None),
@@ -385,6 +449,34 @@ fn locate(source: &str) -> Result<(Vec<Attribute>, Located), Refusal> {
         prefix,
     };
     Ok((attributes, located))
+}
+
+/// Where the string's one `DRIVER` reads its port. A library path is matched
+/// by its file name, so a directory that happens to name another driver does
+/// not decide it; a name matching drivers that disagree is refused.
+fn port_spelling(source: &str, attributes: &[Attribute]) -> Result<PortSpelling, Refusal> {
+    let drivers: Vec<&Attribute> = attributes
+        .iter()
+        .filter(|a| a.is(source, &["DRIVER"]))
+        .collect();
+    let &[driver] = drivers.as_slice() else {
+        return Err(Refusal(NO_DRIVER.to_string()));
+    };
+    let name = driver
+        .text
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let mut matched = DRIVERS
+        .iter()
+        .filter(|(needle, _)| name.contains(needle))
+        .map(|&(_, spelling)| spelling);
+    let first = matched.next();
+    match first {
+        Some(spelling) if matched.all(|other| other == spelling) => Ok(spelling),
+        _ => Err(Refusal(UNKNOWN_DRIVER.to_string())),
+    }
 }
 
 /// The one host and port the string makes the driver dial, or why it cannot be
@@ -486,13 +578,13 @@ mod tests {
                 keys(&["server", "Port"]),
             ),
             (
-                "Server=tcp:sql.example,1433;Database=d",
+                "Driver={SQL Server Native Client 11.0};Server=tcp:sql.example,1433;Database=d",
                 "sql.example",
                 1433,
                 keys(&["Server"]),
             ),
             (
-                "HOSTNAME={db.example};PORT={50000}",
+                "DRIVER=Db2;HOSTNAME={db.example};PORT={50000}",
                 "db.example",
                 50000,
                 keys(&["HOSTNAME", "PORT"]),
@@ -511,6 +603,25 @@ mod tests {
             ),
             (
                 "DRIVER={/opt/ibm/clidriver/lib/libdb2.dylib};HOSTNAME=h;PORT=1",
+                "h",
+                1,
+                keys(&["HOSTNAME", "PORT"]),
+            ),
+            (
+                "DRIVER=/opt/db2/psqlodbcw.so;Servername=h;Port=1",
+                "h",
+                1,
+                keys(&["Servername", "Port"]),
+            ),
+            (
+                "Driver={ODBC Driver 18 for SQL Server};Server=h,1;TrustServerCertificate=no;\
+                 HostNameInCertificate=db.example;ServerSPN=MSSQLSvc/db.example",
+                "h",
+                1,
+                keys(&["Server"]),
+            ),
+            (
+                "DRIVER=Db2;HOSTNAME=h;PORT=1;Security=SSL;SSLServerCertificate=/c.arm",
                 "h",
                 1,
                 keys(&["HOSTNAME", "PORT"]),
@@ -536,19 +647,61 @@ mod tests {
             ("Server=a;Address=b;Port=1", MANY_HOSTS.to_string()),
             ("Server=a;Server=b;Port=1", MANY_HOSTS.to_string()),
             ("PORT=1;port=2", MANY_PORTS.to_string()),
-            ("Server=a,1433;Port=1433", MANY_PORTS.to_string()),
-            ("Server=h", NO_PORT.to_string()),
-            ("Server=a,b;Port=1", BAD_HOST.to_string()),
-            ("Server=a,1,2", BAD_HOST.to_string()),
-            ("HOST=a,1", BAD_HOST.to_string()),
-            ("SERVER=h:3306", BAD_HOST.to_string()),
-            (r"Server=h\SQLEXPRESS;Port=1", BAD_HOST.to_string()),
-            ("Server=np:h,1", BAD_HOST.to_string()),
-            ("Server=[::1];Port=1", BAD_HOST.to_string()),
-            ("HOST=h/x;PORT=1", BAD_HOST.to_string()),
-            ("HOST=h(x);PORT=1", BAD_HOST.to_string()),
-            ("HOST={a b};PORT=1", BAD_HOST.to_string()),
-            ("HOST=;PORT=1", BAD_HOST.to_string()),
+            ("HOST=h;PORT=1", NO_DRIVER.to_string()),
+            ("DRIVER=Db2;DRIVER=Db2;HOST=h;PORT=1", NO_DRIVER.to_string()),
+            (
+                "DRIVER={FreeTDS};Server=h;Port=1",
+                UNKNOWN_DRIVER.to_string(),
+            ),
+            (
+                "DRIVER={MySQL to SQL Server};Server=h;Port=1",
+                UNKNOWN_DRIVER.to_string(),
+            ),
+            (
+                "Driver={ODBC Driver 18 for SQL Server};Server=h;Port=1433",
+                PORT_IN_HOST.to_string(),
+            ),
+            (
+                "Driver={ODBC Driver 18 for SQL Server};Server=a,1433;Port=1433",
+                PORT_IN_HOST.to_string(),
+            ),
+            (
+                "Driver={ODBC Driver 18 for SQL Server};HOSTNAME=h,1",
+                PORT_IN_HOST.to_string(),
+            ),
+            (
+                "Driver={PostgreSQL Unicode};Servername=a,5432",
+                PORT_AS_KEY.to_string(),
+            ),
+            ("DRIVER=Db2;HOST=a,1", PORT_AS_KEY.to_string()),
+            ("DRIVER=Db2;HOST=h", NO_PORT.to_string()),
+            ("Driver={SQL Server};Server=h", NO_PORT.to_string()),
+            ("Driver={SQL Server};Server=a,b", BAD_HOST.to_string()),
+            ("Driver={SQL Server};Server=a,1,2", BAD_HOST.to_string()),
+            ("DRIVER=Db2;SERVER=h:3306", BAD_HOST.to_string()),
+            (
+                r"Driver={SQL Server};Server=h\SQLEXPRESS,1",
+                BAD_HOST.to_string(),
+            ),
+            ("Driver={SQL Server};Server=np:h,1", BAD_HOST.to_string()),
+            ("DRIVER=Db2;Server=tcp:h;Port=1", BAD_HOST.to_string()),
+            ("DRIVER=Db2;Server=[::1];Port=1", BAD_HOST.to_string()),
+            ("DRIVER=Db2;HOST=h/x;PORT=1", BAD_HOST.to_string()),
+            ("DRIVER=Db2;HOST=h(x);PORT=1", BAD_HOST.to_string()),
+            ("DRIVER=Db2;HOST={a b};PORT=1", BAD_HOST.to_string()),
+            ("DRIVER=Db2;HOST=;PORT=1", BAD_HOST.to_string()),
+            ("HOSTNAME=h;PORT=1;Host2=b", other("HOST2")),
+            ("Servername=h;Port=1;hostaddr=10.0.0.1", other("HOSTADDR")),
+            ("HostName=h;Port=1;PortNumber=2", other("PORTNUMBER")),
+            (
+                "Servername=h;Port=1;BackupServerNode=real2:5433",
+                other("BACKUPSERVERNODE"),
+            ),
+            ("Server=h;Port=1;Server Name=b", other("SERVER NAME")),
+            (
+                "Server=h;Port=1;ConnectionEndpoint=b",
+                other("CONNECTIONENDPOINT"),
+            ),
             ("HOST=h;PORT=1;DBQ=x", other("DBQ")),
             ("HOSTNAME=h;SERVICENAME=50000", other("SERVICENAME")),
             ("Server=h;Port=1;Socket=/tmp/s", other("SOCKET")),
@@ -590,9 +743,9 @@ mod tests {
             ("\x0BHOST=evil;HOST=db;PORT=1", CONTROL.to_string()),
             ("HOST=db;PORT=1\0;HOST=evil", CONTROL.to_string()),
             ("HOST=db;\tPORT=1", CONTROL.to_string()),
-            ("HOST=h;PORT=0", BAD_PORT.to_string()),
-            ("HOST=h;PORT=70000", BAD_PORT.to_string()),
-            ("HOST=h;PORT=x", BAD_PORT.to_string()),
+            ("DRIVER=Db2;HOST=h;PORT=0", BAD_PORT.to_string()),
+            ("DRIVER=Db2;HOST=h;PORT=70000", BAD_PORT.to_string()),
+            ("DRIVER=Db2;HOST=h;PORT=x", BAD_PORT.to_string()),
             ("Driver={x;HOST=h;PORT=1", UNTERMINATED.to_string()),
             ("Driver={x}y;HOST=h;PORT=1", AFTER_BRACE.to_string()),
             ("HOST=h;PORT=1;stray", BARE.to_string()),
@@ -610,18 +763,21 @@ mod tests {
                 "DRIVER=Db2;HOSTNAME=127.0.0.1;PORT=61234;UID=a",
             ),
             (
-                "Server=tcp:sql.example,1433;Encrypt=yes",
-                "Server=tcp:127.0.0.1,61234;Encrypt=yes",
+                "Driver={SQL Server};Server=tcp:sql.example,1433;Encrypt=yes",
+                "Driver={SQL Server};Server=tcp:127.0.0.1,61234;Encrypt=yes",
             ),
             (
-                "HOSTNAME={db.example};PORT={50000}",
-                "HOSTNAME={127.0.0.1};PORT={61234}",
+                "DRIVER=Db2;HOSTNAME={db.example};PORT={50000}",
+                "DRIVER=Db2;HOSTNAME={127.0.0.1};PORT={61234}",
             ),
             (
-                " driver ={x y} ;  Host =  h ;Port= 5 ;;PWD=",
-                " driver ={x y} ;  Host =  127.0.0.1 ;Port= 61234 ;;PWD=",
+                " driver ={IBM DB2 ODBC DRIVER} ;  Host =  h ;Port= 5 ;;PWD=",
+                " driver ={IBM DB2 ODBC DRIVER} ;  Host =  127.0.0.1 ;Port= 61234 ;;PWD=",
             ),
-            ("PORT=1;HOST=h", "PORT=61234;HOST=127.0.0.1"),
+            (
+                "PORT=1;HOST=h;DRIVER=Db2",
+                "PORT=61234;HOST=127.0.0.1;DRIVER=Db2",
+            ),
         ] {
             assert_eq!(through_tunnel(source, local()).as_deref(), Ok(expected));
         }
