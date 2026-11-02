@@ -2617,15 +2617,19 @@ pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
     // An unreadable verdict's mode is the lowest one it may be run once in.
     // Any, where the server holds Read-only to reads; otherwise nothing stops
     // what it turns out to write, so Read-only may not run it at all.
+    let unreadable = || Verdict {
+        mode: if engine.holds_read_only() {
+            Mode::ReadOnly
+        } else {
+            Mode::ReadWrite
+        },
+        destructive: vec![Destructive::Unreadable],
+    };
+    if spec.sql.parser_dialect == ParserDialect::Generic && lexes_apart(dialect.as_ref(), sql) {
+        return unreadable();
+    }
     let Ok(statements) = SqlParser::parse_sql(dialect.as_ref(), sql) else {
-        return Verdict {
-            mode: if engine.holds_read_only() {
-                Mode::ReadOnly
-            } else {
-                Mode::ReadWrite
-            },
-            destructive: vec![Destructive::Unreadable],
-        };
+        return unreadable();
     };
 
     // An empty or comment-only string parses to no statements at all. There is
@@ -2634,6 +2638,23 @@ pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
         .iter()
         .map(|statement| spec_verdict(spec, statement))
         .fold(Verdict::READ, Verdict::max)
+}
+
+/// Whether a server whose lexer is not known, as Generic's is not, could
+/// split `sql` otherwise than sqlparser's Generic tokenizer: a `/*` inside a
+/// comment, which the tokenizer nests and a server may not, so
+/// `/* /* */ DELETE FROM t -- */` is one comment to one and a `DELETE` to the
+/// other; MySQL's `/*! … */`, which it runs; and a backslash in a literal or a
+/// quoted name, which ends it a byte later on a server where it escapes.
+fn lexes_apart(dialect: &dyn Dialect, sql: &str) -> bool {
+    let (tokens, _) = located_prefix(dialect, sql);
+    tokens.iter().any(|(token, range)| match token {
+        Token::Whitespace(Whitespace::MultiLineComment(comment)) => {
+            comment.contains("/*") || comment.starts_with('!')
+        }
+        Token::Whitespace(_) => false,
+        _ => sql[range.clone()].contains('\\'),
+    })
 }
 
 /// [`classify`] where the floor under an unreadable statement is its first
@@ -7288,6 +7309,30 @@ mod tests {
         Verdict {
             mode,
             destructive: vec![Destructive::Unreadable],
+        }
+    }
+
+    #[test]
+    fn generic_reads_as_unreadable_what_a_server_it_does_not_know_could_lex_otherwise() {
+        for sql in [
+            "/* /* */ DELETE FROM t -- */",
+            "/* /* */ SELECT 1 */",
+            "/*! DELETE FROM t */ SELECT 1",
+            r"SELECT '\'' ; DELETE FROM t; -- '",
+            r#"SELECT "a\" FROM t"#,
+        ] {
+            assert_eq!(
+                classify(Engine::Generic, sql),
+                unreadable_at(Mode::ReadWrite),
+                "{sql}"
+            );
+        }
+        for (sql, verdict) in [
+            ("/* a comment */ SELECT 1", Verdict::READ),
+            ("SELECT '/* not a comment */', 'a\"b'", Verdict::READ),
+            ("DELETE FROM t WHERE a = 1 -- /* \\", Verdict::WRITE),
+        ] {
+            assert_eq!(classify(Engine::Generic, sql), verdict, "{sql}");
         }
     }
 

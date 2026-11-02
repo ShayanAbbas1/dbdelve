@@ -554,7 +554,7 @@ source: src/sql_snapshots.rs
 
 [generic] value backslash before quote
   |DELETE FROM "public"."accounts" WHERE "Name" = '\\'''|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) matches_key=exact:true superset:false subset:false other:false
 
 [generic] value unicode
   |DELETE FROM "public"."accounts" WHERE "Name" = '李小龍 ünï 😀'|
@@ -590,7 +590,7 @@ source: src/sql_snapshots.rs
 
 [generic] relation backslash
   |DELETE FROM "back\\slash"."trail\\" WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) matches_key=exact:true superset:false subset:false other:false
 
 [mongodb] mongo objectid
   |db.getCollection("accounts").deleteOne({_id: ObjectId("65f0c0ffee0000000000abcd")})|

@@ -1407,15 +1407,15 @@ source: src/sql_snapshots.rs
 
 [generic] plain · backslash
   |UPDATE "public"."accounts" SET "Name" = 'back\\slash' WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] plain · backslash before quote
   |UPDATE "public"."accounts" SET "Name" = '\\''' WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] plain · odd backslashes then quote
   |UPDATE "public"."accounts" SET "Name" = 'a\\\\\\''b' WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] plain · unicode
   |UPDATE "public"."accounts" SET "Name" = '李小龍 ünï 😀' WHERE "id" = '7'|
@@ -1440,7 +1440,7 @@ source: src/sql_snapshots.rs
 
 [generic] plain · glob metacharacters
   |UPDATE "public"."accounts" SET "Name" = '*?[a]\\' WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] plain · number
   |UPDATE "public"."accounts" SET "Name" = '42' WHERE "id" = '7'|
@@ -1516,7 +1516,7 @@ source: src/sql_snapshots.rs
 
 [generic] relation backslash
   |UPDATE "back\\slash"."trail\\" SET "Name" = 'v' WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] empty sets
   (none)

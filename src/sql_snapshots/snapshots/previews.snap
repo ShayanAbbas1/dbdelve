@@ -14756,179 +14756,179 @@ source: src/sql_snapshots.rs
 
 [generic] backslash · all
   |SELECT * FROM "back\\slash"."trail\\"|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · all · no key · paged
   |SELECT * FROM "back\\slash"."trail\\"|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · all · no key · unpaged
   |SELECT * FROM "back\\slash"."trail\\"|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · all · one key · paged
   |SELECT * FROM "back\\slash"."trail\\"|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · all · one key · unpaged
   |SELECT * FROM "back\\slash"."trail\\"|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · all · composite key · paged
   |SELECT * FROM "back\\slash"."trail\\"|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · all · composite key · unpaged
   |SELECT * FROM "back\\slash"."trail\\"|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · all · awkward keys · paged
   |SELECT * FROM "back\\slash"."trail\\"|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · all · awkward keys · unpaged
   |SELECT * FROM "back\\slash"."trail\\"|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · all · empty name · paged
   |SELECT * FROM "back\\slash"."trail\\"|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · all · empty name · unpaged
   |SELECT * FROM "back\\slash"."trail\\"|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · page
   |SELECT * FROM "back\\slash"."trail\\" LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · page · no key · paged
   |SELECT * FROM "back\\slash"."trail\\" LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · page · no key · unpaged
   |SELECT * FROM "back\\slash"."trail\\" LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · page · one key · paged
   |SELECT * FROM "back\\slash"."trail\\" LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · page · one key · unpaged
   |SELECT * FROM "back\\slash"."trail\\" LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · page · composite key · paged
   |SELECT * FROM "back\\slash"."trail\\" LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · page · composite key · unpaged
   |SELECT * FROM "back\\slash"."trail\\" LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · page · awkward keys · paged
   |SELECT * FROM "back\\slash"."trail\\" LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · page · awkward keys · unpaged
   |SELECT * FROM "back\\slash"."trail\\" LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · page · empty name · paged
   |SELECT * FROM "back\\slash"."trail\\" LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · page · empty name · unpaged
   |SELECT * FROM "back\\slash"."trail\\" LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · page 3
   |SELECT * FROM "back\\slash"."trail\\" LIMIT 100 OFFSET 200|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · page 3 · no key · paged
   |SELECT * FROM "back\\slash"."trail\\" LIMIT 100 OFFSET 200|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · page 3 · no key · unpaged
   |SELECT * FROM "back\\slash"."trail\\" LIMIT 100 OFFSET 200|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · page 3 · one key · paged
   |SELECT * FROM "back\\slash"."trail\\" LIMIT 100 OFFSET 200|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · page 3 · one key · unpaged
   |SELECT * FROM "back\\slash"."trail\\" LIMIT 100 OFFSET 200|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · page 3 · composite key · paged
   |SELECT * FROM "back\\slash"."trail\\" LIMIT 100 OFFSET 200|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · page 3 · composite key · unpaged
   |SELECT * FROM "back\\slash"."trail\\" LIMIT 100 OFFSET 200|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · page 3 · awkward keys · paged
   |SELECT * FROM "back\\slash"."trail\\" LIMIT 100 OFFSET 200|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · page 3 · awkward keys · unpaged
   |SELECT * FROM "back\\slash"."trail\\" LIMIT 100 OFFSET 200|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · page 3 · empty name · paged
   |SELECT * FROM "back\\slash"."trail\\" LIMIT 100 OFFSET 200|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · page 3 · empty name · unpaged
   |SELECT * FROM "back\\slash"."trail\\" LIMIT 100 OFFSET 200|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · filtered
   |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · filtered · no key · paged
   |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · filtered · no key · unpaged
   |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · filtered · one key · paged
   |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · filtered · one key · unpaged
   |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · filtered · composite key · paged
   |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · filtered · composite key · unpaged
   |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · filtered · awkward keys · paged
   |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · filtered · awkward keys · unpaged
   |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · filtered · empty name · paged
   |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · filtered · empty name · unpaged
   |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] no limit · paged
   |SELECT * FROM "public"."accounts"|

@@ -2243,7 +2243,7 @@ source: src/sql_snapshots.rs
 
 [generic] "SELECT 'a\\\\'"
   |SELECT 'a\\\\'|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [generic] "SELECT $$x$$"
   |SELECT $$x$$|
@@ -2251,7 +2251,7 @@ source: src/sql_snapshots.rs
 
 [generic] "SELECT E'a\\nb'"
   |SELECT E'a\\nb'|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [generic] "SELECT TOP 5 * FROM t"
   |SELECT TOP 5 * FROM t|
@@ -2430,7 +2430,7 @@ source: src/sql_snapshots.rs
 
 [generic] "SELECT 1 FROM t WHERE a = 'x\\'"
   |SELECT 1 FROM t WHERE a = 'x\\'|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [generic] "SELECT \"a\\\"b\" FROM t"
   |SELECT "a\\"b" FROM t|
@@ -2454,20 +2454,20 @@ source: src/sql_snapshots.rs
 
 [generic] "UPDATE t SET a = 1 WHERE b = 'x\\'"
   |UPDATE t SET a = 1 WHERE b = 'x\\'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [generic] "DELETE FROM t WHERE a = 'x\\'"
   |DELETE FROM t WHERE a = 'x\\'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [generic] "DELETE FROM t WHERE a = 'x\\' OR 1 = 1 -- '"
   |DELETE FROM t WHERE a = 'x\\' OR 1 = 1 -- '|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [generic] "UPDATE t SET a = 'a\\' , b = 'b' WHERE c = 'y'"
   |UPDATE t SET a = 'a\\' , b = 'b' WHERE c = 'y'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [generic] "INSERT INTO t VALUES ('a\\', 'b')"
   |INSERT INTO t VALUES ('a\\', 'b')|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false

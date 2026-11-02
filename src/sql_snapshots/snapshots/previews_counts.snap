@@ -1332,16 +1332,16 @@ source: src/sql_snapshots.rs
 
 [generic] backslash · count all
   |SELECT COUNT(*) FROM "back\\slash"."trail\\"|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · probe all
   |SELECT 1 FROM "back\\slash"."trail\\" LIMIT 1|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · count filtered
   |SELECT COUNT(*) FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s'|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] backslash · probe filtered
   |SELECT 1 FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' LIMIT 1|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)

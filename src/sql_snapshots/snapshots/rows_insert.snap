@@ -1075,15 +1075,15 @@ source: src/sql_snapshots.rs
 
 [generic] value backslash
   |INSERT INTO "public"."accounts" ("Name") VALUES ('back\\slash')|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] value backslash before quote
   |INSERT INTO "public"."accounts" ("Name") VALUES ('\\''')|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] value odd backslashes then quote
   |INSERT INTO "public"."accounts" ("Name") VALUES ('a\\\\\\''b')|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] value unicode
   |INSERT INTO "public"."accounts" ("Name") VALUES ('李小龍 ünï 😀')|
@@ -1108,7 +1108,7 @@ source: src/sql_snapshots.rs
 
 [generic] value glob metacharacters
   |INSERT INTO "public"."accounts" ("Name") VALUES ('*?[a]\\')|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] value number
   |INSERT INTO "public"."accounts" ("Name") VALUES ('42')|
@@ -1160,7 +1160,7 @@ source: src/sql_snapshots.rs
 
 [generic] relation backslash
   |INSERT INTO "back\\slash"."trail\\" ("Name") VALUES ('v')|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [mongodb] mongo four columns
   |db.getCollection("accounts").insertOne({"id": 42, "Name": "it's", "flag": true, "created": ISODate("2024-01-02T03:04:05.123Z")})|

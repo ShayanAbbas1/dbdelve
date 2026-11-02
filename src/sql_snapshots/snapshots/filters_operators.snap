@@ -7840,11 +7840,11 @@ source: src/sql_snapshots.rs
 
 [generic] Name Equals · backslash before quote
   |SELECT * FROM "public"."accounts" WHERE "Name" = '\\''' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] Name Equals · odd backslashes then quote
   |SELECT * FROM "public"."accounts" WHERE "Name" = 'a\\\\\\''b' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] Name Equals · unicode
   |SELECT * FROM "public"."accounts" WHERE "Name" = '李小龍 ünï 😀' LIMIT 1000|
@@ -7856,7 +7856,7 @@ source: src/sql_snapshots.rs
 
 [generic] Name Equals · glob metacharacters
   |SELECT * FROM "public"."accounts" WHERE "Name" = '*?[a]\\' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] Name Equals · empty
   |SELECT * FROM "public"."accounts" WHERE "Name" = '' LIMIT 1000|
@@ -7872,11 +7872,11 @@ source: src/sql_snapshots.rs
 
 [generic] Name NotEquals · backslash before quote
   |SELECT * FROM "public"."accounts" WHERE "Name" <> '\\''' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] Name NotEquals · odd backslashes then quote
   |SELECT * FROM "public"."accounts" WHERE "Name" <> 'a\\\\\\''b' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] Name NotEquals · unicode
   |SELECT * FROM "public"."accounts" WHERE "Name" <> '李小龍 ünï 😀' LIMIT 1000|
@@ -7888,7 +7888,7 @@ source: src/sql_snapshots.rs
 
 [generic] Name NotEquals · glob metacharacters
   |SELECT * FROM "public"."accounts" WHERE "Name" <> '*?[a]\\' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] Name NotEquals · empty
   |SELECT * FROM "public"."accounts" WHERE "Name" <> '' LIMIT 1000|
@@ -8016,11 +8016,11 @@ source: src/sql_snapshots.rs
 
 [generic] Name Greater · backslash before quote
   |SELECT * FROM "public"."accounts" WHERE "Name" > '\\''' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] Name Greater · odd backslashes then quote
   |SELECT * FROM "public"."accounts" WHERE "Name" > 'a\\\\\\''b' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] Name Greater · unicode
   |SELECT * FROM "public"."accounts" WHERE "Name" > '李小龍 ünï 😀' LIMIT 1000|
@@ -8032,7 +8032,7 @@ source: src/sql_snapshots.rs
 
 [generic] Name Greater · glob metacharacters
   |SELECT * FROM "public"."accounts" WHERE "Name" > '*?[a]\\' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] Name Greater · empty
   |SELECT * FROM "public"."accounts" WHERE "Name" > '' LIMIT 1000|
@@ -8048,11 +8048,11 @@ source: src/sql_snapshots.rs
 
 [generic] Name GreaterOrEqual · backslash before quote
   |SELECT * FROM "public"."accounts" WHERE "Name" >= '\\''' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] Name GreaterOrEqual · odd backslashes then quote
   |SELECT * FROM "public"."accounts" WHERE "Name" >= 'a\\\\\\''b' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] Name GreaterOrEqual · unicode
   |SELECT * FROM "public"."accounts" WHERE "Name" >= '李小龍 ünï 😀' LIMIT 1000|
@@ -8064,7 +8064,7 @@ source: src/sql_snapshots.rs
 
 [generic] Name GreaterOrEqual · glob metacharacters
   |SELECT * FROM "public"."accounts" WHERE "Name" >= '*?[a]\\' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] Name GreaterOrEqual · empty
   |SELECT * FROM "public"."accounts" WHERE "Name" >= '' LIMIT 1000|
@@ -8080,11 +8080,11 @@ source: src/sql_snapshots.rs
 
 [generic] Name Less · backslash before quote
   |SELECT * FROM "public"."accounts" WHERE "Name" < '\\''' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] Name Less · odd backslashes then quote
   |SELECT * FROM "public"."accounts" WHERE "Name" < 'a\\\\\\''b' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] Name Less · unicode
   |SELECT * FROM "public"."accounts" WHERE "Name" < '李小龍 ünï 😀' LIMIT 1000|
@@ -8096,7 +8096,7 @@ source: src/sql_snapshots.rs
 
 [generic] Name Less · glob metacharacters
   |SELECT * FROM "public"."accounts" WHERE "Name" < '*?[a]\\' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] Name Less · empty
   |SELECT * FROM "public"."accounts" WHERE "Name" < '' LIMIT 1000|
@@ -8112,11 +8112,11 @@ source: src/sql_snapshots.rs
 
 [generic] Name LessOrEqual · backslash before quote
   |SELECT * FROM "public"."accounts" WHERE "Name" <= '\\''' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] Name LessOrEqual · odd backslashes then quote
   |SELECT * FROM "public"."accounts" WHERE "Name" <= 'a\\\\\\''b' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] Name LessOrEqual · unicode
   |SELECT * FROM "public"."accounts" WHERE "Name" <= '李小龍 ünï 😀' LIMIT 1000|
@@ -8128,7 +8128,7 @@ source: src/sql_snapshots.rs
 
 [generic] Name LessOrEqual · glob metacharacters
   |SELECT * FROM "public"."accounts" WHERE "Name" <= '*?[a]\\' LIMIT 1000|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] Name LessOrEqual · empty
   |SELECT * FROM "public"."accounts" WHERE "Name" <= '' LIMIT 1000|
@@ -8185,11 +8185,11 @@ source: src/sql_snapshots.rs
 
 [generic] we"ird Equals · backslash before quote
   |SELECT * FROM "public"."accounts" WHERE "we""ird" = '\\''' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] we"ird Equals · odd backslashes then quote
   |SELECT * FROM "public"."accounts" WHERE "we""ird" = 'a\\\\\\''b' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] we"ird Equals · unicode
   |SELECT * FROM "public"."accounts" WHERE "we""ird" = '李小龍 ünï 😀' LIMIT 1000|
@@ -8201,7 +8201,7 @@ source: src/sql_snapshots.rs
 
 [generic] we"ird Equals · glob metacharacters
   |SELECT * FROM "public"."accounts" WHERE "we""ird" = '*?[a]\\' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] we"ird Equals · empty
   |SELECT * FROM "public"."accounts" WHERE "we""ird" = '' LIMIT 1000|
@@ -8217,11 +8217,11 @@ source: src/sql_snapshots.rs
 
 [generic] we"ird NotEquals · backslash before quote
   |SELECT * FROM "public"."accounts" WHERE "we""ird" <> '\\''' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] we"ird NotEquals · odd backslashes then quote
   |SELECT * FROM "public"."accounts" WHERE "we""ird" <> 'a\\\\\\''b' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] we"ird NotEquals · unicode
   |SELECT * FROM "public"."accounts" WHERE "we""ird" <> '李小龍 ünï 😀' LIMIT 1000|
@@ -8233,7 +8233,7 @@ source: src/sql_snapshots.rs
 
 [generic] we"ird NotEquals · glob metacharacters
   |SELECT * FROM "public"."accounts" WHERE "we""ird" <> '*?[a]\\' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] we"ird NotEquals · empty
   |SELECT * FROM "public"."accounts" WHERE "we""ird" <> '' LIMIT 1000|
@@ -8361,11 +8361,11 @@ source: src/sql_snapshots.rs
 
 [generic] we"ird Greater · backslash before quote
   |SELECT * FROM "public"."accounts" WHERE "we""ird" > '\\''' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] we"ird Greater · odd backslashes then quote
   |SELECT * FROM "public"."accounts" WHERE "we""ird" > 'a\\\\\\''b' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] we"ird Greater · unicode
   |SELECT * FROM "public"."accounts" WHERE "we""ird" > '李小龍 ünï 😀' LIMIT 1000|
@@ -8377,7 +8377,7 @@ source: src/sql_snapshots.rs
 
 [generic] we"ird Greater · glob metacharacters
   |SELECT * FROM "public"."accounts" WHERE "we""ird" > '*?[a]\\' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] we"ird Greater · empty
   |SELECT * FROM "public"."accounts" WHERE "we""ird" > '' LIMIT 1000|
@@ -8393,11 +8393,11 @@ source: src/sql_snapshots.rs
 
 [generic] we"ird GreaterOrEqual · backslash before quote
   |SELECT * FROM "public"."accounts" WHERE "we""ird" >= '\\''' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] we"ird GreaterOrEqual · odd backslashes then quote
   |SELECT * FROM "public"."accounts" WHERE "we""ird" >= 'a\\\\\\''b' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] we"ird GreaterOrEqual · unicode
   |SELECT * FROM "public"."accounts" WHERE "we""ird" >= '李小龍 ünï 😀' LIMIT 1000|
@@ -8409,7 +8409,7 @@ source: src/sql_snapshots.rs
 
 [generic] we"ird GreaterOrEqual · glob metacharacters
   |SELECT * FROM "public"."accounts" WHERE "we""ird" >= '*?[a]\\' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] we"ird GreaterOrEqual · empty
   |SELECT * FROM "public"."accounts" WHERE "we""ird" >= '' LIMIT 1000|
@@ -8425,11 +8425,11 @@ source: src/sql_snapshots.rs
 
 [generic] we"ird Less · backslash before quote
   |SELECT * FROM "public"."accounts" WHERE "we""ird" < '\\''' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] we"ird Less · odd backslashes then quote
   |SELECT * FROM "public"."accounts" WHERE "we""ird" < 'a\\\\\\''b' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] we"ird Less · unicode
   |SELECT * FROM "public"."accounts" WHERE "we""ird" < '李小龍 ünï 😀' LIMIT 1000|
@@ -8441,7 +8441,7 @@ source: src/sql_snapshots.rs
 
 [generic] we"ird Less · glob metacharacters
   |SELECT * FROM "public"."accounts" WHERE "we""ird" < '*?[a]\\' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] we"ird Less · empty
   |SELECT * FROM "public"."accounts" WHERE "we""ird" < '' LIMIT 1000|
@@ -8457,11 +8457,11 @@ source: src/sql_snapshots.rs
 
 [generic] we"ird LessOrEqual · backslash before quote
   |SELECT * FROM "public"."accounts" WHERE "we""ird" <= '\\''' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] we"ird LessOrEqual · odd backslashes then quote
   |SELECT * FROM "public"."accounts" WHERE "we""ird" <= 'a\\\\\\''b' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] we"ird LessOrEqual · unicode
   |SELECT * FROM "public"."accounts" WHERE "we""ird" <= '李小龍 ünï 😀' LIMIT 1000|
@@ -8473,7 +8473,7 @@ source: src/sql_snapshots.rs
 
 [generic] we"ird LessOrEqual · glob metacharacters
   |SELECT * FROM "public"."accounts" WHERE "we""ird" <= '*?[a]\\' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] we"ird LessOrEqual · empty
   |SELECT * FROM "public"."accounts" WHERE "we""ird" <= '' LIMIT 1000|

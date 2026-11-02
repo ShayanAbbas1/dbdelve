@@ -1922,14 +1922,14 @@ source: src/sql_snapshots.rs
 [generic] base · skip=false
   |INSERT INTO "public"."accounts" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
   |('-2.5', NULL, 'false', '')|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] base · skip=true
   error: |This engine cannot skip rows that already exist.|
 
 [generic] json cell · skip=false
   |INSERT INTO "public"."accounts" ("id", "doc") VALUES ('1', '{"a":[1,"it''s",null,{"b":true}],"c":"x\\\\\\\\y"}')|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] json cell · skip=true
   error: |This engine cannot skip rows that already exist.|
@@ -2023,7 +2023,7 @@ source: src/sql_snapshots.rs
 [generic] relation plain · skip=false
   |INSERT INTO "public"."accounts" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
   |('-2.5', NULL, 'false', '')|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] relation plain · skip=true
   error: |This engine cannot skip rows that already exist.|
@@ -2031,7 +2031,7 @@ source: src/sql_snapshots.rs
 [generic] relation quotes · skip=false
   |INSERT INTO "my ""odd"" schema"."it's `tick` ""dq""" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
   |('-2.5', NULL, 'false', '')|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] relation quotes · skip=true
   error: |This engine cannot skip rows that already exist.|
@@ -2039,7 +2039,7 @@ source: src/sql_snapshots.rs
 [generic] relation unicode · skip=false
   |INSERT INTO "données"."Ünïcødé 表" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
   |('-2.5', NULL, 'false', '')|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] relation unicode · skip=true
   error: |This engine cannot skip rows that already exist.|
@@ -2047,7 +2047,7 @@ source: src/sql_snapshots.rs
 [generic] relation reserved · skip=false
   |INSERT INTO "select"."order" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
   |('-2.5', NULL, 'false', '')|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] relation reserved · skip=true
   error: |This engine cannot skip rows that already exist.|
@@ -2055,7 +2055,7 @@ source: src/sql_snapshots.rs
 [generic] relation mixed case · skip=false
   |INSERT INTO "Sales"."OrderLines" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
   |('-2.5', NULL, 'false', '')|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] relation mixed case · skip=true
   error: |This engine cannot skip rows that already exist.|
@@ -2063,7 +2063,7 @@ source: src/sql_snapshots.rs
 [generic] relation brackets and dots · skip=false
   |INSERT INTO "[dbo]"."a.b" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
   |('-2.5', NULL, 'false', '')|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] relation brackets and dots · skip=true
   error: |This engine cannot skip rows that already exist.|
@@ -2071,7 +2071,7 @@ source: src/sql_snapshots.rs
 [generic] relation backslash · skip=false
   |INSERT INTO "back\\slash"."trail\\" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
   |('-2.5', NULL, 'false', '')|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
 
 [generic] relation backslash · skip=true
   error: |This engine cannot skip rows that already exist.|
