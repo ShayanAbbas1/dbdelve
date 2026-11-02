@@ -43,3 +43,13 @@ Zed's Ayu, Gruvbox and One theme files, from [`assets/themes`](https://github.co
 - **License:** MIT
 - **Upstream:** https://github.com/atom/atom/tree/master/packages/one-dark-ui
 - **Full License Text:** [licenses/MIT-one.txt](licenses/MIT-one.txt)
+
+## unixODBC
+
+Statically linked into the ODBC bridge (`dbdelve-odbc`) that the macOS app bundle carries, through the `unix-odbc` crate. Linux builds use the system's `libodbc.so.2` and Windows builds the system's `odbc32`, so neither redistributes it.
+
+- **Copyright:** Copyright the unixODBC authors
+- **License:** LGPL-2.1-or-later
+- **Upstream:** https://www.unixodbc.org (the crate vendors release 2.3.14)
+- **Source:** published at the upstream address above. The bridge that links it is in this repository under `plugins/odbc/`.
+- **Full License Text:** [licenses/LGPL-2.1.txt](licenses/LGPL-2.1.txt)
