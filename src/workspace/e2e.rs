@@ -7,11 +7,12 @@ use std::{borrow::Cow, cell::RefCell, rc::Rc};
 use gpui::{
     App, AppContext as _, Entity, Focusable as _, TestAppContext, VisualTestContext, Window,
 };
-use gpui_component::Root;
+use gpui_component::{Root, input::InputState};
 
 use super::Workspace;
 use crate::{
     actions::CancelQuery,
+    connection_form::ConnectionForm,
     db::{CancelToken, ConnectionConfig, Engine, ExternalConfig, Fetch, SshTunnel},
     explorer, keybindings,
     palette::{Mode as PaletteMode, Scope},
@@ -1884,6 +1885,67 @@ fn an_odbc_profile_saves_and_restores_as_it_was(cx: &mut TestAppContext) {
             });
         });
         assert_eq!(cx.update(|_, cx| external(workspace.read(cx))), restored);
+
+        quit(workspace, cx);
+    });
+}
+
+/// The ODBC tile is picked from the engine picker by keyboard, and the
+/// keyboard goes on working through both field-set changes: the Connection
+/// field takes it, and Host takes it back once Postgres unmounts that field.
+#[gpui::test]
+fn picking_the_odbc_tile_puts_the_keyboard_in_its_connection_string(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_with(cx, vec![store::tests::odbc_plugin()]);
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.new_connection_in(None, window, cx);
+            });
+        });
+        settle(cx);
+        let has_keyboard =
+            |cx: &mut VisualTestContext, field: fn(&ConnectionForm) -> &Entity<InputState>| {
+                cx.update(|window, cx| {
+                    let workspace = workspace.read(cx);
+                    let form = workspace.form.as_ref().expect("the form is open");
+                    field(form).focus_handle(cx).is_focused(window)
+                })
+            };
+        let pick = |cx: &mut VisualTestContext, typed: &str| {
+            cx.update(|window, cx| {
+                workspace.update(cx, |workspace, cx| {
+                    workspace.open_palette(PaletteMode::Engine, window, cx);
+                });
+            });
+            settle(cx);
+            cx.simulate_input(typed);
+            cx.simulate_keystrokes("enter");
+            settle(cx);
+        };
+
+        pick(cx, "odbc");
+        assert!(palette_mode(&workspace, cx).is_none());
+        workspace.read_with(cx, |workspace, _| {
+            let form = workspace.form.as_ref().unwrap();
+            assert_eq!(form.target().fields(), crate::db::Fields::ConnectionString);
+            assert_eq!(form.engine, Engine::Generic);
+            assert_eq!(form.mode, crate::sql::Mode::ReadOnly);
+        });
+        assert!(has_keyboard(cx, |form| &form.connection));
+        cx.simulate_input("Db2Dev");
+        let typed = cx.update(|_, cx| {
+            let workspace = workspace.read(cx);
+            let form = workspace.form.as_ref().unwrap();
+            form.connection.read(cx).value().to_string()
+        });
+        assert_eq!(typed, "Db2Dev");
+
+        pick(cx, "postgres");
+        workspace.read_with(cx, |workspace, _| {
+            let form = workspace.form.as_ref().unwrap();
+            assert_eq!(form.target(), crate::db::Target::built_in(Engine::Postgres));
+        });
+        assert!(has_keyboard(cx, |form| &form.host));
 
         quit(workspace, cx);
     });
