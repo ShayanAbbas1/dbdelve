@@ -240,7 +240,12 @@ driver printing to stdout would corrupt them (`ponytail:` not on Windows).
   refused when the driver keeps its own value): a driver otherwise rewrites
   `{fn …}`, `{d '…'}` and `{call …}`, which is a rewrite of the user's statement
   (hard rule 1). A `?` is still a parameter marker to some drivers; their error
-  is shown as is.
+  is shown as is. The read-back trusts the driver's answer, and psqlODBC answers
+  on while it keeps scanning: `SELECT {d '2020-01-01'}` returns a date there,
+  seen live on 18.00.0005, where Db2 refuses the same escape. Postgres has no
+  bare `{` in its grammar, so valid SQL is unchanged and only a statement that
+  would have been a syntax error runs rewritten. Accepted as a driver limit;
+  refusing a bare `{` for that driver is the upgrade.
 - **Wide text everywhere** (`SQLExecDirectW`, `SQL_C_WCHAR`), so a client code
   page derived from a C or POSIX locale cannot mangle text. Binary columns are
   read as bytes and sent as `0x…` hex text, as is a driver's own type code
