@@ -11,6 +11,8 @@
 
 use std::env;
 use std::sync::OnceLock;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use super::echo;
 use crate::db::conformance::{COLUMNS, Fixture, Subject, sql_find, sql_read};
@@ -18,6 +20,7 @@ use crate::db::plugin::Plugin;
 use crate::db::target::Driver;
 use crate::db::{
     CancelToken, Connection, ConnectionConfig, Engine, ExternalConfig, Fetch, QueryResult, Target,
+    is_cancel,
 };
 
 /// A finite read, since the bridge drains a capped read to its end rather than
@@ -137,6 +140,109 @@ fn live_psqlodbc_read_only_hold_is_the_servers() {
     assert!(message.contains("read-only transaction"), "{message}");
     run(&connection, "INSERT INTO dbdelve_odbc_hold VALUES (1)");
     run(&connection, "DROP TABLE dbdelve_odbc_hold");
+}
+
+/// A timeout is the server ending the statement, not the user's Cancel, and
+/// the session it happens on carries on.
+#[test]
+#[ignore = "needs a Postgres and psqlODBC: set dbdelve_ODBC_POSTGRES, _USER and _PASSWORD"]
+fn live_psqlodbc_a_statement_timeout_leaves_the_session_open() {
+    let connection = open_as(ExternalConfig {
+        statement_timeout: 1,
+        ..config()
+    });
+    let started = Instant::now();
+    let error = connection
+        .query(
+            "SELECT pg_sleep(30)",
+            &CancelToken::default(),
+            Fetch::default(),
+        )
+        .expect_err("the timeout should have ended the statement");
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert!(!is_cancel(target(), &error), "{}", error.message);
+    assert!(
+        error.message.contains("statement timeout"),
+        "{}",
+        error.message
+    );
+    assert!(!connection.is_lost());
+    assert_eq!(
+        run(&connection, "SELECT 1 AS one").rows[0].get(0),
+        Some("1")
+    );
+}
+
+/// `nextval` is not undone by anything and each run of the statement takes one,
+/// so the sequence counts how many times the server saw it.
+#[test]
+#[ignore = "needs a Postgres and psqlODBC: set dbdelve_ODBC_POSTGRES, _USER and _PASSWORD"]
+fn live_psqlodbc_a_killed_bridge_is_a_reset_and_the_statement_is_not_replayed() {
+    let observer = open();
+    run(&observer, "DROP SEQUENCE IF EXISTS dbdelve_odbc_replay");
+    run(&observer, "CREATE SEQUENCE dbdelve_odbc_replay");
+    let runs = || {
+        let sql = "SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM dbdelve_odbc_replay";
+        run(&observer, sql).rows[0].get(0).map(str::to_string)
+    };
+
+    let connection = super::Connection::open(&config()).unwrap();
+    let running = {
+        let connection = connection.clone();
+        thread::spawn(move || {
+            connection.query(
+                "SELECT nextval('dbdelve_odbc_replay'), pg_sleep(30)",
+                &CancelToken::default(),
+                Fetch::default(),
+            )
+        })
+    };
+    let started = Instant::now();
+    while runs().as_deref() != Some("1") {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the statement never reached the server"
+        );
+    }
+
+    connection.host.kill();
+    let error = running
+        .join()
+        .unwrap()
+        .expect_err("the kill should have ended the statement");
+    assert!(
+        error
+            .message
+            .contains("The connection was reset: any open transaction"),
+        "{}",
+        error.message
+    );
+    assert!(
+        error
+            .message
+            .ends_with("Whether the statement that was running committed is unknown."),
+        "{}",
+        error.message
+    );
+    assert!(connection.is_lost());
+    let again = connection
+        .query("SELECT 1", &CancelToken::default(), Fetch::default())
+        .expect_err("a reset session should stay reset");
+    assert!(
+        again.message.contains("The connection was reset"),
+        "{}",
+        again.message
+    );
+    assert_eq!(runs().as_deref(), Some("1"));
+
+    // The server has not noticed its client went, and the sleep's backend
+    // holds a lock the DROP would wait out.
+    run(
+        &observer,
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+         WHERE query LIKE 'SELECT nextval(''dbdelve_odbc_replay''%'",
+    );
+    run(&observer, "DROP SEQUENCE dbdelve_odbc_replay");
 }
 
 /// The compose database as the bastion sees it, by service name and the port
