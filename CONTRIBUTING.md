@@ -35,7 +35,8 @@ cargo run
 ```
 
 To see the ODBC tile, stage the bridge first with `dev/plugins.sh` (`--release` for the
-release profile, `--echo` to add the test plugin).
+release profile, `--echo` to add the test plugin). On Linux the bridge links the
+system unixODBC, so building it needs `sudo apt install unixodbc-dev`.
 
 `docker compose up -d` starts the Postgres, MySQL, MariaDB, SQL Server, MongoDB, Redis and ClickHouse dev databases (see
 `compose.yaml`). It also starts two SSH bastions for testing tunnels;
@@ -248,6 +249,7 @@ chore(release): bump version to 0.3.8
 | `postgres`, `mysql`, `sqlite`, `mssql`, `mongo`, `redis`, `snowflake`, `turso`, `duckdb`, `clickhouse` | One engine's module in `src/db/` (MySQL covers MariaDB) |
 | `db`          | Engine dispatch and what every engine shares (`src/db/mod.rs`)          |
 | `ssh`         | SSH tunnels                                                             |
+| `plugins`     | The plugin host, the protocol and the bridges under `plugins/`          |
 | `connections` | Connection form, profiles, TLS                                          |
 | `explorer`    | The schema/object tree                                                  |
 | `editor`      | Query editor, SQL handling, completion                                  |
