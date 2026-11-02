@@ -51,6 +51,25 @@ Without `x11` or `wayland` the Linux backend panics on the first frame.
   `security-framework` in with it. Accepted, because it is the only maintained
   TDS client and its only TLS that is not OpenSSL.
 
+- `arrow-ipc` (in `plugins/protocol`): its `lz4` and `zstd` features are what
+  decode a compressed batch, and protocol 1 forbids compression because a
+  compressed body's decoded size is not its declared size; left out, one cannot
+  decode at all, whatever slips past the check. The arrow crates are pinned to
+  the version duckdb already locks, so host and graph share one copy.
+- `odbc-api` (in `plugins/odbc` only): its default `prompt` feature pulls in
+  winit for a driver's login dialog, which a headless bridge never shows. Raw
+  calls go through its `odbc_api::sys` re-export rather than a direct
+  `odbc-sys` dependency, so the graph holds the one version odbc-api locks.
+
+**unixODBC is compiled into the macOS bridge and nowhere else.** macOS ships no
+driver manager, so the bridge takes odbc-api's `vendored-unix-odbc` (unixODBC's
+C sources built with `cc`, linked statically: a C compiler is the only build
+need, no Homebrew), as a `cfg(target_os = "macos")` dependency, because
+odbc-sys's `static` panics in its build script on Windows and Linux links the
+system `libodbc.so.2` (`unixodbc-dev` to build). It is LGPL-2.1-or-later,
+admitted crate by crate in `deny.toml`. The app itself links no ODBC; only the
+bridge process loads a driver manager or a vendor driver.
+
 **Build profiles are deliberate.** `[profile.dev.package."*"] opt-level = 3`
 builds dependencies optimized, because GPUI lays out and shapes text on the CPU
 every frame; deleting it makes the grid crawl. `[profile.release]` sets
