@@ -718,15 +718,17 @@ pub(crate) fn substring(
     )
 }
 
-const LIKE_PLAIN_REFUSAL: &str = r"Generic SQL has no LIKE escape DBDelve can write, so a value with %, _ or \ cannot be matched exactly.";
+const LIKE_PLAIN_REFUSAL: &str = r"Generic SQL has no LIKE escape DBDelve can write, so a value with %, _, [ or \ cannot be matched exactly.";
 
+/// `[` opens a character class on SQL Server and Sybase, which Generic may be
+/// speaking to.
 fn refuses_plain_like(spec: &EngineSpec, operator: Operator, value: &str) -> bool {
     spec.sql.substring == SubstringMatch::LikePlain
         && matches!(
             operator,
             Operator::Contains | Operator::NotContains | Operator::StartsWith | Operator::EndsWith
         )
-        && value.contains(['%', '_', '\\'])
+        && value.contains(['%', '_', '\\', '['])
 }
 
 /// Why a bar is refused outright, for the caller to say. A refused bar writes no
@@ -811,14 +813,16 @@ pub(crate) fn stored_filter(bar: &FilterBar) -> store::StoredFilter {
 /// not record one, it is derived from the bars, so an operator the new engine
 /// cannot express drops out rather than being sent to a server that cannot
 /// parse it (spec §7). A tab stored before the bars existed has none, and keeps
-/// the expression it came with.
+/// the expression it came with. Bars the new engine refuses outright
+/// ([`refusal`]) keep it too: derived, they would drop out and widen the rows,
+/// and the tab's run refuses them with the sentence instead.
 pub(crate) fn restored_filter(
     engine: Engine,
     stored: &store::StoredObject,
 ) -> (String, Vec<FilterBar>) {
     let bars = stored_bars(stored);
     let written_here = stored.filter_engine.as_deref() == Some(engine.as_str());
-    let filter = match bars.is_empty() || written_here {
+    let filter = match bars.is_empty() || written_here || refusal(engine, &bars).is_some() {
         true => stored.filter.clone(),
         false => derived_filter(engine, &bars, &[]),
     };
@@ -1811,6 +1815,35 @@ mod tests {
     }
 
     #[test]
+    fn a_tab_restored_onto_an_engine_that_refuses_its_bars_keeps_its_filter() {
+        // Derived, the refused bar would drop out and the tab would read every
+        // row; kept, the run refuses it and says why.
+        let filter = r#""name" ILIKE '%50\%%' ESCAPE '\'"#;
+        let stored = store::StoredObject {
+            schema: "public".into(),
+            name: "accounts".into(),
+            routine: false,
+            structure: false,
+            kind: RelationKind::default(),
+            filter: filter.into(),
+            filter_engine: Some(Engine::Postgres.as_str().into()),
+            origin: None,
+            filters: Vec::new(),
+            active: true,
+            bars: vec![store::StoredFilter {
+                column: "name".into(),
+                value: "50%".into(),
+                operator: Operator::Contains.slug().into(),
+                conjunction: "AND".into(),
+                raw: false,
+            }],
+        };
+        let (restored, bars) = restored_filter(Engine::Generic, &stored);
+        assert_eq!(restored, filter);
+        assert_eq!(refusal(Engine::Generic, &bars), Some(LIKE_PLAIN_REFUSAL));
+    }
+
+    #[test]
     fn a_tab_restored_onto_its_own_engine_runs_the_filter_it_ran() {
         // Spelled by a column type the restore has not loaded: re-derived, it
         // would be `N'0x00FF'`, match nothing, and miss the grid snapshot.
@@ -2158,7 +2191,7 @@ mod tests {
             let sql = explorer::preview_sql(Engine::Generic, "public", "t", &written, Some(100), 0);
             assert!(sql::is_generated_select(Engine::Generic, &sql), "{sql}");
         }
-        for value in ["50%", "a_b", r"a\b"] {
+        for value in ["50%", "a_b", r"a\b", "a[b"] {
             let bars = [bar(Some("c"), Operator::Contains, value)];
             assert_eq!(predicate(Operator::Contains, value), None);
             assert_eq!(refusal(Engine::Generic, &bars), Some(LIKE_PLAIN_REFUSAL));

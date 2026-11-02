@@ -250,12 +250,22 @@ impl Workspace {
             structure,
             count,
             sent_from,
+            filters,
             ..
         } = &mut tab.body
         else {
             return;
         };
         if !change(filter, sort, limit, offset) {
+            return;
+        }
+        // Bars this engine refuses reach here only from a tab restored under
+        // another one, whose filter is still that engine's (`restored_filter`):
+        // the tab stays as it was and says why, as `apply_filter` leaves it.
+        if let Some(sentence) = crate::filter::refusal(engine, &crate::filter::filter_bars(filters))
+        {
+            *stale = false;
+            self.note(sentence.to_string(), cx);
             return;
         }
         // Discarded, not cancelled: on most engines a cancel stops whatever
