@@ -62,7 +62,10 @@ pub(crate) fn recognise(text: &str) -> Recognised {
         .map(|(scheme, _)| scheme)
         .filter(|scheme| !scheme.is_empty());
     match scheme {
-        Some(scheme) => Engine::parse(scheme).map_or(Recognised::Unknown, Recognised::Url),
+        Some(scheme) => Engine::parse(scheme)
+            .ok()
+            .filter(|engine| engine.has_built_in_driver())
+            .map_or(Recognised::Unknown, Recognised::Url),
         None => {
             let typed = text.to_ascii_lowercase();
             if Engine::schemes().any(|(spelling, _)| spelling.starts_with(&typed)) {
@@ -947,7 +950,13 @@ mod tests {
         for text in ["p", "post", "POSTGRESQL", "mongodb+", "redi"] {
             assert_eq!(recognise(text), Recognised::Typing, "{text}");
         }
-        for text in ["localhost:5432", "http://example.com", "hello world", "xyz"] {
+        for text in [
+            "localhost:5432",
+            "http://example.com",
+            "hello world",
+            "xyz",
+            "generic://x",
+        ] {
             assert_eq!(recognise(text), Recognised::Unknown, "{text}");
         }
     }
