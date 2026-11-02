@@ -5033,6 +5033,7 @@ mod live {
             key: "id",
             columns: &COLUMNS,
             read: sql_read(Engine::ClickHouse, "dbdelve_dev"),
+            endless_rows: None,
             endless: "SELECT number FROM system.numbers",
             runaway: RUNAWAY,
             read_only_refusal: "readonly mode",

@@ -2259,6 +2259,7 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
             key: "id",
             columns: &COLUMNS,
             read: sql_read(Engine::Sqlite, "main"),
+            endless_rows: None,
             endless: "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n) \
                       SELECT i FROM n",
             runaway: FOREVER,

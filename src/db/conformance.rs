@@ -26,6 +26,9 @@ pub(super) struct Subject {
     pub key: &'static str,
     pub columns: &'static [&'static str],
     pub read: String,
+    /// What `endless` counts to, on a subject that drains it instead of
+    /// stopping at the limit.
+    pub endless_rows: Option<usize>,
     pub endless: &'static str,
     pub runaway: &'static str,
     pub read_only_refusal: &'static str,
@@ -358,11 +361,8 @@ pub(super) fn row_limit_stops_an_eligible_read(subject: &Subject) {
         // transaction drains the statement to its end instead, so the
         // subject's `endless` is finite there and counted whole.
         assert_eq!(result.stopped, None, "{at}");
-        assert!(
-            result.capped_from.is_some_and(|total| total > 3),
-            "{at}: capped_from {:?}",
-            result.capped_from
-        );
+        assert!(subject.endless_rows.is_some(), "{at}: no count to drain to");
+        assert_eq!(result.capped_from, subject.endless_rows, "{at}");
     }
 }
 

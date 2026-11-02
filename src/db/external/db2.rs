@@ -109,6 +109,7 @@ fn conformance_subject() -> Subject {
             quoted("ID"),
             quoted("ID"),
         ),
+        endless_rows: Some(1_000_000),
         endless: MILLION,
         runaway: RUNAWAY,
         // Generic holds nothing, so the scenario takes its no-op form.

@@ -2269,6 +2269,7 @@ mod tests {
             key: "id",
             columns: &COLUMNS,
             read: sql_read(engine, "dbdelve_dev"),
+            endless_rows: None,
             endless: LIVE_ENDLESS_SELECT,
             runaway: LIVE_SLOW_SELECT,
             read_only_refusal: "READ ONLY",

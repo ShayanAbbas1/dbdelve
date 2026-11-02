@@ -4666,6 +4666,7 @@ mod tests {
             key: "_id",
             columns: &COLUMNS_BY_ID,
             read: "db.conformance.find({_id: {$lt: 900}}).sort({_id: 1})".to_string(),
+            endless_rows: None,
             endless: "db.events.find()",
             runaway: SLOW,
             read_only_refusal: "",

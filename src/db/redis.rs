@@ -3903,6 +3903,7 @@ mod tests {
             key: "key",
             columns: &["key", "type", "ttl", "value"],
             read: "SCAN 0 MATCH item:* COUNT 10".to_string(),
+            endless_rows: None,
             endless: "SCAN 0 MATCH item:* COUNT 10",
             runaway: "BLPOP live:never 0",
             read_only_refusal: "",

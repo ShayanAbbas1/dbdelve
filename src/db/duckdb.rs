@@ -2539,6 +2539,7 @@ mod tests {
             key: "id",
             columns: &COLUMNS,
             read: sql_read(Engine::DuckDb, "main"),
+            endless_rows: None,
             endless: "SELECT range FROM range(1000000000)",
             runaway: "SELECT count(*) FROM range(100000000000)",
             read_only_refusal: "",
