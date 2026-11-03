@@ -208,6 +208,12 @@ The core of the mode check is in `AGENTS.md`, "Connection modes". The detail:
   literal or quoted name, which ends it a byte later where it escapes. An
   unreadable verdict asks; a wrong read verdict on Generic would run a write in
   Read-only with nothing on the server to stop it.
+- **A `--` comment a lone carriage return runs through** is unreadable on every
+  dialect whose server may end the comment there and sqlparser does not
+  (`line_comment_past_carriage_return`): DuckDB's tokenizer does, Snowflake's
+  and SQL Server's are not known not to, and Generic's server is unknown.
+  Postgres's dialect already stops where Postgres does, and MySQL, MariaDB,
+  SQLite and Turso run on to the newline as sqlparser does.
 - **`IF` conditions.** T-SQL's `IF … ELSE` and the `IF … END IF` Postgres, MySQL
   and Snowflake parse to the same variant. `condition_verdict` reads a plain
   name, value, comparison or `IS …` test as a read, and a subquery (`EXISTS`,

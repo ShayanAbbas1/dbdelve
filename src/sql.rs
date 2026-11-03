@@ -2633,7 +2633,11 @@ pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
         }
         .max(calls.clone())
     };
-    if spec.sql.parser_dialect == ParserDialect::Generic && lexes_apart(dialect.as_ref(), sql) {
+    let parser_dialect = spec.sql.parser_dialect;
+    if parser_dialect == ParserDialect::Generic && lexes_apart(dialect.as_ref(), sql)
+        || !ends_line_comments_as_sqlparser_does(parser_dialect)
+            && line_comment_past_carriage_return(dialect.as_ref(), sql)
+    {
         return unreadable();
     }
     let Ok(statements) = SqlParser::parse_sql(dialect.as_ref(), sql) else {
@@ -2735,8 +2739,8 @@ fn opens_read_write(modes: &[TransactionMode]) -> bool {
 /// quoted name, which ends it a byte later on a server where it escapes; a
 /// token opening with `$`, a dollar-quoted string or placeholder to the
 /// tokenizer and a name to Db2, so `$$; DELETE FROM t --$$` hides a `DELETE`
-/// Db2 runs; and a `--` comment a lone carriage return runs through, which
-/// psqlODBC ends there.
+/// Db2 runs. A `--` comment a lone carriage return runs through, which
+/// psqlODBC ends there, is [`line_comment_past_carriage_return`]'s.
 ///
 /// Generic's tokenizer replaces a `/*! … */` with the tokens inside it, so no
 /// comment token is left to see, and those tokens' spans are placed as if the
@@ -2754,9 +2758,6 @@ fn lexes_apart(dialect: &dyn Dialect, sql: &str) -> bool {
                 Token::Whitespace(Whitespace::MultiLineComment(comment)) => {
                     comment.contains("/*") || comment.starts_with('!')
                 }
-                Token::Whitespace(Whitespace::SingleLineComment { comment, .. }) => {
-                    carriage_return_inside(comment)
-                }
                 Token::Whitespace(_) => false,
                 Token::DollarQuotedString(_) => true,
                 Token::Placeholder(placeholder) if placeholder.starts_with('$') => true,
@@ -2766,6 +2767,29 @@ fn lexes_apart(dialect: &dyn Dialect, sql: &str) -> bool {
                 }
             }
     }) || whole && end != sql.len()
+}
+
+/// Whether the servers read in `dialect` end a `--` comment where sqlparser's
+/// tokenizer does: Postgres's dialect stops at a carriage return as Postgres
+/// does, and MySQL, MariaDB, SQLite and Turso, like the tokenizer elsewhere,
+/// run on to a newline. DuckDB's own tokenizer stops at a carriage return, and
+/// Snowflake's and SQL Server's are not known to agree.
+fn ends_line_comments_as_sqlparser_does(dialect: ParserDialect) -> bool {
+    matches!(
+        dialect,
+        ParserDialect::PostgreSql | ParserDialect::MySql | ParserDialect::Sqlite
+    )
+}
+
+/// Whether any `--` comment in `sql` runs on past a carriage return.
+fn line_comment_past_carriage_return(dialect: &dyn Dialect, sql: &str) -> bool {
+    located_prefix(dialect, sql).0.iter().any(|(token, _)| {
+        matches!(
+            token,
+            Token::Whitespace(Whitespace::SingleLineComment { comment, .. })
+                if carriage_return_inside(comment)
+        )
+    })
 }
 
 /// Whether a `--` comment's text runs on past a carriage return, where a
@@ -7579,6 +7603,64 @@ mod tests {
             "SELECT 1\rFROM t",
         ] {
             assert_eq!(classify(Engine::Generic, sql), Verdict::READ, "{sql:?}");
+        }
+    }
+
+    /// DuckDB's tokenizer ends a `--` comment at a carriage return as well as a
+    /// newline, and sqlparser's DuckDB dialect only at a newline, so
+    /// `SELECT 1 -- c\r; DROP TABLE t` was a read to the classifier and a
+    /// `DROP` to the server, run with no confirmation and, with no hold behind
+    /// DuckDB's Read-only, in Read-only too. Snowflake's and SQL Server's lexers
+    /// are not known to agree either. Postgres's dialect already ends the
+    /// comment where Postgres does, and MySQL, MariaDB, SQLite and Turso end it
+    /// at a newline as sqlparser does.
+    #[test]
+    fn a_line_comment_a_lone_carriage_return_may_end_is_unreadable_where_lexers_part() {
+        let parted = [
+            "SELECT 1 --\rDROP TABLE t",
+            "SELECT 1 -- c\r; DELETE FROM t WHERE id = 1",
+            "--\rDELETE FROM t WHERE id = 1",
+            "-- one\n-- two\rTRUNCATE t",
+        ];
+        let agreed = ["-- c\r\nSELECT 1", "SELECT 1 -- c\r", "SELECT 1\rFROM t"];
+        for engine in [
+            Engine::DuckDb,
+            Engine::Snowflake,
+            Engine::SqlServer,
+            Engine::Generic,
+        ] {
+            for sql in parted {
+                let verdict = classify(engine, sql);
+                assert!(
+                    verdict.destructive.contains(&Destructive::Unreadable),
+                    "{engine:?} {sql:?}: {verdict:?}"
+                );
+            }
+            for sql in agreed {
+                assert_eq!(classify(engine, sql), Verdict::READ, "{engine:?} {sql:?}");
+            }
+        }
+
+        assert_eq!(
+            classify(
+                Engine::Postgres,
+                "SELECT 1 -- c\r; DELETE FROM t WHERE id = 1"
+            ),
+            Verdict::WRITE
+        );
+        assert_eq!(
+            classify(Engine::Postgres, "-- one\n-- two\rTRUNCATE t"),
+            Verdict::destroys(Destructive::Truncate)
+        );
+        for engine in [
+            Engine::MySql,
+            Engine::MariaDb,
+            Engine::Sqlite,
+            Engine::Turso,
+        ] {
+            for sql in parted[1..].iter().chain(&agreed) {
+                assert_eq!(classify(engine, sql), Verdict::READ, "{engine:?} {sql:?}");
+            }
         }
     }
 
