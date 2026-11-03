@@ -43,9 +43,9 @@ impl Workspace {
             return;
         };
         let entering_read_only = mode == Mode::ReadOnly;
-        let read_only_task = cx
-            .background_executor()
-            .spawn(async move { connection.set_read_only(entering_read_only) });
+        let read_only_task = spawn_blocking(cx.background_executor(), move || {
+            connection.set_read_only(entering_read_only)
+        });
         cx.spawn(async move |workspace, cx| {
             if let Err(error) = read_only_task.await {
                 // Only entering Read-only is worth a notice: a failure here

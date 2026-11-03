@@ -190,12 +190,12 @@ impl Workspace {
             cancels
         };
         cx.notify();
-        let cancel_task = cx.background_executor().spawn(on_own_thread(move || {
+        let cancel_task = spawn_blocking(cx.background_executor(), move || {
             cancels
                 .iter()
                 .map(|cancel| connection.cancel(cancel))
                 .fold(Ok(()), Result::and)
-        }));
+        });
 
         cx.spawn(async move |workspace, cx| {
             if let Err(error) = cancel_task.await {
@@ -2345,13 +2345,10 @@ impl Workspace {
             let lost = !alongside && result.is_err() && connection.is_lost();
             (result, lost)
         };
-        // Up to eight of a queue's statements each hold a thread for as long
-        // as the server takes, which on Linux can fill GPUI's background
-        // executor and stall the Cancel spawned behind them.
-        let query_task = match alongside {
-            true => cx.background_executor().spawn(on_own_thread(work)),
-            false => cx.background_executor().spawn(async move { work() }),
-        };
+        // Blocks for as long as the server takes, and statements queued
+        // behind it on the same session block on its lock, so none of them
+        // may hold one of the executor's threads (`spawn_blocking`).
+        let query_task = spawn_blocking(cx.background_executor(), work);
 
         cx.spawn(async move |workspace, cx| {
             let (result, lost) = query_task.await;

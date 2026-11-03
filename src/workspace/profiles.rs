@@ -294,8 +294,9 @@ impl Workspace {
 
         let password_task = {
             let id = id.clone();
-            cx.background_executor()
-                .spawn(async move { store::password(&id).ok().flatten() })
+            spawn_blocking(cx.background_executor(), move || {
+                store::password(&id).ok().flatten()
+            })
         };
         cx.spawn_in(window, async move |workspace, cx| {
             let password = password_task.await;
@@ -749,7 +750,7 @@ impl Workspace {
             .map_or(form.mode, |profile| profile.mode);
         form.error = None;
 
-        let probe = cx.background_executor().spawn(async move {
+        let probe = spawn_blocking(cx.background_executor(), move || {
             // A blank password on an existing profile means "keep the saved
             // one", which is what the connect would use.
             if let Some(id) = editing
@@ -895,7 +896,7 @@ impl Workspace {
         let in_transaction = profile.in_transaction;
         cx.notify();
 
-        let refresh_task = cx.background_executor().spawn(async move {
+        let refresh_task = spawn_blocking(cx.background_executor(), move || {
             // A failed read inside the user's transaction fails the transaction
             // on Postgres, so it never goes on that session: with no other to
             // be had, an in-memory database's among them, the refresh says so.
@@ -1001,9 +1002,9 @@ impl Workspace {
             return;
         };
         let (id, generation) = (profile.id.clone(), profile.generation);
-        let fetch = cx
-            .background_executor()
-            .spawn(async move { connection.databases(target.engine) });
+        let fetch = spawn_blocking(cx.background_executor(), move || {
+            connection.databases(target.engine)
+        });
         cx.spawn_in(window, async move |workspace, cx| {
             let result = fetch.await;
             _ = workspace.update_in(cx, |workspace, window, cx| {
@@ -1229,7 +1230,7 @@ impl Workspace {
         let id = profile.id.clone();
         connection.set_database(profile.config.database_name().as_deref());
         let applying = connection.clone();
-        let set = on_own_thread(move || applying.apply_schema());
+        let set = spawn_blocking(cx.background_executor(), move || applying.apply_schema());
         self.refresh_explorer(&id, cx);
         cx.notify();
         cx.spawn(async move |workspace, cx| {
@@ -1334,7 +1335,7 @@ impl Workspace {
         // whichever thread applies last applies the latest.
         connection.set_schema(Some(&name));
         let applying = connection.clone();
-        let set = on_own_thread(move || applying.apply_schema());
+        let set = spawn_blocking(cx.background_executor(), move || applying.apply_schema());
         cx.spawn(async move |workspace, cx| {
             let Err(error) = set.await else {
                 return;
@@ -1420,7 +1421,7 @@ impl Workspace {
         }
         self.importing = true;
         self.note(format!("Reading {} connections…", source.label()), cx);
-        let read = cx.background_executor().spawn(async move { source.read() });
+        let read = spawn_blocking(cx.background_executor(), move || source.read());
         cx.spawn_in(window, async move |workspace, cx| {
             let report = read.await;
             _ = workspace.update_in(cx, |workspace, window, cx| {
@@ -1590,9 +1591,9 @@ impl Workspace {
         self.refresh_explorer(&id, cx);
         cx.notify();
 
-        let connection_task = cx.background_executor().spawn({
+        let connection_task = spawn_blocking(cx.background_executor(), {
             let id = id.clone();
-            async move {
+            move || {
                 // A file engine has nothing to authenticate to, so it never
                 // reaches the Keychain — and never triggers its prompt.
                 if let Some(slot) = config.password_mut()
@@ -1712,9 +1713,7 @@ impl Workspace {
             self.catalog_landed(id, cx);
             return;
         };
-        let catalog_task = cx
-            .background_executor()
-            .spawn(async move { connection.catalog() });
+        let catalog_task = spawn_blocking(cx.background_executor(), move || connection.catalog());
 
         let id = id.to_string();
         cx.spawn(async move |workspace, cx| {
@@ -1787,9 +1786,7 @@ impl Workspace {
             }
             return;
         };
-        let routines_task = cx
-            .background_executor()
-            .spawn(async move { connection.routines() });
+        let routines_task = spawn_blocking(cx.background_executor(), move || connection.routines());
 
         let id = id.to_string();
         cx.spawn(async move |workspace, cx| {
@@ -1840,9 +1837,7 @@ impl Workspace {
         else {
             return;
         };
-        let sizes_task = cx
-            .background_executor()
-            .spawn(async move { connection.sizes() });
+        let sizes_task = spawn_blocking(cx.background_executor(), move || connection.sizes());
 
         let id = id.to_string();
         cx.spawn(async move |workspace, cx| {
@@ -1898,9 +1893,9 @@ impl Workspace {
         let generation = profile.generation;
         let columns = profile.session.completion_columns.clone();
 
-        let task = cx.background_executor().spawn({
+        let task = spawn_blocking(cx.background_executor(), {
             let (schema, relation) = (schema.clone(), relation.clone());
-            async move { connection.structure(&schema, &relation) }
+            move || connection.structure(&schema, &relation)
         });
         cx.spawn(async move |workspace, cx| {
             let result = task.await;

@@ -246,8 +246,8 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   results ahead of those still running, and only while the tab still runs
   that same run; a switch to another profile meanwhile changes nothing about
   where it lands. Each statement's blocking call runs on a thread of its own
-  (`on_own_thread`), as a Cancel does, not on GPUI's background executor,
-  which on Linux has a thread per core and would be filled by them.
+  (`spawn_blocking`), as every blocking call does, not on GPUI's background
+  executor, which has a thread per core and would be filled by them.
   `Connection::query_alongside` opens the connection the way the
   profile's was (its tunnel, password and timeout; Postgres and MySQL share
   its side session; the Read-only hold is put on it too) and drops it when the

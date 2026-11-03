@@ -406,9 +406,9 @@ impl Workspace {
         remember_statement(&mut profile.session.history, recorded.clone());
         cx.notify();
 
-        let task = cx
-            .background_executor()
-            .spawn(async move { connection.generated(&sql, &cancel, None, None) });
+        let task = spawn_blocking(cx.background_executor(), move || {
+            connection.generated(&sql, &cancel, None, None)
+        });
         cx.spawn(async move |workspace, cx| {
             let result = task.await;
             // Before the checks below: a filter changed or a tab closed under
@@ -490,9 +490,7 @@ impl Workspace {
         }
         let cancel = cancel.clone();
         cx.notify();
-        let task = cx
-            .background_executor()
-            .spawn(async move { connection.cancel(&cancel) });
+        let task = spawn_blocking(cx.background_executor(), move || connection.cancel(&cancel));
         cx.spawn(async move |workspace, cx| {
             if let Err(error) = task.await {
                 _ = workspace.update(cx, |workspace, cx| workspace.note(error.message, cx));
@@ -561,9 +559,9 @@ impl Workspace {
         };
         let profile_id = profile.id.clone();
         let generation = profile.generation;
-        let task = cx
-            .background_executor()
-            .spawn(async move { connection.ddl(&schema, &relation, kind) });
+        let task = spawn_blocking(cx.background_executor(), move || {
+            connection.ddl(&schema, &relation, kind)
+        });
 
         cx.spawn(async move |workspace, cx| {
             let result = task.await;
@@ -609,7 +607,7 @@ impl Workspace {
         let request = profile.session.last_structure_request;
         profile.session.structure_requests.insert(id, request);
         let key = (schema.clone(), relation.clone());
-        let structure_task = cx.background_executor().spawn(async move {
+        let structure_task = spawn_blocking(cx.background_executor(), move || {
             let mut structure = connection.structure(&schema, &relation)?;
             // Only an arrow hangs off this, so a failed lookup is no arrows
             // and not a failed structure.
@@ -956,7 +954,7 @@ impl Workspace {
         });
         cx.notify();
 
-        let task = cx.background_executor().spawn(async move {
+        let task = spawn_blocking(cx.background_executor(), move || {
             reference_answers(
                 candidates
                     .into_iter()

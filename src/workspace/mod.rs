@@ -653,9 +653,7 @@ impl Workspace {
         }
 
         if workspace.settings.check_for_updates {
-            let check = cx
-                .background_executor()
-                .spawn(async { update::newer_release() });
+            let check = spawn_blocking(cx.background_executor(), update::newer_release);
             cx.spawn(async move |workspace, cx| {
                 let Some(release) = check.await else {
                     return;
@@ -2305,19 +2303,31 @@ pub(crate) const FONT_SIZE_STEP: f32 = 1.0;
 /// chrome stops at 17 because the titlebar does not grow with it: the window
 /// buttons are placed against it once, when the window opens, and past 17 the
 /// controls in it would touch its edges.
-/// Blocking work on a thread of its own, for the background executor to await
-/// without holding one of its threads: on Linux it has only as many as there
-/// are cores, and a run parked on the server for each of them would stall
-/// everything else spawned there, a Cancel included.
-pub(crate) async fn on_own_thread<T: Send + 'static>(
+/// Blocking work -- anything that talks to a connection, the network, the
+/// disk or the Keychain -- on a thread of its own, started at once, for the
+/// background executor to await. It never runs on the executor's own threads:
+/// there are only as many as cores, and one statement draining on a session
+/// with the rest queued behind it on the same session's lock would hold every
+/// one of them, stalling everything else spawned there, the Cancel that would
+/// free them included.
+pub(crate) fn spawn_blocking<T: Send + 'static>(
+    executor: &gpui::BackgroundExecutor,
     work: impl FnOnce() -> T + Send + 'static,
-) -> T {
+) -> gpui::Task<T> {
+    // GPUI's deterministic test scheduler runs every task on the test's own
+    // thread and fails a test woken from any other, so the end-to-end tests
+    // get the work inline, as one blocking task at a time.
+    if executor.is_test() {
+        return executor.spawn(async move { work() });
+    }
     let (sender, receiver) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || sender.send(work()));
-    // Dropped unsent only by a panic on that thread, which is a panic here.
-    receiver
-        .await
-        .expect("the thread running blocking work panicked")
+    executor.spawn(async move {
+        // Dropped unsent only by a panic on that thread, which is a panic here.
+        receiver
+            .await
+            .expect("the thread running blocking work panicked")
+    })
 }
 
 pub(crate) fn font_size_range(slot: FontSlot) -> (f32, f32, f32) {
@@ -2407,7 +2417,77 @@ pub(crate) fn opacity_from_percent_input(typed: &str, current: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
+    use crate::db::{CancelToken, Fetch};
+
+    /// What `task` came to, awaited from the executor as the workspace awaits
+    /// one, or None when it came to nothing within `limit`.
+    fn landed<T: Send + 'static>(
+        executor: &gpui::BackgroundExecutor,
+        task: gpui::Task<T>,
+        limit: Duration,
+    ) -> Option<T> {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        executor
+            .spawn(async move { _ = sender.send(task.await) })
+            .detach();
+        receiver.recv_timeout(limit).ok()
+    }
+
+    /// A pool as big as `ThreadedDispatcher`'s, filled by one statement
+    /// running and the rest queued behind it on the same session.
+    #[test]
+    fn statements_parked_on_one_connection_leave_the_background_executor_free() {
+        let executor = gpui::BackgroundExecutor::new(Arc::new(gpui::ThreadedDispatcher::new()));
+        let pool = std::thread::available_parallelism().map_or(2, |cores| cores.get().max(2));
+        let connection = db::Connection::open(db::ConnectionConfig::External(db::ExternalConfig {
+            plugin: db::echo::plugin(),
+            speaks: db::Engine::Postgres,
+            connection: "DSN=echo".to_owned(),
+            user: String::new(),
+            password: String::new(),
+            statement_timeout: 0,
+            ssh: None,
+        }))
+        .unwrap();
+
+        let run = CancelToken::default();
+        let sleep = spawn_blocking(&executor, {
+            let (connection, run) = (connection.clone(), run.clone());
+            move || connection.query("sleep 60000", &run, Fetch::default())
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        let queued: Vec<_> = (1..pool)
+            .map(|_| {
+                let connection = connection.clone();
+                spawn_blocking(&executor, move || {
+                    connection.query("rows 1", &CancelToken::default(), Fetch::default())
+                })
+            })
+            .collect();
+        std::thread::sleep(Duration::from_millis(200));
+
+        let timer = executor.timer(Duration::from_millis(10));
+        assert!(
+            landed(&executor, timer, Duration::from_secs(1)).is_some(),
+            "a timer did not fire while {pool} statements were parked on one connection"
+        );
+        let cancel = spawn_blocking(&executor, {
+            let connection = connection.clone();
+            move || connection.cancel(&run)
+        });
+        let cancelled = landed(&executor, cancel, Duration::from_secs(2));
+        assert!(matches!(cancelled, Some(Ok(()))), "the Cancel did not land");
+        let slept = landed(&executor, sleep, Duration::from_secs(5)).expect("the sleep ended");
+        let error = slept.expect_err("the sleep was cancelled");
+        assert!(error.message.starts_with("Cancelled"), "{}", error.message);
+        for statement in queued {
+            let ran = landed(&executor, statement, Duration::from_secs(5));
+            assert!(matches!(ran, Some(Ok(_))), "a queued statement did not run");
+        }
+    }
 
     #[test]
     fn a_window_too_narrow_to_hold_the_sidebar_does_not_relabel_the_squeeze() {

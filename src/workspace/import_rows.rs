@@ -142,9 +142,9 @@ impl Workspace {
             return;
         };
         // ponytail: whole file in memory; stream rows if multi-GB imports matter
-        let read = cx.background_executor().spawn({
+        let read = spawn_blocking(cx.background_executor(), {
             let path = path.clone();
-            async move { std::fs::read(&path) }
+            move || std::fs::read(&path)
         });
         cx.spawn_in(window, async move |workspace, cx| {
             let read = read.await;
@@ -238,9 +238,9 @@ impl Workspace {
             dialog.table.clone(),
             dialog.bytes.clone(),
         );
-        let structure = cx
-            .background_executor()
-            .spawn(async move { connection.structure(&schema, &table) });
+        let structure = spawn_blocking(cx.background_executor(), move || {
+            connection.structure(&schema, &table)
+        });
         let profile = profile.to_string();
         cx.spawn(async move |workspace, cx| {
             let structure = structure.await;
@@ -516,9 +516,7 @@ impl Workspace {
         };
         cx.notify();
 
-        let apart = cx
-            .background_executor()
-            .spawn(on_own_thread(move || connection.apart()));
+        let apart = spawn_blocking(cx.background_executor(), move || connection.apart());
         cx.spawn({
             let id = id.clone();
             async move |workspace, cx| {
@@ -605,13 +603,13 @@ impl Workspace {
             return;
         };
         let (plan, cancel) = (plan.clone(), cancel.clone());
-        let sent = cx.background_executor().spawn(on_own_thread(move || {
+        let sent = spawn_blocking(cx.background_executor(), move || {
             let sql = plan.sql(step).map_err(|message| DbError {
                 message,
                 position: None,
             })?;
             send(&connection, target, &sql, mode, &confirmed, &cancel)
-        }));
+        });
         cx.spawn(async move |workspace, cx| {
             let landed = sent.await;
             _ = workspace.update(cx, |workspace, cx| {
@@ -866,9 +864,7 @@ fn stop_import(dialog: &mut ImportDialog, cx: &mut Context<Workspace>) {
         && matches!(out, Some(Step::Begin | Step::Chunk(_)))
     {
         let cancel = cancel.clone();
-        cx.background_executor()
-            .spawn(on_own_thread(move || connection.cancel(&cancel)))
-            .detach();
+        spawn_blocking(cx.background_executor(), move || connection.cancel(&cancel)).detach();
     }
 }
 

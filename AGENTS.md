@@ -187,10 +187,13 @@ in the graph.
   makes the grid crawl.
 - **Do not put tokio on GPUI's executor.** GPUI's executor is `async-task` with
   no reactor. A tokio future on `cx.background_executor().spawn(...)` _panics_
-  the moment it touches a socket or timer. Database work uses blocking calls
-  spawned onto the background executor; a driver that is async (Postgres, SQL
-  Server, MongoDB) owns a tokio runtime per connection, and DBDelve blocks on
-  it from a background thread. Nothing that leaves `src/db/` is a future.
+  the moment it touches a socket or timer. Database work uses blocking calls,
+  each on a thread of its own the executor awaits (`workspace::spawn_blocking`),
+  never on the executor's own threads: there is one per core, and statements
+  queued on one session's lock would fill them, Cancel and every other
+  engine's work stalled behind. A driver that is async (Postgres, SQL Server,
+  MongoDB) owns a tokio runtime per connection, and DBDelve blocks on it from
+  that thread. Nothing that leaves `src/db/` is a future.
 
 ## Build, run and check
 
