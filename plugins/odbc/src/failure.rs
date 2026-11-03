@@ -3,7 +3,7 @@
 use dbdelve_plugin_protocol::{ErrorKind, Response};
 use odbc_api::handles::AnyHandle;
 
-use crate::raw;
+use crate::raw::{self, Record};
 
 /// IM002 is the driver manager finding no DSN by that name and no default
 /// driver. A `DRIVER=` name it has no entry for is not IM002: unixODBC then
@@ -19,9 +19,32 @@ pub fn from(handle: &impl AnyHandle, function: &str) -> Response {
     error(&records(handle), function)
 }
 
-/// The (SQLSTATE, message) pairs the last call on `handle` left, first first.
-pub fn records(handle: &impl AnyHandle) -> Vec<(String, String)> {
+/// The records the last call on `handle` left, first first.
+pub fn records(handle: &impl AnyHandle) -> Vec<Record> {
     raw::diagnostics(handle, MOST_RECORDS)
+}
+
+/// Said after IBM's `CLI0212W`, whose own words name a failover and not what
+/// it cost the session.
+pub const RECONNECTED: &str = "The connection was lost and the driver silently re-established it before running this statement, so temporary tables, global variables and session settings other than SET CURRENT special registers were reset.";
+
+/// IBM's Db2 driver's report that its automatic client reroute reconnected
+/// without an error (`raw::report_seamless_failover`). Its SQLSTATE, 01000, is
+/// any warning, so the code and the native error decide.
+fn reconnected_silently(record: &Record) -> bool {
+    record.native == -99999 && record.message.contains("CLI0212W")
+}
+
+/// The records' messages, with `RECONNECTED` after a silent reconnect.
+pub fn messages(records: &[Record]) -> Vec<&str> {
+    let mut messages = Vec::new();
+    for record in records {
+        messages.push(record.message.as_str());
+        if reconnected_silently(record) {
+            messages.push(RECONNECTED);
+        }
+    }
+    messages
 }
 
 /// `response` with every spelling of `secret` the connection string could
@@ -61,13 +84,9 @@ pub fn plain(message: &str) -> Response {
     }
 }
 
-fn error(records: &[(String, String)], function: &str) -> Response {
-    let state = |wanted: &str| records.iter().any(|(state, _)| state == wanted);
-    let mut message = records
-        .iter()
-        .map(|(_, message)| message.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
+fn error(records: &[Record], function: &str) -> Response {
+    let state = |wanted: &str| records.iter().any(|record| record.state == wanted);
+    let mut message = messages(records).join("\n");
     if message.is_empty() {
         message = format!("{function} failed, and the driver said nothing about why.");
     }
@@ -81,9 +100,9 @@ fn error(records: &[(String, String)], function: &str) -> Response {
     Response::Error {
         kind: ErrorKind::Server,
         message,
-        sqlstate: records.first().map(|(state, _)| state.clone()),
+        sqlstate: records.first().map(|record| record.state.clone()),
         position: None,
-        lost: records.iter().any(|(state, _)| is_lost(state)),
+        lost: records.iter().any(|record| is_lost(&record.state)),
     }
 }
 
@@ -100,11 +119,44 @@ fn is_lost(state: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn records(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+    fn records(pairs: &[(&str, &str)]) -> Vec<Record> {
         pairs
             .iter()
-            .map(|(state, message)| (state.to_string(), message.to_string()))
+            .map(|(state, message)| Record {
+                state: state.to_string(),
+                native: 0,
+                message: message.to_string(),
+            })
             .collect()
+    }
+
+    /// IBM's driver words it this way (12.1, live), alongside the statement's
+    /// own result.
+    #[test]
+    fn a_silent_reconnect_is_said_and_any_other_warning_is_not() {
+        let warning = |state: &str, native, message: &str| Record {
+            state: state.to_string(),
+            native,
+            message: message.to_string(),
+        };
+        let failover = "[IBM][CLI Driver] CLI0212W  A seamless failover occurred during a connect or an execute request. SQLSTATE=01000";
+        assert_eq!(
+            messages(&[warning("01000", -99999, failover)]),
+            [failover, RECONNECTED]
+        );
+        for other in [
+            warning("01000", 0, failover),
+            warning(
+                "01000",
+                -99999,
+                "[IBM][CLI Driver] CLI0109E  String data right truncation.",
+            ),
+        ] {
+            assert_eq!(
+                messages(std::slice::from_ref(&other)),
+                [other.message.as_str()]
+            );
+        }
     }
 
     #[test]

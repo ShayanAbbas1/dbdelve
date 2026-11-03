@@ -13,19 +13,28 @@
 
 use odbc_api::handles::{self, AnyHandle, Statement, StatementImpl};
 use odbc_api::sys::{
-    CDataType, Desc, FreeStmtOption, HDbc, HStmt, InfoType, Len, NO_TOTAL, Nullability, Pointer,
-    SQLBindCol, SQLCancel, SQLColAttributeW, SQLColumnsW, SQLDescribeColW, SQLExecDirectW,
-    SQLFetch, SQLForeignKeysW, SQLFreeHandle, SQLFreeStmt, SQLGetData, SQLGetDiagRecW, SQLGetInfoW,
-    SQLGetStmtAttrW, SQLMoreResults, SQLNumResultCols, SQLPrimaryKeysW, SQLRowCount,
-    SQLSetStmtAttrW, SQLTablesW, SqlDataType, SqlReturn, StatementAttribute, ULen,
+    CDataType, ConnectionAttribute, Desc, FreeStmtOption, HDbc, HStmt, InfoType, Len, NO_TOTAL,
+    Nullability, Pointer, SQLBindCol, SQLCancel, SQLColAttributeW, SQLColumnsW, SQLDescribeColW,
+    SQLExecDirectW, SQLFetch, SQLForeignKeysW, SQLFreeHandle, SQLFreeStmt, SQLGetData,
+    SQLGetDiagRecW, SQLGetInfoW, SQLGetStmtAttrW, SQLMoreResults, SQLNumResultCols,
+    SQLPrimaryKeysW, SQLRowCount, SQLSetConnectAttrW, SQLSetStmtAttrW, SQLTablesW, SqlDataType,
+    SqlReturn, StatementAttribute, ULen,
 };
 
 pub const NULL_DATA: isize = -1;
 
-/// Every (SQLSTATE, message) record the last call on `handle` left, first
-/// first, up to `most`. Read here rather than through odbc-api's `Record`,
-/// which panics on a SQLSTATE that is not UTF-8 or a negative length.
-pub fn diagnostics(handle: &impl AnyHandle, most: i16) -> Vec<(String, String)> {
+/// One diagnostic record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Record {
+    pub state: String,
+    pub native: i32,
+    pub message: String,
+}
+
+/// Every record the last call on `handle` left, first first, up to `most`.
+/// Read here rather than through odbc-api's `Record`, which panics on a
+/// SQLSTATE that is not UTF-8 or a negative length.
+pub fn diagnostics(handle: &impl AnyHandle, most: i16) -> Vec<Record> {
     let mut records = Vec::new();
     for number in 1..=most {
         let mut state = [0u16; 6];
@@ -59,7 +68,11 @@ pub fn diagnostics(handle: &impl AnyHandle, most: i16) -> Vec<(String, String)> 
             }
             let state = String::from_utf16_lossy(&state[..5]);
             let message = String::from_utf16_lossy(&message[..length.min(message.len() - 1)]);
-            records.push((state.trim_end_matches('\0').to_string(), message));
+            records.push(Record {
+                state: state.trim_end_matches('\0').to_string(),
+                native,
+                message,
+            });
             break;
         }
     }
@@ -153,6 +166,27 @@ fn get_info(handle: HDbc, info: InfoType, buffer: &mut [u16]) -> Option<usize> {
         true => usize::try_from(bytes).ok(),
         false => None,
     }
+}
+
+/// Asks IBM's Db2 driver to warn (`CLI0212W`) on the first statement after
+/// its automatic client reroute reconnected without an error, which it
+/// otherwise does silently. `SQL_ATTR_REPORT_SEAMLESSFAILOVER_WARNING` in
+/// IBM's `sqlcli1.h`, numbered below the range ODBC reserves for driver
+/// attributes, so another driver may read 2605 as something else.
+pub fn report_seamless_failover(connection: &handles::Connection) -> bool {
+    const SQL_ATTR_REPORT_SEAMLESSFAILOVER_WARNING: i32 = 2605;
+    const SQL_TRUE: usize = 1;
+    // SAFETY: a live connection handle the caller borrows; the attribute
+    // takes an integer passed by value in the pointer argument, so the driver
+    // dereferences nothing.
+    succeeded(unsafe {
+        SQLSetConnectAttrW(
+            connection.as_sys(),
+            ConnectionAttribute(SQL_ATTR_REPORT_SEAMLESSFAILOVER_WARNING),
+            SQL_TRUE as Pointer,
+            0,
+        )
+    })
 }
 
 /// Turns ODBC escape scanning off, so `{fn …}`, `{d '…'}` and `{call …}` reach
@@ -813,7 +847,7 @@ pub fn statistics(
 fn truncated(statement: &StatementImpl) -> bool {
     diagnostics(statement, 16)
         .iter()
-        .any(|(state, _)| state == "01004")
+        .any(|record| record.state == "01004")
 }
 
 /// Cancels whatever runs on `statement`, from a thread other than the one

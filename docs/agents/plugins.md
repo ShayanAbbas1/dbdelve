@@ -276,6 +276,17 @@ driver printing to stdout would corrupt them (`ponytail:` not on Windows).
   SQLSTATE: Db2 reports its query timeout as the same `HY008`. `ponytail:` a
   cancel landing just before or after the published call is missed, and the
   host's deadline covers it; closing that needs the driver's async mode.
+- **IBM's driver reconnects on its own** (automatic client reroute) when the
+  link drops and no temporary table or global variable is in use, runs the
+  statement on the new connection with no error, and replays only the `SET
+  CURRENT` special registers. No string keyword turns that off, so on IBM's
+  driver alone (by `SQL_DRIVER_NAME`: 2605 lies outside ODBC's driver range,
+  and another driver may read it its own way) the bridge sets
+  `SQL_ATTR_REPORT_SEAMLESSFAILOVER_WARNING`, the statement then warns
+  `CLI0212W` (native −99999), and a line after it says what was reset, in the
+  result's messages or an error's. The session is not marked lost, since the
+  statement ran. A catalog request that comes first after the reconnect
+  swallows the warning.
 - **Credentials are appended braced only when needed** (`UID=…;PWD=…`, after a
   string the user wrote): Db2's CLI driver keeps braces as part of the value,
   so a value is braced, `}` doubled, only for a leading `{` or a space at

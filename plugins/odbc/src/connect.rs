@@ -103,14 +103,21 @@ impl Session {
             ),
         };
         let mut connected = succeeded(connected);
+        let driver = match connected {
+            true => raw::info_string(&handle, InfoType::DriverName).unwrap_or_default(),
+            false => String::new(),
+        };
         if connected
             && !dsn
-            && let Some(streaming) = streaming(&handle, &texts[0])
+            && let Some(streaming) = streaming(&driver, &texts[0])
         {
             let _ = handle.disconnect();
             connected = succeeded(handle.connect_with_connection_string(&SqlText::new(&streaming)));
         }
         if connected {
+            if is_ibm_cli(&driver) {
+                let _ = raw::report_seamless_failover(&handle);
+            }
             let reads_bound_columns = raw::reads_bound_columns(&handle);
             return Ok(Self {
                 handle,
@@ -229,8 +236,7 @@ const CURSOR_ROWS: u32 = 4096;
 /// `Fetch` rows at a time unless the string sets that too. In autocommit
 /// psqlODBC opens the cursor in a transaction of its own and ends it with the
 /// statement.
-fn streaming(handle: &handles::Connection, connection: &str) -> Option<String> {
-    let driver = raw::info_string(handle, InfoType::DriverName)?;
+fn streaming(driver: &str, connection: &str) -> Option<String> {
     if !driver.to_ascii_lowercase().starts_with("psqlodbc") {
         return None;
     }
@@ -253,6 +259,15 @@ fn streaming(handle: &handles::Connection, connection: &str) -> Option<String> {
         string.push_str(&format!(";Fetch={CURSOR_ROWS}"));
     }
     Some(string)
+}
+
+/// IBM's Db2 driver by the `SQL_DRIVER_NAME` it reports: `libdb2.a` on macOS
+/// (12.1, live), and matched loosely beyond it, as only that one was seen.
+/// IBM's driver for IBM i and other vendors' Db2 drivers report names of
+/// their own.
+fn is_ibm_cli(driver: &str) -> bool {
+    let driver = driver.to_ascii_lowercase();
+    driver.starts_with("libdb2") || driver.starts_with("db2")
 }
 
 /// The longest `DRIVER=` value the bridge passes on. unixODBC formats a failed

@@ -21,7 +21,7 @@ use odbc_api::sys::{HStmt, SqlDataType, SqlReturn};
 
 use crate::connect::Session;
 use crate::failure;
-use crate::raw::{self, Bound, BoundValue, DataError, Fetched};
+use crate::raw::{self, Bound, BoundValue, DataError, Fetched, Record};
 
 /// So a driver that warns on every row cannot make `end` the size of a result.
 const MOST_MESSAGES: usize = 16;
@@ -525,15 +525,17 @@ impl<W: Write> Run<'_, W> {
     fn note_fetched(&mut self, bound: bool) {
         let records = failure::records(self.statement)
             .into_iter()
-            .filter(|(state, _)| !(bound && state == "01004"))
+            .filter(|record| !(bound && record.state == "01004"))
             .collect();
         self.keep(records);
     }
 
-    fn keep(&mut self, records: Vec<(String, String)>) {
-        for (_, message) in records {
-            if self.messages.len() < MOST_MESSAGES && !self.messages.contains(&message) {
-                self.messages.push(message);
+    fn keep(&mut self, records: Vec<Record>) {
+        for message in failure::messages(&records) {
+            if self.messages.len() < MOST_MESSAGES
+                && !self.messages.iter().any(|kept| kept == message)
+            {
+                self.messages.push(message.to_string());
             }
         }
     }

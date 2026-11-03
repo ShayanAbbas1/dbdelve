@@ -520,6 +520,42 @@ fn live_cancel_mid_stream_ends_the_read() {
     assert_eq!(after.rows, [vec![Some("5".to_string())]]);
 }
 
+/// Forced off the server, IBM's driver reconnects on the next statement and
+/// runs it with no error, the session's state gone, so the bridge says so. The
+/// compose service's container and instance owner are forced from inside.
+#[test]
+#[ignore = "needs a Db2 and IBM's driver: set dbdelve_ODBC_DB2, _USER and _PASSWORD"]
+fn live_a_silent_reconnect_is_said_alongside_the_statements_result() {
+    const HANDLE: &str = "SELECT MON_GET_APPLICATION_HANDLE() FROM SYSIBM.SYSDUMMY1";
+    let mut bridge = Bridge::open(0);
+    let before = bridge.query(HANDLE).rows[0][0].clone().unwrap();
+    let forced = Command::new("docker")
+        .args(["exec", "dbdelve-db2-1", "su", "-", "db2inst1", "-c"])
+        .arg(format!("db2 \"force application ({before})\""))
+        .output()
+        .unwrap();
+    assert!(forced.status.success(), "{forced:?}");
+    // `force application` returns before the agent has gone.
+    thread::sleep(Duration::from_secs(3));
+
+    let after = bridge.query(HANDLE);
+    let Response::End { messages, .. } = &after.terminal else {
+        panic!("an end, got {:?}", after.terminal);
+    };
+    eprintln!("messages: {messages:?}");
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("silently re-established")),
+        "{messages:?}"
+    );
+    assert_ne!(after.rows[0][0].as_deref(), Some(before.as_str()));
+    let Response::End { messages, .. } = bridge.query(HANDLE).terminal else {
+        panic!("an end");
+    };
+    assert!(messages.is_empty(), "{messages:?}");
+}
+
 fn run_all(bridge: &mut Bridge, statements: &[&str]) {
     for sql in statements {
         let outcome = bridge.query(sql);
