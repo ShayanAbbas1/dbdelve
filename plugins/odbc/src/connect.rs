@@ -400,7 +400,7 @@ pub fn connection_string(base: &str, user: &str, password: &str) -> Result<Strin
     }
     let mut attributes = Vec::new();
     if !user.is_empty() {
-        attributes.push(format!("UID={}", value(user)));
+        attributes.push(format!("UID={}", user_value(user)));
     }
     if !user.is_empty() || !password.is_empty() {
         attributes.push(format!("PWD={}", value(password)));
@@ -421,13 +421,23 @@ pub fn connection_string(base: &str, user: &str, password: &str) -> Result<Strin
 /// braces as part of the value (12.1, live: `PWD={secret}` and `PWD={a}}b{c}`
 /// are refused, `PWD=a}b{c` is taken), so braces inside a value go plain, as
 /// does `@`. A leading `{`, which the ODBC grammar reads as an opening brace,
-/// or space at either end, which a driver trims, is braced with `}` doubled.
-/// Db2 can take neither: it trims the spaces plain and keeps the braces.
+/// is braced with `}` doubled, and so is a password's space at either end,
+/// which a driver trims. A user's spaces go plain: psqlODBC (18) strips braces
+/// from a password but keeps them in a `UID`, and reads a plain one as
+/// written. Db2 can take neither: it trims the spaces plain and keeps the
+/// braces.
 fn value(value: &str) -> String {
-    let plain = !value.starts_with('{') && value.trim() == value;
-    match plain {
-        true => value.to_string(),
-        false => format!("{{{}}}", value.replace('}', "}}")),
+    braced_when(value, value.trim() != value)
+}
+
+fn user_value(user: &str) -> String {
+    braced_when(user, false)
+}
+
+fn braced_when(value: &str, spaced: bool) -> String {
+    match value.starts_with('{') || spaced {
+        true => format!("{{{}}}", value.replace('}', "}}")),
+        false => value.to_string(),
     }
 }
 
@@ -446,8 +456,18 @@ mod tests {
             "DRIVER={x};HOSTNAME=h;UID=a@b;PWD=p}w{"
         );
         assert_eq!(
-            string("DRIVER={x};", " u", "{p}"),
-            "DRIVER={x};UID={ u};PWD={{p}}}"
+            string("DRIVER={x};", "u", "{p}"),
+            "DRIVER={x};UID=u;PWD={{p}}}"
+        );
+    }
+
+    /// psqlODBC takes a `UID` as written, braces and all, and strips braces
+    /// only from a password.
+    #[test]
+    fn spaces_at_either_end_of_a_user_go_plain_and_of_a_password_braced() {
+        assert_eq!(
+            string("DRIVER={x}", " u ", " p "),
+            "DRIVER={x};UID= u ;PWD={ p }"
         );
     }
 

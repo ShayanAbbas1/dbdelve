@@ -65,6 +65,31 @@ impl Bridge {
         bridge
     }
 
+    /// Opens on the live Postgres the environment names, through psqlODBC.
+    fn open_postgres() -> Self {
+        let user = env::var("dbdelve_ODBC_POSTGRES_USER").unwrap_or_default();
+        let password = env::var("dbdelve_ODBC_POSTGRES_PASSWORD").unwrap_or_default();
+        let mut bridge = Self::spawn();
+        let opened = bridge.open_postgres_as(&user, &password);
+        assert!(
+            matches!(opened, Response::Opened { .. }),
+            "opened, got {opened:?}"
+        );
+        bridge
+    }
+
+    fn open_postgres_as(&mut self, user: &str, password: &str) -> Response {
+        let connection = env::var("dbdelve_ODBC_POSTGRES").expect("dbdelve_ODBC_POSTGRES");
+        self.request(Request::Open {
+            fields: BTreeMap::from([
+                ("connection".to_string(), connection),
+                ("user".to_string(), user.to_string()),
+            ]),
+            password: Password(password.to_string()),
+            statement_timeout: 0,
+        })
+    }
+
     fn send(&mut self, id: u64, request: Request) {
         let stdin = self.child.stdin.as_mut().unwrap();
         write_frame(stdin, Kind::Control, id, &request.to_payload()).unwrap();
@@ -628,4 +653,27 @@ fn live_the_catalog_reads_relations_keys_indexes_and_references() {
             referenced_column: "ID".to_string(),
         }]
     );
+}
+
+/// psqlODBC copies a braced `UID` with its braces, so a user name with spaces
+/// at either end has to travel plain.
+#[test]
+#[ignore = "needs psqlODBC and a Postgres: set dbdelve_ODBC_POSTGRES, _USER and _PASSWORD"]
+fn live_postgres_a_user_with_spaces_at_either_end_logs_in() {
+    let mut admin = Bridge::open_postgres();
+    for user in [" dbdelve lead", "dbdelve trail "] {
+        let quoted = user.replace('"', "\"\"");
+        admin.query(&format!("DROP ROLE IF EXISTS \"{quoted}\""));
+        let created = admin.query(&format!(
+            "CREATE ROLE \"{quoted}\" LOGIN PASSWORD ' p+%41 '"
+        ));
+        ended(&created);
+        let mut bridge = Bridge::spawn();
+        let opened = bridge.open_postgres_as(user, " p+%41 ");
+        admin.query(&format!("DROP ROLE IF EXISTS \"{quoted}\""));
+        assert!(
+            matches!(opened, Response::Opened { .. }),
+            "{user:?}: {opened:?}"
+        );
+    }
 }
