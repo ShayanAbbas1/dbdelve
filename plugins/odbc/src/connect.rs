@@ -75,6 +75,9 @@ impl Session {
                 "The connection string, user or password is longer than the 32,767 characters ODBC takes.",
             ));
         }
+        if !dsn && let Some(driver) = driver_named(&texts[0]) {
+            check_driver(&driver)?;
+        }
         let mut handle = match environment.allocate_connection() {
             SqlResult::Success(handle) | SqlResult::SuccessWithInfo(handle) => {
                 ManuallyDrop::new(handle)
@@ -200,6 +203,185 @@ pub fn is_dsn(connection: &str) -> bool {
     !connection.contains('=')
 }
 
+/// The longest `DRIVER=` value the bridge passes on. unixODBC formats a failed
+/// load as the name and the loader's error, which repeats the name, into a
+/// 2,048-byte buffer; past that it aborts the process.
+const MOST_DRIVER: usize = 512;
+
+/// The `DRIVER=` value the driver manager will load, read as unixODBC reads
+/// the string: pairs split on `;`, a value in braces runs to a `}` not
+/// doubled, the later of two keywords wins, and whichever of `DSN` and
+/// `DRIVER`/`FILEDSN` comes first excludes the other.
+pub fn driver_named(connection: &str) -> Option<String> {
+    let bytes = connection.as_bytes();
+    let mut at = 0;
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    let (mut dsn, mut driver) = (false, false);
+    loop {
+        while at < bytes.len() && (bytes[at].is_ascii_whitespace() || bytes[at] == b';') {
+            at += 1;
+        }
+        let start = at;
+        while at < bytes.len() && bytes[at] != b'=' {
+            at += 1;
+        }
+        if at >= bytes.len() {
+            break;
+        }
+        let keyword = connection[start..at].to_string();
+        at += 1;
+        let mut value = Vec::new();
+        if bytes.get(at) == Some(&b'{') {
+            at += 1;
+            while at < bytes.len() && (bytes[at] != b'}' || bytes.get(at + 1) == Some(&b'}')) {
+                if bytes[at] == b'}' {
+                    at += 1;
+                }
+                value.push(bytes[at]);
+                at += 1;
+            }
+            if at < bytes.len() {
+                at += 1;
+            }
+        } else {
+            while at < bytes.len() && bytes[at] != b';' {
+                value.push(bytes[at]);
+                at += 1;
+            }
+        }
+        let value = String::from_utf8_lossy(&value).into_owned();
+        let is = |name: &str| keyword.eq_ignore_ascii_case(name);
+        if is("DSN") {
+            if driver {
+                continue;
+            }
+            dsn = true;
+        } else if is("DRIVER") || is("FILEDSN") {
+            if dsn {
+                continue;
+            }
+            driver = true;
+        }
+        match pairs
+            .iter_mut()
+            .find(|(name, _)| name.eq_ignore_ascii_case(&keyword))
+        {
+            Some(pair) => pair.1 = value,
+            None => pairs.push((keyword, value)),
+        }
+    }
+    pairs
+        .into_iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("DRIVER"))
+        .map(|(_, value)| value)
+}
+
+/// Refuses a driver the driver manager could not load, before it tries:
+/// unixODBC's report of a failed load overflows its buffer and kills the
+/// bridge when the name or the loader's error is long, and macOS's loader
+/// lists every path it tried.
+fn check_driver(driver: &str) -> Result<(), Response> {
+    if driver.trim().is_empty() {
+        return Err(failure::plain(
+            "The connection string's DRIVER= is empty. Name the driver by its library path (DRIVER=/path/to/library) or by the name the driver manager registers.",
+        ));
+    }
+    if driver.len() > MOST_DRIVER {
+        return Err(failure::plain(&format!(
+            "The connection string's DRIVER= is longer than the {MOST_DRIVER} bytes the bridge passes to the driver manager."
+        )));
+    }
+    loadable(driver)
+}
+
+/// The vendored driver manager loads a driver with exactly this `dlopen`, so
+/// a failure here is the failure it would have, reported without its
+/// overflow. The library stays loaded: the driver manager's own `dlopen` then
+/// finds it, rather than loading it a second time.
+#[cfg(target_os = "macos")]
+fn loadable(driver: &str) -> Result<(), Response> {
+    use std::ffi::{CStr, CString, c_char, c_int, c_void};
+
+    const RTLD_LAZY: c_int = 0x1;
+    const RTLD_GLOBAL: c_int = 0x8;
+    unsafe extern "C" {
+        fn dlopen(path: *const c_char, mode: c_int) -> *mut c_void;
+        fn dlerror() -> *const c_char;
+    }
+
+    let not_loadable = |why: &str| {
+        failure::plain(&format!(
+            "The connection string's DRIVER={driver} could not be loaded: {why}\nName the driver by its library path (DRIVER=/path/to/library) or by the name the driver manager registers."
+        ))
+    };
+    let library = registered_library(driver).unwrap_or_else(|| driver.to_string());
+    let Ok(path) = CString::new(library) else {
+        return Err(not_loadable("it holds a NUL character."));
+    };
+    // SAFETY: `path` is a NUL-terminated string that outlives the call; the
+    // handle is deliberately never closed.
+    let handle = unsafe { dlopen(path.as_ptr(), RTLD_LAZY | RTLD_GLOBAL) };
+    if !handle.is_null() {
+        return Ok(());
+    }
+    // SAFETY: `dlerror` answers NULL or a NUL-terminated string the loader
+    // owns, read here before any other loader call on this thread.
+    let why = unsafe {
+        let why = dlerror();
+        match why.is_null() {
+            true => "the loader gave no reason.".to_string(),
+            false => CStr::from_ptr(why).to_string_lossy().into_owned(),
+        }
+    };
+    Err(not_loadable(&why))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn loadable(_driver: &str) -> Result<(), Response> {
+    Ok(())
+}
+
+/// The library `odbcinst.ini` registers under `driver`, looked up as the
+/// driver manager does on a 64-bit platform: `Driver64`, then `Driver`.
+#[cfg(target_os = "macos")]
+fn registered_library(driver: &str) -> Option<String> {
+    use std::ffi::{CStr, CString, c_char, c_int};
+
+    unsafe extern "C" {
+        fn SQLGetPrivateProfileString(
+            section: *const c_char,
+            entry: *const c_char,
+            default: *const c_char,
+            out: *mut c_char,
+            size: c_int,
+            file: *const c_char,
+        ) -> c_int;
+    }
+
+    let section = CString::new(driver).ok()?;
+    for entry in [c"Driver64", c"Driver"] {
+        let mut out = vec![0 as c_char; 1001];
+        // SAFETY: every string argument is NUL-terminated and outlives the
+        // call; unixODBC writes at most `size` bytes, NUL included, into `out`.
+        unsafe {
+            SQLGetPrivateProfileString(
+                section.as_ptr(),
+                entry.as_ptr(),
+                c"".as_ptr(),
+                out.as_mut_ptr(),
+                out.len() as c_int,
+                c"ODBCINST.INI".as_ptr(),
+            );
+        }
+        // SAFETY: `out` was zeroed, and the call leaves it NUL-terminated.
+        let library = unsafe { CStr::from_ptr(out.as_ptr()) }.to_string_lossy();
+        if !library.is_empty() {
+            return Some(library.into_owned());
+        }
+    }
+    None
+}
+
 /// A user `a@b` or a password holding a brace arrives whole. With a user the
 /// password key is sent even when blank, since some token-based logins need it
 /// present; without one it is still sent when given, for a string that names
@@ -293,6 +475,30 @@ mod tests {
             string("DRIVER={x};UID=u", "", "p"),
             "DRIVER={x};UID=u;PWD=p"
         );
+    }
+
+    #[test]
+    fn the_driver_is_read_as_unix_odbc_reads_it() {
+        let driver = |text| driver_named(text);
+        assert_eq!(driver("DRIVER=/a/b.so;X=1").as_deref(), Some("/a/b.so"));
+        assert_eq!(driver(" ;driver={a;b}}c};X=1").as_deref(), Some("a;b}c"));
+        assert_eq!(driver("DRIVER={unclosed").as_deref(), Some("unclosed"));
+        assert_eq!(driver("DRIVER=;X=1").as_deref(), Some(""));
+        assert_eq!(driver("DRIVER=a;Driver=b").as_deref(), Some("b"));
+        assert_eq!(driver("DSN=d;DRIVER=a"), None);
+        assert_eq!(driver("DRIVER=a;DSN=d").as_deref(), Some("a"));
+        assert_eq!(driver("DRIVER =a"), None);
+        assert_eq!(driver("Server=h"), None);
+    }
+
+    #[test]
+    fn a_blank_or_overlong_driver_is_refused_before_the_driver_manager() {
+        for driver in ["", "  ", &"x".repeat(MOST_DRIVER + 1)] {
+            let Err(Response::Error { message, .. }) = check_driver(driver) else {
+                panic!("a refusal of {driver:?}");
+            };
+            assert!(message.starts_with("The connection string's DRIVER="));
+        }
     }
 
     #[test]

@@ -213,6 +213,40 @@ fn it_exits_on_stdin_eof() {
     assert_eq!(bridge.exits_within(Duration::from_secs(5)), Some(0));
 }
 
+/// unixODBC formats a failed driver load into a fixed buffer, which macOS's
+/// long `dlopen` errors overran, killing the bridge.
+#[test]
+fn a_driver_that_cannot_be_loaded_is_refused_and_the_bridge_lives() {
+    let long = format!("DRIVER={{{}}}", "NoSuchDriver".repeat(80));
+    for connection in [
+        "DRIVER=",
+        "DRIVER={};Server=h",
+        "DRIVER=  ;Server=h",
+        "DRIVER=NoSuchDriver;Server=h",
+        "Driver={No Such Driver};Server=h",
+        "DRIVER=/no/such/libdriver.so;Server=h",
+        "DRIVER=NoSuchDriver;DRIVER=Another",
+        &long,
+    ] {
+        let mut bridge = Bridge::spawn();
+        let refused = bridge.request(Request::Open {
+            fields: BTreeMap::from([("connection".to_string(), connection.to_string())]),
+            password: Password(String::new()),
+            statement_timeout: 0,
+        });
+        let Response::Error { kind, message, .. } = &refused else {
+            panic!("{connection}: an error, got {refused:?}");
+        };
+        assert_eq!(*kind, ErrorKind::Server, "{connection}: {message}");
+        assert!(
+            message.starts_with("The connection string's DRIVER="),
+            "{connection}: {message}"
+        );
+        let hello = bridge.request(Request::Hello { protocol: PROTOCOL });
+        assert!(matches!(hello, Response::Hello { .. }), "{connection}");
+    }
+}
+
 #[test]
 #[ignore = "needs a Db2 and IBM's driver: set dbdelve_ODBC_DB2, _USER and _PASSWORD"]
 fn live_open_names_the_dbms_and_close_ends_the_process() {
