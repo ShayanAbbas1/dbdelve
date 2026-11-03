@@ -190,7 +190,7 @@ impl Workspace {
             cancels
         };
         cx.notify();
-        let cancel_task = spawn_blocking(cx.background_executor(), move || {
+        let cancel_task = spawn_cancel(cx.background_executor(), move || {
             cancels
                 .iter()
                 .map(|cancel| connection.cancel(cancel))

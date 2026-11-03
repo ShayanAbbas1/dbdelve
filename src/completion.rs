@@ -71,6 +71,12 @@ pub enum ColumnState {
 /// How many times a relation's columns are asked for before dbdelve stops.
 const FETCH_ATTEMPTS: u8 = 3;
 
+/// How many relations' columns may be asked for at once. Each describe queues
+/// on the session's one lock, so more in flight are no sooner back and only
+/// hold more of the blocking pool, which a name in a few hundred schemas would
+/// otherwise fill. One left over is asked for on a later keystroke.
+const FETCHES_IN_FLIGHT: usize = 4;
+
 /// Columns by schema and relation, shared between the provider that reads them
 /// and the workspace that fills them. `Rc` rather than `Arc` because both live
 /// on the foreground thread; the fetch itself is a background task that hands
@@ -575,6 +581,19 @@ impl CompletionProvider for SchemaCompletions {
 }
 
 impl SchemaCompletions {
+    /// As many of `wanted`, in order, as may be asked for alongside the
+    /// fetches already in flight.
+    fn admitted(&self, mut wanted: Wanted) -> Wanted {
+        let in_flight = self
+            .columns
+            .borrow()
+            .values()
+            .filter(|state| matches!(state, ColumnState::Loading(_)))
+            .count();
+        wanted.truncate(FETCHES_IN_FLIGHT.saturating_sub(in_flight));
+        wanted
+    }
+
     /// Ask for the columns `items` wanted, and hand its rows to the popup as
     /// edits over `text`, the rope the ranges are offsets into.
     fn respond(
@@ -586,20 +605,31 @@ impl SchemaCompletions {
     ) -> Task<Result<CompletionResponse>> {
         // Marked before the request so a second keystroke arriving while the
         // first fetch is in flight does not ask again.
-        for key in wanted {
-            let attempts = match self.columns.borrow().get(&key) {
-                Some(ColumnState::Failed(attempts)) => *attempts,
+        for key in self.admitted(wanted) {
+            let before = self.columns.borrow().get(&key).cloned();
+            let attempts = match before {
+                Some(ColumnState::Failed(attempts)) => attempts,
                 _ => 0,
             };
             self.columns
                 .borrow_mut()
                 .insert(key.clone(), ColumnState::Loading(attempts));
-            if let Some(workspace) = &self.workspace {
+            let asked = self.workspace.as_ref().is_some_and(|workspace| {
+                let (schema, relation) = key.clone();
                 workspace
                     .update(cx, |workspace, cx| {
-                        workspace.load_completion_columns(key.0, key.1, cx);
+                        workspace.load_completion_columns(schema, relation, cx)
                     })
-                    .ok();
+                    .unwrap_or(false)
+            });
+            // A `Loading` nothing will answer would hold a place in flight
+            // for the rest of the session.
+            if !asked {
+                let mut columns = self.columns.borrow_mut();
+                match before {
+                    Some(state) => columns.insert(key, state),
+                    None => columns.remove(&key),
+                };
             }
         }
 
@@ -1220,6 +1250,43 @@ mod tests {
             ColumnState::Loading(0),
         );
         assert!(completions.items(sql, sql.len()).1.is_empty());
+    }
+
+    #[test]
+    fn a_keystroke_asks_for_no_more_relations_than_may_be_in_flight() {
+        let many = Catalog {
+            schemas: (0..200)
+                .map(|n| Schema {
+                    name: format!("tenant_{n}"),
+                    relations: vec![relation("users")],
+                    routines: Vec::new(),
+                })
+                .collect(),
+            database: None,
+        };
+        let completions = detached(many, &[]);
+        let sql = "SELECT * FROM users WHERE u";
+
+        let (_, wanted) = completions.items(sql, sql.len());
+        assert_eq!(wanted.len(), 200, "every schema's users is wanted");
+        let first = completions.admitted(wanted.clone());
+        assert_eq!(first, wanted[..FETCHES_IN_FLIGHT]);
+
+        completions
+            .columns
+            .borrow_mut()
+            .insert(first[0].clone(), ColumnState::Loading(0));
+        assert_eq!(
+            completions.admitted(wanted.clone()).len(),
+            FETCHES_IN_FLIGHT - 1
+        );
+        for key in &first {
+            completions
+                .columns
+                .borrow_mut()
+                .insert(key.clone(), ColumnState::Loading(0));
+        }
+        assert!(completions.admitted(wanted).is_empty());
     }
 
     #[test]

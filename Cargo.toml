@@ -58,6 +58,12 @@ lsp-types = "=0.97.0"
 # actions caught are the ones its keymap dispatches.
 gpui-base = "=0.8.0"
 
+# The pool every blocking connection, network, disk and Keychain call runs on
+# (`workspace::spawn_blocking`), so the background executor only awaits them.
+# smol's: capped, and it lowers the cap rather than panicking when the OS will
+# not start another thread. Pinned to the version already locked through GPUI.
+blocking = "=1.6.2"
+
 # Async, driven the way SQL Server's tiberius is below: each connection owns a
 # tokio current-thread runtime and blocks on it from the background executor,
 # so no tokio future reaches GPUI's. Directly rather than through the blocking

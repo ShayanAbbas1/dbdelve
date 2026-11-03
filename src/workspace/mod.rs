@@ -2299,17 +2299,17 @@ pub(crate) const EDITOR_FONT_SIZE_MAX: f32 = 24.0;
 
 pub(crate) const FONT_SIZE_STEP: f32 = 1.0;
 
-/// The range the controls offer for a slot, and where Reset puts it. The
-/// chrome stops at 17 because the titlebar does not grow with it: the window
-/// buttons are placed against it once, when the window opens, and past 17 the
-/// controls in it would touch its edges.
 /// Blocking work -- anything that talks to a connection, the network, the
-/// disk or the Keychain -- on a thread of its own, started at once, for the
-/// background executor to await. It never runs on the executor's own threads:
-/// there are only as many as cores, and one statement draining on a session
-/// with the rest queued behind it on the same session's lock would hold every
-/// one of them, stalling everything else spawned there, the Cancel that would
-/// free them included.
+/// disk or the Keychain -- on `blocking`'s pool, for the background executor
+/// to await. It never runs on the executor's own threads: there are only as
+/// many as cores, and one statement draining on a session with the rest queued
+/// behind it on the same session's lock would hold every one of them, stalling
+/// everything else spawned there.
+///
+/// The pool is capped, so calls parked on a busy session cannot start threads
+/// without end, and a call dropped before a thread takes it never runs. A
+/// Cancel goes through [`spawn_cancel`] instead, since a full pool would queue
+/// it behind the very statements it is there to stop.
 pub(crate) fn spawn_blocking<T: Send + 'static>(
     executor: &gpui::BackgroundExecutor,
     work: impl FnOnce() -> T + Send + 'static,
@@ -2320,16 +2320,46 @@ pub(crate) fn spawn_blocking<T: Send + 'static>(
     if executor.is_test() {
         return executor.spawn(async move { work() });
     }
+    executor.spawn(blocking::unblock(work))
+}
+
+/// A Cancel, on a thread of its own started at once rather than on
+/// [`spawn_blocking`]'s pool, which the statements it cancels may be filling.
+/// Where the OS will not start a thread, it waits its turn on the pool instead.
+pub(crate) fn spawn_cancel<T, F>(executor: &gpui::BackgroundExecutor, work: F) -> gpui::Task<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    if executor.is_test() {
+        return executor.spawn(async move { work() });
+    }
     let (sender, receiver) = tokio::sync::oneshot::channel();
-    std::thread::spawn(move || sender.send(work()));
+    let (hand_over, take) = std::sync::mpsc::channel::<F>();
+    // A thread that did not start dropped `take` with it, so the send fails
+    // and hands `work` back.
+    _ = std::thread::Builder::new()
+        .name("dbdelve-cancel".to_owned())
+        .spawn(move || {
+            if let Ok(work) = take.recv() {
+                _ = sender.send(work());
+            }
+        });
+    if let Err(std::sync::mpsc::SendError(work)) = hand_over.send(work) {
+        return spawn_blocking(executor, work);
+    }
     executor.spawn(async move {
         // Dropped unsent only by a panic on that thread, which is a panic here.
         receiver
             .await
-            .expect("the thread running blocking work panicked")
+            .expect("the thread running a Cancel panicked")
     })
 }
 
+/// The range the controls offer for a slot, and where Reset puts it. The
+/// chrome stops at 17 because the titlebar does not grow with it: the window
+/// buttons are placed against it once, when the window opens, and past 17 the
+/// controls in it would touch its edges.
 pub(crate) fn font_size_range(slot: FontSlot) -> (f32, f32, f32) {
     match slot {
         FontSlot::Chrome => (11.0, layout::BODY_FONT_SIZE, 17.0),
@@ -2436,12 +2466,17 @@ mod tests {
         receiver.recv_timeout(limit).ok()
     }
 
-    /// A pool as big as `ThreadedDispatcher`'s, filled by one statement
-    /// running and the rest queued behind it on the same session.
+    /// `blocking`'s cap when `BLOCKING_MAX_THREADS` does not set one.
+    const BLOCKING_POOL_CAP: usize = 500;
+
+    /// More statements than either `ThreadedDispatcher`'s pool or
+    /// `blocking`'s, one running and the rest queued behind it on the same
+    /// session.
     #[test]
     fn statements_parked_on_one_connection_leave_the_background_executor_free() {
         let executor = gpui::BackgroundExecutor::new(Arc::new(gpui::ThreadedDispatcher::new()));
-        let pool = std::thread::available_parallelism().map_or(2, |cores| cores.get().max(2));
+        let cores = std::thread::available_parallelism().map_or(2, |cores| cores.get().max(2));
+        let pool = BLOCKING_POOL_CAP + cores;
         let connection = db::Connection::open(db::ConnectionConfig::External(db::ExternalConfig {
             plugin: db::echo::plugin(),
             speaks: db::Engine::Postgres,
@@ -2474,12 +2509,15 @@ mod tests {
             landed(&executor, timer, Duration::from_secs(1)).is_some(),
             "a timer did not fire while {pool} statements were parked on one connection"
         );
-        let cancel = spawn_blocking(&executor, {
+        let cancel = spawn_cancel(&executor, {
             let connection = connection.clone();
             move || connection.cancel(&run)
         });
         let cancelled = landed(&executor, cancel, Duration::from_secs(2));
-        assert!(matches!(cancelled, Some(Ok(()))), "the Cancel did not land");
+        assert!(
+            matches!(cancelled, Some(Ok(()))),
+            "the Cancel did not land behind {pool} parked statements"
+        );
         let slept = landed(&executor, sleep, Duration::from_secs(5)).expect("the sleep ended");
         let error = slept.expect_err("the sleep was cancelled");
         assert!(error.message.starts_with("Cancelled"), "{}", error.message);

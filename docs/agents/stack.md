@@ -90,8 +90,9 @@ for finding a late exception's marker across reads.
 reactor (Grand Central Dispatch on macOS). A tokio future on
 `cx.background_executor().spawn(...)` _panics_ the moment it touches a socket or
 timer. Database work uses blocking drivers, which own their runtimes
-internally, each call on a thread of its own that the background executor
-awaits (`workspace::spawn_blocking`), never on the executor's own threads.
+internally, each call on `blocking`'s capped pool for the background executor
+to await (`workspace::spawn_blocking`), never on the executor's own threads; a
+Cancel on a thread of its own (`workspace::spawn_cancel`).
 `rusqlite` is blocking by construction and has no runtime at all.
 
 `tokio` is a direct dependency for three drivers, and the same rule is why it

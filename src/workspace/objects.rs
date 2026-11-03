@@ -490,7 +490,7 @@ impl Workspace {
         }
         let cancel = cancel.clone();
         cx.notify();
-        let task = spawn_blocking(cx.background_executor(), move || connection.cancel(&cancel));
+        let task = spawn_cancel(cx.background_executor(), move || connection.cancel(&cancel));
         cx.spawn(async move |workspace, cx| {
             if let Err(error) = task.await {
                 _ = workspace.update(cx, |workspace, cx| workspace.note(error.message, cx));

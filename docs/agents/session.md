@@ -245,9 +245,10 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   never by position, because a SQL Server batch landing several sets puts
   results ahead of those still running, and only while the tab still runs
   that same run; a switch to another profile meanwhile changes nothing about
-  where it lands. Each statement's blocking call runs on a thread of its own
-  (`spawn_blocking`), as every blocking call does, not on GPUI's background
-  executor, which has a thread per core and would be filled by them.
+  where it lands. Each statement's blocking call runs on `blocking`'s capped
+  pool (`spawn_blocking`), as every blocking call does, not on GPUI's
+  background executor, which has a thread per core and would be filled by
+  them; a Cancel runs on a thread of its own (`spawn_cancel`).
   `Connection::query_alongside` opens the connection the way the
   profile's was (its tunnel, password and timeout; Postgres and MySQL share
   its side session; the Read-only hold is put on it too) and drops it when the

@@ -864,7 +864,7 @@ fn stop_import(dialog: &mut ImportDialog, cx: &mut Context<Workspace>) {
         && matches!(out, Some(Step::Begin | Step::Chunk(_)))
     {
         let cancel = cancel.clone();
-        spawn_blocking(cx.background_executor(), move || connection.cancel(&cancel)).detach();
+        spawn_cancel(cx.background_executor(), move || connection.cancel(&cancel)).detach();
     }
 }
 

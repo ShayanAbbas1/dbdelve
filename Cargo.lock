@@ -2113,6 +2113,7 @@ dependencies = [
  "arrow-cast",
  "arrow-schema",
  "base64 0.22.1",
+ "blocking",
  "calamine",
  "cbc 0.1.2",
  "dbdelve-plugin-protocol",

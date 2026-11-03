@@ -1877,17 +1877,19 @@ impl Workspace {
     /// trade: one extra pair of catalog queries per relation the session
     /// actually writes about, against three more engine-specific statements to
     /// maintain and keep in step with hard rule 4.
+    ///
+    /// False when there is no connection to ask, and nothing was asked.
     pub(crate) fn load_completion_columns(
         &mut self,
         schema: String,
         relation: String,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let Some(profile) = self.profile() else {
-            return;
+            return false;
         };
         let Some(connection) = profile.connection() else {
-            return;
+            return false;
         };
         let id = profile.id.clone();
         let generation = profile.generation;
@@ -1932,6 +1934,7 @@ impl Workspace {
                 .ok();
         })
         .detach();
+        true
     }
 
     pub(crate) fn install_completions(&mut self, id: &str, cx: &mut Context<Self>) {
