@@ -41,9 +41,9 @@ use std::{borrow::Cow, path::PathBuf, rc::Rc, sync::Arc};
 
 use gpui::{
     AnyElement, App, AppContext, ClickEvent, ClipboardItem, Context, Entity, FocusHandle,
-    Focusable, FontWeight, InteractiveElement, IntoElement, KeyBinding, Menu, MenuItem,
-    ParentElement, Render, StatefulInteractiveElement, Styled, TitlebarOptions, Window,
-    WindowDecorations, WindowOptions, div, point, prelude::FluentBuilder, px,
+    Focusable, FontWeight, InteractiveElement, IntoElement, Menu, MenuItem, ParentElement, Render,
+    StatefulInteractiveElement, Styled, TitlebarOptions, Window, WindowDecorations, WindowOptions,
+    div, point, prelude::FluentBuilder, px,
 };
 use gpui_component::{
     Disableable, Root,
@@ -295,9 +295,6 @@ fn main() {
                     }
                 });
             });
-            if cfg!(target_os = "macos") {
-                cx.bind_keys([KeyBinding::new("cmd-m", Minimize, None)]);
-            }
             cx.set_menus(app_menus(false));
 
             // The platform titlebar is kept only for its window buttons on macOS:

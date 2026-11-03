@@ -568,8 +568,7 @@ impl Workspace {
     /// truth both here and in the row that shows what's currently bound.
     pub(crate) fn apply_rebind(&mut self, id: &'static str, chord: String, cx: &mut Context<Self>) {
         self.rebinding = None;
-        let context = keybindings::REGISTRY
-            .iter()
+        let context = keybindings::available_registry()
             .find(|spec| spec.id == id)
             .and_then(|spec| spec.context);
         if let Some(owner) =
