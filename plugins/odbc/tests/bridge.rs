@@ -732,6 +732,29 @@ fn live_postgres_a_user_with_spaces_at_either_end_logs_in() {
     }
 }
 
+/// psqlODBC percent-decodes a plain `PWD` and reads `+` as a space, so these
+/// passwords have to travel braced.
+#[test]
+#[ignore = "needs psqlODBC and a Postgres: set dbdelve_ODBC_POSTGRES, _USER and _PASSWORD"]
+fn live_postgres_a_password_psqlodbc_would_decode_logs_in() {
+    let mut admin = Bridge::open_postgres();
+    let user = "dbdelve_odbc_password";
+    let mut refused = Vec::new();
+    for password in [
+        "a+b", "50%off", "50%ab", "x%41y", "p{w}d", "{a+b}", "ends}", " p+%41 ",
+    ] {
+        admin.query(&format!("DROP ROLE IF EXISTS {user}"));
+        ended(&admin.query(&format!("CREATE ROLE {user} LOGIN PASSWORD '{password}'")));
+        let mut bridge = Bridge::spawn();
+        let opened = bridge.open_postgres_as(user, password);
+        if !matches!(opened, Response::Opened { .. }) {
+            refused.push((password, opened));
+        }
+    }
+    admin.query(&format!("DROP ROLE IF EXISTS {user}"));
+    assert!(refused.is_empty(), "{refused:#?}");
+}
+
 /// Db2's text form of a `DOUBLE` keeps 15 digits, so a shown value filtered on
 /// matched nothing; the binary value's shortest form matches itself.
 #[test]

@@ -128,7 +128,11 @@ impl Session {
         let error = failure::from(&*handle, function);
         // SAFETY: the handle never connected and is not used again.
         unsafe { raw::free(&*handle) };
-        Err(failure::scrubbed(error, password, &[value(password)]))
+        Err(failure::scrubbed(
+            error,
+            password,
+            &[braced_when(password, true)],
+        ))
     }
 
     pub fn handle(&self) -> &handles::Connection<'static> {
@@ -453,6 +457,22 @@ fn registered_library(driver: &str) -> Option<String> {
     None
 }
 
+#[cfg(not(target_os = "macos"))]
+fn registered_library(_driver: &str) -> Option<String> {
+    None
+}
+
+/// psqlODBC, by the library a `DRIVER=` loads or a name its installers
+/// register (`PostgreSQL Unicode`, `PostgreSQL ANSI(x64)`). Another vendor's
+/// Postgres driver taken for it gets a braced password, which the ODBC grammar
+/// reads as the same value.
+fn is_psqlodbc(driver: &str) -> bool {
+    let library = registered_library(driver).unwrap_or_else(|| driver.to_string());
+    let file = library.rsplit(['/', '\\']).next().unwrap_or_default();
+    file.to_ascii_lowercase().starts_with("psqlodbc")
+        || driver.trim().to_ascii_lowercase().starts_with("postgresql")
+}
+
 /// A user `a@b` or a password holding a brace arrives whole. With a user the
 /// password key is sent even when blank, since some token-based logins need it
 /// present; without one it is still sent when given, for a string that names
@@ -474,7 +494,8 @@ pub fn connection_string(base: &str, user: &str, password: &str) -> Result<Strin
         attributes.push(format!("UID={}", user_value(user)));
     }
     if !user.is_empty() || !password.is_empty() {
-        attributes.push(format!("PWD={}", value(password)));
+        let decoded = driver_named(base).is_some_and(|driver| is_psqlodbc(&driver));
+        attributes.push(format!("PWD={}", value(password, decoded)));
     }
     if attributes.is_empty() {
         return Ok(base.to_string());
@@ -497,16 +518,22 @@ pub fn connection_string(base: &str, user: &str, password: &str) -> Result<Strin
 /// from a password but keeps them in a `UID`, and reads a plain one as
 /// written. Db2 can take neither: it trims the spaces plain and keeps the
 /// braces.
-fn value(value: &str) -> String {
-    braced_when(value, value.trim() != value)
+///
+/// psqlODBC (18, `decode` in its `dlg_specific.c`) reads a plain password as
+/// URL-encoded, `+` as a space and `%41` as `A`, and a braced one as written,
+/// so on that driver a password holding either is braced too. Only a `DRIVER=`
+/// says which driver it is before the connect; a `DSN=` string does not.
+fn value(value: &str, decoded: bool) -> String {
+    let encoded = decoded && value.contains(['+', '%']);
+    braced_when(value, value.trim() != value || encoded)
 }
 
 fn user_value(user: &str) -> String {
     braced_when(user, false)
 }
 
-fn braced_when(value: &str, spaced: bool) -> String {
-    match value.starts_with('{') || spaced {
+fn braced_when(value: &str, unreadable: bool) -> String {
+    match value.starts_with('{') || unreadable {
         true => format!("{{{}}}", value.replace('}', "}}")),
         false => value.to_string(),
     }
@@ -552,6 +579,33 @@ mod tests {
             };
             assert!(message.starts_with(&format!("The {field} holds a `;`")));
         }
+    }
+
+    #[test]
+    fn a_password_psqlodbc_would_decode_is_braced_for_it_alone() {
+        for driver in [
+            "/opt/homebrew/lib/psqlodbcw.so",
+            "C:\\psqlODBC\\bin\\psqlodbc35w.dll",
+            "{PostgreSQL Unicode(x64)}",
+        ] {
+            let base = format!("DRIVER={driver}");
+            assert_eq!(
+                string(&base, "u", "a+b"),
+                format!("{base};UID=u;PWD={{a+b}}")
+            );
+            assert_eq!(
+                string(&base, "u", "%41}"),
+                format!("{base};UID=u;PWD={{%41}}}}}}")
+            );
+            assert_eq!(
+                string(&base, "u", "plain"),
+                format!("{base};UID=u;PWD=plain")
+            );
+        }
+        assert_eq!(
+            string("DRIVER=/a/libdb2.dylib", "u", "a+b%41"),
+            "DRIVER=/a/libdb2.dylib;UID=u;PWD=a+b%41"
+        );
     }
 
     #[test]

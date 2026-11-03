@@ -290,7 +290,12 @@ driver printing to stdout would corrupt them (`ponytail:` not on Windows).
 - **Credentials are appended braced only when needed** (`UID=…;PWD=…`, after a
   string the user wrote): Db2's CLI driver keeps braces as part of the value,
   so a value is braced, `}` doubled, only for a leading `{` or a space at
-  either end. A `;` in the user or password is refused, because Db2 splits on it
+  either end. psqlODBC reads a plain `PWD` URL-encoded (`+` a space, `%41`
+  `A`) and a braced one as written, so a password holding `+` or `%` is braced
+  too when the `DRIVER=` is psqlODBC, by its library or a `PostgreSQL…` name.
+  A `DSN=…` string names no driver before the connect, so through one such a
+  password still fails; a bare DSN goes to `SQLConnect`, which psqlODBC reads
+  as written. A `;` in the user or password is refused, because Db2 splits on it
   even inside braces, and a credential would become a key of the string. A user
   `a@b` and a blank password go as they are (hard rule 5). A string with no `=`
   is a DSN and goes to `SQLConnect` with the user and password beside it.
