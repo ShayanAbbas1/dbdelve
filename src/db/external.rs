@@ -395,7 +395,12 @@ impl Connection {
     }
 
     /// One non-query request, under the session like a statement, and
-    /// bounded by [`catalog_deadline`], since no Cancel reaches it.
+    /// bounded by [`catalog_deadline`], since no Cancel reaches it: once while
+    /// it waits for the session, which a statement may hold for as long as
+    /// the server takes, and once for the plugin's answer. The answer gets
+    /// the whole deadline rather than what the wait left of it, because past
+    /// it the plugin is ended and the session reset, which a request that
+    /// waited its turn has done nothing to deserve.
     fn call(&self, request: Request) -> Result<Response, DbError> {
         let what = match &request {
             Request::Catalog => "catalog",
@@ -404,7 +409,14 @@ impl Connection {
             _ => "a request",
         };
         let deadline = catalog_deadline(self.config.statement_timeout);
-        let _session = self.host.session();
+        let Some(_session) = self.host.session_by(Instant::now() + deadline) else {
+            return Err(failure(format!(
+                "`{what}` waited {} s for the {} plugin's session, busy with another \
+                 statement, and was not sent.",
+                deadline.as_secs(),
+                self.host.plugin.name
+            )));
+        };
         let (_in_flight, answers) = self.host.request(request)?;
         match answers.recv_timeout(deadline) {
             Ok(Routed::Control(Response::Error {
@@ -1816,6 +1828,44 @@ mod tests {
         assert!(connection.is_lost());
         assert!(gone_within(pid, Duration::from_secs(1)));
         assert_eq!(catalog_deadline(0), CATALOG_BOUND);
+    }
+
+    #[test]
+    fn a_catalog_call_queued_behind_a_statement_gives_up_at_its_deadline_and_keeps_the_session() {
+        let config = ExternalConfig {
+            statement_timeout: 1,
+            ..config()
+        };
+        let connection = Connection::open(&config).unwrap();
+        let run = CancelToken::default();
+        let running = {
+            let (connection, run) = (connection.clone(), run.clone());
+            std::thread::spawn(move || connection.query("sleep 60000", &run, Fetch::default()))
+        };
+        std::thread::sleep(Duration::from_millis(200));
+        let started = Instant::now();
+        let error = connection.catalog().unwrap_err();
+        let took = started.elapsed();
+        let deadline = catalog_deadline(1);
+        assert!(
+            took >= deadline && took < deadline + Duration::from_secs(1),
+            "{took:?}"
+        );
+        assert_eq!(
+            error.message,
+            "`catalog` waited 6 s for the Echo plugin's session, busy with another statement, \
+             and was not sent."
+        );
+        assert!(!connection.is_lost());
+
+        connection.cancel(&run).unwrap();
+        let cancelled = running.join().unwrap().unwrap_err();
+        assert!(
+            cancelled.message.starts_with(CANCELLED),
+            "{}",
+            cancelled.message
+        );
+        assert!(!connection.catalog().unwrap().schemas.is_empty());
     }
 
     #[test]

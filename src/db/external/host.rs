@@ -16,7 +16,7 @@ use std::io::{self, BufReader, Read, Write};
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -320,6 +320,25 @@ impl Host {
 
     pub(super) fn session(&self) -> MutexGuard<'_, ()> {
         lock(&self.session)
+    }
+
+    /// The session, or None if it is still held by `due`. Polled, since a
+    /// std mutex has no timed lock.
+    pub(super) fn session_by(&self, due: Instant) -> Option<MutexGuard<'_, ()>> {
+        let mut pause = Duration::from_millis(1);
+        loop {
+            match self.session.try_lock() {
+                Ok(session) => return Some(session),
+                Err(TryLockError::Poisoned(poisoned)) => return Some(poisoned.into_inner()),
+                Err(TryLockError::WouldBlock) => {}
+            }
+            let left = due.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            thread::sleep(pause.min(left));
+            pause = (pause * 2).min(Duration::from_millis(50));
+        }
     }
 
     pub(super) fn is_reset(&self) -> bool {
