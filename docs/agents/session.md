@@ -534,6 +534,10 @@ one waiting on a column ignores whatever is typed into it.
   Ctrl elsewhere. Never `cmd-`: on Linux that is Super, which the window manager
   takes first. Every binding is rebindable from Settings (`keybindings.rs`), and
   a rebind takes effect on the next launch.
+  Minimize is macOS-only; its Cmd-M default yields to an existing override.
+  Collision checks compare parsed keystrokes (`secondary-m` and `cmd-m` are
+  equivalent there), and Settings reads the same effective chords as startup,
+  so a suppressed Minimize default is shown as unbound, not as a conflict.
 
 ## The connection form
 

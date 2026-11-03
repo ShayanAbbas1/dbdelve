@@ -965,6 +965,43 @@ fn tab_reaches_the_default_sorting_choice_in_settings(cx: &mut TestAppContext) {
     });
 }
 
+#[cfg(target_os = "macos")]
+#[gpui::test]
+fn an_existing_cmd_m_binding_can_be_recaptured_in_settings(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let directory = store::dbdelve_directory().unwrap();
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("profiles.toml"),
+            "[settings]\ncheck_for_updates = false\n\
+             [settings.custom_keybindings]\nshow_messages = \"secondary-m\"\n",
+        )
+        .unwrap();
+        let (workspace, cx) = launch(cx);
+        cx.simulate_keystrokes("secondary-,");
+        settle(cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.start_rebind("show_messages", window, cx);
+            });
+        });
+        settle(cx);
+        cx.simulate_keystrokes("cmd-m");
+        settle(cx);
+        let saved = store::peek_profiles()
+            .unwrap()
+            .settings
+            .unwrap()
+            .custom_keybindings
+            .unwrap();
+        assert_eq!(
+            saved.get("show_messages").map(String::as_str),
+            Some("cmd-m")
+        );
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn stepping_to_the_next_result_keeps_the_keyboard_in_the_grid(cx: &mut TestAppContext) {
     store::tests::with_home(|| {

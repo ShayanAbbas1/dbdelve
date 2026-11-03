@@ -110,17 +110,9 @@ macro_rules! registry_spec {
 macro_rules! registry_binding {
     (($id:literal, $label:literal, $context:expr, [$($default:literal),*], @macos, $($action:tt)+), $overrides:ident, $bindings:ident) => {
         if cfg!(target_os = "macos") {
-            match $overrides.get($id) {
-                Some(chord) if is_parseable(chord) => {
-                    $bindings.push(KeyBinding::new(chord, $($action)+, $context))
-                }
-                _ => {
-                    for default in [$($default),*] {
-                        if conflict(default, $context, $id, $overrides).is_none() {
-                            $bindings.push(KeyBinding::new(default, $($action)+, $context));
-                        }
-                    }
-                }
+            let spec = registry_spec!(($id, $label, $context, [$($default),*], @macos, $($action)+));
+            for chord in chords_for(&spec, $overrides) {
+                $bindings.push(KeyBinding::new(chord, $($action)+, $context));
             }
         }
     };
@@ -315,6 +307,18 @@ fn inert(id: &str, context: Option<&str>) -> bool {
         .any(|&(action, within)| action == id && Some(within) == context)
 }
 
+fn same_chord(a: &str, b: &str) -> bool {
+    let mut a = a.split_whitespace().map(Keystroke::parse);
+    let mut b = b.split_whitespace().map(Keystroke::parse);
+    loop {
+        match (a.next(), b.next()) {
+            (Some(Ok(a)), Some(Ok(b))) if a == b => {}
+            (None, None) => return true,
+            _ => return false,
+        }
+    }
+}
+
 /// The chords currently in force for `spec`: its override if it has one,
 /// its shipped defaults otherwise.
 pub(crate) fn chords_for<'a>(
@@ -322,8 +326,20 @@ pub(crate) fn chords_for<'a>(
     overrides: &'a HashMap<String, String>,
 ) -> Vec<&'a str> {
     match overrides.get(spec.id) {
-        Some(chord) => vec![chord.as_str()],
-        None => spec.defaults.to_vec(),
+        Some(chord) if is_parseable(chord) => vec![chord.as_str()],
+        _ if spec.id == "minimize"
+            && available_registry().any(|other| {
+                other.id != spec.id
+                    && overrides.get(other.id).is_some_and(|chord| {
+                        spec.defaults
+                            .iter()
+                            .any(|default| same_chord(chord, default))
+                    })
+            }) =>
+        {
+            Vec::new()
+        }
+        _ => spec.defaults.to_vec(),
     }
 }
 
@@ -343,7 +359,9 @@ pub(crate) fn conflict(
                 && contexts_overlap(spec.context, context)
                 && !inert(spec.id, context)
                 && !inert(exclude_id, spec.context)
-                && chords_for(spec, overrides).contains(&chord)
+                && chords_for(spec, overrides)
+                    .iter()
+                    .any(|bound| same_chord(bound, chord))
         })
         .map(|spec| spec.label)
 }
@@ -440,17 +458,34 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn configured_cmd_m_override_keeps_minimize_from_taking_the_chord() {
-        let overrides = HashMap::from([("show_messages".to_string(), "cmd-m".to_string())]);
-        assert_eq!(
-            conflict("cmd-m", None, "minimize", &overrides),
-            Some("Toggle Messages")
-        );
-        assert!(
-            !build_bindings(&overrides)
-                .iter()
-                .any(|binding| binding.action().partial_eq(&Minimize))
-        );
+    fn configured_cmd_m_override_keeps_its_chord_until_removed() {
+        let minimize = available_registry()
+            .find(|spec| spec.id == "minimize")
+            .unwrap();
+        for chord in ["cmd-m", "secondary-m"] {
+            let mut overrides = HashMap::from([("run_query".to_string(), chord.to_string())]);
+            let keymap = gpui::Keymap::new(build_bindings(&overrides));
+            let (bindings, _) =
+                keymap.bindings_for_input(&[Keystroke::parse("cmd-m").unwrap()], &[]);
+            assert!(bindings[0].action().partial_eq(&RunQuery));
+            assert!(chords_for(minimize, &overrides).is_empty());
+            assert_eq!(conflict("cmd-m", None, "run_query", &overrides), None);
+            assert_eq!(
+                conflict("cmd-m", None, "new_query", &overrides),
+                Some("Run Query")
+            );
+
+            overrides.remove("run_query");
+            let keymap = gpui::Keymap::new(build_bindings(&overrides));
+            let (bindings, _) =
+                keymap.bindings_for_input(&[Keystroke::parse("cmd-m").unwrap()], &[]);
+            assert!(bindings[0].action().partial_eq(&Minimize));
+            assert_eq!(chords_for(minimize, &overrides), vec!["cmd-m"]);
+            assert_eq!(
+                conflict("secondary-m", None, "run_query", &overrides),
+                Some("Minimize Window")
+            );
+        }
     }
 
     #[test]
