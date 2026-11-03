@@ -352,6 +352,39 @@ fn the_cancel_chord_reaches_the_workspace_from_the_editor_and_the_grid(cx: &mut 
 }
 
 #[gpui::test]
+fn a_note_about_one_tab_shows_only_while_that_tab_is_in_front(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let shown = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                let session = &workspace.profile().expect("a profile is open").session;
+                session.shown_notice().map(str::to_string)
+            })
+        };
+        let first = workspace.update(cx, |workspace, _| {
+            let session = &mut workspace.profile_mut().unwrap().session;
+            session.tab_notice = Some((session.active, "cancelled here".into()));
+            session.active
+        });
+        assert_eq!(shown(cx).as_deref(), Some("cancelled here"));
+
+        cx.simulate_keystrokes("secondary-t");
+        settle(cx);
+        assert_eq!(shown(cx), None);
+
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.activate_tab(first, window, cx)
+            })
+        });
+        settle(cx);
+        assert_eq!(shown(cx).as_deref(), Some("cancelled here"));
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn the_move_tab_chords_reorder_the_strip(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite(cx);

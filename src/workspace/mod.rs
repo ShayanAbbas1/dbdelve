@@ -788,7 +788,10 @@ impl Workspace {
     /// and one of those says the connection came up weaker than it asked for.
     pub(crate) fn clear_notice(&mut self) {
         match self.profile_mut() {
-            Some(profile) => profile.session.notice = None,
+            Some(profile) => {
+                profile.session.notice = None;
+                profile.session.tab_notice = None;
+            }
             None => self.welcome_notice = None,
         }
     }
@@ -1664,7 +1667,7 @@ impl Render for Workspace {
         } else {
             (Some(status_group), None)
         };
-        let notice = profile.session.notice.clone();
+        let notice = profile.session.shown_notice().map(str::to_string);
         let newer_release = self.newer_release.clone();
         let pending_count = self.pending_edit_count(cx);
         let has_pending = pending_count > 0;

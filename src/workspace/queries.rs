@@ -2659,7 +2659,7 @@ impl Workspace {
                     if let Some(notice) = notice
                         && let Some(profile) = workspace.issued_to(&id, generation)
                     {
-                        profile.session.notice = Some(notice);
+                        profile.session.tab_notice = Some((tab, notice));
                     }
                     if succeeded && let Some(profile) = workspace.issued_to(&id, generation) {
                         // A statement that returned no columns produced no grid,

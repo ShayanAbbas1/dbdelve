@@ -443,6 +443,9 @@ pub(crate) struct Session {
     /// has applied.
     pub(crate) pending_discard: Option<PendingDiscard>,
     pub(crate) notice: Option<String>,
+    /// What a statement's run cost beyond its result (`QueryResult::notice`),
+    /// said only while the tab it ran on is in front, under any `notice`.
+    pub(crate) tab_notice: Option<(Tab, String)>,
     /// The generated batch a relation tab is showing before it runs. That tab
     /// has no buffer to put SQL in, so the modal is where the statement is on
     /// screen — and nothing runs until Run.
@@ -858,6 +861,7 @@ impl Session {
             query_rename_needs_focus: false,
             pending_discard: None,
             notice,
+            tab_notice: None,
             apply_review: None,
             insert_form: None,
             import_rows: None,
@@ -869,6 +873,17 @@ impl Session {
             structure_requests: HashMap::new(),
             last_structure_request: 0,
         }
+    }
+
+    /// The status bar's notice: the session's, or else one about the tab in
+    /// front.
+    pub(crate) fn shown_notice(&self) -> Option<&str> {
+        self.notice.as_deref().or_else(|| {
+            self.tab_notice
+                .as_ref()
+                .filter(|(tab, _)| *tab == self.active)
+                .map(|(_, notice)| notice.as_str())
+        })
     }
 
     pub(crate) fn query_tab(&self, id: u64) -> Option<&QueryTab> {
