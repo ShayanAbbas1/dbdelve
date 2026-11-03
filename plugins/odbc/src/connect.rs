@@ -45,6 +45,7 @@ pub struct Session {
     handle: ManuallyDrop<handles::Connection<'static>>,
     /// Seconds; 0 is none.
     statement_timeout: u32,
+    reads_bound_columns: bool,
 }
 
 impl Session {
@@ -101,10 +102,20 @@ impl Session {
                 "SQLDriverConnect",
             ),
         };
-        if succeeded(connected) {
+        let mut connected = succeeded(connected);
+        if connected
+            && !dsn
+            && let Some(streaming) = streaming(&handle, &texts[0])
+        {
+            let _ = handle.disconnect();
+            connected = succeeded(handle.connect_with_connection_string(&SqlText::new(&streaming)));
+        }
+        if connected {
+            let reads_bound_columns = raw::reads_bound_columns(&handle);
             return Ok(Self {
                 handle,
                 statement_timeout,
+                reads_bound_columns,
             });
         }
         let error = failure::from(&*handle, function);
@@ -115,6 +126,11 @@ impl Session {
 
     pub fn handle(&self) -> &handles::Connection<'static> {
         &self.handle
+    }
+
+    /// The driver's `SQLGetData` reads bound columns, in any order.
+    pub fn reads_bound_columns(&self) -> bool {
+        self.reads_bound_columns
     }
 
     /// A statement with escape scanning off, refused when the driver will not
@@ -203,16 +219,59 @@ pub fn is_dsn(connection: &str) -> bool {
     !connection.contains('=')
 }
 
+/// Rows psqlODBC fetches through its cursor at a time.
+const CURSOR_ROWS: u32 = 4096;
+
+/// psqlODBC (`UseDeclareFetch=0`, its default) reads a whole result into the
+/// bridge's memory before the first row, which defeats a row limit that stops
+/// the stream. So when the driver turns out to be psqlODBC and the string
+/// leaves the choice open, it is reconnected told to fetch through a cursor,
+/// `Fetch` rows at a time unless the string sets that too. In autocommit
+/// psqlODBC opens the cursor in a transaction of its own and ends it with the
+/// statement.
+fn streaming(handle: &handles::Connection, connection: &str) -> Option<String> {
+    let driver = raw::info_string(handle, InfoType::DriverName)?;
+    if !driver.to_ascii_lowercase().starts_with("psqlodbc") {
+        return None;
+    }
+    let pairs = attributes(connection);
+    let names = |keys: &[&str]| {
+        pairs
+            .iter()
+            .any(|(name, _)| keys.iter().any(|key| name.eq_ignore_ascii_case(key)))
+    };
+    if names(&["UseDeclareFetch", "B6"]) {
+        return None;
+    }
+    let mut string = connection.to_string();
+    let typed = connection.trim_end();
+    if !typed.is_empty() && !typed.ends_with(';') {
+        string.push(';');
+    }
+    string.push_str("UseDeclareFetch=1");
+    if !names(&["Fetch", "A7"]) {
+        string.push_str(&format!(";Fetch={CURSOR_ROWS}"));
+    }
+    Some(string)
+}
+
 /// The longest `DRIVER=` value the bridge passes on. unixODBC formats a failed
 /// load as the name and the loader's error, which repeats the name, into a
 /// 2,048-byte buffer; past that it aborts the process.
 const MOST_DRIVER: usize = 512;
 
-/// The `DRIVER=` value the driver manager will load, read as unixODBC reads
-/// the string: pairs split on `;`, a value in braces runs to a `}` not
-/// doubled, the later of two keywords wins, and whichever of `DSN` and
-/// `DRIVER`/`FILEDSN` comes first excludes the other.
+/// The `DRIVER=` value the driver manager will load.
 pub fn driver_named(connection: &str) -> Option<String> {
+    attributes(connection)
+        .into_iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("DRIVER"))
+        .map(|(_, value)| value)
+}
+
+/// The string's pairs as unixODBC reads them: split on `;`, a value in braces
+/// running to a `}` not doubled, the later of two keywords winning, and
+/// whichever of `DSN` and `DRIVER`/`FILEDSN` comes first excluding the other.
+fn attributes(connection: &str) -> Vec<(String, String)> {
     let bytes = connection.as_bytes();
     let mut at = 0;
     let mut pairs: Vec<(String, String)> = Vec::new();
@@ -271,9 +330,6 @@ pub fn driver_named(connection: &str) -> Option<String> {
         }
     }
     pairs
-        .into_iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("DRIVER"))
-        .map(|(_, value)| value)
 }
 
 /// Refuses a driver the driver manager could not load, before it tries:

@@ -80,6 +80,11 @@ impl Bridge {
 
     fn open_postgres_as(&mut self, user: &str, password: &str) -> Response {
         let connection = env::var("dbdelve_ODBC_POSTGRES").expect("dbdelve_ODBC_POSTGRES");
+        self.open_postgres_with(&connection, user, password)
+    }
+
+    fn open_postgres_with(&mut self, connection: &str, user: &str, password: &str) -> Response {
+        let connection = connection.to_string();
         self.request(Request::Open {
             fields: BTreeMap::from([
                 ("connection".to_string(), connection),
@@ -801,4 +806,129 @@ fn live_postgres_a_binary_value_may_take_the_whole_frame() {
         message,
         "A value in column big is larger than 64 MiB, which protocol 1 cannot carry."
     );
+}
+
+/// Prints rows a second for a million-row read of mixed columns, as the host
+/// reads it; run with `--release --nocapture` to measure.
+#[test]
+#[ignore = "needs psqlODBC and a Postgres: set dbdelve_ODBC_POSTGRES, _USER and _PASSWORD"]
+fn live_postgres_read_throughput() {
+    let mut bridge = Bridge::open_postgres();
+    ended(&bridge.query(
+        "CREATE TEMP TABLE throughput AS SELECT g AS id, 'name ' || g AS name, \
+         g * 1.5::float8 AS f, timestamp '2024-01-01' + g * interval '1 second' AS ts, \
+         (g % 2 = 0) AS flag, md5(g::text) AS hash, (g * 1.25)::numeric(12, 2) AS amount \
+         FROM generate_series(1, 1000000) AS g",
+    ));
+    let started = Instant::now();
+    let outcome = bridge.query("SELECT * FROM throughput");
+    let elapsed = started.elapsed();
+    assert_eq!(ended(&outcome).0, 1_000_000);
+    assert_eq!(outcome.rows.len(), 1_000_000);
+    assert_eq!(
+        outcome.rows[0],
+        [
+            Some("1".to_string()),
+            Some("name 1".to_string()),
+            Some("1.5".to_string()),
+            Some("2024-01-01 00:00:01".to_string()),
+            Some("0".to_string()),
+            Some("c4ca4238a0b923820dcc509a6f75849b".to_string()),
+            Some("1.25".to_string()),
+        ]
+    );
+    eprintln!(
+        "1,000,000 rows in {elapsed:?}: {:.0} rows/s",
+        1_000_000.0 / elapsed.as_secs_f64()
+    );
+}
+
+/// psqlODBC reads a whole result into memory unless told to use a cursor, so
+/// the bridge tells it to, which the server shows as the statement's own
+/// cursor; a string that says otherwise is obeyed.
+#[test]
+#[ignore = "needs psqlODBC and a Postgres: set dbdelve_ODBC_POSTGRES, _USER and _PASSWORD"]
+fn live_postgres_a_result_streams_through_a_cursor_unless_the_string_says_otherwise() {
+    let cursors = "SELECT count(*) FROM pg_cursors";
+    let mut bridge = Bridge::open_postgres();
+    assert_eq!(bridge.query(cursors).rows, [vec![Some("1".to_string())]]);
+
+    let user = env::var("dbdelve_ODBC_POSTGRES_USER").unwrap_or_default();
+    let password = env::var("dbdelve_ODBC_POSTGRES_PASSWORD").unwrap_or_default();
+    let base = env::var("dbdelve_ODBC_POSTGRES").expect("dbdelve_ODBC_POSTGRES");
+    let mut whole = Bridge::spawn();
+    let opened = whole.open_postgres_with(&format!("{base};UseDeclareFetch=0"), &user, &password);
+    assert!(matches!(opened, Response::Opened { .. }), "{opened:?}");
+    assert_eq!(whole.query(cursors).rows, [vec![Some("0".to_string())]]);
+}
+
+/// The cursor's transaction ends with the statement, so a read leaves the
+/// session idle rather than holding a transaction open.
+#[test]
+#[ignore = "needs psqlODBC and a Postgres: set dbdelve_ODBC_POSTGRES, _USER and _PASSWORD"]
+fn live_postgres_a_streamed_read_leaves_no_transaction_open() {
+    let mut bridge = Bridge::open_postgres();
+    let pid = bridge.query("SELECT pg_backend_pid()").rows[0][0]
+        .clone()
+        .unwrap();
+    assert_eq!(
+        ended(&bridge.query("SELECT generate_series(1, 5000)")).0,
+        5000
+    );
+    let mut observer = Bridge::open_postgres();
+    let state = observer.query(&format!(
+        "SELECT state FROM pg_stat_activity WHERE pid = {pid}"
+    ));
+    assert_eq!(state.rows, [vec![Some("idle".to_string())]]);
+    let failed = bridge.query("SELECT 1/0");
+    assert_eq!(error_of(&failed).1.as_deref(), Some("22012"));
+    assert_eq!(bridge.query("SELECT 2").rows, [vec![Some("2".to_string())]]);
+}
+
+/// A value longer than the buffer its column was bound with is read again
+/// whole, and the truncation the fetch warned of is no message.
+#[test]
+#[ignore = "needs psqlODBC and a Postgres: set dbdelve_ODBC_POSTGRES, _USER and _PASSWORD"]
+fn live_postgres_a_value_outgrowing_its_bound_buffer_arrives_whole() {
+    let mut bridge = Bridge::open_postgres();
+    let outcome = bridge.query(
+        "SELECT n, repeat('x', n) AS t, repeat('é', n)::varchar(20000) AS v, \
+         (n::numeric ^ 90)::numeric AS big, NULL::text AS nothing, \
+         (n::numeric ^ 90)::text AS big_text \
+         FROM (VALUES (1), (5000), (20000)) AS r(n) ORDER BY n",
+    );
+    for (row, n) in outcome.rows.iter().zip([1usize, 5000, 20000]) {
+        assert_eq!(row[1].as_deref(), Some("x".repeat(n).as_str()));
+        assert_eq!(row[2].as_deref(), Some("é".repeat(n).as_str()));
+        assert_eq!(row[4], None);
+        assert_eq!(row[3], row[5]);
+    }
+    assert!(outcome.rows[2][3].as_ref().unwrap().len() > 300);
+    let Response::End { messages, .. } = &outcome.terminal else {
+        panic!("an end, got {:?}", outcome.terminal);
+    };
+    assert!(messages.is_empty(), "{messages:?}");
+}
+
+#[test]
+#[ignore = "needs a Db2 and IBM's driver: set dbdelve_ODBC_DB2, _USER and _PASSWORD"]
+fn live_a_value_outgrowing_its_bound_buffer_arrives_whole() {
+    let mut bridge = Bridge::open(0);
+    let outcome = bridge.query(
+        "SELECT CAST(REPEAT('x', 20000) AS VARCHAR(32000)), CAST('a' AS VARCHAR(32000)), \
+         CAST(NULL AS VARCHAR(10)), CAST(1 AS INTEGER) FROM SYSIBM.SYSDUMMY1",
+    );
+    assert_eq!(
+        outcome.rows,
+        [vec![
+            Some("x".repeat(20000)),
+            Some("a".to_string()),
+            None,
+            Some("1".to_string()),
+        ]]
+    );
+    let Response::End { messages, .. } = &outcome.terminal else {
+        panic!("an end, got {:?}", outcome.terminal);
+    };
+    assert!(messages.is_empty(), "{messages:?}");
 }

@@ -7,16 +7,17 @@
 //! half as it found it. So every SQLLEN out-parameter here starts at zero and
 //! is read back through [`sqllen`], for every driver alike. odbc-api's buffers,
 //! indicators and `row_count` trust a 64-bit SQLLEN, which is why no value is
-//! read through them, and why nothing binds columns: a bound array's indicator
-//! stride would carry the same bug where no wrapper could fix it.
+//! read through them. Columns are bound one row at a time ([`Bindings`]), never
+//! as arrays: a bound array's indicator stride would carry the same bug where
+//! no wrapper could fix it.
 
 use odbc_api::handles::{self, AnyHandle, Statement, StatementImpl};
 use odbc_api::sys::{
-    CDataType, Desc, HDbc, HStmt, InfoType, Len, NO_TOTAL, Nullability, Pointer, SQLCancel,
-    SQLColAttributeW, SQLColumnsW, SQLDescribeColW, SQLExecDirectW, SQLFetch, SQLForeignKeysW,
-    SQLFreeHandle, SQLGetData, SQLGetDiagRecW, SQLGetInfoW, SQLGetStmtAttrW, SQLMoreResults,
-    SQLNumResultCols, SQLPrimaryKeysW, SQLRowCount, SQLSetStmtAttrW, SQLTablesW, SqlDataType,
-    SqlReturn, StatementAttribute, ULen,
+    CDataType, Desc, FreeStmtOption, HDbc, HStmt, InfoType, Len, NO_TOTAL, Nullability, Pointer,
+    SQLBindCol, SQLCancel, SQLColAttributeW, SQLColumnsW, SQLDescribeColW, SQLExecDirectW,
+    SQLFetch, SQLForeignKeysW, SQLFreeHandle, SQLFreeStmt, SQLGetData, SQLGetDiagRecW, SQLGetInfoW,
+    SQLGetStmtAttrW, SQLMoreResults, SQLNumResultCols, SQLPrimaryKeysW, SQLRowCount,
+    SQLSetStmtAttrW, SQLTablesW, SqlDataType, SqlReturn, StatementAttribute, ULen,
 };
 
 pub const NULL_DATA: isize = -1;
@@ -230,14 +231,143 @@ pub fn num_result_cols(statement: &StatementImpl) -> Option<u16> {
 }
 
 pub fn fetch(statement: &StatementImpl) -> SqlReturn {
-    // SAFETY: a live statement handle with no bound columns, so the driver
-    // writes nowhere of ours.
+    // SAFETY: a live statement handle; any bound columns are held by a live
+    // `Bindings`, whose buffers outlive it, and unbound when it drops.
     unsafe { SQLFetch(statement.as_sys()) }
 }
 
 pub fn more_results(statement: &StatementImpl) -> SqlReturn {
-    // SAFETY: a live statement handle with no bound columns.
+    // SAFETY: a live statement handle; a result's `Bindings` has dropped, and
+    // unbound its columns, before the next result is asked for.
     unsafe { SQLMoreResults(statement.as_sys()) }
+}
+
+/// `SQLGetData` may read a column that is bound, which recovers a value too
+/// long for its bound buffer, and any column in any order.
+pub fn reads_bound_columns(connection: &handles::Connection) -> bool {
+    const SQL_GD_ANY_COLUMN: u32 = 1;
+    const SQL_GD_BOUND: u32 = 8;
+    let wanted = SQL_GD_ANY_COLUMN | SQL_GD_BOUND;
+    info_u32(connection, InfoType::GetDataExtensions).is_some_and(|bits| bits & wanted == wanted)
+}
+
+/// How one column is bound for `SQLFetch` to fill.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Bound {
+    /// Wide text of at most this many UTF-16 units; a longer value is
+    /// truncated there and read again with `SQLGetData`.
+    Text(usize),
+    Double,
+    Real,
+}
+
+pub enum BoundValue<'a> {
+    Null,
+    /// UTF-16 code units, as native-endian bytes.
+    Text(&'a [u8]),
+    /// Longer than its buffer, or of a length the driver did not give.
+    Truncated,
+    Double(f64),
+    Real(f32),
+}
+
+struct Slot {
+    bound: Bound,
+    /// `u64`s so a bound `double` is aligned.
+    buffer: Vec<u64>,
+    indicator: Box<Len>,
+}
+
+/// Columns bound for the current row, unbound on drop, which must come before
+/// the statement moves to another result or is freed.
+pub struct Bindings<'s> {
+    statement: &'s StatementImpl<'s>,
+    slots: Vec<(u16, Slot)>,
+}
+
+impl<'s> Bindings<'s> {
+    /// `None` when the driver refused a binding, every one then undone.
+    pub fn new(statement: &'s StatementImpl<'s>, columns: &[(u16, Bound)]) -> Option<Self> {
+        let mut bindings = Self {
+            statement,
+            slots: Vec::with_capacity(columns.len()),
+        };
+        for &(column, bound) in columns {
+            let (target, bytes) = match bound {
+                Bound::Text(units) => (CDataType::WChar, (units + 1) * 2),
+                Bound::Double => (CDataType::Double, 8),
+                Bound::Real => (CDataType::Float, 4),
+            };
+            let mut slot = Slot {
+                bound,
+                buffer: vec![0; bytes.div_ceil(8)],
+                indicator: Box::new(0),
+            };
+            // SAFETY: a live statement handle; the buffer holds `bytes` bytes
+            // and the indicator one SQLLEN, both on the heap, so moving the
+            // slot into `bindings` leaves them where the driver was told, and
+            // both live until `drop` unbinds them.
+            let result = unsafe {
+                SQLBindCol(
+                    statement.as_sys(),
+                    column,
+                    target,
+                    slot.buffer.as_mut_ptr() as Pointer,
+                    bytes as Len,
+                    &mut *slot.indicator,
+                )
+            };
+            bindings.slots.push((column, slot));
+            if !succeeded(result) {
+                return None;
+            }
+        }
+        Some(bindings)
+    }
+
+    /// Zeroes every indicator before a fetch, for a driver that writes only
+    /// the low half of one.
+    pub fn clear(&mut self) {
+        for (_, slot) in &mut self.slots {
+            *slot.indicator = 0;
+        }
+    }
+
+    /// The slot bound to `column`, if any.
+    pub fn slot(&self, column: u16) -> Option<usize> {
+        self.slots.iter().position(|(bound, _)| *bound == column)
+    }
+
+    /// The fetched row's value in slot `index`.
+    pub fn value(&self, index: usize) -> BoundValue<'_> {
+        let slot = &self.slots[index].1;
+        let indicator = sqllen(*slot.indicator);
+        if indicator == NULL_DATA {
+            return BoundValue::Null;
+        }
+        let bytes: &[u8] = as_bytes(&slot.buffer);
+        match slot.bound {
+            Bound::Double => BoundValue::Double(f64::from_ne_bytes(bytes[..8].try_into().unwrap())),
+            Bound::Real => BoundValue::Real(f32::from_ne_bytes(bytes[..4].try_into().unwrap())),
+            Bound::Text(units) => match usize::try_from(indicator) {
+                Ok(length) if length <= units * 2 => BoundValue::Text(&bytes[..length & !1]),
+                _ => BoundValue::Truncated,
+            },
+        }
+    }
+}
+
+impl Drop for Bindings<'_> {
+    fn drop(&mut self) {
+        // SAFETY: a live statement handle; afterwards the driver holds no
+        // pointer into the slots, which drop after this.
+        let _ = unsafe { SQLFreeStmt(self.statement.as_sys(), FreeStmtOption::Unbind) };
+    }
+}
+
+fn as_bytes(words: &[u64]) -> &[u8] {
+    // SAFETY: any `u64` is eight initialised bytes, and `u8` has no alignment.
+    unsafe { std::slice::from_raw_parts(words.as_ptr() as *const u8, words.len() * 8) }
 }
 
 /// `None` when the driver cannot say, which a negative count means.

@@ -21,7 +21,7 @@ use odbc_api::sys::{HStmt, SqlDataType, SqlReturn};
 
 use crate::connect::Session;
 use crate::failure;
-use crate::raw::{self, DataError, Fetched};
+use crate::raw::{self, Bound, BoundValue, DataError, Fetched};
 
 /// So a driver that warns on every row cannot make `end` the size of a result.
 const MOST_MESSAGES: usize = 16;
@@ -225,6 +225,7 @@ pub fn query(
         out,
         id,
         messages: Vec::new(),
+        reads_bound: session.reads_bound_columns(),
     }
     .run(sql);
     control.settle(&statement);
@@ -237,6 +238,9 @@ struct Run<'a, W: Write> {
     out: &'a mut W,
     id: u64,
     messages: Vec<String>,
+    /// Columns may be bound, since `SQLGetData` can still read one whose
+    /// value outgrew its buffer.
+    reads_bound: bool,
 }
 
 /// What a statement's results add up to: the first result set's rows, the
@@ -333,6 +337,7 @@ impl<W: Write> Run<'_, W> {
     fn stream(&mut self, columns: u16) -> Result<u64, Response> {
         let mut fields = Vec::new();
         let mut fetched = Vec::new();
+        let mut plan = Vec::new();
         for column in 1..=columns {
             let Some(described) = raw::describe_col(self.statement, column) else {
                 return Err(self.failure("SQLDescribeCol"));
@@ -341,11 +346,20 @@ impl<W: Write> Run<'_, W> {
                 return Err(self.failure("SQLColAttribute"));
             };
             let read = read_as(described.data_type, described.size, &type_name);
+            if self.reads_bound
+                && let Some(bound) = bound_as(read, described.data_type, described.size)
+            {
+                plan.push((column, bound));
+            }
             fields.push(column_field(described.name, type_name, read));
             fetched.push(read);
         }
         let schema: SchemaRef = Arc::new(Schema::new(fields));
         let mut draining = self.send(&encode_schema(&schema))?;
+        let mut bindings = raw::Bindings::new(self.statement, &plan);
+        let slots: Vec<Option<usize>> = (1..=columns)
+            .map(|column| bindings.as_ref().and_then(|b| b.slot(column)))
+            .collect();
 
         let mut total = 0;
         let mut batcher = Batcher::new(fetched.len());
@@ -356,6 +370,13 @@ impl<W: Write> Run<'_, W> {
                 Some(Interrupt::Stop) => draining = true,
                 None => {}
             }
+            if draining {
+                // Unbound, so the rest is fetched without converting a value.
+                bindings = None;
+            }
+            if let Some(bindings) = &mut bindings {
+                bindings.clear();
+            }
             let statement = self.statement;
             let Some(fetched_row) = self.control.published(statement, || raw::fetch(statement))
             else {
@@ -363,7 +384,7 @@ impl<W: Write> Run<'_, W> {
             };
             match fetched_row {
                 SqlReturn::SUCCESS => {}
-                SqlReturn::SUCCESS_WITH_INFO => self.note(),
+                SqlReturn::SUCCESS_WITH_INFO => self.note_fetched(bindings.is_some()),
                 SqlReturn::NO_DATA => break,
                 _ => return Err(self.failure("SQLFetch")),
             }
@@ -371,7 +392,10 @@ impl<W: Write> Run<'_, W> {
             if draining {
                 continue;
             }
-            let row = self.row(&schema, &fetched, &mut scratch)?;
+            let bound = bindings
+                .as_ref()
+                .map(|bindings| (bindings, slots.as_slice()));
+            let row = self.row(&schema, &fetched, bound, &mut scratch)?;
             for batch in batcher.push(row, Instant::now()) {
                 if self.send_batch(&schema, batch)? {
                     draining = true;
@@ -389,20 +413,32 @@ impl<W: Write> Run<'_, W> {
         &mut self,
         schema: &Schema,
         fetched: &[Read],
+        bound: Option<(&raw::Bindings, &[Option<usize>])>,
         scratch: &mut [u8],
     ) -> Result<Vec<Option<Cell>>, Response> {
         let mut row = Vec::with_capacity(fetched.len());
         for (index, &read) in fetched.iter().enumerate() {
             let column = index as u16 + 1;
-            let value = match read {
-                Read::Double => raw::get_double(self.statement, column)
-                    .map(|v| v.map(|v| Cell::Text(shown_f64(v)))),
-                Read::Real => raw::get_real(self.statement, column)
-                    .map(|v| v.map(|v| Cell::Text(shown_f32(v)))),
-                Read::Chunked(as_fetched) => self.chunked(column, as_fetched, scratch),
-                Read::ImplicitXml => self
-                    .chunked(column, Fetched::Text, scratch)
-                    .map(|v| v.map(Cell::undeclared)),
+            let slot =
+                bound.and_then(|(bindings, slots)| slots[index].map(|slot| (bindings, slot)));
+            let value = match (slot, read) {
+                (Some((bindings, slot)), _) => match bindings.value(slot) {
+                    BoundValue::Null => Ok(None),
+                    BoundValue::Text(bytes) => Ok(Some(Cell::Text(wide_text(bytes)))),
+                    BoundValue::Truncated => self.chunked(column, Fetched::Text, scratch),
+                    BoundValue::Double(value) => Ok(Some(Cell::Text(shown_f64(value)))),
+                    BoundValue::Real(value) => Ok(Some(Cell::Text(shown_f32(value)))),
+                },
+                (None, read) => match read {
+                    Read::Double => raw::get_double(self.statement, column)
+                        .map(|v| v.map(|v| Cell::Text(shown_f64(v)))),
+                    Read::Real => raw::get_real(self.statement, column)
+                        .map(|v| v.map(|v| Cell::Text(shown_f32(v)))),
+                    Read::Chunked(as_fetched) => self.chunked(column, as_fetched, scratch),
+                    Read::ImplicitXml => self
+                        .chunked(column, Fetched::Text, scratch)
+                        .map(|v| v.map(Cell::undeclared)),
+                },
             };
             let value = match value {
                 Ok(value) => value,
@@ -480,7 +516,22 @@ impl<W: Write> Run<'_, W> {
 
     /// Keeps the warnings the last call left, as `end.messages`.
     fn note(&mut self) {
-        for (_, message) in failure::records(self.statement) {
+        self.keep(failure::records(self.statement));
+    }
+
+    /// As `note`, but a fetch into bound columns warns `01004` for each value
+    /// that outgrew its buffer, which is then read whole, so that is no
+    /// message.
+    fn note_fetched(&mut self, bound: bool) {
+        let records = failure::records(self.statement)
+            .into_iter()
+            .filter(|(state, _)| !(bound && state == "01004"))
+            .collect();
+        self.keep(records);
+    }
+
+    fn keep(&mut self, records: Vec<(String, String)>) {
+        for (_, message) in records {
             if self.messages.len() < MOST_MESSAGES && !self.messages.contains(&message) {
                 self.messages.push(message);
             }
@@ -534,6 +585,23 @@ fn read_as(data_type: i16, size: usize, type_name: &str) -> Read {
         SqlDataType::REAL if size <= REAL_SIZE => Read::Real,
         _ if data_type == IBM_XML && type_name.eq_ignore_ascii_case("XML") => Read::ImplicitXml,
         _ => Read::Chunked(fetched_as(data_type, type_name)),
+    }
+}
+
+/// How a column read with `SQLGetData` is bound instead, when it can be: a
+/// float as itself, and text of a type ODBC defines in a buffer sized from the
+/// column's declared size, which a value may still outgrow (psqlODBC declares
+/// an unbounded `text` or `numeric` at a guess) and is then read again whole.
+/// A driver's own type and binary stay unbound, read in chunks.
+fn bound_as(read: Read, data_type: i16, size: usize) -> Option<Bound> {
+    match read {
+        Read::Double => Some(Bound::Double),
+        Read::Real => Some(Bound::Real),
+        Read::Chunked(Fetched::Text) if odbc_defines(data_type) => Some(Bound::Text(match size {
+            0 => 1024,
+            _ => size.saturating_mul(2).clamp(64, 8192),
+        })),
+        _ => None,
     }
 }
 
@@ -903,6 +971,20 @@ mod tests {
         assert_eq!(read_as(7, 24, "REAL"), Read::Real);
         assert_eq!(read_as(6, 126, "FLOAT"), Read::Chunked(Fetched::Text));
         assert_eq!(read_as(3, 31, "DECIMAL"), Read::Chunked(Fetched::Text));
+    }
+
+    #[test]
+    fn floats_and_odbc_text_are_bound_and_binary_and_a_drivers_own_types_are_not() {
+        assert_eq!(bound_as(Read::Double, 8, 15), Some(Bound::Double));
+        assert_eq!(bound_as(Read::Real, 7, 24), Some(Bound::Real));
+        let text = Read::Chunked(Fetched::Text);
+        assert_eq!(bound_as(text, 12, 10), Some(Bound::Text(64)));
+        assert_eq!(bound_as(text, -9, 1000), Some(Bound::Text(2000)));
+        assert_eq!(bound_as(text, -10, 0), Some(Bound::Text(1024)));
+        assert_eq!(bound_as(text, -1, 1 << 30), Some(Bound::Text(8192)));
+        assert_eq!(bound_as(text, -99, 100), None);
+        assert_eq!(bound_as(Read::Chunked(Fetched::Binary), -3, 10), None);
+        assert_eq!(bound_as(Read::ImplicitXml, -370, 0), None);
     }
 
     #[test]
