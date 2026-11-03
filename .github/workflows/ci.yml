@@ -179,9 +179,11 @@ jobs:
           dbdelve_ODBC_POSTGRES: DRIVER=/usr/lib/x86_64-linux-gnu/odbc/psqlodbcw.so;Server=127.0.0.1;Port=55432;Database=dbdelve_dev
           dbdelve_ODBC_POSTGRES_USER: dbdelve
           dbdelve_ODBC_POSTGRES_PASSWORD: dbdelve
-        run: >-
-          cargo nextest run --run-ignored all --test-threads 4
-          -E 'test(external::psqlodbc::)'
+        # The throughput test only measures; a debug build drains its million
+        # rows for nothing.
+        run: |
+          cargo nextest run --run-ignored all --test-threads 4 -E 'test(external::psqlodbc::)'
+          cargo test -p dbdelve-plugin-odbc --test bridge -- --ignored live_postgres_ --skip live_postgres_read_throughput
       # The one live Snowflake test that needs no account: it is what proves
       # the TLS provider is linked at run time.
       - name: snowflake tls
@@ -263,7 +265,7 @@ jobs:
         run: |
           driver="$(dev/db2/driver.sh)"
           export dbdelve_ODBC_DB2="$driver;HOSTNAME=127.0.0.1;PORT=55000;DATABASE=dbdelve;PROTOCOL=TCPIP"
-          cargo test -p dbdelve-plugin-odbc --test bridge -- --include-ignored
+          cargo test -p dbdelve-plugin-odbc --test bridge -- --include-ignored --skip live_postgres_
           # The host's side: the conformance subject builds the bridge itself.
           # No bastion in this job, so the tunnel test runs locally only. nextest
           # because it fails when the filter matches nothing, as a renamed

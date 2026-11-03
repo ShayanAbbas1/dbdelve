@@ -281,8 +281,11 @@ fn a_driver_that_cannot_be_loaded_is_refused_and_the_bridge_lives() {
             panic!("{connection}: an error, got {refused:?}");
         };
         assert_eq!(*kind, ErrorKind::Server, "{connection}: {message}");
+        // Only macOS checks a driver name before the driver manager sees it;
+        // elsewhere the system manager refuses an unknown name itself.
         assert!(
-            message.starts_with("The connection string's DRIVER="),
+            message.starts_with("The connection string's DRIVER=")
+                || (!cfg!(target_os = "macos") && message.contains("Driver Manager]")),
             "{connection}: {message}"
         );
         let hello = bridge.request(Request::Hello { protocol: PROTOCOL });
