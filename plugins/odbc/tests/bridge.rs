@@ -739,3 +739,29 @@ fn live_postgres_floats_show_as_the_server_prints_them() {
         assert_eq!(row[2 * index], row[2 * index + 1], "{value}");
     }
 }
+
+/// Db2's driver serializes an `XML` value with a byte-order mark and an XML
+/// declaration of its own; the server keeps neither.
+#[test]
+#[ignore = "needs a Db2 and IBM's driver: set dbdelve_ODBC_DB2, _USER and _PASSWORD"]
+fn live_xml_arrives_without_the_drivers_byte_order_mark_or_declaration() {
+    let mut bridge = Bridge::open(0);
+    let outcome = bridge.query(
+        "SELECT XMLPARSE(DOCUMENT '<a b=\"1\">é&amp;&lt;</a>'), \
+         XMLPARSE(DOCUMENT '<?xml version=\"1.0\"?><a/>'), \
+         XMLPARSE(DOCUMENT '<!--c--><a>&#xFEFF;x</a>'), \
+         XMLSERIALIZE(XMLPARSE(DOCUMENT '<a/>') AS CLOB(1K) INCLUDING XMLDECLARATION), \
+         CAST(NULL AS XML) \
+         FROM SYSIBM.SYSDUMMY1",
+    );
+    assert_eq!(
+        outcome.rows,
+        [vec![
+            Some("<a b=\"1\">é&amp;&lt;</a>".to_string()),
+            Some("<a/>".to_string()),
+            Some("<!--c--><a>\u{feff}x</a>".to_string()),
+            Some("<?xml version=\"1.0\" encoding=\"UTF-8\"?><a/>".to_string()),
+            None,
+        ]]
+    );
+}

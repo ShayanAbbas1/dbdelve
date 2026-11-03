@@ -397,6 +397,9 @@ impl<W: Write> Run<'_, W> {
                 Read::Double => raw::get_double(self.statement, column).map(|v| v.map(shown_f64)),
                 Read::Real => raw::get_real(self.statement, column).map(|v| v.map(shown_f32)),
                 Read::Chunked(as_fetched) => self.chunked(column, as_fetched, scratch),
+                Read::ImplicitXml => self
+                    .chunked(column, Fetched::Text, scratch)
+                    .map(|v| v.map(|text| undeclared(&text).to_string())),
             };
             let value = match value {
                 Ok(value) => value,
@@ -499,7 +502,15 @@ enum Read {
     Chunked(Fetched),
     Double,
     Real,
+    /// Text the driver serialized from a type that keeps no declaration of
+    /// its own.
+    ImplicitXml,
 }
+
+/// IBM's `SQL_XML`. Db2 stores an XML value parsed and keeps no declaration,
+/// and its driver adds a byte-order mark and one (`encoding="UTF-16"`) when it
+/// serializes the value, so both are the driver's and are taken off.
+const IBM_XML: i16 = -370;
 
 /// The widest an approximate numeric may be, in either of the radixes a driver
 /// sizes it in (`DOUBLE` as 15 or 17 digits, or 53 bits), and still fit a
@@ -515,6 +526,7 @@ fn read_as(data_type: i16, size: usize, type_name: &str) -> Read {
     match SqlDataType(data_type) {
         SqlDataType::DOUBLE | SqlDataType::FLOAT if size <= DOUBLE_SIZE => Read::Double,
         SqlDataType::REAL if size <= REAL_SIZE => Read::Real,
+        _ if data_type == IBM_XML && type_name.eq_ignore_ascii_case("XML") => Read::ImplicitXml,
         _ => Read::Chunked(fetched_as(data_type, type_name)),
     }
 }
@@ -574,6 +586,18 @@ pub fn rendered(fetched: Fetched, bytes: &[u8]) -> String {
             }
             text
         }
+    }
+}
+
+/// `text` without a leading byte-order mark and the XML declaration after it.
+fn undeclared(text: &str) -> &str {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let declared = text
+        .strip_prefix("<?xml")
+        .filter(|rest| rest.starts_with(|c: char| c.is_ascii_whitespace()));
+    match declared.and_then(|rest| rest.split_once("?>")) {
+        Some((_, rest)) => rest,
+        None => text,
     }
 }
 
@@ -839,6 +863,21 @@ mod tests {
         assert_eq!(read_as(7, 24, "REAL"), Read::Real);
         assert_eq!(read_as(6, 126, "FLOAT"), Read::Chunked(Fetched::Text));
         assert_eq!(read_as(3, 31, "DECIMAL"), Read::Chunked(Fetched::Text));
+    }
+
+    #[test]
+    fn only_ibms_xml_loses_the_declaration_its_driver_adds() {
+        assert_eq!(read_as(-370, 0, "XML"), Read::ImplicitXml);
+        assert_eq!(read_as(-370, 0, "OTHER"), Read::Chunked(Fetched::Text));
+        assert_eq!(read_as(-10, 0, "xml"), Read::Chunked(Fetched::Text));
+        let declared = "\u{feff}<?xml version=\"1.0\" encoding=\"UTF-16\" ?><a>\u{feff}</a>";
+        assert_eq!(undeclared(declared), "<a>\u{feff}</a>");
+        assert_eq!(
+            undeclared("<?xml-stylesheet href=\"s\"?><a/>"),
+            "<?xml-stylesheet href=\"s\"?><a/>"
+        );
+        assert_eq!(undeclared("<a/>"), "<a/>");
+        assert_eq!(undeclared("\u{feff}<a/>"), "<a/>");
     }
 
     #[test]
