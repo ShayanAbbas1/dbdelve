@@ -2328,8 +2328,24 @@ pub(crate) fn spawn_blocking<T: Send + 'static>(
 
 /// A Cancel, on a thread of its own started at once rather than on
 /// [`spawn_blocking`]'s pool, which the statements it cancels may be filling.
-/// Where the OS will not start a thread, it waits its turn on the pool instead.
+/// Where the OS will not start a thread, it runs on the reserve one
+/// ([`reserve_cancel_thread`]), and only where that never started either does
+/// it wait its turn on the pool.
 pub(crate) fn spawn_cancel<T, F>(executor: &gpui::BackgroundExecutor, work: F) -> gpui::Task<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    spawn_cancel_starting(executor, work, start_cancel_thread)
+}
+
+type CancelJob = Box<dyn FnOnce() + Send>;
+
+fn spawn_cancel_starting<T, F>(
+    executor: &gpui::BackgroundExecutor,
+    work: F,
+    start: fn(CancelJob) -> Result<(), CancelJob>,
+) -> gpui::Task<T>
 where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
@@ -2337,26 +2353,68 @@ where
     if executor.is_test() {
         return executor.spawn(async move { work() });
     }
+    let reserve = reserve_cancel_thread();
     let (sender, receiver) = tokio::sync::oneshot::channel();
-    let (hand_over, take) = std::sync::mpsc::channel::<F>();
-    // A thread that did not start dropped `take` with it, so the send fails
-    // and hands `work` back.
-    _ = std::thread::Builder::new()
-        .name("dbdelve-cancel".to_owned())
-        .spawn(move || {
-            if let Ok(work) = take.recv() {
-                _ = sender.send(work());
-            }
-        });
-    if let Err(std::sync::mpsc::SendError(work)) = hand_over.send(work) {
-        return spawn_blocking(executor, work);
+    let job: CancelJob = Box::new(move || _ = sender.send(work()));
+    if let Err(job) = start(job)
+        && let Err(job) = match reserve {
+            Some(reserve) => reserve
+                .send(job)
+                .map_err(|std::sync::mpsc::SendError(job)| job),
+            None => Err(job),
+        }
+    {
+        spawn_blocking(executor, job).detach();
     }
     executor.spawn(async move {
-        // Dropped unsent only by a panic on that thread, which is a panic here.
+        // Dropped unsent only by a panic running it, which is a panic here.
         receiver
             .await
             .expect("the thread running a Cancel panicked")
     })
+}
+
+/// The one long-lived thread a Cancel runs on when the OS will not start a
+/// fresh one, started by the first Cancel so it already exists by the time
+/// threads run out. Cancels that land on it run one after another.
+fn reserve_cancel_thread() -> Option<std::sync::mpsc::Sender<CancelJob>> {
+    static RESERVE: std::sync::Mutex<Option<std::sync::mpsc::Sender<CancelJob>>> =
+        std::sync::Mutex::new(None);
+    let mut reserve = RESERVE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if reserve.is_none() {
+        let (sender, jobs) = std::sync::mpsc::channel::<CancelJob>();
+        *reserve = std::thread::Builder::new()
+            .name("dbdelve-cancel-reserve".to_owned())
+            .spawn(move || {
+                for job in jobs {
+                    // A panicking Cancel drops its answer unsent, which its
+                    // awaiting task reports; the thread stays for the next.
+                    _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+                }
+            })
+            .ok()
+            .map(|_| sender);
+    }
+    reserve.clone()
+}
+
+/// `job` on a fresh thread, or back if the OS will not start one.
+fn start_cancel_thread(job: CancelJob) -> Result<(), CancelJob> {
+    let (hand_over, take) = std::sync::mpsc::channel::<CancelJob>();
+    // A thread that did not start dropped `take` with it, so the send fails
+    // and hands `job` back.
+    _ = std::thread::Builder::new()
+        .name("dbdelve-cancel".to_owned())
+        .spawn(move || {
+            if let Ok(job) = take.recv() {
+                job();
+            }
+        });
+    hand_over
+        .send(job)
+        .map_err(|std::sync::mpsc::SendError(job)| job)
 }
 
 /// The range the controls offer for a slot, and where Reset puts it. The
@@ -2474,9 +2532,17 @@ mod tests {
 
     /// More statements than either `ThreadedDispatcher`'s pool or
     /// `blocking`'s, one running and the rest queued behind it on the same
-    /// session.
+    /// session, then a Cancel, on a thread of its own and where the OS refuses
+    /// one.
     #[test]
     fn statements_parked_on_one_connection_leave_the_background_executor_free() {
+        let refused: fn(CancelJob) -> Result<(), CancelJob> = Err;
+        for start in [start_cancel_thread, refused] {
+            cancel_behind_parked_statements(start);
+        }
+    }
+
+    fn cancel_behind_parked_statements(start: fn(CancelJob) -> Result<(), CancelJob>) {
         let executor = gpui::BackgroundExecutor::new(Arc::new(gpui::ThreadedDispatcher::new()));
         let cores = std::thread::available_parallelism().map_or(2, |cores| cores.get().max(2));
         let pool = BLOCKING_POOL_CAP + cores;
@@ -2512,10 +2578,14 @@ mod tests {
             landed(&executor, timer, Duration::from_secs(1)).is_some(),
             "a timer did not fire while {pool} statements were parked on one connection"
         );
-        let cancel = spawn_cancel(&executor, {
-            let connection = connection.clone();
-            move || connection.cancel(&run)
-        });
+        let cancel = spawn_cancel_starting(
+            &executor,
+            {
+                let connection = connection.clone();
+                move || connection.cancel(&run)
+            },
+            start,
+        );
         let cancelled = landed(&executor, cancel, Duration::from_secs(2));
         assert!(
             matches!(cancelled, Some(Ok(()))),

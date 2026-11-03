@@ -92,7 +92,9 @@ reactor (Grand Central Dispatch on macOS). A tokio future on
 timer. Database work uses blocking drivers, which own their runtimes
 internally, each call on `blocking`'s capped pool for the background executor
 to await (`workspace::spawn_blocking`), never on the executor's own threads; a
-Cancel on a thread of its own (`workspace::spawn_cancel`).
+Cancel on a thread of its own (`workspace::spawn_cancel`), or, where the OS
+will not start one, on a long-lived reserve thread the first Cancel starts,
+so it does not wait on the pool the statements it stops may be filling.
 `rusqlite` is blocking by construction and has no runtime at all.
 
 `tokio` is a direct dependency for three drivers, and the same rule is why it
