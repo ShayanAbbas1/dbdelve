@@ -1797,6 +1797,35 @@ fn a_pin_dropped_on_the_top_half_of_another_goes_before_it(cx: &mut TestAppConte
 }
 
 #[gpui::test]
+fn pinning_leaves_every_row_its_height(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        let table = explorer::relation_row("main", "birds");
+        let unpinned = explorer_row(&workspace, &table, cx).size.height;
+
+        cx.update(|_, cx| {
+            workspace.update(cx, |workspace, cx| {
+                let leaf = workspace.profile().unwrap().session.explorer_leaves[&table];
+                let birds = workspace.member_at(leaf.target).unwrap();
+                workspace.toggle_pin(explorer::Pin::Member(birds), cx);
+            })
+        });
+        settle(cx);
+
+        assert_eq!(explorer_row(&workspace, &table, cx).size.height, unpinned);
+        assert_eq!(
+            explorer_row(&workspace, explorer::PINNED_GROUP, cx)
+                .size
+                .height,
+            unpinned,
+            "the Pinned group, listed first, is the row every row is sized by"
+        );
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn a_service_launch_does_not_reuse_a_profiles_explicit_port(cx: &mut TestAppContext) {
     // PGSERVICE must be set before the process starts, not raced against
     // every other test that reads the environment.

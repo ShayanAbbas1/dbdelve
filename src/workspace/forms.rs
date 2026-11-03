@@ -2450,9 +2450,16 @@ impl Workspace {
                                     Some((_, input, error)) => {
                                         rename_field(label, input, error.clone(), t)
                                     }
-                                    None if pinned_group => {
-                                        div().flex_1().child(row_icon(t, icon::PIN))
-                                    }
+                                    // The tree gives every row the height of its
+                                    // first, which this is once anything is pinned:
+                                    // the empty text keeps it a line tall rather
+                                    // than an icon tall.
+                                    None if pinned_group => div()
+                                        .flex_1()
+                                        .flex()
+                                        .items_center()
+                                        .child(row_icon(t, icon::PIN))
+                                        .child("\u{200B}"),
                                     None => div()
                                         .flex_1()
                                         .min_w_0()
