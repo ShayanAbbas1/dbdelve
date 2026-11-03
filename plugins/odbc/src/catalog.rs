@@ -178,7 +178,7 @@ fn rows(
                     &cancelled,
                 );
                 match value {
-                    Ok(value) => Ok(value.map(|bytes| run::rendered(Fetched::Text, &bytes))),
+                    Ok(value) => Ok(value.map(|bytes| run::wide_text(&bytes))),
                     Err(DataError::Odbc) => Err(control.failure(statement, "SQLGetData")),
                     Err(DataError::Cancelled) => Err(run::cancelled()),
                     Err(DataError::TooLarge | DataError::Unmeasured) => {

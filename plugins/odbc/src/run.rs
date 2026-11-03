@@ -8,7 +8,7 @@ use std::process;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
-use arrow_array::builder::StringBuilder;
+use arrow_array::builder::{BinaryBuilder, StringBuilder};
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use dbdelve_plugin_protocol::arrow::{encode_batch, encode_schema};
@@ -340,8 +340,9 @@ impl<W: Write> Run<'_, W> {
             let Some(type_name) = raw::type_name(self.statement, column) else {
                 return Err(self.failure("SQLColAttribute"));
             };
-            fetched.push(read_as(described.data_type, described.size, &type_name));
-            fields.push(column_field(described.name, type_name));
+            let read = read_as(described.data_type, described.size, &type_name);
+            fields.push(column_field(described.name, type_name, read));
+            fetched.push(read);
         }
         let schema: SchemaRef = Arc::new(Schema::new(fields));
         let mut draining = self.send(&encode_schema(&schema))?;
@@ -389,17 +390,19 @@ impl<W: Write> Run<'_, W> {
         schema: &Schema,
         fetched: &[Read],
         scratch: &mut [u8],
-    ) -> Result<Vec<Option<String>>, Response> {
+    ) -> Result<Vec<Option<Cell>>, Response> {
         let mut row = Vec::with_capacity(fetched.len());
         for (index, &read) in fetched.iter().enumerate() {
             let column = index as u16 + 1;
             let value = match read {
-                Read::Double => raw::get_double(self.statement, column).map(|v| v.map(shown_f64)),
-                Read::Real => raw::get_real(self.statement, column).map(|v| v.map(shown_f32)),
+                Read::Double => raw::get_double(self.statement, column)
+                    .map(|v| v.map(|v| Cell::Text(shown_f64(v)))),
+                Read::Real => raw::get_real(self.statement, column)
+                    .map(|v| v.map(|v| Cell::Text(shown_f32(v)))),
                 Read::Chunked(as_fetched) => self.chunked(column, as_fetched, scratch),
                 Read::ImplicitXml => self
                     .chunked(column, Fetched::Text, scratch)
-                    .map(|v| v.map(|text| undeclared(&text).to_string())),
+                    .map(|v| v.map(Cell::undeclared)),
             };
             let value = match value {
                 Ok(value) => value,
@@ -424,10 +427,10 @@ impl<W: Write> Run<'_, W> {
         column: u16,
         as_fetched: Fetched,
         scratch: &mut [u8],
-    ) -> Result<Option<String>, DataError> {
+    ) -> Result<Option<Cell>, DataError> {
         let limit = match as_fetched {
             Fetched::Text => 2 * MAX_PAYLOAD,
-            Fetched::Binary => (MAX_PAYLOAD - 2) / 2,
+            Fetched::Binary => MAX_PAYLOAD,
         };
         let control = self.control;
         let cancelled_now = || control.cancelled();
@@ -439,14 +442,17 @@ impl<W: Write> Run<'_, W> {
             scratch,
             &cancelled_now,
         )?;
-        Ok(read.map(|bytes| rendered(as_fetched, &bytes)))
+        Ok(read.map(|bytes| match as_fetched {
+            Fetched::Text => Cell::Text(wide_text(&bytes)),
+            Fetched::Binary => Cell::Bytes(bytes),
+        }))
     }
 
     /// `Ok(true)` when a `stop` arrived instead of the credit.
     fn send_batch(
         &mut self,
         schema: &SchemaRef,
-        rows: Vec<Vec<Option<String>>>,
+        rows: Vec<Vec<Option<Cell>>>,
     ) -> Result<bool, Response> {
         let batch = batch(schema, rows);
         let payload = match encode_batch(&batch) {
@@ -562,31 +568,49 @@ fn names_binary(type_name: &str) -> bool {
     name.contains("BLOB") || name.contains("BINARY")
 }
 
-fn column_field(name: String, type_name: String) -> Field {
-    Field::new(name, DataType::Utf8, true)
+/// One value as it travels: text as Utf8, and bytes as Binary, which the host
+/// shows as `0x` and hex, so a binary value's limit is its own size rather
+/// than its hex's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Cell {
+    Text(String),
+    Bytes(Vec<u8>),
+}
+
+impl Cell {
+    fn len(&self) -> usize {
+        match self {
+            Cell::Text(text) => text.len(),
+            Cell::Bytes(bytes) => bytes.len(),
+        }
+    }
+
+    fn undeclared(self) -> Self {
+        match self {
+            Cell::Text(text) => Cell::Text(undeclared(&text).to_string()),
+            bytes => bytes,
+        }
+    }
+}
+
+fn column_field(name: String, type_name: String, read: Read) -> Field {
+    let data_type = match read {
+        Read::Chunked(Fetched::Binary) => DataType::Binary,
+        _ => DataType::Utf8,
+    };
+    Field::new(name, data_type, true)
         .with_metadata(HashMap::from([("dbdelve.type".to_string(), type_name)]))
 }
 
-pub fn rendered(fetched: Fetched, bytes: &[u8]) -> String {
-    match fetched {
-        Fetched::Text => {
-            let units: Vec<u16> = bytes
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|&unit| u16::from_ne_bytes(unit))
-                .collect();
-            String::from_utf16_lossy(&units)
-        }
-        Fetched::Binary => {
-            let mut text = String::with_capacity(2 + bytes.len() * 2);
-            text.push_str("0x");
-            for byte in bytes {
-                text.push_str(&format!("{byte:02X}"));
-            }
-            text
-        }
-    }
+/// UTF-16 code units, as `Fetched::Text` reads them.
+pub fn wide_text(bytes: &[u8]) -> String {
+    let units: Vec<u16> = bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&unit| u16::from_ne_bytes(unit))
+        .collect();
+    String::from_utf16_lossy(&units)
 }
 
 /// `text` without a leading byte-order mark and the XML declaration after it.
@@ -683,22 +707,38 @@ fn unmeasured(schema: &Schema, index: usize) -> Response {
     ))
 }
 
-fn batch(schema: &SchemaRef, rows: Vec<Vec<Option<String>>>) -> RecordBatch {
-    let mut builders: Vec<StringBuilder> = schema
+enum Builder {
+    Text(StringBuilder),
+    Bytes(BinaryBuilder),
+}
+
+fn batch(schema: &SchemaRef, rows: Vec<Vec<Option<Cell>>>) -> RecordBatch {
+    let mut builders: Vec<Builder> = schema
         .fields()
         .iter()
-        .map(|_| StringBuilder::new())
+        .map(|field| match field.data_type() {
+            DataType::Binary => Builder::Bytes(BinaryBuilder::new()),
+            _ => Builder::Text(StringBuilder::new()),
+        })
         .collect();
     for row in rows {
         for (builder, value) in builders.iter_mut().zip(row) {
-            builder.append_option(value);
+            match (builder, value) {
+                (Builder::Text(builder), Some(Cell::Text(text))) => builder.append_value(text),
+                (Builder::Bytes(builder), Some(Cell::Bytes(bytes))) => builder.append_value(bytes),
+                (Builder::Text(builder), _) => builder.append_null(),
+                (Builder::Bytes(builder), _) => builder.append_null(),
+            }
         }
     }
     let columns: Vec<ArrayRef> = builders
         .into_iter()
-        .map(|mut builder| Arc::new(builder.finish()) as ArrayRef)
+        .map(|builder| match builder {
+            Builder::Text(mut builder) => Arc::new(builder.finish()) as ArrayRef,
+            Builder::Bytes(mut builder) => Arc::new(builder.finish()) as ArrayRef,
+        })
         .collect();
-    RecordBatch::try_new(Arc::clone(schema), columns).expect("one Utf8 column per field")
+    RecordBatch::try_new(Arc::clone(schema), columns).expect("one column per field, of its type")
 }
 
 pub fn write_or_exit(out: &mut impl Write, kind: Kind, id: u64, payload: &[u8]) {
@@ -721,7 +761,7 @@ pub fn write_or_exit(out: &mut impl Write, kind: Kind, id: u64, payload: &[u8]) 
 /// driver trickles rows.
 struct Batcher {
     most_rows: usize,
-    rows: Vec<Vec<Option<String>>>,
+    rows: Vec<Vec<Option<Cell>>>,
     bytes: usize,
     since: Option<Instant>,
 }
@@ -736,8 +776,8 @@ impl Batcher {
         }
     }
 
-    fn push(&mut self, row: Vec<Option<String>>, now: Instant) -> Vec<Vec<Vec<Option<String>>>> {
-        let size: usize = row.iter().flatten().map(String::len).sum();
+    fn push(&mut self, row: Vec<Option<Cell>>, now: Instant) -> Vec<Vec<Vec<Option<Cell>>>> {
+        let size: usize = row.iter().flatten().map(Cell::len).sum();
         let mut closed = Vec::new();
         if !self.rows.is_empty() && self.bytes + size > BATCH_TARGET {
             closed.extend(self.finish());
@@ -754,7 +794,7 @@ impl Batcher {
         closed
     }
 
-    fn finish(&mut self) -> Option<Vec<Vec<Option<String>>>> {
+    fn finish(&mut self) -> Option<Vec<Vec<Option<Cell>>>> {
         self.bytes = 0;
         self.since = None;
         match self.rows.is_empty() {
@@ -770,8 +810,8 @@ mod tests {
     use dbdelve_plugin_protocol::limits::FRAME_COST;
     use std::time::Duration;
 
-    fn row(value: &str) -> Vec<Option<String>> {
-        vec![Some(value.to_string()), None]
+    fn row(value: &str) -> Vec<Option<Cell>> {
+        vec![Some(Cell::Text(value.to_string())), None]
     }
 
     #[test]
@@ -913,13 +953,33 @@ mod tests {
     }
 
     #[test]
-    fn binary_is_shown_as_hex_and_text_is_read_as_utf_16() {
-        assert_eq!(rendered(Fetched::Binary, &[0x00, 0xff]), "0x00FF");
+    fn text_is_read_as_utf_16() {
         let text: Vec<u8> = "Zoë 李 🐉"
             .encode_utf16()
             .flat_map(u16::to_ne_bytes)
             .collect();
-        assert_eq!(rendered(Fetched::Text, &text), "Zoë 李 🐉");
+        assert_eq!(wide_text(&text), "Zoë 李 🐉");
+    }
+
+    #[test]
+    fn a_binary_column_travels_as_bytes_and_text_as_utf8() {
+        let reads = [Read::Chunked(Fetched::Binary), Read::Chunked(Fetched::Text)];
+        let fields: Vec<Field> = reads
+            .iter()
+            .map(|&read| column_field("c".to_string(), "t".to_string(), read))
+            .collect();
+        let schema: SchemaRef = Arc::new(Schema::new(fields));
+        let rows = vec![
+            vec![
+                Some(Cell::Bytes(vec![0, 0xff])),
+                Some(Cell::Text("a".to_string())),
+            ],
+            vec![None, None],
+        ];
+        let batch = batch(&schema, rows);
+        assert_eq!(batch.column(0).data_type(), &DataType::Binary);
+        assert_eq!(batch.column(1).data_type(), &DataType::Utf8);
+        assert_eq!(batch.column(0).null_count(), 1);
     }
 
     /// Review focus 9, at grep level: every value is read through `raw.rs`.

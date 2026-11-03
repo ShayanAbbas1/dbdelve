@@ -13,7 +13,7 @@ use std::process::{Child, ChildStdout, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use arrow_array::{Array, StringArray};
+use arrow_array::{Array, BinaryArray, StringArray};
 use arrow_schema::SchemaRef;
 use dbdelve_plugin_protocol::arrow::{decode_batch, decode_schema};
 use dbdelve_plugin_protocol::limits::{CANCEL_DEADLINE, credit_cost};
@@ -164,11 +164,7 @@ impl Bridge {
                             batch
                                 .columns()
                                 .iter()
-                                .map(|column| {
-                                    let column =
-                                        column.as_any().downcast_ref::<StringArray>().unwrap();
-                                    (!column.is_null(row)).then(|| column.value(row).to_string())
-                                })
+                                .map(|column| shown(column.as_ref(), row))
                                 .collect(),
                         );
                     }
@@ -195,6 +191,23 @@ impl Bridge {
         self.child.kill().unwrap();
         None
     }
+}
+
+/// A cell as the host shows it: text as sent, bytes as `0x` and hex.
+fn shown(column: &dyn Array, row: usize) -> Option<String> {
+    if column.is_null(row) {
+        return None;
+    }
+    if let Some(text) = column.as_any().downcast_ref::<StringArray>() {
+        return Some(text.value(row).to_string());
+    }
+    let bytes = column.as_any().downcast_ref::<BinaryArray>().unwrap();
+    let hex: String = bytes
+        .value(row)
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect();
+    Some(format!("0x{hex}"))
 }
 
 fn live_fields() -> BTreeMap<String, String> {
@@ -763,5 +776,29 @@ fn live_xml_arrives_without_the_drivers_byte_order_mark_or_declaration() {
             Some("<?xml version=\"1.0\" encoding=\"UTF-8\"?><a/>".to_string()),
             None,
         ]]
+    );
+}
+
+/// A binary value travels as its bytes, so the 64 MiB a frame carries is the
+/// value's own size, not that of its hex.
+#[test]
+#[ignore = "needs psqlODBC and a Postgres: set dbdelve_ODBC_POSTGRES, _USER and _PASSWORD"]
+fn live_postgres_a_binary_value_may_take_the_whole_frame() {
+    const MIB: usize = 1 << 20;
+    let mut bridge = Bridge::open_postgres();
+    let outcome = bridge.query(&format!("SELECT decode(repeat('AB', {}), 'hex')", 40 * MIB));
+    let cell = outcome.rows[0][0].as_ref().expect("a value");
+    assert_eq!(cell.len(), 2 + 2 * 40 * MIB);
+    assert!(cell[2..].bytes().all(|b| b == b'A' || b == b'B'));
+    let refused = bridge.query(&format!(
+        "SELECT decode(repeat('AB', {}), 'hex') AS big",
+        65 * MIB
+    ));
+    let Response::Error { message, .. } = &refused.terminal else {
+        panic!("a refusal, got {:?}", refused.terminal);
+    };
+    assert_eq!(
+        message,
+        "A value in column big is larger than 64 MiB, which protocol 1 cannot carry."
     );
 }
