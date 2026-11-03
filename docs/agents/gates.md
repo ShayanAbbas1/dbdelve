@@ -231,7 +231,11 @@ The core of the mode check is in `AGENTS.md`, "Connection modes". The detail:
   (a bare, unquoted name of an aggregate, window, string, number, date or cast
   built-in), in any clause or in `FROM`, needs Read-write
   (`calls_unknown_function`). Built-in engines keep reading such a call as a
-  read: their hold stops what it writes.
+  read: their hold stops what it writes. The list matches names, not
+  overloads, so a user's own overload of a listed name (Postgres's
+  `public.abs(text)` whose body inserts) reads as a read; this is accepted,
+  since SQL alone cannot resolve an overload and Read-only guards against the
+  user's mistakes, not a schema built to trap it.
 - **Db2's own spellings read on Generic** where sqlparser fails on them: a
   statement's trailing isolation clause (`WITH UR`, `CS`, `RS`, `RR`) is
   blanked and a statement opening with `VALUES` is read as `SELECT` over the

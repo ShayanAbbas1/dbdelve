@@ -2721,7 +2721,11 @@ fn db2_spelled(dialect: &dyn Dialect, sql: &str) -> Option<String> {
 ///
 /// Only a bare, unquoted name is matched against the list: `s.upper(x)` and
 /// `"UPPER"(x)` may name a function of the user's. An overload of a listed
-/// name taking other argument types is not told apart.
+/// name the user created with other argument types (Postgres's
+/// `public.abs(text)` whose body inserts) still reads, since the server picks
+/// it by its arguments' types, which SQL alone cannot resolve. That is
+/// accepted: Read-only guards against the user's mistakes, not a schema built
+/// to trap it.
 fn calls_unknown_function(statement: &Statement) -> bool {
     struct Calls;
     impl Visitor for Calls {
