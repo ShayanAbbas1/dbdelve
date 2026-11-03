@@ -2612,8 +2612,8 @@ pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
         return classify(engine, &american);
     }
 
-    let calls = calls_verdict(dialect.as_ref(), sql);
     let spec = engine.spec();
+    let calls = calls_verdict(dialect.as_ref(), spec.sql.parser_dialect, sql);
     if spec.sql.unreadable_floor == UnreadableFloor::FirstKeyword {
         return by_statement(spec, dialect.as_ref(), sql).max(calls);
     }
@@ -2987,20 +2987,20 @@ const SIDE_EFFECT_FREE_FUNCTIONS: &[&str] = &[
 ///
 /// - a call no read-only hold stops ([`HOLD_IGNORING_CALLS`]) needs Full;
 /// - advancing a sequence (`nextval(…)`, `setval(…)`, `NEXT VALUE FOR s`,
-///   Db2's `NEXTVAL FOR s` and `s.NEXTVAL`) is a write: Postgres lets a
-///   temporary sequence advance in a read-only transaction, and Generic holds
-///   nothing;
+///   Db2's `NEXTVAL FOR s`, and `s.NEXTVAL` where [`advances_by_name`]) is a
+///   write: Postgres lets a temporary sequence advance in a read-only
+///   transaction, and Generic holds nothing;
 /// - a `set_config` that may lift the read-only hold ([`READ_ONLY_SETTINGS`])
 ///   is a write. One naming another setting by a plain literal is left alone;
 ///   any other first argument might name the hold.
-fn calls_verdict(dialect: &dyn Dialect, sql: &str) -> Verdict {
+fn calls_verdict(dialect: &dyn Dialect, parser_dialect: ParserDialect, sql: &str) -> Verdict {
     let (tokens, _) = located_prefix(dialect, sql);
     let tokens: Vec<&Token> = tokens
         .iter()
         .map(|(token, _)| token)
         .filter(|token| !matches!(token, Token::Whitespace(_)))
         .collect();
-    let named = |at: usize, name: &str| matches!(tokens.get(at), Some(Token::Word(word)) if word.value.eq_ignore_ascii_case(name));
+    let bare = |at: usize, name: &str| matches!(tokens.get(at), Some(Token::Word(word)) if word.quote_style.is_none() && word.value.eq_ignore_ascii_case(name));
     let keyword = |at: usize, name: &str| is_keyword(tokens.get(at), name);
     let called = |at: usize| tokens.get(at + 1) == Some(&&Token::LParen);
     let call_name = |at: usize| match tokens.get(at) {
@@ -3017,7 +3017,9 @@ fn calls_verdict(dialect: &dyn Dialect, sql: &str) -> Verdict {
         call_name(at).is_some_and(|name| name == "nextval" || name == "setval")
             || keyword(at, "NEXT") && keyword(at + 1, "VALUE") && keyword(at + 2, "FOR")
             || keyword(at, "NEXTVAL") && keyword(at + 1, "FOR")
-            || tokens.get(at) == Some(&&Token::Period) && named(at + 1, "NEXTVAL")
+            || advances_by_name(parser_dialect)
+                && tokens.get(at) == Some(&&Token::Period)
+                && bare(at + 1, "NEXTVAL")
     });
     let lifts_hold = (0..tokens.len()).any(|at| {
         call_name(at).as_deref() == Some("set_config")
@@ -3031,6 +3033,15 @@ fn calls_verdict(dialect: &dyn Dialect, sql: &str) -> Verdict {
         true => Verdict::WRITE,
         false => Verdict::READ,
     }
+}
+
+/// Whether the servers read in `dialect` advance a sequence by the name
+/// `s.NEXTVAL`, where anywhere else it is a column: Db2's and Oracle's, which
+/// Generic stands for, and Snowflake's. MariaDB spells it so only under
+/// `sql_mode=ORACLE`, a session setting this cannot see, so there it is read
+/// as the column it is by default.
+fn advances_by_name(dialect: ParserDialect) -> bool {
+    matches!(dialect, ParserDialect::Generic | ParserDialect::Snowflake)
 }
 
 /// Calls that act outside the transaction they run in, so no read-only hold
@@ -8186,6 +8197,19 @@ mod tests {
                 "SELECT NEXT VALUE FOR s",
                 "SELECT next value for s FROM t",
                 "SELECT NEXTVAL FOR s FROM t",
+            ] {
+                assert!(
+                    classify(engine, sql).mode >= Mode::ReadWrite,
+                    "{engine:?} {sql}: {:?}",
+                    classify(engine, sql)
+                );
+            }
+        }
+        // `s.NEXTVAL` only where the server spells an advance that way: Db2
+        // and Oracle behind Generic, and Snowflake. Anywhere else, and quoted
+        // anywhere, it is a column.
+        for engine in [Engine::Generic, Engine::Snowflake] {
+            for sql in [
                 "SELECT s.NEXTVAL FROM SYSIBM.SYSDUMMY1",
                 "SELECT DELVETEST.SEQ.NEXTVAL FROM SYSIBM.SYSDUMMY1",
                 "SELECT a FROM t WHERE id = s.nextval",
@@ -8198,6 +8222,17 @@ mod tests {
                     classify(engine, sql)
                 );
             }
+        }
+        for (engine, sql) in [
+            (Engine::Postgres, "SELECT t.nextval FROM t"),
+            (Engine::Postgres, "SELECT t.\"nextval\" FROM t"),
+            (Engine::MySql, "SELECT t.nextval FROM t"),
+            (Engine::SqlServer, "SELECT t.nextval FROM t"),
+            (Engine::DuckDb, "SELECT t.nextval FROM t"),
+            (Engine::Generic, "SELECT t.\"NEXTVAL\" FROM t"),
+            (Engine::Snowflake, "SELECT t.\"NEXTVAL\" FROM t"),
+        ] {
+            assert_eq!(classify(engine, sql), Verdict::READ, "{engine:?} {sql}");
         }
         for engine in [Engine::Postgres, Engine::Generic] {
             assert_eq!(

@@ -218,9 +218,11 @@ The core of the mode check is in `AGENTS.md`, "Connection modes". The detail:
   CHARACTERISTICS`) and a `set_config` that may name one of those settings
   are writes on every engine (`set_lifts_hold`, `calls_verdict`): the hold
   is a session setting the user's own statement can lift. Advancing a
-  sequence (`nextval`, `setval`, `NEXT VALUE FOR`, Db2's `NEXTVAL FOR` and
-  `s.NEXTVAL`) is a write everywhere, since Postgres lets a temporary
-  sequence advance in a read-only transaction. A call that acts outside the
+  sequence (`nextval`, `setval`, `NEXT VALUE FOR`, Db2's `NEXTVAL FOR`) is a
+  write everywhere, since Postgres lets a temporary sequence advance in a
+  read-only transaction. An unquoted `s.NEXTVAL` is one only on Generic and
+  Snowflake, whose servers spell an advance that way (`advances_by_name`);
+  elsewhere it is a column. A call that acts outside the
   transaction (`pg_terminate_backend`, `pg_reload_conf`, `dblink_exec`, the
   rest of `HOLD_IGNORING_CALLS`) needs Full.
 - **On Generic, a function call is a read only if it is a known built-in.**
