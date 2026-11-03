@@ -68,9 +68,9 @@ unsupported }` from a plugin.
 
 **Limits** are `plugins/protocol/src/limits.rs`. The ones with a reason:
 
-- `MAX_FRAME` (64 MiB) bounds the largest cell a result can carry: a text
-  cell up to that size, a binary cell near 32 MiB, since it doubles as hex. A larger
-  value is an `error` naming its column, never a truncation. `ponytail:`
+- `MAX_FRAME` (64 MiB) bounds the largest cell a result can carry, text or
+  binary, since bytes travel as Arrow Binary rather than hex. A larger value is
+  an `error` naming its column, never a truncation. `ponytail:`
   chunked values lift it.
 - **Credit.** A query starts with `WINDOW` (8 MiB) of credit. A data frame of
   payload `s` costs `credit_cost(s)`, the payload plus a flat `FRAME_COST`
@@ -246,12 +246,23 @@ driver printing to stdout would corrupt them (`ponytail:` not on Windows).
   bare `{` in its grammar, so valid SQL is unchanged and only a statement that
   would have been a syntax error runs rewritten. Accepted as a driver limit;
   refusing a bare `{` for that driver is the upgrade.
+- **psqlODBC alters some date and time values**, another driver limit:
+  version 18 re-parses a date or timestamp for every C type
+  (`copy_and_convert_field`, `bZone = FALSE`), so BC dates, `infinity`, years
+  past 9999 and a `timestamptz`'s offset show altered. Cast to `::text` in the
+  query, or use the Postgres engine.
 - **Wide text everywhere** (`SQLExecDirectW`, `SQL_C_WCHAR`), so a client code
   page derived from a C or POSIX locale cannot mangle text. Binary columns are
-  read as bytes and sent as `0x…` hex text, as is a driver's own type code
-  whose name is `BLOB` or `BINARY` (Db2's `BLOB` is code −98 and would otherwise
-  arrive as hex without the `0x`). Every column is sent as Utf8 tagged with the
+  read as bytes and sent as Arrow Binary, which the host shows as `0x` and hex,
+  as is a driver's own type code whose name is `BLOB` or `BINARY` (Db2's `BLOB`
+  is code −98 and would otherwise arrive in its driver's character form, hex
+  without the `0x`). Approximate numerics are read as binary floats and sent as
+  their shortest round-trip digits, since a driver's text may round (Db2 shows
+  a `DOUBLE` to 15 digits). Every other column is Utf8. Each is tagged with the
   driver's own type name.
+- **IBM's XML loses what its driver adds:** Db2 keeps no declaration, but its
+  driver serializes a value with a byte-order mark and an `encoding="UTF-16"`
+  declaration, so both are taken off IBM's `SQL_XML` (−370) and only off it.
 - **SQLLEN out-values are zeroed and normalised, for every driver.** IBM's
   macOS `libdb2.dylib` writes only the low 32 bits of every SQLLEN (an
   indicator, a row count, a numeric attribute), so a NULL reads as
@@ -265,9 +276,25 @@ driver printing to stdout would corrupt them (`ponytail:` not on Windows).
   `raw::get_data` reads each value in chunks, driven by the return code
   (`01004`: more follows) and the bytes gathered, never by the indicator's
   total, which a 32-bit driver cannot report past 2³¹; binary versus text comes
-  from the column's SQL type, an `SQLSMALLINT` no SQLLEN width garbles. Nothing
-  binds columns: a bound array's indicator stride would carry the bug where no
-  wrapper could fix it.
+  from the column's SQL type, an `SQLSMALLINT` no SQLLEN width garbles.
+- **Columns are bound one row at a time, never as arrays** (`raw::Bindings`):
+  a bound array's indicator stride would carry the bug where no wrapper could
+  fix it. Only when the driver reports `SQL_GD_BOUND | SQL_GD_ANY_COLUMN`,
+  since a value that outgrows its buffer (psqlODBC sizes an unbounded `text` at
+  a guess) is read again whole with `SQLGetData`; floats and text of a type ODBC
+  defines are bound, binary and a driver's own types stay unbound.
+- **psqlODBC streams through a cursor.** Its default, `UseDeclareFetch=0`,
+  reads a whole result into the bridge before the first row, which defeats a
+  row limit that stops the stream. So when `SQL_DRIVER_NAME` says psqlODBC and
+  the string sets no `UseDeclareFetch`, the bridge reconnects once per open
+  with `UseDeclareFetch=1;Fetch=4096` (keeping a `Fetch` the string sets).
+  Connection strings only: a bare DSN is left as configured.
+- **`DRIVER=` is checked before the driver manager sees it.** unixODBC formats a
+  failed load into a 2,048-byte buffer and aborts past it, which macOS's
+  `dlopen` error, listing every path tried, overran. A blank `DRIVER=` or one
+  over 512 bytes is refused, and on macOS the name is resolved through
+  `odbcinst.ini` and loaded with the driver manager's own `dlopen` first, its
+  error reported by the bridge.
 - **Cancel** sets the request's flag, wakes a worker waiting for credit, and
   calls `SQLCancel` from the main thread on the handle the worker published.
   Only calls that may wait on the server are published, with the statement's
