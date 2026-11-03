@@ -2641,7 +2641,15 @@ pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
     {
         return unreadable();
     }
-    let Ok(statements) = SqlParser::parse_sql(dialect.as_ref(), sql) else {
+    let parsed = SqlParser::parse_sql(dialect.as_ref(), sql).or_else(|error| {
+        match db2_spelled(dialect.as_ref(), sql)
+            .filter(|_| parser_dialect == ParserDialect::Generic)
+        {
+            Some(respelled) => SqlParser::parse_sql(dialect.as_ref(), &respelled),
+            None => Err(error),
+        }
+    });
+    let Ok(statements) = parsed else {
         return unreadable();
     };
 
@@ -2658,6 +2666,50 @@ pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
         .iter()
         .map(|statement| spec_verdict(spec, statement))
         .fold(calls, Verdict::max)
+}
+
+/// `sql` with what Db2 reads and sqlparser's Generic dialect does not spelled
+/// so sqlparser reads it, for classifying only: a statement's trailing
+/// isolation clause, `WITH UR`, `CS`, `RS` or `RR`, blanked out, and a
+/// statement opening with `VALUES` respelled `SELECT`, so `VALUES 1, 2` is
+/// read by the expressions it evaluates. Every other token keeps its place.
+/// `None` when there is neither, or `sql` does not tokenize.
+fn db2_spelled(dialect: &dyn Dialect, sql: &str) -> Option<String> {
+    let tokens = located_tokens(dialect, sql)?;
+    let words: Vec<&(Token, Range<usize>)> = tokens
+        .iter()
+        .filter(|(token, _)| !matches!(token, Token::Whitespace(_)))
+        .collect();
+    // A span is checked against its text as well as its token: one after
+    // Generic's `/*! … */` expansion points at the wrong text.
+    let spelled = |(token, range): &(Token, Range<usize>), keyword: &str| {
+        is_keyword(Some(&token), keyword)
+            && sql
+                .get(range.clone())
+                .is_some_and(|text| text.eq_ignore_ascii_case(keyword))
+    };
+    let mut respelled = sql.to_string();
+    let mut changed = false;
+    for statement in words.split(|(token, _)| *token == Token::SemiColon) {
+        if let Some(first) = statement.first()
+            && spelled(first, "VALUES")
+        {
+            respelled.replace_range(first.1.clone(), "SELECT");
+            changed = true;
+        }
+        if let [.., with, level] = statement
+            && spelled(with, "WITH")
+            && ["UR", "CS", "RS", "RR"]
+                .iter()
+                .any(|isolation| spelled(level, isolation))
+        {
+            for (_, range) in [with, level] {
+                respelled.replace_range(range.clone(), &" ".repeat(range.len()));
+            }
+            changed = true;
+        }
+    }
+    changed.then_some(respelled)
 }
 
 /// Whether `statement` calls, anywhere in it, a function that is not one of
@@ -8181,6 +8233,55 @@ mod tests {
             "SELECT * FROM TABLE(DELVETEST.UPD_TF())",
         ] {
             assert_eq!(classify(Engine::Postgres, sql), Verdict::READ, "{sql}");
+        }
+    }
+
+    /// Db2 ends a query with its isolation clause, `WITH UR|CS|RS|RR`, and
+    /// takes `VALUES 1` without parentheses, neither of which sqlparser's
+    /// Generic dialect parses. They read as what they are, and whatever else
+    /// the submission holds is read as strictly as ever.
+    #[test]
+    fn generic_reads_db2_isolation_clauses_and_bare_values() {
+        for sql in [
+            "SELECT * FROM t WITH UR",
+            "SELECT a FROM t WHERE b = 1 with cs;",
+            "SELECT a FROM t ORDER BY a FETCH FIRST 5 ROWS ONLY WITH RS",
+            "SELECT 1 FROM t WITH RR; SELECT 2 FROM u WITH UR",
+            "VALUES 1",
+            "VALUES 1, 2",
+            "values current_date",
+            "VALUES (1, 'a'), (2, 'b')",
+            "VALUES upper('a'); SELECT 1 FROM t WITH UR",
+        ] {
+            assert_eq!(classify(Engine::Generic, sql), Verdict::READ, "{sql}");
+        }
+        for (sql, verdict) in [
+            (
+                "SELECT 1 FROM t WITH UR; DELETE FROM t WHERE id = 1",
+                Verdict::WRITE,
+            ),
+            ("DELETE FROM t WHERE id = 1 WITH UR", Verdict::WRITE),
+            (
+                "VALUES 1; DROP TABLE t",
+                Verdict::destroys(Destructive::Drop),
+            ),
+            ("VALUES upd_f()", Verdict::WRITE),
+            ("VALUES DELVETEST.SEQ.NEXTVAL", Verdict::WRITE),
+            ("SELECT upd_f() FROM t WITH UR", Verdict::WRITE),
+        ] {
+            assert_eq!(classify(Engine::Generic, sql), verdict, "{sql}");
+        }
+        for sql in [
+            "SELECT * FROM t WITH RS USE AND KEEP EXCLUSIVE LOCKS",
+            "SELECT * FROM t WITH UR UR",
+            "SELECT * FROM t WITH \"UR\"",
+            "VALUES",
+        ] {
+            assert_eq!(
+                classify(Engine::Generic, sql),
+                unreadable_at(Mode::ReadWrite),
+                "{sql}"
+            );
         }
     }
 

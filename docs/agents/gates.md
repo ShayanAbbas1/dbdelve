@@ -227,6 +227,12 @@ The core of the mode check is in `AGENTS.md`, "Connection modes". The detail:
   built-in), in any clause or in `FROM`, needs Read-write
   (`calls_unknown_function`). Built-in engines keep reading such a call as a
   read: their hold stops what it writes.
+- **Db2's own spellings read on Generic** where sqlparser fails on them: a
+  statement's trailing isolation clause (`WITH UR`, `CS`, `RS`, `RR`) is
+  blanked and a statement opening with `VALUES` is read as `SELECT` over the
+  same expressions (`db2_spelled`), for classifying only; what runs is the
+  text as typed. Anything after the clause, `USE AND KEEP … LOCKS` or
+  `SKIP LOCKED DATA`, leaves it unreadable.
 - **A `--` comment a lone carriage return runs through** is unreadable on every
   dialect whose server may end the comment there and sqlparser does not
   (`line_comment_past_carriage_return`): DuckDB's tokenizer does, Snowflake's
