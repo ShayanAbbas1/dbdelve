@@ -32,7 +32,7 @@ use lsp_types::{
 
 use crate::{
     Workspace,
-    db::{Catalog, RelationKind, Syntax},
+    db::{Catalog, Engine, RelationKind, Syntax},
     fuzzy::{Fuzzy, Query},
     mql::{self, Completing},
     redis_cmd, sql,
@@ -160,6 +160,10 @@ struct Candidate {
     /// relation a column belongs to. What tells two `id`s apart.
     detail: Option<String>,
     kind: CompletionItemKind,
+    /// Whether accepting it writes the relation under the schema in `detail`.
+    /// A flag rather than the name, which is spelled only for the few that
+    /// survive ranking; ranking reads the label alone either way.
+    qualified: bool,
 }
 
 impl Candidate {
@@ -168,6 +172,19 @@ impl Candidate {
             label: label.into(),
             detail,
             kind,
+            qualified: false,
+        }
+    }
+
+    /// What accepting it writes into the buffer.
+    fn written(&self, engine: Engine) -> String {
+        match (self.qualified, &self.detail) {
+            (true, Some(schema)) => format!(
+                "{}.{}",
+                engine.quote_identifier_if_needed(schema),
+                engine.quote_identifier_if_needed(&self.label)
+            ),
+            _ => self.label.clone(),
         }
     }
 }
@@ -177,9 +194,10 @@ impl Candidate {
 /// Holds a snapshot rather than a live handle. The catalog is replaced whole
 /// when it reloads, and so is this — see `Workspace::install_completions`.
 pub struct SchemaCompletions {
-    syntax: Syntax,
+    engine: Engine,
     catalog: Arc<Catalog>,
     columns: ColumnCache,
+    qualify: bool,
     /// Who to ask when a relation's columns are wanted and not yet held.
     ///
     /// `None` only in this module's own tests, which drive [`Self::items`]
@@ -192,15 +210,17 @@ pub struct SchemaCompletions {
 
 impl SchemaCompletions {
     pub fn new(
-        syntax: Syntax,
+        engine: Engine,
         catalog: Arc<Catalog>,
         columns: ColumnCache,
+        qualify: bool,
         workspace: WeakEntity<Workspace>,
     ) -> Self {
         Self {
-            syntax,
+            engine,
             catalog,
             columns,
+            qualify,
             workspace: Some(workspace),
             fuzzy: RefCell::new(Fuzzy::new()),
         }
@@ -313,13 +333,14 @@ impl SchemaCompletions {
             .collect()
     }
 
-    fn all_relations(&self) -> Vec<Candidate> {
+    fn all_relations(&self, qualify: bool) -> Vec<Candidate> {
         self.catalog
             .schemas
             .iter()
             .flat_map(|schema| {
-                schema.relations.iter().map(|rel| {
-                    Candidate::new(
+                schema.relations.iter().map(move |rel| Candidate {
+                    qualified: qualify,
+                    ..Candidate::new(
                         &rel.name,
                         Some(schema.name.clone()),
                         relation_kind(rel.kind),
@@ -388,8 +409,11 @@ impl SchemaCompletions {
             return self.relations_in(qualifier);
         }
 
+        // A qualifier `qualifier_before` cannot read, `"audit".` say, is still
+        // one, and qualifying after it would write a second.
+        let qualify = self.qualify && !before.ends_with('.');
         if expects_relation(before) {
-            let mut candidates = self.all_relations();
+            let mut candidates = self.all_relations(qualify);
             candidates.extend(self.schema_names());
             return candidates;
         }
@@ -421,7 +445,7 @@ impl SchemaCompletions {
                 .iter()
                 .map(|keyword| Candidate::new(*keyword, None, CompletionItemKind::KEYWORD)),
         );
-        candidates.extend(self.all_relations());
+        candidates.extend(self.all_relations(qualify));
         candidates.extend(self.all_routines());
         candidates
     }
@@ -443,8 +467,9 @@ impl SchemaCompletions {
         }
         match mql::completing(text, word.start) {
             None => Vec::new(),
+            // `db.` already names the database a collection is in.
             Some(Completing::Database) => {
-                let mut candidates = self.all_relations();
+                let mut candidates = self.all_relations(false);
                 candidates.extend(methods(mql::DbMethod::ALL.iter().map(|m| m.name())));
                 candidates
             }
@@ -495,7 +520,7 @@ impl SchemaCompletions {
         }
 
         let word = word_before(sql, offset);
-        match self.syntax {
+        match self.engine.syntax() {
             Syntax::Sql => {}
             Syntax::Redis => {
                 let (word, candidates) = redis_candidates(sql, offset);
@@ -609,9 +634,6 @@ impl SchemaCompletions {
         let items = items
             .into_iter()
             .map(|(word, candidate)| CompletionItem {
-                label: candidate.label.clone(),
-                detail: candidate.detail,
-                kind: Some(candidate.kind),
                 // The edit is given explicitly rather than left to the input's
                 // own guess at where the word started. That guess is taken on
                 // the first keystroke of a run and not revised, so a word typed
@@ -622,8 +644,11 @@ impl SchemaCompletions {
                         start: text.offset_to_position(word.start),
                         end: text.offset_to_position(word.end),
                     },
-                    new_text: candidate.label,
+                    new_text: candidate.written(self.engine),
                 })),
+                label: candidate.label,
+                detail: candidate.detail,
+                kind: Some(candidate.kind),
                 ..Default::default()
             })
             .collect::<Vec<_>>();
@@ -683,7 +708,14 @@ impl FilterCompletions {
         let items = items
             .into_iter()
             .filter(|(word, _)| word.start >= shift)
-            .map(|(word, candidate)| (word.start - shift..word.end - shift, candidate))
+            // Qualifying is an editor setting, and the bar is not the editor.
+            .map(|(word, candidate)| {
+                let candidate = Candidate {
+                    qualified: false,
+                    ..candidate
+                };
+                (word.start - shift..word.end - shift, candidate)
+            })
             .collect();
         (items, wanted)
     }
@@ -965,9 +997,10 @@ mod tests {
             })
             .collect();
         SchemaCompletions {
-            syntax: Syntax::Sql,
+            engine: Engine::Postgres,
             catalog: Arc::new(catalog),
             columns: Rc::new(RefCell::new(held)),
+            qualify: false,
             workspace: None,
             fuzzy: RefCell::new(Fuzzy::new()),
         }
@@ -1177,6 +1210,86 @@ mod tests {
         assert_eq!(candidate.label, "total");
     }
 
+    /// The first label offered for a caret at `|`, and what accepting it writes.
+    fn first_edit(sql: &str, qualify: bool) -> (String, String) {
+        let offset = sql.find('|').expect("the test must mark the caret");
+        let sql = sql.replace('|', "");
+        let completions = SchemaCompletions {
+            qualify,
+            ..catalog()
+        };
+        let (_, candidate) = completions
+            .items(&sql, offset)
+            .0
+            .into_iter()
+            .next()
+            .expect("something was offered");
+        (
+            candidate.label.clone(),
+            candidate.written(completions.engine),
+        )
+    }
+
+    #[test]
+    fn qualifying_writes_a_relation_with_its_schema_and_ranks_it_by_its_name() {
+        assert_eq!(
+            first_edit("SELECT * FROM eve|", true),
+            ("events".to_string(), "audit.events".to_string())
+        );
+    }
+
+    #[test]
+    fn qualifying_does_not_repeat_a_schema_already_typed() {
+        assert_eq!(
+            first_edit("SELECT * FROM audit.eve|", true),
+            ("events".to_string(), "events".to_string())
+        );
+    }
+
+    #[test]
+    fn qualifying_does_not_repeat_a_quoted_schema_already_typed() {
+        assert_eq!(
+            first_edit("SELECT * FROM \"audit\".eve|", true),
+            ("events".to_string(), "events".to_string())
+        );
+    }
+
+    #[test]
+    fn a_qualified_name_quotes_each_part_that_would_not_read_back_unquoted() {
+        let completions = SchemaCompletions {
+            qualify: true,
+            ..detached(
+                Catalog {
+                    schemas: vec![Schema {
+                        name: "Audit Log".to_string(),
+                        relations: vec![relation("events")],
+                        routines: Vec::new(),
+                    }],
+                    database: None,
+                },
+                &[],
+            )
+        };
+        let (_, candidate) = completions
+            .items("SELECT * FROM eve", 17)
+            .0
+            .into_iter()
+            .next()
+            .expect("a relation was offered");
+        assert_eq!(
+            candidate.written(completions.engine),
+            "\"Audit Log\".events"
+        );
+    }
+
+    #[test]
+    fn a_relation_is_written_bare_unless_qualifying_is_on() {
+        assert_eq!(
+            first_edit("SELECT * FROM eve|", false),
+            ("events".to_string(), "events".to_string())
+        );
+    }
+
     #[test]
     fn a_routine_is_offered() {
         assert!(labels("SELECT recalc|").contains(&"recalculate_totals".to_string()));
@@ -1290,7 +1403,7 @@ mod tests {
             },
             &[("shop", "users", &["_id", "name", "email"])],
         );
-        completions.syntax = Syntax::Mongo;
+        completions.engine = Engine::MongoDb;
         completions
             .items(&text, offset)
             .0
@@ -1371,7 +1484,7 @@ mod tests {
             },
             &[],
         );
-        completions.syntax = Syntax::Redis;
+        completions.engine = Engine::Redis;
         completions
             .items(&text, offset)
             .0
@@ -1428,7 +1541,7 @@ mod tests {
             },
             &held,
         );
-        schema.syntax = engine.syntax();
+        schema.engine = engine;
         let scope = ("public".to_string(), name.to_string());
         FilterCompletions::new(engine.syntax(), Rc::new(schema), scope)
             .expect("the engine completes a raw filter")

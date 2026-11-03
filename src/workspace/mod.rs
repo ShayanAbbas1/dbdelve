@@ -70,6 +70,9 @@ pub(crate) struct Settings {
     /// holds rather than by asking the server again. Off by default, which is
     /// how every tab sorted before this was a choice.
     pub(crate) client_sort: bool,
+    /// Whether completing a relation writes it as `schema.relation`, for
+    /// databases whose search path does not reach every schema.
+    pub(crate) qualify_completions: bool,
     /// Whether the first-run greeting has played on the welcome surface.
     pub(crate) welcomed: bool,
     /// Keybinding overrides, keyed by action id. Applied to the keymap on
@@ -106,6 +109,7 @@ impl Default for Settings {
             check_for_updates: true,
             color_titlebar: true,
             client_sort: false,
+            qualify_completions: false,
             welcomed: false,
             custom_keybindings: HashMap::new(),
         }
@@ -565,6 +569,8 @@ impl Workspace {
                     stored_settings.check_for_updates.unwrap_or(true);
                 workspace.settings.color_titlebar = stored_settings.color_titlebar.unwrap_or(true);
                 workspace.settings.client_sort = stored_settings.client_sort.unwrap_or(false);
+                workspace.settings.qualify_completions =
+                    stored_settings.qualify_completions.unwrap_or(false);
                 workspace.settings.welcomed = welcome::welcomed(
                     stored_settings.welcomed,
                     !profiles.is_empty() || !unavailable.is_empty(),
@@ -998,6 +1004,25 @@ impl Workspace {
             return;
         }
         self.settings.client_sort = client;
+        self.remember_profiles(cx);
+        cx.notify();
+    }
+
+    /// Rebuilt on every profile now rather than at its next catalog load, which
+    /// may be a reconnect away.
+    pub(crate) fn set_qualify_completions(&mut self, qualify: bool, cx: &mut Context<Self>) {
+        if self.settings.qualify_completions == qualify {
+            return;
+        }
+        self.settings.qualify_completions = qualify;
+        let ids: Vec<String> = self
+            .profiles
+            .iter()
+            .map(|profile| profile.id.clone())
+            .collect();
+        for id in ids {
+            self.install_completions(&id, cx);
+        }
         self.remember_profiles(cx);
         cx.notify();
     }

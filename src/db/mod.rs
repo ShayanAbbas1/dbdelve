@@ -665,6 +665,26 @@ impl Engine {
         }
     }
 
+    /// [`Self::quote_identifier`], for a name that is not one a bare spelling
+    /// reads back as: Postgres folds `Audit` to `audit`, Snowflake `events` to
+    /// `EVENTS`, and `Audit Log` is two words. For a name dbdelve writes where
+    /// the user reads it, where quoting every `users` would be noise.
+    pub fn quote_identifier_if_needed(self, identifier: &str) -> String {
+        let folded = |byte: u8| match self.spec().sql.identifier_folds_upper {
+            true => byte.is_ascii_uppercase(),
+            false => byte.is_ascii_lowercase(),
+        };
+        let mut bytes = identifier.bytes();
+        let plain = bytes
+            .next()
+            .is_some_and(|first| folded(first) || first == b'_')
+            && bytes.all(|byte| folded(byte) || byte.is_ascii_digit() || byte == b'_');
+        match plain {
+            true => identifier.to_string(),
+            false => self.quote_identifier(identifier),
+        }
+    }
+
     /// The inverse, for reading back a name dbdelve wrote — matching a sort key in
     /// a statement to the column header it belongs to, say.
     ///
@@ -3891,6 +3911,26 @@ mod tests {
         assert_eq!(
             Engine::Snowflake.qualified("PUBLIC", "ORDERS"),
             "\"PUBLIC\".\"ORDERS\""
+        );
+    }
+
+    #[test]
+    fn a_name_is_left_bare_only_in_the_case_its_server_folds_a_bare_one_to() {
+        assert_eq!(
+            Engine::Snowflake.quote_identifier_if_needed("EVENTS"),
+            "EVENTS"
+        );
+        assert_eq!(
+            Engine::Snowflake.quote_identifier_if_needed("events"),
+            "\"events\""
+        );
+        assert_eq!(
+            Engine::Postgres.quote_identifier_if_needed("events"),
+            "events"
+        );
+        assert_eq!(
+            Engine::Postgres.quote_identifier_if_needed("EVENTS"),
+            "\"EVENTS\""
         );
     }
 

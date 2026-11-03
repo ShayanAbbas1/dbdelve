@@ -18,6 +18,7 @@ opacity = 0.85
 check_for_updates = false
 color_titlebar = true
 client_sort = false
+qualify_completions = true
 welcomed = true
 
 [settings.custom_keybindings]
