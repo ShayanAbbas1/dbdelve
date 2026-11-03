@@ -139,8 +139,8 @@ pub(crate) fn fresh_count<'a>(
 }
 
 /// Whether `candidate` points where an existing profile already does, so that
-/// running an import twice adds nothing the second time. A blank port is the
-/// default one, since DBeaver writes 5432 where the form leaves it blank.
+/// running an import twice adds nothing the second time. Without a service,
+/// a blank port is the engine default; beside one, its file supplies the port.
 pub(crate) fn already_have<'a>(
     existing: impl IntoIterator<Item = &'a ConnectionConfig>,
     candidate: &ConnectionConfig,
@@ -158,8 +158,13 @@ pub(crate) fn already_have<'a>(
             && config.service() == candidate.service()
             && match (config.server(), candidate.server()) {
                 (Some(a), Some(b)) => {
+                    let ports_match = if config.service().is_some() {
+                        a.port == b.port
+                    } else {
+                        a.port.or(engine.default_port()) == b.port.or(engine.default_port())
+                    };
                     a.host.eq_ignore_ascii_case(&b.host)
-                        && a.port.or(engine.default_port()) == b.port.or(engine.default_port())
+                        && ports_match
                         && (&a.database, &a.user) == (&b.database, &b.user)
                 }
                 _ => config.endpoint() == candidate.endpoint(),

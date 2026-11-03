@@ -78,7 +78,9 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   Importing from DBeaver or TablePlus starts there too, or from the File menu
   and the palette once connections exist, never from over the connection form
   (its root does not answer `ImportConnections`, so nothing typed into it is
-  lost); before anything is added,
+  lost). Import deduplication treats a blank port as the engine default only
+  without a service: beside one, the file supplies it, so even an explicit
+  default port can name a different server. Before anything is added,
   `render_import_choice` asks which project the new connections join
   (`PendingImport`): "Imported from <client>" by default, made if it is new
   and joined if not, an existing project, or none. While it asks, the

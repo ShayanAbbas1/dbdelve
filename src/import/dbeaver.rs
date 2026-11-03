@@ -739,6 +739,26 @@ mod tests {
     }
 
     #[test]
+    fn service_urls_with_inherited_and_explicit_ports_are_both_imported() {
+        let batch = [
+            "jdbc:postgresql://?service=harness",
+            "jdbc:postgresql://?service=harness&port=5432",
+        ]
+        .map(|url| {
+            imported(
+                connection(
+                    "postgresql",
+                    "postgres-jdbc",
+                    json!({ "url": url, "configurationType": "URL" }),
+                ),
+                None,
+            )
+            .unwrap()
+        });
+        assert_eq!(super::super::fresh_count(&[], &batch), 2);
+    }
+
+    #[test]
     fn url_connections_read_postgres_mysql_and_mariadb_urls() {
         let by_url_driver = |provider: &str, driver: &str, url: &str| {
             imported(
