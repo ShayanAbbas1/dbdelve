@@ -259,6 +259,10 @@ pub struct SqlSpec {
     /// Whether a backslash inside a quoted identifier escapes the character
     /// after it, so a literal one has to survive as two.
     pub identifier_backslash_escapes: bool,
+    /// Whether a bare name is read as upper case, as the standard has it,
+    /// rather than lower. A server that folds neither way is treated as
+    /// folding down: quoting a name it would have matched bare costs nothing.
+    pub identifier_folds_upper: bool,
     /// How a NUL in text is written, where a literal has no escape for it.
     pub nul_text: NulText,
     /// String literals are written `N'…'`, because a bare one is converted to
@@ -323,6 +327,7 @@ impl SqlSpec {
         identifier_quote: IdentifierQuote::Double,
         backslash_escapes: false,
         identifier_backslash_escapes: false,
+        identifier_folds_upper: false,
         nul_text: NulText::Unspelled,
         national_strings: false,
         literal_offsets: true,
@@ -1034,6 +1039,7 @@ pub(crate) const SNOWFLAKE: EngineSpec = EngineSpec {
     sql: SqlSpec {
         // Unconditionally.
         backslash_escapes: true,
+        identifier_folds_upper: true,
         foreign_table: ForeignTable::External,
         parser_dialect: ParserDialect::Snowflake,
         regex: RegexMatch::RegexpCount,

@@ -1924,7 +1924,7 @@ impl Workspace {
         let engine = profile.config.engine();
         profile.session.completions = match &profile.catalog {
             CatalogState::Loaded(catalog, _) => Some(Rc::new(SchemaCompletions::new(
-                engine.syntax(),
+                engine,
                 Arc::new(catalog.clone()),
                 profile.session.completion_columns.clone(),
                 self.settings.qualify_completions,
