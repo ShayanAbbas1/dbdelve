@@ -647,6 +647,14 @@ mod tests {
     }
 
     #[test]
+    fn only_ibm_s_driver_is_told_to_report_a_silent_reconnect() {
+        assert!(is_ibm_cli("libdb2.a"));
+        for other in ["psqlodbcw.so", "ivdb228.so", "libcwbodbc.so", ""] {
+            assert!(!is_ibm_cli(other), "{other}");
+        }
+    }
+
+    #[test]
     fn a_string_without_an_equals_sign_is_a_dsn() {
         assert!(is_dsn("Db2Dev"));
         assert!(!is_dsn("DRIVER={x};HOSTNAME=h"));
