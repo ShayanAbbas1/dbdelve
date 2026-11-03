@@ -21,8 +21,8 @@ use serde::Deserialize;
 // and the two parsers are never interchangeable -- see `classify`'s doc.
 use sqlparser::ast::{
     AlterTableOperation, ConditionalStatementBlock, CopySource, CopyTarget, CreateTableOptions,
-    Delete, Expr, Insert, Merge, Query, SetExpr, SqlOption, Statement, TableObject, Update,
-    UtilityOption,
+    Delete, Expr, Insert, Merge, ObjectName, Query, Set, SetExpr, SqlOption, Statement,
+    TableObject, TransactionAccessMode, TransactionMode, Update, UtilityOption,
 };
 use sqlparser::dialect::{
     ClickHouseDialect, Dialect, DuckDbDialect, GenericDialect, MsSqlDialect, MySqlDialect,
@@ -2611,9 +2611,10 @@ pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
         return classify(engine, &american);
     }
 
+    let calls = calls_verdict(dialect.as_ref(), sql);
     let spec = engine.spec();
     if spec.sql.unreadable_floor == UnreadableFloor::FirstKeyword {
-        return by_statement(spec, dialect.as_ref(), sql);
+        return by_statement(spec, dialect.as_ref(), sql).max(calls);
     }
 
     // All or nothing: one statement it cannot read makes the whole submission
@@ -2621,13 +2622,16 @@ pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
     // An unreadable verdict's mode is the lowest one it may be run once in.
     // Any, where the server holds Read-only to reads; otherwise nothing stops
     // what it turns out to write, so Read-only may not run it at all.
-    let unreadable = || Verdict {
-        mode: if engine.holds_read_only() {
-            Mode::ReadOnly
-        } else {
-            Mode::ReadWrite
-        },
-        destructive: vec![Destructive::Unreadable],
+    let unreadable = || {
+        Verdict {
+            mode: if engine.holds_read_only() {
+                Mode::ReadOnly
+            } else {
+                Mode::ReadWrite
+            },
+            destructive: vec![Destructive::Unreadable],
+        }
+        .max(calls.clone())
     };
     if spec.sql.parser_dialect == ParserDialect::Generic && lexes_apart(dialect.as_ref(), sql) {
         return unreadable();
@@ -2641,7 +2645,86 @@ pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
     statements
         .iter()
         .map(|statement| spec_verdict(spec, statement))
-        .fold(Verdict::READ, Verdict::max)
+        .fold(calls, Verdict::max)
+}
+
+/// What a submission's calls do that its tree does not show, read off its
+/// tokens wherever they stand, so a call in a statement sqlparser cannot read
+/// counts too: a `set_config` that may lift the read-only hold
+/// ([`READ_ONLY_SETTINGS`]) is a write. One naming another setting by a plain
+/// literal is left alone; any other first argument might name the hold.
+fn calls_verdict(dialect: &dyn Dialect, sql: &str) -> Verdict {
+    let (tokens, _) = located_prefix(dialect, sql);
+    let tokens: Vec<&Token> = tokens
+        .iter()
+        .map(|(token, _)| token)
+        .filter(|token| !matches!(token, Token::Whitespace(_)))
+        .collect();
+    let lifts_hold = tokens.windows(2).enumerate().any(|(at, pair)| {
+        let [Token::Word(word), Token::LParen] = pair else {
+            return false;
+        };
+        word.value.eq_ignore_ascii_case("set_config")
+            && !matches!(
+                tokens.get(at + 2..at + 4),
+                Some([Token::SingleQuotedString(name), Token::Comma])
+                    if !READ_ONLY_SETTINGS.contains(&name.to_ascii_lowercase().as_str())
+            )
+    });
+    match lifts_hold {
+        true => Verdict::WRITE,
+        false => Verdict::READ,
+    }
+}
+
+/// The settings that hold a session to reads: Postgres's
+/// `default_transaction_read_only` and `transaction_read_only`, MySQL's and
+/// MariaDB's `transaction_read_only` and its older name `tx_read_only`.
+const READ_ONLY_SETTINGS: &[&str] = &[
+    "default_transaction_read_only",
+    "transaction_read_only",
+    "tx_read_only",
+];
+
+/// Whether a `SET` may lift the read-only hold: an assignment to one of
+/// [`READ_ONLY_SETTINGS`] that is not plainly on (`DEFAULT` is whatever the
+/// server was started with), or a transaction characteristic of `READ WRITE`.
+fn set_lifts_hold(set: &Set) -> bool {
+    let lifts = |name: &ObjectName, values: &[Expr]| {
+        let name = name.to_string().to_ascii_lowercase();
+        let setting = name
+            .rsplit('.')
+            .next()
+            .unwrap_or(&name)
+            .trim_start_matches('@')
+            .trim_matches(['"', '`']);
+        let on = matches!(
+            values,
+            [value] if ["on", "true", "1", "yes"]
+                .contains(&value.to_string().trim_matches('\'').to_ascii_lowercase().as_str())
+        );
+        READ_ONLY_SETTINGS.contains(&setting) && !on
+    };
+    match set {
+        Set::SingleAssignment {
+            variable, values, ..
+        } => lifts(variable, values),
+        Set::ParenthesizedAssignments { variables, .. } => {
+            variables.iter().any(|variable| lifts(variable, &[]))
+        }
+        Set::MultipleAssignments { assignments } => assignments
+            .iter()
+            .any(|assignment| lifts(&assignment.name, std::slice::from_ref(&assignment.value))),
+        Set::SetTransaction { modes, .. } => opens_read_write(modes),
+        _ => false,
+    }
+}
+
+/// Whether a transaction's characteristics include `READ WRITE`.
+fn opens_read_write(modes: &[TransactionMode]) -> bool {
+    modes.contains(&TransactionMode::AccessMode(
+        TransactionAccessMode::ReadWrite,
+    ))
 }
 
 /// Whether a server whose lexer is not known, as Generic's is not, could
@@ -3813,6 +3896,9 @@ fn variant_verdict(statement: &Statement) -> Verdict {
                 )
                 .fold(Verdict::READ, Verdict::max)
         }
+
+        Statement::Set(set) if set_lifts_hold(set) => Verdict::WRITE,
+        Statement::StartTransaction { modes, .. } if opens_read_write(modes) => Verdict::WRITE,
 
         Statement::ShowTables { .. }
         | Statement::ShowCatalogs { .. }
@@ -7493,6 +7579,84 @@ mod tests {
             "SELECT 1\rFROM t",
         ] {
             assert_eq!(classify(Engine::Generic, sql), Verdict::READ, "{sql:?}");
+        }
+    }
+
+    /// Postgres holds Read-only with `default_transaction_read_only`, MySQL and
+    /// MariaDB with the session's transaction access mode. A statement that
+    /// lifts either lifts the hold, after which the server runs any write.
+    #[test]
+    fn a_statement_that_lifts_the_read_only_hold_is_a_write() {
+        let postgres = [
+            "SET default_transaction_read_only = off",
+            "SET default_transaction_read_only TO off",
+            "SET SESSION default_transaction_read_only = 'off'",
+            "SET LOCAL default_transaction_read_only = false",
+            "SET default_transaction_read_only = DEFAULT",
+            "SET \"default_transaction_read_only\" = off",
+            "SET transaction_read_only = off",
+            "RESET default_transaction_read_only",
+            "RESET ALL",
+            "DISCARD ALL",
+            "BEGIN READ WRITE",
+            "BEGIN TRANSACTION READ WRITE",
+            "BEGIN ISOLATION LEVEL SERIALIZABLE, READ WRITE",
+            "START TRANSACTION READ WRITE",
+            "SET TRANSACTION READ WRITE",
+            "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE",
+            "SELECT set_config('default_transaction_read_only', 'off', false)",
+            "SELECT set_config('TRANSACTION_READ_ONLY', 'off', true), 1",
+            "SELECT pg_catalog.set_config('default_transaction_read_only', 'off', false)",
+            "SELECT set_config(name, 'off', false) FROM t",
+            "SELECT set_config('default_transaction_' || 'read_only', 'off', false)",
+        ];
+        let mysql = [
+            "SET transaction_read_only = 0",
+            "SET transaction_read_only = OFF",
+            "SET @@transaction_read_only = 0",
+            "SET @@session.transaction_read_only = OFF",
+            "SET SESSION transaction_read_only = 0",
+            "SET GLOBAL transaction_read_only = 0",
+            "SET tx_read_only = 0",
+            "SET autocommit = 1, transaction_read_only = 0",
+            "SET transaction_read_only = DEFAULT",
+            "START TRANSACTION READ WRITE",
+            "SET TRANSACTION READ WRITE",
+            "SET SESSION TRANSACTION READ WRITE",
+        ];
+        let lifts = |engines: &[Engine], cases: &[&str]| {
+            for &engine in engines {
+                for sql in cases {
+                    assert!(
+                        classify(engine, sql).mode >= Mode::ReadWrite,
+                        "{engine:?} {sql}: {:?}",
+                        classify(engine, sql)
+                    );
+                }
+            }
+        };
+        lifts(&[Engine::Postgres, Engine::Generic], &postgres);
+        lifts(&[Engine::MySql, Engine::MariaDb, Engine::Generic], &mysql);
+
+        for engine in [Engine::Postgres, Engine::MySql, Engine::MariaDb] {
+            for sql in [
+                "SET search_path = x",
+                "SET default_transaction_read_only = on",
+                "SET transaction_read_only = 1",
+                "BEGIN",
+                "START TRANSACTION READ ONLY",
+                "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+                "SET SESSION TRANSACTION READ ONLY",
+            ] {
+                assert_eq!(classify(engine, sql), Verdict::READ, "{engine:?} {sql}");
+            }
+        }
+        for sql in [
+            "BEGIN READ ONLY",
+            "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY",
+            "SELECT set_config('search_path', 'x', false)",
+        ] {
+            assert_eq!(classify(Engine::Postgres, sql), Verdict::READ, "{sql}");
         }
     }
 
