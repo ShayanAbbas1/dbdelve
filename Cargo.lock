@@ -2131,6 +2131,7 @@ dependencies = [
  "serde_json",
  "sqlformat",
  "sqlparser",
+ "strum 0.28.0",
  "tiberius",
  "time",
  "tokio",

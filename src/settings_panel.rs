@@ -108,6 +108,7 @@ impl SettingsTab {
 enum SettingId {
     RowLimit,
     DefaultSorting,
+    VimMode,
     CheckForUpdates,
     MatchSystemAppearance,
     Theme,
@@ -169,6 +170,14 @@ fn setting_rows() -> Vec<SettingRow> {
              loaded, so a table sorts only the page on screen. Tabs already \
              open keep theirs; each can be switched from its status bar.",
             &["sort", "order", "server", "client"],
+        ),
+        row(
+            SettingId::VimMode,
+            SettingsTab::General,
+            "Editor",
+            "Vim mode",
+            "Enable Vim mode and key bindings.",
+            &["vim", "mode", "editor"],
         ),
         row(
             SettingId::CheckForUpdates,
@@ -755,6 +764,12 @@ fn render_control(
                 )
                 .into_any_element()
         }
+        SettingId::VimMode => switch("vim-mode", settings.vim_mode, t)
+            .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
+                let on = !workspace.settings.vim_mode;
+                workspace.set_vim_mode(on, cx);
+            }))
+            .into_any_element(),
         SettingId::CheckForUpdates => switch("check-for-updates", settings.check_for_updates, t)
             .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
                 let check = !workspace.settings.check_for_updates;

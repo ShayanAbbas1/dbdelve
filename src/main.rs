@@ -36,6 +36,7 @@ mod theme;
 mod tls;
 mod ui;
 mod update;
+mod vim;
 
 use std::{borrow::Cow, path::PathBuf, rc::Rc, sync::Arc};
 

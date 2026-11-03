@@ -270,6 +270,9 @@ unicode-segmentation = "=1.13.3"
 # of a result being drained. Already in the graph through nucleo-matcher and
 # the regex stack; pinned to the locked version so naming it links no second copy.
 memchr = "=2.8.3"
+# `EnumIter` lists every variant of the enums, so one added
+# later is never left out of processing
+strum = { version = "0.28", features = ["derive"] }
 
 serde = { version = "1", features = ["derive"] }
 # `raw_value` lets Import Rows keep a JSON number's own text (`import_rows::Json`),
