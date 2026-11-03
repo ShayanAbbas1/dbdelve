@@ -1056,9 +1056,7 @@ mod tests {
         ];
         for row in rows {
             assert!(
-                keybindings::REGISTRY
-                    .iter()
-                    .any(|spec| spec.id == row.action()),
+                keybindings::available_registry().any(|spec| spec.id == row.action()),
                 "{row:?}"
             );
         }

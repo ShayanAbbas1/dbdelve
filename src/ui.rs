@@ -951,8 +951,7 @@ pub(crate) fn keycap_text(chord: &str) -> String {
 /// beside the label: a hint spelled out at the call site goes on claiming the
 /// shipped chord after the action has been rebound to another one.
 pub(crate) fn chord_hint(id: &str, overrides: &HashMap<String, String>) -> String {
-    keybindings::REGISTRY
-        .iter()
+    keybindings::available_registry()
         .find(|spec| spec.id == id)
         .and_then(|spec| keybindings::chords_for(spec, overrides).first().copied())
         .map(keycap_text)
@@ -962,8 +961,7 @@ pub(crate) fn chord_hint(id: &str, overrides: &HashMap<String, String>) -> Strin
 /// The chord bound to an action today, as GPUI writes it -- an override if the
 /// user set one, else the shipped default -- or `None` for an unbound action.
 pub(crate) fn chord_for(id: &str, overrides: &HashMap<String, String>) -> Option<String> {
-    keybindings::REGISTRY
-        .iter()
+    keybindings::available_registry()
         .find(|spec| spec.id == id)
         .and_then(|spec| keybindings::chords_for(spec, overrides).first().copied())
         .map(str::to_string)
