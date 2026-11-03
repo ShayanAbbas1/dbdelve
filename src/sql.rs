@@ -14,15 +14,16 @@
 //! not need a trailing semicolon on a statement sent over the wire.
 
 use std::borrow::Cow;
-use std::ops::Range;
+use std::ops::{ControlFlow, Range};
 
 use serde::Deserialize;
 // Aliased: `tree_sitter::Parser` already owns the name `Parser` in this file,
 // and the two parsers are never interchangeable -- see `classify`'s doc.
 use sqlparser::ast::{
     AlterTableOperation, ConditionalStatementBlock, CopySource, CopyTarget, CreateTableOptions,
-    Delete, Expr, Insert, Merge, ObjectName, Query, Set, SetExpr, SqlOption, Statement,
-    TableObject, TransactionAccessMode, TransactionMode, Update, UtilityOption,
+    Delete, Expr, Insert, Merge, ObjectName, ObjectNamePart, Query, Set, SetExpr, SqlOption,
+    Statement, TableFactor, TableObject, TransactionAccessMode, TransactionMode, Update,
+    UtilityOption, Visit, Visitor,
 };
 use sqlparser::dialect::{
     ClickHouseDialect, Dialect, DuckDbDialect, GenericDialect, MsSqlDialect, MySqlDialect,
@@ -2644,6 +2645,13 @@ pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
         return unreadable();
     };
 
+    let calls = match parser_dialect == ParserDialect::Generic
+        && statements.iter().any(calls_unknown_function)
+    {
+        true => calls.max(Verdict::WRITE),
+        false => calls,
+    };
+
     // An empty or comment-only string parses to no statements at all. There is
     // nothing there to be dangerous, and a dialog over nothing is noise.
     statements
@@ -2652,11 +2660,286 @@ pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
         .fold(calls, Verdict::max)
 }
 
+/// Whether `statement` calls, anywhere in it, a function that is not one of
+/// [`SIDE_EFFECT_FREE_FUNCTIONS`]: a scalar or aggregate call, or a function
+/// in `FROM`. A function can write whatever its body does, and nothing in the
+/// call says, so on a server that holds nothing ([`Engine::holds_read_only`])
+/// only a known built-in reads.
+///
+/// Only a bare, unquoted name is matched against the list: `s.upper(x)` and
+/// `"UPPER"(x)` may name a function of the user's. An overload of a listed
+/// name taking other argument types is not told apart.
+fn calls_unknown_function(statement: &Statement) -> bool {
+    struct Calls;
+    impl Visitor for Calls {
+        type Break = ();
+        fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
+            match expr {
+                Expr::Function(function) if !side_effect_free(&function.name) => {
+                    ControlFlow::Break(())
+                }
+                _ => ControlFlow::Continue(()),
+            }
+        }
+        fn pre_visit_table_factor(&mut self, factor: &TableFactor) -> ControlFlow<()> {
+            match factor {
+                TableFactor::Table {
+                    name,
+                    args: Some(_),
+                    ..
+                }
+                | TableFactor::Function { name, .. }
+                    if !side_effect_free(name) =>
+                {
+                    ControlFlow::Break(())
+                }
+                _ => ControlFlow::Continue(()),
+            }
+        }
+    }
+    statement.visit(&mut Calls).is_break()
+}
+
+fn side_effect_free(name: &ObjectName) -> bool {
+    matches!(
+        name.0.as_slice(),
+        [ObjectNamePart::Identifier(ident)]
+            if ident.quote_style.is_none()
+                && SIDE_EFFECT_FREE_FUNCTIONS
+                    .contains(&ident.value.to_ascii_lowercase().as_str())
+    )
+}
+
+/// The functions a Generic Read-only connection may call: built-ins of
+/// Postgres, Db2 and ANSI SQL that compute a value and change nothing, so a
+/// call to one is a read wherever it stands. Anything not listed needs
+/// Read-write there ([`calls_unknown_function`]). Keep it to functions whose
+/// every spelling across those servers is side-effect free.
+const SIDE_EFFECT_FREE_FUNCTIONS: &[&str] = &[
+    // Aggregates.
+    "count",
+    "sum",
+    "avg",
+    "min",
+    "max",
+    "every",
+    "any_value",
+    "bool_and",
+    "bool_or",
+    "bit_and",
+    "bit_or",
+    "array_agg",
+    "string_agg",
+    "listagg",
+    "median",
+    "mode",
+    "percentile_cont",
+    "percentile_disc",
+    "stddev",
+    "stddev_pop",
+    "stddev_samp",
+    "variance",
+    "var_pop",
+    "var_samp",
+    "corr",
+    "covar_pop",
+    "covar_samp",
+    "covariance",
+    "regr_slope",
+    "regr_intercept",
+    "regr_count",
+    "regr_r2",
+    "regr_avgx",
+    "regr_avgy",
+    "regr_sxx",
+    "regr_syy",
+    "regr_sxy",
+    "grouping",
+    // Window functions.
+    "row_number",
+    "rank",
+    "dense_rank",
+    "percent_rank",
+    "cume_dist",
+    "ntile",
+    "lag",
+    "lead",
+    "first_value",
+    "last_value",
+    "nth_value",
+    // Nulls and choices.
+    "coalesce",
+    "nullif",
+    "ifnull",
+    "nvl",
+    "nvl2",
+    "value",
+    "greatest",
+    "least",
+    "decode",
+    // Numbers.
+    "abs",
+    "ceil",
+    "ceiling",
+    "floor",
+    "round",
+    "trunc",
+    "truncate",
+    "mod",
+    "power",
+    "pow",
+    "sqrt",
+    "exp",
+    "ln",
+    "log",
+    "log10",
+    "sign",
+    "pi",
+    "degrees",
+    "radians",
+    "sin",
+    "cos",
+    "tan",
+    "asin",
+    "acos",
+    "atan",
+    "atan2",
+    "random",
+    "rand",
+    // Strings.
+    "upper",
+    "lower",
+    "ucase",
+    "lcase",
+    "initcap",
+    "length",
+    "char_length",
+    "character_length",
+    "octet_length",
+    "bit_length",
+    "substr",
+    "substring",
+    "trim",
+    "ltrim",
+    "rtrim",
+    "btrim",
+    "replace",
+    "translate",
+    "concat",
+    "concat_ws",
+    "left",
+    "right",
+    "lpad",
+    "rpad",
+    "repeat",
+    "reverse",
+    "position",
+    "strpos",
+    "locate",
+    "instr",
+    "posstr",
+    "split_part",
+    "starts_with",
+    "regexp_replace",
+    "regexp_substr",
+    "regexp_like",
+    "regexp_instr",
+    "regexp_count",
+    "chr",
+    "ascii",
+    "md5",
+    "hex",
+    "to_hex",
+    "digits",
+    "space",
+    "format",
+    // Dates and times.
+    "current_date",
+    "current_time",
+    "current_timestamp",
+    "localtime",
+    "localtimestamp",
+    "now",
+    "date_trunc",
+    "date_part",
+    "extract",
+    "year",
+    "month",
+    "day",
+    "hour",
+    "minute",
+    "second",
+    "microsecond",
+    "dayofweek",
+    "dayofyear",
+    "dayofmonth",
+    "week",
+    "quarter",
+    "days",
+    "julian_day",
+    "monthname",
+    "dayname",
+    "age",
+    "make_date",
+    "make_timestamp",
+    "last_day",
+    "next_day",
+    "add_months",
+    "months_between",
+    "timestampdiff",
+    "timestamp_format",
+    "varchar_format",
+    "to_char",
+    "to_date",
+    "to_timestamp",
+    "to_number",
+    // Casts.
+    "cast",
+    "try_cast",
+    "int",
+    "integer",
+    "bigint",
+    "smallint",
+    "decimal",
+    "dec",
+    "numeric",
+    "double",
+    "real",
+    "float",
+    "char",
+    "varchar",
+    "date",
+    "time",
+    "timestamp",
+    // The session's own names.
+    "current_user",
+    "session_user",
+    "user",
+    "current_schema",
+    "current_database",
+    "current_catalog",
+    "current_setting",
+    "version",
+    // A sequence's value as this session last advanced it.
+    "currval",
+    "lastval",
+    // Rows from values.
+    "generate_series",
+    "unnest",
+];
+
 /// What a submission's calls do that its tree does not show, read off its
 /// tokens wherever they stand, so a call in a statement sqlparser cannot read
-/// counts too: a `set_config` that may lift the read-only hold
-/// ([`READ_ONLY_SETTINGS`]) is a write. One naming another setting by a plain
-/// literal is left alone; any other first argument might name the hold.
+/// counts too:
+///
+/// - a call no read-only hold stops ([`HOLD_IGNORING_CALLS`]) needs Full;
+/// - advancing a sequence (`nextval(…)`, `setval(…)`, `NEXT VALUE FOR s`,
+///   Db2's `NEXTVAL FOR s` and `s.NEXTVAL`) is a write: Postgres lets a
+///   temporary sequence advance in a read-only transaction, and Generic holds
+///   nothing;
+/// - a `set_config` that may lift the read-only hold ([`READ_ONLY_SETTINGS`])
+///   is a write. One naming another setting by a plain literal is left alone;
+///   any other first argument might name the hold.
 fn calls_verdict(dialect: &dyn Dialect, sql: &str) -> Verdict {
     let (tokens, _) = located_prefix(dialect, sql);
     let tokens: Vec<&Token> = tokens
@@ -2664,22 +2947,60 @@ fn calls_verdict(dialect: &dyn Dialect, sql: &str) -> Verdict {
         .map(|(token, _)| token)
         .filter(|token| !matches!(token, Token::Whitespace(_)))
         .collect();
-    let lifts_hold = tokens.windows(2).enumerate().any(|(at, pair)| {
-        let [Token::Word(word), Token::LParen] = pair else {
-            return false;
-        };
-        word.value.eq_ignore_ascii_case("set_config")
+    let named = |at: usize, name: &str| matches!(tokens.get(at), Some(Token::Word(word)) if word.value.eq_ignore_ascii_case(name));
+    let keyword = |at: usize, name: &str| is_keyword(tokens.get(at), name);
+    let called = |at: usize| tokens.get(at + 1) == Some(&&Token::LParen);
+    let call_name = |at: usize| match tokens.get(at) {
+        Some(Token::Word(word)) if called(at) => Some(word.value.to_ascii_lowercase()),
+        _ => None,
+    };
+
+    let ignores_hold = (0..tokens.len())
+        .any(|at| call_name(at).is_some_and(|name| HOLD_IGNORING_CALLS.contains(&name.as_str())));
+    if ignores_hold {
+        return Verdict::FULL;
+    }
+    let advances = (0..tokens.len()).any(|at| {
+        call_name(at).is_some_and(|name| name == "nextval" || name == "setval")
+            || keyword(at, "NEXT") && keyword(at + 1, "VALUE") && keyword(at + 2, "FOR")
+            || keyword(at, "NEXTVAL") && keyword(at + 1, "FOR")
+            || tokens.get(at) == Some(&&Token::Period) && named(at + 1, "NEXTVAL")
+    });
+    let lifts_hold = (0..tokens.len()).any(|at| {
+        call_name(at).as_deref() == Some("set_config")
             && !matches!(
                 tokens.get(at + 2..at + 4),
                 Some([Token::SingleQuotedString(name), Token::Comma])
                     if !READ_ONLY_SETTINGS.contains(&name.to_ascii_lowercase().as_str())
             )
     });
-    match lifts_hold {
+    match advances || lifts_hold {
         true => Verdict::WRITE,
         false => Verdict::READ,
     }
 }
+
+/// Calls that act outside the transaction they run in, so no read-only hold
+/// stops them: signalling another backend, reloading or rotating the server's
+/// configuration and logs, writing the server's files, and running a
+/// statement down another connection with dblink.
+const HOLD_IGNORING_CALLS: &[&str] = &[
+    "pg_terminate_backend",
+    "pg_cancel_backend",
+    "pg_reload_conf",
+    "pg_rotate_logfile",
+    "pg_promote",
+    "pg_switch_wal",
+    "pg_create_restore_point",
+    "pg_file_write",
+    "pg_file_rename",
+    "pg_file_unlink",
+    "lo_import",
+    "lo_export",
+    "dblink",
+    "dblink_exec",
+    "dblink_send_query",
+];
 
 /// The settings that hold a session to reads: Postgres's
 /// `default_transaction_read_only` and `transaction_read_only`, MySQL's and
@@ -7740,6 +8061,152 @@ mod tests {
         ] {
             assert_eq!(classify(Engine::Postgres, sql), Verdict::READ, "{sql}");
         }
+    }
+
+    /// Advancing a sequence writes, and no engine's read-only hold stops it
+    /// for every sequence: Postgres lets a temporary one advance in a read-only
+    /// transaction, and Db2 reached through Generic holds nothing at all.
+    #[test]
+    fn advancing_a_sequence_is_a_write_on_every_engine() {
+        let engines = Engine::ALL
+            .into_iter()
+            .filter(|engine| engine.syntax() == Syntax::Sql);
+        for engine in engines {
+            for sql in [
+                "SELECT nextval('s')",
+                "SELECT setval('delvetest.seq', 100)",
+                "SELECT pg_catalog.nextval('s')",
+                "SELECT NEXTVAL(s)",
+                "SELECT NEXT VALUE FOR s",
+                "SELECT next value for s FROM t",
+                "SELECT NEXTVAL FOR s FROM t",
+                "SELECT s.NEXTVAL FROM SYSIBM.SYSDUMMY1",
+                "SELECT DELVETEST.SEQ.NEXTVAL FROM SYSIBM.SYSDUMMY1",
+                "SELECT a FROM t WHERE id = s.nextval",
+                "VALUES (DELVETEST.SEQ.NEXTVAL)",
+                "SET DELVETEST.VV = DELVETEST.SEQ.NEXTVAL",
+            ] {
+                assert!(
+                    classify(engine, sql).mode >= Mode::ReadWrite,
+                    "{engine:?} {sql}: {:?}",
+                    classify(engine, sql)
+                );
+            }
+        }
+        for engine in [Engine::Postgres, Engine::Generic] {
+            assert_eq!(
+                classify(engine, "SELECT \"nextval\"('s')").mode,
+                Mode::ReadWrite,
+                "{engine:?}"
+            );
+            for sql in [
+                "SELECT currval('s')",
+                "SELECT nextval_at, next, value FROM t",
+                "SELECT 'nextval(1)' FROM t",
+                "SELECT 1 -- nextval('s')",
+            ] {
+                assert_eq!(classify(engine, sql), Verdict::READ, "{engine:?} {sql}");
+            }
+        }
+    }
+
+    /// A read-only transaction does not stop a backend being signalled, the
+    /// configuration reloaded, or a statement sent down another connection.
+    #[test]
+    fn a_call_the_read_only_hold_does_not_stop_needs_full() {
+        for engine in [Engine::Postgres, Engine::Generic] {
+            for sql in [
+                "SELECT pg_terminate_backend(123)",
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = 'x'",
+                "SELECT pg_cancel_backend(123)",
+                "SELECT pg_catalog.pg_reload_conf()",
+                "SELECT dblink_exec('dbname=x', 'DELETE FROM t')",
+                "SELECT * FROM dblink('dbname=x', 'DELETE FROM t RETURNING 1') AS r(a int)",
+            ] {
+                assert_eq!(classify(engine, sql).mode, Mode::Full, "{engine:?} {sql}");
+            }
+        }
+    }
+
+    /// Nothing on a Generic server holds Read-only, and what a function does
+    /// cannot be read off its call, so a call to anything but a known
+    /// side-effect-free built-in needs Read-write there. Built-in engines keep
+    /// reading such a call as a read, since their hold stops what it writes.
+    #[test]
+    fn generic_read_only_refuses_a_call_to_a_function_it_does_not_know() {
+        for sql in [
+            "SELECT delvetest.upd_f()",
+            "SELECT upd_f()",
+            "SELECT * FROM delvetest.upd_f()",
+            "SELECT 1 WHERE delvetest.upd_f() = 1",
+            "VALUES (delvetest.upd_f())",
+            "SELECT * FROM TABLE(DELVETEST.UPD_TF())",
+            "SELECT * FROM TABLE(DELVETEST.UPD_TF()) AS T",
+            "SELECT COUNT(*) FROM TABLE(DELVETEST.UPD_TF()) x WHERE 1=0",
+            "WITH t AS (SELECT * FROM TABLE(DELVETEST.UPD_TF()) x) SELECT * FROM t",
+            "SET DELVETEST.VV = (SELECT COUNT(*) FROM TABLE(DELVETEST.UPD_TF()) x)",
+            "SELECT myschema.upper(x) FROM t",
+            "SELECT \"UPPER\"(x) FROM t",
+            "SELECT count(upd_f()) FROM t",
+            "SELECT 1 FROM t ORDER BY upd_f()",
+            "SELECT 1 FROM t GROUP BY upd_f()",
+            "SELECT * FROM t JOIN u ON upd_f() = 1",
+            "SELECT CAST(upd_f() AS INT)",
+            "SELECT CASE WHEN upd_f() = 1 THEN 1 END",
+            "SELECT * FROM t WHERE x IN (SELECT upd_f())",
+            "SELECT * FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.a = upd_f())",
+            "SELECT 1 UNION SELECT upd_f()",
+            "EXPLAIN ANALYZE SELECT upd_f()",
+        ] {
+            assert!(
+                classify(Engine::Generic, sql).mode >= Mode::ReadWrite,
+                "{sql}: {:?}",
+                classify(Engine::Generic, sql)
+            );
+        }
+        for sql in [
+            "SELECT count(*), upper(x), coalesce(a, b), cast(x as int), current_date, \
+             substr(x, 1, 2) FROM t",
+            "SELECT max(a), min(b), sum(c), avg(d), count(DISTINCT e) FROM t GROUP BY f",
+            "SELECT lower(name), length(name), trim(name), round(v, 2), abs(v) FROM t",
+            "SELECT row_number() OVER (ORDER BY a), lag(a) OVER (ORDER BY a) FROM t",
+            "SELECT current_timestamp, year(d), nullif(a, b), concat(a, b) FROM t",
+            "SELECT * FROM t WHERE upper(x) = 'A' AND replace(y, 'a', 'b') LIKE 'c%'",
+            "SELECT extract(year FROM d), substring(x FROM 2), position('a' IN x) FROM t",
+        ] {
+            assert_eq!(classify(Engine::Generic, sql), Verdict::READ, "{sql}");
+        }
+        for sql in [
+            "SELECT delvetest.upd_f()",
+            "SELECT * FROM TABLE(DELVETEST.UPD_TF())",
+        ] {
+            assert_eq!(classify(Engine::Postgres, sql), Verdict::READ, "{sql}");
+        }
+    }
+
+    /// The filter bar's raw text is spliced into the preview, and the preview
+    /// goes through the same gate: a call in it is read as it is anywhere.
+    #[test]
+    fn a_generic_preview_filter_calling_an_unknown_function_needs_read_write() {
+        let preview = |filter: &str| {
+            crate::explorer::preview_sql(Engine::Generic, "DELVETEST", "INJ", filter, Some(100), 0)
+        };
+        for filter in [
+            "ID = DELVETEST.UPD_F()",
+            "ID IN (SELECT C FROM TABLE(DELVETEST.UPD_TF()) T)",
+            "ID = DELVETEST.SEQ.NEXTVAL",
+            "ID = NEXT VALUE FOR DELVETEST.SEQ",
+        ] {
+            let sql = preview(filter);
+            assert!(
+                classify(Engine::Generic, &sql).mode >= Mode::ReadWrite,
+                "{sql}: {:?}",
+                classify(Engine::Generic, &sql)
+            );
+        }
+        let sql = preview("upper(V) = 'A'");
+        assert!(is_generated_select(Engine::Generic, &sql), "{sql}");
+        assert_eq!(classify(Engine::Generic, &sql), Verdict::READ, "{sql}");
     }
 
     #[test]

@@ -322,8 +322,10 @@ encoding_rs = "=0.8.35"
 #
 # Default features off: they pull `psm`, which builds assembly through `cc`, to
 # guard against pathological nesting we do not accept from a local buffer. Off,
-# it is two pure-Rust crates and an 8.5s build instead of 28.6s.
-sqlparser = { version = "=0.63.0", default-features = false, features = ["std"] }
+# it is two pure-Rust crates and an 8.5s build instead of 28.6s. `visitor`
+# walks a parsed statement for every function it calls, which the Generic
+# Read-only gate checks against an allowlist.
+sqlparser = { version = "=0.63.0", default-features = false, features = ["std", "visitor"] }
 
 # The Format Query command, and only that. A token-level reformatter: it splits
 # the text into keywords, strings and comments and re-emits them with newlines,

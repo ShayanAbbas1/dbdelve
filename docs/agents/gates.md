@@ -208,6 +208,25 @@ The core of the mode check is in `AGENTS.md`, "Connection modes". The detail:
   literal or quoted name, which ends it a byte later where it escapes. An
   unreadable verdict asks; a wrong read verdict on Generic would run a write in
   Read-only with nothing on the server to stop it.
+- **What lifts or ignores the hold is never a read.** A `SET` of
+  `default_transaction_read_only`, `transaction_read_only` or `tx_read_only`
+  to anything but on, a `READ WRITE` transaction characteristic (`BEGIN`,
+  `START TRANSACTION`, `SET [SESSION] TRANSACTION`, `SET SESSION
+  CHARACTERISTICS`) and a `set_config` that may name one of those settings
+  are writes on every engine (`set_lifts_hold`, `calls_verdict`): the hold
+  is a session setting the user's own statement can lift. Advancing a
+  sequence (`nextval`, `setval`, `NEXT VALUE FOR`, Db2's `NEXTVAL FOR` and
+  `s.NEXTVAL`) is a write everywhere, since Postgres lets a temporary
+  sequence advance in a read-only transaction. A call that acts outside the
+  transaction (`pg_terminate_backend`, `pg_reload_conf`, `dblink_exec`, the
+  rest of `HOLD_IGNORING_CALLS`) needs Full.
+- **On Generic, a function call is a read only if it is a known built-in.**
+  A function writes whatever its body does, and with no hold behind
+  Generic's Read-only, a call to anything outside `SIDE_EFFECT_FREE_FUNCTIONS`
+  (a bare, unquoted name of an aggregate, window, string, number, date or cast
+  built-in), in any clause or in `FROM`, needs Read-write
+  (`calls_unknown_function`). Built-in engines keep reading such a call as a
+  read: their hold stops what it writes.
 - **A `--` comment a lone carriage return runs through** is unreadable on every
   dialect whose server may end the comment there and sqlparser does not
   (`line_comment_past_carriage_return`): DuckDB's tokenizer does, Snowflake's
