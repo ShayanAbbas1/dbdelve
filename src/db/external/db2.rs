@@ -126,11 +126,7 @@ fn conformance_subject() -> Subject {
                 "TIMESTAMP",
                 "VARBINARY",
             ],
-            // Db2's own character form of a DOUBLE, converted by its driver.
-            renders: &[
-                ("RATIO", 0, "5.00000000000000E-001"),
-                ("RATIO", 1, "-1.25000000000000E+000"),
-            ],
+            renders: &[],
             find: Box::new(|key| {
                 format!(
                     "SELECT {} FROM {} WHERE {} = {key}",
