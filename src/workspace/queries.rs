@@ -752,6 +752,8 @@ impl Workspace {
             let Some(profile) = self.profile_mut() else {
                 return;
             };
+            let engine = profile.config.engine();
+            let uncertain = profile.in_transaction || profile.session_changed;
             let Some(query) = profile.session.query_tab_mut(id) else {
                 return;
             };
@@ -759,7 +761,7 @@ impl Workspace {
                 return;
             }
             let failed = matches!(query.query, QueryState::Failed(_));
-            let state = query.query.clone();
+            let mut state = query.query.clone();
             let grid = query.results.clone();
             // Always set for a statement sent from the buffer, which every
             // statement of a queue is.
@@ -770,6 +772,11 @@ impl Workspace {
             // Only a statement the queue itself sent is one of its results.
             if !std::mem::take(&mut queue.awaiting) {
                 return;
+            }
+            if let QueryState::Failed(error) = &mut state
+                && let Some(note) = queue.committed_note(engine, uncertain)
+            {
+                error.message = format!("{}\n\n{note}", error.message.trim_end());
             }
             // Only follow the result that just landed if the statement in
             // flight was what the user was watching. Someone reading an

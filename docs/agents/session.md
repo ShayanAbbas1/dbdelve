@@ -218,8 +218,11 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   was there. Two consequences are worth stating. The split costs the implicit
   transaction a single Postgres `simple_query` submission used to give a
   multi-statement selection, so a failure part way leaves the statements
-  before it committed; an explicit `BEGIN`/`COMMIT` in the selection still
-  works, since the session holds it across submissions. And a statement that
+  before it committed, and its error says how many
+  (`Queue::committed_note`), only when that is certain: no transaction open,
+  no session setting changed (one may have turned autocommit off), no
+  transaction control in the queue. An explicit `BEGIN`/`COMMIT` in the
+  selection still works, since the session holds it across submissions. And a statement that
   fails raises a Stop/Continue decision (`Session::queue_failure`) rather
   than deciding for the user, while a Cancel ends the queue without asking,
   because a cancel was already the decision.

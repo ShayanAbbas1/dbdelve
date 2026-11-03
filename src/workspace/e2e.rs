@@ -975,6 +975,36 @@ fn tab_reaches_the_default_sorting_choice_in_settings(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_selection_failing_part_way_says_what_it_already_committed(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "CREATE TABLE t (a INTEGER);");
+        cx.executor().allow_parking();
+        cx.simulate_input(
+            "insert into t values (1); insert into t values (2); \
+             select * from nope; insert into t values (3)",
+        );
+        cx.simulate_keystrokes("secondary-a secondary-enter");
+        settle(cx);
+        let failed = workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("a profile is active");
+            assert!(profile.session.queue_failure.is_some());
+            let tab = profile.session.active_query_tab().expect("a query tab");
+            let last = tab.queue.as_ref().and_then(|queue| queue.done.last());
+            match &last.expect("a queue with results").state {
+                QueryState::Failed(error) => error.message.clone(),
+                _ => panic!("the third statement did not fail"),
+            }
+        });
+        assert!(
+            failed.ends_with("\n\n2 statements before it were already committed."),
+            "{failed}"
+        );
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn stepping_to_the_next_result_keeps_the_keyboard_in_the_grid(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite(cx);

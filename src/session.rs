@@ -1716,6 +1716,37 @@ pub(crate) struct Finished<G = Entity<TableState<ResultGrid>>> {
 }
 
 impl<G: Clone> Queue<G> {
+    /// How many of the statements already in `done` were committed, said
+    /// beside the failure of the one after them, which leaves them in place.
+    /// Only when that is certain: never with a transaction open, a session
+    /// setting changed (one may have turned autocommit off), or a statement
+    /// of the queue's own having opened or ended a transaction.
+    pub(crate) fn committed_note(&self, engine: Engine, uncertain: bool) -> Option<String> {
+        if uncertain
+            || self
+                .done
+                .iter()
+                .any(|finished| sql::leaves(engine, &finished.sql).transaction.is_some())
+        {
+            return None;
+        }
+        let committed = self
+            .done
+            .iter()
+            .filter(|finished| {
+                matches!(
+                    finished.state,
+                    QueryState::Complete { .. } | QueryState::Explained { .. }
+                )
+            })
+            .count();
+        match committed {
+            0 => None,
+            1 => Some("1 statement before it was already committed.".into()),
+            n => Some(format!("{n} statements before it were already committed.")),
+        }
+    }
+
     /// Whether its statements are running at once and not all back yet. Each
     /// is then in a slot of its own in `done`, which is what the status bar
     /// reads and Cancel stops, where a queue run in turn has its one statement
@@ -2834,6 +2865,72 @@ pub(crate) fn result_pane_is_expanded(query: &QueryState) -> bool {
 mod tests {
     use super::*;
     use crate::sql;
+
+    #[test]
+    fn a_failed_queue_statement_says_what_before_it_was_committed() {
+        let complete = || QueryState::Complete {
+            rows: 0,
+            bytes: 0,
+            elapsed: std::time::Duration::ZERO,
+            rows_affected: Some(1),
+            messages: Vec::new(),
+        };
+        let failed = || {
+            QueryState::Failed(DbError {
+                message: "no".into(),
+                position: None,
+            })
+        };
+        let queue = |done: Vec<(&str, QueryState)>| Queue {
+            sql: String::new(),
+            remaining: Vec::new(),
+            done: done
+                .into_iter()
+                .map(|(sql, state)| Finished {
+                    sql: sql.into(),
+                    start: 0,
+                    state,
+                    grid: (),
+                })
+                .collect(),
+            showing: 0,
+            awaiting: true,
+            spare: Vec::new(),
+        };
+        let engine = Engine::Generic;
+        let insert = "INSERT INTO t VALUES (1)";
+
+        assert_eq!(queue(vec![]).committed_note(engine, false), None);
+        assert_eq!(
+            queue(vec![(insert, complete())]).committed_note(engine, false),
+            Some("1 statement before it was already committed.".into())
+        );
+        assert_eq!(
+            queue(vec![
+                (insert, complete()),
+                (insert, failed()),
+                (insert, complete())
+            ])
+            .committed_note(engine, false),
+            Some("2 statements before it were already committed.".into())
+        );
+        // A transaction open, or a session setting that may have turned
+        // autocommit off, and nothing is claimed.
+        assert_eq!(
+            queue(vec![(insert, complete())]).committed_note(engine, true),
+            None
+        );
+        // Nor when the queue itself opened or ended one: a `ROLLBACK` took
+        // back what came before it.
+        for bracket in ["BEGIN", "ROLLBACK", "COMMIT"] {
+            assert_eq!(
+                queue(vec![(bracket, complete()), (insert, complete())])
+                    .committed_note(engine, false),
+                None,
+                "{bracket}"
+            );
+        }
+    }
 
     fn review_from(tab: Tab) -> ApplyReview {
         ApplyReview {
