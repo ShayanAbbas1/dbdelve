@@ -41,9 +41,9 @@ use std::{borrow::Cow, path::PathBuf, rc::Rc, sync::Arc};
 
 use gpui::{
     AnyElement, App, AppContext, ClickEvent, ClipboardItem, Context, Entity, FocusHandle,
-    Focusable, FontWeight, InteractiveElement, IntoElement, Menu, MenuItem, ParentElement, Render,
-    StatefulInteractiveElement, Styled, TitlebarOptions, Window, WindowDecorations, WindowOptions,
-    div, point, prelude::FluentBuilder, px,
+    Focusable, FontWeight, InteractiveElement, IntoElement, KeyBinding, Menu, MenuItem,
+    ParentElement, Render, StatefulInteractiveElement, Styled, TitlebarOptions, Window,
+    WindowDecorations, WindowOptions, div, point, prelude::FluentBuilder, px,
 };
 use gpui_component::{
     Disableable, Root,
@@ -57,7 +57,7 @@ use actions::{
     AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseTab, CommandPalette, CopyCell, CopyPlan,
     CopyResults, CopyRow, CopyRows, CustomRowLimit, CycleMode, DeleteRow, DiscardEdits, EditCell,
     ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen, GoToColumn, HideColumn,
-    ImportConnections, ImportRows, LimitTarget, MoveTabLeft, MoveTabRight, NewConnection,
+    ImportConnections, ImportRows, LimitTarget, Minimize, MoveTabLeft, MoveTabRight, NewConnection,
     NewProject, NewQuery, NewRow, NextEdit, NextPage, NextProfile, NextResult, NextTab,
     OpenReference, OpenSettings, PreviousEdit, PreviousPage, PreviousProfile, PreviousResult,
     PreviousTab, Quit, RefreshConnection, RefreshRelation, RemoveFilter, RequestWriteMode,
@@ -286,6 +286,18 @@ fn main() {
             // Edit menu -- dbdelve does not own cut, copy and paste, the focused
             // field does, and a menu claiming them would take them from it.
             cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
+            cx.on_action(|_: &Minimize, cx: &mut App| {
+                cx.defer(|cx| {
+                    if let Some(window) = cx.active_window() {
+                        window
+                            .update(cx, |_, window, _| window.minimize_window())
+                            .ok();
+                    }
+                });
+            });
+            if cfg!(target_os = "macos") {
+                cx.bind_keys([KeyBinding::new("cmd-m", Minimize, None)]);
+            }
             cx.set_menus(app_menus(false));
 
             // The platform titlebar is kept only for its window buttons on macOS:
@@ -430,4 +442,11 @@ pub(crate) fn app_menus(imports_rows: bool) -> Vec<Menu> {
             ],
         },
     ]
+    .into_iter()
+    .chain(cfg!(target_os = "macos").then(|| Menu {
+        name: "Window".into(),
+        disabled: false,
+        items: vec![MenuItem::action("Minimize", Minimize)],
+    }))
+    .collect()
 }

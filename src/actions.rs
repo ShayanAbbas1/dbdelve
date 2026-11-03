@@ -229,5 +229,6 @@ actions!(
         ResetConfirmations,
         SubmitConnection,
         Quit,
+        Minimize,
     ]
 );
