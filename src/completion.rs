@@ -160,6 +160,9 @@ struct Candidate {
     /// relation a column belongs to. What tells two `id`s apart.
     detail: Option<String>,
     kind: CompletionItemKind,
+    /// What accepting it writes, when that is not the label. Ranking reads
+    /// only the label, so a qualified name still matches the word typed.
+    insert: Option<String>,
 }
 
 impl Candidate {
@@ -168,6 +171,7 @@ impl Candidate {
             label: label.into(),
             detail,
             kind,
+            insert: None,
         }
     }
 }
@@ -180,6 +184,8 @@ pub struct SchemaCompletions {
     syntax: Syntax,
     catalog: Arc<Catalog>,
     columns: ColumnCache,
+    /// Whether a relation offered unqualified is written as `schema.relation`.
+    qualify: bool,
     /// Who to ask when a relation's columns are wanted and not yet held.
     ///
     /// `None` only in this module's own tests, which drive [`Self::items`]
@@ -195,12 +201,14 @@ impl SchemaCompletions {
         syntax: Syntax,
         catalog: Arc<Catalog>,
         columns: ColumnCache,
+        qualify: bool,
         workspace: WeakEntity<Workspace>,
     ) -> Self {
         Self {
             syntax,
             catalog,
             columns,
+            qualify,
             workspace: Some(workspace),
             fuzzy: RefCell::new(Fuzzy::new()),
         }
@@ -313,13 +321,14 @@ impl SchemaCompletions {
             .collect()
     }
 
-    fn all_relations(&self) -> Vec<Candidate> {
+    fn all_relations(&self, qualify: bool) -> Vec<Candidate> {
         self.catalog
             .schemas
             .iter()
             .flat_map(|schema| {
-                schema.relations.iter().map(|rel| {
-                    Candidate::new(
+                schema.relations.iter().map(move |rel| Candidate {
+                    insert: qualify.then(|| format!("{}.{}", schema.name, rel.name)),
+                    ..Candidate::new(
                         &rel.name,
                         Some(schema.name.clone()),
                         relation_kind(rel.kind),
@@ -389,7 +398,7 @@ impl SchemaCompletions {
         }
 
         if expects_relation(before) {
-            let mut candidates = self.all_relations();
+            let mut candidates = self.all_relations(self.qualify);
             candidates.extend(self.schema_names());
             return candidates;
         }
@@ -421,7 +430,7 @@ impl SchemaCompletions {
                 .iter()
                 .map(|keyword| Candidate::new(*keyword, None, CompletionItemKind::KEYWORD)),
         );
-        candidates.extend(self.all_relations());
+        candidates.extend(self.all_relations(self.qualify));
         candidates.extend(self.all_routines());
         candidates
     }
@@ -443,8 +452,9 @@ impl SchemaCompletions {
         }
         match mql::completing(text, word.start) {
             None => Vec::new(),
+            // `db.` already names the database a collection is in.
             Some(Completing::Database) => {
-                let mut candidates = self.all_relations();
+                let mut candidates = self.all_relations(false);
                 candidates.extend(methods(mql::DbMethod::ALL.iter().map(|m| m.name())));
                 candidates
             }
@@ -622,7 +632,7 @@ impl SchemaCompletions {
                         start: text.offset_to_position(word.start),
                         end: text.offset_to_position(word.end),
                     },
-                    new_text: candidate.label,
+                    new_text: candidate.insert.unwrap_or(candidate.label),
                 })),
                 ..Default::default()
             })
@@ -683,7 +693,14 @@ impl FilterCompletions {
         let items = items
             .into_iter()
             .filter(|(word, _)| word.start >= shift)
-            .map(|(word, candidate)| (word.start - shift..word.end - shift, candidate))
+            // Qualifying is an editor setting, and the bar is not the editor.
+            .map(|(word, candidate)| {
+                let candidate = Candidate {
+                    insert: None,
+                    ..candidate
+                };
+                (word.start - shift..word.end - shift, candidate)
+            })
             .collect();
         (items, wanted)
     }
@@ -968,6 +985,7 @@ mod tests {
             syntax: Syntax::Sql,
             catalog: Arc::new(catalog),
             columns: Rc::new(RefCell::new(held)),
+            qualify: false,
             workspace: None,
             fuzzy: RefCell::new(Fuzzy::new()),
         }
@@ -1175,6 +1193,50 @@ mod tests {
             .expect("a column was offered");
         assert_eq!(&sql[word], "tot");
         assert_eq!(candidate.label, "total");
+    }
+
+    /// The first label offered for a caret at `|`, and what accepting it writes.
+    fn first_edit(sql: &str, qualify: bool) -> (String, String) {
+        let offset = sql.find('|').expect("the test must mark the caret");
+        let sql = sql.replace('|', "");
+        let completions = SchemaCompletions {
+            qualify,
+            ..catalog()
+        };
+        let (_, candidate) = completions
+            .items(&sql, offset)
+            .0
+            .into_iter()
+            .next()
+            .expect("something was offered");
+        (
+            candidate.label.clone(),
+            candidate.insert.unwrap_or(candidate.label),
+        )
+    }
+
+    #[test]
+    fn qualifying_writes_a_relation_with_its_schema_and_ranks_it_by_its_name() {
+        assert_eq!(
+            first_edit("SELECT * FROM eve|", true),
+            ("events".to_string(), "audit.events".to_string())
+        );
+    }
+
+    #[test]
+    fn qualifying_does_not_repeat_a_schema_already_typed() {
+        assert_eq!(
+            first_edit("SELECT * FROM audit.eve|", true),
+            ("events".to_string(), "events".to_string())
+        );
+    }
+
+    #[test]
+    fn a_relation_is_written_bare_unless_qualifying_is_on() {
+        assert_eq!(
+            first_edit("SELECT * FROM eve|", false),
+            ("events".to_string(), "events".to_string())
+        );
     }
 
     #[test]

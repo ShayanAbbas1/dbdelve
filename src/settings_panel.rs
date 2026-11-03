@@ -108,6 +108,7 @@ impl SettingsTab {
 enum SettingId {
     RowLimit,
     DefaultSorting,
+    QualifyCompletions,
     CheckForUpdates,
     MatchSystemAppearance,
     Theme,
@@ -169,6 +170,21 @@ fn setting_rows() -> Vec<SettingRow> {
              loaded, so a table sorts only the page on screen. Tabs already \
              open keep theirs; each can be switched from its status bar.",
             &["sort", "order", "server", "client"],
+        ),
+        row(
+            SettingId::QualifyCompletions,
+            SettingsTab::General,
+            "Editor",
+            "Qualify table names",
+            "Completing a table name inserts it with its schema, as \
+             schema.table.",
+            &[
+                "autocomplete",
+                "completion",
+                "schema",
+                "prefix",
+                "qualified",
+            ],
         ),
         row(
             SettingId::CheckForUpdates,
@@ -760,6 +776,14 @@ fn render_control(
                 workspace.set_check_for_updates(check, cx);
             }))
             .into_any_element(),
+        SettingId::QualifyCompletions => {
+            switch("qualify-completions", settings.qualify_completions, t)
+                .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
+                    let qualify = !workspace.settings.qualify_completions;
+                    workspace.set_qualify_completions(qualify, cx);
+                }))
+                .into_any_element()
+        }
         SettingId::ColorTitlebar => switch("color-titlebar", settings.color_titlebar, t)
             .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
                 let color = !workspace.settings.color_titlebar;
@@ -1031,6 +1055,7 @@ mod tests {
     fn a_setting_is_found_by_the_word_the_user_would_type() {
         assert!(found("sort").contains(&SettingId::DefaultSorting));
         assert!(found("titlebar").contains(&SettingId::ColorTitlebar));
+        assert!(found("autocomplete").contains(&SettingId::QualifyCompletions));
         assert!(found("transparency").contains(&SettingId::Opacity));
         assert!(found("updates").contains(&SettingId::CheckForUpdates));
         assert!(found("auto").contains(&SettingId::MatchSystemAppearance));
@@ -1081,7 +1106,7 @@ mod tests {
                 SettingId::Keybinding("sort_active_column"),
             ]
         );
-        assert_eq!(found("!keyboard").len(), 12);
+        assert_eq!(found("!keyboard").len(), 13);
     }
 
     #[test]
