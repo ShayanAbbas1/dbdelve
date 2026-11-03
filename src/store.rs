@@ -96,6 +96,10 @@ pub struct StoredProfile {
     /// what every profile written before it could be picked connected with.
     #[serde(default)]
     pub schema: Option<String>,
+    /// The connection service file section a Postgres profile names. Absent
+    /// is every other profile, which spells out where it connects.
+    #[serde(default)]
+    pub service: Option<String>,
     /// The editor's zoom, back when it was a per-profile setting. Read only:
     /// the live value is [`StoredSettings::editor_font_size`] now, and this is
     /// what the migration seeds it from for anyone upgrading -- dropping the
@@ -2840,6 +2844,7 @@ user = "shayan"
                 options: None,
                 login_database: None,
                 schema: None,
+                service: None,
                 editor_font_size: None,
                 statement_timeout: Some(30),
                 next_query_id: Some(1),
@@ -2894,6 +2899,7 @@ user = "shayan"
             options: None,
             login_database: None,
             schema: None,
+            service: None,
             editor_font_size: Some(16.0),
             statement_timeout: Some(30),
             next_query_id: Some(7),
@@ -3027,6 +3033,7 @@ open_objects = []
             options: None,
             login_database: None,
             schema: None,
+            service: None,
             editor_font_size: None,
             statement_timeout: None,
             next_query_id: Some(0),
@@ -3267,6 +3274,28 @@ folder = "Hot"
     }
 
     #[test]
+    fn a_service_survives_the_round_trip_through_toml_with_no_host() {
+        let profile = StoredProfile {
+            host: String::new(),
+            user: String::new(),
+            service: Some("harness".into()),
+            ..a_stored_profile()
+        };
+        let file = ProfileFile {
+            fonts: None,
+            active: None,
+            settings: None,
+            projects: Vec::new(),
+            profiles: vec![profile.clone()],
+        };
+
+        let text = toml::to_string_pretty(&file).expect("profiles must encode");
+        let decoded: ProfileFile = toml::from_str(&text).expect("profiles must decode");
+
+        assert_eq!(decoded.profiles, vec![profile]);
+    }
+
+    #[test]
     fn no_tunnel_is_not_written_as_an_empty_section() {
         let file = ProfileFile {
             fonts: None,
@@ -3306,6 +3335,7 @@ folder = "Hot"
             options: None,
             login_database: None,
             schema: None,
+            service: None,
             editor_font_size: None,
             statement_timeout: None,
             next_query_id: Some(0),
@@ -3384,6 +3414,7 @@ folder = "Hot"
             options: None,
             login_database: None,
             schema: None,
+            service: None,
             editor_font_size: Some(14.0),
             statement_timeout: None,
             next_query_id: Some(7),
@@ -3448,6 +3479,7 @@ folder = "Hot"
             options: None,
             login_database: None,
             schema: None,
+            service: None,
             editor_font_size: None,
             statement_timeout: Some(60),
             next_query_id: Some(1),
@@ -3561,6 +3593,7 @@ open_objects = []
             options: None,
             login_database: None,
             schema: None,
+            service: None,
             editor_font_size: None,
             statement_timeout: Some(30),
             next_query_id: Some(7),
@@ -3685,6 +3718,7 @@ open_objects = []
                     options: None,
                     login_database: None,
                     schema: None,
+                    service: None,
                     editor_font_size: None,
                     statement_timeout: Some(30),
                     next_query_id: Some(2),
@@ -3719,6 +3753,7 @@ open_objects = []
                     options: None,
                     login_database: None,
                     schema: None,
+                    service: None,
                     editor_font_size: None,
                     statement_timeout: None,
                     next_query_id: None,
@@ -4351,6 +4386,7 @@ open_objects = []
             options: None,
             login_database: None,
             schema: None,
+            service: None,
             editor_font_size: Some(15.0),
             statement_timeout: Some(30),
             next_query_id: Some(7),
@@ -4715,6 +4751,7 @@ name = \"accounts\"
             options: None,
             login_database: None,
             schema: None,
+            service: None,
             editor_font_size: None,
             statement_timeout: None,
             next_query_id: Some(0),
@@ -4829,6 +4866,7 @@ name = \"accounts\"
             options: None,
             login_database: None,
             schema: None,
+            service: None,
             editor_font_size: None,
             statement_timeout: None,
             next_query_id: Some(0),

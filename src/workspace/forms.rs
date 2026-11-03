@@ -346,6 +346,12 @@ impl Workspace {
                     ]
                     .map(IntoElement::into_any_element),
                 );
+                if form.engine.takes_service() {
+                    connection.push(
+                        field_row("service", "Service", &form.service, bare(&form.service), t)
+                            .into_any_element(),
+                    );
+                }
                 if form.engine.takes_options() {
                     connection.push(
                         field_row(
@@ -426,16 +432,17 @@ impl Workspace {
                     "Encryption",
                     // Five words do not say which ones check who answered,
                     // and that is the whole difference between them.
-                    Some(form.sslmode.explanation().into()),
+                    Some(form.encryption_explanation(cx).into()),
                     self.sslmode_dropdown(cx),
                     t,
                 )
                 .into_any_element(),
             );
-            // Only where it is consulted: on `require` a certificate file
-            // changes nothing, and a field that changes nothing reads as
-            // though it does.
-            if form.sslmode.checks_certificate() {
+            // Only where it is consulted: with no service, a certificate file
+            // on `require` changes nothing, and a field that changes nothing
+            // reads as though it does. Beside a service it makes `require`
+            // check, and the service may be what sets a verifying mode.
+            if form.shows_root_certificate(cx) {
                 security.push(
                     field_row(
                         "root-certificate",
@@ -827,7 +834,7 @@ impl Workspace {
                     // The dialog does not hold the window: by now the form may
                     // be another one, or its field gone with the engine or a
                     // switch, and the pick no longer has anywhere to go.
-                    if !shown_file_fields(form).contains(&&input) {
+                    if !shown_file_fields(form, cx).contains(&&input) {
                         return;
                     }
                     let path = path.to_string_lossy().into_owned();
@@ -3380,14 +3387,14 @@ fn bare(input: &Entity<InputState>) -> Input {
 }
 
 /// The path fields the form is drawing, each with a [`browse_button`].
-fn shown_file_fields(form: &ConnectionForm) -> Vec<&Entity<InputState>> {
+fn shown_file_fields<'a>(form: &'a ConnectionForm, cx: &App) -> Vec<&'a Entity<InputState>> {
     let fields = form.target().fields();
     match fields {
         Fields::File => vec![&form.path],
         Fields::Account => vec![&form.private_key],
         Fields::Server | Fields::ConnectionString => {
             let mut shown = Vec::new();
-            if fields == Fields::Server && form.sslmode.checks_certificate() {
+            if fields == Fields::Server && form.shows_root_certificate(cx) {
                 shown.push(&form.root_certificate);
             }
             if form.ssh {

@@ -29,9 +29,9 @@ use crate::{
         AcceptCompletion, AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseTab,
         CommandPalette, ConfirmDialog, CopyCell, CopyPlan, CopyResults, CopyRow, CopyRows,
         CycleMode, DeleteRow, DiscardEdits, EditCell, ExplainQuery, FocusSidebar, FollowForeignKey,
-        FormatQuery, FuzzyOpen, GoToColumn, HideColumn, ImportConnections, ImportRows, MoveTabLeft,
-        MoveTabRight, NewConnection, NewProject, NewQuery, NewRow, NextDialogButton, NextEdit,
-        NextPage, NextProfile, NextResult, NextTab, OpenSettings, OpenSidebarItem,
+        FormatQuery, FuzzyOpen, GoToColumn, HideColumn, ImportConnections, ImportRows, Minimize,
+        MoveTabLeft, MoveTabRight, NewConnection, NewProject, NewQuery, NewRow, NextDialogButton,
+        NextEdit, NextPage, NextProfile, NextResult, NextTab, OpenSettings, OpenSidebarItem,
         PaletteHistoryFilter, PaletteHistorySort, PaletteNext, PaletteNextScope, PalettePrevious,
         PalettePreviousScope, PaletteRowActions, PaletteScopeLeft, PaletteScopeRight,
         PreviousDialogButton, PreviousEdit, PreviousPage, PreviousProfile, PreviousResult,
@@ -61,6 +61,9 @@ pub(crate) struct KeybindingSpec {
     /// and unshifted key so `+` reads the same on every layout. An override
     /// replaces the whole list with a single chord.
     pub(crate) defaults: &'static [&'static str],
+    /// Platform-specific actions stay out of the keymap and Settings on other
+    /// platforms.
+    pub(crate) macos_only: bool,
 }
 
 /// Whether `key` is a modifier held on its own. GPUI reports one as a
@@ -83,17 +86,54 @@ pub(crate) fn is_parseable(chord: &str) -> bool {
 // The action is matched as a token sequence rather than an `ident` so that one
 // carrying a field can be bound too: `expr` cannot be followed by the closing
 // paren of the row, and every action is spelled here as a literal value.
-macro_rules! registry {
-    ($(($id:literal, $label:literal, $context:expr, [$($default:literal),*], $($action:tt)+)),* $(,)?) => {
-        pub(crate) const REGISTRY: &[KeybindingSpec] = &[
-            $(
-                KeybindingSpec {
-                    id: $id,
-                    label: $label,
-                    context: $context,
-                    defaults: &[$($default),*],
+macro_rules! registry_spec {
+    (($id:literal, $label:literal, $context:expr, [$($default:literal),*], @macos, $($action:tt)+)) => {
+        KeybindingSpec {
+            id: $id,
+            label: $label,
+            context: $context,
+            defaults: &[$($default),*],
+            macos_only: true,
+        }
+    };
+    (($id:literal, $label:literal, $context:expr, [$($default:literal),*], $($action:tt)+)) => {
+        KeybindingSpec {
+            id: $id,
+            label: $label,
+            context: $context,
+            defaults: &[$($default),*],
+            macos_only: false,
+        }
+    };
+}
+
+macro_rules! registry_binding {
+    (($id:literal, $label:literal, $context:expr, [$($default:literal),*], @macos, $($action:tt)+), $overrides:ident, $bindings:ident) => {
+        if cfg!(target_os = "macos") {
+            let spec = registry_spec!(($id, $label, $context, [$($default),*], @macos, $($action)+));
+            for chord in chords_for(&spec, $overrides) {
+                $bindings.push(KeyBinding::new(chord, $($action)+, $context));
+            }
+        }
+    };
+    (($id:literal, $label:literal, $context:expr, [$($default:literal),*], $($action:tt)+), $overrides:ident, $bindings:ident) => {
+        match $overrides.get($id) {
+            Some(chord) if is_parseable(chord) => {
+                $bindings.push(KeyBinding::new(chord, $($action)+, $context))
+            }
+            _ => {
+                for default in [$($default),*] {
+                    $bindings.push(KeyBinding::new(default, $($action)+, $context));
                 }
-            ),*
+            }
+        }
+    };
+}
+
+macro_rules! registry {
+    ($(($($entry:tt)+)),* $(,)?) => {
+        pub(crate) const REGISTRY: &[KeybindingSpec] = &[
+            $(registry_spec!(($($entry)+))),*
         ];
 
         /// Every `KeyBinding` GPUI should register at startup: a user's
@@ -101,16 +141,7 @@ macro_rules! registry {
         pub(crate) fn build_bindings(overrides: &HashMap<String, String>) -> Vec<KeyBinding> {
             let mut bindings = Vec::new();
             $(
-                match overrides.get($id) {
-                    Some(chord) if is_parseable(chord) => {
-                        bindings.push(KeyBinding::new(chord, $($action)+, $context))
-                    }
-                    _ => {
-                        for default in [$($default),*] {
-                            bindings.push(KeyBinding::new(default, $($action)+, $context));
-                        }
-                    }
-                }
+                registry_binding!(($($entry)+), overrides, bindings);
             )*
             bindings
         }
@@ -194,6 +225,9 @@ registry! {
     ("focus_sidebar", "Focus Sidebar", None, ["secondary-k e"], FocusSidebar),
     ("open_sidebar_item", "Sidebar: Open Selected", Some("Explorer"), ["enter"], OpenSidebarItem),
     ("quit", "Quit dbdelve", None, ["secondary-q"], Quit),
+    // AppKit only wires Window > Minimize through the application menu on
+    // macOS. Its default is omitted when a configured binding already owns it.
+    ("minimize", "Minimize Window", None, ["cmd-m"], @macos, Minimize),
     // macOS's own stop chord. Unscoped, so it beats the input's `cmd-.` code
     // actions, which no editor here offers.
     ("cancel_query", "Cancel Query", None, ["secondary-."], CancelQuery),
@@ -242,6 +276,14 @@ registry! {
     ("import_tableplus", "Import Connections from TablePlus", None, [], ImportConnections { source: Source::TablePlus }),
 }
 
+/// The bindings that exist on this platform. macOS-only actions stay out of
+/// Settings and out of conflict checks everywhere else.
+pub(crate) fn available_registry() -> impl Iterator<Item = &'static KeybindingSpec> {
+    REGISTRY
+        .iter()
+        .filter(|spec| !spec.macos_only || cfg!(target_os = "macos"))
+}
+
 /// Whether both bindings can apply at the same focus path. The query editor
 /// supplies both the surface's wrapper and the widget's editor-mode context.
 fn contexts_overlap(a: Option<&str>, b: Option<&str>) -> bool {
@@ -265,6 +307,18 @@ fn inert(id: &str, context: Option<&str>) -> bool {
         .any(|&(action, within)| action == id && Some(within) == context)
 }
 
+fn same_chord(a: &str, b: &str) -> bool {
+    let mut a = a.split_whitespace().map(Keystroke::parse);
+    let mut b = b.split_whitespace().map(Keystroke::parse);
+    loop {
+        match (a.next(), b.next()) {
+            (Some(Ok(a)), Some(Ok(b))) if a == b => {}
+            (None, None) => return true,
+            _ => return false,
+        }
+    }
+}
+
 /// The chords currently in force for `spec`: its override if it has one,
 /// its shipped defaults otherwise.
 pub(crate) fn chords_for<'a>(
@@ -272,8 +326,23 @@ pub(crate) fn chords_for<'a>(
     overrides: &'a HashMap<String, String>,
 ) -> Vec<&'a str> {
     match overrides.get(spec.id) {
-        Some(chord) => vec![chord.as_str()],
-        None => spec.defaults.to_vec(),
+        Some(chord) if is_parseable(chord) => vec![chord.as_str()],
+        _ if spec.id == "minimize"
+            && available_registry().any(|other| {
+                other.id != spec.id
+                    && overrides.get(other.id).is_some_and(|chord| {
+                        is_parseable(chord)
+                            && chord.split_whitespace().next().is_some_and(|first| {
+                                spec.defaults
+                                    .iter()
+                                    .any(|default| same_chord(first, default))
+                            })
+                    })
+            }) =>
+        {
+            Vec::new()
+        }
+        _ => spec.defaults.to_vec(),
     }
 }
 
@@ -287,14 +356,15 @@ pub(crate) fn conflict(
     exclude_id: &str,
     overrides: &HashMap<String, String>,
 ) -> Option<&'static str> {
-    REGISTRY
-        .iter()
+    available_registry()
         .find(|spec| {
             spec.id != exclude_id
                 && contexts_overlap(spec.context, context)
                 && !inert(spec.id, context)
                 && !inert(exclude_id, spec.context)
-                && chords_for(spec, overrides).contains(&chord)
+                && chords_for(spec, overrides)
+                    .iter()
+                    .any(|bound| same_chord(bound, chord))
         })
         .map(|spec| spec.label)
 }
@@ -329,12 +399,10 @@ mod tests {
 
     #[test]
     fn completion_and_comment_overrides_conflict_in_the_query_editor() {
-        let completion = REGISTRY
-            .iter()
+        let completion = available_registry()
             .find(|spec| spec.id == "accept_completion")
             .unwrap();
-        let comment = REGISTRY
-            .iter()
+        let comment = available_registry()
             .find(|spec| spec.id == "toggle_comment")
             .unwrap();
         let overrides = HashMap::from([(comment.id.to_string(), "tab".to_string())]);
@@ -379,7 +447,7 @@ mod tests {
     #[test]
     fn no_shipped_default_collides_with_another() {
         let overrides = HashMap::new();
-        for spec in REGISTRY {
+        for spec in available_registry() {
             for chord in spec.defaults {
                 assert_eq!(
                     conflict(chord, spec.context, spec.id, &overrides),
@@ -389,6 +457,61 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn configured_cmd_m_override_keeps_its_chord_until_removed() {
+        let minimize = available_registry()
+            .find(|spec| spec.id == "minimize")
+            .unwrap();
+        for chord in ["cmd-m", "secondary-m"] {
+            let mut overrides = HashMap::from([("run_query".to_string(), chord.to_string())]);
+            let keymap = gpui::Keymap::new(build_bindings(&overrides));
+            let (bindings, _) =
+                keymap.bindings_for_input(&[Keystroke::parse("cmd-m").unwrap()], &[]);
+            assert!(bindings[0].action().partial_eq(&RunQuery));
+            assert!(chords_for(minimize, &overrides).is_empty());
+            assert_eq!(conflict("cmd-m", None, "run_query", &overrides), None);
+            assert_eq!(
+                conflict("cmd-m", None, "new_query", &overrides),
+                Some("Run Query")
+            );
+
+            overrides.remove("run_query");
+            let keymap = gpui::Keymap::new(build_bindings(&overrides));
+            let (bindings, _) =
+                keymap.bindings_for_input(&[Keystroke::parse("cmd-m").unwrap()], &[]);
+            assert!(bindings[0].action().partial_eq(&Minimize));
+            assert_eq!(chords_for(minimize, &overrides), vec!["cmd-m"]);
+            assert_eq!(
+                conflict("secondary-m", None, "run_query", &overrides),
+                Some("Minimize Window")
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cmd_m_prefix_yields_only_to_valid_multistroke_overrides() {
+        let first = Keystroke::parse("cmd-m").unwrap();
+        for chord in ["cmd-m k", "secondary-m k"] {
+            let overrides = HashMap::from([("run_query".to_string(), chord.to_string())]);
+            let keymap = gpui::Keymap::new(build_bindings(&overrides));
+            let (bindings, pending) = keymap.bindings_for_input(std::slice::from_ref(&first), &[]);
+            assert!(pending);
+            assert!(bindings.is_empty());
+            let (bindings, pending) =
+                keymap.bindings_for_input(&[first.clone(), Keystroke::parse("k").unwrap()], &[]);
+            assert!(!pending);
+            assert!(bindings[0].action().partial_eq(&RunQuery));
+        }
+
+        let overrides = HashMap::from([("run_query".to_string(), "cmd-m bad-key".to_string())]);
+        let keymap = gpui::Keymap::new(build_bindings(&overrides));
+        let (bindings, pending) = keymap.bindings_for_input(&[first], &[]);
+        assert!(!pending);
+        assert!(bindings[0].action().partial_eq(&Minimize));
     }
 
     #[test]

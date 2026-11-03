@@ -165,7 +165,7 @@ enum Target {
 fn target(provider: &str, driver: &str) -> Result<Target, String> {
     match provider {
         // Redshift, Timescale, CockroachDB and the rest are drivers under it.
-        "postgresql" => Ok(Target::Server(ConnectionConfig::Postgres)),
+        "postgresql" => Ok(Target::Server(ConnectionConfig::postgres)),
         // DBeaver files its MariaDB driver under the MySQL provider too.
         "mysql" if driver.eq_ignore_ascii_case("mariadb") => {
             Ok(Target::Server(ConnectionConfig::MariaDb))
@@ -692,7 +692,7 @@ mod tests {
         .expect("imports");
         assert_eq!(
             imported.config,
-            ConnectionConfig::Postgres(ServerConfig {
+            ConnectionConfig::postgres(ServerConfig {
                 host: "db.example.com".into(),
                 port: Some(5432),
                 database: "app".into(),
@@ -739,6 +739,26 @@ mod tests {
     }
 
     #[test]
+    fn service_urls_with_inherited_and_explicit_ports_are_both_imported() {
+        let batch = [
+            "jdbc:postgresql://?service=harness",
+            "jdbc:postgresql://?service=harness&port=5432",
+        ]
+        .map(|url| {
+            imported(
+                connection(
+                    "postgresql",
+                    "postgres-jdbc",
+                    json!({ "url": url, "configurationType": "URL" }),
+                ),
+                None,
+            )
+            .unwrap()
+        });
+        assert_eq!(super::super::fresh_count(&[], &batch), 2);
+    }
+
+    #[test]
     fn url_connections_read_postgres_mysql_and_mariadb_urls() {
         let by_url_driver = |provider: &str, driver: &str, url: &str| {
             imported(
@@ -753,8 +773,9 @@ mod tests {
         };
         let by_url = |provider: &str, url: &str| by_url_driver(provider, "d", url);
 
-        let ConnectionConfig::Postgres(postgres) =
-            by_url("postgresql", "jdbc:postgresql://db.example.com:5433/app").unwrap()
+        let ConnectionConfig::Postgres(crate::db::PostgresConfig {
+            server: postgres, ..
+        }) = by_url("postgresql", "jdbc:postgresql://db.example.com:5433/app").unwrap()
         else {
             panic!("not Postgres");
         };

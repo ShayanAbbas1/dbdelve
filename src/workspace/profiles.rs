@@ -355,7 +355,7 @@ impl Workspace {
                 (&form.name, default_profile_name(&config)),
                 (&form.path, path.clone()),
             ],
-            ConnectionConfig::Postgres(server)
+            ConnectionConfig::Postgres(crate::db::PostgresConfig { server, .. })
             | ConnectionConfig::MySql(server)
             | ConnectionConfig::MariaDb(server)
             | ConnectionConfig::SqlServer(server)
@@ -383,9 +383,14 @@ impl Workspace {
             ConnectionConfig::MongoDb(mongo) => Some(mongo),
             _ => None,
         };
+        let service = config.engine().takes_service().then(|| {
+            let service = config.service().unwrap_or_default();
+            (&form.service, service.to_string())
+        });
         let filled = filled
             .into_iter()
-            .chain(mongo.map(|mongo| (&form.options, mongo.options.clone())));
+            .chain(mongo.map(|mongo| (&form.options, mongo.options.clone())))
+            .chain(service);
         for (input, value) in filled {
             let input = input.clone();
             input.update(cx, |input, cx| input.set_value(value, window, cx));
@@ -2308,7 +2313,10 @@ fn stored_config(
                     options: stored.options.clone().unwrap_or_default(),
                     login_database: stored.login_database.clone(),
                 }),
-                _ => ConnectionConfig::Postgres(server),
+                _ => ConnectionConfig::Postgres(crate::db::PostgresConfig {
+                    server,
+                    service: stored.service.clone(),
+                }),
             }
         }
         // `restored_config` and `decode_profiles` hold such a profile back
@@ -2520,6 +2528,18 @@ mod tests {
             restored_configs(include_str!("../testdata/every-engine.toml")),
             include_str!("../testdata/every-engine.configs.txt")
         );
+    }
+
+    #[test]
+    fn only_a_postgres_profile_restores_the_service_it_names() {
+        let profile = |engine: &str| {
+            format!(
+                "[[profiles]]\nid = 'a'\nname = 'A'\nhost = 'h'\ndatabase = 'd'\n\
+                 user = 'u'\nengine = '{engine}'\nservice = 'harness'\n"
+            )
+        };
+        assert!(restored_configs(&profile("postgres")).contains("harness"));
+        assert!(!restored_configs(&profile("mysql")).contains("harness"));
     }
 
     /// A supported `pg` and, hand-edited to the same id, one on a plugin.

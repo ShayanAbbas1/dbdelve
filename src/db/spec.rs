@@ -36,6 +36,7 @@ pub struct EngineSpec {
     pub layout: Fields,
     pub default_port: Option<u16>,
     pub takes_options: bool,
+    pub takes_service: bool,
     pub resolves_srv: bool,
     pub system_databases: &'static [&'static str],
     /// Exact type names read as bytes beyond the families every engine shares.
@@ -217,7 +218,8 @@ pub struct Hints {
     pub name: &'static str,
     pub host: &'static str,
     /// What a blank database connects to (`ConnectionConfig::database_name`)
-    /// where the engine has one; elsewhere it leaves the server to pick.
+    /// where the engine has one; elsewhere it leaves the server to pick. The
+    /// form says the service answers instead where one is typed.
     pub database: &'static str,
     pub user: &'static str,
     pub path: &'static str,
@@ -708,6 +710,7 @@ pub(crate) const POSTGRES: EngineSpec = EngineSpec {
     layout: Fields::Server,
     default_port: Some(postgres::DEFAULT_PORT),
     takes_options: false,
+    takes_service: true,
     resolves_srv: false,
     // `postgres` is an ordinary database people work in.
     system_databases: &[],
@@ -764,6 +767,7 @@ pub(crate) const MYSQL: EngineSpec = EngineSpec {
     layout: Fields::Server,
     default_port: Some(mysql::DEFAULT_PORT),
     takes_options: false,
+    takes_service: false,
     resolves_srv: false,
     system_databases: &["information_schema", "mysql", "performance_schema", "sys"],
     binary_types: &[],
@@ -825,6 +829,7 @@ pub(crate) const MARIADB: EngineSpec = EngineSpec {
     layout: Fields::Server,
     default_port: Some(mysql::DEFAULT_PORT),
     takes_options: false,
+    takes_service: false,
     resolves_srv: false,
     system_databases: &["information_schema", "mysql", "performance_schema", "sys"],
     binary_types: &[],
@@ -883,6 +888,7 @@ pub(crate) const SQLITE: EngineSpec = EngineSpec {
     layout: Fields::File,
     default_port: None,
     takes_options: false,
+    takes_service: false,
     resolves_srv: false,
     system_databases: &[],
     binary_types: &[],
@@ -934,6 +940,7 @@ pub(crate) const TURSO: EngineSpec = EngineSpec {
     layout: Fields::File,
     default_port: None,
     takes_options: false,
+    takes_service: false,
     resolves_srv: false,
     system_databases: &[],
     binary_types: &[],
@@ -975,6 +982,7 @@ pub(crate) const DUCKDB: EngineSpec = EngineSpec {
     layout: Fields::File,
     default_port: None,
     takes_options: false,
+    takes_service: false,
     resolves_srv: false,
     system_databases: &[],
     binary_types: &[],
@@ -1033,6 +1041,7 @@ pub(crate) const SNOWFLAKE: EngineSpec = EngineSpec {
     layout: Fields::Account,
     default_port: None,
     takes_options: false,
+    takes_service: false,
     resolves_srv: false,
     // The account usage share every account has. `SNOWFLAKE_SAMPLE_DATA` is a
     // share too, but one people query.
@@ -1097,6 +1106,7 @@ pub(crate) const SQL_SERVER: EngineSpec = EngineSpec {
     layout: Fields::Server,
     default_port: Some(mssql::DEFAULT_PORT),
     takes_options: false,
+    takes_service: false,
     resolves_srv: false,
     system_databases: &["master", "tempdb", "model", "msdb"],
     // `image` is the legacy binary type here; elsewhere it is a name anyone
@@ -1169,6 +1179,7 @@ pub(crate) const MONGODB: EngineSpec = EngineSpec {
     layout: Fields::Server,
     default_port: Some(mongo::DEFAULT_PORT),
     takes_options: true,
+    takes_service: false,
     resolves_srv: true,
     system_databases: &["admin", "local", "config"],
     binary_types: &["bindata"],
@@ -1208,6 +1219,7 @@ pub(crate) const REDIS: EngineSpec = EngineSpec {
     layout: Fields::Server,
     default_port: Some(redis::DEFAULT_PORT),
     takes_options: false,
+    takes_service: false,
     resolves_srv: false,
     system_databases: &[],
     binary_types: &[],
@@ -1249,6 +1261,7 @@ pub(crate) const CLICKHOUSE: EngineSpec = EngineSpec {
     layout: Fields::Server,
     default_port: Some(clickhouse::DEFAULT_PORT),
     takes_options: false,
+    takes_service: false,
     resolves_srv: false,
     system_databases: &["system", "INFORMATION_SCHEMA", "information_schema"],
     binary_types: &[],
@@ -1373,6 +1386,7 @@ pub(crate) const GENERIC: EngineSpec = EngineSpec {
     layout: Fields::Server,
     default_port: None,
     takes_options: false,
+    takes_service: false,
     resolves_srv: false,
     system_databases: &[],
     binary_types: &[],

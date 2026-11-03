@@ -139,8 +139,8 @@ pub(crate) fn fresh_count<'a>(
 }
 
 /// Whether `candidate` points where an existing profile already does, so that
-/// running an import twice adds nothing the second time. A blank port is the
-/// default one, since DBeaver writes 5432 where the form leaves it blank.
+/// running an import twice adds nothing the second time. Without a service,
+/// a blank port is the engine default; beside one, its file supplies the port.
 pub(crate) fn already_have<'a>(
     existing: impl IntoIterator<Item = &'a ConnectionConfig>,
     candidate: &ConnectionConfig,
@@ -154,10 +154,17 @@ pub(crate) fn already_have<'a>(
     };
     existing.into_iter().any(|config| {
         family(config.engine()) == family(engine)
+            // A service can say a different port, so a host alone is not the same place.
+            && config.service() == candidate.service()
             && match (config.server(), candidate.server()) {
                 (Some(a), Some(b)) => {
+                    let ports_match = if config.service().is_some() {
+                        a.port == b.port
+                    } else {
+                        a.port.or(engine.default_port()) == b.port.or(engine.default_port())
+                    };
                     a.host.eq_ignore_ascii_case(&b.host)
-                        && a.port.or(engine.default_port()) == b.port.or(engine.default_port())
+                        && ports_match
                         && (&a.database, &a.user) == (&b.database, &b.user)
                 }
                 _ => config.endpoint() == candidate.endpoint(),
@@ -231,7 +238,7 @@ mod tests {
     use crate::db::ServerConfig;
 
     fn postgres(host: &str, port: Option<u16>, database: &str, user: &str) -> ConnectionConfig {
-        ConnectionConfig::Postgres(ServerConfig {
+        ConnectionConfig::postgres(ServerConfig {
             host: host.into(),
             port,
             database: database.into(),
@@ -269,7 +276,7 @@ mod tests {
             &ConnectionConfig::MariaDb(server())
         ));
         assert!(!already_have(
-            &[ConnectionConfig::Postgres(server())],
+            &[ConnectionConfig::postgres(server())],
             &ConnectionConfig::MariaDb(server())
         ));
     }
@@ -300,6 +307,15 @@ mod tests {
             &[postgres("db.example.com", None, "app", "alice")],
             &postgres("db.example.com", Some(5433), "app", "alice")
         ));
+        // A service can say a different port, so these may be different places.
+        let mut on_service = postgres("db.example.com", None, "app", "alice");
+        if let ConnectionConfig::Postgres(config) = &mut on_service {
+            config.service = Some("harness".into());
+        }
+        assert!(!already_have(
+            &[postgres("db.example.com", None, "app", "alice")],
+            &on_service
+        ));
         assert!(already_have(
             &existing,
             &ConnectionConfig::Sqlite {
@@ -320,7 +336,7 @@ mod tests {
             &existing,
             &postgres("db.example.com", Some(5432), "other", "alice")
         ));
-        let ConnectionConfig::Postgres(server) =
+        let ConnectionConfig::Postgres(crate::db::PostgresConfig { server, .. }) =
             postgres("db.example.com", Some(5432), "app", "alice")
         else {
             unreachable!()

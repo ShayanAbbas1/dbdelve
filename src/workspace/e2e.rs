@@ -1007,6 +1007,43 @@ fn tab_reaches_the_default_sorting_choice_in_settings(cx: &mut TestAppContext) {
     });
 }
 
+#[cfg(target_os = "macos")]
+#[gpui::test]
+fn an_existing_cmd_m_binding_can_be_recaptured_in_settings(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let directory = store::dbdelve_directory().unwrap();
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("profiles.toml"),
+            "[settings]\ncheck_for_updates = false\n\
+             [settings.custom_keybindings]\nshow_messages = \"secondary-m\"\n",
+        )
+        .unwrap();
+        let (workspace, cx) = launch(cx);
+        cx.simulate_keystrokes("secondary-,");
+        settle(cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.start_rebind("show_messages", window, cx);
+            });
+        });
+        settle(cx);
+        cx.simulate_keystrokes("cmd-m");
+        settle(cx);
+        let saved = store::peek_profiles(&[])
+            .unwrap()
+            .settings
+            .unwrap()
+            .custom_keybindings
+            .unwrap();
+        assert_eq!(
+            saved.get("show_messages").map(String::as_str),
+            Some("cmd-m")
+        );
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn a_selection_failing_part_way_says_what_it_already_committed(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
@@ -2120,5 +2157,60 @@ fn a_mode_picked_while_connecting_is_the_one_the_session_holds(cx: &mut TestAppC
         );
 
         quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_service_launch_does_not_reuse_a_profiles_explicit_port(cx: &mut TestAppContext) {
+    // PGSERVICE must be set before the process starts, not raced against
+    // every other test that reads the environment.
+    const CHILD: &str = "DBDELVE_SERVICE_PORT_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "workspace::e2e::a_service_launch_does_not_reuse_a_profiles_explicit_port",
+                "--exact",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("PGSERVICE", "startup-port")
+            .env_remove("PGSERVICEFILE")
+            .env_remove("PGSYSCONFDIR")
+            .status()
+            .expect("the child test should run");
+        assert!(status.success());
+        return;
+    }
+
+    store::tests::with_home(|| {
+        let directory = store::dbdelve_directory().unwrap();
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("profiles.toml"),
+            "active = \"explicit\"\n\
+             [settings]\n\
+             check_for_updates = false\n\
+             [[profiles]]\n\
+             id = \"explicit\"\n\
+             name = \"Explicit port\"\n\
+             host = \"\"\n\
+             port = 5432\n\
+             database = \"\"\n\
+             user = \"\"\n\
+             service = \"startup-port\"\n\
+             [[profiles]]\n\
+             id = \"inherited\"\n\
+             name = \"Service port\"\n\
+             host = \"\"\n\
+             database = \"\"\n\
+             user = \"\"\n\
+             service = \"startup-port\"\n",
+        )
+        .unwrap();
+        let (workspace, cx) = launch(cx);
+        let active =
+            workspace.read_with(cx, |workspace, _| workspace.profile().unwrap().id.clone());
+        quit(workspace, cx);
+        assert_eq!(active, "inherited");
     });
 }

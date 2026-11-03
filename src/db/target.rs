@@ -72,6 +72,13 @@ impl Target {
         }
     }
 
+    /// Whether a profile can name a connection service file's section: DBDelve
+    /// reads that file for its own driver, and a plugin's string goes to its
+    /// driver as typed.
+    pub fn takes_service(self) -> bool {
+        self.driver == Driver::BuiltIn && self.engine.takes_service()
+    }
+
     /// ponytail: every plugin wears one generic plug, since no manifest names
     /// artwork. A `logo.svg` beside the manifest arrives with the first
     /// third-party plugin.
@@ -298,6 +305,7 @@ mod tests {
                 target.picks_schema(),
                 target.catalog_is_per_database(),
                 target.exact_row_estimates(),
+                target.takes_service(),
             ]
             .into_iter()
             .chain(kinds.iter().map(|&kind| target.takes_inserts(kind)))

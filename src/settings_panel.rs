@@ -258,7 +258,7 @@ fn setting_rows() -> Vec<SettingRow> {
     // Grouped by where a binding fires, each group where its first binding
     // stands in the registry, and the registry's order inside it.
     let mut groups: Vec<&'static str> = Vec::new();
-    for spec in keybindings::REGISTRY {
+    for spec in keybindings::available_registry() {
         let group = keyboard_group(spec.context);
         if !groups.contains(&group) {
             groups.push(group);
@@ -266,8 +266,7 @@ fn setting_rows() -> Vec<SettingRow> {
     }
     for group in groups {
         rows.extend(
-            keybindings::REGISTRY
-                .iter()
+            keybindings::available_registry()
                 .filter(|spec| keyboard_group(spec.context) == group)
                 .map(|spec| SettingRow {
                     id: SettingId::Keybinding(spec.id),
@@ -379,7 +378,7 @@ fn merged(mut ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
 }
 
 fn keybinding(id: &str) -> Option<&'static KeybindingSpec> {
-    keybindings::REGISTRY.iter().find(|spec| spec.id == id)
+    keybindings::available_registry().find(|spec| spec.id == id)
 }
 
 /// Whether a row is on offer as things are set: the one theme while the

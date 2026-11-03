@@ -350,7 +350,7 @@ fn target(driver: &str) -> Result<Target, String> {
     let lowered = driver.to_ascii_lowercase();
     match lowered.as_str() {
         "postgresql" | "cockroach" | "greenplum" | "redshift" => {
-            Ok(Target::Server(ConnectionConfig::Postgres, POSTGRES_TLS))
+            Ok(Target::Server(ConnectionConfig::postgres, POSTGRES_TLS))
         }
         "mysql" => Ok(Target::Server(ConnectionConfig::MySql, MYSQL_TLS)),
         "mariadb" => Ok(Target::Server(ConnectionConfig::MariaDb, MARIADB_TLS)),
@@ -902,7 +902,7 @@ mod tests {
         let postgres = imported("PostgreSQL", json!({ "DatabasePort": "5433" })).unwrap();
         assert_eq!(
             postgres.config,
-            ConnectionConfig::Postgres(ServerConfig {
+            ConnectionConfig::postgres(ServerConfig {
                 host: "db.example.com".into(),
                 port: Some(5433),
                 database: "app".into(),
