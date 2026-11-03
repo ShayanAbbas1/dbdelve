@@ -2636,6 +2636,7 @@ pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
     };
     let parser_dialect = spec.sql.parser_dialect;
     if parser_dialect == ParserDialect::Generic && lexes_apart(dialect.as_ref(), sql)
+        || parser_dialect == ParserDialect::MySql && runs_mariadb_comment(dialect.as_ref(), sql)
         || !ends_line_comments_as_sqlparser_does(parser_dialect)
             && line_comment_past_carriage_return(dialect.as_ref(), sql)
     {
@@ -3108,7 +3109,7 @@ fn opens_read_write(modes: &[TransactionMode]) -> bool {
 /// split `sql` otherwise than sqlparser's Generic tokenizer: a `/*` inside a
 /// comment, which the tokenizer nests and a server may not, so
 /// `/* /* */ DELETE FROM t -- */` is one comment to one and a `DELETE` to the
-/// other; MySQL's `/*! … */`, which it runs; a backslash in a literal or a
+/// other; MySQL's `/*! … */` and MariaDB's `/*M! … */`, which they run; a backslash in a literal or a
 /// quoted name, which ends it a byte later on a server where it escapes; a
 /// token opening with `$`, a dollar-quoted string or placeholder to the
 /// tokenizer and a name to Db2, so `$$; DELETE FROM t --$$` hides a `DELETE`
@@ -3129,7 +3130,7 @@ fn lexes_apart(dialect: &dyn Dialect, sql: &str) -> bool {
         after_a_hole
             || match token {
                 Token::Whitespace(Whitespace::MultiLineComment(comment)) => {
-                    comment.contains("/*") || comment.starts_with('!')
+                    comment.contains("/*") || comment.starts_with('!') || comment.starts_with("M!")
                 }
                 Token::Whitespace(_) => false,
                 Token::DollarQuotedString(_) => true,
@@ -3140,6 +3141,19 @@ fn lexes_apart(dialect: &dyn Dialect, sql: &str) -> bool {
                 }
             }
     }) || whole && end != sql.len()
+}
+
+/// Whether `sql` holds MariaDB's `/*M! … */`, which MariaDB runs and
+/// sqlparser's MySQL tokenizer keeps as a comment, unlike the `/*! … */` it
+/// reads the inside of. Nothing in the dialect tells MariaDB from MySQL, which
+/// ignores it, so it is unreadable to both.
+fn runs_mariadb_comment(dialect: &dyn Dialect, sql: &str) -> bool {
+    located_prefix(dialect, sql).0.iter().any(|(token, _)| {
+        matches!(
+            token,
+            Token::Whitespace(Whitespace::MultiLineComment(comment)) if comment.starts_with("M!")
+        )
+    })
 }
 
 /// Whether the servers read in `dialect` end a `--` comment where sqlparser's
@@ -7932,6 +7946,8 @@ mod tests {
             "/*! DELETE FROM t */",
             "SELECT 1 /*!99999 ; DELETE FROM t */",
             "SELECT 1 /*! */",
+            "SELECT 1 /*M! INTO OUTFILE '/tmp/x' */",
+            "SELECT 1 /*M!100100 ; DELETE FROM t */",
         ] {
             assert_eq!(
                 classify(Engine::Generic, sql),
@@ -7943,8 +7959,28 @@ mod tests {
             "SELECT '/*!' FROM t",
             "SELECT 1 -- /*! $$ */",
             "SELECT 1 /* ! */",
+            "SELECT 1 /* M! */",
+            "SELECT '/*M!' FROM t",
         ] {
             assert_eq!(classify(Engine::Generic, sql), Verdict::READ, "{sql:?}");
+        }
+    }
+
+    #[test]
+    fn mysql_dialect_reads_as_unreadable_a_comment_mariadb_runs() {
+        for engine in [Engine::MariaDb, Engine::MySql] {
+            for sql in [
+                "SELECT 1 /*M! ; DELETE FROM t */",
+                "SELECT 1 /*M!100100 INTO OUTFILE '/tmp/x' */",
+                "DELETE FROM t /*M! WHERE 1 = 0 */",
+            ] {
+                assert_eq!(
+                    classify(engine, sql),
+                    unreadable_at(Mode::ReadOnly),
+                    "{engine:?} {sql:?}"
+                );
+            }
+            assert_eq!(classify(engine, "SELECT 1 /* M! */"), Verdict::READ);
         }
     }
 

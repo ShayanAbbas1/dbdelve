@@ -204,10 +204,13 @@ The core of the mode check is in `AGENTS.md`, "Connection modes". The detail:
   otherwise** (`lexes_apart`): a `/*` inside a block comment, which
   sqlparser's tokenizer nests and a server may not (Db2 does, the tree-sitter
   split does not), so `/* /* */ DELETE FROM t -- */` is a comment to one and a
-  `DELETE` to the other; MySQL's `/*! … */`, which it runs; and a backslash in a
-  literal or quoted name, which ends it a byte later where it escapes. An
-  unreadable verdict asks; a wrong read verdict on Generic would run a write in
-  Read-only with nothing on the server to stop it.
+  `DELETE` to the other; MySQL's `/*! … */` and MariaDB's `/*M! … */`, which
+  they run; and a backslash in a literal or quoted name, which ends it a byte
+  later where it escapes. An unreadable verdict asks; a wrong read verdict on
+  Generic would run a write in Read-only with nothing on the server to stop it.
+  On MySQL and MariaDB, sqlparser reads the inside of a `/*! … */` but keeps a
+  `/*M! … */` a comment, so that is unreadable on both (`runs_mariadb_comment`):
+  the dialect cannot tell the server that runs it from the one that ignores it.
 - **What lifts or ignores the hold is never a read.** A `SET` of
   `default_transaction_read_only`, `transaction_read_only` or `tx_read_only`
   to anything but on, a `READ WRITE` transaction characteristic (`BEGIN`,
