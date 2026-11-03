@@ -422,7 +422,10 @@ pub struct PostgresConfig {
 impl PostgresConfig {
     pub fn endpoint(&self) -> String {
         match &self.service {
-            Some(service) if self.server.host.is_empty() => format!("service {service}"),
+            Some(service) if self.server.host.is_empty() => match self.server.port {
+                Some(port) => format!("service {service}:{port}"),
+                None => format!("service {service}"),
+            },
             _ => self.server.endpoint(),
         }
     }

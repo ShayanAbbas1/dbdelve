@@ -207,6 +207,8 @@ Decided, and not to be re-litigated:
   the Keychain, and that connection's side sessions keep what it read.
   What the profile states wins, then the service, then the `PG*` variables, and a
   setting DBDelve cannot carry is refused by name rather than dropped.
+  An endpoint with no host still retains an explicit port beside its service:
+  startup matching must not replace a service's port with a saved override.
   `ServerConfig::sslmode` has no "unset", so the default `prefer` means the
   service's mode decides, `disable` included, and a URL stating `sslmode=prefer`
   beside a service is refused. The form's selector cannot show it, so the line
