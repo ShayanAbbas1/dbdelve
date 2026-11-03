@@ -2644,17 +2644,33 @@ pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
 /// split `sql` otherwise than sqlparser's Generic tokenizer: a `/*` inside a
 /// comment, which the tokenizer nests and a server may not, so
 /// `/* /* */ DELETE FROM t -- */` is one comment to one and a `DELETE` to the
-/// other; MySQL's `/*! … */`, which it runs; and a backslash in a literal or a
-/// quoted name, which ends it a byte later on a server where it escapes.
+/// other; MySQL's `/*! … */`, which it runs; a backslash in a literal or a
+/// quoted name, which ends it a byte later on a server where it escapes; a
+/// token opening with `$`, a dollar-quoted string or placeholder to the
+/// tokenizer and a name to Db2, so `$$; DELETE FROM t --$$` hides a `DELETE`
+/// Db2 runs; and a `--` comment a lone carriage return runs through, which
+/// psqlODBC ends there.
 fn lexes_apart(dialect: &dyn Dialect, sql: &str) -> bool {
     let (tokens, _) = located_prefix(dialect, sql);
     tokens.iter().any(|(token, range)| match token {
         Token::Whitespace(Whitespace::MultiLineComment(comment)) => {
             comment.contains("/*") || comment.starts_with('!')
         }
+        Token::Whitespace(Whitespace::SingleLineComment { comment, .. }) => {
+            carriage_return_inside(comment)
+        }
         Token::Whitespace(_) => false,
-        _ => sql[range.clone()].contains('\\'),
+        _ => {
+            let text = &sql[range.clone()];
+            text.starts_with('$') || text.contains('\\')
+        }
     })
+}
+
+/// Whether a `--` comment's text runs on past a carriage return, where a
+/// server that ends the comment there reads the rest as SQL.
+fn carriage_return_inside(comment: &str) -> bool {
+    comment.trim_end_matches('\r').contains('\r')
 }
 
 /// [`classify`] where the floor under an unreadable statement is its first
@@ -2759,7 +2775,7 @@ fn misread_token(token: &Token, text: &str) -> bool {
     match token {
         Token::Char(_) => true,
         Token::Whitespace(Whitespace::SingleLineComment { comment, .. }) => {
-            comment.trim_end_matches('\r').contains('\r')
+            carriage_return_inside(comment)
         }
         Token::Whitespace(_)
         | Token::SingleQuotedString(_)
@@ -7333,6 +7349,70 @@ mod tests {
             ("DELETE FROM t WHERE a = 1 -- /* \\", Verdict::WRITE),
         ] {
             assert_eq!(classify(Engine::Generic, sql), verdict, "{sql}");
+        }
+    }
+
+    #[test]
+    fn generic_reads_as_unreadable_a_dollar_quote_db2_reads_as_a_name() {
+        for sql in [
+            "SELECT * FROM (SELECT 1 FROM SYSIBM.SYSDUMMY1) T(\"$$\") WHERE 1 = $$; \
+             DELETE FROM DELVETEST.GATE WHERE ID=1 --$$",
+            "SELECT * FROM (SELECT 1 FROM SYSIBM.SYSDUMMY1) T(\"$$\") WHERE 1 = $$; \
+             DELETE FROM DELVETEST.GATE --$$",
+            "SELECT * FROM (SELECT 1 FROM SYSIBM.SYSDUMMY1) T(\"$$\") WHERE 1 = $$;\n\
+             DROP TABLE DELVETEST.GATE --$$",
+            "SELECT * FROM (SELECT 1 FROM SYSIBM.SYSDUMMY1) T(\"$A$\") WHERE 1 = $a$; \
+             DELETE FROM DELVETEST.GATE WHERE ID=1 --$a$",
+            "SELECT 1 FROM SYSIBM.SYSDUMMY1 WHERE 1 = $$; \
+             DELETE FROM DELVETEST.GATE WHERE ID=1; SELECT 1 FROM SYSIBM.SYSDUMMY1 $$",
+            "SELECT $1$ ; DELETE FROM t WHERE id=1; SELECT $1$",
+        ] {
+            assert_eq!(
+                classify(Engine::Generic, sql),
+                unreadable_at(Mode::ReadWrite),
+                "{sql}"
+            );
+        }
+        for sql in [
+            "SELECT '$$' FROM t",
+            "SELECT \"a$$\" FROM t",
+            "SELECT a$$ FROM t",
+            "SELECT * FROM V$SESSION",
+            "SELECT 1 /* $$ */",
+            "-- $$\nSELECT 1",
+        ] {
+            assert_eq!(classify(Engine::Generic, sql), Verdict::READ, "{sql}");
+        }
+    }
+
+    #[test]
+    fn generic_reads_as_unreadable_a_line_comment_a_lone_carriage_return_may_end() {
+        for sql in [
+            "SELECT 1 -- x\r; DELETE FROM t WHERE id=1; --",
+            "SELECT 1\r--\r; DELETE FROM t WHERE id=1",
+            "SELECT 1; --\rDELETE FROM t WHERE id=1",
+            "/*\r*/--\rDELETE FROM t WHERE id=1",
+            "SELECT 1 /* x */ --\rDELETE FROM t WHERE id=1",
+            "-- line one\n-- line two\rDELETE FROM t WHERE id=1",
+            "-- line one\r\n-- line two\rDELETE FROM t WHERE id=1",
+            "-- c\rDELETE FROM t WHERE id=1",
+            "--\rDROP TABLE t",
+            "--\rTRUNCATE t",
+            "--\rCREATE TABLE zz (a int)",
+        ] {
+            assert_eq!(
+                classify(Engine::Generic, sql),
+                unreadable_at(Mode::ReadWrite),
+                "{sql:?}"
+            );
+        }
+        for sql in [
+            "-- c\r\nSELECT 1",
+            "SELECT 1 -- c\r",
+            "SELECT 1\r\nFROM t\r\n",
+            "SELECT 1\rFROM t",
+        ] {
+            assert_eq!(classify(Engine::Generic, sql), Verdict::READ, "{sql:?}");
         }
     }
 
