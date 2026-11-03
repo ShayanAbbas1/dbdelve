@@ -329,7 +329,7 @@ secret refusal must hold before anything is written to disk (saving starts no
 process) and the tunnel rewrite happens where the tunnel is.
 
 - **`storable()` refuses** a key holding any secret-shaped part (`PWD`,
-  `PASSW`, `SECRET`, `TOKEN`, `PASSCODE`, `ACCESSKEY`, `APIKEY`, `ACCOUNTKEY`,
+  `PSWD`, `PASS`, `SECRET`, `TOKEN`, `ACCESSKEY`, `APIKEY`, `ACCOUNTKEY`,
   `SHAREDKEY`, `PRIVATEKEY`, `CREDENTIAL`), a secret-shaped `key=` inside a
   value braced or not (a driver reading braces differently, or libpq inside
   psqlODBC's `pqopt`, would take it as one), a control character, a string that

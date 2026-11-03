@@ -67,15 +67,16 @@ const DRIVERS: &[(&str, PortSpelling)] = &[
 ];
 const DSN_KEYS: &[&str] = &["DSN", "FILEDSN"];
 /// A key holding any of these is a secret: `PWD1` (MySQL's second factor),
-/// `sslpassword`, `priv_key_file_pwd`, `KeystoreSecret`, `AccessToken`,
-/// `passcode`. Wide on purpose: a key read as a secret that is not one costs
-/// a refusal, never a password on disk.
+/// `Pass`, `PSWD`, `PASSWD`, `sslpassword`, `priv_key_file_pwd`,
+/// `private_key_passphrase`, `KeystoreSecret`, `AccessToken`, `passcode`.
+/// Wide on purpose: a key read as a secret that is not one costs a refusal,
+/// never a password on disk.
 const SECRET_PARTS: &[&str] = &[
     "PWD",
-    "PASSW",
+    "PSWD",
+    "PASS",
     "SECRET",
     "TOKEN",
-    "PASSCODE",
     "ACCESSKEY",
     "APIKEY",
     "ACCOUNTKEY",
@@ -929,6 +930,11 @@ mod tests {
             ("Driver=x;AccessToken=x", SECRET),
             ("Driver=x;token=x", SECRET),
             ("Driver=x;passcode=x", SECRET),
+            ("Driver=x;Pass=x", SECRET),
+            ("Driver=x;PSWD=x", SECRET),
+            ("Driver=x;passwd=x", SECRET),
+            ("Driver=x;private_key_passphrase=x", SECRET),
+            ("Servername=h;pqopt={pass=x}", SECRET),
             ("Driver=x;AccessKey=x", SECRET),
             ("Driver=x;ApiKey=x", SECRET),
             ("Driver=x;AccountKey=x", SECRET),

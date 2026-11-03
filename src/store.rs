@@ -2626,11 +2626,25 @@ user = ""
 
     #[test]
     fn a_connection_string_holding_a_password_is_never_written() {
-        let mut list = decode_profiles(ODBC, &[odbc_plugin()]).unwrap();
-        list.profiles[0].connection = Some("DSN=x;PWD=hunter2".into());
-        let refused = encode_profiles(&list).unwrap_err();
-        assert!(!refused.contains("hunter2"), "{refused}");
-        assert!(refused.contains("Password field"), "{refused}");
+        for key in [
+            "PWD",
+            "pwd",
+            "Password",
+            "Pass",
+            "pass",
+            "PSWD",
+            "PASSWD",
+            "Passphrase",
+        ] {
+            let mut list = decode_profiles(ODBC, &[odbc_plugin()]).unwrap();
+            list.profiles[0].connection = Some(format!("DSN=x;{key}=hunter2"));
+            let refused = encode_profiles(&list).unwrap_err();
+            assert!(!refused.contains("hunter2"), "{key}: {refused}");
+            assert!(refused.contains("Password field"), "{key}: {refused}");
+            let text = ODBC.replace("DATABASE=x", &format!("DATABASE=x;{key}=hunter2"));
+            let held = decode_profiles(&text, &[odbc_plugin()]).unwrap();
+            assert!(held.profiles.is_empty(), "{key}");
+        }
     }
 
     #[test]
