@@ -677,3 +677,65 @@ fn live_postgres_a_user_with_spaces_at_either_end_logs_in() {
         );
     }
 }
+
+/// Db2's text form of a `DOUBLE` keeps 15 digits, so a shown value filtered on
+/// matched nothing; the binary value's shortest form matches itself.
+#[test]
+#[ignore = "needs a Db2 and IBM's driver: set dbdelve_ODBC_DB2, _USER and _PASSWORD"]
+fn live_a_double_shows_every_digit_it_holds_and_filters_back_to_itself() {
+    let mut bridge = Bridge::open(0);
+    let outcome = bridge.query(
+        "SELECT CAST(1.2345678901234567E0 AS DOUBLE), \
+         CAST(0.1E0 AS DOUBLE) + CAST(0.2E0 AS DOUBLE), \
+         CAST(1.79769E308 AS DOUBLE), CAST(-0.1E0 AS DOUBLE), \
+         CAST(1.5E0 AS REAL), CAST(1.17549E-37 AS REAL), CAST(NULL AS DOUBLE) \
+         FROM SYSIBM.SYSDUMMY1",
+    );
+    let shown = [
+        "1.2345678901234567",
+        "0.30000000000000004",
+        "1.79769e+308",
+        "-0.1",
+        "1.5",
+        "1.17549e-37",
+    ];
+    let mut want: Vec<Option<String>> = shown.iter().map(|v| Some(v.to_string())).collect();
+    want.push(None);
+    assert_eq!(outcome.rows, [want]);
+    for value in &shown[..4] {
+        let matched = bridge.query(&format!(
+            "SELECT COUNT(*) FROM (SELECT CAST(1.2345678901234567E0 AS DOUBLE) FROM SYSIBM.SYSDUMMY1 \
+             UNION ALL SELECT CAST(0.1E0 AS DOUBLE) + CAST(0.2E0 AS DOUBLE) FROM SYSIBM.SYSDUMMY1 \
+             UNION ALL SELECT CAST(1.79769E308 AS DOUBLE) FROM SYSIBM.SYSDUMMY1 \
+             UNION ALL SELECT CAST(-0.1E0 AS DOUBLE) FROM SYSIBM.SYSDUMMY1) AS T(D) WHERE D = {value}"
+        ));
+        assert_eq!(matched.rows, [vec![Some("1".to_string())]], "{value}");
+    }
+}
+
+#[test]
+#[ignore = "needs psqlODBC and a Postgres: set dbdelve_ODBC_POSTGRES, _USER and _PASSWORD"]
+fn live_postgres_floats_show_as_the_server_prints_them() {
+    let mut bridge = Bridge::open_postgres();
+    let values = [
+        "'NaN'::float8",
+        "'Infinity'::float8",
+        "'-Infinity'::float8",
+        "1.2345678901234567::float8",
+        "0.1::float8 + 0.2::float8",
+        "'-0'::float8",
+        "1e15::float8",
+        "1e-5::float8",
+        "1.17549e-37::float4",
+        "16777216::float4",
+    ];
+    let columns: Vec<String> = values
+        .iter()
+        .flat_map(|value| [value.to_string(), format!("({value})::text")])
+        .collect();
+    let outcome = bridge.query(&format!("SELECT {}", columns.join(", ")));
+    let row = &outcome.rows[0];
+    for (index, value) in values.iter().enumerate() {
+        assert_eq!(row[2 * index], row[2 * index + 1], "{value}");
+    }
+}

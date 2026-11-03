@@ -252,10 +252,19 @@ pub fn row_count(statement: &StatementImpl) -> Option<u64> {
     }
 }
 
-/// The column's name and its SQL data type. The type is an `SQLSMALLINT`,
-/// which no SQLLEN width can garble; the column size, an SQLULEN, is zeroed
-/// and never read.
-pub fn describe_col(statement: &StatementImpl, column: u16) -> Option<(String, i16)> {
+/// A column as `SQLDescribeCol` describes it.
+pub struct Described {
+    pub name: String,
+    pub data_type: i16,
+    /// Digits, or bits for a type whose radix is 2; 0 when the driver gave
+    /// none.
+    pub size: usize,
+}
+
+/// The column's name, SQL data type and size. The type is an `SQLSMALLINT`,
+/// which no SQLLEN width can garble; the size, an SQLULEN, is zeroed first, so
+/// a driver writing only its low half still leaves a small size readable.
+pub fn describe_col(statement: &StatementImpl, column: u16) -> Option<Described> {
     let mut name = vec![0u16; 128];
     loop {
         let capacity = i16::try_from(name.len()).unwrap_or(i16::MAX);
@@ -289,7 +298,11 @@ pub fn describe_col(statement: &StatementImpl, column: u16) -> Option<(String, i
             continue;
         }
         let name = String::from_utf16_lossy(&name[..length.min(name.len())]);
-        return Some((name, data_type.0));
+        return Some(Described {
+            name,
+            data_type: data_type.0,
+            size: usize::try_from(sqllen(size as isize)).unwrap_or(0),
+        });
     }
 }
 
@@ -411,6 +424,46 @@ pub fn get_data(
             return Ok(Some(value));
         }
         first = false;
+    }
+}
+
+/// One approximate numeric of the current row's `column`, read as the
+/// driver's binary `double` or `float`, `None` for NULL. A driver's text form
+/// may round it (Db2's shows 15 digits), where the binary value is exact.
+pub fn get_double(statement: &StatementImpl, column: u16) -> Result<Option<f64>, DataError> {
+    get_fixed(statement, column, CDataType::Double)
+}
+
+pub fn get_real(statement: &StatementImpl, column: u16) -> Result<Option<f32>, DataError> {
+    get_fixed(statement, column, CDataType::Float)
+}
+
+fn get_fixed<T: Copy + Default>(
+    statement: &StatementImpl,
+    column: u16,
+    target: CDataType,
+) -> Result<Option<T>, DataError> {
+    let mut value = T::default();
+    let mut indicator: Len = 0;
+    // SAFETY: a live statement handle positioned on a row; `target` is the C
+    // type of `T`, a fixed-size type the driver writes whole and no more of,
+    // and the indicator is a zeroed local read through `sqllen`.
+    let result = unsafe {
+        SQLGetData(
+            statement.as_sys(),
+            column,
+            target,
+            &mut value as *mut T as Pointer,
+            size_of::<T>() as Len,
+            &mut indicator,
+        )
+    };
+    match result {
+        SqlReturn::SUCCESS | SqlReturn::SUCCESS_WITH_INFO if sqllen(indicator) == NULL_DATA => {
+            Ok(None)
+        }
+        SqlReturn::SUCCESS | SqlReturn::SUCCESS_WITH_INFO => Ok(Some(value)),
+        _ => Err(DataError::Odbc),
     }
 }
 

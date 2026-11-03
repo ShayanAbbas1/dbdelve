@@ -334,14 +334,14 @@ impl<W: Write> Run<'_, W> {
         let mut fields = Vec::new();
         let mut fetched = Vec::new();
         for column in 1..=columns {
-            let Some((name, data_type)) = raw::describe_col(self.statement, column) else {
+            let Some(described) = raw::describe_col(self.statement, column) else {
                 return Err(self.failure("SQLDescribeCol"));
             };
             let Some(type_name) = raw::type_name(self.statement, column) else {
                 return Err(self.failure("SQLColAttribute"));
             };
-            fetched.push(fetched_as(data_type, &type_name));
-            fields.push(column_field(name, type_name));
+            fetched.push(read_as(described.data_type, described.size, &type_name));
+            fields.push(column_field(described.name, type_name));
         }
         let schema: SchemaRef = Arc::new(Schema::new(fields));
         let mut draining = self.send(&encode_schema(&schema))?;
@@ -387,28 +387,19 @@ impl<W: Write> Run<'_, W> {
     fn row(
         &mut self,
         schema: &Schema,
-        fetched: &[Fetched],
+        fetched: &[Read],
         scratch: &mut [u8],
     ) -> Result<Vec<Option<String>>, Response> {
         let mut row = Vec::with_capacity(fetched.len());
-        for (index, &as_fetched) in fetched.iter().enumerate() {
+        for (index, &read) in fetched.iter().enumerate() {
             let column = index as u16 + 1;
-            let limit = match as_fetched {
-                Fetched::Text => 2 * MAX_PAYLOAD,
-                Fetched::Binary => (MAX_PAYLOAD - 2) / 2,
-            };
-            let control = self.control;
-            let cancelled_now = || control.cancelled();
-            let read = raw::get_data(
-                self.statement,
-                column,
-                as_fetched,
-                limit,
-                scratch,
-                &cancelled_now,
-            );
             let value = match read {
-                Ok(value) => value.map(|bytes| rendered(as_fetched, &bytes)),
+                Read::Double => raw::get_double(self.statement, column).map(|v| v.map(shown_f64)),
+                Read::Real => raw::get_real(self.statement, column).map(|v| v.map(shown_f32)),
+                Read::Chunked(as_fetched) => self.chunked(column, as_fetched, scratch),
+            };
+            let value = match value {
+                Ok(value) => value,
                 Err(DataError::Odbc) => return Err(self.failure("SQLGetData")),
                 Err(DataError::TooLarge) => return Err(too_large(schema, index)),
                 Err(DataError::Cancelled) => return Err(cancelled()),
@@ -423,6 +414,29 @@ impl<W: Write> Run<'_, W> {
             row.push(value);
         }
         Ok(row)
+    }
+
+    fn chunked(
+        &self,
+        column: u16,
+        as_fetched: Fetched,
+        scratch: &mut [u8],
+    ) -> Result<Option<String>, DataError> {
+        let limit = match as_fetched {
+            Fetched::Text => 2 * MAX_PAYLOAD,
+            Fetched::Binary => (MAX_PAYLOAD - 2) / 2,
+        };
+        let control = self.control;
+        let cancelled_now = || control.cancelled();
+        let read = raw::get_data(
+            self.statement,
+            column,
+            as_fetched,
+            limit,
+            scratch,
+            &cancelled_now,
+        )?;
+        Ok(read.map(|bytes| rendered(as_fetched, &bytes)))
     }
 
     /// `Ok(true)` when a `stop` arrived instead of the credit.
@@ -476,6 +490,32 @@ impl<W: Write> Run<'_, W> {
             messages: mem::take(&mut self.messages),
             more_sets,
         }
+    }
+}
+
+/// How a column's values are read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Read {
+    Chunked(Fetched),
+    Double,
+    Real,
+}
+
+/// The widest an approximate numeric may be, in either of the radixes a driver
+/// sizes it in (`DOUBLE` as 15 or 17 digits, or 53 bits), and still fit a
+/// `double`; past it the type is a decimal reported as a float, as Oracle's
+/// `FLOAT(126)` is, which only its text form keeps whole.
+const DOUBLE_SIZE: usize = 53;
+const REAL_SIZE: usize = 24;
+
+/// Approximate numerics are read as binary floats, whose shortest round-trip
+/// form is exact where a driver's text may round (Db2 shows a `DOUBLE` to 15
+/// digits). Everything else is read as `fetched_as` says.
+fn read_as(data_type: i16, size: usize, type_name: &str) -> Read {
+    match SqlDataType(data_type) {
+        SqlDataType::DOUBLE | SqlDataType::FLOAT if size <= DOUBLE_SIZE => Read::Double,
+        SqlDataType::REAL if size <= REAL_SIZE => Read::Real,
+        _ => Read::Chunked(fetched_as(data_type, type_name)),
     }
 }
 
@@ -535,6 +575,64 @@ pub fn rendered(fetched: Fetched, bytes: &[u8]) -> String {
             text
         }
     }
+}
+
+/// A `double` as Postgres prints one: its shortest round-trip digits, fixed
+/// from 1e-4 up to 1e15 and in `e±NN` notation outside, and `NaN`,
+/// `Infinity` and `-Infinity` by name. A literal every SQL dialect reads back
+/// as the same value.
+fn shown_f64(value: f64) -> String {
+    named(value.is_nan(), value.is_infinite(), value < 0.0)
+        .unwrap_or_else(|| laid_out(&format!("{value:e}"), 15))
+}
+
+/// A `real` the same way, fixed below 1e6, as Postgres prints a `float4`.
+fn shown_f32(value: f32) -> String {
+    named(value.is_nan(), value.is_infinite(), value < 0.0)
+        .unwrap_or_else(|| laid_out(&format!("{value:e}"), 6))
+}
+
+fn named(nan: bool, infinite: bool, negative: bool) -> Option<String> {
+    match (nan, infinite, negative) {
+        (true, _, _) => Some("NaN".to_string()),
+        (_, true, false) => Some("Infinity".to_string()),
+        (_, true, true) => Some("-Infinity".to_string()),
+        _ => None,
+    }
+}
+
+/// `scientific` is Rust's `{:e}`, the shortest digits that round-trip.
+fn laid_out(scientific: &str, fixed_below: i32) -> String {
+    let (sign, unsigned) = match scientific.strip_prefix('-') {
+        Some(unsigned) => ("-", unsigned),
+        None => ("", scientific),
+    };
+    let (mantissa, exponent) = unsigned.split_once('e').unwrap_or((unsigned, "0"));
+    let exponent: i32 = exponent.parse().unwrap_or(0);
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    let body = match exponent {
+        ..-4 => scientific_notation(&digits, exponent),
+        -4..0 => format!("0.{}{digits}", "0".repeat((-exponent - 1) as usize)),
+        _ if exponent < fixed_below => {
+            let whole = exponent as usize + 1;
+            match digits.len() > whole {
+                true => format!("{}.{}", &digits[..whole], &digits[whole..]),
+                false => format!("{digits}{}", "0".repeat(whole - digits.len())),
+            }
+        }
+        _ => scientific_notation(&digits, exponent),
+    };
+    format!("{sign}{body}")
+}
+
+fn scientific_notation(digits: &str, exponent: i32) -> String {
+    let (first, rest) = digits.split_at(1);
+    let point = match rest.is_empty() {
+        true => String::new(),
+        false => format!(".{rest}"),
+    };
+    let sign = if exponent < 0 { '-' } else { '+' };
+    format!("{first}{point}e{sign}{:02}", exponent.abs())
 }
 
 pub fn cancelled() -> Response {
@@ -731,6 +829,48 @@ mod tests {
         assert_eq!(fetched_as(-370, "XML"), Fetched::Text);
         assert_eq!(fetched_as(8, "BINARY_DOUBLE"), Fetched::Text);
         assert_eq!(fetched_as(12, "VARCHAR"), Fetched::Text);
+    }
+
+    #[test]
+    fn an_approximate_numeric_is_read_as_a_float_only_when_it_fits_one() {
+        assert_eq!(read_as(8, 53, "DOUBLE"), Read::Double);
+        assert_eq!(read_as(8, 15, "float8"), Read::Double);
+        assert_eq!(read_as(6, 0, "FLOAT"), Read::Double);
+        assert_eq!(read_as(7, 24, "REAL"), Read::Real);
+        assert_eq!(read_as(6, 126, "FLOAT"), Read::Chunked(Fetched::Text));
+        assert_eq!(read_as(3, 31, "DECIMAL"), Read::Chunked(Fetched::Text));
+    }
+
+    #[test]
+    fn a_float_shows_its_shortest_round_trip_digits_as_postgres_prints_them() {
+        let doubles = [
+            (1.2345678901234567, "1.2345678901234567"),
+            (0.1 + 0.2, "0.30000000000000004"),
+            (1.79769e308, "1.79769e+308"),
+            (-1.79769e308, "-1.79769e+308"),
+            (0.1, "0.1"),
+            (1.5, "1.5"),
+            (100.0, "100"),
+            (123456789012345.0, "123456789012345"),
+            (1e15, "1e+15"),
+            (0.0001, "0.0001"),
+            (0.00001, "1e-05"),
+            (-0.0, "-0"),
+            (0.0, "0"),
+            (f64::NAN, "NaN"),
+            (f64::INFINITY, "Infinity"),
+            (f64::NEG_INFINITY, "-Infinity"),
+        ];
+        for (value, shown) in doubles {
+            assert_eq!(shown_f64(value), shown);
+            if value.is_finite() {
+                assert_eq!(shown.parse::<f64>().unwrap().to_bits(), value.to_bits());
+            }
+        }
+        assert_eq!(shown_f32(1.17549e-37), "1.17549e-37");
+        assert_eq!(shown_f32(3.4028e38), "3.4028e+38");
+        assert_eq!(shown_f32(16777216.0), "1.6777216e+07");
+        assert_eq!(shown_f32(1.5), "1.5");
     }
 
     #[test]
