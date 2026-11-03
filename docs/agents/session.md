@@ -221,7 +221,9 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   before it committed, and its error says how many
   (`Queue::committed_note`), only when that is certain: no transaction open,
   no session setting changed (one may have turned autocommit off), no
-  transaction control in the queue. An explicit `BEGIN`/`COMMIT` in the
+  transaction control in the queue, and no procedure call, block or
+  statement sqlparser cannot read before the failure (`sql::runs_unseen`),
+  since its body may have done either. An explicit `BEGIN`/`COMMIT` in the
   selection still works, since the session holds it across submissions. And a statement that
   fails raises a Stop/Continue decision (`Session::queue_failure`) rather
   than deciding for the user, while a Cancel ends the queue without asking,

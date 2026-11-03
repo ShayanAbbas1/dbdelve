@@ -23,7 +23,7 @@ use sqlparser::ast::{
     AlterTableOperation, ConditionalStatementBlock, CopySource, CopyTarget, CreateTableOptions,
     Delete, Expr, Insert, Merge, ObjectName, ObjectNamePart, Query, Set, SetExpr, SqlOption,
     Statement, TableFactor, TableObject, TransactionAccessMode, TransactionMode, Update,
-    UtilityOption, Visit, Visitor,
+    UtilityOption, Visit, Visitor, visit_statements,
 };
 use sqlparser::dialect::{
     ClickHouseDialect, Dialect, DuckDbDialect, GenericDialect, MsSqlDialect, MySqlDialect,
@@ -4112,6 +4112,24 @@ fn touches_session(engine: Engine, sql: &str) -> bool {
         }
     }
     false
+}
+
+/// Whether `sql` runs statements it does not show, so what they did to the
+/// transaction cannot be read off it: a procedure call (`CALL`, `EXEC`,
+/// `EXECUTE`), anywhere in it, or anything sqlparser cannot read, which
+/// Postgres's `DO` block and MariaDB's `BEGIN NOT ATOMIC` are.
+pub(crate) fn runs_unseen(engine: Engine, sql: &str) -> bool {
+    let Some(dialect) = dialect(engine) else {
+        return false;
+    };
+    match SqlParser::parse_sql(dialect.as_ref(), sql) {
+        Ok(statements) => visit_statements(&statements, |statement| match statement {
+            Statement::Call(_) | Statement::Execute { .. } => ControlFlow::Break(()),
+            _ => ControlFlow::Continue(()),
+        })
+        .is_break(),
+        Err(_) => true,
+    }
 }
 
 /// What running `sql` leaves on its session that a fresh connection to the

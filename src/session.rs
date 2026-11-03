@@ -1735,13 +1735,14 @@ impl<G: Clone> Queue<G> {
     /// beside the failure of the one after them, which leaves them in place.
     /// Only when that is certain: never with a transaction open, a session
     /// setting changed (one may have turned autocommit off), or a statement
-    /// of the queue's own having opened or ended a transaction.
+    /// of the queue's own having opened or ended a transaction or run a
+    /// procedure or block that may have.
     pub(crate) fn committed_note(&self, engine: Engine, uncertain: bool) -> Option<String> {
         if uncertain
-            || self
-                .done
-                .iter()
-                .any(|finished| sql::leaves(engine, &finished.sql).transaction.is_some())
+            || self.done.iter().any(|finished| {
+                sql::leaves(engine, &finished.sql).transaction.is_some()
+                    || sql::runs_unseen(engine, &finished.sql)
+            })
         {
             return None;
         }
@@ -2943,6 +2944,23 @@ mod tests {
                     .committed_note(engine, false),
                 None,
                 "{bracket}"
+            );
+        }
+        // Nor after a procedure or block whose statements the queue does not
+        // show, which may have turned autocommit off or opened a transaction.
+        for (engine, call) in [
+            (Engine::MySql, "CALL p()"),
+            (Engine::MariaDb, "BEGIN NOT ATOMIC SET autocommit = 0; END"),
+            (Engine::SqlServer, "EXEC p"),
+            (Engine::SqlServer, "BEGIN EXEC p END"),
+            (Engine::Postgres, "CALL p()"),
+            (Engine::Postgres, "DO $$ BEGIN PERFORM 1; END $$"),
+            (Engine::Generic, "CALL DELVETEST.P()"),
+        ] {
+            assert_eq!(
+                queue(vec![(call, complete()), (insert, complete())]).committed_note(engine, false),
+                None,
+                "{engine:?} {call}"
             );
         }
     }
