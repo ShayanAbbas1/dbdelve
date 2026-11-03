@@ -21,6 +21,7 @@ const FAKE: EngineSpec = EngineSpec {
     layout: Fields::Server,
     default_port: None,
     takes_options: false,
+    takes_service: false,
     resolves_srv: false,
     system_databases: &[],
     binary_types: &[],

@@ -15,8 +15,8 @@ use gpui_component::input::{InputEvent, InputState};
 use crate::{
     Workspace,
     db::{
-        ConnectionConfig, Engine, Fields, MongoConfig, ServerConfig, SnowflakeConfig, SshTunnel,
-        SslMode,
+        ConnectionConfig, Engine, Fields, MongoConfig, PostgresConfig, ServerConfig,
+        SnowflakeConfig, SshTunnel, SslMode,
     },
     explorer::Shortcuts,
     session::Profile,
@@ -65,6 +65,8 @@ pub(crate) struct ConnectionForm {
     pub(crate) role: Entity<InputState>,
     /// Driver options passed through as typed, where `Engine::takes_options`.
     pub(crate) options: Entity<InputState>,
+    /// A section of a connection service file, where `Engine::takes_service`.
+    pub(crate) service: Entity<InputState>,
     /// The host is a DNS name listing the servers, where
     /// `Engine::resolves_srv`.
     pub(crate) srv: bool,
@@ -97,8 +99,9 @@ pub(crate) struct ConnectionForm {
     /// The welcome surface's contours were already on screen, so the form's,
     /// the same ones, are there from the start rather than fading in again.
     pub(crate) backdrop_shown: bool,
-    /// The engine the engine-dependent placeholders were last written for.
-    pub(crate) placeholders_for: Option<Engine>,
+    /// The engine the engine-dependent placeholders were last written for,
+    /// whether a service was typed then, and the root certificate's.
+    pub(crate) placeholders_for: Option<(Engine, bool, &'static str)>,
     /// The URL field as of its last change, to tell a URL pasted whole from
     /// one being typed.
     pub(crate) last_url: SharedString,
@@ -256,6 +259,11 @@ impl ConnectionForm {
                 .placeholder("authSource=admin&replicaSet=rs0")
                 .default_value(value(mongo.map(|mongo| mongo.options.as_str())))
         });
+        let service = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Optional")
+                .default_value(value(config.and_then(ConnectionConfig::service)))
+        });
         let project_name = cx.new(|cx| InputState::new(window, cx).placeholder("Project name"));
         let statement_timeout = cx.new(|cx| {
             InputState::new(window, cx)
@@ -289,6 +297,7 @@ impl ConnectionForm {
             &port,
             &database,
             &user,
+            &service,
             &ssh_host,
             &account_name,
         ] {
@@ -324,6 +333,7 @@ impl ConnectionForm {
             warehouse,
             role,
             options,
+            service,
             srv: mongo.is_some_and(|mongo| mongo.srv),
             login_database: mongo.and_then(|mongo| mongo.login_database.clone()),
             statement_timeout,
@@ -426,7 +436,10 @@ impl ConnectionForm {
                 },
                 statement_timeout,
             ),
-            Engine::Postgres => ConnectionConfig::Postgres(self.server(cx)?),
+            Engine::Postgres => ConnectionConfig::Postgres(PostgresConfig {
+                server: self.server(cx)?,
+                service: self.typed_service(cx),
+            }),
             Engine::MySql => ConnectionConfig::MySql(self.server(cx)?),
             Engine::MariaDb => ConnectionConfig::MariaDb(self.server(cx)?),
             Engine::SqlServer => ConnectionConfig::SqlServer(self.server(cx)?),
@@ -463,14 +476,23 @@ impl ConnectionForm {
 
     /// The placeholders that say what a blank field means, which is the
     /// engine's to say: its port, whether it asks for a user, what it names
-    /// a connection after. Written whenever the engine has changed since.
+    /// a connection after, unless a service answers for the blank instead.
+    /// Written whenever any of that has changed since.
     pub(crate) fn sync_placeholders(&mut self, window: &mut Window, cx: &mut App) {
-        if self.placeholders_for == Some(self.engine) {
+        let beside_a_service = self.typed_service(cx).is_some();
+        let root_certificate = root_certificate_placeholder(self.sslmode, beside_a_service);
+        let written = (self.engine, beside_a_service, root_certificate);
+        if self.placeholders_for == Some(written) {
             return;
         }
-        self.placeholders_for = Some(self.engine);
-        let blank = placeholders(self.engine);
+        self.placeholders_for = Some(written);
+        let blank = if beside_a_service {
+            from_the_service(placeholders(self.engine))
+        } else {
+            placeholders(self.engine)
+        };
         for (input, placeholder) in [
+            (&self.root_certificate, SharedString::from(root_certificate)),
             (&self.name, SharedString::from(blank.name)),
             (&self.host, blank.host.into()),
             (&self.port, blank.port.into()),
@@ -484,10 +506,27 @@ impl ConnectionForm {
         }
     }
 
+    /// The service typed, where the engine has one.
+    pub(crate) fn typed_service(&self, cx: &App) -> Option<String> {
+        Some(self.service.read(cx).value().trim().to_string())
+            .filter(|service| self.engine.takes_service() && !service.is_empty())
+    }
+
+    /// Whether the root certificate field means anything for what is typed.
+    pub(crate) fn shows_root_certificate(&self, cx: &App) -> bool {
+        consults_root_certificate(self.sslmode, self.typed_service(cx).as_deref())
+    }
+
+    /// What Encryption means for what is typed.
+    pub(crate) fn encryption_explanation(&self, cx: &App) -> &'static str {
+        encryption_explanation(self.sslmode, self.typed_service(cx).as_deref())
+    }
+
     /// Where the form points, for the line under its title.
     pub(crate) fn summary(&self, cx: &App) -> Option<String> {
         let read = |input: &Entity<InputState>| input.read(cx).value().trim().to_string();
         let tunnel = read(&self.ssh_host);
+        let service = self.typed_service(cx);
         summary(
             self.engine,
             self.srv,
@@ -498,6 +537,7 @@ impl ConnectionForm {
                 user: &read(&self.user),
                 path: &read(&self.path),
                 account: &read(&self.account),
+                service: service.as_deref(),
                 tunnel: self.ssh.then_some(tunnel.as_str()),
             },
         )
@@ -569,11 +609,14 @@ impl ConnectionForm {
         let database = read(&self.database);
         let user = read(&self.user);
         let port = read(&self.port);
+        let service = self.typed_service(cx);
 
         // Blank database is the one the server signs the login into, which is
-        // what a profile that moves between databases starts on.
+        // what a profile that moves between databases starts on. A service
+        // answers for the rest, and says so on connect if it does not.
         for (label, value) in [("Host", &host), ("Username", &user)] {
-            if value.is_empty() && (label == "Host" || required.contains(&label)) {
+            let needed = label == "Host" || required.contains(&label);
+            if value.is_empty() && needed && service.is_none() {
                 return Err(format!("{label} is required."));
             }
         }
@@ -582,9 +625,7 @@ impl ConnectionForm {
 
         // Kept only where it is consulted. A path left behind by switching down
         // to `require` would be stored and shown as though it were in force.
-        let root_certificate = self
-            .sslmode
-            .checks_certificate()
+        let root_certificate = consults_root_certificate(self.sslmode, service.as_deref())
             .then(|| read(&self.root_certificate))
             .filter(|path| !path.is_empty());
 
@@ -635,6 +676,8 @@ pub(crate) fn keep_schema(config: &mut ConnectionConfig, current: &ConnectionCon
     if let Some(schema) = current.schema()
         && config.engine() == current.engine()
         && config.database_name() == current.database_name()
+        // A blank database beside a service is whichever that service names.
+        && config.service() == current.service()
     {
         config.set_schema(Some(schema.to_string()));
     }
@@ -676,6 +719,57 @@ pub(crate) fn placeholders(engine: Engine) -> Placeholders {
     }
 }
 
+const FROM_THE_SERVICE: &str = "From the service";
+
+/// Beside a service, a blank host, port, database or user is its to fill. The
+/// port field is too narrow for the whole phrase.
+fn from_the_service(blank: Placeholders) -> Placeholders {
+    Placeholders {
+        name: "Database, else the service",
+        host: FROM_THE_SERVICE,
+        port: "Service".to_string(),
+        database: FROM_THE_SERVICE,
+        user: FROM_THE_SERVICE,
+        ..blank
+    }
+}
+
+/// A file the service names replaces the trust store. A mode that does not
+/// verify never reaches that store on its own, so beside a service whether
+/// anything is checked is the service's to say.
+fn root_certificate_placeholder(mode: SslMode, beside_a_service: bool) -> &'static str {
+    match (beside_a_service, mode.checks_certificate()) {
+        (false, _) => "System trust store",
+        (true, true) => "Service, else system trust store",
+        (true, false) => FROM_THE_SERVICE,
+    }
+}
+
+/// The line under the selector. The default stands for "not said" beside a
+/// service, so what the selector shows may not be the mode that connects, and
+/// a root certificate makes `require` check.
+fn encryption_explanation(mode: SslMode, service: Option<&str>) -> &'static str {
+    match (mode, service) {
+        (SslMode::Prefer, Some(_)) => {
+            "The mode the service or PGSSLMODE sets applies, even disable. If neither \
+             sets one, encrypted when the server offers it, without checking the \
+             certificate, and a root certificate needs Require or stricter."
+        }
+        (SslMode::Require, Some(_)) => {
+            "Always encrypted. A root certificate from here, the service or PGSSLROOTCERT \
+             is checked as Verify CA. Without one, the certificate is not checked."
+        }
+        _ => mode.explanation(),
+    }
+}
+
+/// Whether a root certificate can change the connection: the mode shown checks
+/// one, or a service may set the mode that does, or make `require` check it.
+/// `disable` is stated, so no service replaces it.
+pub(crate) fn consults_root_certificate(mode: SslMode, service: Option<&str>) -> bool {
+    mode.checks_certificate() || (service.is_some() && mode != SslMode::Disable)
+}
+
 /// The fields `summary` reads, as typed and trimmed.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Typed<'a> {
@@ -685,6 +779,8 @@ pub(crate) struct Typed<'a> {
     pub(crate) user: &'a str,
     pub(crate) path: &'a str,
     pub(crate) account: &'a str,
+    /// The service, where the engine has one.
+    pub(crate) service: Option<&'a str>,
     /// The SSH host, while the tunnel is on.
     pub(crate) tunnel: Option<&'a str>,
 }
@@ -707,16 +803,17 @@ pub(crate) fn summary(engine: Engine, srv: bool, typed: &Typed) -> Option<String
             (!typed.account.is_empty()).then(|| signed_in(database(typed.account.to_string())))
         }
         Fields::Server => {
-            if typed.host.is_empty() {
+            if typed.host.is_empty() && typed.service.is_none() {
                 return None;
             }
             // An SRV name takes no port, so whatever the hidden field holds
             // is not where it points.
-            let place = match typed.port {
-                port if !port.is_empty() && !(srv && engine.resolves_srv()) => {
-                    format!("{}:{port}", typed.host)
+            let place = match (typed.host, typed.port, typed.service) {
+                ("", _, Some(service)) => format!("service {service}"),
+                (host, port, _) if !port.is_empty() && !(srv && engine.resolves_srv()) => {
+                    format!("{host}:{port}")
                 }
-                _ => typed.host.to_string(),
+                (host, ..) => host.to_string(),
             };
             let line = signed_in(database(place));
             Some(match typed.tunnel {
@@ -792,17 +889,17 @@ pub(crate) enum ConnectionTest {
 /// the file for an engine that is one.
 pub(crate) fn default_profile_name(config: &ConnectionConfig) -> String {
     match config {
-        ConnectionConfig::Postgres(server)
+        ConnectionConfig::Postgres(PostgresConfig { server, .. })
         | ConnectionConfig::MySql(server)
         | ConnectionConfig::MariaDb(server)
         | ConnectionConfig::SqlServer(server)
         | ConnectionConfig::ClickHouse(server)
         | ConnectionConfig::MongoDb(MongoConfig { server, .. }) => if server.database.is_empty() {
-            &server.host
+            config.service().unwrap_or(&server.host)
         } else {
-            &server.database
+            server.database.as_str()
         }
-        .clone(),
+        .to_string(),
         ConnectionConfig::DuckDb { path, .. } if path == crate::db::DUCKDB_IN_MEMORY => {
             "DuckDB".to_string()
         }
@@ -872,7 +969,7 @@ mod tests {
     #[test]
     fn the_active_schema_stays_only_on_the_engine_and_database_it_was_picked_on() {
         let postgres = |database: &str| {
-            ConnectionConfig::Postgres(ServerConfig {
+            ConnectionConfig::postgres(ServerConfig {
                 database: database.into(),
                 ..ServerConfig::default()
             })
@@ -894,6 +991,15 @@ mod tests {
         assert_eq!(kept(&postgres("app"), postgres("other")), None);
         // Blank is the `postgres` it connects to.
         assert_eq!(kept(&postgres(""), postgres("postgres")), sales);
+        // Neither states a database, and each service may name its own.
+        let on_service = |service: &str| {
+            ConnectionConfig::Postgres(PostgresConfig {
+                service: Some(service.into()),
+                ..PostgresConfig::default()
+            })
+        };
+        assert_eq!(kept(&on_service("a"), on_service("a")), sales);
+        assert_eq!(kept(&on_service("a"), on_service("b")), None);
         assert_eq!(kept(&postgres("app"), snowflake("app")), None);
         assert_eq!(kept(&snowflake("ANALYTICS"), snowflake("analytics")), sales);
         assert_eq!(
@@ -1091,6 +1197,24 @@ mod tests {
         assert_eq!(postgres.database, "postgres");
         // `server` asks for a user here, and `server_requiring(&[])` there.
         assert_eq!(postgres.user, "Required");
+        let beside_a_service = from_the_service(postgres);
+        assert_eq!(beside_a_service.host, "From the service");
+        assert_eq!(beside_a_service.user, "From the service");
+        assert_eq!(beside_a_service.database, "From the service");
+        assert_eq!(beside_a_service.port, "Service");
+        assert_eq!(beside_a_service.name, "Database, else the service");
+        assert_eq!(
+            root_certificate_placeholder(SslMode::Require, true),
+            "From the service"
+        );
+        assert_eq!(
+            root_certificate_placeholder(SslMode::Require, false),
+            "System trust store"
+        );
+        assert_eq!(
+            root_certificate_placeholder(SslMode::VerifyFull, true),
+            "Service, else system trust store"
+        );
         assert_eq!(placeholders(Engine::MongoDb).user, "Optional");
         assert_eq!(placeholders(Engine::Redis).name, "Named after the host");
         assert_eq!(placeholders(Engine::Turso).name, "Named after the file");
@@ -1136,7 +1260,7 @@ mod tests {
             ssh: None,
             schema: None,
         };
-        let typed = ConnectionConfig::Postgres(server("hunter2"));
+        let typed = ConnectionConfig::postgres(server("hunter2"));
         assert_eq!(password_to_persist(&typed, Origin::Form), Some("hunter2"));
         // `PGPASSWORD` belongs to the shell that set it.
         assert_eq!(password_to_persist(&typed, Origin::Environment), None);
@@ -1168,6 +1292,71 @@ mod tests {
     }
 
     #[test]
+    fn a_service_is_where_a_form_with_no_host_points() {
+        let typed = Typed {
+            service: Some("harness"),
+            ..Typed::default()
+        };
+        assert_eq!(
+            summary(Engine::Postgres, false, &typed).as_deref(),
+            Some("service harness")
+        );
+        let typed = Typed {
+            host: "db.internal",
+            port: "6432",
+            ..typed
+        };
+        assert_eq!(
+            summary(Engine::Postgres, false, &typed).as_deref(),
+            Some("db.internal:6432")
+        );
+    }
+
+    #[test]
+    fn a_root_certificate_is_kept_beside_a_service_unless_the_mode_is_disable() {
+        assert!(!consults_root_certificate(SslMode::Prefer, None));
+        assert!(!consults_root_certificate(SslMode::Require, None));
+        assert!(consults_root_certificate(SslMode::VerifyFull, None));
+        assert!(consults_root_certificate(SslMode::Prefer, Some("harness")));
+        assert!(consults_root_certificate(SslMode::Require, Some("harness")));
+        assert!(!consults_root_certificate(
+            SslMode::Disable,
+            Some("harness")
+        ));
+    }
+
+    #[test]
+    fn the_line_under_the_selector_says_what_a_service_can_change() {
+        let prefer = encryption_explanation(SslMode::Prefer, Some("harness"));
+        assert!(prefer.contains("service or PGSSLMODE"), "{prefer}");
+        assert!(prefer.contains("If neither sets one"), "{prefer}");
+        let require = encryption_explanation(SslMode::Require, Some("harness"));
+        assert!(require.contains("checked as Verify CA"), "{require}");
+        assert_eq!(
+            encryption_explanation(SslMode::Require, None),
+            SslMode::Require.explanation()
+        );
+        assert_eq!(
+            encryption_explanation(SslMode::Prefer, None),
+            SslMode::Prefer.explanation()
+        );
+        assert_eq!(
+            encryption_explanation(SslMode::VerifyFull, Some("harness")),
+            SslMode::VerifyFull.explanation()
+        );
+    }
+
+    #[test]
+    fn a_profile_with_only_a_service_is_named_after_it() {
+        let config = ConnectionConfig::Postgres(PostgresConfig {
+            service: Some("harness".into()),
+            ..Default::default()
+        });
+        assert_eq!(default_profile_name(&config), "harness");
+        assert_eq!(config.endpoint(), "service harness");
+    }
+
+    #[test]
     fn a_server_left_to_pick_the_database_is_named_after_its_host() {
         let mut server = ServerConfig {
             host: "db.example".to_string(),
@@ -1175,7 +1364,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            default_profile_name(&ConnectionConfig::Postgres(server.clone())),
+            default_profile_name(&ConnectionConfig::postgres(server.clone())),
             "app"
         );
         server.database.clear();

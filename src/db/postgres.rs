@@ -26,6 +26,7 @@ use super::{
 };
 
 mod pgpass;
+mod service;
 
 /// The port the server listens on when the profile does not say.
 pub(super) const DEFAULT_PORT: u16 = 5432;
@@ -408,56 +409,100 @@ const SIDE_TIMEOUT_SECONDS: u32 = 2;
 /// before they are shown untyped, to be restyled once it answers.
 const TYPES_PATIENCE: Duration = Duration::from_secs(1);
 
-pub fn config_from_url(url: &str) -> Result<ServerConfig, String> {
+/// What a Postgres profile connects with: a server engine's fields plus the
+/// connection service that fills in what they leave blank.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PostgresConfig {
+    /// `host` and `user` may be blank beside a `service`, which answers for them.
+    pub server: ServerConfig,
+    /// libpq's `service`: a section of a connection service file.
+    pub service: Option<String>,
+}
+
+impl PostgresConfig {
+    pub fn endpoint(&self) -> String {
+        match &self.service {
+            Some(service) if self.server.host.is_empty() => match self.server.port {
+                Some(port) => format!("service {service}:{port}"),
+                None => format!("service {service}"),
+            },
+            _ => self.server.endpoint(),
+        }
+    }
+
+    /// The server to reach, read as a connection opens: before the tunnel, TLS
+    /// and the password file, which all use what a service can supply.
+    pub fn resolved(&self) -> Result<ServerConfig, DbError> {
+        service::resolved(self).map_err(plain_error)
+    }
+}
+
+pub fn config_from_url(url: &str) -> Result<PostgresConfig, String> {
     let url_parts =
         url::Url::parse(url).map_err(|error| format!("Connection URL is invalid: {error}"))?;
     let has_explicit_port = url_parts.port().is_some()
         || url_parts
             .query_pairs()
             .any(|(key, _)| key.as_ref() == "port");
-    // The two keys dbdelve owns come out of the URL before the driver sees
-    // it. Its parser has a fixed key list and refuses anything outside it,
-    // so `sslrootcert` would die as "invalid connection string" and so
-    // would `sslmode=verify-full` — naming neither the option nor the
-    // reason. dbdelve carries both itself and re-emits an `sslmode` the
-    // driver does know.
+    // The keys dbdelve owns come out of the URL before the driver sees it.
+    // Its parser has a fixed key list and refuses anything outside it, so
+    // `sslrootcert` would die as "invalid connection string" and so would
+    // `sslmode=verify-full` — naming neither the option nor the reason.
+    // dbdelve carries them itself and re-emits an `sslmode` the driver does
+    // know.
     let mut sslmode = tls::SslMode::default();
     let mut root_certificate = None;
+    let mut service = None;
     let mut passed_through = Vec::new();
     for (key, value) in url_parts.query_pairs() {
         match key.as_ref() {
             "sslmode" => sslmode = tls::SslMode::parse(value.as_ref())?,
+            // The driver has no such key, and what a service sets is read on
+            // connect: see `service`.
+            "service" => service = Some(value.trim().to_string()).filter(|s| !s.is_empty()),
             "sslrootcert" => {
                 root_certificate = Some(value.trim().to_string()).filter(|p| !p.is_empty());
             }
             _ => passed_through.push((key.into_owned(), value.into_owned())),
         }
     }
-    let mut without_tls_keys = url_parts.clone();
-    without_tls_keys.set_query(None);
+    let mut for_driver = url_parts.clone();
+    for_driver.set_query(None);
     {
-        let mut query = without_tls_keys.query_pairs_mut();
+        let mut query = for_driver.query_pairs_mut();
         for (key, value) in &passed_through {
             query.append_pair(key, value);
         }
     }
-    let parsed: tokio_postgres::Config = without_tls_keys
+    let parsed: tokio_postgres::Config = for_driver
         .as_str()
         .parse()
         .map_err(|error| format!("Connection URL is invalid: {error}"))?;
+    // Rule 6: a profile has no way to hold "not said", so `prefer`, the default,
+    // reads as that beside a service and the service's own mode would replace it.
+    if service.is_some()
+        && sslmode == tls::SslMode::Prefer
+        && url_parts.query_pairs().any(|(key, _)| key == "sslmode")
+    {
+        return Err(
+            "sslmode=prefer cannot be stated beside a service: leave it out, or name another mode."
+                .into(),
+        );
+    }
     let host = match parsed.get_hosts() {
         [Host::Tcp(host)] => host.clone(),
+        [] if service.is_some() => String::new(),
         [] => return Err("Connection URL does not contain a host.".into()),
         #[cfg(unix)]
         [Host::Unix(_)] => return Err("Connection URL contains a Unix socket host.".into()),
         _ => return Err("Connection URL contains more than one host.".into()),
     };
     let database = parsed.get_dbname().unwrap_or_default().to_string();
-    let user = parsed
-        .get_user()
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| "Connection URL does not contain a username.".to_string())?
-        .to_string();
+    let user = match parsed.get_user().filter(|value| !value.is_empty()) {
+        Some(user) => user.to_string(),
+        None if service.is_some() => String::new(),
+        None => return Err("Connection URL does not contain a username.".into()),
+    };
     let password = parsed
         .get_password()
         .map(|password| {
@@ -468,23 +513,26 @@ pub fn config_from_url(url: &str) -> Result<ServerConfig, String> {
         .transpose()?
         .unwrap_or_default();
 
-    Ok(ServerConfig {
-        host,
-        // Last wins, as in libpq: the driver's URL parser takes a port
-        // from the host section first -- 5432 when there is none -- and
-        // then pushes any `?port=` value after it.
-        port: has_explicit_port
-            .then(|| parsed.get_ports().last().copied())
-            .flatten(),
-        database,
-        user,
-        password,
-        sslmode,
-        root_certificate,
-        // A URL has nowhere to say it; the form is where it is set.
-        statement_timeout: 0,
-        ssh: None,
-        schema: None,
+    Ok(PostgresConfig {
+        server: ServerConfig {
+            host,
+            // Last wins, as in libpq: the driver's URL parser takes a port
+            // from the host section first -- 5432 when there is none -- and
+            // then pushes any `?port=` value after it.
+            port: has_explicit_port
+                .then(|| parsed.get_ports().last().copied())
+                .flatten(),
+            database,
+            user,
+            password,
+            sslmode,
+            root_certificate,
+            // A URL has nowhere to say it; the form is where it is set.
+            statement_timeout: 0,
+            ssh: None,
+            schema: None,
+        },
+        service,
     })
 }
 
@@ -717,6 +765,9 @@ pub struct Connection {
     /// The schema the server's own `search_path` put the session in, read
     /// before a picked one is set. None if it would not say, or names none.
     current_schema: Option<String>,
+    /// The database this session is on, which a service may have named where
+    /// the profile left it blank. A session stays on the one it opened.
+    current_database: String,
     /// A second session to the same server, for what has to be asked while
     /// this one is busy with a statement's rows: its column types, and
     /// whether it can be stopped at the row limit. Opened the first time it
@@ -737,6 +788,10 @@ pub struct Connection {
 impl Connection {
     pub fn open(server: &ServerConfig) -> Result<Self, DbError> {
         tunnelled(server, DEFAULT_PORT, |tunnel| Self::connect(server, tunnel))
+    }
+
+    pub fn current_database(&self) -> &str {
+        &self.current_database
     }
 
     /// Open the side session now, so the first run's types and stop do not
@@ -830,6 +885,7 @@ impl Connection {
             cancel: client.client.cancel_token(),
             pid,
             current_schema,
+            current_database: dbname(server).to_string(),
             side: Arc::default(),
             connector,
             client: Arc::new(Mutex::new(client)),
@@ -1948,6 +2004,70 @@ mod tests {
         );
     }
 
+    /// Run again in a child process, for the same reason as the password file
+    /// test below: `PGSERVICEFILE` has to be set before it starts, and the file
+    /// holds the live password.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_a_profile_naming_a_service_connects_where_the_file_says() {
+        use std::os::unix::fs::DirBuilderExt as _;
+
+        const CHILD: &str = "DBDELVE_PGSERVICE_CHILD";
+        let name =
+            "db::postgres::tests::live_a_profile_naming_a_service_connects_where_the_file_says";
+        if std::env::var_os(CHILD).is_none() {
+            let directory =
+                std::env::temp_dir().join(format!("dbdelve-pgservice-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&directory)
+                .expect("the private directory should create");
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([name, "--exact", "--include-ignored", "--nocapture"])
+                .env(CHILD, "1")
+                .env("PGSERVICEFILE", directory.join("pg_service.conf"))
+                .status()
+                .expect("the child test should run");
+            let _ = std::fs::remove_dir_all(&directory);
+            assert!(status.success());
+            return;
+        }
+
+        let config = live_config();
+        let file = std::env::var_os("PGSERVICEFILE").unwrap();
+        std::fs::write(
+            &file,
+            format!(
+                "[unrelated]\nhost=nowhere.invalid\n\n[harness]\nhost={}\nport={}\n\
+                 dbname={}\nuser={}\npassword={}\nsslmode={}\n",
+                config.host,
+                config.port.unwrap_or(DEFAULT_PORT),
+                config.database,
+                config.user,
+                config.password,
+                config.sslmode.as_str(),
+            ),
+        )
+        .expect("the service file should write");
+
+        let named = |service: &str| {
+            crate::db::ConnectionConfig::Postgres(PostgresConfig {
+                service: Some(service.into()),
+                ..PostgresConfig::default()
+            })
+        };
+        let opened = crate::db::Connection::open(named("harness"))
+            .expect("the service should say where to connect");
+        assert_eq!(opened.spelled_database(), Some(config.database.as_str()));
+        let failure = crate::db::Connection::open(named("absent"))
+            .err()
+            .expect("an unknown service should fail")
+            .message;
+        assert!(failure.contains("absent"), "{failure}");
+    }
+
     /// Run again in a child process, `PGPASSFILE` set before it starts: a
     /// `set_var` here would race every other test thread reading the
     /// environment. The file sits in a directory only this user can enter,
@@ -2206,17 +2326,20 @@ mod tests {
 
         assert_eq!(
             config,
-            ServerConfig {
-                host: "db.example.test".into(),
-                port: None,
-                database: "dbdelve_test".into(),
-                user: "person@example.com".into(),
-                password: String::new(),
-                sslmode: SslMode::default(),
-                root_certificate: None,
-                statement_timeout: 0,
-                ssh: None,
-                schema: None,
+            PostgresConfig {
+                server: ServerConfig {
+                    host: "db.example.test".into(),
+                    port: None,
+                    database: "dbdelve_test".into(),
+                    user: "person@example.com".into(),
+                    password: String::new(),
+                    sslmode: SslMode::default(),
+                    root_certificate: None,
+                    statement_timeout: 0,
+                    ssh: None,
+                    schema: None,
+                },
+                service: None,
             }
         );
     }
@@ -2227,8 +2350,8 @@ mod tests {
             config_from_url("postgres://someone:pa%20ss@db.example.test:8432/dbdelve_demo")
                 .unwrap();
 
-        assert_eq!(config.port, Some(8432));
-        assert_eq!(config.password, "pa ss");
+        assert_eq!(config.server.port, Some(8432));
+        assert_eq!(config.server.password, "pa ss");
     }
 
     #[test]
@@ -2246,7 +2369,11 @@ mod tests {
             ("verify-full", SslMode::VerifyFull),
         ] {
             let url = format!("postgresql://someone@db.example.test/dbdelve_test?sslmode={mode}");
-            assert_eq!(config_from_url(&url).unwrap().sslmode, expected, "{url}");
+            assert_eq!(
+                config_from_url(&url).unwrap().server.sslmode,
+                expected,
+                "{url}"
+            );
         }
     }
 
@@ -2262,10 +2389,13 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(config.sslmode, SslMode::VerifyFull);
-        assert_eq!(config.root_certificate.as_deref(), Some("/tmp/rds.pem"));
-        assert_eq!(config.port, Some(5433));
-        assert_eq!(config.user, "someone");
+        assert_eq!(config.server.sslmode, SslMode::VerifyFull);
+        assert_eq!(
+            config.server.root_certificate.as_deref(),
+            Some("/tmp/rds.pem")
+        );
+        assert_eq!(config.server.port, Some(5433));
+        assert_eq!(config.server.user, "someone");
     }
 
     #[test]
@@ -2274,6 +2404,50 @@ mod tests {
             config_from_url("postgresql://someone@db.example.test/dbdelve_test?sslmode=allow")
                 .unwrap_err()
                 .contains("allow")
+        );
+    }
+
+    #[test]
+    fn a_url_naming_a_service_needs_nothing_else() {
+        for scheme in ["postgres", "postgresql"] {
+            let config = config_from_url(&format!("{scheme}://?service=harness")).unwrap();
+            assert_eq!(config.service.as_deref(), Some("harness"));
+            assert_eq!(
+                (config.server.host.as_str(), config.server.user.as_str()),
+                ("", "")
+            );
+        }
+    }
+
+    #[test]
+    fn a_url_naming_a_service_keeps_what_it_states_beside_it() {
+        let config = config_from_url(
+            "postgresql://ada@db.example.test:6432/orders?service=harness&sslmode=require",
+        )
+        .unwrap();
+        assert_eq!(config.service.as_deref(), Some("harness"));
+        assert_eq!(config.server.host, "db.example.test");
+        assert_eq!(config.server.port, Some(6432));
+        assert_eq!(config.server.database, "orders");
+        assert_eq!(config.server.user, "ada");
+        assert_eq!(config.server.sslmode, SslMode::Require);
+    }
+
+    #[test]
+    fn a_url_cannot_state_the_mode_that_means_unsaid_beside_a_service() {
+        assert!(
+            config_from_url("postgresql://?service=harness&sslmode=prefer")
+                .unwrap_err()
+                .contains("prefer")
+        );
+    }
+
+    #[test]
+    fn a_url_with_a_blank_service_still_has_to_say_where() {
+        assert!(
+            config_from_url("postgresql://?service=")
+                .unwrap_err()
+                .contains("host")
         );
     }
 
@@ -2297,7 +2471,7 @@ mod tests {
                 Some(6000),
             ),
         ] {
-            assert_eq!(config_from_url(url).unwrap().port, expected, "{url}");
+            assert_eq!(config_from_url(url).unwrap().server.port, expected, "{url}");
         }
     }
 

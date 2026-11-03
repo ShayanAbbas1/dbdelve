@@ -154,6 +154,7 @@ host = "localhost"
 database = "postgres"
 user = "postgres"
 engine = "postgresql"
+service = "reports"
 confirmed = []
 open_queries = []
 open_objects = []

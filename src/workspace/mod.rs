@@ -609,6 +609,7 @@ impl Workspace {
                 let existing = workspace.profiles.iter().position(|profile| {
                     profile.config.engine() == config.engine()
                         && profile.config.endpoint() == config.endpoint()
+                        && profile.config.service() == config.service()
                         && profile.config.server().map(|server| server.user.as_str())
                             == config.server().map(|server| server.user.as_str())
                 });

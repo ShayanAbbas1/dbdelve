@@ -78,7 +78,9 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   Importing from DBeaver or TablePlus starts there too, or from the File menu
   and the palette once connections exist, never from over the connection form
   (its root does not answer `ImportConnections`, so nothing typed into it is
-  lost); before anything is added,
+  lost). Import deduplication treats a blank port as the engine default only
+  without a service: beside one, the file supplies it, so even an explicit
+  default port can name a different server. Before anything is added,
   `render_import_choice` asks which project the new connections join
   (`PendingImport`): "Imported from <client>" by default, made if it is new
   and joined if not, an existing project, or none. While it asks, the
@@ -539,7 +541,9 @@ one waiting on a column ignores whatever is typed into it.
 
 Pick the engine first, from the searchable picker the engine pill in the form's header opens; it decides which fields exist.
 Then paste a URL into the form's URL row, which fills the fields as it lands (one
-typed rather than pasted fills them on Enter), or fill the fields in.
+typed rather than pasted fills them on Enter), or fill the fields in. Where
+`Engine::takes_service`, a service stands in for the host and username, which
+are otherwise required; what it leaves unset fails on connect, naming the key.
 `secondary-enter` connects, or saves an edit (`submit_connection`, scoped to
 `ConnectionForm`): it is Run Query's chord, and the unscoped Run Query reaches
 the form first, finds no handler there and lets it through
