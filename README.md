@@ -5,6 +5,11 @@ with GPUI, no Electron and no JVM: instant startup, friendly on your memory,
 and smooth scrolling through large tables where other clients crash or
 introduce limits.
 
+
+## Community
+
+Ideas and discussion on [Discord](https://discord.gg/7PegWzwqCm).
+
 > Early days. Everything listed below works today.
 
 ![DBDelve in Gruvbox Dark Glass: a SELECT on the events table in the editor and its result grid below](assets/screenshots/query-dark.png)
@@ -132,9 +137,6 @@ runs each (2026-10-11, M1 Pro, 32 GB):
 \* The whole 1M-row table pulled into memory on purpose, with the row limit
 off. Method and full results in [BENCHMARKS.md](BENCHMARKS.md).
 
-## Community
-
-Ideas and discussion on [Discord](https://discord.gg/upKpusAnS).
 
 ## License
 
