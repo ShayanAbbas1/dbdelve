@@ -331,9 +331,12 @@ pub(crate) fn chords_for<'a>(
             && available_registry().any(|other| {
                 other.id != spec.id
                     && overrides.get(other.id).is_some_and(|chord| {
-                        spec.defaults
-                            .iter()
-                            .any(|default| same_chord(chord, default))
+                        is_parseable(chord)
+                            && chord.split_whitespace().next().is_some_and(|first| {
+                                spec.defaults
+                                    .iter()
+                                    .any(|default| same_chord(first, default))
+                            })
                     })
             }) =>
         {
@@ -486,6 +489,29 @@ mod tests {
                 Some("Minimize Window")
             );
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cmd_m_prefix_yields_only_to_valid_multistroke_overrides() {
+        let first = Keystroke::parse("cmd-m").unwrap();
+        for chord in ["cmd-m k", "secondary-m k"] {
+            let overrides = HashMap::from([("run_query".to_string(), chord.to_string())]);
+            let keymap = gpui::Keymap::new(build_bindings(&overrides));
+            let (bindings, pending) = keymap.bindings_for_input(std::slice::from_ref(&first), &[]);
+            assert!(pending);
+            assert!(bindings.is_empty());
+            let (bindings, pending) =
+                keymap.bindings_for_input(&[first.clone(), Keystroke::parse("k").unwrap()], &[]);
+            assert!(!pending);
+            assert!(bindings[0].action().partial_eq(&RunQuery));
+        }
+
+        let overrides = HashMap::from([("run_query".to_string(), "cmd-m bad-key".to_string())]);
+        let keymap = gpui::Keymap::new(build_bindings(&overrides));
+        let (bindings, pending) = keymap.bindings_for_input(&[first], &[]);
+        assert!(!pending);
+        assert!(bindings[0].action().partial_eq(&Minimize));
     }
 
     #[test]
