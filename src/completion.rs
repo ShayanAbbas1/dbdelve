@@ -160,9 +160,10 @@ struct Candidate {
     /// relation a column belongs to. What tells two `id`s apart.
     detail: Option<String>,
     kind: CompletionItemKind,
-    /// What accepting it writes, when that is not the label. Ranking reads
-    /// only the label, so a qualified name still matches the word typed.
-    insert: Option<String>,
+    /// Whether accepting it writes the relation under the schema in `detail`.
+    /// A flag rather than the name, which is spelled only for the few that
+    /// survive ranking; ranking reads the label alone either way.
+    qualified: bool,
 }
 
 impl Candidate {
@@ -171,7 +172,19 @@ impl Candidate {
             label: label.into(),
             detail,
             kind,
-            insert: None,
+            qualified: false,
+        }
+    }
+
+    /// What accepting it writes into the buffer.
+    fn written(&self, engine: Engine) -> String {
+        match (self.qualified, &self.detail) {
+            (true, Some(schema)) => format!(
+                "{}.{}",
+                engine.quote_identifier_if_needed(schema),
+                engine.quote_identifier_if_needed(&self.label)
+            ),
+            _ => self.label.clone(),
         }
     }
 }
@@ -326,13 +339,7 @@ impl SchemaCompletions {
             .iter()
             .flat_map(|schema| {
                 schema.relations.iter().map(move |rel| Candidate {
-                    insert: qualify.then(|| {
-                        format!(
-                            "{}.{}",
-                            self.engine.quote_identifier_if_needed(&schema.name),
-                            self.engine.quote_identifier_if_needed(&rel.name)
-                        )
-                    }),
+                    qualified: qualify,
                     ..Candidate::new(
                         &rel.name,
                         Some(schema.name.clone()),
@@ -627,9 +634,6 @@ impl SchemaCompletions {
         let items = items
             .into_iter()
             .map(|(word, candidate)| CompletionItem {
-                label: candidate.label.clone(),
-                detail: candidate.detail,
-                kind: Some(candidate.kind),
                 // The edit is given explicitly rather than left to the input's
                 // own guess at where the word started. That guess is taken on
                 // the first keystroke of a run and not revised, so a word typed
@@ -640,8 +644,11 @@ impl SchemaCompletions {
                         start: text.offset_to_position(word.start),
                         end: text.offset_to_position(word.end),
                     },
-                    new_text: candidate.insert.unwrap_or(candidate.label),
+                    new_text: candidate.written(self.engine),
                 })),
+                label: candidate.label,
+                detail: candidate.detail,
+                kind: Some(candidate.kind),
                 ..Default::default()
             })
             .collect::<Vec<_>>();
@@ -704,7 +711,7 @@ impl FilterCompletions {
             // Qualifying is an editor setting, and the bar is not the editor.
             .map(|(word, candidate)| {
                 let candidate = Candidate {
-                    insert: None,
+                    qualified: false,
                     ..candidate
                 };
                 (word.start - shift..word.end - shift, candidate)
@@ -1219,7 +1226,7 @@ mod tests {
             .expect("something was offered");
         (
             candidate.label.clone(),
-            candidate.insert.unwrap_or(candidate.label),
+            candidate.written(completions.engine),
         )
     }
 
@@ -1269,7 +1276,10 @@ mod tests {
             .into_iter()
             .next()
             .expect("a relation was offered");
-        assert_eq!(candidate.insert.as_deref(), Some("\"Audit Log\".events"));
+        assert_eq!(
+            candidate.written(completions.engine),
+            "\"Audit Log\".events"
+        );
     }
 
     #[test]
