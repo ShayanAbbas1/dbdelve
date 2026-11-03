@@ -2650,21 +2650,35 @@ pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
 /// tokenizer and a name to Db2, so `$$; DELETE FROM t --$$` hides a `DELETE`
 /// Db2 runs; and a `--` comment a lone carriage return runs through, which
 /// psqlODBC ends there.
+///
+/// Generic's tokenizer replaces a `/*! … */` with the tokens inside it, so no
+/// comment token is left to see, and those tokens' spans are placed as if the
+/// `/*!` and any version were not there, so their text is the wrong slice of
+/// `sql`. The comment is caught instead by the hole it leaves: every other
+/// token's span picks up where the last one ended, and the tokens of an
+/// expanded comment never cover its own `*/`.
 fn lexes_apart(dialect: &dyn Dialect, sql: &str) -> bool {
-    let (tokens, _) = located_prefix(dialect, sql);
-    tokens.iter().any(|(token, range)| match token {
-        Token::Whitespace(Whitespace::MultiLineComment(comment)) => {
-            comment.contains("/*") || comment.starts_with('!')
-        }
-        Token::Whitespace(Whitespace::SingleLineComment { comment, .. }) => {
-            carriage_return_inside(comment)
-        }
-        Token::Whitespace(_) => false,
-        _ => {
-            let text = &sql[range.clone()];
-            text.starts_with('$') || text.contains('\\')
-        }
-    })
+    let (tokens, whole) = located_prefix(dialect, sql);
+    let mut end = 0;
+    tokens.iter().any(|(token, range)| {
+        let after_a_hole = std::mem::replace(&mut end, range.end) != range.start;
+        after_a_hole
+            || match token {
+                Token::Whitespace(Whitespace::MultiLineComment(comment)) => {
+                    comment.contains("/*") || comment.starts_with('!')
+                }
+                Token::Whitespace(Whitespace::SingleLineComment { comment, .. }) => {
+                    carriage_return_inside(comment)
+                }
+                Token::Whitespace(_) => false,
+                Token::DollarQuotedString(_) => true,
+                Token::Placeholder(placeholder) if placeholder.starts_with('$') => true,
+                _ => {
+                    let text = &sql[range.clone()];
+                    text.starts_with('$') || text.contains('\\')
+                }
+            }
+    }) || whole && end != sql.len()
 }
 
 /// Whether a `--` comment's text runs on past a carriage return, where a
@@ -7382,6 +7396,36 @@ mod tests {
             "-- $$\nSELECT 1",
         ] {
             assert_eq!(classify(Engine::Generic, sql), Verdict::READ, "{sql}");
+        }
+    }
+
+    #[test]
+    fn generic_reads_as_unreadable_any_executable_comment() {
+        for sql in [
+            "/*! SELECT $$ INTO OUTFILE '/tmp/x' FROM t AS $$ */",
+            "/*!50000 SELECT $$ INTO OUTFILE '/tmp/x' FROM t AS $$ */",
+            "/*! SELECT $$ ; DELETE FROM t ; SELECT $$ */",
+            "SELECT 1 FROM t WHERE 1 = /*! $$ ; DELETE FROM t ; SELECT $$ */",
+            "/*!\nSELECT $$ ; DELETE FROM t ; SELECT $$ */",
+            "/*! SELECT $1$ ; DELETE FROM t ; SELECT $1$ */",
+            "/*! SELECT \"a\\\" FROM t */",
+            "/*! SELECT 1 /* /* */ DELETE FROM t -- */ */",
+            "/*! DELETE FROM t */",
+            "SELECT 1 /*!99999 ; DELETE FROM t */",
+            "SELECT 1 /*! */",
+        ] {
+            assert_eq!(
+                classify(Engine::Generic, sql),
+                unreadable_at(Mode::ReadWrite),
+                "{sql:?}"
+            );
+        }
+        for sql in [
+            "SELECT '/*!' FROM t",
+            "SELECT 1 -- /*! $$ */",
+            "SELECT 1 /* ! */",
+        ] {
+            assert_eq!(classify(Engine::Generic, sql), Verdict::READ, "{sql:?}");
         }
     }
 
