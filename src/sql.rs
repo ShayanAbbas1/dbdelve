@@ -2607,6 +2607,10 @@ pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
         return classify(engine, &explain);
     }
 
+    if let Some(american) = analyse_as_analyze(dialect.as_ref(), sql) {
+        return classify(engine, &american);
+    }
+
     let spec = engine.spec();
     if spec.sql.unreadable_floor == UnreadableFloor::FirstKeyword {
         return by_statement(spec, dialect.as_ref(), sql);
@@ -3108,6 +3112,27 @@ fn mariadb_analyze_as_explain(dialect: &dyn Dialect, sql: &str) -> Option<String
             )
         );
     dml.then(|| format!("EXPLAIN {sql}"))
+}
+
+/// Postgres's `EXPLAIN ANALYSE <statement>`, which runs the statement as
+/// `EXPLAIN ANALYZE` does, respelled as the `ANALYZE` sqlparser reads so it is
+/// classified by the statement it runs. The two words are the same length, so
+/// every other token keeps its place.
+fn analyse_as_analyze(dialect: &dyn Dialect, sql: &str) -> Option<String> {
+    let tokens = located_tokens(dialect, sql)?;
+    let mut words = tokens
+        .iter()
+        .filter(|(token, _)| !matches!(token, Token::Whitespace(_)));
+    let (first, _) = words.next()?;
+    let (second, range) = words.next()?;
+    let is = |token: &Token, keyword: &str| is_keyword(Some(&token), keyword);
+    // The slice is checked as well as the token: a span after Generic's
+    // `/*! … */` expansion points at the wrong text.
+    let spelled = sql
+        .get(range.clone())
+        .is_some_and(|text| text.eq_ignore_ascii_case("ANALYSE"));
+    (is(first, "EXPLAIN") && is(second, "ANALYSE") && spelled)
+        .then(|| format!("{}ANALYZE{}", &sql[..range.start], &sql[range.end..]))
 }
 
 /// Whether `sql` can run again just to reload the rows it produced. A grid is
@@ -3898,9 +3923,11 @@ fn variant_verdict(statement: &Statement) -> Verdict {
 /// (`EXPLAIN ANALYZE …`); the parenthesized form lands in `options` untouched,
 /// so `EXPLAIN (ANALYZE TRUE) DELETE FROM t` read as a plain EXPLAIN and
 /// deleted the rows. Anything but an explicit off counts as on: an argument
-/// this does not recognise is not a reason to call a write a read.
+/// this does not recognise is not a reason to call a write a read. Postgres
+/// takes the British `ANALYSE` as the same option.
 fn analyze_option_is_on(option: &UtilityOption) -> bool {
-    if !option.name.value.eq_ignore_ascii_case("analyze") {
+    let name = &option.name.value;
+    if !name.eq_ignore_ascii_case("analyze") && !name.eq_ignore_ascii_case("analyse") {
         return false;
     }
     match &option.arg {
@@ -6994,29 +7021,38 @@ mod tests {
             "EXPLAIN (ANALYZE TRUE, COSTS FALSE) DELETE FROM t",
             "EXPLAIN (COSTS FALSE, ANALYZE ON) DELETE FROM t",
             "EXPLAIN (analyze true) DELETE FROM t",
+            "EXPLAIN (ANALYSE) DELETE FROM t",
+            "EXPLAIN (ANALYSE TRUE) DELETE FROM t",
+            "EXPLAIN (ANALYSE on) DELETE FROM t",
+            "EXPLAIN (VERBOSE, analyse 1) DELETE FROM t",
+            "EXPLAIN ANALYSE DELETE FROM t",
+            "EXPLAIN ANALYSE VERBOSE DELETE FROM t",
         ];
 
-        for sql in cases {
-            assert_eq!(
-                classify(Engine::Postgres, sql),
-                Verdict {
-                    mode: Mode::Full,
-                    destructive: vec![Destructive::UnfilteredDelete],
-                },
-                "{sql}"
-            );
-        }
+        for engine in [Engine::Postgres, Engine::Generic] {
+            for sql in cases {
+                assert_eq!(
+                    classify(engine, sql),
+                    Verdict {
+                        mode: Mode::Full,
+                        destructive: vec![Destructive::UnfilteredDelete],
+                    },
+                    "{engine:?} {sql}"
+                );
+            }
 
-        for sql in [
-            "EXPLAIN (ANALYZE FALSE) DELETE FROM t",
-            "EXPLAIN (ANALYZE OFF) DELETE FROM t",
-            "EXPLAIN (COSTS TRUE) SELECT 1",
-        ] {
-            assert_eq!(
-                classify(Engine::Postgres, sql).mode,
-                Mode::ReadOnly,
-                "{sql}"
-            );
+            for sql in [
+                "EXPLAIN (ANALYZE FALSE) DELETE FROM t",
+                "EXPLAIN (ANALYZE OFF) DELETE FROM t",
+                "EXPLAIN (ANALYSE FALSE) DELETE FROM t",
+                "EXPLAIN (COSTS TRUE) SELECT 1",
+            ] {
+                assert_eq!(
+                    classify(engine, sql).mode,
+                    Mode::ReadOnly,
+                    "{engine:?} {sql}"
+                );
+            }
         }
     }
 
