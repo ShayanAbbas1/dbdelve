@@ -83,8 +83,17 @@ fn error(records: &[(String, String)], function: &str) -> Response {
         message,
         sqlstate: records.first().map(|(state, _)| state.clone()),
         position: None,
-        lost: records.iter().any(|(state, _)| state.starts_with("08")),
+        lost: records.iter().any(|(state, _)| is_lost(state)),
     }
+}
+
+/// Db2 CLI reports a dead link as 40003 and psqlODBC reports the server
+/// terminating the session as 57P01/57P02, both with no 08 record, so the
+/// session would stay green until the next statement. 40001/40P01 are
+/// retryable transaction failures on a live connection, and 57P03 is a
+/// refusal at connect time, so neither counts.
+fn is_lost(state: &str) -> bool {
+    state.starts_with("08") || matches!(state, "40003" | "57P01" | "57P02")
 }
 
 #[cfg(test)]
@@ -163,5 +172,37 @@ mod tests {
         };
         assert!(message.starts_with("SQLConnect failed"));
         assert_eq!(sqlstate, None);
+    }
+
+    #[test]
+    fn a_dead_link_or_terminated_session_is_lost() {
+        for state in ["08001", "08S01", "40003", "57P01", "57P02"] {
+            let Response::Error { lost, .. } = error(&records(&[(state, "gone")]), "f") else {
+                panic!("an error");
+            };
+            assert!(lost, "{state}");
+        }
+    }
+
+    #[test]
+    fn a_lost_record_after_the_first_still_marks_the_session() {
+        let Response::Error { lost, .. } =
+            error(&records(&[("HY000", "x"), ("40003", "link")]), "f")
+        else {
+            panic!("an error");
+        };
+        assert!(lost);
+    }
+
+    #[test]
+    fn retryable_and_ordinary_failures_are_not_lost() {
+        for state in [
+            "40001", "40P01", "42000", "42P01", "57014", "57P03", "HY000", "HY008",
+        ] {
+            let Response::Error { lost, .. } = error(&records(&[(state, "no")]), "f") else {
+                panic!("an error");
+            };
+            assert!(!lost, "{state}");
+        }
     }
 }
