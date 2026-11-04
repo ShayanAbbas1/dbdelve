@@ -25,10 +25,32 @@ use crate::{
     ui::{Control, Tone, icon_button},
 };
 
+/// Past this much text, a copy carries the text alone: the rows beside it are
+/// a second rendering of the same rows, built on the UI thread and held on the
+/// clipboard twice over. A paste of it then reads only the text, which loses
+/// NULL against empty and each value's own type.
+pub const COPIED_ROWS_TEXT_LIMIT: usize = 16 * 1024 * 1024;
+
 /// `text` for the clipboard, with `result`'s rows beside it for a paste back
 /// into DBDelve ([`export::CopiedRows`]).
 pub fn copied_rows(text: String, result: &QueryResult) -> ClipboardItem {
-    ClipboardItem::new_string_with_json_metadata(text, export::CopiedRows::of(result))
+    copied_row_slice(text, &result.columns, &result.rows, &result.cell_types)
+}
+
+/// [`copied_rows`] over rows that are not a result of their own.
+pub fn copied_row_slice(
+    text: String,
+    columns: &[db::Column],
+    rows: &[db::Row],
+    cell_types: &[Vec<&str>],
+) -> ClipboardItem {
+    if text.len() > COPIED_ROWS_TEXT_LIMIT {
+        return ClipboardItem::new_string(text);
+    }
+    ClipboardItem::new_string_with_json_metadata(
+        text,
+        export::CopiedRows::new(columns, rows, cell_types),
+    )
 }
 
 /// ponytail: a column is a few hundred pixels wide, so shaping more than this is
@@ -6142,5 +6164,32 @@ mod tests {
 
         assert_eq!(restored.active(), Some((2, 0)));
         assert_eq!(restored.result.rows, grid.result.rows);
+    }
+
+    #[test]
+    fn a_copy_past_the_limit_carries_its_text_alone() {
+        let columns = vec![db::Column {
+            name: "v".into(),
+            ..Default::default()
+        }];
+        let rows = vec![db::Row::new(vec![Some("x".to_string())]).unwrap()];
+        let metadata = |item: ClipboardItem| {
+            item.entries().iter().find_map(|entry| match entry {
+                gpui::ClipboardEntry::String(string) => string.metadata.clone(),
+                _ => None,
+            })
+        };
+
+        let small = metadata(copied_row_slice("v\nx\n".into(), &columns, &rows, &[]));
+        assert_eq!(
+            small.as_deref(),
+            Some(r#"{"dbdelve":2,"columns":[{"name":"v","type":null}],"rows":[{"v":"x"}]}"#)
+        );
+
+        let large = "x".repeat(COPIED_ROWS_TEXT_LIMIT + 1);
+        assert_eq!(
+            metadata(copied_row_slice(large, &columns, &rows, &[])),
+            None
+        );
     }
 }

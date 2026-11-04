@@ -937,7 +937,12 @@ mod tests {
                 "string"
             ]
         );
-        let metadata = serde_json::to_string(&crate::export::CopiedRows::of(&copied)).unwrap();
+        let metadata = serde_json::to_string(&crate::export::CopiedRows::new(
+            &copied.columns,
+            &copied.rows,
+            &copied.cell_types,
+        ))
+        .unwrap();
         let (format, bytes, problems) = pasted("", Some(&metadata), true).unwrap();
         assert_eq!((format, problems), (Format::Json, Vec::new()));
         assert_eq!(

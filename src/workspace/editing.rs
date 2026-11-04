@@ -1341,8 +1341,12 @@ impl Workspace {
             result.cell_types.get(row..=row).unwrap_or_default(),
         );
         let text = export::render_rows(Format::Tsv, &result.columns, rows, cell_types);
-        let copied = export::CopiedRows::new(&result.columns, rows, cell_types);
-        cx.write_to_clipboard(ClipboardItem::new_string_with_json_metadata(text, copied));
+        cx.write_to_clipboard(result_grid::copied_row_slice(
+            text,
+            &result.columns,
+            rows,
+            cell_types,
+        ));
     }
 
     /// The selected rows, or the active cell's alone with nothing selected, in

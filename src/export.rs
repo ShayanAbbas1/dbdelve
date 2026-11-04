@@ -411,7 +411,8 @@ struct CopiedColumn<'a> {
 
 impl<'a> CopiedRows<'a> {
     pub fn new(columns: &'a [Column], rows: &[Row], cell_types: &'a [Vec<&'a str>]) -> Self {
-        let json = render_rows(Format::Json, columns, rows, cell_types);
+        let writer = Writer::with_shape(Vec::new(), Shape::json(columns, &COMPACT_JSON), columns);
+        let json = rendered(writer, rows, cell_types);
         Self {
             dbdelve: COPIED_ROWS_VERSION,
             columns: columns
@@ -424,10 +425,6 @@ impl<'a> CopiedRows<'a> {
             rows: RawValue::from_string(json).expect("the JSON writer writes JSON"),
             types: cell_types,
         }
-    }
-
-    pub fn of(result: &'a QueryResult) -> Self {
-        Self::new(&result.columns, &result.rows, &result.cell_types)
     }
 }
 
@@ -473,18 +470,53 @@ pub struct Writer<W: Write> {
 
 enum Shape {
     Delimited(char),
-    /// Each column's key, already spelled as a JSON string.
-    Json(Vec<String>),
+    /// Each column's key, already spelled as a JSON string, and the spacing
+    /// between the pieces.
+    Json(Vec<String>, &'static JsonLayout),
     Inserts(Inserts),
 }
 
+struct JsonLayout {
+    first_row: &'static [u8],
+    next_row: &'static [u8],
+    first_field: &'static [u8],
+    next_field: &'static [u8],
+    colon: &'static [u8],
+    close_row: &'static [u8],
+    close: &'static [u8],
+    empty: &'static [u8],
+}
+
+const PRETTY_JSON: JsonLayout = JsonLayout {
+    first_row: b"[\n  ",
+    next_row: b",\n  ",
+    first_field: b"{\n    ",
+    next_field: b",\n    ",
+    colon: b": ",
+    close_row: b"\n  }",
+    close: b"\n]\n",
+    empty: b"[]\n",
+};
+
+const COMPACT_JSON: JsonLayout = JsonLayout {
+    first_row: b"[",
+    next_row: b",",
+    first_field: b"{",
+    next_field: b",",
+    colon: b":",
+    close_row: b"}",
+    close: b"]",
+    empty: b"[]",
+};
+
 impl Shape {
-    fn json(columns: &[Column]) -> Self {
+    fn json(columns: &[Column], layout: &'static JsonLayout) -> Self {
         Shape::Json(
             json_keys(columns)
                 .iter()
                 .map(|key| serde_json::to_string(key).expect("a string always serializes"))
                 .collect(),
+            layout,
         )
     }
 }
@@ -494,7 +526,7 @@ impl<W: Write> Writer<W> {
         let shape = match format {
             Format::Csv => Shape::Delimited(','),
             Format::Tsv => Shape::Delimited('\t'),
-            Format::Json => Shape::json(columns),
+            Format::Json => Shape::json(columns, &PRETTY_JSON),
         };
         Self::with_shape(out, shape, columns)
     }
@@ -544,11 +576,11 @@ impl<W: Write> Writer<W> {
             }
             // A document's missing field is left out of its object rather
             // than written as the `null` it does not hold.
-            Shape::Json(keys) => {
+            Shape::Json(keys, layout) => {
                 for (row_ix, row) in rows.iter().enumerate() {
                     out.write_all(match self.written {
-                        0 => b"[\n  ",
-                        _ => b",\n  ",
+                        0 => layout.first_row,
+                        _ => layout.next_row,
                     })?;
                     let types = cell_types.get(row_ix);
                     let mut fields = 0;
@@ -557,11 +589,11 @@ impl<W: Write> Writer<W> {
                             continue;
                         }
                         out.write_all(match fields {
-                            0 => b"{\n    ",
-                            _ => b",\n    ",
+                            0 => layout.first_field,
+                            _ => layout.next_field,
                         })?;
                         out.write_all(key.as_bytes())?;
-                        out.write_all(b": ")?;
+                        out.write_all(layout.colon)?;
                         match cell {
                             None => out.write_all(b"null")?,
                             Some(value) => serde_json::to_writer(&mut *out, value)?,
@@ -570,7 +602,7 @@ impl<W: Write> Writer<W> {
                     }
                     out.write_all(match fields {
                         0 => b"{}",
-                        _ => b"\n  }",
+                        _ => layout.close_row,
                     })?;
                     self.written += 1;
                 }
@@ -591,9 +623,9 @@ impl<W: Write> Writer<W> {
 
     pub fn finish(mut self) -> io::Result<W> {
         match &self.shape {
-            Shape::Json(_) => self.out.write_all(match self.written {
-                0 => b"[]\n",
-                _ => b"\n]\n",
+            Shape::Json(_, layout) => self.out.write_all(match self.written {
+                0 => layout.empty,
+                _ => layout.close,
             })?,
             Shape::Inserts(Inserts {
                 around: Some((_, after)),
@@ -1353,6 +1385,13 @@ mod tests {
             assert_eq!(
                 String::from_utf8(writer.finish().unwrap()).unwrap(),
                 expected
+            );
+            let compact =
+                Writer::with_shape(Vec::new(), Shape::json(&columns, &COMPACT_JSON), &columns);
+            let parsed: serde_json::Value = serde_json::from_str(&expected).unwrap();
+            assert_eq!(
+                rendered(compact, &rows, &cell_types),
+                serde_json::to_string(&parsed).unwrap()
             );
         }
     }
