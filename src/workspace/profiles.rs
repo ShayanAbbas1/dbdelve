@@ -65,6 +65,7 @@ impl Workspace {
             check_for_updates: Some(self.settings.check_for_updates),
             color_titlebar: Some(self.settings.color_titlebar),
             client_sort: Some(self.settings.client_sort),
+            qualify_completions: Some(self.settings.qualify_completions),
             welcomed: Some(self.settings.welcomed),
             custom_keybindings: Some(self.settings.custom_keybindings.clone()),
             theme_opacity: Some(self.settings.theme_opacity.clone()),
@@ -1949,9 +1950,10 @@ impl Workspace {
         let engine = profile.config.engine();
         profile.session.completions = match &profile.catalog {
             CatalogState::Loaded(catalog, _) => Some(Rc::new(SchemaCompletions::new(
-                engine.syntax(),
+                engine,
                 Arc::new(catalog.clone()),
                 profile.session.completion_columns.clone(),
+                self.settings.qualify_completions,
                 cx.weak_entity(),
             ))),
             _ => None,

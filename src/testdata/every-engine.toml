@@ -18,6 +18,7 @@ opacity = 0.85
 check_for_updates = false
 color_titlebar = true
 client_sort = false
+qualify_completions = true
 welcomed = true
 
 # One entry each: both are HashMaps, and a second entry would make the

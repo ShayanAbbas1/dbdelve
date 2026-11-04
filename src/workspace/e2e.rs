@@ -11,7 +11,7 @@ use gpui_component::{Root, input::InputState};
 
 use super::Workspace;
 use crate::{
-    actions::CancelQuery,
+    actions::{CancelQuery, ImportRowsFromClipboard},
     connection_form::ConnectionForm,
     db::{CancelToken, ConnectionConfig, Engine, ExternalConfig, Fetch, SshTunnel},
     explorer, keybindings,
@@ -721,6 +721,320 @@ fn tab_walks_the_import_dialog_and_its_buttons_answer_the_keyboard(cx: &mut Test
         press(cx, "enter");
         assert_eq!(front_dialog(&workspace, cx), None);
         assert!(editor_has_keyboard(&workspace, cx));
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn copy_and_paste_in_a_table_carry_rows_into_the_import_dialog(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            "create table birds (id integer primary key, name text, note text);
+             insert into birds values (1, 'wren', null), (2, 'robin', '');",
+        );
+        cx.simulate_keystrokes("secondary-k e");
+        settle(cx);
+        cx.simulate_keystrokes("down down enter");
+        settle(cx);
+        let clipboard = |cx: &mut VisualTestContext| {
+            let item = cx.read_from_clipboard().expect("something was copied");
+            let metadata = item.entries().iter().find_map(|entry| match entry {
+                gpui::ClipboardEntry::String(string) => string.metadata.clone(),
+                _ => None,
+            });
+            (item.text().unwrap_or_default(), metadata)
+        };
+        let gutter = |row: usize, cx: &mut VisualTestContext| {
+            let selector: &'static str = format!("row-number-{row}").leak();
+            cx.debug_bounds(selector).expect("the row is drawn")
+        };
+
+        let first = gutter(0, cx).center();
+        cx.simulate_click(first, gpui::Modifiers::default());
+        settle(cx);
+        cx.simulate_keystrokes("secondary-c");
+        let (text, metadata) = clipboard(cx);
+        assert_eq!(text, "id\tname\tnote\n1\twren\t\n");
+        assert!(metadata.is_some(), "a row copy carries its rows");
+
+        let second = gutter(1, cx).center();
+        cx.simulate_click(second, gpui::Modifiers::shift());
+        settle(cx);
+        cx.simulate_keystrokes("secondary-c");
+        let (text, metadata) = clipboard(cx);
+        assert_eq!(text, "id\tname\tnote\n1\twren\t\n2\trobin\t\"\"\n");
+        let pasted = crate::import_rows::pasted(&text, metadata.as_deref(), false);
+        assert_eq!(
+            pasted.map(|(format, bytes, _)| (format, String::from_utf8(bytes).unwrap())),
+            Some((
+                crate::import_rows::Format::Json,
+                "{\"id\":\"1\",\"name\":\"wren\",\"note\":null}\n\
+                 {\"id\":\"2\",\"name\":\"robin\",\"note\":\"\"}"
+                    .into()
+            ))
+        );
+
+        // A cell of the first row, clicked: that cell alone, as Copy Cell has it.
+        let cell = gutter(0, cx).right_center() + gpui::point(gpui::px(12.), gpui::px(0.));
+        cx.simulate_click(cell, gpui::Modifiers::default());
+        settle(cx);
+        cx.simulate_keystrokes("right secondary-c");
+        settle(cx);
+        assert_eq!(clipboard(cx), ("wren".into(), None));
+
+        // An open input keeps both keystrokes for its own text.
+        let resolved: Rc<RefCell<Vec<Option<&'static str>>>> = Rc::default();
+        let _observer = cx.update({
+            let resolved = resolved.clone();
+            |_, cx| {
+                cx.observe_keystrokes(move |event, _, _| {
+                    let action = event.action.as_ref().map(|action| action.name());
+                    resolved.borrow_mut().push(action);
+                })
+            }
+        });
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        resolved.borrow_mut().clear();
+        cx.simulate_keystrokes("secondary-c secondary-v");
+        settle(cx);
+        assert_eq!(
+            *resolved.borrow(),
+            [Some("input::Copy"), Some("input::Paste")]
+        );
+        assert_eq!(front_dialog(&workspace, cx), None);
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string("name\nfinch\n".into()));
+        cx.simulate_keystrokes("secondary-v");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("import-rows"));
+        workspace.read_with(cx, |workspace, _| {
+            let dialog = workspace.profile().unwrap().session.import_rows.as_ref();
+            let dialog = dialog.expect("the dialog is open");
+            assert_eq!(dialog.source.name(), "Clipboard");
+            assert_eq!(&*dialog.bytes, b"name\nfinch\n");
+        });
+
+        // A value a paste could not type holds the import up where it is.
+        let profile =
+            workspace.read_with(cx, |workspace, _| workspace.profile().unwrap().id.clone());
+        workspace.update(cx, |workspace, cx| {
+            let session = &mut workspace.profile_mut().unwrap().session;
+            let dialog = session.import_rows.as_mut().unwrap();
+            dialog.options.format = crate::import_rows::Format::Json;
+            dialog.bytes = b"{\"name\":\"finch\"}".as_slice().into();
+            dialog.source =
+                crate::session::ImportSource::Clipboard(vec![crate::import_rows::Problem {
+                    row: Some(0),
+                    line: Some(1),
+                    column: Some(0),
+                    message: "unreadable".into(),
+                }]);
+            workspace.recheck_import(&profile, cx);
+        });
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let dialog = workspace.profile().unwrap().session.import_rows.as_ref();
+            let Some(Ok(prepared)) = &dialog.unwrap().prepared else {
+                panic!("the paste was not checked");
+            };
+            let problems = &prepared.checked.problems;
+            assert!(
+                problems
+                    .iter()
+                    .any(|problem| problem.message == "unreadable"),
+                "{problems:?}"
+            );
+        });
+
+        // A paste read after another import was asked for, or after a dialog
+        // opened, opens nothing.
+        let take = |cx: &mut VisualTestContext| {
+            workspace.update(cx, |workspace, _| {
+                workspace.profile_mut().unwrap().session.import_rows.take()
+            })
+        };
+        let shown = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                let dialog = workspace.profile().unwrap().session.import_rows.as_ref();
+                dialog.map(|dialog| dialog.bytes.to_vec())
+            })
+        };
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string("late\n1\n".into()));
+        let opened = take(cx);
+        let opened_bytes = opened.as_ref().map(|dialog| dialog.bytes.to_vec());
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.import_rows_from_clipboard(&ImportRowsFromClipboard, window, cx);
+            workspace.profile_mut().unwrap().session.import_rows = opened;
+        });
+        settle(cx);
+        assert_eq!(shown(cx), opened_bytes);
+
+        take(cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.import_rows_from_clipboard(&ImportRowsFromClipboard, window, cx);
+            workspace.import_rows_into("main".into(), "birds".into(), window, cx);
+        });
+        settle(cx);
+        assert_eq!(shown(cx), None);
+
+        // Nor one read while the profile moved to another database, whose
+        // table of the same name is not the one asked for.
+        let moved = |workspace: &mut Workspace| workspace.profile_mut().unwrap().generation += 1;
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.import_rows_from_clipboard(&ImportRowsFromClipboard, window, cx);
+            moved(workspace);
+        });
+        settle(cx);
+        assert_eq!(shown(cx), None);
+
+        // A file read is held to both the same way.
+        let file = store::dbdelve_directory().unwrap().join("late.csv");
+        std::fs::write(&file, "id\n7\n").unwrap();
+        let read_file =
+            |workspace: &mut Workspace, window: &mut Window, cx: &mut gpui::Context<Workspace>| {
+                let profile = workspace.profile().unwrap().id.clone();
+                workspace.open_import_file(
+                    profile,
+                    "main".into(),
+                    "birds".into(),
+                    file.clone(),
+                    window,
+                    cx,
+                );
+            };
+        workspace.update_in(cx, |workspace, window, cx| {
+            read_file(workspace, window, cx);
+            workspace.import_rows_from_clipboard(&ImportRowsFromClipboard, window, cx);
+        });
+        settle(cx);
+        assert_eq!(shown(cx), Some(b"late\n1\n".to_vec()));
+        take(cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            read_file(workspace, window, cx);
+            moved(workspace);
+        });
+        settle(cx);
+        assert_eq!(shown(cx), None);
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn rows_copied_from_one_table_paste_into_another_exactly(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            "create table birds (id integer primary key, note text, big integer, ratio real, body text, pic blob);
+             insert into birds values
+               (1, null, 9223372036854775807, 0.1, 'a	b \"q\" ''s''
+ünï ✓', x'00FF10'),
+               (2, '', -9007199254740993, 1.5e300, 'plain', null),
+               (3, 'NULL', 0, -2.5, '', x'');
+             create table nests (pic blob, body text, ratio real, big integer, note text, id integer primary key);",
+        );
+        cx.executor().allow_parking();
+        let read = |table: &str| -> Vec<Vec<String>> {
+            // Not `pic`: Import Rows writes the grid's `x'00FF10'` for a blob
+            // as text, as it does reading the same value from a file.
+            let columns = ["id", "note", "big", "ratio", "body"]
+                .map(|c| format!("typeof({c}) || ' ' || quote({c})"))
+                .join(", ");
+            let db = rusqlite::Connection::open(store::dbdelve_directory().unwrap().join("e2e.db"))
+                .unwrap();
+            let mut statement = db
+                .prepare(&format!("select {columns} from {table} order by id"))
+                .unwrap();
+            statement
+                .query_map([], |row| (0..5).map(|i| row.get::<_, String>(i)).collect())
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let open = |name: &str, cx: &mut VisualTestContext| {
+            cx.simulate_keystrokes("secondary-p");
+            settle(cx);
+            cx.simulate_input(name);
+            cx.simulate_keystrokes("enter");
+            settle(cx);
+            let front = workspace.read_with(cx, |workspace, _| {
+                let session = &workspace.profile().unwrap().session;
+                session.active_object().map(|tab| tab.name.clone())
+            });
+            assert_eq!(front.as_deref(), Some(name));
+        };
+        let paste_and_import = |cx: &mut VisualTestContext| {
+            cx.simulate_keystrokes("secondary-v");
+            settle(cx);
+            assert_eq!(front_dialog(&workspace, cx), Some("import-rows"));
+            cx.executor()
+                .advance_clock(std::time::Duration::from_secs(1));
+            settle(cx);
+            workspace.read_with(cx, |workspace, _| {
+                let dialog = workspace.profile().unwrap().session.import_rows.as_ref();
+                assert_eq!(super::import_dialog::import_blocked(dialog.unwrap()), None);
+            });
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.dialog_focus.focus(window, cx)
+            });
+            cx.simulate_keystrokes("shift-tab");
+            press(cx, "enter");
+            for _ in 0..100 {
+                if front_dialog(&workspace, cx).is_none() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                settle(cx);
+            }
+            assert_eq!(
+                front_dialog(&workspace, cx),
+                None,
+                "the import never finished"
+            );
+        };
+
+        open("birds", cx);
+        let gutter = |row: usize, cx: &mut VisualTestContext| {
+            let selector: &'static str = format!("row-number-{row}").leak();
+            cx.debug_bounds(selector).expect("the row is drawn")
+        };
+        let first = gutter(0, cx).center();
+        cx.simulate_click(first, gpui::Modifiers::default());
+        let last = gutter(2, cx).center();
+        cx.simulate_click(last, gpui::Modifiers::shift());
+        settle(cx);
+        cx.simulate_keystrokes("secondary-c");
+
+        // The way a mouse opens it: an empty table, its keyboard on nothing
+        // the grid draws.
+        let nests = explorer_row(&workspace, "relation-main\0nests", cx).center();
+        cx.simulate_click(nests, gpui::Modifiers::default());
+        settle(cx);
+        paste_and_import(cx);
+        assert_eq!(read("nests"), read("birds"));
+
+        // A spreadsheet's cells, which carry no types and no NULL of their own.
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+            "id\tbody\tnote\tbig\n10\tfrom a sheet\t\t42\n".into(),
+        ));
+        paste_and_import(cx);
+        assert_eq!(
+            read("nests").last().unwrap(),
+            &[
+                "integer 10",
+                "null NULL",
+                "integer 42",
+                "null NULL",
+                "text 'from a sheet'",
+            ]
+        );
 
         quit(workspace, cx);
     });
@@ -2161,6 +2475,35 @@ fn a_mode_picked_while_connecting_is_the_one_the_session_holds(cx: &mut TestAppC
 }
 
 #[gpui::test]
+fn pinning_leaves_every_row_its_height(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        let table = explorer::relation_row("main", "birds");
+        let unpinned = explorer_row(&workspace, &table, cx).size.height;
+
+        cx.update(|_, cx| {
+            workspace.update(cx, |workspace, cx| {
+                let leaf = workspace.profile().unwrap().session.explorer_leaves[&table];
+                let birds = workspace.member_at(leaf.target).unwrap();
+                workspace.toggle_pin(explorer::Pin::Member(birds), cx);
+            })
+        });
+        settle(cx);
+
+        assert_eq!(explorer_row(&workspace, &table, cx).size.height, unpinned);
+        assert_eq!(
+            explorer_row(&workspace, explorer::PINNED_GROUP, cx)
+                .size
+                .height,
+            unpinned,
+            "the Pinned group, listed first, is the row every row is sized by"
+        );
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn a_service_launch_does_not_reuse_a_profiles_explicit_port(cx: &mut TestAppContext) {
     // PGSERVICE must be set before the process starts, not raced against
     // every other test that reads the environment.
@@ -2212,5 +2555,92 @@ fn a_service_launch_does_not_reuse_a_profiles_explicit_port(cx: &mut TestAppCont
             workspace.read_with(cx, |workspace, _| workspace.profile().unwrap().id.clone());
         quit(workspace, cx);
         assert_eq!(active, "inherited");
+    });
+}
+
+#[gpui::test]
+fn a_click_on_an_empty_table_takes_the_keyboard_for_a_paste(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) =
+            launch_on_sqlite_holding(cx, "create table nests (id integer primary key);");
+        cx.executor().allow_parking();
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string("id\n5\n".into()));
+        let nests = explorer_row(&workspace, "relation-main\0nests", cx).center();
+        cx.simulate_click(nests, gpui::Modifiers::default());
+        settle(cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.focus.focus(window, cx)
+        });
+        settle(cx);
+
+        let empty = cx
+            .debug_bounds("empty-results")
+            .expect("the message is drawn");
+        cx.simulate_click(empty.center(), gpui::Modifiers::default());
+        settle(cx);
+        cx.simulate_keystrokes("secondary-v");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("import-rows"));
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_ways_to_import_show_only_where_rows_can_be_imported(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            "create table birds (id integer primary key); insert into birds values (1);
+             create table nests (id integer primary key);",
+        );
+        cx.executor().allow_parking();
+        let drawn = |selector: &'static str, cx: &mut VisualTestContext| {
+            cx.debug_bounds(selector).is_some()
+        };
+        let open = |name: &str, cx: &mut VisualTestContext| {
+            let row: &'static str = format!("relation-main\0{name}").leak();
+            let row = explorer_row(&workspace, row, cx).center();
+            cx.simulate_click(row, gpui::Modifiers::default());
+            settle(cx);
+        };
+        assert!(!drawn("import-rows", cx), "a query tab imports nothing");
+
+        open("birds", cx);
+        assert!(drawn("import-rows", cx));
+        assert!(
+            !drawn("paste-rows", cx),
+            "a table with rows needs no invitation"
+        );
+        let menu_offers_paste = cx.update(|_, cx| {
+            let session = &workspace.read(cx).profile().unwrap().session;
+            session
+                .active_results()
+                .unwrap()
+                .read(cx)
+                .delegate()
+                .takes_imports()
+        });
+        assert!(menu_offers_paste);
+
+        open("nests", cx);
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string("id\n5\n".into()));
+        let paste = cx
+            .debug_bounds("paste-rows")
+            .expect("an empty table invites rows");
+        cx.simulate_click(paste.center(), gpui::Modifiers::default());
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("import-rows"));
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), None);
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_mode(crate::sql::Mode::ReadOnly, cx)
+        });
+        settle(cx);
+        assert!(!drawn("paste-rows", cx), "read-only has nothing to invite");
+
+        quit(workspace, cx);
     });
 }

@@ -70,6 +70,9 @@ pub(crate) struct Settings {
     /// holds rather than by asking the server again. Off by default, which is
     /// how every tab sorted before this was a choice.
     pub(crate) client_sort: bool,
+    /// Whether completing a relation writes it as `schema.relation`, for
+    /// databases whose search path does not reach every schema.
+    pub(crate) qualify_completions: bool,
     /// Whether the first-run greeting has played on the welcome surface.
     pub(crate) welcomed: bool,
     /// Keybinding overrides, keyed by action id. Applied to the keymap on
@@ -106,6 +109,7 @@ impl Default for Settings {
             check_for_updates: true,
             color_titlebar: true,
             client_sort: false,
+            qualify_completions: false,
             welcomed: false,
             custom_keybindings: HashMap::new(),
         }
@@ -213,6 +217,9 @@ pub(crate) struct Workspace {
     pub(crate) form: Option<ConnectionForm>,
     /// Whether the menu bar last set lists Import Rows.
     menu_imports_rows: bool,
+    /// Bumped by every import asked for, so a paste still being read when
+    /// another is asked for opens nothing when it lands.
+    import_requests: u64,
     pub(crate) projects: Vec<store::StoredProject>,
     /// The welcome surface's project name field, while a project is being
     /// named there.
@@ -432,6 +439,7 @@ impl Workspace {
             active: 0,
             form: None,
             menu_imports_rows: false,
+            import_requests: 0,
             projects: Vec::new(),
             project_name: None,
             renaming_project: None,
@@ -572,6 +580,8 @@ impl Workspace {
                     stored_settings.check_for_updates.unwrap_or(true);
                 workspace.settings.color_titlebar = stored_settings.color_titlebar.unwrap_or(true);
                 workspace.settings.client_sort = stored_settings.client_sort.unwrap_or(false);
+                workspace.settings.qualify_completions =
+                    stored_settings.qualify_completions.unwrap_or(false);
                 workspace.settings.welcomed = welcome::welcomed(
                     stored_settings.welcomed,
                     !profiles.is_empty() || !unavailable.is_empty(),
@@ -1015,6 +1025,25 @@ impl Workspace {
             return;
         }
         self.settings.client_sort = client;
+        self.remember_profiles(cx);
+        cx.notify();
+    }
+
+    /// Rebuilt on every profile now rather than at its next catalog load, which
+    /// may be a reconnect away.
+    pub(crate) fn set_qualify_completions(&mut self, qualify: bool, cx: &mut Context<Self>) {
+        if self.settings.qualify_completions == qualify {
+            return;
+        }
+        self.settings.qualify_completions = qualify;
+        let ids: Vec<String> = self
+            .profiles
+            .iter()
+            .map(|profile| profile.id.clone())
+            .collect();
+        for id in ids {
+            self.install_completions(&id, cx);
+        }
         self.remember_profiles(cx);
         cx.notify();
     }
@@ -1674,6 +1703,15 @@ impl Render for Workspace {
         let has_pending = pending_count > 0;
         let has_results = self.has_results(cx);
         let show_result_actions = has_results && !has_pending;
+        // Its menu dispatches into the grid, the context `cmd-v` is bound in.
+        let import_menu = profile
+            .session
+            .active_object()
+            .filter(|tab| !has_pending && tab.takes_imports(profile.config.target()))
+            .and_then(|tab| match &tab.body {
+                ObjectBody::Relation { results, .. } => Some(results.focus_handle(cx)),
+                _ => None,
+            });
         // A structure tab's in place of the rows' copy and export: the
         // relation's own definition, and a statement to fill it with.
         let structure_copies = profile.session.active_object().and_then(|tab| {
@@ -1804,6 +1842,20 @@ impl Render for Workspace {
                                     workspace.ask_refresh_stale(cx);
                                 });
                             })
+                        }))
+                        .children(import_menu.map(|grid| {
+                            button("import-rows", "Import", Tone::Quiet, Control::Compact, t)
+                                .debug_selector(|| "import-rows".into())
+                                .child(
+                                    icon(icon::CHEVRON_DOWN)
+                                        .size(px(layout::chrome(layout::ICON_SIZE)))
+                                        .text_color(t.text_faint),
+                                )
+                                .dropdown_menu(move |menu, _, _| {
+                                    menu.action_context(grid.clone())
+                                        .menu("From Clipboard", Box::new(ImportRowsFromClipboard))
+                                        .menu("From File…", Box::new(ImportRows))
+                                })
                         }))
                         // Not beside pending edits: these write the rows as
                         // fetched, not the values on screen, and the review
@@ -2003,6 +2055,7 @@ impl Render for Workspace {
                 self.plan_copied,
                 &self.tab_strip,
                 self.custom_limit.as_ref(),
+                &self.settings.custom_keybindings,
                 cx,
             )))
             .children(results_status);
@@ -2078,6 +2131,12 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::set_default_row_limit_action))
             .on_action(cx.listener(Self::refresh_connection))
             .on_action(cx.listener(Self::import_rows))
+            .on_action(cx.listener(Self::import_rows_from_clipboard))
+            .on_action(
+                cx.listener(|workspace, _: &MenuImportRowsFromClipboard, window, cx| {
+                    workspace.import_rows_from_clipboard(&ImportRowsFromClipboard, window, cx)
+                }),
+            )
             .on_action(cx.listener(Self::show_editor))
             .on_action(cx.listener(Self::select_theme))
             .on_action(cx.listener(Self::select_database))

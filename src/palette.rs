@@ -331,6 +331,7 @@ pub enum Command {
     /// key, so this is offered where the grid refuses to edit.
     NewRow,
     ImportRows,
+    ImportRowsFromClipboard,
     CloseObject(u64),
     /// Stage a `NULL`, the empty string or `DEFAULT` on the active cell. The
     /// rows are how the gestures stop being folklore; the cell menu dispatches
@@ -3651,6 +3652,15 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
                     icon::PLUS,
                     Command::ImportRows,
                     ROWS,
+                ));
+                items.push(bound(
+                    command(
+                        &format!("Import Rows into {} from Clipboard…", tab.name),
+                        icon::PLUS,
+                        Command::ImportRowsFromClipboard,
+                        ROWS,
+                    ),
+                    "import_rows_from_clipboard",
                 ));
             }
             // Only on a row dbdelve can name by its primary key -- the same

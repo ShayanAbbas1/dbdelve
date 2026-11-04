@@ -696,11 +696,16 @@ impl Workspace {
             return;
         };
         let ObjectBody::Relation {
-            structure: StructureState::Loaded(structure),
-            results,
-            ..
+            structure, results, ..
         } = &tab.body
         else {
+            return;
+        };
+        let takes_imports = tab.takes_imports(self.target());
+        results.update(cx, |table, _| {
+            table.delegate_mut().mark_takes_imports(takes_imports)
+        });
+        let StructureState::Loaded(structure) = structure else {
             return;
         };
         // A row's opener carries the arrow a key does: following it is the

@@ -1310,6 +1310,25 @@ impl Workspace {
         cx.write_to_clipboard(ClipboardItem::new_string(value));
     }
 
+    /// `cmd+c` in the grid: the rows the gutter picked, or several selected
+    /// any way, and otherwise the active cell, as Copy Cell copies it.
+    pub(crate) fn copy_selection(
+        &mut self,
+        _: &CopySelection,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(results) = self
+            .profile()
+            .and_then(|profile| profile.session.active_results())
+        else {
+            return;
+        };
+        if let Some(item) = results.read(cx).delegate().copy() {
+            cx.write_to_clipboard(item);
+        }
+    }
+
     /// The active cell's row, whole values under a header, as TSV: what pastes
     /// into a spreadsheet as cells and into a ticket as something readable.
     pub(crate) fn copy_row(&mut self, _: &CopyRow, _: &mut Window, cx: &mut Context<Self>) {
@@ -1324,13 +1343,18 @@ impl Workspace {
             return;
         };
         let result = grid.result();
-        let text = export::render_rows(
-            Format::Tsv,
-            &result.columns,
+        let (rows, cell_types) = (
             &result.rows[row..=row],
             result.cell_types.get(row..=row).unwrap_or_default(),
         );
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        let text = export::render_rows(Format::Tsv, &result.columns, rows, cell_types);
+        cx.write_to_clipboard(result_grid::copied_row_slice(
+            text,
+            true,
+            &result.columns,
+            rows,
+            cell_types,
+        ));
     }
 
     /// The selected rows, or the active cell's alone with nothing selected, in
@@ -1342,10 +1366,10 @@ impl Workspace {
         else {
             return;
         };
-        let Some(text) = results.read(cx).delegate().rows_as(action.kind) else {
+        let Some(item) = results.read(cx).delegate().rows_as(action.kind) else {
             return;
         };
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        cx.write_to_clipboard(item);
     }
 
     pub(crate) fn copy_results(&mut self, _: &CopyResults, _: &mut Window, cx: &mut Context<Self>) {
@@ -1371,7 +1395,7 @@ impl Workspace {
         }
         let rows = result.rows.len();
         let text = export::render(format, result);
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        cx.write_to_clipboard(result_grid::copied_rows(text, result));
         // A copy changes nothing on screen, and a whole result set is too much
         // to take on trust. Unlike a refusal, the confirmation goes by itself.
         self.confirm(

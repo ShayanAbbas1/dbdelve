@@ -11,6 +11,9 @@ use serde::de::{Deserialize, Deserializer, Error as _, MapAccess, Visitor};
 use serde_json::value::RawValue;
 
 use super::{Delimiter, Encoding, Format, Options, Problem};
+use crate::db::MISSING;
+use crate::export::COPIED_ROWS_VERSION;
+use crate::mql;
 
 /// The format a file's extension names, or `None` for a file Import Rows
 /// does not read.
@@ -22,6 +25,144 @@ pub(crate) fn detect(path: &Path) -> Option<Format> {
         "csv" => Some(Format::Csv),
         _ => None,
     }
+}
+
+/// What a paste imports, and how to read it: the rows DBDelve's own copy
+/// carried beside its text ([`crate::export::CopiedRows`]), or else the text
+/// itself, as JSON where it reads as JSON and as delimited text otherwise.
+/// `None` for a clipboard holding no text. `documents` is whether the rows go
+/// into a collection, which keeps each copied value's own type; the problems
+/// are the values that could not keep theirs.
+pub(crate) fn pasted(
+    text: &str,
+    metadata: Option<&str>,
+    documents: bool,
+) -> Option<(Format, Vec<u8>, Vec<Problem>)> {
+    let copied = metadata.and_then(read_copied);
+    let mut names = None;
+    if let Some(copied) = copied {
+        match copied.rows {
+            Some(rows) => {
+                let (rows, problems) = copied_rows(rows, &copied.types, documents);
+                return Some((Format::Json, rows.into_bytes(), problems));
+            }
+            None if !copied.header => names = Some(copied.columns),
+            None => {}
+        }
+    }
+    if text.trim().is_empty() {
+        return None;
+    }
+    let format = if read_json(text).is_ok() {
+        Format::Json
+    } else if sniff(text, '"') == '\t' {
+        Format::Tsv
+    } else {
+        Format::Csv
+    };
+    // A copy too large to carry its rows, of a shape with no header: its
+    // columns are named for it, or its first row would be read as their names.
+    let bytes = match (names, format) {
+        (Some(columns), Format::Tsv | Format::Csv) => {
+            let delimiter = if format == Format::Tsv { '\t' } else { ',' };
+            let header = columns
+                .iter()
+                .map(|column| crate::export::csv_field(delimiter, &column.name))
+                .collect::<Vec<_>>()
+                .join(&delimiter.to_string());
+            format!("{header}\n{text}").into_bytes()
+        }
+        _ => text.as_bytes().to_vec(),
+    };
+    Some((format, bytes, Vec::new()))
+}
+
+#[derive(serde::Deserialize)]
+struct Copied {
+    dbdelve: u32,
+    #[serde(default)]
+    columns: Vec<CopiedColumn>,
+    rows: Option<Vec<Json>>,
+    #[serde(default = "default_header")]
+    header: bool,
+    #[serde(default)]
+    types: Vec<Vec<String>>,
+}
+
+#[derive(serde::Deserialize)]
+struct CopiedColumn {
+    name: String,
+}
+
+fn default_header() -> bool {
+    true
+}
+
+/// `None` for metadata some other app or another version of DBDelve wrote,
+/// which leaves the paste to the text.
+fn read_copied(metadata: &str) -> Option<Copied> {
+    serde_json::from_str::<Copied>(metadata)
+        .ok()
+        .filter(|copied| copied.dbdelve == COPIED_ROWS_VERSION)
+}
+
+/// The rows of a [`crate::export::CopiedRows`] as JSON Lines, so a problem's
+/// line is its row's number.
+///
+/// A typed cell bound for a collection is read back from its text as an edit
+/// of it would be, and written as the Extended JSON an import reads as that
+/// value: the grid's text alone makes a string of a long, a date or an
+/// ObjectId. One that does not read back is a problem rather than that string.
+fn copied_rows(
+    mut rows: Vec<Json>,
+    types: &[Vec<String>],
+    documents: bool,
+) -> (String, Vec<Problem>) {
+    if rows.is_empty() {
+        return ("[]".into(), Vec::new());
+    }
+    let mut problems = Vec::new();
+    if documents {
+        // Numbered as `read_json` numbers them: in the order first seen.
+        let mut columns: Vec<String> = Vec::new();
+        for (at, (row, types)) in rows.iter_mut().zip(types).enumerate() {
+            let Json::Object(fields) = row else {
+                continue;
+            };
+            let present = types.iter().filter(|tag| *tag != MISSING);
+            for ((key, value), tag) in fields.iter_mut().zip(present) {
+                let column = columns
+                    .iter()
+                    .position(|seen| seen == key)
+                    .unwrap_or_else(|| {
+                        columns.push(key.clone());
+                        columns.len() - 1
+                    });
+                let Json::String(text) = value else {
+                    continue;
+                };
+                let typed = mql::coerce(text, Some(tag)).and_then(|typed| {
+                    mql::extended(&typed)
+                        .ok_or_else(|| format!("`{text}` names no value of type {tag}."))
+                });
+                match typed {
+                    Ok(typed) => *value = typed,
+                    Err(message) => problems.push(Problem {
+                        row: Some(at),
+                        line: Some(at + 1),
+                        column: Some(column),
+                        message,
+                    }),
+                }
+            }
+        }
+    }
+    let rows = rows
+        .iter()
+        .map(Json::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    (rows, problems)
 }
 
 const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
@@ -938,6 +1079,267 @@ mod tests {
                 .unwrap(),
             "The file is not valid UTF-16 LE at byte 2."
         );
+    }
+
+    #[test]
+    fn pasted_text_is_json_where_it_parses_as_json_and_delimited_otherwise() {
+        let format = |text: &str| pasted(text, None, false).map(|(format, ..)| format);
+        assert_eq!(format("[{\"a\": 1}, {\"a\": 2}]"), Some(Format::Json));
+        assert_eq!(format("\n{\"a\": 1}\n{\"a\": 2}\n"), Some(Format::Json));
+        assert_eq!(format("a\tb\n1\t2\n"), Some(Format::Tsv));
+        assert_eq!(format("a,b\n1,2\n"), Some(Format::Csv));
+        assert_eq!(format("[not json\tx\n1\t2"), Some(Format::Tsv));
+        assert_eq!(format("{\"a\": 1}\n{oops}"), Some(Format::Csv));
+        assert_eq!(format(""), None);
+        assert_eq!(format(" \n\t\n"), None);
+    }
+
+    fn copied(columns: &[Column], rows: &[Vec<Option<String>>]) -> String {
+        let rows = crate::db::rows(rows.to_vec());
+        serde_json::to_string(&crate::export::CopiedRows::new(columns, &rows, &[])).unwrap()
+    }
+
+    fn named(names: &[&str]) -> Vec<Column> {
+        names
+            .iter()
+            .map(|name| Column {
+                name: (*name).into(),
+                data_type: None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_dbdelve_copy_pastes_its_rows_by_name_whatever_its_text_says() {
+        let columns = named(&["id", "note"]);
+        let metadata = copied(
+            &columns,
+            &[
+                vec![Some("1".into()), None],
+                vec![Some("2".into()), Some(String::new())],
+                vec![Some("3".into()), Some("NULL".into())],
+            ],
+        );
+        // Copy Rows As Text: no header, and NULL written as the word.
+        let (format, bytes, _) = pasted("1\tNULL\n2\t\n3\tNULL", Some(&metadata), false).unwrap();
+        assert_eq!(format, Format::Json);
+        let options = Options::detected(format, &bytes);
+        let table = read(&bytes, &options).unwrap();
+        assert_eq!(table.columns, ["id", "note"]);
+        assert_eq!(
+            table.rows.iter().map(|r| r.line).collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+
+        let target = |name: &str| TargetColumn {
+            name: name.into(),
+            data_type: "text".into(),
+            nullable: true,
+            has_default: false,
+            generated: false,
+        };
+        let targets = [target("note"), target("id")];
+        let prepared = prepare(
+            &bytes,
+            &options,
+            &targets,
+            None,
+            crate::db::Engine::Postgres,
+        )
+        .unwrap();
+        let checked = &prepared.checked;
+        assert!(checked.problems.is_empty(), "{:?}", checked.problems);
+        assert_eq!(
+            checked
+                .columns
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            ["id", "note"]
+        );
+        let notes: Vec<_> = checked
+            .rows
+            .iter()
+            .map(|row| row.values[1].clone())
+            .collect();
+        assert_eq!(
+            notes,
+            [
+                Some(Value::Null),
+                Some(Value::Text(String::new())),
+                Some(Value::Text("NULL".into()))
+            ]
+        );
+    }
+
+    #[test]
+    fn a_copy_of_documents_pastes_into_a_collection_as_the_types_it_held() {
+        const OID: &str = "65a4f0c2e4b0a1b2c3d4e5f6";
+        let columns = named(&["_id", "count", "big", "on", "nested", "at", "name", "x"]);
+        let rows = crate::db::rows(vec![
+            vec![
+                Some(OID.into()),
+                Some("42".into()),
+                Some("9007199254740993".into()),
+                Some("true".into()),
+                Some(r#"{"x":1,"n":{"$numberLong":"5"}}"#.into()),
+                Some("2024-01-15T09:30:00.123Z".into()),
+                Some("42".into()),
+                Some("2.5".into()),
+            ],
+            vec![
+                Some(OID.into()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("NULL".into()),
+            ],
+        ]);
+        let types: Vec<Vec<&str>> = vec![
+            vec![
+                "objectId", "int", "long", "bool", "object", "date", "string", "double",
+            ],
+            vec![
+                "objectId", MISSING, MISSING, MISSING, MISSING, MISSING, "null", "string",
+            ],
+        ];
+        let metadata =
+            serde_json::to_string(&crate::export::CopiedRows::new(&columns, &rows, &types))
+                .unwrap();
+
+        let (format, bytes, problems) = pasted("ignored", Some(&metadata), true).unwrap();
+        assert!(problems.is_empty(), "{problems:?}");
+        let options = Options::detected(format, &bytes);
+        let prepared = prepare(&bytes, &options, &[], None, crate::db::Engine::MongoDb).unwrap();
+        let checked = &prepared.checked;
+        assert!(checked.problems.is_empty(), "{:?}", checked.problems);
+        let stored = |row: usize| -> Vec<Option<mql::Value>> {
+            checked.rows[row]
+                .values
+                .iter()
+                .map(|value| value.as_ref().map(|value| mql::imported(value).unwrap()))
+                .collect()
+        };
+        let mut oid = [0; 12];
+        hex::decode_to_slice(OID, &mut oid).unwrap();
+        assert_eq!(
+            stored(0),
+            [
+                Some(mql::Value::ObjectId(Some(oid))),
+                Some(mql::Value::Int32(42)),
+                Some(mql::Value::Int64(9_007_199_254_740_993)),
+                Some(mql::Value::Bool(true)),
+                Some(mql::Value::Document(vec![
+                    ("x".into(), mql::Value::Int32(1)),
+                    ("n".into(), mql::Value::Int64(5)),
+                ])),
+                Some(mql::Value::Date(1_705_311_000_123)),
+                Some(mql::Value::String("42".into())),
+                Some(mql::Value::Double(2.5)),
+            ]
+        );
+        assert_eq!(
+            stored(1),
+            [
+                Some(mql::Value::ObjectId(Some(oid))),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(mql::Value::Null),
+                Some(mql::Value::String("NULL".into())),
+            ]
+        );
+
+        // Into a table, the values stay the text the grid showed.
+        let (_, bytes, _) = pasted("ignored", Some(&metadata), false).unwrap();
+        let first = String::from_utf8(bytes).unwrap();
+        assert!(
+            first.starts_with(&format!(
+                r#"{{"_id":"{OID}","count":"42","big":"9007199254740993","#
+            )),
+            "{first}"
+        );
+    }
+
+    #[test]
+    fn metadata_of_another_version_or_app_leaves_the_paste_to_the_text() {
+        let current = copied(&named(&["a"]), &[vec![None]]);
+        let other = current.replacen(
+            &format!("\"dbdelve\":{COPIED_ROWS_VERSION}"),
+            &format!("\"dbdelve\":{}", COPIED_ROWS_VERSION + 1),
+            1,
+        );
+        assert_ne!(other, current);
+        for metadata in [other.as_str(), "[1, 2]", "not json"] {
+            assert_eq!(
+                pasted("a,b\n1,2", Some(metadata), false),
+                Some((Format::Csv, b"a,b\n1,2".to_vec(), Vec::new()))
+            );
+        }
+        let empty = copied(&named(&["a"]), &[]);
+        assert_eq!(
+            pasted("", Some(&empty), false),
+            Some((Format::Json, b"[]".to_vec(), Vec::new()))
+        );
+    }
+
+    #[test]
+    fn a_copy_too_large_for_its_rows_names_the_columns_its_text_left_out() {
+        let columns = named(&["id", "a,b"]);
+        let headerless =
+            serde_json::to_string(&crate::export::CopiedRows::columns_only(&columns, false))
+                .unwrap();
+        assert_eq!(
+            pasted("1\tx\n2\ty", Some(&headerless), false),
+            Some((Format::Tsv, b"id\ta,b\n1\tx\n2\ty".to_vec(), Vec::new()))
+        );
+        assert_eq!(
+            pasted("1,x\n2,y", Some(&headerless), false),
+            Some((Format::Csv, b"id,\"a,b\"\n1,x\n2,y".to_vec(), Vec::new()))
+        );
+        let headed =
+            serde_json::to_string(&crate::export::CopiedRows::columns_only(&columns, true))
+                .unwrap();
+        assert_eq!(
+            pasted("id,n\n1,x", Some(&headed), false),
+            Some((Format::Csv, b"id,n\n1,x".to_vec(), Vec::new()))
+        );
+    }
+
+    #[test]
+    fn a_value_that_cannot_keep_its_type_is_a_problem_not_a_string() {
+        let columns = named(&["_id", "f"]);
+        let rows = crate::db::rows(vec![
+            vec![Some("1".into()), Some("x".into())],
+            vec![
+                Some("2".into()),
+                Some(r#"{"$code":"f","$scope":{}}"#.into()),
+            ],
+        ]);
+        let types: Vec<Vec<&str>> = vec![vec!["int", "string"], vec!["int", "javascriptWithScope"]];
+        let metadata =
+            serde_json::to_string(&crate::export::CopiedRows::new(&columns, &rows, &types))
+                .unwrap();
+        let (_, _, problems) = pasted("ignored", Some(&metadata), true).unwrap();
+        assert_eq!(
+            problems
+                .iter()
+                .map(|problem| (problem.row, problem.line, problem.column))
+                .collect::<Vec<_>>(),
+            [(Some(1), Some(2), Some(1))]
+        );
+        assert!(
+            problems[0].message.contains("javascriptWithScope"),
+            "{}",
+            problems[0].message
+        );
+        let (_, _, into_a_table) = pasted("ignored", Some(&metadata), false).unwrap();
+        assert!(into_a_table.is_empty());
     }
 
     #[test]
