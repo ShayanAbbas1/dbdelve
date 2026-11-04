@@ -1343,6 +1343,7 @@ impl Workspace {
         let text = export::render_rows(Format::Tsv, &result.columns, rows, cell_types);
         cx.write_to_clipboard(result_grid::copied_row_slice(
             text,
+            true,
             &result.columns,
             rows,
             cell_types,

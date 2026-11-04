@@ -38,8 +38,17 @@ pub(crate) fn pasted(
     metadata: Option<&str>,
     documents: bool,
 ) -> Option<(Format, Vec<u8>, Vec<Problem>)> {
-    if let Some((rows, problems)) = metadata.and_then(|metadata| copied_rows(metadata, documents)) {
-        return Some((Format::Json, rows.into_bytes(), problems));
+    let copied = metadata.and_then(read_copied);
+    let mut names = None;
+    if let Some(copied) = copied {
+        match copied.rows {
+            Some(rows) => {
+                let (rows, problems) = copied_rows(rows, &copied.types, documents);
+                return Some((Format::Json, rows.into_bytes(), problems));
+            }
+            None if !copied.header => names = Some(copied.columns),
+            None => {}
+        }
     }
     if text.trim().is_empty() {
         return None;
@@ -51,38 +60,72 @@ pub(crate) fn pasted(
     } else {
         Format::Csv
     };
-    Some((format, text.as_bytes().to_vec(), Vec::new()))
+    // A copy too large to carry its rows, of a shape with no header: its
+    // columns are named for it, or its first row would be read as their names.
+    let bytes = match (names, format) {
+        (Some(columns), Format::Tsv | Format::Csv) => {
+            let delimiter = if format == Format::Tsv { '\t' } else { ',' };
+            let header = columns
+                .iter()
+                .map(|column| crate::export::csv_field(delimiter, &column.name))
+                .collect::<Vec<_>>()
+                .join(&delimiter.to_string());
+            format!("{header}\n{text}").into_bytes()
+        }
+        _ => text.as_bytes().to_vec(),
+    };
+    Some((format, bytes, Vec::new()))
+}
+
+#[derive(serde::Deserialize)]
+struct Copied {
+    dbdelve: u32,
+    #[serde(default)]
+    columns: Vec<CopiedColumn>,
+    rows: Option<Vec<Json>>,
+    #[serde(default = "default_header")]
+    header: bool,
+    #[serde(default)]
+    types: Vec<Vec<String>>,
+}
+
+#[derive(serde::Deserialize)]
+struct CopiedColumn {
+    name: String,
+}
+
+fn default_header() -> bool {
+    true
+}
+
+/// `None` for metadata some other app or another version of DBDelve wrote,
+/// which leaves the paste to the text.
+fn read_copied(metadata: &str) -> Option<Copied> {
+    serde_json::from_str::<Copied>(metadata)
+        .ok()
+        .filter(|copied| copied.dbdelve == COPIED_ROWS_VERSION)
 }
 
 /// The rows of a [`crate::export::CopiedRows`] as JSON Lines, so a problem's
-/// line is its row's number. `None` for metadata some other app or another
-/// version of DBDelve wrote, which leaves the paste to the text.
+/// line is its row's number.
 ///
 /// A typed cell bound for a collection is read back from its text as an edit
 /// of it would be, and written as the Extended JSON an import reads as that
 /// value: the grid's text alone makes a string of a long, a date or an
 /// ObjectId. One that does not read back is a problem rather than that string.
-fn copied_rows(metadata: &str, documents: bool) -> Option<(String, Vec<Problem>)> {
-    #[derive(serde::Deserialize)]
-    struct Copied {
-        dbdelve: u32,
-        rows: Vec<Json>,
-        #[serde(default)]
-        types: Vec<Vec<String>>,
-    }
-    let Copied {
-        mut rows, types, ..
-    } = serde_json::from_str::<Copied>(metadata)
-        .ok()
-        .filter(|copied| copied.dbdelve == COPIED_ROWS_VERSION)?;
+fn copied_rows(
+    mut rows: Vec<Json>,
+    types: &[Vec<String>],
+    documents: bool,
+) -> (String, Vec<Problem>) {
     if rows.is_empty() {
-        return Some(("[]".into(), Vec::new()));
+        return ("[]".into(), Vec::new());
     }
     let mut problems = Vec::new();
     if documents {
         // Numbered as `read_json` numbers them: in the order first seen.
         let mut columns: Vec<String> = Vec::new();
-        for (at, (row, types)) in rows.iter_mut().zip(&types).enumerate() {
+        for (at, (row, types)) in rows.iter_mut().zip(types).enumerate() {
             let Json::Object(fields) = row else {
                 continue;
             };
@@ -119,7 +162,7 @@ fn copied_rows(metadata: &str, documents: bool) -> Option<(String, Vec<Problem>)
         .map(Json::to_string)
         .collect::<Vec<_>>()
         .join("\n");
-    Some((rows, problems))
+    (rows, problems)
 }
 
 const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
@@ -1242,6 +1285,29 @@ mod tests {
         assert_eq!(
             pasted("", Some(&empty), false),
             Some((Format::Json, b"[]".to_vec(), Vec::new()))
+        );
+    }
+
+    #[test]
+    fn a_copy_too_large_for_its_rows_names_the_columns_its_text_left_out() {
+        let columns = named(&["id", "a,b"]);
+        let headerless =
+            serde_json::to_string(&crate::export::CopiedRows::columns_only(&columns, false))
+                .unwrap();
+        assert_eq!(
+            pasted("1\tx\n2\ty", Some(&headerless), false),
+            Some((Format::Tsv, b"id\ta,b\n1\tx\n2\ty".to_vec(), Vec::new()))
+        );
+        assert_eq!(
+            pasted("1,x\n2,y", Some(&headerless), false),
+            Some((Format::Csv, b"id,\"a,b\"\n1,x\n2,y".to_vec(), Vec::new()))
+        );
+        let headed =
+            serde_json::to_string(&crate::export::CopiedRows::columns_only(&columns, true))
+                .unwrap();
+        assert_eq!(
+            pasted("id,n\n1,x", Some(&headed), false),
+            Some((Format::Csv, b"id,n\n1,x".to_vec(), Vec::new()))
         );
     }
 

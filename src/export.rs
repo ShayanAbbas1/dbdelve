@@ -393,11 +393,18 @@ pub const COPIED_ROWS_VERSION: u32 = 2;
 /// NULL apart from both an empty string and the word `NULL`, and some carry
 /// no column names at all. `types` is [`QueryResult::cell_types`], which a
 /// paste into a collection reads each value back to its own type by.
+///
+/// Without `rows` it is a copy too large to carry them twice
+/// ([`CopiedRows::columns_only`]), and `header` says whether the text names
+/// its columns itself.
 #[derive(Serialize)]
 pub struct CopiedRows<'a> {
     dbdelve: u32,
     columns: Vec<CopiedColumn<'a>>,
-    rows: Box<RawValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rows: Option<Box<RawValue>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    header: Option<bool>,
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     types: &'a [Vec<&'a str>],
 }
@@ -414,6 +421,14 @@ impl<'a> CopiedRows<'a> {
         let writer = Writer::with_shape(Vec::new(), Shape::json(columns, &COMPACT_JSON), columns);
         let json = rendered(writer, rows, cell_types);
         Self {
+            rows: Some(RawValue::from_string(json).expect("the JSON writer writes JSON")),
+            types: cell_types,
+            ..Self::columns_only(columns, true)
+        }
+    }
+
+    pub fn columns_only(columns: &'a [Column], header: bool) -> Self {
+        Self {
             dbdelve: COPIED_ROWS_VERSION,
             columns: columns
                 .iter()
@@ -422,8 +437,9 @@ impl<'a> CopiedRows<'a> {
                     data_type: column.data_type.as_deref(),
                 })
                 .collect(),
-            rows: RawValue::from_string(json).expect("the JSON writer writes JSON"),
-            types: cell_types,
+            rows: None,
+            header: (!header).then_some(false),
+            types: &[],
         }
     }
 }

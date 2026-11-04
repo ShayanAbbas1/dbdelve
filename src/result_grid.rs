@@ -25,27 +25,38 @@ use crate::{
     ui::{Control, Tone, icon_button},
 };
 
-/// Past this much text, a copy carries the text alone: the rows beside it are
-/// a second rendering of the same rows, built on the UI thread and held on the
-/// clipboard twice over. A paste of it then reads only the text, which loses
-/// NULL against empty and each value's own type.
+/// Past this much text, a copy carries its columns but not its rows: the rows
+/// beside it are a second rendering of the same rows, built on the UI thread
+/// and held on the clipboard twice over. A paste of it then reads the text,
+/// which loses NULL against empty and each value's own type.
 pub const COPIED_ROWS_TEXT_LIMIT: usize = 16 * 1024 * 1024;
 
 /// `text` for the clipboard, with `result`'s rows beside it for a paste back
 /// into DBDelve ([`export::CopiedRows`]).
 pub fn copied_rows(text: String, result: &QueryResult) -> ClipboardItem {
-    copied_row_slice(text, &result.columns, &result.rows, &result.cell_types)
+    copied_row_slice(
+        text,
+        true,
+        &result.columns,
+        &result.rows,
+        &result.cell_types,
+    )
 }
 
-/// [`copied_rows`] over rows that are not a result of their own.
+/// [`copied_rows`] over rows that are not a result of their own, under a
+/// `text` that may not start with a header.
 pub fn copied_row_slice(
     text: String,
+    header: bool,
     columns: &[db::Column],
     rows: &[db::Row],
     cell_types: &[Vec<&str>],
 ) -> ClipboardItem {
     if text.len() > COPIED_ROWS_TEXT_LIMIT {
-        return ClipboardItem::new_string(text);
+        return ClipboardItem::new_string_with_json_metadata(
+            text,
+            export::CopiedRows::columns_only(columns, header),
+        );
     }
     ClipboardItem::new_string_with_json_metadata(
         text,
@@ -1649,7 +1660,14 @@ impl ResultGrid {
     pub fn rows_as(&self, kind: RowsAs) -> Option<ClipboardItem> {
         let result = self.rows_of(&self.selected_row_indices())?;
         let text = export::render_rows_as(kind, self.engine, self.result.edit.as_ref(), &result);
-        Some(copied_rows(text, &result))
+        let header = !matches!(kind, RowsAs::Text | RowsAs::Csv);
+        Some(copied_row_slice(
+            text,
+            header,
+            &result.columns,
+            &result.rows,
+            &result.cell_types,
+        ))
     }
 
     /// What `cmd+c` copies: the selected rows as TSV under a header, the way
@@ -6167,7 +6185,7 @@ mod tests {
     }
 
     #[test]
-    fn a_copy_past_the_limit_carries_its_text_alone() {
+    fn a_copy_past_the_limit_carries_its_columns_but_not_its_rows() {
         let columns = vec![db::Column {
             name: "v".into(),
             ..Default::default()
@@ -6180,7 +6198,13 @@ mod tests {
             })
         };
 
-        let small = metadata(copied_row_slice("v\nx\n".into(), &columns, &rows, &[]));
+        let small = metadata(copied_row_slice(
+            "v\nx\n".into(),
+            true,
+            &columns,
+            &rows,
+            &[],
+        ));
         assert_eq!(
             small.as_deref(),
             Some(r#"{"dbdelve":2,"columns":[{"name":"v","type":null}],"rows":[{"v":"x"}]}"#)
@@ -6188,8 +6212,12 @@ mod tests {
 
         let large = "x".repeat(COPIED_ROWS_TEXT_LIMIT + 1);
         assert_eq!(
-            metadata(copied_row_slice(large, &columns, &rows, &[])),
-            None
+            metadata(copied_row_slice(large.clone(), true, &columns, &rows, &[])).as_deref(),
+            Some(r#"{"dbdelve":2,"columns":[{"name":"v","type":null}]}"#)
+        );
+        assert_eq!(
+            metadata(copied_row_slice(large, false, &columns, &rows, &[])).as_deref(),
+            Some(r#"{"dbdelve":2,"columns":[{"name":"v","type":null}],"header":false}"#)
         );
     }
 }
