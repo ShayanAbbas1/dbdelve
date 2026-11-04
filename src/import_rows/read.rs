@@ -11,7 +11,9 @@ use serde::de::{Deserialize, Deserializer, Error as _, MapAccess, Visitor};
 use serde_json::value::RawValue;
 
 use super::{Delimiter, Encoding, Format, Options, Problem};
+use crate::db::MISSING;
 use crate::export::COPIED_ROWS_VERSION;
+use crate::mql;
 
 /// The format a file's extension names, or `None` for a file Import Rows
 /// does not read.
@@ -26,11 +28,16 @@ pub(crate) fn detect(path: &Path) -> Option<Format> {
 }
 
 /// What a paste imports, and how to read it: the rows DBDelve's own copy
-/// carried beside its text ([`crate::export::CopiedRows`]), or else the text itself, as JSON
-/// where it reads as JSON and as delimited text otherwise. `None` for a
-/// clipboard holding no text.
-pub(crate) fn pasted(text: &str, metadata: Option<&str>) -> Option<(Format, Vec<u8>)> {
-    if let Some(rows) = metadata.and_then(copied_rows) {
+/// carried beside its text ([`crate::export::CopiedRows`]), or else the text
+/// itself, as JSON where it reads as JSON and as delimited text otherwise.
+/// `None` for a clipboard holding no text. `documents` is whether the rows go
+/// into a collection, which keeps each copied value's own type.
+pub(crate) fn pasted(
+    text: &str,
+    metadata: Option<&str>,
+    documents: bool,
+) -> Option<(Format, Vec<u8>)> {
+    if let Some(rows) = metadata.and_then(|metadata| copied_rows(metadata, documents)) {
         return Some((Format::Json, rows.into_bytes()));
     }
     if text.trim().is_empty() {
@@ -46,25 +53,52 @@ pub(crate) fn pasted(text: &str, metadata: Option<&str>) -> Option<(Format, Vec<
     Some((format, text.as_bytes().to_vec()))
 }
 
-/// The rows of a [`crate::export::CopiedRows`] as JSON Lines, so a problem's line is its
-/// row's number. `None` for metadata some other app or another version of
-/// DBDelve wrote, which leaves the paste to the text.
-fn copied_rows(metadata: &str) -> Option<String> {
+/// The rows of a [`crate::export::CopiedRows`] as JSON Lines, so a problem's
+/// line is its row's number. `None` for metadata some other app or another
+/// version of DBDelve wrote, which leaves the paste to the text.
+///
+/// A typed cell bound for a collection is read back from its text as an edit
+/// of it would be, and written as the Extended JSON an import reads as that
+/// value: the grid's text alone makes a string of a long, a date or an
+/// ObjectId.
+fn copied_rows(metadata: &str, documents: bool) -> Option<String> {
     #[derive(serde::Deserialize)]
     struct Copied {
         dbdelve: u32,
         rows: Vec<Json>,
+        #[serde(default)]
+        types: Vec<Vec<String>>,
     }
-    let copied = serde_json::from_str::<Copied>(metadata)
+    let Copied {
+        mut rows, types, ..
+    } = serde_json::from_str::<Copied>(metadata)
         .ok()
         .filter(|copied| copied.dbdelve == COPIED_ROWS_VERSION)?;
-    if copied.rows.is_empty() {
+    if rows.is_empty() {
         return Some("[]".into());
     }
+    if documents {
+        for (row, types) in rows.iter_mut().zip(&types) {
+            let Json::Object(fields) = row else {
+                continue;
+            };
+            let present = types.iter().filter(|tag| *tag != MISSING);
+            for ((_, value), tag) in fields.iter_mut().zip(present) {
+                let Json::String(text) = value else {
+                    continue;
+                };
+                if let Some(typed) = mql::coerce(text, Some(tag))
+                    .ok()
+                    .as_ref()
+                    .and_then(mql::extended)
+                {
+                    *value = typed;
+                }
+            }
+        }
+    }
     Some(
-        copied
-            .rows
-            .iter()
+        rows.iter()
             .map(Json::to_string)
             .collect::<Vec<_>>()
             .join("\n"),
@@ -989,7 +1023,7 @@ mod tests {
 
     #[test]
     fn pasted_text_is_json_where_it_parses_as_json_and_delimited_otherwise() {
-        let format = |text: &str| pasted(text, None).map(|(format, _)| format);
+        let format = |text: &str| pasted(text, None, false).map(|(format, _)| format);
         assert_eq!(format("[{\"a\": 1}, {\"a\": 2}]"), Some(Format::Json));
         assert_eq!(format("\n{\"a\": 1}\n{\"a\": 2}\n"), Some(Format::Json));
         assert_eq!(format("a\tb\n1\t2\n"), Some(Format::Tsv));
@@ -1027,7 +1061,7 @@ mod tests {
             ],
         );
         // Copy Rows As Text: no header, and NULL written as the word.
-        let (format, bytes) = pasted("1\tNULL\n2\t\n3\tNULL", Some(&metadata)).unwrap();
+        let (format, bytes) = pasted("1\tNULL\n2\t\n3\tNULL", Some(&metadata), false).unwrap();
         assert_eq!(format, Format::Json);
         let options = Options::detected(format, &bytes);
         let table = read(&bytes, &options).unwrap();
@@ -1079,6 +1113,99 @@ mod tests {
     }
 
     #[test]
+    fn a_copy_of_documents_pastes_into_a_collection_as_the_types_it_held() {
+        const OID: &str = "65a4f0c2e4b0a1b2c3d4e5f6";
+        let columns = named(&["_id", "count", "big", "on", "nested", "at", "name", "x"]);
+        let rows = crate::db::rows(vec![
+            vec![
+                Some(OID.into()),
+                Some("42".into()),
+                Some("9007199254740993".into()),
+                Some("true".into()),
+                Some(r#"{"x":1,"n":{"$numberLong":"5"}}"#.into()),
+                Some("2024-01-15T09:30:00.123Z".into()),
+                Some("42".into()),
+                Some("2.5".into()),
+            ],
+            vec![
+                Some(OID.into()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("NULL".into()),
+            ],
+        ]);
+        let types: Vec<Vec<&str>> = vec![
+            vec![
+                "objectId", "int", "long", "bool", "object", "date", "string", "double",
+            ],
+            vec![
+                "objectId", MISSING, MISSING, MISSING, MISSING, MISSING, "null", "string",
+            ],
+        ];
+        let metadata =
+            serde_json::to_string(&crate::export::CopiedRows::new(&columns, &rows, &types))
+                .unwrap();
+
+        let (format, bytes) = pasted("ignored", Some(&metadata), true).unwrap();
+        let options = Options::detected(format, &bytes);
+        let prepared = prepare(&bytes, &options, &[], None, crate::db::Engine::MongoDb).unwrap();
+        let checked = &prepared.checked;
+        assert!(checked.problems.is_empty(), "{:?}", checked.problems);
+        let stored = |row: usize| -> Vec<Option<mql::Value>> {
+            checked.rows[row]
+                .values
+                .iter()
+                .map(|value| value.as_ref().map(|value| mql::imported(value).unwrap()))
+                .collect()
+        };
+        let mut oid = [0; 12];
+        hex::decode_to_slice(OID, &mut oid).unwrap();
+        assert_eq!(
+            stored(0),
+            [
+                Some(mql::Value::ObjectId(Some(oid))),
+                Some(mql::Value::Int32(42)),
+                Some(mql::Value::Int64(9_007_199_254_740_993)),
+                Some(mql::Value::Bool(true)),
+                Some(mql::Value::Document(vec![
+                    ("x".into(), mql::Value::Int32(1)),
+                    ("n".into(), mql::Value::Int64(5)),
+                ])),
+                Some(mql::Value::Date(1_705_311_000_123)),
+                Some(mql::Value::String("42".into())),
+                Some(mql::Value::Double(2.5)),
+            ]
+        );
+        assert_eq!(
+            stored(1),
+            [
+                Some(mql::Value::ObjectId(Some(oid))),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(mql::Value::Null),
+                Some(mql::Value::String("NULL".into())),
+            ]
+        );
+
+        // Into a table, the values stay the text the grid showed.
+        let (_, bytes) = pasted("ignored", Some(&metadata), false).unwrap();
+        let first = String::from_utf8(bytes).unwrap();
+        assert!(
+            first.starts_with(&format!(
+                r#"{{"_id":"{OID}","count":"42","big":"9007199254740993","#
+            )),
+            "{first}"
+        );
+    }
+
+    #[test]
     fn metadata_of_another_version_or_app_leaves_the_paste_to_the_text() {
         let current = copied(&named(&["a"]), &[vec![None]]);
         let other = current.replacen(
@@ -1089,13 +1216,13 @@ mod tests {
         assert_ne!(other, current);
         for metadata in [other.as_str(), "[1, 2]", "not json"] {
             assert_eq!(
-                pasted("a,b\n1,2", Some(metadata)),
+                pasted("a,b\n1,2", Some(metadata), false),
                 Some((Format::Csv, b"a,b\n1,2".to_vec()))
             );
         }
         let empty = copied(&named(&["a"]), &[]);
         assert_eq!(
-            pasted("", Some(&empty)),
+            pasted("", Some(&empty), false),
             Some((Format::Json, b"[]".to_vec()))
         );
     }

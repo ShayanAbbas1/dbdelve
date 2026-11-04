@@ -7,7 +7,7 @@
 
 use std::time::{Duration, Instant};
 
-use gpui::{ClipboardEntry, PathPromptOptions};
+use gpui::{ClipboardEntry, ClipboardItem, PathPromptOptions};
 
 use super::import_dialog::{import_blocked, new_preview, show_preview, show_preview_row};
 use super::*;
@@ -52,20 +52,36 @@ impl Workspace {
         let Some(profile) = self.profile().map(|profile| profile.id.clone()) else {
             return;
         };
-        let pasted = cx.read_from_clipboard().and_then(|item| {
-            let text = item.text()?;
-            let metadata = item.entries().iter().find_map(|entry| match entry {
+        let item = cx.read_from_clipboard();
+        let text = item.as_ref().and_then(ClipboardItem::text);
+        let metadata = item.as_ref().and_then(|item| {
+            item.entries().iter().find_map(|entry| match entry {
                 ClipboardEntry::String(string) => string.metadata.clone(),
                 _ => None,
-            });
-            pasted(&text, metadata.as_deref())
+            })
         });
-        let Some((format, bytes)) = pasted else {
-            self.note("The clipboard holds no rows to import.".into(), cx);
-            return;
-        };
-        let source = ImportSource::Clipboard;
-        self.open_import(profile, schema, table, source, format, bytes, window, cx);
+        let documents = self.engine().takes_new_fields();
+        let reading = cx.background_executor().spawn(async move {
+            text.and_then(|text| pasted(&text, metadata.as_deref(), documents))
+        });
+        cx.spawn_in(window, async move |workspace, cx| {
+            let read = reading.await;
+            _ = workspace.update_in(cx, |workspace, window, cx| match read {
+                Some((format, bytes)) => {
+                    let source = ImportSource::Clipboard;
+                    workspace
+                        .open_import(profile, schema, table, source, format, bytes, window, cx);
+                }
+                None => {
+                    if let Some(found) = workspace.profiles.iter_mut().find(|p| p.id == profile) {
+                        found.session.notice =
+                            Some("The clipboard holds no rows to import.".into());
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
     }
 
     /// The table the object tab in front shows, if rows can be imported into

@@ -2081,6 +2081,11 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::refresh_connection))
             .on_action(cx.listener(Self::import_rows))
             .on_action(cx.listener(Self::import_rows_from_clipboard))
+            .on_action(
+                cx.listener(|workspace, _: &MenuImportRowsFromClipboard, window, cx| {
+                    workspace.import_rows_from_clipboard(&ImportRowsFromClipboard, window, cx)
+                }),
+            )
             .on_action(cx.listener(Self::show_editor))
             .on_action(cx.listener(Self::select_theme))
             .on_action(cx.listener(Self::select_database))

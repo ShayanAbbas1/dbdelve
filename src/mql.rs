@@ -2129,12 +2129,70 @@ fn from_json(json: &Json) -> Result<Value, String> {
         Json::Number(text) => exact_number(text)?,
         Json::String(text) => Value::String(text.clone()),
         Json::Array(items) => Value::Array(items.iter().map(from_json).collect::<Result<_, _>>()?),
-        Json::Object(fields) => Value::Document(
+        Json::Object(fields) => extended_json(
             fields
                 .iter()
                 .map(|(key, value)| Ok((key.clone(), from_json(value)?)))
                 .collect::<Result<_, String>>()?,
+        )?,
+    })
+}
+
+/// `value` as Canonical Extended JSON, which an import reads back as the same
+/// value. `None` for `ObjectId()`, which names no value until it is sent.
+pub(crate) fn extended(value: &Value) -> Option<Json> {
+    let wrap = |key: &str, json: Json| Json::Object(vec![(key.to_owned(), json)]);
+    let text = |text: String| Json::String(text);
+    let number = |n: String| Json::Number(n);
+    Some(match value {
+        Value::Null => Json::Null,
+        Value::Bool(b) => Json::Bool(*b),
+        Value::Int32(n) => number(n.to_string()),
+        Value::Int64(n) => wrap("$numberLong", text(n.to_string())),
+        Value::Double(n) => wrap(
+            "$numberDouble",
+            text(match n {
+                n if n.is_nan() => "NaN".into(),
+                n if n.is_infinite() && *n > 0.0 => "Infinity".into(),
+                n if n.is_infinite() => "-Infinity".into(),
+                n => format!("{n:?}"),
+            }),
         ),
+        Value::Decimal128(n) => wrap("$numberDecimal", text(n.clone())),
+        Value::String(s) => text(s.clone()),
+        Value::ObjectId(bytes) => wrap("$oid", text(hex::encode((*bytes)?))),
+        Value::Date(millis) => wrap("$date", wrap("$numberLong", text(millis.to_string()))),
+        Value::Binary { subtype, bytes } => wrap(
+            "$binary",
+            Json::Object(vec![
+                ("base64".into(), text(STANDARD.encode(bytes))),
+                ("subType".into(), text(format!("{subtype:02x}"))),
+            ]),
+        ),
+        Value::Timestamp { t, i } => wrap(
+            "$timestamp",
+            Json::Object(vec![
+                ("t".into(), number(t.to_string())),
+                ("i".into(), number(i.to_string())),
+            ]),
+        ),
+        Value::Regex { pattern, flags } => wrap(
+            "$regularExpression",
+            Json::Object(vec![
+                ("pattern".into(), text(pattern.clone())),
+                ("options".into(), text(flags.clone())),
+            ]),
+        ),
+        Value::Code(code) => wrap("$code", text(code.clone())),
+        Value::MinKey => wrap("$minKey", number("1".into())),
+        Value::MaxKey => wrap("$maxKey", number("1".into())),
+        Value::Document(fields) => Json::Object(
+            fields
+                .iter()
+                .map(|(key, value)| Some((key.clone(), extended(value)?)))
+                .collect::<Option<_>>()?,
+        ),
+        Value::Array(values) => Json::Array(values.iter().map(extended).collect::<Option<_>>()?),
     })
 }
 
@@ -2384,7 +2442,7 @@ fn quoted(text: &str) -> String {
 /// No `$`-named field anywhere inside: with the Extended JSON wrappers already
 /// read into the values they wrap, what is left starting with `$` is an
 /// operator, and a literal holds none.
-fn operator_free(value: &Value) -> bool {
+pub(crate) fn operator_free(value: &Value) -> bool {
     match value {
         Value::Document(fields) => fields
             .iter()
@@ -4744,6 +4802,48 @@ mod tests {
         }
         // Valid JavaScript, but not a statement DBDelve reads.
         assert!(format("db.c.find().count()").is_err());
+    }
+
+    #[test]
+    fn every_value_reads_back_from_its_extended_json() {
+        let values = [
+            Value::Null,
+            Value::Bool(false),
+            Value::Int32(-7),
+            Value::Int64(5),
+            Value::Double(2.0),
+            Value::Double(0.1),
+            Value::Double(1e300),
+            Value::Double(f64::NEG_INFINITY),
+            Value::Decimal128("12345678901234567890.5".into()),
+            Value::String("$oid".into()),
+            Value::ObjectId(Some([7; 12])),
+            Value::Date(-1),
+            Value::Binary {
+                subtype: 0x80,
+                bytes: vec![0, 255],
+            },
+            Value::Timestamp { t: u32::MAX, i: 1 },
+            Value::Regex {
+                pattern: "a/b".into(),
+                flags: "i".into(),
+            },
+            Value::Code("x => x".into()),
+            Value::MinKey,
+            Value::MaxKey,
+            Value::Document(vec![(
+                "a".into(),
+                Value::Array(vec![Value::Int64(1), Value::Document(Vec::new())]),
+            )]),
+        ];
+        for value in values {
+            let json = extended(&value).unwrap();
+            assert_eq!(from_json(&json), Ok(value), "{json}");
+            let row = [Some(crate::import_rows::Value::Json(json))];
+            let insert = insert_many("c", &["v"], &[row.iter().map(Option::as_ref).collect()]);
+            assert!(is_generated_write(&insert.unwrap()), "{row:?}");
+        }
+        assert_eq!(extended(&Value::ObjectId(None)), None);
     }
 
     #[test]

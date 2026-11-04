@@ -184,6 +184,10 @@ actions!(
         NewRow,
         ImportRows,
         ImportRowsFromClipboard,
+        // The File menu's, bound to nothing: macOS takes an action's binding as
+        // its menu item's key equivalent, scope and all, and would answer a
+        // `cmd-v` nothing else took -- in the sidebar, say -- by importing.
+        MenuImportRowsFromClipboard,
         EditCell,
         CopySelection,
         CopyCell,

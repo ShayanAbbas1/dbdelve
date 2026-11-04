@@ -385,18 +385,21 @@ pub fn render_rows(
 
 /// Bumped whenever [`CopiedRows`] changes shape. A paste reads only the
 /// version it knows, and falls back to the text for any other.
-pub const COPIED_ROWS_VERSION: u32 = 1;
+pub const COPIED_ROWS_VERSION: u32 = 2;
 
 /// What a copy of rows carries on the clipboard beside its text, for a paste
 /// back into DBDelve: the same rows as [`Format::Json`] writes them, which
 /// Import Rows reads as it reads a JSON file. No shape of the text keeps a
 /// NULL apart from both an empty string and the word `NULL`, and some carry
-/// no column names at all.
+/// no column names at all. `types` is [`QueryResult::cell_types`], which a
+/// paste into a collection reads each value back to its own type by.
 #[derive(Serialize)]
 pub struct CopiedRows<'a> {
     dbdelve: u32,
     columns: Vec<CopiedColumn<'a>>,
     rows: Box<RawValue>,
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    types: &'a [Vec<&'a str>],
 }
 
 #[derive(Serialize)]
@@ -407,7 +410,7 @@ struct CopiedColumn<'a> {
 }
 
 impl<'a> CopiedRows<'a> {
-    pub fn new(columns: &'a [Column], rows: &[Row], cell_types: &[Vec<&str>]) -> Self {
+    pub fn new(columns: &'a [Column], rows: &[Row], cell_types: &'a [Vec<&'a str>]) -> Self {
         let json = render_rows(Format::Json, columns, rows, cell_types);
         Self {
             dbdelve: COPIED_ROWS_VERSION,
@@ -419,6 +422,7 @@ impl<'a> CopiedRows<'a> {
                 })
                 .collect(),
             rows: RawValue::from_string(json).expect("the JSON writer writes JSON"),
+            types: cell_types,
         }
     }
 

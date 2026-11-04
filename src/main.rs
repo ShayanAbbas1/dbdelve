@@ -57,17 +57,17 @@ use actions::{
     AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseTab, CommandPalette, CopyCell, CopyPlan,
     CopyResults, CopyRow, CopyRows, CopySelection, CustomRowLimit, CycleMode, DeleteRow,
     DiscardEdits, EditCell, ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen, GoToColumn,
-    HideColumn, ImportConnections, ImportRows, ImportRowsFromClipboard, LimitTarget, Minimize,
-    MoveTabLeft, MoveTabRight, NewConnection, NewProject, NewQuery, NewRow, NextEdit, NextPage,
-    NextProfile, NextResult, NextTab, OpenReference, OpenSettings, PreviousEdit, PreviousPage,
-    PreviousProfile, PreviousResult, PreviousTab, Quit, RefreshConnection, RefreshRelation,
-    RemoveFilter, RequestWriteMode, ResetConfirmations, ResetEditorZoom, RunQuery, SaveQuery,
-    SearchEverything, SelectDatabase, SelectTheme, SetDefault, SetDefaultRowLimit, SetEmpty,
-    SetFilterColumn, SetFilterOperator, SetFilterRaw, SetMode, SetNull, SetQueryLimit, SetRowLimit,
-    ShowAllColumns, ShowEditor, ShowMessages, ShowReferences, SortActiveColumn, SortColumn,
-    SubmitConnection, SwitchConnection, ToggleComment, ToggleFilterJoin, ToggleNextJoin,
-    TogglePinColumn, ToggleRowEdit, ToggleRowPanel, ToggleSidebar, ToggleStructure, ZoomEditorIn,
-    ZoomEditorOut,
+    HideColumn, ImportConnections, ImportRows, ImportRowsFromClipboard, LimitTarget,
+    MenuImportRowsFromClipboard, Minimize, MoveTabLeft, MoveTabRight, NewConnection, NewProject,
+    NewQuery, NewRow, NextEdit, NextPage, NextProfile, NextResult, NextTab, OpenReference,
+    OpenSettings, PreviousEdit, PreviousPage, PreviousProfile, PreviousResult, PreviousTab, Quit,
+    RefreshConnection, RefreshRelation, RemoveFilter, RequestWriteMode, ResetConfirmations,
+    ResetEditorZoom, RunQuery, SaveQuery, SearchEverything, SelectDatabase, SelectTheme,
+    SetDefault, SetDefaultRowLimit, SetEmpty, SetFilterColumn, SetFilterOperator, SetFilterRaw,
+    SetMode, SetNull, SetQueryLimit, SetRowLimit, ShowAllColumns, ShowEditor, ShowMessages,
+    ShowReferences, SortActiveColumn, SortColumn, SubmitConnection, SwitchConnection,
+    ToggleComment, ToggleFilterJoin, ToggleNextJoin, TogglePinColumn, ToggleRowEdit,
+    ToggleRowPanel, ToggleSidebar, ToggleStructure, ZoomEditorIn, ZoomEditorOut,
 };
 use completion::SchemaCompletions;
 use connection_form::{ConnectionForm, default_profile_name};
@@ -419,7 +419,7 @@ pub(crate) fn app_menus(imports_rows: bool) -> Vec<Menu> {
                 [
                     MenuItem::separator(),
                     MenuItem::action("Import Rows…", ImportRows),
-                    MenuItem::action("Import Rows from Clipboard…", ImportRowsFromClipboard),
+                    MenuItem::action("Import Rows from Clipboard…", MenuImportRowsFromClipboard),
                 ]
                 .into_iter()
                 .filter(|_| imports_rows),
@@ -469,7 +469,20 @@ pub(crate) fn app_menus(imports_rows: bool) -> Vec<Menu> {
 
 #[cfg(test)]
 mod tests {
-    use super::connection_config_from;
+    use std::collections::HashMap;
+
+    use super::{MenuImportRowsFromClipboard, connection_config_from, keybindings};
+
+    #[test]
+    fn the_menus_paste_import_has_no_key_equivalent() {
+        let keymap = gpui::Keymap::new(keybindings::build_bindings(&HashMap::new()));
+        assert_eq!(
+            keymap
+                .bindings_for_action(&MenuImportRowsFromClipboard)
+                .count(),
+            0
+        );
+    }
 
     #[test]
     fn pgservice_outranks_the_variables_and_leaves_them_for_connect() {

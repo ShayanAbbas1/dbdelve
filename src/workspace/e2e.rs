@@ -723,7 +723,7 @@ fn copy_and_paste_in_a_table_carry_rows_into_the_import_dialog(cx: &mut TestAppC
         cx.simulate_keystrokes("secondary-c");
         let (text, metadata) = clipboard(cx);
         assert_eq!(text, "id\tname\tnote\n1\twren\t\n2\trobin\t\"\"\n");
-        let pasted = crate::import_rows::pasted(&text, metadata.as_deref());
+        let pasted = crate::import_rows::pasted(&text, metadata.as_deref(), false);
         assert_eq!(
             pasted.map(|(format, bytes)| (format, String::from_utf8(bytes).unwrap())),
             Some((

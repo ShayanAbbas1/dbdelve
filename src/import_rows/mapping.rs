@@ -187,16 +187,6 @@ pub(crate) struct Checked {
     pub(crate) problems: Vec<Problem>,
 }
 
-fn has_operator(json: &Json) -> bool {
-    match json {
-        Json::Object(fields) => fields
-            .iter()
-            .any(|(key, value)| key.starts_with('$') || has_operator(value)),
-        Json::Array(items) => items.iter().any(has_operator),
-        _ => false,
-    }
-}
-
 pub(crate) fn check(
     table: &Table,
     targets: &[TargetColumn],
@@ -283,16 +273,16 @@ pub(crate) fn check(
                     problems.push(problem(source, format!("empty, but `{name}` is NOT NULL")));
                     None
                 }
-                Ok(Some(Value::Json(json))) if engine.takes_new_fields() && has_operator(&json) => {
-                    problems.push(problem(
-                        source,
-                        format!("`{name}` holds a field starting with `$`, which is an operator, not a field DBDelve writes"),
-                    ));
-                    None
-                }
                 Ok(Some(value)) if engine.takes_new_fields() => match mql::imported(&value) {
                     Err(message) => {
                         problems.push(problem(source, message));
+                        None
+                    }
+                    Ok(document) if !mql::operator_free(&document) => {
+                        problems.push(problem(
+                            source,
+                            format!("`{name}` holds a field starting with `$`, which is an operator, not a field DBDelve writes"),
+                        ));
                         None
                     }
                     Ok(_) => Some(value),
