@@ -7,14 +7,15 @@
 
 use std::time::{Duration, Instant};
 
-use gpui::PathPromptOptions;
+use gpui::{ClipboardEntry, ClipboardItem, PathPromptOptions};
 
 use super::import_dialog::{import_blocked, new_preview, show_preview, show_preview_row};
 use super::*;
 use crate::import_rows::{
-    Delimiter, Options, Outcome, Plan, Run, Spellings, Step, TargetColumn, detect, prepare, send,
+    Delimiter, Format, Options, Outcome, Plan, Run, Spellings, Step, TargetColumn, detect, pasted,
+    prepare, send,
 };
-use crate::session::{ImportDialog, ImportInputs, ImportPhase};
+use crate::session::{ImportDialog, ImportInputs, ImportPhase, ImportSource};
 
 /// How long the options sit still before the file is read again, so a word
 /// typed into a field re-reads once rather than per keystroke.
@@ -29,6 +30,79 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some((schema, table)) = self.import_target(cx) {
+            self.import_rows_into(schema, table, window, cx);
+        }
+    }
+
+    /// Import Rows over what the clipboard holds rather than a file. It opens
+    /// the same dialog, so nothing is written before the user has seen it.
+    pub(crate) fn import_rows_from_clipboard(
+        &mut self,
+        _: &ImportRowsFromClipboard,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((schema, table)) = self.import_target(cx) else {
+            return;
+        };
+        if !self.import_slot_free(cx) {
+            return;
+        }
+        let Some((profile, generation)) = self
+            .profile()
+            .map(|profile| (profile.id.clone(), profile.generation))
+        else {
+            return;
+        };
+        let item = cx.read_from_clipboard();
+        let text = item.as_ref().and_then(ClipboardItem::text);
+        let metadata = item.as_ref().and_then(|item| {
+            item.entries().iter().find_map(|entry| match entry {
+                ClipboardEntry::String(string) => string.metadata.clone(),
+                _ => None,
+            })
+        });
+        let documents = self.engine().takes_new_fields();
+        let request = self.import_requests;
+        let reading = cx.background_executor().spawn(async move {
+            text.and_then(|text| pasted(&text, metadata.as_deref(), documents))
+        });
+        cx.spawn_in(window, async move |workspace, cx| {
+            let read = reading.await;
+            _ = workspace.update_in(cx, |workspace, window, cx| {
+                if workspace.import_requests != request {
+                    return;
+                }
+                // A database switched meanwhile has a same-named table that is
+                // not the one asked for.
+                let Some(found) = workspace.issued_to(&profile, generation) else {
+                    return;
+                };
+                // Opened while the paste was read: the user's, not the paste's to replace.
+                if found.session.import_rows.is_some() {
+                    return;
+                }
+                match read {
+                    Some((format, bytes, problems)) => {
+                        let source = ImportSource::Clipboard(problems);
+                        workspace
+                            .open_import(profile, schema, table, source, format, bytes, window, cx);
+                    }
+                    None => {
+                        found.session.notice =
+                            Some("The clipboard holds no rows to import.".into());
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The table the object tab in front shows, if rows can be imported into
+    /// it, or a notice saying why not.
+    fn import_target(&mut self, cx: &mut Context<Self>) -> Option<(String, String)> {
         let engine = self.engine();
         let target = self
             .profile()
@@ -43,13 +117,13 @@ impl Workspace {
         match target {
             None => self.note("Open a table to import rows into.".into(), cx),
             Some((_, _, false)) => self.note("This view takes no imported rows.".into(), cx),
-            Some((schema, table, true)) => self.import_rows_into(schema, table, window, cx),
+            Some((schema, table, true)) => return Some((schema, table)),
         }
+        None
     }
 
     /// Offer the file prompt for an import into `schema.table`, opening
-    /// nothing else: the dialog reads the table's columns itself. Silent
-    /// when a dialog is already open, which is in front of the user.
+    /// nothing else: the dialog reads the table's columns itself.
     pub(crate) fn import_rows_into(
         &mut self,
         schema: String,
@@ -57,20 +131,32 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.import_slot_free(cx) {
+            self.prompt_import_file(schema, table, window, cx);
+        }
+    }
+
+    /// Whether a new import may open. Silent when a dialog is already open,
+    /// which is in front of the user.
+    fn import_slot_free(&mut self, cx: &mut Context<Self>) -> bool {
         if !self.require(Mode::ReadWrite, cx) {
-            return;
+            return false;
         }
         self.clear_notice();
         let Some(profile) = self.profile() else {
-            return;
+            return false;
         };
         // A session holds one dialog, and replacing a running one would drop
         // its connection mid-import.
         if let Some(running) = self.running_import_into(&profile.id) {
             self.note(format!("An import into {running} is running."), cx);
-        } else if profile.session.import_rows.is_none() {
-            self.prompt_import_file(schema, table, window, cx);
+            return false;
         }
+        if profile.session.import_rows.is_some() {
+            return false;
+        }
+        self.import_requests += 1;
+        true
     }
 
     /// Whether the import dialog covers the tab in front, where whatever acts
@@ -99,7 +185,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(profile) = self.profile().map(|profile| profile.id.clone()) else {
+        let Some((profile, generation)) = self
+            .profile()
+            .map(|profile| (profile.id.clone(), profile.generation))
+        else {
             return;
         };
         let chosen = cx.prompt_for_paths(PathPromptOptions {
@@ -112,6 +201,9 @@ impl Workspace {
             let chosen = chosen.await;
             _ = workspace.update_in(cx, |workspace, window, cx| match chosen {
                 Ok(Ok(Some(paths))) => {
+                    if workspace.issued_to(&profile, generation).is_none() {
+                        return;
+                    }
                     if let Some(path) = paths.into_iter().next() {
                         workspace.open_import_file(profile, schema, table, path, window, cx);
                     }
@@ -124,7 +216,7 @@ impl Workspace {
     }
 
     /// Read `path` and open `profile`'s dialog on it, in place of whatever
-    /// file the dialog held, then read the table's columns for it.
+    /// the dialog held.
     pub(super) fn open_import_file(
         &mut self,
         profile: String,
@@ -142,6 +234,16 @@ impl Workspace {
             self.note(format!("{name} is not a CSV, TSV or JSON file."), cx);
             return;
         };
+        let Some(generation) = self
+            .profiles
+            .iter()
+            .find(|found| found.id == profile)
+            .map(|found| found.generation)
+        else {
+            return;
+        };
+        self.import_requests += 1;
+        let request = self.import_requests;
         // ponytail: whole file in memory; stream rows if multi-GB imports matter
         let read = cx.background_executor().spawn({
             let path = path.clone();
@@ -150,62 +252,89 @@ impl Workspace {
         cx.spawn_in(window, async move |workspace, cx| {
             let read = read.await;
             _ = workspace.update_in(cx, |workspace, window, cx| {
-                let Some(found) = workspace.profiles.iter_mut().find(|p| p.id == profile) else {
-                    return;
-                };
-                let bytes = match read {
-                    Ok(bytes) => bytes,
-                    Err(error) => {
-                        found.session.notice =
-                            Some(format!("Could not read {}: {error}", path.display()));
-                        cx.notify();
-                        return;
-                    }
-                };
-                let engine = found.config.engine();
-                let session = &mut found.session;
-                if session
-                    .import_rows
-                    .as_ref()
-                    .is_some_and(|dialog| matches!(dialog.phase, ImportPhase::Running { .. }))
+                if workspace.import_requests != request
+                    || workspace.issued_to(&profile, generation).is_none()
                 {
                     return;
                 }
-                let options = Options::detected(format, &bytes);
-                session.editor_needs_focus = true;
-                session.import_rows = Some(ImportDialog {
-                    schema,
-                    table,
-                    structure: StructureState::Loading,
-                    inputs: import_inputs(&profile, &options, window, cx),
-                    options,
-                    path,
-                    bytes: bytes.into(),
-                    mappings: Vec::new(),
-                    prepared: None,
-                    plan: None,
-                    checks: 0,
-                    checking: false,
-                    phase: ImportPhase::Editing,
-                    error: None,
-                    committed: 0,
-                    preview: new_preview(window, cx),
-                    sql: cx.new(|cx| {
-                        EditorState::new(window, cx)
-                            .language(engine.syntax().highlighter())
-                            .soft_wrap(false)
-                    }),
-                    sql_stale: false,
-                    showing_sql: false,
-                    preview_start: 0,
-                    problem_at: 0,
-                    focused_mapping: None,
-                    mapping_scroll: gpui::ScrollHandle::new(),
-                });
-                workspace.load_import_columns(&profile, cx);
+                match read {
+                    Ok(bytes) => {
+                        let source = ImportSource::File(path);
+                        workspace
+                            .open_import(profile, schema, table, source, format, bytes, window, cx);
+                    }
+                    Err(error) => {
+                        if let Some(found) = workspace.profiles.iter_mut().find(|p| p.id == profile)
+                        {
+                            found.session.notice =
+                                Some(format!("Could not read {}: {error}", path.display()));
+                            cx.notify();
+                        }
+                    }
+                }
             });
         })
         .detach();
+    }
+
+    /// Open `profile`'s dialog on `bytes`, in place of whatever it held, then
+    /// read the table's columns for it.
+    #[allow(clippy::too_many_arguments)]
+    fn open_import(
+        &mut self,
+        profile: String,
+        schema: String,
+        table: String,
+        source: ImportSource,
+        format: Format,
+        bytes: Vec<u8>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(found) = self.profiles.iter_mut().find(|p| p.id == profile) else {
+            return;
+        };
+        let engine = found.config.engine();
+        let session = &mut found.session;
+        if session
+            .import_rows
+            .as_ref()
+            .is_some_and(|dialog| matches!(dialog.phase, ImportPhase::Running { .. }))
+        {
+            return;
+        }
+        let options = Options::detected(format, &bytes);
+        session.editor_needs_focus = true;
+        session.import_rows = Some(ImportDialog {
+            schema,
+            table,
+            structure: StructureState::Loading,
+            inputs: import_inputs(&profile, &options, window, cx),
+            options,
+            source,
+            bytes: bytes.into(),
+            mappings: Vec::new(),
+            prepared: None,
+            plan: None,
+            checks: 0,
+            checking: false,
+            phase: ImportPhase::Editing,
+            error: None,
+            committed: 0,
+            preview: new_preview(window, cx),
+            sql: cx.new(|cx| {
+                EditorState::new(window, cx)
+                    .language(engine.syntax().highlighter())
+                    .soft_wrap(false)
+            }),
+            sql_stale: false,
+            showing_sql: false,
+            preview_start: 0,
+            problem_at: 0,
+            focused_mapping: None,
+            mapping_scroll: gpui::ScrollHandle::new(),
+        });
+        self.load_import_columns(&profile, cx);
     }
 
     /// Read the columns of the table `profile`'s dialog imports into, with the
@@ -300,6 +429,10 @@ impl Workspace {
             StructureState::Loading => return,
         };
         let (check, bytes, options) = (dialog.checks, dialog.bytes.clone(), dialog.options.clone());
+        let pasted_problems = match &dialog.source {
+            ImportSource::Clipboard(problems) if options.format == Format::Json => problems.clone(),
+            _ => Vec::new(),
+        };
         let previous = match &dialog.prepared {
             Some(Ok(prepared)) => Some((prepared.columns.clone(), dialog.mappings.clone())),
             _ => None,
@@ -329,7 +462,12 @@ impl Workspace {
                     let previous = previous
                         .as_ref()
                         .map(|(columns, mappings)| (columns.as_slice(), mappings.as_slice()));
-                    let prepared = prepare(&bytes, &options, &targets, previous, engine)?;
+                    let mut prepared = prepare(&bytes, &options, &targets, previous, engine)?;
+                    if !pasted_problems.is_empty() {
+                        let problems = &mut Arc::make_mut(&mut prepared.checked).problems;
+                        problems.extend(pasted_problems);
+                        problems.sort_by_key(|problem| problem.row);
+                    }
                     let checked = prepared.checked.clone();
                     let plan = Plan::new(engine, schema, table, checked, &options, skips);
                     Ok::<_, String>((prepared, plan))

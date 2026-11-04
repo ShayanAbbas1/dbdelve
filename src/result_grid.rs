@@ -2,9 +2,9 @@ use std::cmp::Ordering;
 use std::rc::Rc;
 
 use gpui::{
-    App, AppContext, Context, Div, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    MouseButton, ParentElement, Pixels, Point, SharedString, Stateful, StatefulInteractiveElement,
-    Styled, Window, div, prelude::FluentBuilder, px,
+    App, AppContext, ClipboardItem, Context, Div, Entity, FocusHandle, Focusable,
+    InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Point, SharedString,
+    Stateful, StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px,
 };
 use gpui_component::{
     InteractiveElementExt,
@@ -24,6 +24,45 @@ use crate::{
     theme::{ConnectionColor, color::Srgb, fonts, layout, theme},
     ui::{Control, Tone, icon_button},
 };
+
+/// Past this much text, a copy carries its columns but not its rows: the rows
+/// beside it are a second rendering of the same rows, built on the UI thread
+/// and held on the clipboard twice over. A paste of it then reads the text,
+/// which loses NULL against empty and each value's own type.
+pub const COPIED_ROWS_TEXT_LIMIT: usize = 16 * 1024 * 1024;
+
+/// `text` for the clipboard, with `result`'s rows beside it for a paste back
+/// into DBDelve ([`export::CopiedRows`]).
+pub fn copied_rows(text: String, result: &QueryResult) -> ClipboardItem {
+    copied_row_slice(
+        text,
+        true,
+        &result.columns,
+        &result.rows,
+        &result.cell_types,
+    )
+}
+
+/// [`copied_rows`] over rows that are not a result of their own, under a
+/// `text` that may not start with a header.
+pub fn copied_row_slice(
+    text: String,
+    header: bool,
+    columns: &[db::Column],
+    rows: &[db::Row],
+    cell_types: &[Vec<&str>],
+) -> ClipboardItem {
+    if text.len() > COPIED_ROWS_TEXT_LIMIT {
+        return ClipboardItem::new_string_with_json_metadata(
+            text,
+            export::CopiedRows::columns_only(columns, header),
+        );
+    }
+    ClipboardItem::new_string_with_json_metadata(
+        text,
+        export::CopiedRows::new(columns, rows, cell_types),
+    )
+}
 
 /// ponytail: a column is a few hundred pixels wide, so shaping more than this is
 /// work nobody can see -- and `db` deliberately keeps whole values, which run to
@@ -107,6 +146,7 @@ pub struct GridSelection {
     active: Option<(usize, usize)>,
     rows: std::collections::BTreeSet<usize>,
     anchor: Option<usize>,
+    from_gutter: bool,
     row: Option<usize>,
 }
 
@@ -316,6 +356,9 @@ pub struct ResultGrid {
     /// The row a plain click lands on, which a shift-click
     /// extends a range from.
     row_selection_anchor: Option<usize>,
+    /// Whether the gutter made the row selection. A click on a cell selects
+    /// its row too, and `cmd+c` there means the cell.
+    rows_from_gutter: bool,
     /// A row the pointer has just selected itself. Telling the library about
     /// it echoes back as `TableEvent::SelectRow`, which must not collapse the
     /// range or toggle the click just made the way a keyboard move does.
@@ -334,6 +377,9 @@ pub struct ResultGrid {
     mode: Mode,
     /// Asked, never matched on, which of the column types is bytes.
     engine: db::Engine,
+    /// Whether the rows are a table's that Import Rows writes into, marked the
+    /// way the structure's keys are, so the cell menu offers a paste.
+    takes_imports: bool,
     /// The table's own focus handle, recorded by the right click that opens the
     /// row menu. The menu dispatches its action into whatever holds focus, and
     /// `context_menu` is handed the delegate alone -- the table is mid-update
@@ -509,11 +555,13 @@ impl ResultGrid {
             opened: None,
             selected_rows: std::collections::BTreeSet::new(),
             row_selection_anchor: None,
+            rows_from_gutter: false,
             pointer_row: None,
             selected_row: None,
             reference_anchor: None,
             mode,
             engine: db::Engine::default(),
+            takes_imports: false,
             focus: None,
         };
         grid.refit();
@@ -1179,6 +1227,7 @@ impl ResultGrid {
     /// Cells and the gutter share one anchor, so Shift can be pressed after
     /// the first click and a range can be extended from either surface.
     fn click_row(&mut self, row: usize, shift: bool, toggle: bool) {
+        self.rows_from_gutter = false;
         if shift {
             let anchor = *self.row_selection_anchor.get_or_insert(row);
             let (start, end) = (anchor.min(row), anchor.max(row));
@@ -1218,6 +1267,7 @@ impl ResultGrid {
             active: self.active,
             rows: self.selected_rows.clone(),
             anchor: self.row_selection_anchor,
+            from_gutter: self.rows_from_gutter,
             row: self.selected_row,
         }
     }
@@ -1238,6 +1288,7 @@ impl ResultGrid {
         self.active = selection.active;
         self.selected_rows = selection.rows;
         self.row_selection_anchor = selection.anchor;
+        self.rows_from_gutter = selection.from_gutter;
         self.selected_row = selection.row;
         true
     }
@@ -1245,6 +1296,15 @@ impl ResultGrid {
     pub fn clear_row_selection(&mut self) {
         self.selected_rows.clear();
         self.row_selection_anchor = None;
+        self.rows_from_gutter = false;
+    }
+
+    pub fn mark_takes_imports(&mut self, takes: bool) {
+        self.takes_imports = takes;
+    }
+
+    pub fn takes_imports(&self) -> bool {
+        self.takes_imports
     }
 
     pub fn mark_primary_key(&mut self, columns: &[String]) {
@@ -1597,12 +1657,46 @@ impl ResultGrid {
     /// in row order. Every row of a multi-row selection, or else the active
     /// cell's row alone -- so the entry works exactly as it did before there
     /// was a selection to make plural.
-    pub fn rows_as(&self, kind: RowsAs) -> Option<String> {
-        let rows = self.selected_row_indices();
+    pub fn rows_as(&self, kind: RowsAs) -> Option<ClipboardItem> {
+        let result = self.rows_of(&self.selected_row_indices())?;
+        let text = export::render_rows_as(kind, self.engine, self.result.edit.as_ref(), &result);
+        let header = !matches!(kind, RowsAs::Text | RowsAs::Csv);
+        Some(copied_row_slice(
+            text,
+            header,
+            &result.columns,
+            &result.rows,
+            &result.cell_types,
+        ))
+    }
+
+    /// What `cmd+c` copies: the selected rows as TSV under a header, the way
+    /// Copy Results writes them, once the gutter has picked rows or more than
+    /// one is selected; the active cell otherwise, as Copy Cell does.
+    pub fn copy(&self) -> Option<ClipboardItem> {
+        if self.editing.is_some() {
+            return None;
+        }
+        if self.copies_rows() {
+            let rows: Vec<usize> = self.selected_rows.iter().copied().collect();
+            let result = self.rows_of(&rows)?;
+            let text = export::render(export::Format::Tsv, &result);
+            return Some(copied_rows(text, &result));
+        }
+        self.active_value()
+            .map(|value| ClipboardItem::new_string(value.to_string()))
+    }
+
+    fn copies_rows(&self) -> bool {
+        self.selected_rows.len() > 1 || (self.rows_from_gutter && !self.selected_rows.is_empty())
+    }
+
+    /// `rows` of the result under all of its columns, as a result of their own.
+    fn rows_of(&self, rows: &[usize]) -> Option<QueryResult> {
         if rows.is_empty() {
             return None;
         }
-        let result = QueryResult {
+        Some(QueryResult {
             columns: self.result.columns.clone(),
             rows: rows
                 .iter()
@@ -1613,13 +1707,7 @@ impl ResultGrid {
                 .filter_map(|&row| self.result.cell_types.get(row).cloned())
                 .collect(),
             ..QueryResult::default()
-        };
-        Some(export::render_rows_as(
-            kind,
-            self.engine,
-            self.result.edit.as_ref(),
-            &result,
-        ))
+        })
     }
 
     /// The rows "Copy Rows As" and the row-number gutter's own highlight agree
@@ -2736,6 +2824,7 @@ impl TableDelegate for ResultGrid {
                 let selected = self.selected_rows.contains(&row_ix);
                 gutter_cell()
                     .id(("row-number", row_ix))
+                    .debug_selector(move || format!("row-number-{row_ix}"))
                     .size_full()
                     .when(selected, |cell| cell.bg(selected_bg))
                     .text_color(if selected { text } else { faint })
@@ -2748,6 +2837,7 @@ impl TableDelegate for ResultGrid {
                         MouseButton::Left,
                         cx.listener(move |table, event: &gpui::MouseDownEvent, window, cx| {
                             click_row(table, row_ix, event, window, cx);
+                            table.delegate_mut().rows_from_gutter = true;
                         }),
                     )
                     .on_click(|_, _, cx| cx.stop_propagation())
@@ -2840,8 +2930,15 @@ impl TableDelegate for ResultGrid {
                 menu.menu(label, Box::new(crate::FollowForeignKey))
                     .separator()
             })
-            .menu("Copy Cell", Box::new(crate::CopyCell))
+            .menu("Copy", Box::new(crate::CopySelection))
+            // "Copy" is the cell itself until rows are picked.
+            .when(self.copies_rows(), |menu| {
+                menu.menu("Copy Cell", Box::new(crate::CopyCell))
+            })
             .item(PopupMenuItem::submenu(rows_as_label, rows_as))
+            .when(self.takes_imports(), |menu| {
+                menu.menu("Paste Rows…", Box::new(crate::ImportRowsFromClipboard))
+            })
             .separator()
             // Named, because the row is what lights up under a right click and
             // the column these act on is only the cell's.
@@ -5730,7 +5827,10 @@ mod tests {
         let mut grid = four_row_grid();
         grid.click_row(2, false, false);
         grid.click_row(0, true, false);
-        assert_eq!(grid.rows_as(RowsAs::Text).as_deref(), Some("0\n1\n2"));
+        assert_eq!(
+            grid.rows_as(RowsAs::Text).and_then(|item| item.text()),
+            Some("0\n1\n2".into())
+        );
     }
 
     #[test]
@@ -6082,5 +6182,42 @@ mod tests {
 
         assert_eq!(restored.active(), Some((2, 0)));
         assert_eq!(restored.result.rows, grid.result.rows);
+    }
+
+    #[test]
+    fn a_copy_past_the_limit_carries_its_columns_but_not_its_rows() {
+        let columns = vec![db::Column {
+            name: "v".into(),
+            ..Default::default()
+        }];
+        let rows = vec![db::Row::new(vec![Some("x".to_string())]).unwrap()];
+        let metadata = |item: ClipboardItem| {
+            item.entries().iter().find_map(|entry| match entry {
+                gpui::ClipboardEntry::String(string) => string.metadata.clone(),
+                _ => None,
+            })
+        };
+
+        let small = metadata(copied_row_slice(
+            "v\nx\n".into(),
+            true,
+            &columns,
+            &rows,
+            &[],
+        ));
+        assert_eq!(
+            small.as_deref(),
+            Some(r#"{"dbdelve":2,"columns":[{"name":"v","type":null}],"rows":[{"v":"x"}]}"#)
+        );
+
+        let large = "x".repeat(COPIED_ROWS_TEXT_LIMIT + 1);
+        assert_eq!(
+            metadata(copied_row_slice(large.clone(), true, &columns, &rows, &[])).as_deref(),
+            Some(r#"{"dbdelve":2,"columns":[{"name":"v","type":null}]}"#)
+        );
+        assert_eq!(
+            metadata(copied_row_slice(large, false, &columns, &rows, &[])).as_deref(),
+            Some(r#"{"dbdelve":2,"columns":[{"name":"v","type":null}],"header":false}"#)
+        );
     }
 }

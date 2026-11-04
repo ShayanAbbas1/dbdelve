@@ -860,6 +860,139 @@ mod tests {
 
     #[test]
     #[ignore = "requires the compose databases"]
+    fn live_a_copy_pastes_into_another_collection_with_every_type_it_held() {
+        use crate::db::Fetch;
+        use crate::import_rows::{Format, Options, pasted, prepare};
+
+        const OID: &str = "65a4f0c2e4b0a1b2c3d4e5f6";
+        let engine = Engine::MongoDb;
+        let connection = live(&var("dbdelve_MONGO_URL"));
+        let ran = |sql: &str| connection.query(sql, &CancelToken::default(), Fetch::default());
+        let collection = |name: &str| format!("db.getCollection(\"{name}\")");
+        let (from, to) = ("dbdelve_paste_from", "dbdelve_paste_to");
+        for name in [from, to] {
+            let _ = ran(&format!("{}.drop()", collection(name)));
+        }
+        let import = |bytes: &[u8]| {
+            let options = Options::detected(Format::Json, bytes);
+            let checked = prepare(bytes, &options, &[], None, engine).unwrap().checked;
+            assert_eq!(checked.problems, []);
+            let plan = Plan::new(
+                engine,
+                "dbdelve_dev".into(),
+                to.into(),
+                checked,
+                &options,
+                false,
+            );
+            let own = connection.apart().unwrap();
+            let cancel = CancelToken::default();
+            let mut run = Run::new(
+                plan.chunks.iter().map(|c| c.len()).collect(),
+                plan.begin.is_some(),
+            );
+            while let Some(step) = run.next() {
+                let sql = plan.sql(step).unwrap();
+                run.landed(
+                    step,
+                    send(&own, engine, &sql, Mode::ReadWrite, &[], &cancel),
+                );
+            }
+            run.outcome().cloned().unwrap()
+        };
+        let found =
+            |name: &str| ran(&format!("{}.find().sort({{_id: 1}})", collection(name))).unwrap();
+
+        ran(&format!(
+            "{}.insertMany([
+                {{_id: 1, i: 7, l: NumberLong('9007199254740993'), d: 2.5, whole: Double(3),
+                  dec: NumberDecimal('12345678901234567890.5'), b: true, n: null,
+                  oid: ObjectId('{OID}'), at: ISODate('2024-01-15T09:30:00.123Z'),
+                  bin: BinData(0, 'AP8Q'), doc: {{x: 1, l: NumberLong('5'), s: 'NULL'}},
+                  arr: [1, 'a', null, {{y: 2.5}}], re: /a\\/b/i, code: Code('x => x'), s: ''}},
+                {{_id: 2, s: 'NULL', i: -1}}
+            ])",
+            collection(from)
+        ))
+        .unwrap();
+        let copied = found(from);
+        assert_eq!(
+            copied.cell_types[0],
+            [
+                "int",
+                "int",
+                "long",
+                "double",
+                "double",
+                "decimal",
+                "bool",
+                "null",
+                "objectId",
+                "date",
+                "binData",
+                "object",
+                "array",
+                "regex",
+                "javascript",
+                "string"
+            ]
+        );
+        let metadata = serde_json::to_string(&crate::export::CopiedRows::new(
+            &copied.columns,
+            &copied.rows,
+            &copied.cell_types,
+        ))
+        .unwrap();
+        let (format, bytes, problems) = pasted("", Some(&metadata), true).unwrap();
+        assert_eq!((format, problems), (Format::Json, Vec::new()));
+        assert_eq!(
+            import(&bytes),
+            Outcome::Imported {
+                rows: 2,
+                affected: Some(2)
+            }
+        );
+        let pasted_back = found(to);
+        assert_eq!(pasted_back.columns, copied.columns);
+        assert_eq!(pasted_back.cell_types, copied.cell_types);
+        assert_eq!(pasted_back.rows, copied.rows);
+        assert_eq!(copied.cell_types[1][2], crate::db::MISSING);
+
+        // mongoexport's Extended JSON reads as the values it wraps.
+        ran(&format!("{}.deleteMany({{}})", collection(to))).unwrap();
+        let exported = format!(
+            r#"{{"_id":{{"$oid":"{OID}"}},"at":{{"$date":"2024-01-15T09:30:00.123Z"}},"n":{{"$numberLong":"5"}}}}"#
+        );
+        assert_eq!(
+            import(exported.as_bytes()),
+            Outcome::Imported {
+                rows: 1,
+                affected: Some(1)
+            }
+        );
+        let read = found(to);
+        assert_eq!(read.cell_types, [["objectId", "date", "long"]]);
+        assert_eq!(
+            read.rows[0].iter().collect::<Vec<_>>(),
+            [Some(OID), Some("2024-01-15T09:30:00.123Z"), Some("5")]
+        );
+
+        // An operator is no value, wrapped or not.
+        for operator in [r#"{"a":{"$gt":1}}"#, r#"{"$where":"1"}"#] {
+            let options = Options::detected(Format::Json, operator.as_bytes());
+            let checked = prepare(operator.as_bytes(), &options, &[], None, engine)
+                .unwrap()
+                .checked;
+            assert_eq!(checked.problems.len(), 1, "{operator}");
+        }
+
+        for name in [from, to] {
+            ran(&format!("{}.drop()", collection(name))).unwrap();
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
     fn live_an_import_round_trips_on_mongodb() {
         live_round_trip(
             live(&var("dbdelve_MONGO_URL")),

@@ -574,13 +574,13 @@ pub(crate) struct InsertField {
     pub(crate) touched: bool,
 }
 
-/// A file on its way into a table.
+/// Rows on their way into a table.
 pub(crate) struct ImportDialog {
     pub(crate) schema: String,
     pub(crate) table: String,
     /// The table's columns, read for the dialog alone.
     pub(crate) structure: StructureState,
-    pub(crate) path: PathBuf,
+    pub(crate) source: ImportSource,
     pub(crate) bytes: Arc<[u8]>,
     pub(crate) options: import_rows::Options,
     pub(crate) mappings: Vec<import_rows::Mapping>,
@@ -608,6 +608,26 @@ pub(crate) struct ImportDialog {
     /// The file column a jump or the "Map a column" link pointed at.
     pub(crate) focused_mapping: Option<usize>,
     pub(crate) mapping_scroll: gpui::ScrollHandle,
+}
+
+/// Where an import's rows were read from.
+pub(crate) enum ImportSource {
+    File(PathBuf),
+    /// With the values a paste could not read back as their own types,
+    /// which hold the import up while the rows are read as JSON.
+    Clipboard(Vec<import_rows::Problem>),
+}
+
+impl ImportSource {
+    pub(crate) fn name(&self) -> String {
+        match self {
+            Self::File(path) => path.file_name().map_or_else(
+                || path.display().to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            ),
+            Self::Clipboard(_) => "Clipboard".into(),
+        }
+    }
 }
 
 /// The import options typed rather than picked.

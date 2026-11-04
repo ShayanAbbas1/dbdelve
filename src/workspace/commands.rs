@@ -637,6 +637,9 @@ impl Workspace {
             Command::ClearFilter => self.clear_filter(&ClearFilter, window, cx),
             Command::NewRow => self.new_row(&NewRow, window, cx),
             Command::ImportRows => self.import_rows(&ImportRows, window, cx),
+            Command::ImportRowsFromClipboard => {
+                self.import_rows_from_clipboard(&ImportRowsFromClipboard, window, cx)
+            }
             Command::CloseObject(id) => self.ask_before_close(Tab::Object(id), window, cx),
             Command::SetNull => self.set_null(&SetNull, window, cx),
             Command::SetEmpty => self.set_empty(&SetEmpty, window, cx),
