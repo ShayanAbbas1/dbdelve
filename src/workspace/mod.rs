@@ -215,6 +215,9 @@ pub(crate) struct Workspace {
     pub(crate) form: Option<ConnectionForm>,
     /// Whether the menu bar last set lists Import Rows.
     menu_imports_rows: bool,
+    /// Bumped by every import asked for, so a paste still being read when
+    /// another is asked for opens nothing when it lands.
+    import_requests: u64,
     pub(crate) projects: Vec<store::StoredProject>,
     /// The welcome surface's project name field, while a project is being
     /// named there.
@@ -429,6 +432,7 @@ impl Workspace {
             active: 0,
             form: None,
             menu_imports_rows: false,
+            import_requests: 0,
             projects: Vec::new(),
             project_name: None,
             renaming_project: None,

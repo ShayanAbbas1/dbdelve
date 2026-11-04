@@ -613,7 +613,9 @@ pub(crate) struct ImportDialog {
 /// Where an import's rows were read from.
 pub(crate) enum ImportSource {
     File(PathBuf),
-    Clipboard,
+    /// With the values a paste could not read back as their own types,
+    /// which hold the import up while the rows are read as JSON.
+    Clipboard(Vec<import_rows::Problem>),
 }
 
 impl ImportSource {
@@ -623,7 +625,7 @@ impl ImportSource {
                 || path.display().to_string(),
                 |name| name.to_string_lossy().into_owned(),
             ),
-            Self::Clipboard => "Clipboard".into(),
+            Self::Clipboard(_) => "Clipboard".into(),
         }
     }
 }

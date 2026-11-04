@@ -11,7 +11,7 @@ use gpui_component::Root;
 
 use super::Workspace;
 use crate::{
-    actions::CancelQuery,
+    actions::{CancelQuery, ImportRowsFromClipboard},
     db::{CancelToken, Engine, Fetch},
     explorer, keybindings,
     palette::{Mode as PaletteMode, Scope},
@@ -725,7 +725,7 @@ fn copy_and_paste_in_a_table_carry_rows_into_the_import_dialog(cx: &mut TestAppC
         assert_eq!(text, "id\tname\tnote\n1\twren\t\n2\trobin\t\"\"\n");
         let pasted = crate::import_rows::pasted(&text, metadata.as_deref(), false);
         assert_eq!(
-            pasted.map(|(format, bytes)| (format, String::from_utf8(bytes).unwrap())),
+            pasted.map(|(format, bytes, _)| (format, String::from_utf8(bytes).unwrap())),
             Some((
                 crate::import_rows::Format::Json,
                 "{\"id\":\"1\",\"name\":\"wren\",\"note\":null}\n\
@@ -776,6 +776,71 @@ fn copy_and_paste_in_a_table_carry_rows_into_the_import_dialog(cx: &mut TestAppC
             assert_eq!(dialog.source.name(), "Clipboard");
             assert_eq!(&*dialog.bytes, b"name\nfinch\n");
         });
+
+        // A value a paste could not type holds the import up where it is.
+        let profile =
+            workspace.read_with(cx, |workspace, _| workspace.profile().unwrap().id.clone());
+        workspace.update(cx, |workspace, cx| {
+            let session = &mut workspace.profile_mut().unwrap().session;
+            let dialog = session.import_rows.as_mut().unwrap();
+            dialog.options.format = crate::import_rows::Format::Json;
+            dialog.bytes = b"{\"name\":\"finch\"}".as_slice().into();
+            dialog.source =
+                crate::session::ImportSource::Clipboard(vec![crate::import_rows::Problem {
+                    row: Some(0),
+                    line: Some(1),
+                    column: Some(0),
+                    message: "unreadable".into(),
+                }]);
+            workspace.recheck_import(&profile, cx);
+        });
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let dialog = workspace.profile().unwrap().session.import_rows.as_ref();
+            let Some(Ok(prepared)) = &dialog.unwrap().prepared else {
+                panic!("the paste was not checked");
+            };
+            let problems = &prepared.checked.problems;
+            assert!(
+                problems
+                    .iter()
+                    .any(|problem| problem.message == "unreadable"),
+                "{problems:?}"
+            );
+        });
+
+        // A paste read after another import was asked for, or after a dialog
+        // opened, opens nothing.
+        let take = |cx: &mut VisualTestContext| {
+            workspace.update(cx, |workspace, _| {
+                workspace.profile_mut().unwrap().session.import_rows.take()
+            })
+        };
+        let shown = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                let dialog = workspace.profile().unwrap().session.import_rows.as_ref();
+                dialog.map(|dialog| dialog.bytes.to_vec())
+            })
+        };
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string("late\n1\n".into()));
+        let opened = take(cx);
+        let opened_bytes = opened.as_ref().map(|dialog| dialog.bytes.to_vec());
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.import_rows_from_clipboard(&ImportRowsFromClipboard, window, cx);
+            workspace.profile_mut().unwrap().session.import_rows = opened;
+        });
+        settle(cx);
+        assert_eq!(shown(cx), opened_bytes);
+
+        take(cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.import_rows_from_clipboard(&ImportRowsFromClipboard, window, cx);
+            workspace.import_rows_into("main".into(), "birds".into(), window, cx);
+        });
+        settle(cx);
+        assert_eq!(shown(cx), None);
 
         quit(workspace, cx);
     });

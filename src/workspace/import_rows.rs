@@ -61,19 +61,30 @@ impl Workspace {
             })
         });
         let documents = self.engine().takes_new_fields();
+        let request = self.import_requests;
         let reading = cx.background_executor().spawn(async move {
             text.and_then(|text| pasted(&text, metadata.as_deref(), documents))
         });
         cx.spawn_in(window, async move |workspace, cx| {
             let read = reading.await;
-            _ = workspace.update_in(cx, |workspace, window, cx| match read {
-                Some((format, bytes)) => {
-                    let source = ImportSource::Clipboard;
-                    workspace
-                        .open_import(profile, schema, table, source, format, bytes, window, cx);
+            _ = workspace.update_in(cx, |workspace, window, cx| {
+                if workspace.import_requests != request {
+                    return;
                 }
-                None => {
-                    if let Some(found) = workspace.profiles.iter_mut().find(|p| p.id == profile) {
+                let Some(found) = workspace.profiles.iter_mut().find(|p| p.id == profile) else {
+                    return;
+                };
+                // Opened while the paste was read: the user's, not the paste's to replace.
+                if found.session.import_rows.is_some() {
+                    return;
+                }
+                match read {
+                    Some((format, bytes, problems)) => {
+                        let source = ImportSource::Clipboard(problems);
+                        workspace
+                            .open_import(profile, schema, table, source, format, bytes, window, cx);
+                    }
+                    None => {
                         found.session.notice =
                             Some("The clipboard holds no rows to import.".into());
                         cx.notify();
@@ -136,7 +147,11 @@ impl Workspace {
             self.note(format!("An import into {running} is running."), cx);
             return false;
         }
-        profile.session.import_rows.is_none()
+        if profile.session.import_rows.is_some() {
+            return false;
+        }
+        self.import_requests += 1;
+        true
     }
 
     /// Whether the import dialog covers the tab in front, where whatever acts
@@ -385,6 +400,10 @@ impl Workspace {
             StructureState::Loading => return,
         };
         let (check, bytes, options) = (dialog.checks, dialog.bytes.clone(), dialog.options.clone());
+        let pasted_problems = match &dialog.source {
+            ImportSource::Clipboard(problems) if options.format == Format::Json => problems.clone(),
+            _ => Vec::new(),
+        };
         let previous = match &dialog.prepared {
             Some(Ok(prepared)) => Some((prepared.columns.clone(), dialog.mappings.clone())),
             _ => None,
@@ -414,7 +433,12 @@ impl Workspace {
                     let previous = previous
                         .as_ref()
                         .map(|(columns, mappings)| (columns.as_slice(), mappings.as_slice()));
-                    let prepared = prepare(&bytes, &options, &targets, previous, engine)?;
+                    let mut prepared = prepare(&bytes, &options, &targets, previous, engine)?;
+                    if !pasted_problems.is_empty() {
+                        let problems = &mut Arc::make_mut(&mut prepared.checked).problems;
+                        problems.extend(pasted_problems);
+                        problems.sort_by_key(|problem| problem.row);
+                    }
                     let checked = prepared.checked.clone();
                     let plan = Plan::new(engine, schema, table, checked, &options, skips);
                     Ok::<_, String>((prepared, plan))

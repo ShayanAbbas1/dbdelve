@@ -171,6 +171,7 @@ pub(crate) fn offered_rules(target: Option<&TargetColumn>) -> Vec<Rule> {
     rules
 }
 
+#[derive(Clone)]
 pub(crate) struct CheckedRow {
     pub(crate) line: usize,
     pub(crate) values: Vec<Option<Value>>,
@@ -180,6 +181,7 @@ pub(crate) struct CheckedRow {
 /// its bad values `None`), which `Problem::row` and the preview rely on.
 /// `columns` is `(name, data_type)` in insert order and `sources` the file
 /// column behind each.
+#[derive(Clone)]
 pub(crate) struct Checked {
     pub(crate) columns: Vec<(String, String)>,
     pub(crate) sources: Vec<usize>,

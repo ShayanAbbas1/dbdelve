@@ -31,14 +31,15 @@ pub(crate) fn detect(path: &Path) -> Option<Format> {
 /// carried beside its text ([`crate::export::CopiedRows`]), or else the text
 /// itself, as JSON where it reads as JSON and as delimited text otherwise.
 /// `None` for a clipboard holding no text. `documents` is whether the rows go
-/// into a collection, which keeps each copied value's own type.
+/// into a collection, which keeps each copied value's own type; the problems
+/// are the values that could not keep theirs.
 pub(crate) fn pasted(
     text: &str,
     metadata: Option<&str>,
     documents: bool,
-) -> Option<(Format, Vec<u8>)> {
-    if let Some(rows) = metadata.and_then(|metadata| copied_rows(metadata, documents)) {
-        return Some((Format::Json, rows.into_bytes()));
+) -> Option<(Format, Vec<u8>, Vec<Problem>)> {
+    if let Some((rows, problems)) = metadata.and_then(|metadata| copied_rows(metadata, documents)) {
+        return Some((Format::Json, rows.into_bytes(), problems));
     }
     if text.trim().is_empty() {
         return None;
@@ -50,7 +51,7 @@ pub(crate) fn pasted(
     } else {
         Format::Csv
     };
-    Some((format, text.as_bytes().to_vec()))
+    Some((format, text.as_bytes().to_vec(), Vec::new()))
 }
 
 /// The rows of a [`crate::export::CopiedRows`] as JSON Lines, so a problem's
@@ -60,8 +61,8 @@ pub(crate) fn pasted(
 /// A typed cell bound for a collection is read back from its text as an edit
 /// of it would be, and written as the Extended JSON an import reads as that
 /// value: the grid's text alone makes a string of a long, a date or an
-/// ObjectId.
-fn copied_rows(metadata: &str, documents: bool) -> Option<String> {
+/// ObjectId. One that does not read back is a problem rather than that string.
+fn copied_rows(metadata: &str, documents: bool) -> Option<(String, Vec<Problem>)> {
     #[derive(serde::Deserialize)]
     struct Copied {
         dbdelve: u32,
@@ -75,34 +76,50 @@ fn copied_rows(metadata: &str, documents: bool) -> Option<String> {
         .ok()
         .filter(|copied| copied.dbdelve == COPIED_ROWS_VERSION)?;
     if rows.is_empty() {
-        return Some("[]".into());
+        return Some(("[]".into(), Vec::new()));
     }
+    let mut problems = Vec::new();
     if documents {
-        for (row, types) in rows.iter_mut().zip(&types) {
+        // Numbered as `read_json` numbers them: in the order first seen.
+        let mut columns: Vec<String> = Vec::new();
+        for (at, (row, types)) in rows.iter_mut().zip(&types).enumerate() {
             let Json::Object(fields) = row else {
                 continue;
             };
             let present = types.iter().filter(|tag| *tag != MISSING);
-            for ((_, value), tag) in fields.iter_mut().zip(present) {
+            for ((key, value), tag) in fields.iter_mut().zip(present) {
+                let column = columns
+                    .iter()
+                    .position(|seen| seen == key)
+                    .unwrap_or_else(|| {
+                        columns.push(key.clone());
+                        columns.len() - 1
+                    });
                 let Json::String(text) = value else {
                     continue;
                 };
-                if let Some(typed) = mql::coerce(text, Some(tag))
-                    .ok()
-                    .as_ref()
-                    .and_then(mql::extended)
-                {
-                    *value = typed;
+                let typed = mql::coerce(text, Some(tag)).and_then(|typed| {
+                    mql::extended(&typed)
+                        .ok_or_else(|| format!("`{text}` names no value of type {tag}."))
+                });
+                match typed {
+                    Ok(typed) => *value = typed,
+                    Err(message) => problems.push(Problem {
+                        row: Some(at),
+                        line: Some(at + 1),
+                        column: Some(column),
+                        message,
+                    }),
                 }
             }
         }
     }
-    Some(
-        rows.iter()
-            .map(Json::to_string)
-            .collect::<Vec<_>>()
-            .join("\n"),
-    )
+    let rows = rows
+        .iter()
+        .map(Json::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some((rows, problems))
 }
 
 const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
@@ -1023,7 +1040,7 @@ mod tests {
 
     #[test]
     fn pasted_text_is_json_where_it_parses_as_json_and_delimited_otherwise() {
-        let format = |text: &str| pasted(text, None, false).map(|(format, _)| format);
+        let format = |text: &str| pasted(text, None, false).map(|(format, ..)| format);
         assert_eq!(format("[{\"a\": 1}, {\"a\": 2}]"), Some(Format::Json));
         assert_eq!(format("\n{\"a\": 1}\n{\"a\": 2}\n"), Some(Format::Json));
         assert_eq!(format("a\tb\n1\t2\n"), Some(Format::Tsv));
@@ -1061,7 +1078,7 @@ mod tests {
             ],
         );
         // Copy Rows As Text: no header, and NULL written as the word.
-        let (format, bytes) = pasted("1\tNULL\n2\t\n3\tNULL", Some(&metadata), false).unwrap();
+        let (format, bytes, _) = pasted("1\tNULL\n2\t\n3\tNULL", Some(&metadata), false).unwrap();
         assert_eq!(format, Format::Json);
         let options = Options::detected(format, &bytes);
         let table = read(&bytes, &options).unwrap();
@@ -1150,7 +1167,8 @@ mod tests {
             serde_json::to_string(&crate::export::CopiedRows::new(&columns, &rows, &types))
                 .unwrap();
 
-        let (format, bytes) = pasted("ignored", Some(&metadata), true).unwrap();
+        let (format, bytes, problems) = pasted("ignored", Some(&metadata), true).unwrap();
+        assert!(problems.is_empty(), "{problems:?}");
         let options = Options::detected(format, &bytes);
         let prepared = prepare(&bytes, &options, &[], None, crate::db::Engine::MongoDb).unwrap();
         let checked = &prepared.checked;
@@ -1195,7 +1213,7 @@ mod tests {
         );
 
         // Into a table, the values stay the text the grid showed.
-        let (_, bytes) = pasted("ignored", Some(&metadata), false).unwrap();
+        let (_, bytes, _) = pasted("ignored", Some(&metadata), false).unwrap();
         let first = String::from_utf8(bytes).unwrap();
         assert!(
             first.starts_with(&format!(
@@ -1217,14 +1235,45 @@ mod tests {
         for metadata in [other.as_str(), "[1, 2]", "not json"] {
             assert_eq!(
                 pasted("a,b\n1,2", Some(metadata), false),
-                Some((Format::Csv, b"a,b\n1,2".to_vec()))
+                Some((Format::Csv, b"a,b\n1,2".to_vec(), Vec::new()))
             );
         }
         let empty = copied(&named(&["a"]), &[]);
         assert_eq!(
             pasted("", Some(&empty), false),
-            Some((Format::Json, b"[]".to_vec()))
+            Some((Format::Json, b"[]".to_vec(), Vec::new()))
         );
+    }
+
+    #[test]
+    fn a_value_that_cannot_keep_its_type_is_a_problem_not_a_string() {
+        let columns = named(&["_id", "f"]);
+        let rows = crate::db::rows(vec![
+            vec![Some("1".into()), Some("x".into())],
+            vec![
+                Some("2".into()),
+                Some(r#"{"$code":"f","$scope":{}}"#.into()),
+            ],
+        ]);
+        let types: Vec<Vec<&str>> = vec![vec!["int", "string"], vec!["int", "javascriptWithScope"]];
+        let metadata =
+            serde_json::to_string(&crate::export::CopiedRows::new(&columns, &rows, &types))
+                .unwrap();
+        let (_, _, problems) = pasted("ignored", Some(&metadata), true).unwrap();
+        assert_eq!(
+            problems
+                .iter()
+                .map(|problem| (problem.row, problem.line, problem.column))
+                .collect::<Vec<_>>(),
+            [(Some(1), Some(2), Some(1))]
+        );
+        assert!(
+            problems[0].message.contains("javascriptWithScope"),
+            "{}",
+            problems[0].message
+        );
+        let (_, _, into_a_table) = pasted("ignored", Some(&metadata), false).unwrap();
+        assert!(into_a_table.is_empty());
     }
 
     #[test]
