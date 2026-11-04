@@ -890,16 +890,6 @@ fn rows_copied_from_one_table_paste_into_another_exactly(cx: &mut TestAppContext
             assert_eq!(front.as_deref(), Some(name));
         };
         let paste_and_import = |cx: &mut VisualTestContext| {
-            cx.update(|window, cx| {
-                let results = workspace
-                    .read(cx)
-                    .profile()
-                    .unwrap()
-                    .session
-                    .active_results()
-                    .cloned();
-                results.unwrap().focus_handle(cx).focus(window, cx);
-            });
             cx.simulate_keystrokes("secondary-v");
             settle(cx);
             assert_eq!(front_dialog(&workspace, cx), Some("import-rows"));
@@ -941,7 +931,11 @@ fn rows_copied_from_one_table_paste_into_another_exactly(cx: &mut TestAppContext
         settle(cx);
         cx.simulate_keystrokes("secondary-c");
 
-        open("nests", cx);
+        // The way a mouse opens it: an empty table, its keyboard on nothing
+        // the grid draws.
+        let nests = explorer_row(&workspace, "relation-main\0nests", cx).center();
+        cx.simulate_click(nests, gpui::Modifiers::default());
+        settle(cx);
         paste_and_import(cx);
         assert_eq!(read("nests"), read("birds"));
 
@@ -2158,5 +2152,92 @@ fn a_service_launch_does_not_reuse_a_profiles_explicit_port(cx: &mut TestAppCont
             workspace.read_with(cx, |workspace, _| workspace.profile().unwrap().id.clone());
         quit(workspace, cx);
         assert_eq!(active, "inherited");
+    });
+}
+
+#[gpui::test]
+fn a_click_on_an_empty_table_takes_the_keyboard_for_a_paste(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) =
+            launch_on_sqlite_holding(cx, "create table nests (id integer primary key);");
+        cx.executor().allow_parking();
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string("id\n5\n".into()));
+        let nests = explorer_row(&workspace, "relation-main\0nests", cx).center();
+        cx.simulate_click(nests, gpui::Modifiers::default());
+        settle(cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.focus.focus(window, cx)
+        });
+        settle(cx);
+
+        let empty = cx
+            .debug_bounds("empty-results")
+            .expect("the message is drawn");
+        cx.simulate_click(empty.center(), gpui::Modifiers::default());
+        settle(cx);
+        cx.simulate_keystrokes("secondary-v");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("import-rows"));
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_ways_to_import_show_only_where_rows_can_be_imported(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            "create table birds (id integer primary key); insert into birds values (1);
+             create table nests (id integer primary key);",
+        );
+        cx.executor().allow_parking();
+        let drawn = |selector: &'static str, cx: &mut VisualTestContext| {
+            cx.debug_bounds(selector).is_some()
+        };
+        let open = |name: &str, cx: &mut VisualTestContext| {
+            let row: &'static str = format!("relation-main\0{name}").leak();
+            let row = explorer_row(&workspace, row, cx).center();
+            cx.simulate_click(row, gpui::Modifiers::default());
+            settle(cx);
+        };
+        assert!(!drawn("import-rows", cx), "a query tab imports nothing");
+
+        open("birds", cx);
+        assert!(drawn("import-rows", cx));
+        assert!(
+            !drawn("paste-rows", cx),
+            "a table with rows needs no invitation"
+        );
+        let menu_offers_paste = cx.update(|_, cx| {
+            let session = &workspace.read(cx).profile().unwrap().session;
+            session
+                .active_results()
+                .unwrap()
+                .read(cx)
+                .delegate()
+                .takes_imports()
+        });
+        assert!(menu_offers_paste);
+
+        open("nests", cx);
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string("id\n5\n".into()));
+        let paste = cx
+            .debug_bounds("paste-rows")
+            .expect("an empty table invites rows");
+        cx.simulate_click(paste.center(), gpui::Modifiers::default());
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("import-rows"));
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), None);
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_mode(crate::sql::Mode::ReadOnly, cx)
+        });
+        settle(cx);
+        assert!(!drawn("paste-rows", cx), "read-only has nothing to invite");
+
+        quit(workspace, cx);
     });
 }

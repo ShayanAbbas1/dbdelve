@@ -344,6 +344,9 @@ pub struct ResultGrid {
     mode: Mode,
     /// Asked, never matched on, which of the column types is bytes.
     engine: db::Engine,
+    /// Whether the rows are a table's that Import Rows writes into, marked the
+    /// way the structure's keys are, so the cell menu offers a paste.
+    takes_imports: bool,
     /// The table's own focus handle, recorded by the right click that opens the
     /// row menu. The menu dispatches its action into whatever holds focus, and
     /// `context_menu` is handed the delegate alone -- the table is mid-update
@@ -525,6 +528,7 @@ impl ResultGrid {
             reference_anchor: None,
             mode,
             engine: db::Engine::default(),
+            takes_imports: false,
             focus: None,
         };
         grid.refit();
@@ -1262,6 +1266,14 @@ impl ResultGrid {
         self.rows_from_gutter = false;
     }
 
+    pub fn mark_takes_imports(&mut self, takes: bool) {
+        self.takes_imports = takes;
+    }
+
+    pub fn takes_imports(&self) -> bool {
+        self.takes_imports
+    }
+
     pub fn mark_primary_key(&mut self, columns: &[String]) {
         self.primary_key = self.columns_named(columns);
         self.refit();
@@ -1625,14 +1637,18 @@ impl ResultGrid {
         if self.editing.is_some() {
             return None;
         }
-        let rows: Vec<usize> = self.selected_rows.iter().copied().collect();
-        if rows.len() > 1 || (self.rows_from_gutter && !rows.is_empty()) {
+        if self.copies_rows() {
+            let rows: Vec<usize> = self.selected_rows.iter().copied().collect();
             let result = self.rows_of(&rows)?;
             let text = export::render(export::Format::Tsv, &result);
             return Some(copied_rows(text, &result));
         }
         self.active_value()
             .map(|value| ClipboardItem::new_string(value.to_string()))
+    }
+
+    fn copies_rows(&self) -> bool {
+        self.selected_rows.len() > 1 || (self.rows_from_gutter && !self.selected_rows.is_empty())
     }
 
     /// `rows` of the result under all of its columns, as a result of their own.
@@ -2874,8 +2890,15 @@ impl TableDelegate for ResultGrid {
                 menu.menu(label, Box::new(crate::FollowForeignKey))
                     .separator()
             })
-            .menu("Copy Cell", Box::new(crate::CopyCell))
+            .menu("Copy", Box::new(crate::CopySelection))
+            // "Copy" is the cell itself until rows are picked.
+            .when(self.copies_rows(), |menu| {
+                menu.menu("Copy Cell", Box::new(crate::CopyCell))
+            })
             .item(PopupMenuItem::submenu(rows_as_label, rows_as))
+            .when(self.takes_imports(), |menu| {
+                menu.menu("Paste Rows…", Box::new(crate::ImportRowsFromClipboard))
+            })
             .separator()
             // Named, because the row is what lights up under a right click and
             // the column these act on is only the cell's.

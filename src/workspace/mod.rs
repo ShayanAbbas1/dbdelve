@@ -1680,6 +1680,15 @@ impl Render for Workspace {
         let has_pending = pending_count > 0;
         let has_results = self.has_results(cx);
         let show_result_actions = has_results && !has_pending;
+        // Its menu dispatches into the grid, the context `cmd-v` is bound in.
+        let import_menu = profile
+            .session
+            .active_object()
+            .filter(|tab| !has_pending && tab.takes_imports(engine))
+            .and_then(|tab| match &tab.body {
+                ObjectBody::Relation { results, .. } => Some(results.focus_handle(cx)),
+                _ => None,
+            });
         // A structure tab's in place of the rows' copy and export: the
         // relation's own definition, and a statement to fill it with.
         let structure_copies = profile.session.active_object().and_then(|tab| {
@@ -1810,6 +1819,20 @@ impl Render for Workspace {
                                     workspace.ask_refresh_stale(cx);
                                 });
                             })
+                        }))
+                        .children(import_menu.map(|grid| {
+                            button("import-rows", "Import", Tone::Quiet, Control::Compact, t)
+                                .debug_selector(|| "import-rows".into())
+                                .child(
+                                    icon(icon::CHEVRON_DOWN)
+                                        .size(px(layout::chrome(layout::ICON_SIZE)))
+                                        .text_color(t.text_faint),
+                                )
+                                .dropdown_menu(move |menu, _, _| {
+                                    menu.action_context(grid.clone())
+                                        .menu("From Clipboard", Box::new(ImportRowsFromClipboard))
+                                        .menu("From File…", Box::new(ImportRows))
+                                })
                         }))
                         // Not beside pending edits: these write the rows as
                         // fetched, not the values on screen, and the review
@@ -2009,6 +2032,7 @@ impl Render for Workspace {
                 self.plan_copied,
                 &self.tab_strip,
                 self.custom_limit.as_ref(),
+                &self.settings.custom_keybindings,
                 cx,
             )))
             .children(results_status);

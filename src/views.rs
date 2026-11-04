@@ -7,6 +7,8 @@
 //! `render_main_content` is the only way in. Everything else is a part of the
 //! surface it assembles, which is why the rest of the module is private.
 
+use std::collections::HashMap;
+
 use gpui::{
     Animation, AnimationExt, AnyElement, App, AppContext, ClickEvent, ClipboardItem, Context, Div,
     Entity, Focusable, FontWeight, HighlightStyle, Hsla, InteractiveElement, IntoElement,
@@ -35,10 +37,10 @@ use crate::{
     InsertForm, TabKey, Workspace,
     actions::{
         AcceptCompletion, AddFilter, CancelQuery, CopyCell, CopySelection, CustomRowLimit,
-        ExplainQuery, FormatQuery, LimitTarget, NewQuery, NewRow, NextPage, PreviousPage,
-        RemoveFilter, RunQuery, SaveQuery, SetDefaultRowLimit, SetFilterColumn, SetFilterOperator,
-        SetFilterRaw, SetQueryLimit, SetRowLimit, ToggleComment, ToggleFilterJoin, ToggleNextJoin,
-        ToggleRowPanel,
+        ExplainQuery, FormatQuery, ImportRows, ImportRowsFromClipboard, LimitTarget, NewQuery,
+        NewRow, NextPage, PreviousPage, RemoveFilter, RunQuery, SaveQuery, SetDefaultRowLimit,
+        SetFilterColumn, SetFilterOperator, SetFilterRaw, SetQueryLimit, SetRowLimit,
+        ToggleComment, ToggleFilterJoin, ToggleNextJoin, ToggleRowPanel,
     },
     db,
     db::{Engine, ExplainMode, RoutineKind},
@@ -54,12 +56,14 @@ use crate::{
         Explained, ObjectBody, ObjectTab, Profile, ProfileState, QueryState, QueryTab, Said,
         Session, StructureState, Tab, query_label, result_pane_is_expanded,
     },
+    sql::Mode,
     structure_grid::{Section, StructureGrid},
     tab_drag::{DragTab, TabStrip},
     theme::{Theme, fonts, layout, theme},
     ui::{
-        Code, Control, Tone, button, code_highlights, compact_count, group_thousands, icon_button,
-        key_hint, keycap_text, kind_color, object_icon, reconnect_button, row_icon, section_label,
+        Code, Control, Tone, button, chord_hint, code_highlights, compact_count, group_thousands,
+        icon_button, key_hint, keycap_text, kind_color, object_icon, reconnect_button, row_icon,
+        section_label,
     },
     workspace::error_in_buffer,
 };
@@ -155,6 +159,7 @@ pub fn render_main_content(
     plan_copied: bool,
     strip: &TabStrip,
     custom_limit: Option<&(LimitTarget, Entity<InputState>)>,
+    keybindings: &HashMap<String, String>,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     let body = match profile.session.active_object() {
@@ -169,6 +174,8 @@ pub fn render_main_content(
                 .insert_form
                 .as_ref()
                 .filter(|form| form.tab == profile.session.active),
+            (tab.takes_imports(profile.config.engine()) && profile.mode >= Mode::ReadWrite)
+                .then(|| chord_hint("import_rows_from_clipboard", keybindings)),
             cx,
         ),
         None => render_query_surface(
@@ -366,6 +373,7 @@ fn render_query_surface(
                 .insert_form
                 .as_ref()
                 .filter(|form| form.tab == Tab::Query(tab.id)),
+            None,
             &scope,
             cx,
         ),
@@ -748,6 +756,7 @@ fn round_count(value: f64) -> String {
 /// An opened object. A relation's generated `SELECT` is an ordinary buffer
 /// the user can edit and run; only a routine, which has nothing to run, is
 /// read-only.
+#[allow(clippy::too_many_arguments)]
 fn render_object(
     tab: &ObjectTab,
     profile_id: &str,
@@ -755,6 +764,7 @@ fn render_object(
     disconnected: bool,
     row_panel: &RowPanel,
     form: Option<&InsertForm>,
+    import_invite: Option<String>,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     let t = *theme(cx);
@@ -827,6 +837,7 @@ fn render_object(
             row_panel_split,
             row_panel,
             form,
+            import_invite,
             &scope,
             cx,
         )))
@@ -1327,6 +1338,9 @@ fn render_results(
     split: &Entity<ResizableState>,
     row_panel: &RowPanel,
     form: Option<&InsertForm>,
+    // The chord that pastes, when an empty table should say rows can be
+    // brought in: one that takes imports, in a mode that writes them.
+    import_invite: Option<String>,
     scope: &str,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
@@ -1507,6 +1521,17 @@ fn render_results(
                 Some(rows) => format!("Query completed. Server row count: {rows}."),
                 None => "Query completed.".into(),
             });
+            let line = match import_invite {
+                None => line,
+                Some(chord) => div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(layout::SPACE_SM))
+                    .child(line)
+                    .child(import_invite_line(&chord, t, cx))
+                    .into_any_element(),
+            };
             Some(match messages.is_empty() {
                 true => centered(line),
                 // Read top to bottom like the log it is, the outcome last,
@@ -1626,6 +1651,7 @@ fn render_results(
             .min_h_0()
             .min_w_0()
             .track_focus(&results.focus_handle(cx))
+            .debug_selector(|| "empty-results".into())
             .child(message)
             .into_any_element(),
         None => match loading {
@@ -1963,6 +1989,41 @@ fn render_messages(
         )
         .children(groups)
         .children(tail.map(|tail| div().font_family(chrome).child(tail)))
+        .into_any_element()
+}
+
+/// "Paste rows with ⌘V or import a file…", each half a way in.
+fn import_invite_line(chord: &str, t: Theme, cx: &mut Context<Workspace>) -> AnyElement {
+    let paste = match chord.is_empty() {
+        true => "Paste rows".to_string(),
+        false => format!("Paste rows with {chord}"),
+    };
+    div()
+        .flex()
+        .items_center()
+        .gap(px(layout::SPACE_XS))
+        .text_size(px(layout::chrome(layout::TEXT_SM)))
+        .text_color(t.text_faint)
+        .child(
+            button("paste-rows", paste, Tone::Quiet, Control::Inline, t)
+                .debug_selector(|| "paste-rows".into())
+                .on_click(cx.listener(|workspace, _, window, cx| {
+                    workspace.import_rows_from_clipboard(&ImportRowsFromClipboard, window, cx)
+                })),
+        )
+        .child("or")
+        .child(
+            button(
+                "import-file",
+                "import a file…",
+                Tone::Quiet,
+                Control::Inline,
+                t,
+            )
+            .on_click(cx.listener(|workspace, _, window, cx| {
+                workspace.import_rows(&ImportRows, window, cx)
+            })),
+        )
         .into_any_element()
 }
 
