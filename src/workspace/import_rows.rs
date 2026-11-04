@@ -49,7 +49,10 @@ impl Workspace {
         if !self.import_slot_free(cx) {
             return;
         }
-        let Some(profile) = self.profile().map(|profile| profile.id.clone()) else {
+        let Some((profile, generation)) = self
+            .profile()
+            .map(|profile| (profile.id.clone(), profile.generation))
+        else {
             return;
         };
         let item = cx.read_from_clipboard();
@@ -71,7 +74,9 @@ impl Workspace {
                 if workspace.import_requests != request {
                     return;
                 }
-                let Some(found) = workspace.profiles.iter_mut().find(|p| p.id == profile) else {
+                // A database switched meanwhile has a same-named table that is
+                // not the one asked for.
+                let Some(found) = workspace.issued_to(&profile, generation) else {
                     return;
                 };
                 // Opened while the paste was read: the user's, not the paste's to replace.
@@ -180,7 +185,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(profile) = self.profile().map(|profile| profile.id.clone()) else {
+        let Some((profile, generation)) = self
+            .profile()
+            .map(|profile| (profile.id.clone(), profile.generation))
+        else {
             return;
         };
         let chosen = cx.prompt_for_paths(PathPromptOptions {
@@ -193,6 +201,9 @@ impl Workspace {
             let chosen = chosen.await;
             _ = workspace.update_in(cx, |workspace, window, cx| match chosen {
                 Ok(Ok(Some(paths))) => {
+                    if workspace.issued_to(&profile, generation).is_none() {
+                        return;
+                    }
                     if let Some(path) = paths.into_iter().next() {
                         workspace.open_import_file(profile, schema, table, path, window, cx);
                     }
@@ -223,6 +234,16 @@ impl Workspace {
             self.note(format!("{name} is not a CSV, TSV or JSON file."), cx);
             return;
         };
+        let Some(generation) = self
+            .profiles
+            .iter()
+            .find(|found| found.id == profile)
+            .map(|found| found.generation)
+        else {
+            return;
+        };
+        self.import_requests += 1;
+        let request = self.import_requests;
         // ponytail: whole file in memory; stream rows if multi-GB imports matter
         let read = cx.background_executor().spawn({
             let path = path.clone();
@@ -230,17 +251,25 @@ impl Workspace {
         });
         cx.spawn_in(window, async move |workspace, cx| {
             let read = read.await;
-            _ = workspace.update_in(cx, |workspace, window, cx| match read {
-                Ok(bytes) => {
-                    let source = ImportSource::File(path);
-                    workspace
-                        .open_import(profile, schema, table, source, format, bytes, window, cx);
+            _ = workspace.update_in(cx, |workspace, window, cx| {
+                if workspace.import_requests != request
+                    || workspace.issued_to(&profile, generation).is_none()
+                {
+                    return;
                 }
-                Err(error) => {
-                    if let Some(found) = workspace.profiles.iter_mut().find(|p| p.id == profile) {
-                        found.session.notice =
-                            Some(format!("Could not read {}: {error}", path.display()));
-                        cx.notify();
+                match read {
+                    Ok(bytes) => {
+                        let source = ImportSource::File(path);
+                        workspace
+                            .open_import(profile, schema, table, source, format, bytes, window, cx);
+                    }
+                    Err(error) => {
+                        if let Some(found) = workspace.profiles.iter_mut().find(|p| p.id == profile)
+                        {
+                            found.session.notice =
+                                Some(format!("Could not read {}: {error}", path.display()));
+                            cx.notify();
+                        }
                     }
                 }
             });

@@ -842,6 +842,45 @@ fn copy_and_paste_in_a_table_carry_rows_into_the_import_dialog(cx: &mut TestAppC
         settle(cx);
         assert_eq!(shown(cx), None);
 
+        // Nor one read while the profile moved to another database, whose
+        // table of the same name is not the one asked for.
+        let moved = |workspace: &mut Workspace| workspace.profile_mut().unwrap().generation += 1;
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.import_rows_from_clipboard(&ImportRowsFromClipboard, window, cx);
+            moved(workspace);
+        });
+        settle(cx);
+        assert_eq!(shown(cx), None);
+
+        // A file read is held to both the same way.
+        let file = store::dbdelve_directory().unwrap().join("late.csv");
+        std::fs::write(&file, "id\n7\n").unwrap();
+        let read_file =
+            |workspace: &mut Workspace, window: &mut Window, cx: &mut gpui::Context<Workspace>| {
+                let profile = workspace.profile().unwrap().id.clone();
+                workspace.open_import_file(
+                    profile,
+                    "main".into(),
+                    "birds".into(),
+                    file.clone(),
+                    window,
+                    cx,
+                );
+            };
+        workspace.update_in(cx, |workspace, window, cx| {
+            read_file(workspace, window, cx);
+            workspace.import_rows_from_clipboard(&ImportRowsFromClipboard, window, cx);
+        });
+        settle(cx);
+        assert_eq!(shown(cx), Some(b"late\n1\n".to_vec()));
+        take(cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            read_file(workspace, window, cx);
+            moved(workspace);
+        });
+        settle(cx);
+        assert_eq!(shown(cx), None);
+
         quit(workspace, cx);
     });
 }
