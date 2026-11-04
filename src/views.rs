@@ -1616,8 +1616,10 @@ fn render_results(
     let content = match message {
         // Holding the grid's handle in its place: a table opened empty was
         // given the keyboard as it opened, and a handle no element tracks
-        // leaves the window with no dispatch path at all.
+        // leaves the window with no dispatch path at all. Its context too, or
+        // `cmd-v`, the way rows reach an empty table, would find no binding.
         Some(message) => div()
+            .key_context("DataTable")
             .size_full()
             .flex()
             .flex_col()

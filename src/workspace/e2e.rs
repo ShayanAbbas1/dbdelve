@@ -847,6 +847,125 @@ fn copy_and_paste_in_a_table_carry_rows_into_the_import_dialog(cx: &mut TestAppC
 }
 
 #[gpui::test]
+fn rows_copied_from_one_table_paste_into_another_exactly(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            "create table birds (id integer primary key, note text, big integer, ratio real, body text, pic blob);
+             insert into birds values
+               (1, null, 9223372036854775807, 0.1, 'a	b \"q\" ''s''
+ünï ✓', x'00FF10'),
+               (2, '', -9007199254740993, 1.5e300, 'plain', null),
+               (3, 'NULL', 0, -2.5, '', x'');
+             create table nests (pic blob, body text, ratio real, big integer, note text, id integer primary key);",
+        );
+        cx.executor().allow_parking();
+        let read = |table: &str| -> Vec<Vec<String>> {
+            // Not `pic`: Import Rows writes the grid's `x'00FF10'` for a blob
+            // as text, as it does reading the same value from a file.
+            let columns = ["id", "note", "big", "ratio", "body"]
+                .map(|c| format!("typeof({c}) || ' ' || quote({c})"))
+                .join(", ");
+            let db = rusqlite::Connection::open(store::dbdelve_directory().unwrap().join("e2e.db"))
+                .unwrap();
+            let mut statement = db
+                .prepare(&format!("select {columns} from {table} order by id"))
+                .unwrap();
+            statement
+                .query_map([], |row| (0..5).map(|i| row.get::<_, String>(i)).collect())
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let open = |name: &str, cx: &mut VisualTestContext| {
+            cx.simulate_keystrokes("secondary-p");
+            settle(cx);
+            cx.simulate_input(name);
+            cx.simulate_keystrokes("enter");
+            settle(cx);
+            let front = workspace.read_with(cx, |workspace, _| {
+                let session = &workspace.profile().unwrap().session;
+                session.active_object().map(|tab| tab.name.clone())
+            });
+            assert_eq!(front.as_deref(), Some(name));
+        };
+        let paste_and_import = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                let results = workspace
+                    .read(cx)
+                    .profile()
+                    .unwrap()
+                    .session
+                    .active_results()
+                    .cloned();
+                results.unwrap().focus_handle(cx).focus(window, cx);
+            });
+            cx.simulate_keystrokes("secondary-v");
+            settle(cx);
+            assert_eq!(front_dialog(&workspace, cx), Some("import-rows"));
+            cx.executor()
+                .advance_clock(std::time::Duration::from_secs(1));
+            settle(cx);
+            workspace.read_with(cx, |workspace, _| {
+                let dialog = workspace.profile().unwrap().session.import_rows.as_ref();
+                assert_eq!(super::import_dialog::import_blocked(dialog.unwrap()), None);
+            });
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.dialog_focus.focus(window, cx)
+            });
+            cx.simulate_keystrokes("shift-tab");
+            press(cx, "enter");
+            for _ in 0..100 {
+                if front_dialog(&workspace, cx).is_none() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                settle(cx);
+            }
+            assert_eq!(
+                front_dialog(&workspace, cx),
+                None,
+                "the import never finished"
+            );
+        };
+
+        open("birds", cx);
+        let gutter = |row: usize, cx: &mut VisualTestContext| {
+            let selector: &'static str = format!("row-number-{row}").leak();
+            cx.debug_bounds(selector).expect("the row is drawn")
+        };
+        let first = gutter(0, cx).center();
+        cx.simulate_click(first, gpui::Modifiers::default());
+        let last = gutter(2, cx).center();
+        cx.simulate_click(last, gpui::Modifiers::shift());
+        settle(cx);
+        cx.simulate_keystrokes("secondary-c");
+
+        open("nests", cx);
+        paste_and_import(cx);
+        assert_eq!(read("nests"), read("birds"));
+
+        // A spreadsheet's cells, which carry no types and no NULL of their own.
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+            "id\tbody\tnote\tbig\n10\tfrom a sheet\t\t42\n".into(),
+        ));
+        paste_and_import(cx);
+        assert_eq!(
+            read("nests").last().unwrap(),
+            &[
+                "integer 10",
+                "null NULL",
+                "integer 42",
+                "null NULL",
+                "text 'from a sheet'",
+            ]
+        );
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn the_import_question_picks_its_project_from_the_keyboard(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite(cx);
