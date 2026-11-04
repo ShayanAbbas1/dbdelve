@@ -11,6 +11,7 @@ use serde::de::{Deserialize, Deserializer, Error as _, MapAccess, Visitor};
 use serde_json::value::RawValue;
 
 use super::{Delimiter, Encoding, Format, Options, Problem};
+use crate::export::COPIED_ROWS_VERSION;
 
 /// The format a file's extension names, or `None` for a file Import Rows
 /// does not read.
@@ -22,6 +23,52 @@ pub(crate) fn detect(path: &Path) -> Option<Format> {
         "csv" => Some(Format::Csv),
         _ => None,
     }
+}
+
+/// What a paste imports, and how to read it: the rows DBDelve's own copy
+/// carried beside its text ([`crate::export::CopiedRows`]), or else the text itself, as JSON
+/// where it reads as JSON and as delimited text otherwise. `None` for a
+/// clipboard holding no text.
+pub(crate) fn pasted(text: &str, metadata: Option<&str>) -> Option<(Format, Vec<u8>)> {
+    if let Some(rows) = metadata.and_then(copied_rows) {
+        return Some((Format::Json, rows.into_bytes()));
+    }
+    if text.trim().is_empty() {
+        return None;
+    }
+    let format = if read_json(text).is_ok() {
+        Format::Json
+    } else if sniff(text, '"') == '\t' {
+        Format::Tsv
+    } else {
+        Format::Csv
+    };
+    Some((format, text.as_bytes().to_vec()))
+}
+
+/// The rows of a [`crate::export::CopiedRows`] as JSON Lines, so a problem's line is its
+/// row's number. `None` for metadata some other app or another version of
+/// DBDelve wrote, which leaves the paste to the text.
+fn copied_rows(metadata: &str) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Copied {
+        dbdelve: u32,
+        rows: Vec<Json>,
+    }
+    let copied = serde_json::from_str::<Copied>(metadata)
+        .ok()
+        .filter(|copied| copied.dbdelve == COPIED_ROWS_VERSION)?;
+    if copied.rows.is_empty() {
+        return Some("[]".into());
+    }
+    Some(
+        copied
+            .rows
+            .iter()
+            .map(Json::to_string)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
 }
 
 const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
@@ -937,6 +984,119 @@ mod tests {
                 .err()
                 .unwrap(),
             "The file is not valid UTF-16 LE at byte 2."
+        );
+    }
+
+    #[test]
+    fn pasted_text_is_json_where_it_parses_as_json_and_delimited_otherwise() {
+        let format = |text: &str| pasted(text, None).map(|(format, _)| format);
+        assert_eq!(format("[{\"a\": 1}, {\"a\": 2}]"), Some(Format::Json));
+        assert_eq!(format("\n{\"a\": 1}\n{\"a\": 2}\n"), Some(Format::Json));
+        assert_eq!(format("a\tb\n1\t2\n"), Some(Format::Tsv));
+        assert_eq!(format("a,b\n1,2\n"), Some(Format::Csv));
+        assert_eq!(format("[not json\tx\n1\t2"), Some(Format::Tsv));
+        assert_eq!(format("{\"a\": 1}\n{oops}"), Some(Format::Csv));
+        assert_eq!(format(""), None);
+        assert_eq!(format(" \n\t\n"), None);
+    }
+
+    fn copied(columns: &[Column], rows: &[Vec<Option<String>>]) -> String {
+        let rows = crate::db::rows(rows.to_vec());
+        serde_json::to_string(&crate::export::CopiedRows::new(columns, &rows, &[])).unwrap()
+    }
+
+    fn named(names: &[&str]) -> Vec<Column> {
+        names
+            .iter()
+            .map(|name| Column {
+                name: (*name).into(),
+                data_type: None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_dbdelve_copy_pastes_its_rows_by_name_whatever_its_text_says() {
+        let columns = named(&["id", "note"]);
+        let metadata = copied(
+            &columns,
+            &[
+                vec![Some("1".into()), None],
+                vec![Some("2".into()), Some(String::new())],
+                vec![Some("3".into()), Some("NULL".into())],
+            ],
+        );
+        // Copy Rows As Text: no header, and NULL written as the word.
+        let (format, bytes) = pasted("1\tNULL\n2\t\n3\tNULL", Some(&metadata)).unwrap();
+        assert_eq!(format, Format::Json);
+        let options = Options::detected(format, &bytes);
+        let table = read(&bytes, &options).unwrap();
+        assert_eq!(table.columns, ["id", "note"]);
+        assert_eq!(
+            table.rows.iter().map(|r| r.line).collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+
+        let target = |name: &str| TargetColumn {
+            name: name.into(),
+            data_type: "text".into(),
+            nullable: true,
+            has_default: false,
+            generated: false,
+        };
+        let targets = [target("note"), target("id")];
+        let prepared = prepare(
+            &bytes,
+            &options,
+            &targets,
+            None,
+            crate::db::Engine::Postgres,
+        )
+        .unwrap();
+        let checked = &prepared.checked;
+        assert!(checked.problems.is_empty(), "{:?}", checked.problems);
+        assert_eq!(
+            checked
+                .columns
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            ["id", "note"]
+        );
+        let notes: Vec<_> = checked
+            .rows
+            .iter()
+            .map(|row| row.values[1].clone())
+            .collect();
+        assert_eq!(
+            notes,
+            [
+                Some(Value::Null),
+                Some(Value::Text(String::new())),
+                Some(Value::Text("NULL".into()))
+            ]
+        );
+    }
+
+    #[test]
+    fn metadata_of_another_version_or_app_leaves_the_paste_to_the_text() {
+        let current = copied(&named(&["a"]), &[vec![None]]);
+        let other = current.replacen(
+            &format!("\"dbdelve\":{COPIED_ROWS_VERSION}"),
+            &format!("\"dbdelve\":{}", COPIED_ROWS_VERSION + 1),
+            1,
+        );
+        assert_ne!(other, current);
+        for metadata in [other.as_str(), "[1, 2]", "not json"] {
+            assert_eq!(
+                pasted("a,b\n1,2", Some(metadata)),
+                Some((Format::Csv, b"a,b\n1,2".to_vec()))
+            );
+        }
+        let empty = copied(&named(&["a"]), &[]);
+        assert_eq!(
+            pasted("", Some(&empty)),
+            Some((Format::Json, b"[]".to_vec()))
         );
     }
 

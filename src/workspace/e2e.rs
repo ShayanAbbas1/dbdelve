@@ -685,6 +685,103 @@ fn tab_walks_the_import_dialog_and_its_buttons_answer_the_keyboard(cx: &mut Test
 }
 
 #[gpui::test]
+fn copy_and_paste_in_a_table_carry_rows_into_the_import_dialog(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            "create table birds (id integer primary key, name text, note text);
+             insert into birds values (1, 'wren', null), (2, 'robin', '');",
+        );
+        cx.simulate_keystrokes("secondary-k e");
+        settle(cx);
+        cx.simulate_keystrokes("down down enter");
+        settle(cx);
+        let clipboard = |cx: &mut VisualTestContext| {
+            let item = cx.read_from_clipboard().expect("something was copied");
+            let metadata = item.entries().iter().find_map(|entry| match entry {
+                gpui::ClipboardEntry::String(string) => string.metadata.clone(),
+                _ => None,
+            });
+            (item.text().unwrap_or_default(), metadata)
+        };
+        let gutter = |row: usize, cx: &mut VisualTestContext| {
+            let selector: &'static str = format!("row-number-{row}").leak();
+            cx.debug_bounds(selector).expect("the row is drawn")
+        };
+
+        let first = gutter(0, cx).center();
+        cx.simulate_click(first, gpui::Modifiers::default());
+        settle(cx);
+        cx.simulate_keystrokes("secondary-c");
+        let (text, metadata) = clipboard(cx);
+        assert_eq!(text, "id\tname\tnote\n1\twren\t\n");
+        assert!(metadata.is_some(), "a row copy carries its rows");
+
+        let second = gutter(1, cx).center();
+        cx.simulate_click(second, gpui::Modifiers::shift());
+        settle(cx);
+        cx.simulate_keystrokes("secondary-c");
+        let (text, metadata) = clipboard(cx);
+        assert_eq!(text, "id\tname\tnote\n1\twren\t\n2\trobin\t\"\"\n");
+        let pasted = crate::import_rows::pasted(&text, metadata.as_deref());
+        assert_eq!(
+            pasted.map(|(format, bytes)| (format, String::from_utf8(bytes).unwrap())),
+            Some((
+                crate::import_rows::Format::Json,
+                "{\"id\":\"1\",\"name\":\"wren\",\"note\":null}\n\
+                 {\"id\":\"2\",\"name\":\"robin\",\"note\":\"\"}"
+                    .into()
+            ))
+        );
+
+        // A cell of the first row, clicked: that cell alone, as Copy Cell has it.
+        let cell = gutter(0, cx).right_center() + gpui::point(gpui::px(12.), gpui::px(0.));
+        cx.simulate_click(cell, gpui::Modifiers::default());
+        settle(cx);
+        cx.simulate_keystrokes("right secondary-c");
+        settle(cx);
+        assert_eq!(clipboard(cx), ("wren".into(), None));
+
+        // An open input keeps both keystrokes for its own text.
+        let resolved: Rc<RefCell<Vec<Option<&'static str>>>> = Rc::default();
+        let _observer = cx.update({
+            let resolved = resolved.clone();
+            |_, cx| {
+                cx.observe_keystrokes(move |event, _, _| {
+                    let action = event.action.as_ref().map(|action| action.name());
+                    resolved.borrow_mut().push(action);
+                })
+            }
+        });
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        resolved.borrow_mut().clear();
+        cx.simulate_keystrokes("secondary-c secondary-v");
+        settle(cx);
+        assert_eq!(
+            *resolved.borrow(),
+            [Some("input::Copy"), Some("input::Paste")]
+        );
+        assert_eq!(front_dialog(&workspace, cx), None);
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string("name\nfinch\n".into()));
+        cx.simulate_keystrokes("secondary-v");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("import-rows"));
+        workspace.read_with(cx, |workspace, _| {
+            let dialog = workspace.profile().unwrap().session.import_rows.as_ref();
+            let dialog = dialog.expect("the dialog is open");
+            assert_eq!(dialog.source.name(), "Clipboard");
+            assert_eq!(&*dialog.bytes, b"name\nfinch\n");
+        });
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn the_import_question_picks_its_project_from_the_keyboard(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite(cx);

@@ -2080,6 +2080,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::set_default_row_limit_action))
             .on_action(cx.listener(Self::refresh_connection))
             .on_action(cx.listener(Self::import_rows))
+            .on_action(cx.listener(Self::import_rows_from_clipboard))
             .on_action(cx.listener(Self::show_editor))
             .on_action(cx.listener(Self::select_theme))
             .on_action(cx.listener(Self::select_database))

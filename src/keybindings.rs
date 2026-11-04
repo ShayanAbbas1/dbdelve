@@ -28,19 +28,20 @@ use crate::{
     actions::{
         AcceptCompletion, AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseTab,
         CommandPalette, ConfirmDialog, CopyCell, CopyPlan, CopyResults, CopyRow, CopyRows,
-        CycleMode, DeleteRow, DiscardEdits, EditCell, ExplainQuery, FocusSidebar, FollowForeignKey,
-        FormatQuery, FuzzyOpen, GoToColumn, HideColumn, ImportConnections, ImportRows, Minimize,
-        MoveTabLeft, MoveTabRight, NewConnection, NewProject, NewQuery, NewRow, NextDialogButton,
-        NextEdit, NextPage, NextProfile, NextResult, NextTab, OpenSettings, OpenSidebarItem,
-        PaletteHistoryFilter, PaletteHistorySort, PaletteNext, PaletteNextScope, PalettePrevious,
-        PalettePreviousScope, PaletteRowActions, PaletteScopeLeft, PaletteScopeRight,
-        PreviousDialogButton, PreviousEdit, PreviousPage, PreviousProfile, PreviousResult,
-        PreviousTab, Quit, RefreshConnection, RefreshRelation, ResetConfirmations, ResetEditorZoom,
-        RunQuery, SaveQuery, SearchEverything, SelectDatabase, SelectTheme, SetDefault, SetEmpty,
-        SetMode, SetNull, ShowAllColumns, ShowEditor, ShowMessages, ShowReferences,
-        SortActiveColumn, SubmitConnection, SwitchConnection, TickDialogBox, ToggleComment,
-        ToggleNextJoin, TogglePinColumn, ToggleResultsFocus, ToggleRowEdit, ToggleRowPanel,
-        ToggleSidebar, ToggleStructure, ZoomEditorIn, ZoomEditorOut,
+        CopySelection, CycleMode, DeleteRow, DiscardEdits, EditCell, ExplainQuery, FocusSidebar,
+        FollowForeignKey, FormatQuery, FuzzyOpen, GoToColumn, HideColumn, ImportConnections,
+        ImportRows, ImportRowsFromClipboard, Minimize, MoveTabLeft, MoveTabRight, NewConnection,
+        NewProject, NewQuery, NewRow, NextDialogButton, NextEdit, NextPage, NextProfile,
+        NextResult, NextTab, OpenSettings, OpenSidebarItem, PaletteHistoryFilter,
+        PaletteHistorySort, PaletteNext, PaletteNextScope, PalettePrevious, PalettePreviousScope,
+        PaletteRowActions, PaletteScopeLeft, PaletteScopeRight, PreviousDialogButton, PreviousEdit,
+        PreviousPage, PreviousProfile, PreviousResult, PreviousTab, Quit, RefreshConnection,
+        RefreshRelation, ResetConfirmations, ResetEditorZoom, RunQuery, SaveQuery,
+        SearchEverything, SelectDatabase, SelectTheme, SetDefault, SetEmpty, SetMode, SetNull,
+        ShowAllColumns, ShowEditor, ShowMessages, ShowReferences, SortActiveColumn,
+        SubmitConnection, SwitchConnection, TickDialogBox, ToggleComment, ToggleNextJoin,
+        TogglePinColumn, ToggleResultsFocus, ToggleRowEdit, ToggleRowPanel, ToggleSidebar,
+        ToggleStructure, ZoomEditorIn, ZoomEditorOut,
     },
     db::ExplainMode,
     export::RowsAs,
@@ -200,7 +201,10 @@ registry! {
     ("zoom_editor_out", "Zoom Out", None, ["secondary--"], ZoomEditorOut),
     ("reset_editor_zoom", "Reset Zoom", None, ["secondary-0"], ResetEditorZoom),
     ("edit_cell", "Edit Cell", Some("DataTable"), ["enter"], EditCell),
-    ("copy_cell", "Copy Cell", Some("DataTable"), ["secondary-c"], CopyCell),
+    ("copy", "Copy", Some("DataTable"), ["secondary-c"], CopySelection),
+    // Copy's chord before Copy copied rows, kept so a chord put on it still
+    // copies the active cell alone.
+    ("copy_cell", "Copy Cell", Some("DataTable"), [], CopyCell),
     // Not the spreadsheet's `ctrl-shift-n`: off macOS that is New Connection's
     // keys, and New Connection wins even with a cell focused -- which left
     // this unreachable there. Clearing a cell with the delete key is the
@@ -251,6 +255,9 @@ registry! {
     ("toggle_next_join", "Toggle Join Type", None, [], ToggleNextJoin),
     ("new_row", "Insert", None, [], NewRow),
     ("import_rows", "Import Rows", None, [], ImportRows),
+    // A cell input open in the grid keeps its own paste: its binding sits
+    // deeper on the focus path, and the deepest match wins.
+    ("import_rows_from_clipboard", "Import Rows from Clipboard", Some("DataTable"), ["secondary-v"], ImportRowsFromClipboard),
     // Scoped like `set_null` rather than left global: they act on the grid's
     // active cell, so a chord put on one later must not fire from the editor.
     ("set_empty", "Set Cell to Empty", Some("DataTable"), [], SetEmpty),

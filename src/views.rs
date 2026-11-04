@@ -34,10 +34,10 @@ use gpui_component::{
 use crate::{
     InsertForm, TabKey, Workspace,
     actions::{
-        AcceptCompletion, AddFilter, CancelQuery, CopyCell, CustomRowLimit, ExplainQuery,
-        FormatQuery, LimitTarget, NewQuery, NewRow, NextPage, PreviousPage, RemoveFilter, RunQuery,
-        SaveQuery, SetDefaultRowLimit, SetFilterColumn, SetFilterOperator, SetFilterRaw,
-        SetQueryLimit, SetRowLimit, ToggleComment, ToggleFilterJoin, ToggleNextJoin,
+        AcceptCompletion, AddFilter, CancelQuery, CopyCell, CopySelection, CustomRowLimit,
+        ExplainQuery, FormatQuery, LimitTarget, NewQuery, NewRow, NextPage, PreviousPage,
+        RemoveFilter, RunQuery, SaveQuery, SetDefaultRowLimit, SetFilterColumn, SetFilterOperator,
+        SetFilterRaw, SetQueryLimit, SetRowLimit, ToggleComment, ToggleFilterJoin, ToggleNextJoin,
         ToggleRowPanel,
     },
     db,
@@ -1561,6 +1561,7 @@ fn render_results(
                 // caught here on its way out of the Table context.
                 .on_action(cx.listener(Workspace::edit_cell))
                 .on_action(cx.listener(Workspace::copy_cell))
+                .on_action(cx.listener(Workspace::copy_selection))
                 // Captured, so the ring steps before the library's own
                 // handler steps from its stale column.
                 .capture_action({
@@ -2658,7 +2659,15 @@ fn render_structure(
         grid.read(cx).horizontal_scroll_handle.clone(),
         cx,
     );
-    let copy_from = grid.clone();
+    let copy = {
+        let grid = grid.clone();
+        move |cx: &mut App| {
+            if let Some(text) = grid.read(cx).delegate().selection_text() {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+            }
+        }
+    };
+    let copy_cell = copy.clone();
     div()
         .size_full()
         .flex()
@@ -2674,13 +2683,10 @@ fn render_structure(
                 .min_w_0()
                 .font_family(fonts(cx).grid.clone())
                 .text_size(px(layout::grid(layout::BODY_FONT_SIZE)))
-                // The data grid's Copy Cell keystroke, answered from this grid's
+                // The data grid's copy keystrokes, answered from this grid's
                 // selection rather than the hidden rows'.
-                .on_action(move |_: &CopyCell, _, cx| {
-                    if let Some(text) = copy_from.read(cx).delegate().selection_text() {
-                        cx.write_to_clipboard(ClipboardItem::new_string(text));
-                    }
-                })
+                .on_action(move |_: &CopySelection, _, cx| copy(cx))
+                .on_action(move |_: &CopyCell, _, cx| copy_cell(cx))
                 .child(
                     DataTable::new(grid)
                         .focus_ring(false)

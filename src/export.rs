@@ -11,7 +11,8 @@ use std::{
     path::Path,
 };
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 
 use crate::db::{
     Column, ColumnDefinition, EditTarget, Engine, IdentityInsert, MISSING, QueryResult, Row, Syntax,
@@ -380,6 +381,50 @@ pub fn render_rows(
     cell_types: &[Vec<&str>],
 ) -> String {
     rendered(Writer::new(Vec::new(), format, columns), rows, cell_types)
+}
+
+/// Bumped whenever [`CopiedRows`] changes shape. A paste reads only the
+/// version it knows, and falls back to the text for any other.
+pub const COPIED_ROWS_VERSION: u32 = 1;
+
+/// What a copy of rows carries on the clipboard beside its text, for a paste
+/// back into DBDelve: the same rows as [`Format::Json`] writes them, which
+/// Import Rows reads as it reads a JSON file. No shape of the text keeps a
+/// NULL apart from both an empty string and the word `NULL`, and some carry
+/// no column names at all.
+#[derive(Serialize)]
+pub struct CopiedRows<'a> {
+    dbdelve: u32,
+    columns: Vec<CopiedColumn<'a>>,
+    rows: Box<RawValue>,
+}
+
+#[derive(Serialize)]
+struct CopiedColumn<'a> {
+    name: &'a str,
+    #[serde(rename = "type")]
+    data_type: Option<&'a str>,
+}
+
+impl<'a> CopiedRows<'a> {
+    pub fn new(columns: &'a [Column], rows: &[Row], cell_types: &[Vec<&str>]) -> Self {
+        let json = render_rows(Format::Json, columns, rows, cell_types);
+        Self {
+            dbdelve: COPIED_ROWS_VERSION,
+            columns: columns
+                .iter()
+                .map(|column| CopiedColumn {
+                    name: &column.name,
+                    data_type: column.data_type.as_deref(),
+                })
+                .collect(),
+            rows: RawValue::from_string(json).expect("the JSON writer writes JSON"),
+        }
+    }
+
+    pub fn of(result: &'a QueryResult) -> Self {
+        Self::new(&result.columns, &result.rows, &result.cell_types)
+    }
 }
 
 pub(crate) fn render_delimited(delimiter: char, columns: &[Column], rows: &[Row]) -> String {

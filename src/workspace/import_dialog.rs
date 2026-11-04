@@ -1298,11 +1298,7 @@ fn import_header(dialog: &ImportDialog, cx: &mut Context<Workspace>) -> impl Int
     let t = popup_theme(cx);
     let workspace = cx.entity().downgrade();
     let (schema, table) = (dialog.schema.clone(), dialog.table.clone());
-    let name = dialog
-        .path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| dialog.path.display().to_string());
+    let name = dialog.source.name();
     let rows = match &dialog.prepared {
         Some(Ok(prepared)) => Some(row_readout(
             prepared.checked.rows.len(),
