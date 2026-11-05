@@ -421,10 +421,15 @@ pub(crate) fn filters_on(engine: Engine, column: &str) -> bool {
 
 /// The bars that narrow anything, which is the same question as whether a bar
 /// has a predicate: an unfinished one reaches neither the statement nor the
-/// file.
+/// file. A bar this engine refuses ([`refusal`]) has no predicate here but
+/// still narrows, so it is kept: dropped, a later restore onto an engine that
+/// accepts it would derive a filter without it and widen the rows.
 pub(crate) fn applied_filters(engine: Engine, bars: &[FilterBar]) -> Vec<FilterBar> {
     bars.iter()
-        .filter(|bar| bar_predicate(engine, bar, &[]).is_some())
+        .filter(|bar| {
+            bar_predicate(engine, bar, &[]).is_some()
+                || refusal(engine, std::slice::from_ref(*bar)).is_some()
+        })
         .cloned()
         .collect()
 }
@@ -1841,6 +1846,44 @@ mod tests {
         let (restored, bars) = restored_filter(Engine::Generic, &stored);
         assert_eq!(restored, filter);
         assert_eq!(refusal(Engine::Generic, &bars), Some(LIKE_PLAIN_REFUSAL));
+    }
+
+    #[test]
+    fn a_refused_bar_is_saved_and_narrows_again_where_it_is_accepted() {
+        let refused = FilterBar {
+            column: Some("name".into()),
+            operator: Operator::Contains,
+            value: "50%".into(),
+            ..FilterBar::default()
+        };
+        let accepted = FilterBar {
+            column: Some("id".into()),
+            operator: Operator::Greater,
+            value: "1".into(),
+            ..FilterBar::default()
+        };
+        let saved = applied_filters(Engine::Generic, &[refused.clone(), accepted.clone()]);
+        assert_eq!(saved, [refused.clone(), accepted.clone()]);
+
+        let stored = store::StoredObject {
+            schema: "public".into(),
+            name: "accounts".into(),
+            routine: false,
+            structure: false,
+            kind: RelationKind::default(),
+            filter: "kept as written".into(),
+            filter_engine: Some(Engine::Generic.as_str().into()),
+            origin: None,
+            filters: Vec::new(),
+            active: true,
+            bars: saved.iter().map(stored_filter).collect(),
+        };
+        let (restored, _) = restored_filter(Engine::Postgres, &stored);
+        assert_eq!(
+            restored,
+            derived_filter(Engine::Postgres, &[refused, accepted], &[])
+        );
+        assert!(restored.contains("50"), "{restored}");
     }
 
     #[test]
