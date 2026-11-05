@@ -10,7 +10,6 @@ introduce limits.
 
 Ideas and discussion on [Discord](https://discord.gg/7PegWzwqCm).
 
-> Early days. Everything listed below works today.
 
 ![DBDelve in Gruvbox Dark Glass: a SELECT on the events table in the editor and its result grid below](assets/screenshots/query-dark.png)
 
@@ -61,7 +60,6 @@ bridge, with the database's own ODBC driver installed. Grid editing is off, and
 statements you type run under the connection's mode. See
 [Connecting through ODBC](docs/odbc.md).
 
-More engines are planned.
 
 ![The welcome screen: paste a connection URL or pick one of the engines, import from DBeaver or TablePlus, or pick a theme](assets/screenshots/welcome.png)
 
