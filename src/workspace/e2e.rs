@@ -2499,6 +2499,9 @@ fn a_refused_bar_edit_leaves_the_bars_as_they_ran(cx: &mut TestAppContext) {
         .unwrap();
 
         let (workspace, cx) = launch_with(cx, vec![crate::db::echo::plugin()]);
+        // The connect and the tab's query run on threads the scheduler does
+        // not own; echo answers both at once, so each wait below ends.
+        cx.executor().allow_parking();
         workspace.update(cx, |workspace, cx| {
             let index = workspace
                 .profiles
