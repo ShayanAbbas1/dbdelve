@@ -127,6 +127,31 @@ impl Workspace {
         );
     }
 
+    /// [`Self::apply_filter`] after a change to the bars, or the bars put back
+    /// as they were in `before` when the engine refuses the result. Left
+    /// changed, the bars would not be the ones the tab's filter came from, and
+    /// they are what the tab saves and restores from.
+    fn apply_changed_filter(
+        &mut self,
+        id: u64,
+        before: Option<Vec<FilterRow>>,
+        cx: &mut Context<Self>,
+    ) {
+        let engine = self.engine();
+        let refused = self
+            .filter_rows_mut(id)
+            .and_then(|rows| refusal(engine, &filter_bars(rows)));
+        match (refused, before) {
+            (Some(sentence), Some(before)) => {
+                if let Some(rows) = self.filter_rows_mut(id) {
+                    *rows = before;
+                }
+                self.note(sentence.to_string(), cx);
+            }
+            _ => self.apply_filter(id, cx),
+        }
+    }
+
     /// Enter in one bar: what it holds now becomes what it applies, and the
     /// filter runs. Only that bar -- text typed into another stays unsent
     /// until Enter there.
@@ -137,13 +162,14 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let value = input.read(cx).value().to_string();
+        let before = self.filter_rows_mut(id).map(|rows| rows.clone());
         if let Some(row) = self
             .filter_rows_mut(id)
             .and_then(|rows| rows.iter_mut().find(|row| &row.value == input))
         {
             row.applied = value;
         }
-        self.apply_filter(id, cx);
+        self.apply_changed_filter(id, before, cx);
     }
 
     /// Add a bar to the active preview, ready to be filled in. Nothing runs
@@ -172,13 +198,14 @@ impl Workspace {
             return;
         };
         let row = action.row;
+        let before = self.filter_rows_mut(id).map(|rows| rows.clone());
         match self.filter_rows_mut(id) {
             Some(filters) if row < filters.len() => {
                 filters.remove(row);
             }
             _ => return,
         }
-        self.apply_filter(id, cx);
+        self.apply_changed_filter(id, before, cx);
         cx.notify();
     }
 
@@ -195,6 +222,7 @@ impl Workspace {
             return;
         };
         let engine = self.engine();
+        let before = self.filter_rows_mut(id).map(|rows| rows.clone());
         let Some(filter) = self.filter_row_mut(id, action.row) else {
             return;
         };
@@ -215,7 +243,7 @@ impl Workspace {
             }
             shape_value(input, engine, false, operator, None, window, cx);
         });
-        self.apply_filter(id, cx);
+        self.apply_changed_filter(id, before, cx);
         cx.notify();
     }
 
@@ -233,6 +261,7 @@ impl Workspace {
         };
         let engine = self.engine();
         let completions = self.filter_completions(id);
+        let before = self.filter_rows_mut(id).map(|rows| rows.clone());
         let Some(filter) = self.filter_row_mut(id, action.row) else {
             return;
         };
@@ -252,7 +281,7 @@ impl Workspace {
                 cx,
             );
         });
-        self.apply_filter(id, cx);
+        self.apply_changed_filter(id, before, cx);
         cx.notify();
     }
 
@@ -265,6 +294,7 @@ impl Workspace {
         let Some(id) = self.active_object_id() else {
             return;
         };
+        let before = self.filter_rows_mut(id).map(|rows| rows.clone());
         let Some(filter) = self.filter_row_mut(id, action.row) else {
             return;
         };
@@ -277,7 +307,7 @@ impl Workspace {
                 cx,
             );
         });
-        self.apply_filter(id, cx);
+        self.apply_changed_filter(id, before, cx);
         cx.notify();
     }
 
@@ -290,11 +320,12 @@ impl Workspace {
         let Some(id) = self.active_object_id() else {
             return;
         };
+        let before = self.filter_rows_mut(id).map(|rows| rows.clone());
         match self.filter_row_mut(id, action.row) {
             Some(filter) => filter.conjunction = filter.conjunction.toggled(),
             None => return,
         }
-        self.apply_filter(id, cx);
+        self.apply_changed_filter(id, before, cx);
         cx.notify();
     }
 

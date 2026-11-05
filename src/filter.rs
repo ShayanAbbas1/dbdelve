@@ -289,6 +289,7 @@ pub(crate) struct FilterBar {
 ///
 /// A code editor rather than an input, drawn one line tall, because only an
 /// editor highlights and completes, and a raw bar is SQL being written.
+#[derive(Clone)]
 pub(crate) struct FilterRow {
     pub(crate) column: Option<String>,
     pub(crate) operator: Operator,

@@ -2474,6 +2474,112 @@ fn a_mode_picked_while_connecting_is_the_one_the_session_holds(cx: &mut TestAppC
     });
 }
 
+/// A bar edit Generic refuses is put back, so the bars the tab saves stay the
+/// ones its filter ran from.
+#[gpui::test]
+fn a_refused_bar_edit_leaves_the_bars_as_they_ran(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let directory = store::dbdelve_directory().unwrap();
+        std::fs::create_dir_all(&directory).unwrap();
+        let database = directory.join("e2e.db");
+        std::fs::write(&database, b"").unwrap();
+        std::fs::write(
+            directory.join("profiles.toml"),
+            format!(
+                "active = \"e2e\"\n\
+                 [settings]\ncheck_for_updates = false\n\
+                 [[profiles]]\nid = \"e2e\"\nname = \"E2E\"\nhost = \"\"\ndatabase = \"\"\n\
+                 user = \"\"\nengine = \"sqlite\"\npath = {:?}\n\
+                 [[profiles]]\nid = \"echo\"\nname = \"Echo\"\nhost = \"\"\ndatabase = \"\"\n\
+                 user = \"\"\nengine = \"plugin:echo\"\nspeaks = \"generic\"\n\
+                 connection = \"DSN=echo\"\n",
+                database.display().to_string(),
+            ),
+        )
+        .unwrap();
+
+        let (workspace, cx) = launch_with(cx, vec![crate::db::echo::plugin()]);
+        workspace.update(cx, |workspace, cx| {
+            let index = workspace
+                .profiles
+                .iter()
+                .position(|profile| matches!(profile.config, ConnectionConfig::External(_)))
+                .unwrap();
+            if let ConnectionConfig::External(config) = &mut workspace.profiles[index].config {
+                config.password = "x".into();
+            }
+            workspace.activate(index, cx);
+        });
+        cx.run_until_parked();
+
+        let bar = |column: &str, operator, value: &str| crate::filter::FilterBar {
+            column: Some(column.into()),
+            operator,
+            value: value.into(),
+            ..Default::default()
+        };
+        let ran = vec![
+            bar("name", crate::filter::Operator::Contains, "ab"),
+            bar("id", crate::filter::Operator::Equals, "50%"),
+        ];
+        let id = cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                let opened = crate::session::OpenedObject::Relation {
+                    schema: "public".into(),
+                    name: "accounts".into(),
+                    kind: Default::default(),
+                    filter: crate::filter::derived_filter(Engine::Generic, &ran, &[]),
+                    filters: ran.clone(),
+                };
+                let id = workspace.open_object(opened, window, cx).unwrap();
+                workspace.activate_tab(crate::session::Tab::Object(id), window, cx);
+                id
+            })
+        });
+        cx.run_until_parked();
+
+        let saved = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                let workspace = workspace.read(cx);
+                let profile = workspace.profile().unwrap();
+                let tab = profile
+                    .session
+                    .objects
+                    .iter()
+                    .find(|tab| tab.id == id)
+                    .unwrap();
+                let notice = profile.session.shown_notice().map(str::to_string);
+                (tab.filters(Engine::Generic), notice)
+            })
+        };
+        let as_ran: Vec<_> = ran.iter().map(crate::filter::stored_filter).collect();
+
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                let input = workspace.filter_rows_mut(id).unwrap()[0].value.clone();
+                input.update(cx, |input, cx| input.set_value("a%b", window, cx));
+                workspace.submit_filter(id, &input, cx);
+            })
+        });
+        let (bars, notice) = saved(cx);
+        assert_eq!(bars, as_ran);
+        assert!(notice.is_some_and(|notice| notice.contains("LIKE")));
+
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                let action = crate::actions::SetFilterOperator {
+                    row: 1,
+                    operator: crate::filter::Operator::Contains,
+                };
+                workspace.set_filter_operator(&action, window, cx);
+            })
+        });
+        assert_eq!(saved(cx).0, as_ran);
+
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn pinning_leaves_every_row_its_height(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
