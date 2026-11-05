@@ -103,7 +103,6 @@ impl Workspace {
     /// The table the object tab in front shows, if rows can be imported into
     /// it, or a notice saying why not.
     fn import_target(&mut self, cx: &mut Context<Self>) -> Option<(String, String)> {
-        let engine = self.engine();
         let target = self
             .profile()
             .and_then(|profile| profile.session.active_object())
@@ -111,7 +110,7 @@ impl Workspace {
                 (
                     tab.schema.clone(),
                     tab.name.clone(),
-                    tab.takes_imports(engine),
+                    tab.takes_imports(self.target()),
                 )
             });
         match target {
@@ -245,9 +244,9 @@ impl Workspace {
         self.import_requests += 1;
         let request = self.import_requests;
         // ponytail: whole file in memory; stream rows if multi-GB imports matter
-        let read = cx.background_executor().spawn({
+        let read = spawn_blocking(cx.background_executor(), {
             let path = path.clone();
-            async move { std::fs::read(&path) }
+            move || std::fs::read(&path)
         });
         cx.spawn_in(window, async move |workspace, cx| {
             let read = read.await;
@@ -368,9 +367,9 @@ impl Workspace {
             dialog.table.clone(),
             dialog.bytes.clone(),
         );
-        let structure = cx
-            .background_executor()
-            .spawn(async move { connection.structure(&schema, &table) });
+        let structure = spawn_blocking(cx.background_executor(), move || {
+            connection.structure(&schema, &table)
+        });
         let profile = profile.to_string();
         cx.spawn(async move |workspace, cx| {
             let structure = structure.await;
@@ -655,9 +654,7 @@ impl Workspace {
         };
         cx.notify();
 
-        let apart = cx
-            .background_executor()
-            .spawn(on_own_thread(move || connection.apart()));
+        let apart = spawn_blocking(cx.background_executor(), move || connection.apart());
         cx.spawn({
             let id = id.clone();
             async move |workspace, cx| {
@@ -715,11 +712,11 @@ impl Workspace {
 
     /// Send the run's next submission, or end the run when there is none.
     fn import_step(&mut self, profile: String, started: Instant, cx: &mut Context<Self>) {
-        let Some((mode, confirmed)) = self
+        let Some((mode, confirmed, target)) = self
             .profiles
             .iter()
             .find(|found| found.id == profile)
-            .map(|found| (found.mode, found.confirmed.clone()))
+            .map(|found| (found.mode, found.confirmed.clone(), found.config.target()))
         else {
             return;
         };
@@ -744,13 +741,13 @@ impl Workspace {
             return;
         };
         let (plan, cancel) = (plan.clone(), cancel.clone());
-        let sent = cx.background_executor().spawn(on_own_thread(move || {
+        let sent = spawn_blocking(cx.background_executor(), move || {
             let sql = plan.sql(step).map_err(|message| DbError {
                 message,
                 position: None,
             })?;
-            send(&connection, plan.engine, &sql, mode, &confirmed, &cancel)
-        }));
+            send(&connection, target, &sql, mode, &confirmed, &cancel)
+        });
         cx.spawn(async move |workspace, cx| {
             let landed = sent.await;
             _ = workspace.update(cx, |workspace, cx| {
@@ -1005,9 +1002,7 @@ fn stop_import(dialog: &mut ImportDialog, cx: &mut Context<Workspace>) {
         && matches!(out, Some(Step::Begin | Step::Chunk(_)))
     {
         let cancel = cancel.clone();
-        cx.background_executor()
-            .spawn(on_own_thread(move || connection.cancel(&cancel)))
-            .detach();
+        spawn_cancel(cx.background_executor(), move || connection.cancel(&cancel)).detach();
     }
 }
 

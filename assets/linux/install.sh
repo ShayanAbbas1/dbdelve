@@ -27,6 +27,7 @@ refresh() {
 
 if [[ "${1:-}" == --uninstall ]]; then
   rm -f "$BIN/dbdelve" "$APPS/dbdelve.desktop"
+  rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/dbdelve/plugins/odbc"
   for size in "${SIZES[@]}"; do
     rm -f "$ICONS/${size}x${size}/apps/dbdelve.png"
   done
@@ -39,6 +40,12 @@ fi
 
 mkdir -p "$BIN" "$APPS"
 install -m 755 "$HERE/dbdelve" "$BIN/dbdelve"
+# The binary lands alone in ~/.local/bin, so its bridge goes to the per-user
+# plugin directory db::plugin::discover() also reads, not beside the binary.
+PLUGINS="${XDG_DATA_HOME:-$HOME/.local/share}/dbdelve/plugins"
+rm -rf "$PLUGINS/odbc"
+mkdir -p "$PLUGINS"
+cp -R "$HERE/plugins/odbc" "$PLUGINS/odbc"
 # Exec gets the absolute path rather than the bare name the entry ships with:
 # a desktop launches its entries with the session's PATH, and ~/.local/bin only
 # joins that at login -- and only when it already existed. Bare `dbdelve` would

@@ -210,6 +210,8 @@ pub(crate) struct Workspace {
     /// Profiles on an engine this build cannot open, held as they were read
     /// and written back by `remember_profiles`; never restored.
     pub(crate) unavailable: Vec<store::UnavailableProfile>,
+    /// Discovered once in `main`, before the profiles that name them load.
+    pub(crate) plugins: Vec<&'static crate::db::Plugin>,
     pub(crate) settings: Settings,
     pub(crate) active: usize,
     pub(crate) form: Option<ConnectionForm>,
@@ -364,7 +366,11 @@ pub(crate) struct Workspace {
 }
 
 impl Workspace {
-    pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        plugins: Vec<&'static crate::db::Plugin>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let row_panel_search = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Filter columns and values…")
@@ -434,6 +440,7 @@ impl Workspace {
         let mut workspace = Self {
             profiles: Vec::new(),
             unavailable: Vec::new(),
+            plugins,
             settings: Settings::default(),
             active: 0,
             form: None,
@@ -508,7 +515,7 @@ impl Workspace {
         };
 
         let mut load_failure = None;
-        match store::load_profiles() {
+        match store::load_profiles(&workspace.plugins) {
             Ok(store::ProfileList {
                 profiles,
                 active,
@@ -663,9 +670,7 @@ impl Workspace {
         }
 
         if workspace.settings.check_for_updates {
-            let check = cx
-                .background_executor()
-                .spawn(async { update::newer_release() });
+            let check = spawn_blocking(cx.background_executor(), update::newer_release);
             cx.spawn(async move |workspace, cx| {
                 let Some(release) = check.await else {
                     return;
@@ -774,6 +779,15 @@ impl Workspace {
             .unwrap_or_default()
     }
 
+    /// [`Self::engine`] and the driver that reaches it, which the abilities
+    /// are asked of.
+    pub(crate) fn target(&self) -> Target {
+        self.profile()
+            .map_or(Target::built_in(Engine::default()), |profile| {
+                profile.config.target()
+            })
+    }
+
     pub(crate) fn issued_to(&mut self, id: &str, generation: u64) -> Option<&mut Profile> {
         self.profiles
             .iter_mut()
@@ -791,7 +805,10 @@ impl Workspace {
     /// and one of those says the connection came up weaker than it asked for.
     pub(crate) fn clear_notice(&mut self) {
         match self.profile_mut() {
-            Some(profile) => profile.session.notice = None,
+            Some(profile) => {
+                profile.session.notice = None;
+                profile.session.tab_notice = None;
+            }
             None => self.welcome_notice = None,
         }
     }
@@ -1149,7 +1166,7 @@ impl Render for Workspace {
             profile
                 .session
                 .active_object()
-                .is_some_and(|tab| tab.takes_imports(profile.config.engine()))
+                .is_some_and(|tab| tab.takes_imports(profile.config.target()))
         });
         if imports_rows != self.menu_imports_rows {
             self.menu_imports_rows = imports_rows;
@@ -1507,7 +1524,13 @@ impl Render for Workspace {
                     query,
                     QueryState::Complete { rows, .. } if limit.is_none_or(|limit| *rows < limit)
                 );
-            session::relation_rows(count, filter, estimate, engine.exact_row_estimates(), whole)
+            session::relation_rows(
+                count,
+                filter,
+                estimate,
+                profile.config.target().exact_row_estimates(),
+                whole,
+            )
         });
         // The way to an exact number, which is never run unasked. Its tooltip
         // is the statement it runs.
@@ -1680,7 +1703,7 @@ impl Render for Workspace {
         } else {
             (Some(status_group), None)
         };
-        let notice = profile.session.notice.clone();
+        let notice = profile.session.shown_notice().map(str::to_string);
         let newer_release = self.newer_release.clone();
         let pending_count = self.pending_edit_count(cx);
         let has_pending = pending_count > 0;
@@ -1690,7 +1713,7 @@ impl Render for Workspace {
         let import_menu = profile
             .session
             .active_object()
-            .filter(|tab| !has_pending && tab.takes_imports(engine))
+            .filter(|tab| !has_pending && tab.takes_imports(profile.config.target()))
             .and_then(|tab| match &tab.body {
                 ObjectBody::Relation { results, .. } => Some(results.focus_handle(cx)),
                 _ => None,
@@ -2345,25 +2368,125 @@ pub(crate) const EDITOR_FONT_SIZE_MAX: f32 = 24.0;
 
 pub(crate) const FONT_SIZE_STEP: f32 = 1.0;
 
+/// Blocking work -- anything that talks to a connection, the network, the
+/// disk or the Keychain -- on `blocking`'s pool, for the background executor
+/// to await. It never runs on the executor's own threads: there are only as
+/// many as cores, and one statement draining on a session with the rest queued
+/// behind it on the same session's lock would hold every one of them, stalling
+/// everything else spawned there.
+///
+/// The pool is capped, so calls parked on a busy session cannot start threads
+/// without end, and a call dropped before a thread takes it never runs. A
+/// Cancel goes through [`spawn_cancel`] instead, since a full pool would queue
+/// it behind the very statements it is there to stop.
+pub(crate) fn spawn_blocking<T: Send + 'static>(
+    executor: &gpui::BackgroundExecutor,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> gpui::Task<T> {
+    // GPUI's deterministic test scheduler runs every task on the test's own
+    // thread and fails a test woken from any other, so the end-to-end tests
+    // get the work inline, as one blocking task at a time.
+    if executor.is_test() {
+        return executor.spawn(async move { work() });
+    }
+    executor.spawn(blocking::unblock(work))
+}
+
+/// A Cancel, on a thread of its own started at once rather than on
+/// [`spawn_blocking`]'s pool, which the statements it cancels may be filling.
+/// Where the OS will not start a thread, it runs on the reserve one
+/// ([`reserve_cancel_thread`]), and only where that never started either does
+/// it wait its turn on the pool.
+pub(crate) fn spawn_cancel<T, F>(executor: &gpui::BackgroundExecutor, work: F) -> gpui::Task<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    spawn_cancel_starting(executor, work, start_cancel_thread)
+}
+
+type CancelJob = Box<dyn FnOnce() + Send>;
+
+fn spawn_cancel_starting<T, F>(
+    executor: &gpui::BackgroundExecutor,
+    work: F,
+    start: fn(CancelJob) -> Result<(), CancelJob>,
+) -> gpui::Task<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    if executor.is_test() {
+        return executor.spawn(async move { work() });
+    }
+    let reserve = reserve_cancel_thread();
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let job: CancelJob = Box::new(move || _ = sender.send(work()));
+    if let Err(job) = start(job)
+        && let Err(job) = match reserve {
+            Some(reserve) => reserve
+                .send(job)
+                .map_err(|std::sync::mpsc::SendError(job)| job),
+            None => Err(job),
+        }
+    {
+        spawn_blocking(executor, job).detach();
+    }
+    executor.spawn(async move {
+        // Dropped unsent only by a panic running it, which is a panic here.
+        receiver
+            .await
+            .expect("the thread running a Cancel panicked")
+    })
+}
+
+/// The one long-lived thread a Cancel runs on when the OS will not start a
+/// fresh one, started by the first Cancel so it already exists by the time
+/// threads run out. Cancels that land on it run one after another.
+fn reserve_cancel_thread() -> Option<std::sync::mpsc::Sender<CancelJob>> {
+    static RESERVE: std::sync::Mutex<Option<std::sync::mpsc::Sender<CancelJob>>> =
+        std::sync::Mutex::new(None);
+    let mut reserve = RESERVE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if reserve.is_none() {
+        let (sender, jobs) = std::sync::mpsc::channel::<CancelJob>();
+        *reserve = std::thread::Builder::new()
+            .name("dbdelve-cancel-reserve".to_owned())
+            .spawn(move || {
+                for job in jobs {
+                    // A panicking Cancel drops its answer unsent, which its
+                    // awaiting task reports; the thread stays for the next.
+                    _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+                }
+            })
+            .ok()
+            .map(|_| sender);
+    }
+    reserve.clone()
+}
+
+/// `job` on a fresh thread, or back if the OS will not start one.
+fn start_cancel_thread(job: CancelJob) -> Result<(), CancelJob> {
+    let (hand_over, take) = std::sync::mpsc::channel::<CancelJob>();
+    // A thread that did not start dropped `take` with it, so the send fails
+    // and hands `job` back.
+    _ = std::thread::Builder::new()
+        .name("dbdelve-cancel".to_owned())
+        .spawn(move || {
+            if let Ok(job) = take.recv() {
+                job();
+            }
+        });
+    hand_over
+        .send(job)
+        .map_err(|std::sync::mpsc::SendError(job)| job)
+}
+
 /// The range the controls offer for a slot, and where Reset puts it. The
 /// chrome stops at 17 because the titlebar does not grow with it: the window
 /// buttons are placed against it once, when the window opens, and past 17 the
 /// controls in it would touch its edges.
-/// Blocking work on a thread of its own, for the background executor to await
-/// without holding one of its threads: on Linux it has only as many as there
-/// are cores, and a run parked on the server for each of them would stall
-/// everything else spawned there, a Cancel included.
-pub(crate) async fn on_own_thread<T: Send + 'static>(
-    work: impl FnOnce() -> T + Send + 'static,
-) -> T {
-    let (sender, receiver) = tokio::sync::oneshot::channel();
-    std::thread::spawn(move || sender.send(work()));
-    // Dropped unsent only by a panic on that thread, which is a panic here.
-    receiver
-        .await
-        .expect("the thread running blocking work panicked")
-}
-
 pub(crate) fn font_size_range(slot: FontSlot) -> (f32, f32, f32) {
     match slot {
         FontSlot::Chrome => (11.0, layout::BODY_FONT_SIZE, 17.0),
@@ -2451,7 +2574,97 @@ pub(crate) fn opacity_from_percent_input(typed: &str, current: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
+    use crate::db::{CancelToken, Fetch};
+
+    /// What `task` came to, awaited from the executor as the workspace awaits
+    /// one, or None when it came to nothing within `limit`.
+    fn landed<T: Send + 'static>(
+        executor: &gpui::BackgroundExecutor,
+        task: gpui::Task<T>,
+        limit: Duration,
+    ) -> Option<T> {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        executor
+            .spawn(async move { _ = sender.send(task.await) })
+            .detach();
+        receiver.recv_timeout(limit).ok()
+    }
+
+    /// `blocking`'s cap when `BLOCKING_MAX_THREADS` does not set one.
+    const BLOCKING_POOL_CAP: usize = 500;
+
+    /// More statements than either `ThreadedDispatcher`'s pool or
+    /// `blocking`'s, one running and the rest queued behind it on the same
+    /// session, then a Cancel, on a thread of its own and where the OS refuses
+    /// one.
+    #[test]
+    fn statements_parked_on_one_connection_leave_the_background_executor_free() {
+        let refused: fn(CancelJob) -> Result<(), CancelJob> = Err;
+        for start in [start_cancel_thread, refused] {
+            cancel_behind_parked_statements(start);
+        }
+    }
+
+    fn cancel_behind_parked_statements(start: fn(CancelJob) -> Result<(), CancelJob>) {
+        let executor = gpui::BackgroundExecutor::new(Arc::new(gpui::ThreadedDispatcher::new()));
+        let cores = std::thread::available_parallelism().map_or(2, |cores| cores.get().max(2));
+        let pool = BLOCKING_POOL_CAP + cores;
+        let connection = db::Connection::open(db::ConnectionConfig::External(db::ExternalConfig {
+            plugin: db::echo::plugin(),
+            speaks: db::Engine::Postgres,
+            connection: "DSN=echo".to_owned(),
+            user: String::new(),
+            password: String::new(),
+            statement_timeout: 0,
+            ssh: None,
+        }))
+        .unwrap();
+
+        let run = CancelToken::default();
+        let sleep = spawn_blocking(&executor, {
+            let (connection, run) = (connection.clone(), run.clone());
+            move || connection.query("sleep 60000", &run, Fetch::default())
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        let queued: Vec<_> = (1..pool)
+            .map(|_| {
+                let connection = connection.clone();
+                spawn_blocking(&executor, move || {
+                    connection.query("rows 1", &CancelToken::default(), Fetch::default())
+                })
+            })
+            .collect();
+        std::thread::sleep(Duration::from_millis(200));
+
+        let timer = executor.timer(Duration::from_millis(10));
+        assert!(
+            landed(&executor, timer, Duration::from_secs(1)).is_some(),
+            "a timer did not fire while {pool} statements were parked on one connection"
+        );
+        let cancel = spawn_cancel_starting(
+            &executor,
+            {
+                let connection = connection.clone();
+                move || connection.cancel(&run)
+            },
+            start,
+        );
+        let cancelled = landed(&executor, cancel, Duration::from_secs(2));
+        assert!(
+            matches!(cancelled, Some(Ok(()))),
+            "the Cancel did not land behind {pool} parked statements"
+        );
+        let slept = landed(&executor, sleep, Duration::from_secs(5)).expect("the sleep ended");
+        let error = slept.expect_err("the sleep was cancelled");
+        assert!(error.message.starts_with("Cancelled"), "{}", error.message);
+        for statement in queued {
+            let ran = landed(&executor, statement, Duration::from_secs(5));
+            assert!(matches!(ran, Some(Ok(_))), "a queued statement did not run");
+        }
+    }
 
     #[test]
     fn a_window_too_narrow_to_hold_the_sidebar_does_not_relabel_the_squeeze() {

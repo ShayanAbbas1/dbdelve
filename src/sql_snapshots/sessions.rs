@@ -115,10 +115,11 @@ fn statement_units_per_engine() {
     check("sessions_units", &out);
 }
 
-const STATEMENTS: [&str; 27] = [
+const STATEMENTS: [&str; 28] = [
     "SELECT * FROM t",
     "SELECT a, b FROM s.t",
     "SELECT nextval('s')",
+    "SELECT t.nextval FROM t",
     "SELECT @@IDENTITY",
     "SET x = 1",
     "USE db",

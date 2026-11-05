@@ -49,7 +49,7 @@ impl Workspace {
     /// [`Workspace::has_editable_cell`] is.
     pub(crate) fn has_nameable_row(&self, cx: &App) -> bool {
         self.profile().is_some_and(|profile| {
-            profile.config.engine().edits_rows()
+            profile.config.target().edits_rows()
                 && profile.session.active_results().is_some_and(|results| {
                     let grid = results.read(cx);
                     grid.delegate()
@@ -190,12 +190,12 @@ impl Workspace {
             cancels
         };
         cx.notify();
-        let cancel_task = cx.background_executor().spawn(on_own_thread(move || {
+        let cancel_task = spawn_cancel(cx.background_executor(), move || {
             cancels
                 .iter()
                 .map(|cancel| connection.cancel(cancel))
                 .fold(Ok(()), Result::and)
-        }));
+        });
 
         cx.spawn(async move |workspace, cx| {
             if let Err(error) = cancel_task.await {
@@ -752,6 +752,8 @@ impl Workspace {
             let Some(profile) = self.profile_mut() else {
                 return;
             };
+            let engine = profile.config.engine();
+            let uncertain = profile.in_transaction || profile.session_changed;
             let Some(query) = profile.session.query_tab_mut(id) else {
                 return;
             };
@@ -759,7 +761,7 @@ impl Workspace {
                 return;
             }
             let failed = matches!(query.query, QueryState::Failed(_));
-            let state = query.query.clone();
+            let mut state = query.query.clone();
             let grid = query.results.clone();
             // Always set for a statement sent from the buffer, which every
             // statement of a queue is.
@@ -770,6 +772,11 @@ impl Workspace {
             // Only a statement the queue itself sent is one of its results.
             if !std::mem::take(&mut queue.awaiting) {
                 return;
+            }
+            if let QueryState::Failed(error) = &mut state
+                && let Some(note) = queue.committed_note(engine, uncertain)
+            {
+                error.message = format!("{}\n\n{note}", error.message.trim_end());
             }
             // Only follow the result that just landed if the statement in
             // flight was what the user was watching. Someone reading an
@@ -2032,7 +2039,8 @@ impl Workspace {
             return;
         };
         // Read before the task, which outlives the borrow of `self`.
-        let engine = profile.config.engine();
+        let target = profile.config.target();
+        let engine = target.engine;
         let connection = profile.connection();
         let id = profile.id.clone();
         let generation = profile.generation;
@@ -2344,13 +2352,10 @@ impl Workspace {
             let lost = !alongside && result.is_err() && connection.is_lost();
             (result, lost)
         };
-        // Up to eight of a queue's statements each hold a thread for as long
-        // as the server takes, which on Linux can fill GPUI's background
-        // executor and stall the Cancel spawned behind them.
-        let query_task = match alongside {
-            true => cx.background_executor().spawn(on_own_thread(work)),
-            false => cx.background_executor().spawn(async move { work() }),
-        };
+        // Blocks for as long as the server takes, and statements queued
+        // behind it on the same session block on its lock, so none of them
+        // may hold one of the executor's threads (`spawn_blocking`).
+        let query_task = spawn_blocking(cx.background_executor(), work);
 
         cx.spawn(async move |workspace, cx| {
             let (result, lost) = query_task.await;
@@ -2361,7 +2366,7 @@ impl Workspace {
             // tab is there to count them.
             let mut unrecorded = recorded
                 .as_ref()
-                .map(|entry| answered(entry, &result, feed.is_some(), started.elapsed(), engine));
+                .map(|entry| answered(entry, &result, feed.is_some(), started.elapsed(), target));
             workspace
                 .update(cx, |workspace, cx| {
                     // The plan is carried out of this block rather than stored
@@ -2427,24 +2432,24 @@ impl Workspace {
                         // Read before the cost is appended to the message,
                         // which is what the engine's cancel is told by.
                         let cancel_landed = cancelled
-                            && matches!(&result, Err(error) if db::is_cancel(engine, error));
+                            && matches!(&result, Err(error) if db::is_cancel(target, error));
                         let result = match result {
                             Err(error)
                                 if cancelled
                                     && reads_only
-                                    && db::is_cancel(engine, &error)
+                                    && db::is_cancel(target, &error)
                                     && results.read(cx).delegate().streamed_set().is_some() =>
                             {
                                 Ok(QueryResult {
                                     columns: results.read(cx).delegate().result().columns.clone(),
                                     elapsed: started.elapsed(),
                                     stopped: Some(Stopped::Cancelled),
-                                    notice: db::cancel_cost(engine, &error, true, ran),
+                                    notice: db::cancel_cost(target, &error, true, ran),
                                     ..QueryResult::default()
                                 })
                             }
-                            Err(mut error) if cancelled && db::is_cancel(engine, &error) => {
-                                if let Some(cost) = db::cancel_cost(engine, &error, reads_only, ran)
+                            Err(mut error) if cancelled && db::is_cancel(target, &error) => {
+                                if let Some(cost) = db::cancel_cost(target, &error, reads_only, ran)
                                     && cost != error.message
                                 {
                                     error.message = format!("{}\n\n{cost}", error.message);
@@ -2654,7 +2659,7 @@ impl Workspace {
                     if let Some(notice) = notice
                         && let Some(profile) = workspace.issued_to(&id, generation)
                     {
-                        profile.session.notice = Some(notice);
+                        profile.session.tab_notice = Some((tab, notice));
                     }
                     if succeeded && let Some(profile) = workspace.issued_to(&id, generation) {
                         // A statement that returned no columns produced no grid,
@@ -3411,7 +3416,7 @@ pub(super) fn answered(
     result: &Result<QueryResult, DbError>,
     streamed: bool,
     elapsed: std::time::Duration,
-    engine: Engine,
+    target: Target,
 ) -> store::HistoryEntry {
     match result {
         Ok(result) => {
@@ -3421,7 +3426,7 @@ pub(super) fn answered(
             }
             landed
         }
-        Err(error) => entry.failed(error, elapsed, db::is_cancel(engine, error)),
+        Err(error) => entry.failed(error, elapsed, db::is_cancel(target, error)),
     }
 }
 
@@ -3442,7 +3447,7 @@ mod tests {
             &Ok(streamed.clone()),
             true,
             Default::default(),
-            Engine::Sqlite,
+            Target::built_in(Engine::Sqlite),
         );
         assert_eq!((landed.rows, landed.ms), (None, Some(9)));
         let capped = QueryResult {
@@ -3454,7 +3459,7 @@ mod tests {
             &Ok(capped),
             true,
             Default::default(),
-            Engine::Sqlite,
+            Target::built_in(Engine::Sqlite),
         );
         assert_eq!(landed.rows, Some(7));
 
@@ -3467,7 +3472,7 @@ mod tests {
             &Err(interrupted),
             false,
             Default::default(),
-            Engine::Sqlite,
+            Target::built_in(Engine::Sqlite),
         );
         assert!(landed.cancelled && landed.error.is_none());
     }

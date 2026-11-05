@@ -398,7 +398,8 @@ impl<F: Fn(&str) -> Result<QueryResult, DbError>> Schema<F> {
             | Engine::Snowflake
             | Engine::ClickHouse
             | Engine::MongoDb
-            | Engine::Redis => unreachable!("only SQLite and Turso read pragmas"),
+            | Engine::Redis
+            | Engine::Generic => unreachable!("only SQLite and Turso read pragmas"),
         }
     }
 
@@ -414,7 +415,8 @@ impl<F: Fn(&str) -> Result<QueryResult, DbError>> Schema<F> {
             | Engine::Snowflake
             | Engine::ClickHouse
             | Engine::MongoDb
-            | Engine::Redis => unreachable!("only SQLite and Turso read pragmas"),
+            | Engine::Redis
+            | Engine::Generic => unreachable!("only SQLite and Turso read pragmas"),
         }
     }
 
@@ -1190,7 +1192,7 @@ SELECT count(*) FROM forever
         })
         .expect_err("the statement should be interrupted");
         assert!(
-            crate::db::is_cancel(Engine::Sqlite, &error),
+            crate::db::is_cancel(crate::db::Target::built_in(Engine::Sqlite), &error),
             "{}",
             error.message
         );
@@ -2251,12 +2253,13 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
                 statement_timeout: 0,
             })
             .expect("connection should open"),
-            engine: Engine::Sqlite,
+            target: crate::db::Target::built_in(Engine::Sqlite),
             schema: "main",
             relation: "conformance",
             key: "id",
             columns: &COLUMNS,
             read: sql_read(Engine::Sqlite, "main"),
+            endless_rows: None,
             endless: "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n) \
                       SELECT i FROM n",
             runaway: FOREVER,

@@ -11,19 +11,24 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::db::{
-    CancelToken, Connection, Engine, Fetch, QueryResult, RelationKind, Stopped, is_cancel,
+    CancelToken, Connection, Engine, Fetch, QueryResult, RelationKind, Stopped, Target, is_cancel,
 };
+use crate::explorer;
+use crate::filter::{self, Operator};
 use crate::result_grid::{NewValue, PendingRow};
-use crate::sql;
+use crate::sql::{self, SortKey};
 
 pub(super) struct Subject {
     pub connection: Connection,
-    pub engine: Engine,
+    pub target: Target,
     pub schema: &'static str,
     pub relation: &'static str,
     pub key: &'static str,
     pub columns: &'static [&'static str],
     pub read: String,
+    /// What `endless` counts to, on a subject that drains it instead of
+    /// stopping at the limit.
+    pub endless_rows: Option<usize>,
     pub endless: &'static str,
     pub runaway: &'static str,
     pub read_only_refusal: &'static str,
@@ -171,7 +176,10 @@ impl Subject {
         self.connection
             .query(sql, &CancelToken::default(), fetch)
             .unwrap_or_else(|error| {
-                panic!("{scenario} on {:?}: `{sql}` failed: {error}", self.engine)
+                panic!(
+                    "{scenario} on {:?}: `{sql}` failed: {error}",
+                    self.target.engine
+                )
             })
     }
 
@@ -182,7 +190,7 @@ impl Subject {
     fn fixture(&self, scenario: &str) -> &Fixture {
         self.fixture
             .as_ref()
-            .unwrap_or_else(|| panic!("{scenario} on {:?} needs a fixture", self.engine))
+            .unwrap_or_else(|| panic!("{scenario} on {:?} needs a fixture", self.target.engine))
     }
 
     fn label_of(&self, scenario: &str, key: &str) -> Vec<Option<String>> {
@@ -203,19 +211,19 @@ pub(super) fn connects(subject: &Subject) {
     assert!(
         !subject.connection.is_lost(),
         "connects on {:?}: the session is lost",
-        subject.engine
+        subject.target.engine
     );
     let result = subject.read("connects");
     assert_eq!(
         names(&result),
         subject.columns,
         "connects on {:?}",
-        subject.engine
+        subject.target.engine
     );
 }
 
 pub(super) fn query_round_trip(subject: &Subject) {
-    let at = format!("query_round_trip on {:?}", subject.engine);
+    let at = format!("query_round_trip on {:?}", subject.target.engine);
     let result = subject.read("query_round_trip");
     assert_eq!(names(&result), subject.columns, "{at}");
     assert_eq!(result.rows.len(), 3, "{at}");
@@ -228,7 +236,7 @@ pub(super) fn query_round_trip(subject: &Subject) {
 }
 
 pub(super) fn catalog_round_trip(subject: &Subject) {
-    let at = format!("catalog_round_trip on {:?}", subject.engine);
+    let at = format!("catalog_round_trip on {:?}", subject.target.engine);
     let catalog = subject
         .connection
         .catalog()
@@ -244,7 +252,7 @@ pub(super) fn catalog_round_trip(subject: &Subject) {
         .find(|relation| relation.name == subject.relation)
         .unwrap_or_else(|| panic!("{at}: no relation {}", subject.relation));
     assert_eq!(relation.kind, RelationKind::Table, "{at}");
-    if subject.engine.copies_ddl() {
+    if subject.target.copies_ddl() {
         let ddl = subject
             .connection
             .ddl(subject.schema, subject.relation, RelationKind::Table)
@@ -254,7 +262,7 @@ pub(super) fn catalog_round_trip(subject: &Subject) {
 }
 
 pub(super) fn structure_round_trip(subject: &Subject) {
-    let at = format!("structure_round_trip on {:?}", subject.engine);
+    let at = format!("structure_round_trip on {:?}", subject.target.engine);
     let structure = subject
         .connection
         .structure(subject.schema, subject.relation)
@@ -271,7 +279,7 @@ pub(super) fn structure_round_trip(subject: &Subject) {
 }
 
 pub(super) fn types_render_as_expected(subject: &Subject) {
-    let at = format!("types_render_as_expected on {:?}", subject.engine);
+    let at = format!("types_render_as_expected on {:?}", subject.target.engine);
     let fixture = subject.fixture("types_render_as_expected");
     let result = subject.read("types_render_as_expected");
     let types: Vec<Option<&str>> = result
@@ -300,7 +308,7 @@ pub(super) fn types_render_as_expected(subject: &Subject) {
 }
 
 pub(super) fn cancel_stops_a_long_query(subject: &Subject) {
-    let at = format!("cancel_stops_a_long_query on {:?}", subject.engine);
+    let at = format!("cancel_stops_a_long_query on {:?}", subject.target.engine);
     let token = CancelToken::default();
     let (sender, receiver) = mpsc::channel();
     let connection = subject.connection.clone();
@@ -319,14 +327,20 @@ pub(super) fn cancel_stops_a_long_query(subject: &Subject) {
         }
     };
     let error = outcome.expect_err(&format!("{at}: the run should have been cancelled"));
-    assert!(is_cancel(subject.engine, &error), "{at}: {}", error.message);
+    assert!(is_cancel(subject.target, &error), "{at}: {}", error.message);
     assert!(started.elapsed() < WITHIN, "{at}");
     subject.read("cancel_stops_a_long_query");
 }
 
 pub(super) fn row_limit_stops_an_eligible_read(subject: &Subject) {
-    let at = format!("row_limit_stops_an_eligible_read on {:?}", subject.engine);
-    assert!(sql::stoppable(subject.engine, subject.endless), "{at}");
+    let at = format!(
+        "row_limit_stops_an_eligible_read on {:?}",
+        subject.target.engine
+    );
+    assert!(
+        sql::stoppable(subject.target.engine, subject.endless),
+        "{at}"
+    );
     let started = Instant::now();
     let result = subject.run(
         "row_limit_stops_an_eligible_read",
@@ -337,16 +351,25 @@ pub(super) fn row_limit_stops_an_eligible_read(subject: &Subject) {
             ..Fetch::default()
         },
     );
-    assert_eq!(result.stopped, Some(Stopped::AtLimit), "{at}");
-    assert_eq!(result.capped_from, None, "{at}");
     assert_eq!(result.rows.len(), 3, "{at}");
-    assert!(started.elapsed() < WITHIN, "{at}");
+    if subject.connection.stops_at_limit() {
+        assert_eq!(result.stopped, Some(Stopped::AtLimit), "{at}");
+        assert_eq!(result.capped_from, None, "{at}");
+        assert!(started.elapsed() < WITHIN, "{at}");
+    } else {
+        // A driver that cannot prove ending early keeps the user's
+        // transaction drains the statement to its end instead, so the
+        // subject's `endless` is finite there and counted whole.
+        assert_eq!(result.stopped, None, "{at}");
+        assert!(subject.endless_rows.is_some(), "{at}: no count to drain to");
+        assert_eq!(result.capped_from, subject.endless_rows, "{at}");
+    }
 }
 
 pub(super) fn row_limit_drains_an_ineligible_read(subject: &Subject) {
     let at = format!(
         "row_limit_drains_an_ineligible_read on {:?}",
-        subject.engine
+        subject.target.engine
     );
     let full = subject.read("row_limit_drains_an_ineligible_read");
     let capped = subject.run(
@@ -366,8 +389,8 @@ pub(super) fn row_limit_drains_an_ineligible_read(subject: &Subject) {
 
 pub(super) fn capped_read_keeps_the_users_transaction(subject: &Subject) {
     let scenario = "capped_read_keeps_the_users_transaction";
-    let at = format!("{scenario} on {:?}", subject.engine);
-    let engine = subject.engine;
+    let at = format!("{scenario} on {:?}", subject.target.engine);
+    let engine = subject.target.engine;
     let delete = sql_delete(engine, subject.schema, 950);
     let _cleanup = Cleanup {
         connection: &subject.connection,
@@ -443,8 +466,8 @@ pub(super) fn capped_read_keeps_the_users_transaction(subject: &Subject) {
 
 pub(super) fn read_only_session_refuses_a_write(subject: &Subject) {
     let scenario = "read_only_session_refuses_a_write";
-    let at = format!("{scenario} on {:?}", subject.engine);
-    let engine = subject.engine;
+    let at = format!("{scenario} on {:?}", subject.target.engine);
+    let engine = subject.target.engine;
     if !engine.holds_read_only() {
         subject
             .connection
@@ -487,8 +510,8 @@ pub(super) fn read_only_session_refuses_a_write(subject: &Subject) {
 
 pub(super) fn generated_writes_round_trip(subject: &Subject) {
     let scenario = "generated_writes_round_trip";
-    let at = format!("{scenario} on {:?}", subject.engine);
-    let engine = subject.engine;
+    let at = format!("{scenario} on {:?}", subject.target.engine);
+    let engine = subject.target.engine;
     let (schema, relation, key) = (subject.schema, subject.relation, subject.key);
     let structure = subject
         .connection
@@ -521,7 +544,7 @@ pub(super) fn generated_writes_round_trip(subject: &Subject) {
         generated(delete);
     }
 
-    if engine.takes_inserts(RelationKind::Table) {
+    if subject.target.takes_inserts(RelationKind::Table) {
         let insert = sql::insert_row(
             engine,
             schema,
@@ -595,4 +618,125 @@ pub(super) fn generated_writes_round_trip(subject: &Subject) {
     );
     generated(&delete);
     assert!(subject.label_of(scenario, "901").is_empty(), "{at}");
+}
+
+/// What DBDelve writes for a browsing surface, run on the subject: a paged
+/// preview, a header sort spliced into it, a count, and every filter operator
+/// the engine offers, each passing the gate and narrowing the fixture to the
+/// rows it should.
+pub(super) fn generated_reads_run(subject: &Subject) {
+    let scenario = "generated_reads_run";
+    let at = format!("{scenario} on {:?}", subject.target.engine);
+    let engine = subject.target.engine;
+    let (schema, relation, key) = (subject.schema, subject.relation, subject.key);
+    let (label, whole) = (subject.columns[1], subject.columns[2]);
+    let structure = subject
+        .connection
+        .structure(schema, relation)
+        .unwrap_or_else(|error| panic!("{at}: {error}"));
+    let type_of = |column: &str| {
+        structure
+            .columns
+            .iter()
+            .find(|candidate| candidate.name == column)
+            .map(|candidate| candidate.data_type.clone())
+    };
+    let run = |sql: &str| {
+        assert!(
+            sql::is_generated_select(engine, sql),
+            "{at}: the gate refuses `{sql}`"
+        );
+        subject
+            .connection
+            .generated(sql, &CancelToken::default(), None, None)
+            .unwrap_or_else(|error| panic!("{at}: `{sql}` failed: {error}"))
+    };
+    let predicate = |column: &str, operator: Operator, value: &str| {
+        filter::filter_predicate(engine, column, type_of(column).as_deref(), operator, value)
+            .unwrap_or_else(|| panic!("{at}: no predicate for {operator:?} `{value}`"))
+    };
+    let ids = |result: &QueryResult| -> Vec<String> {
+        let column = result
+            .columns
+            .iter()
+            .position(|column| column.name == key)
+            .unwrap_or_else(|| panic!("{at}: no key column in the preview"));
+        result
+            .rows
+            .iter()
+            .map(|row| row.get(column).unwrap_or_default().to_string())
+            .collect()
+    };
+    let fixture_only = predicate(key, Operator::Less, "900");
+    let filtered = |column: &str, operator: Operator, value: &str| {
+        let filter = format!("{fixture_only} AND {}", predicate(column, operator, value));
+        let sql = format!(
+            "{} ORDER BY {}",
+            explorer::preview_sql(engine, schema, relation, &filter, None, 0),
+            engine.quote_identifier(key)
+        );
+        (ids(&run(&sql)), sql)
+    };
+
+    let cases = [
+        (label, Operator::Equals, "alpha", &["1"][..]),
+        (label, Operator::NotEquals, "alpha", &["2", "3"]),
+        (label, Operator::Contains, "lph", &["1"]),
+        (label, Operator::NotContains, "lph", &["2", "3"]),
+        (label, Operator::StartsWith, "nul", &["3"]),
+        (label, Operator::EndsWith, "pha", &["1"]),
+        (key, Operator::Greater, "1", &["2", "3"]),
+        (key, Operator::GreaterOrEqual, "2", &["2", "3"]),
+        (key, Operator::Less, "2", &["1"]),
+        (key, Operator::LessOrEqual, "2", &["1", "2"]),
+        (whole, Operator::IsNull, "", &["3"]),
+        (whole, Operator::IsNotNull, "", &["1", "2"]),
+        (label, Operator::IsEmpty, "", &[]),
+        (label, Operator::IsNotEmpty, "", &["1", "2", "3"]),
+        (key, Operator::InList, "1, 3", &["1", "3"]),
+        (key, Operator::NotInList, "1, 3", &["2"]),
+        (key, Operator::Between, "1 .. 2", &["1", "2"]),
+        (label, Operator::Regex, "^al", &["1"]),
+    ];
+    for operator in Operator::ALL
+        .into_iter()
+        .filter(|operator| operator.on(engine))
+    {
+        let (column, _, value, wanted) = cases
+            .iter()
+            .find(|case| case.1 == operator)
+            .unwrap_or_else(|| panic!("{at}: no case for {operator:?}"));
+        let (found, sql) = filtered(column, operator, value);
+        assert_eq!(found, *wanted, "{at}: {operator:?} `{value}`: {sql}");
+    }
+
+    // The cells of the fixture's first two rows as the grid shows them, so
+    // each column type's literal has to reach the server and match.
+    for column in [3, 5, 6, 7] {
+        for (row, id) in [(0, "1"), (1, "2")] {
+            let value = EXPECTED[row][column].expect("the first two rows hold no NULL");
+            let (found, sql) = filtered(subject.columns[column], Operator::Equals, value);
+            assert_eq!(found, [id], "{at}: `{value}`: {sql}");
+        }
+    }
+
+    let count = run(&explorer::count_sql(
+        engine,
+        schema,
+        relation,
+        &fixture_only,
+    ));
+    assert_eq!(count.rows[0].get(0), Some("3"), "{at}: count");
+
+    let page = explorer::preview_sql(engine, schema, relation, &fixture_only, Some(2), 1);
+    let sorted = sql::with_order_by(
+        engine,
+        &page,
+        &[SortKey {
+            expression: engine.quote_identifier(key),
+            ascending: false,
+        }],
+    )
+    .unwrap_or_else(|| panic!("{at}: no ORDER BY spliced into `{page}`"));
+    assert_eq!(ids(&run(&sorted)), ["2", "1"], "{at}: {sorted}");
 }

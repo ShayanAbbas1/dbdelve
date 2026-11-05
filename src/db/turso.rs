@@ -775,12 +775,13 @@ mod tests {
                 statement_timeout: 0,
             })
             .expect("connection should open"),
-            engine: Engine::Turso,
+            target: crate::db::Target::built_in(Engine::Turso),
             schema: "main",
             relation: "conformance",
             key: "id",
             columns: &COLUMNS,
             read: sql_read(Engine::Turso, "main"),
+            endless_rows: None,
             endless: "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n) \
                       SELECT i FROM n",
             runaway: RUNAWAY,

@@ -7,12 +7,13 @@ use std::{borrow::Cow, cell::RefCell, rc::Rc};
 use gpui::{
     App, AppContext as _, Entity, Focusable as _, TestAppContext, VisualTestContext, Window,
 };
-use gpui_component::Root;
+use gpui_component::{Root, input::InputState};
 
 use super::Workspace;
 use crate::{
     actions::{CancelQuery, ImportRowsFromClipboard},
-    db::{CancelToken, Engine, Fetch},
+    connection_form::ConnectionForm,
+    db::{CancelToken, ConnectionConfig, Engine, ExternalConfig, Fetch, SshTunnel},
     explorer, keybindings,
     palette::{Mode as PaletteMode, Scope},
     session::{CatalogState, ObjectBody, QueryState, QueryTab},
@@ -23,6 +24,14 @@ use crate::{
 /// What `main` sets up before the window opens, minus the menu bar and the
 /// panic log, which the test platform has no use for.
 fn launch(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext) {
+    launch_with(cx, Vec::new())
+}
+
+/// `launch` with these plugins discovered.
+fn launch_with<'a>(
+    cx: &'a mut TestAppContext,
+    plugins: Vec<&'static crate::db::Plugin>,
+) -> (Entity<Workspace>, &'a mut VisualTestContext) {
     cx.update(|cx| {
         cx.text_system()
             .add_fonts(
@@ -38,7 +47,7 @@ fn launch(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext
         let theme = theme::starting_theme(theme::Appearance::of_system(cx.window_appearance()));
         theme.apply_to_components(cx);
         cx.set_global(theme);
-        let overrides = store::peek_profiles()
+        let overrides = store::peek_profiles(&plugins)
             .and_then(|list| list.settings)
             .and_then(|settings| settings.custom_keybindings)
             .unwrap_or_default();
@@ -46,7 +55,7 @@ fn launch(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext
     });
     let mut workspace = None;
     let (_, cx) = cx.add_window_view(|window, cx| {
-        let entity = cx.new(|cx| Workspace::new(window, cx));
+        let entity = cx.new(|cx| Workspace::new(plugins, window, cx));
         workspace = Some(entity.clone());
         Root::new(entity, window, cx)
     });
@@ -337,6 +346,39 @@ fn the_cancel_chord_reaches_the_workspace_from_the_editor_and_the_grid(cx: &mut 
             cx.simulate_keystrokes("secondary-.");
             assert_eq!(*resolved.borrow(), [true], "in grid: {in_grid}");
         }
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_note_about_one_tab_shows_only_while_that_tab_is_in_front(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let shown = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                let session = &workspace.profile().expect("a profile is open").session;
+                session.shown_notice().map(str::to_string)
+            })
+        };
+        let first = workspace.update(cx, |workspace, _| {
+            let session = &mut workspace.profile_mut().unwrap().session;
+            session.tab_notice = Some((session.active, "cancelled here".into()));
+            session.active
+        });
+        assert_eq!(shown(cx).as_deref(), Some("cancelled here"));
+
+        cx.simulate_keystrokes("secondary-t");
+        settle(cx);
+        assert_eq!(shown(cx), None);
+
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.activate_tab(first, window, cx)
+            })
+        });
+        settle(cx);
+        assert_eq!(shown(cx).as_deref(), Some("cancelled here"));
 
         quit(workspace, cx);
     });
@@ -1302,7 +1344,7 @@ fn an_existing_cmd_m_binding_can_be_recaptured_in_settings(cx: &mut TestAppConte
         settle(cx);
         cx.simulate_keystrokes("cmd-m");
         settle(cx);
-        let saved = store::peek_profiles()
+        let saved = store::peek_profiles(&[])
             .unwrap()
             .settings
             .unwrap()
@@ -1312,6 +1354,36 @@ fn an_existing_cmd_m_binding_can_be_recaptured_in_settings(cx: &mut TestAppConte
             saved.get("show_messages").map(String::as_str),
             Some("cmd-m")
         );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_selection_failing_part_way_says_what_it_already_committed(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "CREATE TABLE t (a INTEGER);");
+        cx.executor().allow_parking();
+        cx.simulate_input(
+            "insert into t values (1); insert into t values (2); \
+             select * from nope; insert into t values (3)",
+        );
+        cx.simulate_keystrokes("secondary-a secondary-enter");
+        settle(cx);
+        let failed = workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("a profile is active");
+            assert!(profile.session.queue_failure.is_some());
+            let tab = profile.session.active_query_tab().expect("a query tab");
+            let last = tab.queue.as_ref().and_then(|queue| queue.done.last());
+            match &last.expect("a queue with results").state {
+                QueryState::Failed(error) => error.message.clone(),
+                _ => panic!("the third statement did not fail"),
+            }
+        });
+        assert!(
+            failed.ends_with("\n\n2 statements before it were already committed."),
+            "{failed}"
+        );
+
         quit(workspace, cx);
     });
 }
@@ -2105,6 +2177,407 @@ fn a_pin_dropped_on_the_top_half_of_another_goes_before_it(cx: &mut TestAppConte
             pins,
             [explorer::Pin::Member(fish), explorer::Pin::Member(birds)]
         );
+
+        quit(workspace, cx);
+    });
+}
+
+/// Through the real restore and the real save: what `Profile::stored` writes
+/// for a plugin profile is the user's string, never its password, and it
+/// restores to the same connection.
+#[gpui::test]
+fn an_odbc_profile_saves_and_restores_as_it_was(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let odbc = store::tests::odbc_plugin();
+        let directory = store::dbdelve_directory().unwrap();
+        std::fs::create_dir_all(&directory).unwrap();
+        // A SQLite profile in front, since launching connects the active one
+        // and a plugin profile would reach for the keychain.
+        let database = directory.join("e2e.db");
+        std::fs::write(&database, b"").unwrap();
+        let strings = [
+            "Db2Dev",
+            "DRIVER={PostgreSQL Unicode}; Server = pg.internal ;Port=5432;Opts={a;b}}c}",
+        ];
+        std::fs::write(
+            directory.join("profiles.toml"),
+            format!(
+                "active = \"e2e\"\n\
+                 [settings]\ncheck_for_updates = false\n\
+                 [[profiles]]\nid = \"e2e\"\nname = \"E2E\"\nhost = \"\"\ndatabase = \"\"\n\
+                 user = \"\"\nengine = \"sqlite\"\npath = {:?}\n\
+                 [[profiles]]\nid = \"dsn\"\nname = \"DSN\"\nhost = \"\"\ndatabase = \"\"\n\
+                 user = \"a@b.example\"\nengine = \"plugin:odbc\"\nspeaks = \"generic\"\n\
+                 connection = {:?}\nstatement_timeout = 30\n\
+                 [[profiles]]\nid = \"tunnel\"\nname = \"Tunnel\"\nhost = \"\"\ndatabase = \"\"\n\
+                 user = \"u\"\nengine = \"plugin:odbc\"\nspeaks = \"postgres\"\n\
+                 connection = {:?}\n\
+                 [profiles.ssh]\nhost = \"bastion.example\"\nport = 2222\nuser = \"me\"\n",
+                database.display().to_string(),
+                strings[0],
+                strings[1],
+            ),
+        )
+        .unwrap();
+
+        let (workspace, cx) = launch_with(cx, vec![odbc]);
+        let external = |workspace: &Workspace| {
+            workspace
+                .profiles
+                .iter()
+                .filter(|profile| matches!(profile.config, ConnectionConfig::External(_)))
+                .map(|profile| profile.config.clone())
+                .collect::<Vec<_>>()
+        };
+        let restored = cx.update(|_, cx| external(workspace.read(cx)));
+        let expected = |connection: &str, speaks, user: &str, timeout, ssh| {
+            ConnectionConfig::External(ExternalConfig {
+                plugin: odbc,
+                speaks,
+                connection: connection.into(),
+                user: user.into(),
+                password: String::new(),
+                statement_timeout: timeout,
+                ssh,
+            })
+        };
+        assert_eq!(
+            restored,
+            [
+                expected(strings[0], Engine::Generic, "a@b.example", 30, None),
+                expected(
+                    strings[1],
+                    Engine::Postgres,
+                    "u",
+                    0,
+                    Some(SshTunnel {
+                        host: "bastion.example".into(),
+                        port: Some(2222),
+                        user: "me".into(),
+                        identity_file: None,
+                    })
+                ),
+            ]
+        );
+
+        workspace.update(cx, |workspace, cx| {
+            for profile in &mut workspace.profiles {
+                if let ConnectionConfig::External(config) = &mut profile.config {
+                    config.password = "hunter2".into();
+                }
+            }
+            workspace.remember_profiles(cx);
+        });
+        let saved = std::fs::read_to_string(directory.join("profiles.toml")).unwrap();
+        assert!(!saved.contains("hunter2"), "{saved}");
+        let list = store::decode_profiles(&saved, &[odbc]).unwrap();
+        let written = list
+            .profiles
+            .iter()
+            .filter_map(|stored| {
+                Some((
+                    stored.engine.as_deref()?,
+                    stored.speaks.as_deref()?,
+                    stored.connection.as_deref()?,
+                ))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            written,
+            [
+                ("plugin:odbc", "generic", strings[0]),
+                ("plugin:odbc", "postgres", strings[1]),
+            ]
+        );
+
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.profiles.clear();
+                for stored in list.profiles {
+                    workspace.restore_profile(stored, window, cx);
+                }
+            });
+        });
+        assert_eq!(cx.update(|_, cx| external(workspace.read(cx))), restored);
+
+        quit(workspace, cx);
+    });
+}
+
+/// A duplicate has no Keychain entry of its own, so its Password field carries
+/// the original's, for an ODBC profile as for a server.
+#[gpui::test]
+fn duplicating_an_odbc_profile_keeps_its_password(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let directory = store::dbdelve_directory().unwrap();
+        std::fs::create_dir_all(&directory).unwrap();
+        let database = directory.join("e2e.db");
+        std::fs::write(&database, b"").unwrap();
+        std::fs::write(
+            directory.join("profiles.toml"),
+            format!(
+                "active = \"e2e\"\n\
+                 [settings]\ncheck_for_updates = false\n\
+                 [[profiles]]\nid = \"e2e\"\nname = \"E2E\"\nhost = \"\"\ndatabase = \"\"\n\
+                 user = \"\"\nengine = \"sqlite\"\npath = {:?}\n\
+                 [[profiles]]\nid = \"dsn\"\nname = \"DSN\"\nhost = \"\"\ndatabase = \"\"\n\
+                 user = \"a@b.example\"\nengine = \"plugin:odbc\"\nspeaks = \"generic\"\n\
+                 connection = \"Db2Dev\"\n",
+                database.display().to_string(),
+            ),
+        )
+        .unwrap();
+        let (workspace, cx) = launch_with(cx, vec![store::tests::odbc_plugin()]);
+        let password = cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                let profile = workspace
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.id == "dsn")
+                    .unwrap();
+                let form = ConnectionForm::duplicating(
+                    profile,
+                    "DSN copy".into(),
+                    Some("hunter2".into()),
+                    window,
+                    cx,
+                );
+                form.password.read(cx).unmask_value().to_string()
+            })
+        });
+        assert_eq!(password, "hunter2");
+        quit(workspace, cx);
+    });
+}
+
+/// The ODBC tile is picked from the engine picker by keyboard, and the
+/// keyboard goes on working through both field-set changes: the Connection
+/// field takes it, and Host takes it back once Postgres unmounts that field.
+#[gpui::test]
+fn picking_the_odbc_tile_puts_the_keyboard_in_its_connection_string(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_with(cx, vec![store::tests::odbc_plugin()]);
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.new_connection_in(None, window, cx);
+            });
+        });
+        settle(cx);
+        let has_keyboard =
+            |cx: &mut VisualTestContext, field: fn(&ConnectionForm) -> &Entity<InputState>| {
+                cx.update(|window, cx| {
+                    let workspace = workspace.read(cx);
+                    let form = workspace.form.as_ref().expect("the form is open");
+                    field(form).focus_handle(cx).is_focused(window)
+                })
+            };
+        let pick = |cx: &mut VisualTestContext, typed: &str| {
+            cx.update(|window, cx| {
+                workspace.update(cx, |workspace, cx| {
+                    workspace.open_palette(PaletteMode::Engine, window, cx);
+                });
+            });
+            settle(cx);
+            cx.simulate_input(typed);
+            cx.simulate_keystrokes("enter");
+            settle(cx);
+        };
+
+        pick(cx, "odbc");
+        assert!(palette_mode(&workspace, cx).is_none());
+        workspace.read_with(cx, |workspace, _| {
+            let form = workspace.form.as_ref().unwrap();
+            assert_eq!(form.target().fields(), crate::db::Fields::ConnectionString);
+            assert_eq!(form.engine, Engine::Generic);
+            assert_eq!(form.mode, crate::sql::Mode::ReadOnly);
+        });
+        assert!(has_keyboard(cx, |form| &form.connection));
+        cx.simulate_input("Db2Dev");
+        let typed = cx.update(|_, cx| {
+            let workspace = workspace.read(cx);
+            let form = workspace.form.as_ref().unwrap();
+            form.connection.read(cx).value().to_string()
+        });
+        assert_eq!(typed, "Db2Dev");
+
+        pick(cx, "postgres");
+        workspace.read_with(cx, |workspace, _| {
+            let form = workspace.form.as_ref().unwrap();
+            assert_eq!(form.target(), crate::db::Target::built_in(Engine::Postgres));
+        });
+        assert!(has_keyboard(cx, |form| &form.host));
+
+        quit(workspace, cx);
+    });
+}
+
+/// Read-only picked while a connect is under way finds no connection to hold
+/// (`set_mode`), so the session that lands is opened again under it rather
+/// than left as the Read-write it set out as, with Read-only on screen.
+#[gpui::test]
+fn a_mode_picked_while_connecting_is_the_one_the_session_holds(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let echo = crate::db::echo::plugin();
+        let directory = store::dbdelve_directory().unwrap();
+        std::fs::create_dir_all(&directory).unwrap();
+        let database = directory.join("e2e.db");
+        std::fs::write(&database, b"").unwrap();
+        std::fs::write(
+            directory.join("profiles.toml"),
+            format!(
+                "active = \"e2e\"\n\
+                 [settings]\ncheck_for_updates = false\n\
+                 [[profiles]]\nid = \"e2e\"\nname = \"E2E\"\nhost = \"\"\ndatabase = \"\"\n\
+                 user = \"\"\nengine = \"sqlite\"\npath = {:?}\n\
+                 [[profiles]]\nid = \"echo\"\nname = \"Echo\"\nhost = \"\"\ndatabase = \"\"\n\
+                 user = \"\"\nengine = \"plugin:echo\"\nspeaks = \"postgres\"\n\
+                 connection = \"DSN=echo\"\n",
+                database.display().to_string(),
+            ),
+        )
+        .unwrap();
+
+        let (workspace, cx) = launch_with(cx, vec![echo]);
+        workspace.update(cx, |workspace, cx| {
+            let index = workspace
+                .profiles
+                .iter()
+                .position(|profile| matches!(profile.config, ConnectionConfig::External(_)))
+                .expect("the echo profile is restored");
+            assert_eq!(workspace.profiles[index].mode, crate::sql::Mode::ReadWrite);
+            // Set so the connect never reaches for the keychain.
+            if let ConnectionConfig::External(config) = &mut workspace.profiles[index].config {
+                config.password = "x".into();
+            }
+            workspace.activate(index, cx);
+            workspace.set_mode(crate::sql::Mode::ReadOnly, cx);
+        });
+        cx.run_until_parked();
+
+        let connection = cx
+            .update(|_, cx| {
+                workspace
+                    .read(cx)
+                    .profile()
+                    .and_then(|profile| profile.connection())
+            })
+            .expect("the echo profile connects");
+        let last = connection
+            .query("last", &CancelToken::default(), Fetch::default())
+            .unwrap();
+        assert_eq!(
+            last.rows[0].get(0),
+            Some("SET default_transaction_read_only = on")
+        );
+
+        quit(workspace, cx);
+    });
+}
+
+/// A bar edit Generic refuses is put back, so the bars the tab saves stay the
+/// ones its filter ran from.
+#[gpui::test]
+fn a_refused_bar_edit_leaves_the_bars_as_they_ran(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let directory = store::dbdelve_directory().unwrap();
+        std::fs::create_dir_all(&directory).unwrap();
+        let database = directory.join("e2e.db");
+        std::fs::write(&database, b"").unwrap();
+        std::fs::write(
+            directory.join("profiles.toml"),
+            format!(
+                "active = \"e2e\"\n\
+                 [settings]\ncheck_for_updates = false\n\
+                 [[profiles]]\nid = \"e2e\"\nname = \"E2E\"\nhost = \"\"\ndatabase = \"\"\n\
+                 user = \"\"\nengine = \"sqlite\"\npath = {:?}\n\
+                 [[profiles]]\nid = \"echo\"\nname = \"Echo\"\nhost = \"\"\ndatabase = \"\"\n\
+                 user = \"\"\nengine = \"plugin:echo\"\nspeaks = \"generic\"\n\
+                 connection = \"DSN=echo\"\n",
+                database.display().to_string(),
+            ),
+        )
+        .unwrap();
+
+        let (workspace, cx) = launch_with(cx, vec![crate::db::echo::plugin()]);
+        // The connect and the tab's query run on threads the scheduler does
+        // not own; echo answers both at once, so each wait below ends.
+        cx.executor().allow_parking();
+        workspace.update(cx, |workspace, cx| {
+            let index = workspace
+                .profiles
+                .iter()
+                .position(|profile| matches!(profile.config, ConnectionConfig::External(_)))
+                .unwrap();
+            if let ConnectionConfig::External(config) = &mut workspace.profiles[index].config {
+                config.password = "x".into();
+            }
+            workspace.activate(index, cx);
+        });
+        cx.run_until_parked();
+
+        let bar = |column: &str, operator, value: &str| crate::filter::FilterBar {
+            column: Some(column.into()),
+            operator,
+            value: value.into(),
+            ..Default::default()
+        };
+        let ran = vec![
+            bar("name", crate::filter::Operator::Contains, "ab"),
+            bar("id", crate::filter::Operator::Equals, "50%"),
+        ];
+        let id = cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                let opened = crate::session::OpenedObject::Relation {
+                    schema: "public".into(),
+                    name: "accounts".into(),
+                    kind: Default::default(),
+                    filter: crate::filter::derived_filter(Engine::Generic, &ran, &[]),
+                    filters: ran.clone(),
+                };
+                let id = workspace.open_object(opened, window, cx).unwrap();
+                workspace.activate_tab(crate::session::Tab::Object(id), window, cx);
+                id
+            })
+        });
+        cx.run_until_parked();
+
+        let saved = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                let workspace = workspace.read(cx);
+                let profile = workspace.profile().unwrap();
+                let tab = profile
+                    .session
+                    .objects
+                    .iter()
+                    .find(|tab| tab.id == id)
+                    .unwrap();
+                let notice = profile.session.shown_notice().map(str::to_string);
+                (tab.filters(Engine::Generic), notice)
+            })
+        };
+        let as_ran: Vec<_> = ran.iter().map(crate::filter::stored_filter).collect();
+
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                let input = workspace.filter_rows_mut(id).unwrap()[0].value.clone();
+                input.update(cx, |input, cx| input.set_value("a%b", window, cx));
+                workspace.submit_filter(id, &input, cx);
+            })
+        });
+        let (bars, notice) = saved(cx);
+        assert_eq!(bars, as_ran);
+        assert!(notice.is_some_and(|notice| notice.contains("LIKE")));
+
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                let action = crate::actions::SetFilterOperator {
+                    row: 1,
+                    operator: crate::filter::Operator::Contains,
+                };
+                workspace.set_filter_operator(&action, window, cx);
+            })
+        });
+        assert_eq!(saved(cx).0, as_ran);
 
         quit(workspace, cx);
     });

@@ -6,7 +6,8 @@
 use super::*;
 use gpui_component::menu::PopupMenuItem;
 
-use crate::connection_form::{ConnectionTest, duplicate_profile_name, keep_schema};
+use crate::connection_form::{ConnectionTest, Reported, duplicate_profile_name, keep_schema};
+use crate::db::{ExternalConfig, Plugin};
 use crate::explorer::Shortcuts;
 use crate::import::{self, Source};
 use crate::session::{STALE_ROWS, restored_shortcuts};
@@ -98,20 +99,25 @@ impl Workspace {
                 Err(message) => (SslMode::VerifyFull, Some(message)),
             },
         };
-        // No engine at all is a profile written before dbdelve had a second one,
-        // and Postgres is what it was. An engine this build cannot read is held
-        // back by `decode_profiles` as an `UnavailableProfile`, so the `Err` arm
-        // is reached only by a file the mixed reader fell back on: it is read
-        // as Postgres and says so rather than connecting somewhere the user did
-        // not ask for without mentioning it.
-        let (engine, unreadable_engine) = match stored.engine.as_deref() {
-            None => (Engine::Postgres, None),
-            Some(stored) => match Engine::parse(stored) {
-                Ok(engine) => (engine, None),
-                Err(message) => (Engine::Postgres, Some(message)),
-            },
+        let (config, unreadable_engine) = match restored_config(&stored, sslmode, &self.plugins) {
+            Ok(restored) => restored,
+            Err(_) => {
+                let above = self.profiles.iter().map(|profile| profile.id.as_str());
+                match store::UnavailableProfile::held_back(&stored, above) {
+                    Ok(gone) => self.unavailable.push(gone),
+                    // Dropping it would lose it on the next save, so nothing
+                    // is saved this run instead.
+                    Err(message) => {
+                        self.store_unreadable = true;
+                        self.note(
+                            format!("Could not hold back {}: {message}", stored.name),
+                            cx,
+                        );
+                    }
+                }
+                return;
+            }
         };
-        let config = stored_config(&stored, engine, sslmode);
         let stored_queries = stored_buffers(
             stored.open_queries,
             stored.next_query_id,
@@ -289,8 +295,9 @@ impl Workspace {
 
         let password_task = {
             let id = id.clone();
-            cx.background_executor()
-                .spawn(async move { store::password(&id).ok().flatten() })
+            spawn_blocking(cx.background_executor(), move || {
+                store::password(&id).ok().flatten()
+            })
         };
         cx.spawn_in(window, async move |workspace, cx| {
             let password = password_task.await;
@@ -371,7 +378,7 @@ impl Workspace {
                 ),
             ],
             // `from_url` refuses the scheme, so no URL arrives as one.
-            ConnectionConfig::Snowflake(_) => Vec::new(),
+            ConnectionConfig::Snowflake(_) | ConnectionConfig::External(_) => Vec::new(),
         };
         let mongo = match &config {
             ConnectionConfig::MongoDb(mongo) => Some(mongo),
@@ -395,8 +402,8 @@ impl Workspace {
         let srv = mongo.is_some_and(|mongo| mongo.srv);
         if let Some(form) = &mut self.form {
             // A URL for another kind of engine unmounts the field it was
-            // pasted into, and `set_engine` hands focus on.
-            form.set_engine(engine);
+            // pasted into, and `set_target` hands focus on.
+            form.set_target(crate::db::Target::built_in(engine));
             form.srv = srv;
             if let Some(sslmode) = sslmode {
                 // The URL's own mode, so pasting one that demands verification
@@ -749,15 +756,15 @@ impl Workspace {
             .map_or(form.mode, |profile| profile.mode);
         form.error = None;
 
-        let probe = cx.background_executor().spawn(async move {
+        let probe = spawn_blocking(cx.background_executor(), move || {
             // A blank password on an existing profile means "keep the saved
             // one", which is what the connect would use.
             if let Some(id) = editing
-                && let Some(server) = config.server_mut()
-                && server.password.is_empty()
+                && let Some(slot) = config.password_mut()
+                && slot.is_empty()
                 && let Some(password) = store::password(&id)?
             {
-                server.password = password;
+                *slot = password;
             }
             let connection = Connection::open(config).map_err(|error| error.message)?;
             if mode == Mode::ReadOnly {
@@ -765,7 +772,7 @@ impl Workspace {
                     .set_read_only(true)
                     .map_err(|error| error.message)?;
             }
-            Ok::<_, String>(())
+            Ok::<_, String>(Reported::of(&connection))
         });
         let task = cx.spawn(async move |workspace, cx| {
             let result = probe.await;
@@ -774,7 +781,7 @@ impl Workspace {
                     return;
                 };
                 let finished = match result {
-                    Ok(()) => ConnectionTest::Passed,
+                    Ok(reported) => ConnectionTest::Passed(reported),
                     Err(message) => ConnectionTest::Failed(message),
                 };
                 if let Some(ConnectionTest::Running(task)) = form.test.replace(finished) {
@@ -895,7 +902,7 @@ impl Workspace {
         let in_transaction = profile.in_transaction;
         cx.notify();
 
-        let refresh_task = cx.background_executor().spawn(async move {
+        let refresh_task = spawn_blocking(cx.background_executor(), move || {
             // A failed read inside the user's transaction fails the transaction
             // on Postgres, so it never goes on that session: with no other to
             // be had, an in-memory database's among them, the refresh says so.
@@ -985,12 +992,12 @@ impl Workspace {
         let Some(profile) = self.profile() else {
             return;
         };
-        let engine = profile.config.engine();
-        if !engine.switches_database() {
+        let target = profile.config.target();
+        if !target.switches_database() {
             self.note(
                 format!(
                     "A {} connection has no other database to switch to.",
-                    engine.label()
+                    target.label()
                 ),
                 cx,
             );
@@ -1001,9 +1008,9 @@ impl Workspace {
             return;
         };
         let (id, generation) = (profile.id.clone(), profile.generation);
-        let fetch = cx
-            .background_executor()
-            .spawn(async move { connection.databases(engine) });
+        let fetch = spawn_blocking(cx.background_executor(), move || {
+            connection.databases(target.engine)
+        });
         cx.spawn_in(window, async move |workspace, cx| {
             let result = fetch.await;
             _ = workspace.update_in(cx, |workspace, window, cx| {
@@ -1109,7 +1116,7 @@ impl Workspace {
                 true => String::new(),
                 false => name,
             });
-        let in_session = profile.config.engine().switches_database_in_session();
+        let in_session = profile.config.target().switches_database_in_session();
         self.remember_profiles(cx);
         match in_session {
             true => self.use_database(index, left, cx),
@@ -1204,7 +1211,7 @@ impl Workspace {
 
     /// Move the open connection onto the database the profile at `index` now
     /// names, where that is a `USE` and not a new connection
-    /// ([`Engine::switches_database_in_session`]). The catalog is read again
+    /// ([`Target::switches_database_in_session`]). The catalog is read again
     /// under a new generation, as a connect would; a `USE` that fails puts
     /// the profile back on `left`, the database and schema it was on.
     fn use_database(
@@ -1229,7 +1236,7 @@ impl Workspace {
         let id = profile.id.clone();
         connection.set_database(profile.config.database_name().as_deref());
         let applying = connection.clone();
-        let set = on_own_thread(move || applying.apply_schema());
+        let set = spawn_blocking(cx.background_executor(), move || applying.apply_schema());
         self.refresh_explorer(&id, cx);
         cx.notify();
         cx.spawn(async move |workspace, cx| {
@@ -1260,7 +1267,7 @@ impl Workspace {
         let Some(profile) = self.profile() else {
             return;
         };
-        if !profile.config.engine().picks_schema() {
+        if !profile.config.target().picks_schema() {
             return;
         }
         let unready = match (&profile.state, &profile.catalog) {
@@ -1334,7 +1341,7 @@ impl Workspace {
         // whichever thread applies last applies the latest.
         connection.set_schema(Some(&name));
         let applying = connection.clone();
-        let set = on_own_thread(move || applying.apply_schema());
+        let set = spawn_blocking(cx.background_executor(), move || applying.apply_schema());
         cx.spawn(async move |workspace, cx| {
             let Err(error) = set.await else {
                 return;
@@ -1420,7 +1427,7 @@ impl Workspace {
         }
         self.importing = true;
         self.note(format!("Reading {} connections…", source.label()), cx);
-        let read = cx.background_executor().spawn(async move { source.read() });
+        let read = spawn_blocking(cx.background_executor(), move || source.read());
         cx.spawn_in(window, async move |workspace, cx| {
             let report = read.await;
             _ = workspace.update_in(cx, |workspace, window, cx| {
@@ -1507,8 +1514,8 @@ impl Workspace {
             // keychain is gone at the next launch, and has to be said.
             let mut config = imported.config.clone();
             let password = config
-                .server_mut()
-                .map(|server| std::mem::take(&mut server.password))
+                .password_mut()
+                .map(std::mem::take)
                 .filter(|password| !password.is_empty());
             let index = self.create_profile(
                 imported.name.clone(),
@@ -1526,8 +1533,8 @@ impl Workspace {
                 {
                     added.notes.push(message);
                 }
-                if let Some(server) = profile.config.server_mut() {
-                    server.password = password;
+                if let Some(slot) = profile.config.password_mut() {
+                    *slot = password;
                 }
             }
             added.imported.push(imported);
@@ -1590,16 +1597,16 @@ impl Workspace {
         self.refresh_explorer(&id, cx);
         cx.notify();
 
-        let connection_task = cx.background_executor().spawn({
+        let connection_task = spawn_blocking(cx.background_executor(), {
             let id = id.clone();
-            async move {
+            move || {
                 // A file engine has nothing to authenticate to, so it never
                 // reaches the Keychain — and never triggers its prompt.
-                if let Some(server) = config.server_mut()
-                    && server.password.is_empty()
+                if let Some(slot) = config.password_mut()
+                    && slot.is_empty()
                 {
                     match store::password(&id) {
-                        Ok(Some(password)) => server.password = password,
+                        Ok(Some(password)) => *slot = password,
                         // No keychain item is not a missing password: a blank
                         // one is valid, so this connects with what it has.
                         Ok(None) => {}
@@ -1631,6 +1638,18 @@ impl Workspace {
                     let Some(profile) = workspace.issued_to(&id, generation) else {
                         return;
                     };
+                    // A mode picked while this was connecting found no
+                    // connection to hold (`set_mode`), so this one is held as
+                    // the mode it set out under was, and the gate runs what it
+                    // cannot read in Read-only on the strength of that hold.
+                    let held_otherwise =
+                        (profile.mode == Mode::ReadOnly) != (mode == Mode::ReadOnly);
+                    if held_otherwise && result.is_ok() {
+                        if let Some(index) = workspace.profiles.iter().position(|p| p.id == id) {
+                            workspace.begin_connect(index, cx);
+                        }
+                        return;
+                    }
                     // A picked database or schema that is gone opens where
                     // nothing is picked, and the profile follows it there.
                     let unpicked = result.as_ref().ok().and_then(Connection::unpicked).cloned();
@@ -1644,10 +1663,20 @@ impl Workspace {
                         }
                         profile.session.notice = Some(unpicked.message.clone());
                     }
+                    let reported = result.as_ref().ok().and_then(Reported::of);
                     profile.state = match result {
                         Ok(connection) => ProfileState::Connected(Box::new(connection)),
                         Err(message) => ProfileState::Failed(message),
                     };
+                    // A plugin's driver is the user's own, so what it reached
+                    // is news; what a built-in reached is the profile.
+                    if let Some(reported) = reported
+                        && profile.session.notice.is_none()
+                    {
+                        let sentence = reported.sentence();
+                        profile.session.notice = Some(sentence.clone());
+                        workspace.clear_notice_later(id.clone(), generation, sentence, cx);
+                    }
                     if unpicked.is_some() {
                         workspace.remember_profiles(cx);
                     }
@@ -1690,9 +1719,7 @@ impl Workspace {
             self.catalog_landed(id, cx);
             return;
         };
-        let catalog_task = cx
-            .background_executor()
-            .spawn(async move { connection.catalog() });
+        let catalog_task = spawn_blocking(cx.background_executor(), move || connection.catalog());
 
         let id = id.to_string();
         cx.spawn(async move |workspace, cx| {
@@ -1765,9 +1792,7 @@ impl Workspace {
             }
             return;
         };
-        let routines_task = cx
-            .background_executor()
-            .spawn(async move { connection.routines() });
+        let routines_task = spawn_blocking(cx.background_executor(), move || connection.routines());
 
         let id = id.to_string();
         cx.spawn(async move |workspace, cx| {
@@ -1818,9 +1843,7 @@ impl Workspace {
         else {
             return;
         };
-        let sizes_task = cx
-            .background_executor()
-            .spawn(async move { connection.sizes() });
+        let sizes_task = spawn_blocking(cx.background_executor(), move || connection.sizes());
 
         let id = id.to_string();
         cx.spawn(async move |workspace, cx| {
@@ -1860,25 +1883,27 @@ impl Workspace {
     /// trade: one extra pair of catalog queries per relation the session
     /// actually writes about, against three more engine-specific statements to
     /// maintain and keep in step with hard rule 4.
+    ///
+    /// False when there is no connection to ask, and nothing was asked.
     pub(crate) fn load_completion_columns(
         &mut self,
         schema: String,
         relation: String,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let Some(profile) = self.profile() else {
-            return;
+            return false;
         };
         let Some(connection) = profile.connection() else {
-            return;
+            return false;
         };
         let id = profile.id.clone();
         let generation = profile.generation;
         let columns = profile.session.completion_columns.clone();
 
-        let task = cx.background_executor().spawn({
+        let task = spawn_blocking(cx.background_executor(), {
             let (schema, relation) = (schema.clone(), relation.clone());
-            async move { connection.structure(&schema, &relation) }
+            move || connection.structure(&schema, &relation)
         });
         cx.spawn(async move |workspace, cx| {
             let result = task.await;
@@ -1915,6 +1940,7 @@ impl Workspace {
                 .ok();
         })
         .detach();
+        true
     }
 
     pub(crate) fn install_completions(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -2185,8 +2211,58 @@ enum ProjectChoice {
     New,
 }
 
-/// The connection a stored profile describes, on `engine` and `sslmode` as
-/// [`Workspace::restore_profile`] read them.
+/// The connection a stored profile describes and any notice it opens with, or,
+/// for one on a plugin it cannot open, why. No engine at all is a profile
+/// written before dbdelve had a second one, and Postgres is what it was. A
+/// profile this build cannot open is held back by `decode_profiles` as an
+/// `UnavailableProfile`, so the rest is reached only by a file the mixed
+/// reader fell back on: a built-in engine it cannot read is read as Postgres
+/// and says so, rather than connecting somewhere the user did not ask for
+/// without mentioning it; a plugin profile is held back here instead, because
+/// read as Postgres it would be saved as one.
+fn restored_config(
+    stored: &store::StoredProfile,
+    sslmode: SslMode,
+    plugins: &[&'static Plugin],
+) -> Result<(ConnectionConfig, Option<String>), String> {
+    let Some(tag) = stored.engine.as_deref() else {
+        return Ok((stored_config(stored, Engine::Postgres, sslmode), None));
+    };
+    if let Some(id) = tag.strip_prefix(store::PLUGIN_TAG) {
+        let connection = stored.connection.as_deref();
+        let (plugin, speaks) =
+            store::through_plugin(id, stored.speaks.as_deref(), connection, plugins)?;
+        return Ok((
+            ConnectionConfig::External(ExternalConfig {
+                plugin,
+                speaks,
+                connection: connection.unwrap_or_default().to_string(),
+                user: stored.user.clone(),
+                // Never on disk. Read from the Keychain when connecting.
+                password: String::new(),
+                statement_timeout: stored.statement_timeout.unwrap_or_default(),
+                ssh: stored.ssh.clone(),
+            }),
+            None,
+        ));
+    }
+    Ok(match Engine::parse(tag) {
+        Ok(engine) if engine.has_built_in_driver() => {
+            (stored_config(stored, engine, sslmode), None)
+        }
+        Ok(_) => (
+            stored_config(stored, Engine::Postgres, sslmode),
+            Some(crate::db::GENERIC_REFUSAL.to_string()),
+        ),
+        Err(message) => (
+            stored_config(stored, Engine::Postgres, sslmode),
+            Some(message),
+        ),
+    })
+}
+
+/// The connection a stored profile on a built-in `engine` describes, with
+/// `sslmode` as [`Workspace::restore_profile`] read it.
 fn stored_config(
     stored: &store::StoredProfile,
     engine: Engine,
@@ -2245,6 +2321,9 @@ fn stored_config(
                 }),
             }
         }
+        // `restored_config` and `decode_profiles` hold such a profile back
+        // before it reaches here.
+        Engine::Generic => unreachable!("{}", crate::db::GENERIC_REFUSAL),
         Engine::Snowflake => ConnectionConfig::Snowflake(SnowflakeConfig {
             account: stored.account.clone().unwrap_or_default(),
             // Blank on disk is the derived host, the same as absent.
@@ -2276,7 +2355,7 @@ pub(crate) fn active_after_removal(active: usize, removed: usize, remaining: usi
 }
 
 fn identity_file(config: &ConnectionConfig) -> Option<&str> {
-    config.server()?.ssh.as_ref()?.identity_file.as_deref()
+    config.ssh()?.identity_file.as_deref()
 }
 
 /// A key the importer wrote goes with the last profile naming it; Duplicate
@@ -2300,12 +2379,27 @@ pub(crate) fn is_unshared_imported_key<'a>(
         && !others.into_iter().any(|other| other == key)
 }
 
-/// Why a profile on `engine` cannot be opened: a plugin it names that is not
-/// installed, or an engine only a newer build has.
-pub(crate) fn unavailable_reason(engine: &str) -> String {
-    match engine.strip_prefix("plugin:") {
-        Some(plugin) if !plugin.is_empty() => format!("Needs the {plugin} plugin"),
-        _ => format!("Made by a newer DBDelve (engine `{engine}`)"),
+/// Why a profile cannot be opened: a plugin it names that is not installed, or
+/// what that plugin cannot carry, or an engine only a newer build has.
+pub(crate) fn unavailable_reason(
+    gone: &store::UnavailableProfile,
+    plugins: &[&'static Plugin],
+) -> String {
+    let newer = || format!("Made by a newer DBDelve (engine `{}`)", gone.engine);
+    match gone.engine.strip_prefix(store::PLUGIN_TAG) {
+        Some(id) if !id.is_empty() => store::through_plugin(
+            id,
+            gone.speaks.as_deref(),
+            gone.connection.as_deref(),
+            plugins,
+        )
+        .err()
+        .unwrap_or_else(newer),
+        Some(_) => newer(),
+        None => match Engine::parse(&gone.engine) {
+            Ok(_) => crate::db::GENERIC_REFUSAL.to_string(),
+            Err(_) => newer(),
+        },
     }
 }
 
@@ -2390,9 +2484,9 @@ pub(crate) fn pasted_url(before: &str, after: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn restored_configs(text: &str) -> String {
+    fn restored(text: &str) -> Vec<(String, ConnectionConfig)> {
         let store::ProfileList { profiles, .. } =
-            store::decode_profiles(text).expect("the fixture loads");
+            store::decode_profiles(text, &[]).expect("the fixture loads");
         profiles
             .iter()
             .map(|stored| {
@@ -2403,13 +2497,31 @@ mod tests {
                     .as_deref()
                     .map_or(Ok(SslMode::default()), SslMode::parse)
                     .expect("a known sslmode");
-                format!(
-                    "{} {:#?}\n",
-                    stored.id,
-                    stored_config(stored, engine, sslmode)
-                )
+                (stored.id.clone(), stored_config(stored, engine, sslmode))
             })
             .collect()
+    }
+
+    fn restored_configs(text: &str) -> String {
+        restored(text)
+            .into_iter()
+            .map(|(id, config)| format!("{id} {config:#?}\n"))
+            .collect()
+    }
+
+    #[test]
+    fn the_tunnel_is_read_where_each_built_in_engine_keeps_it() {
+        let configs = restored(include_str!("../testdata/every-engine.toml"));
+        for (id, config) in &configs {
+            let server = config.server().and_then(|server| server.ssh.as_ref());
+            assert_eq!(config.ssh(), server, "{id}");
+        }
+        assert!(configs.iter().any(|(_, config)| config.ssh().is_some()));
+        let sqlite = configs
+            .iter()
+            .find(|(_, config)| config.engine() == Engine::Sqlite)
+            .expect("the fixture has a SQLite profile");
+        assert_eq!(sqlite.1.ssh(), None);
     }
 
     #[test]
@@ -2439,25 +2551,86 @@ mod tests {
 
     #[test]
     fn an_unavailable_profile_says_what_it_is_missing() {
-        assert_eq!(unavailable_reason("plugin:odbc"), "Needs the odbc plugin");
+        let odbc = store::tests::odbc_plugin();
+        let reason = |engine: &str, extra: &str, plugins: &[&'static Plugin]| {
+            let file = format!("[[profiles]]\nid = 'a'\nname = 'A'\nengine = '{engine}'\n{extra}");
+            let list = store::decode_profiles(&file, plugins).expect("held back, not failed");
+            assert!(list.profiles.is_empty(), "{file}");
+            unavailable_reason(&list.unavailable[0], plugins)
+        };
+        let generic = "speaks = 'generic'";
+        assert_eq!(reason("plugin:odbc", generic, &[]), "Needs the odbc plugin");
         assert_eq!(
-            unavailable_reason("zz-unknown"),
+            reason("plugin:odbc", "speaks = 'clickhouse'", &[odbc]),
+            format!(
+                "{}'s SQL cannot be spoken through a plugin driver",
+                Engine::ClickHouse.label()
+            )
+        );
+        assert_eq!(
+            reason("plugin:odbc", "speaks = 'nope'", &[odbc]),
+            "Made by a newer DBDelve (dialect `nope`)"
+        );
+        assert_eq!(reason("plugin:odbc", "", &[odbc]), "Names no SQL dialect");
+        assert_eq!(
+            reason("plugin:odbc", generic, &[odbc]),
+            "Names no connection string"
+        );
+        assert_eq!(
+            reason(
+                "plugin:odbc",
+                &format!("{generic}\nconnection = 'DRIVER=x;PWD=y'"),
+                &[odbc]
+            ),
+            "The connection string holds a password or another secret, which would be stored in \
+             plain text. Put the password in the Password field, which is kept in the Keychain."
+        );
+        assert_eq!(
+            reason("zz-unknown", "", &[odbc]),
             "Made by a newer DBDelve (engine `zz-unknown`)"
         );
         // No id to name: not a plugin anyone could install.
         assert_eq!(
-            unavailable_reason("plugin:"),
+            reason("plugin:", generic, &[odbc]),
             "Made by a newer DBDelve (engine `plugin:`)"
         );
+        assert_eq!(reason("generic", "", &[odbc]), crate::db::GENERIC_REFUSAL);
+    }
+
+    /// A file the mixed reader falls back on decodes every profile, so the
+    /// restore is what holds a plugin profile back, rather than reading it as
+    /// Postgres and saving it as one.
+    #[test]
+    fn the_restore_holds_back_a_plugin_profile_it_cannot_open() {
+        let odbc = store::tests::odbc_plugin();
+        let stored: store::StoredProfile = toml::from_str(
+            "id = 'o'\nname = 'O'\nhost = ''\ndatabase = ''\nuser = 'a@b.example'\n\
+             engine = 'plugin:odbc'\nspeaks = 'postgres'\nconnection = 'DSN=x'\n",
+        )
+        .unwrap();
+        let (config, notice) = restored_config(&stored, SslMode::default(), &[odbc]).unwrap();
+        assert_eq!(notice, None);
+        assert!(matches!(config, ConnectionConfig::External(_)));
+        assert_eq!(
+            restored_config(&stored, SslMode::default(), &[]).unwrap_err(),
+            "Needs the odbc plugin"
+        );
+        let gone = store::UnavailableProfile::held_back(&stored, ["x", "o"].into_iter()).unwrap();
+        assert_eq!(
+            (gone.id.as_str(), gone.engine.as_str()),
+            ("o", "plugin:odbc")
+        );
+        assert_eq!(gone.speaks.as_deref(), Some("postgres"));
     }
 
     #[test]
     fn a_restore_prunes_no_grids_while_an_unavailable_profile_holds_the_id() {
-        let list = store::decode_profiles(SHARED_ID).expect("a mixed file loads");
+        let list = store::decode_profiles(SHARED_ID, &[]).expect("a mixed file loads");
         assert_eq!((list.profiles.len(), list.unavailable.len()), (1, 1));
         assert!(held_by_unavailable(&list.profiles[0].id, &list.unavailable));
         // A file with no unavailable profile prunes every profile's grids, as before.
-        let alone = store::decode_profiles(include_str!("../testdata/every-engine.toml")).unwrap();
+        let alone =
+            store::decode_profiles(include_str!("../testdata/every-engine.toml"), &[]).unwrap();
         assert!(alone.unavailable.is_empty());
         assert!(
             alone
@@ -2469,7 +2642,7 @@ mod tests {
 
     #[test]
     fn removing_a_profile_keeps_what_an_unavailable_one_under_its_id_still_owns() {
-        let list = store::decode_profiles(SHARED_ID).expect("a mixed file loads");
+        let list = store::decode_profiles(SHARED_ID, &[]).expect("a mixed file loads");
         assert!(held_by_unavailable("pg", &list.unavailable));
         // Only the id decides: another id's keychain entry, queries, grids and
         // project membership go with it as before.

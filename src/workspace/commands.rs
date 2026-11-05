@@ -300,9 +300,7 @@ impl Workspace {
     ) {
         let finding = format!("Finding {} themes…", source.name());
         self.note(finding.clone(), cx);
-        let found = cx
-            .background_executor()
-            .spawn(on_own_thread(move || source.found()));
+        let found = spawn_blocking(cx.background_executor(), move || source.found());
         cx.spawn_in(window, async move |workspace, cx| {
             found.await;
             _ = workspace.update_in(cx, |workspace, window, cx| {
@@ -694,9 +692,9 @@ impl Workspace {
             Command::SelectTheme => self.select_theme(&SelectTheme, window, cx),
             Command::SelectDatabase => self.select_database(&SelectDatabase, window, cx),
             Command::SetDatabase(name) => self.set_database(name, window, cx),
-            Command::SetEngine(engine) => {
+            Command::SetTarget(target) => {
                 if let Some(form) = &mut self.form {
-                    form.set_engine(engine);
+                    form.set_target(target);
                 }
                 cx.notify();
             }

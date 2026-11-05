@@ -115,6 +115,23 @@ to `%APPDATA%\dbdelve`. Passwords go in Credential Manager. The window draws
 its own title bar, buttons included. Chords are the same as macOS with Ctrl in
 place of Cmd.
 
+## Other databases through ODBC
+
+Databases without a built-in engine, such as IBM Db2, connect through the ODBC
+bridge that ships with DBDelve. You install your database's own ODBC driver;
+DBDelve doesn't bundle any.
+
+- **Linux** needs the unixODBC package, which provides `libodbc.so.2`:
+  `sudo apt install unixodbc`. The tarball and the AppImage both use it.
+- **macOS** carries its own unixODBC, which reads `/etc/odbcinst.ini` and not
+  Homebrew's configuration. Put the driver's absolute path in the connection
+  string, `DRIVER=/absolute/path/to/lib.dylib`, instead of a driver name. An app
+  opened from Finder doesn't get your shell's environment variables either, so
+  `ODBCSYSINI` and the like have no effect.
+- A driver downloaded with a browser may be quarantined, and macOS then refuses
+  to load it: `xattr -dr com.apple.quarantine <driver directory>`.
+- **Windows** uses the system ODBC manager. That path is untested.
+
 ## Updating
 
 `brew upgrade --cask dbdelve`, if you installed it that way. Otherwise the

@@ -15,8 +15,8 @@ use gpui_component::input::{InputEvent, InputState};
 use crate::{
     Workspace,
     db::{
-        ConnectionConfig, Engine, Fields, MongoConfig, PostgresConfig, ServerConfig,
-        SnowflakeConfig, SshTunnel, SslMode,
+        ConnectionConfig, Driver, Engine, ExternalConfig, Fields, MongoConfig, Plugin,
+        PostgresConfig, ServerConfig, SnowflakeConfig, SshTunnel, SslMode, Target, odbc_string,
     },
     explorer::Shortcuts,
     session::Profile,
@@ -30,6 +30,9 @@ pub(crate) struct ConnectionForm {
     /// and kept; the engine decides which are drawn and which are read, so
     /// switching engine and switching back does not lose what was typed.
     pub(crate) engine: Engine,
+    /// What carries the connection. A plugin keeps `engine` as the dialect it
+    /// speaks, so every read of `engine` still means the SQL written.
+    pub(crate) driver: Driver,
     pub(crate) name: Entity<InputState>,
     pub(crate) color: Option<ConnectionColor>,
     /// What the connection will be allowed to do once it exists. Read only on
@@ -39,6 +42,8 @@ pub(crate) struct ConnectionForm {
     pub(crate) mode: Mode,
     /// SQLite's entire connection. No host, no credentials, no transport.
     pub(crate) path: Entity<InputState>,
+    /// A plugin's DSN or connection string, stored as typed.
+    pub(crate) connection: Entity<InputState>,
     pub(crate) host: Entity<InputState>,
     pub(crate) port: Entity<InputState>,
     pub(crate) database: Entity<InputState>,
@@ -65,7 +70,7 @@ pub(crate) struct ConnectionForm {
     pub(crate) role: Entity<InputState>,
     /// Driver options passed through as typed, where `Engine::takes_options`.
     pub(crate) options: Entity<InputState>,
-    /// A section of a connection service file, where `Engine::takes_service`.
+    /// A section of a connection service file, where `Target::takes_service`.
     pub(crate) service: Entity<InputState>,
     /// The host is a DNS name listing the servers, where
     /// `Engine::resolves_srv`.
@@ -99,9 +104,9 @@ pub(crate) struct ConnectionForm {
     /// The welcome surface's contours were already on screen, so the form's,
     /// the same ones, are there from the start rather than fading in again.
     pub(crate) backdrop_shown: bool,
-    /// The engine the engine-dependent placeholders were last written for,
+    /// The target the target-dependent placeholders were last written for,
     /// whether a service was typed then, and the root certificate's.
-    pub(crate) placeholders_for: Option<(Engine, bool, &'static str)>,
+    pub(crate) placeholders_for: Option<(Target, bool, &'static str)>,
     /// The URL field as of its last change, to tell a URL pasted whole from
     /// one being typed.
     pub(crate) last_url: SharedString,
@@ -111,29 +116,52 @@ pub(crate) struct ConnectionForm {
 }
 
 impl ConnectionForm {
-    /// The first field the form draws for its engine.
-    pub(crate) fn lead_field(&self) -> Entity<InputState> {
-        match self.engine.fields() {
-            Fields::Server => self.url.clone(),
-            Fields::File => self.path.clone(),
-            Fields::Account => self.account.clone(),
+    pub(crate) fn target(&self) -> Target {
+        Target {
+            engine: self.engine,
+            driver: self.driver,
         }
     }
 
-    pub(crate) fn set_engine(&mut self, engine: Engine) {
+    /// The first field the form draws for its target.
+    pub(crate) fn lead_field(&self) -> Entity<InputState> {
+        match self.target().fields() {
+            Fields::Server => self.url.clone(),
+            Fields::File => self.path.clone(),
+            Fields::Account => self.account.clone(),
+            Fields::ConnectionString => self.connection.clone(),
+        }
+    }
+
+    pub(crate) fn set_target(&mut self, target: Target) {
+        // The plugin's tile picked again keeps the dialect already chosen
+        // under it, which the tile itself would reset to Generic SQL.
+        if target.driver != Driver::BuiltIn && target.driver == self.driver {
+            return;
+        }
         // Only when the field set actually changes: Postgres and MySQL show
         // the same fields, so a switch between them leaves focus where the
         // palette hands it back (the lead field). Only a change of field set
         // moves it, to the new set's first field.
-        if self.engine.fields() != engine.fields() {
-            self.needs_focus = Some(match engine.fields() {
+        if self.target().fields() != target.fields() {
+            self.needs_focus = Some(match target.fields() {
                 Fields::Server => self.host.clone(),
                 Fields::File => self.path.clone(),
                 Fields::Account => self.account.clone(),
+                Fields::ConnectionString => self.connection.clone(),
             });
         }
-        self.engine = engine;
+        self.engine = target.engine;
+        self.driver = target.driver;
         // Both belonged to the fields that just left the screen.
+        self.error = None;
+        self.test = None;
+    }
+
+    /// The SQL a plugin's connection is written in. A pass was for the
+    /// dialect's own Read-only hold, so it no longer stands.
+    pub(crate) fn set_dialect(&mut self, engine: Engine) {
+        self.engine = engine;
         self.error = None;
         self.test = None;
     }
@@ -161,6 +189,10 @@ impl ConnectionForm {
             Some(ConnectionConfig::MongoDb(mongo)) => Some(mongo),
             _ => None,
         };
+        let external = match config {
+            Some(ConnectionConfig::External(external)) => Some(external),
+            _ => None,
+        };
 
         let url = cx.new(|cx| InputState::new(window, cx).placeholder("Paste a connection URL"));
         let name = cx.new(|cx| {
@@ -175,6 +207,11 @@ impl ConnectionForm {
             InputState::new(window, cx)
                 .placeholder("/path/to/app.sqlite")
                 .default_value(value(file))
+        });
+        let connection = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("DSN or connection string")
+                .default_value(value(external.map(|external| external.connection.as_str())))
         });
         let host = cx.new(|cx| {
             InputState::new(window, cx).default_value(value(
@@ -202,13 +239,18 @@ impl ConnectionForm {
             InputState::new(window, cx).default_value(value(
                 server
                     .map(|server| server.user.as_str())
-                    .or_else(|| account.map(|account| account.user.as_str())),
+                    .or_else(|| account.map(|account| account.user.as_str()))
+                    .or_else(|| external.map(|external| external.user.as_str())),
             ))
         });
         let password = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Optional")
-                .default_value(value(server.map(|server| server.password.as_str())))
+                .default_value(value(
+                    server
+                        .map(|server| server.password.as_str())
+                        .or_else(|| external.map(|external| external.password.as_str())),
+                ))
                 .masked(true)
         });
 
@@ -219,7 +261,7 @@ impl ConnectionForm {
                     server.and_then(|server| server.root_certificate.as_deref()),
                 ))
         });
-        let ssh = server.and_then(|server| server.ssh.as_ref());
+        let ssh = config.and_then(ConnectionConfig::ssh);
         let [ssh_host, ssh_port, ssh_user, ssh_identity_file] = ssh_fields(ssh);
         let mut input = |placeholder: &'static str, value: String| {
             cx.new(|cx| {
@@ -293,6 +335,7 @@ impl ConnectionForm {
         for input in [
             &name,
             &path,
+            &connection,
             &host,
             &port,
             &database,
@@ -312,10 +355,12 @@ impl ConnectionForm {
             needs_focus: None,
             url,
             engine: config.map(ConnectionConfig::engine).unwrap_or_default(),
+            driver: config.map_or(Driver::BuiltIn, |config| config.target().driver),
             name,
             color: None,
             mode: starting_mode(None),
             path,
+            connection,
             host,
             port,
             database,
@@ -397,9 +442,9 @@ impl ConnectionForm {
     ) -> Self {
         let mut config = profile.config.clone();
         if let Some(password) = password
-            && let Some(server) = config.server_mut()
+            && let Some(slot) = config.password_mut()
         {
-            server.password = password;
+            *slot = password;
         }
         let mut form = Self::new(Some(&config), window, cx);
         form.color = profile.color;
@@ -413,6 +458,9 @@ impl ConnectionForm {
 
     pub(crate) fn config(&self, cx: &App) -> Result<(String, ConnectionConfig), String> {
         let read = |input: &Entity<InputState>| input.read(cx).value().trim().to_string();
+        if let Driver::Plugin(plugin) = self.driver {
+            return self.named(ConnectionConfig::External(self.external(plugin, cx)?), cx);
+        }
         let statement_timeout = self.statement_timeout(cx)?;
         let file = || match read(&self.path) {
             path if path.is_empty() => Err("Database file is required.".to_string()),
@@ -462,16 +510,53 @@ impl ConnectionForm {
             // An ACL user and a password are both optional: a server with
             // neither configured takes any connection.
             Engine::Redis => ConnectionConfig::Redis(self.server_requiring(&[], cx)?),
+            Engine::Generic => return Err(crate::db::GENERIC_REFUSAL.to_string()),
         };
+        self.named(config, cx)
+    }
 
-        let name = match read(&self.name) {
-            name if name.is_empty() => default_profile_name(&config),
-            name => name,
+    fn named(
+        &self,
+        config: ConnectionConfig,
+        cx: &App,
+    ) -> Result<(String, ConnectionConfig), String> {
+        let name = match self.name.read(cx).value().trim() {
+            "" => default_profile_name(&config),
+            name => name.to_string(),
         };
         if name.is_empty() {
             return Err("Display name is required.".into());
         }
         Ok((name, config))
+    }
+
+    fn external(&self, plugin: &'static Plugin, cx: &App) -> Result<ExternalConfig, String> {
+        let read = |input: &Entity<InputState>| input.read(cx).value().trim().to_string();
+        checked_external(ExternalConfig {
+            plugin,
+            speaks: self.engine,
+            connection: read(&self.connection),
+            user: read(&self.user),
+            password: self.password.read(cx).unmask_value().to_string(),
+            statement_timeout: self.statement_timeout(cx)?,
+            ssh: ssh_tunnel(
+                self.ssh,
+                [
+                    read(&self.ssh_host),
+                    read(&self.ssh_port),
+                    read(&self.ssh_user),
+                    read(&self.ssh_identity_file),
+                ],
+            )?,
+        })
+    }
+
+    /// What the tunnel will do to the connection string, while it is on and
+    /// the string has been started.
+    pub(crate) fn tunnel_line(&self, cx: &App) -> Option<Result<String, String>> {
+        let connection = self.connection.read(cx).value();
+        let connection = connection.trim();
+        (self.ssh && !connection.is_empty()).then(|| tunnel_line(connection))
     }
 
     /// The placeholders that say what a blank field means, which is the
@@ -481,15 +566,15 @@ impl ConnectionForm {
     pub(crate) fn sync_placeholders(&mut self, window: &mut Window, cx: &mut App) {
         let beside_a_service = self.typed_service(cx).is_some();
         let root_certificate = root_certificate_placeholder(self.sslmode, beside_a_service);
-        let written = (self.engine, beside_a_service, root_certificate);
+        let written = (self.target(), beside_a_service, root_certificate);
         if self.placeholders_for == Some(written) {
             return;
         }
         self.placeholders_for = Some(written);
         let blank = if beside_a_service {
-            from_the_service(placeholders(self.engine))
+            from_the_service(placeholders(self.target()))
         } else {
-            placeholders(self.engine)
+            placeholders(self.target())
         };
         for (input, placeholder) in [
             (&self.root_certificate, SharedString::from(root_certificate)),
@@ -509,7 +594,7 @@ impl ConnectionForm {
     /// The service typed, where the engine has one.
     pub(crate) fn typed_service(&self, cx: &App) -> Option<String> {
         Some(self.service.read(cx).value().trim().to_string())
-            .filter(|service| self.engine.takes_service() && !service.is_empty())
+            .filter(|service| self.target().takes_service() && !service.is_empty())
     }
 
     /// Whether the root certificate field means anything for what is typed.
@@ -528,9 +613,10 @@ impl ConnectionForm {
         let tunnel = read(&self.ssh_host);
         let service = self.typed_service(cx);
         summary(
-            self.engine,
+            self.target(),
             self.srv,
             &Typed {
+                connection: &read(&self.connection),
                 host: &read(&self.host),
                 port: &read(&self.port),
                 database: &read(&self.database),
@@ -691,7 +777,7 @@ pub(crate) fn starting_mode(copied_from: Option<Mode>) -> Mode {
 
 /// What a blank field means, field by field.
 pub(crate) struct Placeholders {
-    pub(crate) name: &'static str,
+    pub(crate) name: String,
     pub(crate) host: &'static str,
     pub(crate) port: String,
     pub(crate) database: &'static str,
@@ -701,12 +787,18 @@ pub(crate) struct Placeholders {
 
 /// Read against `ConnectionConfig::server`, `account` and
 /// `default_profile_name`, which decide what blank actually does.
-pub(crate) fn placeholders(engine: Engine) -> Placeholders {
+pub(crate) fn placeholders(target: Target) -> Placeholders {
+    let engine = target.engine;
     let hints = engine.spec().hints;
+    let plugin = match target.driver {
+        Driver::Plugin(plugin) => Some(plugin),
+        Driver::BuiltIn => None,
+    };
     Placeholders {
-        name: match engine.fields() {
-            Fields::File => "Named after the file",
-            Fields::Server | Fields::Account => hints.name,
+        name: match (target.fields(), plugin) {
+            (Fields::ConnectionString, Some(plugin)) => external_name(plugin, engine),
+            (Fields::File, _) => "Named after the file".into(),
+            _ => hints.name.into(),
         },
         host: hints.host,
         port: engine
@@ -714,7 +806,12 @@ pub(crate) fn placeholders(engine: Engine) -> Placeholders {
             .map(|port| port.to_string())
             .unwrap_or_default(),
         database: hints.database,
-        user: hints.user,
+        // A plugin's driver decides, and a DSN can carry one of its own.
+        user: if plugin.is_some() {
+            "Optional"
+        } else {
+            hints.user
+        },
         path: hints.path,
     }
 }
@@ -725,7 +822,7 @@ const FROM_THE_SERVICE: &str = "From the service";
 /// port field is too narrow for the whole phrase.
 fn from_the_service(blank: Placeholders) -> Placeholders {
     Placeholders {
-        name: "Database, else the service",
+        name: "Database, else the service".into(),
         host: FROM_THE_SERVICE,
         port: "Service".to_string(),
         database: FROM_THE_SERVICE,
@@ -773,6 +870,7 @@ pub(crate) fn consults_root_certificate(mode: SslMode, service: Option<&str>) ->
 /// The fields `summary` reads, as typed and trimmed.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Typed<'a> {
+    pub(crate) connection: &'a str,
     pub(crate) host: &'a str,
     pub(crate) port: &'a str,
     pub(crate) database: &'a str,
@@ -786,9 +884,16 @@ pub(crate) struct Typed<'a> {
 }
 
 /// Where a form points, in one line: `user@host:port/database` and the SSH
-/// host it goes through, the file for a file, the account for an account.
+/// host it goes through, the file for a file, the account for an account, and
+/// for a connection string its DSN or the host and port a tunnel would find
+/// in it, never the string, which can carry a password until it is saved.
 /// `None` until there is somewhere: a user on its own points nowhere.
-pub(crate) fn summary(engine: Engine, srv: bool, typed: &Typed) -> Option<String> {
+pub(crate) fn summary(target: Target, srv: bool, typed: &Typed) -> Option<String> {
+    let engine = target.engine;
+    let tunnelled = |line: String| match typed.tunnel {
+        Some(tunnel) if !tunnel.is_empty() => format!("{line} via {tunnel}"),
+        _ => line,
+    };
     let signed_in = |place: String| match typed.user {
         "" => place,
         user => format!("{user}@{place}"),
@@ -797,7 +902,18 @@ pub(crate) fn summary(engine: Engine, srv: bool, typed: &Typed) -> Option<String
         "" => place,
         database => format!("{place}/{database}"),
     };
-    match engine.fields() {
+    match target.fields() {
+        Fields::ConnectionString => {
+            let place = match typed.connection {
+                "" => return None,
+                dsn if !dsn.contains('=') => dsn.to_string(),
+                connection => {
+                    let endpoint = odbc_string::endpoint(connection).ok()?;
+                    format!("{}:{}", endpoint.host, endpoint.port)
+                }
+            };
+            Some(tunnelled(signed_in(place)))
+        }
         Fields::File => Some(typed.path.to_string()).filter(|path| !path.is_empty()),
         Fields::Account => {
             (!typed.account.is_empty()).then(|| signed_in(database(typed.account.to_string())))
@@ -815,13 +931,60 @@ pub(crate) fn summary(engine: Engine, srv: bool, typed: &Typed) -> Option<String
                 }
                 (host, ..) => host.to_string(),
             };
-            let line = signed_in(database(place));
-            Some(match typed.tunnel {
-                Some(tunnel) if !tunnel.is_empty() => format!("{line} via {tunnel}"),
-                _ => line,
-            })
+            Some(tunnelled(signed_in(database(place))))
         }
     }
+}
+
+/// What a plugin's profile is called when nobody has named it: the string
+/// can carry a password, so none of it becomes a name.
+fn external_name(plugin: &Plugin, speaks: Engine) -> String {
+    format!("{} ({})", plugin.name, speaks.label())
+}
+
+/// The dialects a plugin's connection may be written in, Generic SQL first
+/// as the one that assumes nothing of the server.
+pub(crate) fn dialects() -> Vec<Engine> {
+    let mut dialects: Vec<Engine> = Engine::ALL
+        .into_iter()
+        .filter(|engine| engine.speaks_through_plugins())
+        .collect();
+    dialects.sort_by_key(|engine| *engine != Engine::Generic);
+    dialects
+}
+
+/// A plugin profile as it may be saved: no secret in a string that is
+/// written to disk in plain text, and through a tunnel only a string whose
+/// one host and port can be pointed at the forward.
+fn checked_external(config: ExternalConfig) -> Result<ExternalConfig, String> {
+    if config.connection.is_empty() {
+        return Err("DSN or connection string is required.".into());
+    }
+    odbc_string::storable(&config.connection).map_err(|refusal| refusal.0)?;
+    if config.ssh.is_some() {
+        odbc_string::endpoint(&config.connection).map_err(|refusal| refusal.0)?;
+    }
+    Ok(config)
+}
+
+/// What the tunnel will do to `connection` when connecting, or why it cannot.
+pub(crate) fn tunnel_line(connection: &str) -> Result<String, String> {
+    let endpoint = odbc_string::endpoint(connection).map_err(|refusal| refusal.0)?;
+    let keys = match endpoint.keys.as_slice() {
+        [key] => format!("{key} is"),
+        [leading @ .., last] => format!("{} and {last} are", leading.join(", ")),
+        [] => unreachable!("an endpoint is found in at least one key"),
+    };
+    Ok(format!(
+        "The tunnel forwards to {}:{}; {keys} pointed at it when connecting.",
+        endpoint.host, endpoint.port
+    ))
+}
+
+/// The built-in dialect the driver's reported DBMS belongs to, when it is not
+/// the one picked: offered, never switched to.
+pub(crate) fn suggested_dialect(picked: Engine, reported: &Reported) -> Option<Engine> {
+    Engine::from_dbms_name(&reported.dbms).filter(|engine| *engine != picked)
 }
 
 /// The SSH fields' text for `ssh`, in the order `ssh_tunnel` reads it back.
@@ -880,8 +1043,28 @@ fn parse_port(label: &str, value: &str) -> Result<Option<u16>, String> {
 /// form closed or retested mid-connect never hears back from the stale one.
 pub(crate) enum ConnectionTest {
     Running(Task<()>),
-    Passed,
+    /// What a plugin's driver said it reached, which a built-in leaves out.
+    Passed(Option<Reported>),
     Failed(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Reported {
+    pub(crate) dbms: String,
+    pub(crate) driver: String,
+}
+
+impl Reported {
+    pub(crate) fn of(connection: &crate::db::Connection) -> Option<Self> {
+        Some(Self {
+            dbms: connection.reported_dbms()?.to_string(),
+            driver: connection.reported_driver()?.to_string(),
+        })
+    }
+
+    pub(crate) fn sentence(&self) -> String {
+        format!("Connected to {} through {}.", self.dbms, self.driver)
+    }
 }
 
 /// What a profile is called when nobody has named it: the database for an
@@ -909,6 +1092,7 @@ pub(crate) fn default_profile_name(config: &ConnectionConfig) -> String {
         ConnectionConfig::Snowflake(account) => account.database.clone(),
         // A database there is a number, which names nothing.
         ConnectionConfig::Redis(server) => server.host.clone(),
+        ConnectionConfig::External(external) => external_name(external.plugin, external.speaks),
     }
 }
 
@@ -951,10 +1135,7 @@ pub(crate) fn password_to_persist(config: &ConnectionConfig, origin: Origin) -> 
     if origin == Origin::Environment {
         return None;
     }
-    config
-        .server()
-        .map(|server| server.password.as_str())
-        .filter(|password| !password.is_empty())
+    config.password().filter(|password| !password.is_empty())
 }
 
 #[cfg(test)]
@@ -1075,7 +1256,7 @@ mod tests {
 
     #[test]
     fn the_summary_says_where_the_form_points_once_it_points_somewhere() {
-        let at = |engine, srv, typed: &Typed| summary(engine, srv, typed);
+        let at = |engine, srv, typed: &Typed| summary(Target::built_in(engine), srv, typed);
         let server = Typed {
             host: "db.internal",
             port: "5432",
@@ -1192,7 +1373,7 @@ mod tests {
 
     #[test]
     fn a_blank_field_says_what_blank_means_for_the_engine() {
-        let postgres = placeholders(Engine::Postgres);
+        let postgres = placeholders(Target::built_in(Engine::Postgres));
         assert_eq!(postgres.port, "5432");
         assert_eq!(postgres.database, "postgres");
         // `server` asks for a user here, and `server_requiring(&[])` there.
@@ -1215,14 +1396,23 @@ mod tests {
             root_certificate_placeholder(SslMode::VerifyFull, true),
             "Service, else system trust store"
         );
-        assert_eq!(placeholders(Engine::MongoDb).user, "Optional");
-        assert_eq!(placeholders(Engine::Redis).name, "Named after the host");
-        assert_eq!(placeholders(Engine::Turso).name, "Named after the file");
         assert_eq!(
-            placeholders(Engine::DuckDb).path,
+            placeholders(Target::built_in(Engine::MongoDb)).user,
+            "Optional"
+        );
+        assert_eq!(
+            placeholders(Target::built_in(Engine::Redis)).name,
+            "Named after the host"
+        );
+        assert_eq!(
+            placeholders(Target::built_in(Engine::Turso)).name,
+            "Named after the file"
+        );
+        assert_eq!(
+            placeholders(Target::built_in(Engine::DuckDb)).path,
             "Blank for a database in memory"
         );
-        assert_eq!(placeholders(Engine::Snowflake).port, "");
+        assert_eq!(placeholders(Target::built_in(Engine::Snowflake)).port, "");
     }
 
     #[test]
@@ -1292,13 +1482,201 @@ mod tests {
     }
 
     #[test]
+    fn a_plugin_profiles_password_goes_to_the_keychain_like_a_servers() {
+        let plugin = Box::leak(Box::new(crate::db::plugin::Plugin {
+            id: "odbc".into(),
+            name: "ODBC".into(),
+            version: "1".into(),
+            executable: "dbdelve-odbc".into(),
+        }));
+        let external = |password: &str| {
+            ConnectionConfig::External(crate::db::ExternalConfig {
+                plugin,
+                speaks: crate::db::Engine::Generic,
+                connection: "DRIVER=Db2;HOSTNAME=h;PORT=50000".into(),
+                user: "a@b.example".into(),
+                password: password.into(),
+                statement_timeout: 0,
+                ssh: None,
+            })
+        };
+        assert_eq!(
+            password_to_persist(&external("hunter2"), Origin::Form),
+            Some("hunter2")
+        );
+        assert_eq!(password_to_persist(&external(""), Origin::Form), None);
+        assert_eq!(default_profile_name(&external("")), "ODBC (Generic SQL)");
+    }
+
+    fn odbc() -> &'static Plugin {
+        Box::leak(Box::new(Plugin {
+            id: "odbc".into(),
+            name: "ODBC".into(),
+            version: "1".into(),
+            executable: "dbdelve-odbc".into(),
+        }))
+    }
+
+    fn odbc_config(connection: &str, ssh: Option<SshTunnel>) -> ExternalConfig {
+        ExternalConfig {
+            plugin: odbc(),
+            speaks: Engine::Generic,
+            connection: connection.into(),
+            user: "a@b.example".into(),
+            password: String::new(),
+            statement_timeout: 0,
+            ssh,
+        }
+    }
+
+    #[test]
+    fn a_connection_string_saves_through_a_tunnel_only_where_its_endpoint_is_found() {
+        let bastion = || {
+            Some(SshTunnel {
+                host: "bastion".into(),
+                ..SshTunnel::default()
+            })
+        };
+        let string = "DRIVER=Db2;HOSTNAME=h;PORT=50000";
+        let saved = checked_external(odbc_config(string, bastion())).unwrap();
+        assert_eq!(saved.connection, string);
+        assert_eq!(saved.ssh, bastion());
+        assert_eq!(
+            checked_external(odbc_config("Db2Dev", bastion())).map(|_| ()),
+            Err(
+                "A DSN keeps its server's address in odbc.ini, where DBDelve cannot route it \
+                 through a tunnel. Write the connection string out to use one."
+                    .into()
+            )
+        );
+        assert!(checked_external(odbc_config("Db2Dev", None)).is_ok());
+        assert_eq!(
+            checked_external(odbc_config("", None)).map(|_| ()),
+            Err("DSN or connection string is required.".into())
+        );
+    }
+
+    #[test]
+    fn a_password_in_the_string_is_refused_and_a_blank_one_in_its_field_is_not() {
+        let refused = checked_external(odbc_config("DRIVER=Db2;HOSTNAME=h;PWD=x", None));
+        assert!(
+            refused.unwrap_err().ends_with(
+                "Put the password in the Password field, which is kept in the Keychain."
+            )
+        );
+        // Hard rule 5: a blank password and a user with an `@` are a profile.
+        let saved = checked_external(odbc_config("DRIVER=Db2;HOSTNAME=h;PORT=50000", None));
+        let saved = saved.unwrap();
+        assert_eq!(
+            (saved.user.as_str(), saved.password.as_str()),
+            ("a@b.example", "")
+        );
+        assert_eq!(
+            default_profile_name(&ConnectionConfig::External(saved)),
+            "ODBC (Generic SQL)"
+        );
+    }
+
+    #[test]
+    fn the_tunnel_line_names_the_endpoint_and_the_keys_it_rewrites() {
+        assert_eq!(
+            tunnel_line("DRIVER=Db2;HOSTNAME=db.example.com;PORT=50000").as_deref(),
+            Ok(
+                "The tunnel forwards to db.example.com:50000; HOSTNAME and PORT are pointed at \
+                it when connecting."
+            )
+        );
+        assert_eq!(
+            tunnel_line("DRIVER={ODBC Driver 18 for SQL Server};Server=sql.internal,1433")
+                .as_deref(),
+            Ok(
+                "The tunnel forwards to sql.internal:1433; Server is pointed at it when \
+                connecting."
+            )
+        );
+        assert_eq!(
+            tunnel_line("DRIVER=Db2;HOSTNAME=db.example.com"),
+            Err(
+                "Name the port (PORT=…, or Server=host,port) so the tunnel knows where to \
+                 forward."
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn a_plugin_speaks_sql_with_a_session_hold_generic_first() {
+        let offered = dialects();
+        assert_eq!(offered[0], Engine::Generic);
+        for engine in [Engine::ClickHouse, Engine::MongoDb, Engine::Redis] {
+            assert!(!offered.contains(&engine), "{engine:?}");
+        }
+        assert!(offered.contains(&Engine::Postgres));
+    }
+
+    #[test]
+    fn the_reported_dbms_suggests_a_dialect_only_when_it_differs() {
+        let reported = |dbms: &str| Reported {
+            dbms: dbms.into(),
+            driver: "psqlodbcw.so".into(),
+        };
+        assert_eq!(
+            suggested_dialect(Engine::Generic, &reported("PostgreSQL")),
+            Some(Engine::Postgres)
+        );
+        assert_eq!(
+            suggested_dialect(Engine::Postgres, &reported("PostgreSQL")),
+            None
+        );
+        assert_eq!(
+            suggested_dialect(Engine::Generic, &reported("DB2/LINUXX8664")),
+            None
+        );
+        assert_eq!(
+            reported("PostgreSQL").sentence(),
+            "Connected to PostgreSQL through psqlodbcw.so."
+        );
+    }
+
+    #[test]
+    fn a_plugin_form_points_at_its_dsn_or_the_endpoint_never_the_string() {
+        let target = Target {
+            engine: Engine::Generic,
+            driver: Driver::Plugin(odbc()),
+        };
+        let at = |connection: &str, tunnel| {
+            summary(
+                target,
+                false,
+                &Typed {
+                    connection,
+                    user: "a@b.example",
+                    tunnel,
+                    ..Typed::default()
+                },
+            )
+        };
+        assert_eq!(at("Db2Dev", None).as_deref(), Some("a@b.example@Db2Dev"));
+        assert_eq!(
+            at("DRIVER=Db2;HOSTNAME=h;PORT=50000;PWD=x", Some("bastion")).as_deref(),
+            Some("a@b.example@h:50000 via bastion")
+        );
+        assert_eq!(at("DRIVER=Unknown;Opaque=1", None), None);
+        assert_eq!(at("", None), None);
+
+        let blank = placeholders(target);
+        assert_eq!(blank.name, "ODBC (Generic SQL)");
+        assert_eq!(blank.user, "Optional");
+    }
+
+    #[test]
     fn a_service_is_where_a_form_with_no_host_points() {
         let typed = Typed {
             service: Some("harness"),
             ..Typed::default()
         };
         assert_eq!(
-            summary(Engine::Postgres, false, &typed).as_deref(),
+            summary(Target::built_in(Engine::Postgres), false, &typed).as_deref(),
             Some("service harness")
         );
         let typed = Typed {
@@ -1307,7 +1685,7 @@ mod tests {
             ..typed
         };
         assert_eq!(
-            summary(Engine::Postgres, false, &typed).as_deref(),
+            summary(Target::built_in(Engine::Postgres), false, &typed).as_deref(),
             Some("db.internal:6432")
         );
     }

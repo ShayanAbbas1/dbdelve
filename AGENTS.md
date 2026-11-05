@@ -2,7 +2,8 @@
 
 DBDelve is a native database client in Rust on GPUI for macOS, Linux and Windows,
 speaking Postgres, MySQL, MariaDB, SQLite, DuckDB, Snowflake, SQL Server, MongoDB,
-Redis and ClickHouse.
+Redis and ClickHouse, and, through a bundled ODBC bridge, anything an ODBC
+driver reaches.
 
 The split everything below leans on is _whose SQL it is_. An editor buffer is
 the user's and is never touched uninvited; a browsing surface (an object tab's
@@ -75,24 +76,34 @@ require it, stop and raise it instead.
 
 4. **Driver types do not reach the UI layer.** The grid receives rendered
    strings and type tags, never a `postgres::Row`, a `mysql::Value`, a
-   `rusqlite::ValueRef`, a `tiberius::ColumnData`, an OID, a storage class or
-   an epoch count off Snowflake's wire. Engine dispatch is a closed enum inside
-   `src/db/` and stops there: no trait, no plugin surface. A UI that knows which
-   engine it is talking to grows an engine-shaped special case in every view,
-   and those are the special cases nobody ever removes. An enum rather than a
-   trait for the same reason in miniature: an arm per engine the compiler makes
-   every match enumerate, instead of an open extension point.
+   `rusqlite::ValueRef`, a `tiberius::ColumnData`, an OID, a storage class, an
+   epoch count off Snowflake's wire or an Arrow array off a plugin's pipe.
+   Engine dispatch is a closed enum inside `src/db/` and stops there: no trait,
+   and no in-process plugin surface (no dynamic libraries, no trait objects).
+   One arm, `Connection::External`, drives an out-of-process plugin over its
+   stdin and stdout (`docs/agents/plugins.md`), and its SQL is spelled by a
+   built-in `EngineSpec`, the dialect the profile speaks, never by the plugin.
+   A UI that knows which engine it is talking to grows an engine-shaped special
+   case in every view, and those are the special cases nobody ever removes. An
+   enum rather than a trait for the same reason in miniature: an arm per engine
+   the compiler makes every match enumerate, instead of an open extension
+   point.
 
-   What crosses out is `db::Engine` (`src/db/mod.rs`) and the data that
-   describes it, `EngineSpec` and its strategy types (`src/db/spec.rs`),
+   What crosses out is `db::Engine` (`src/db/mod.rs`), the data that describes
+   it, `EngineSpec` and its strategy types (`src/db/spec.rs`), and `db::Target`
+   (`src/db/target.rs`), the engine paired with the driver that carries it,
    because DBDelve writes SQL and has to spell it the way the server will read
-   it. Neither holds a connection or a driver type. Views and workspace code _ask_ it, through its
-   methods, and never match on it. Where an engine question is missing, add a
-   method to `Engine` rather than a `match` at the caller. `sql.rs`,
+   it. None holds a connection or a driver type. Views and workspace code _ask_
+   them, through their methods, and never match on them: spelling is asked of
+   `Engine`, and abilities (editing, inserting, importing, switching database,
+   picking a schema, Copy DDL) of `Target`, never of `Engine`, because a plugin
+   target is the read-only tier whatever its dialect could do. Where a question
+   is missing, add a method rather than a `match` at the caller. `sql.rs`,
    `filter.rs` and `explorer.rs` branch on `Engine::syntax()` and read the
    engine's `EngineSpec`; they never name an engine. The only places above
-   `src/db/` that do are the code that builds or persists a `ConnectionConfig`,
-   the importers, and the few file-opening and `PG*` connect paths.
+   `src/db/` that name an engine or a driver are the code that builds or
+   persists a `ConnectionConfig`, the importers, and the few file-opening and
+   `PG*` connect paths.
 
 5. **Blank passwords are valid.** Never warn about them. Usernames containing `@`
    must work. Both are required by cloud IAM auth and both are commonly broken.
@@ -176,10 +187,15 @@ in the graph.
   makes the grid crawl.
 - **Do not put tokio on GPUI's executor.** GPUI's executor is `async-task` with
   no reactor. A tokio future on `cx.background_executor().spawn(...)` _panics_
-  the moment it touches a socket or timer. Database work uses blocking calls
-  spawned onto the background executor; a driver that is async (Postgres, SQL
-  Server, MongoDB) owns a tokio runtime per connection, and DBDelve blocks on
-  it from a background thread. Nothing that leaves `src/db/` is a future.
+  the moment it touches a socket or timer. Database work uses blocking calls,
+  each on `blocking`'s capped pool for the executor to await
+  (`workspace::spawn_blocking`), never on the executor's own threads: there is
+  one per core, and statements queued on one session's lock would fill them,
+  every other engine's work stalled behind. A Cancel gets a thread of its own
+  (`workspace::spawn_cancel`), so it never queues behind the statements it
+  stops. A driver that is async (Postgres, SQL Server,
+  MongoDB) owns a tokio runtime per connection, and DBDelve blocks on it from
+  that thread. Nothing that leaves `src/db/` is a future.
 
 ## Build, run and check
 
@@ -191,7 +207,9 @@ cargo run
 Linux needs the system packages listed in `README.md` first. **Plain `cargo
 run` is the release variant**: with `DBDELVE_VARIANT` unset it reads and
 writes the installed app's profiles and keychain passwords. Run
-`DBDELVE_VARIANT=dev cargo run` to share the dev bundle's instead. The
+`DBDELVE_VARIANT=dev cargo run` to share the dev bundle's instead. For plugin
+work (the ODBC tile) run `dev/plugins.sh && DBDELVE_VARIANT=dev cargo run`: the
+script stages the bridge where `cargo run` discovers it. The
 development databases accept:
 
 ```text
@@ -311,9 +329,14 @@ Read the file a task touches before changing that area:
   how the tokio-based drivers stay off GPUI's executor, and where the MongoDB
   and Redis code lives.
 - `docs/agents/ssh-tunnels.md`: **SSH tunnels**: the system-`ssh` forward, its
-  readiness check, watchdog and TLS naming.
+  readiness check, watchdog and TLS naming, and the ODBC string rewrite.
 - `docs/agents/dev-databases.md`: **dev databases** beyond the URLs above:
-  SQLite and DuckDB seeds, Snowflake's mock and live tests, moving ports, and
-  telling a half-seeded container from a good one.
+  SQLite and DuckDB seeds, Snowflake's mock and live tests, Db2 and psqlODBC
+  through the bridge, moving ports, and telling a half-seeded container from a
+  good one.
+- `docs/agents/plugins.md`: **plugins and the ODBC bridge**: the protocol,
+  the manifest and discovery, stop vs drain, cancel and resets, the bridge's
+  ODBC decisions, and what a plugin connection may not do.
 - `docs/agents/shipping.md`: **bundling and releasing**: `dev/bundle.sh`, the
-  dev and release variants, signing and the Keychain, and cutting a release.
+  dev and release variants, signing and the Keychain, where the ODBC bridge
+  lands in each artifact, and cutting a release.

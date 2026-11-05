@@ -56,7 +56,7 @@ impl Workspace {
                     ObjectBody::Relation { structure, .. } => structure,
                     ObjectBody::Structure { .. } | ObjectBody::Routine(_) => return,
                 };
-                if !tab.takes_inserts(engine) {
+                if !tab.takes_inserts(self.target()) {
                     self.note("This view takes no inserts.".into(), cx);
                     return;
                 }
@@ -80,6 +80,12 @@ impl Workspace {
             // The grid's own columns, where its rows are written back to: one
             // table, which is never so for a join or a computed result.
             Tab::Query(_) => {
+                // The grid's `edit` was set by whichever driver read its rows,
+                // and the profile may have moved to a plugin's since.
+                if !self.target().takes_inserts(db::RelationKind::Table) {
+                    self.note("These rows take no new row.".into(), cx);
+                    return;
+                }
                 let Some(target) = profile.session.query_insert_target(cx) else {
                     self.note("These rows take no new row.".into(), cx);
                     return;
@@ -1166,9 +1172,10 @@ impl Workspace {
         // Does not route through `editable`: `row_key` answers "can this row be
         // named" and is true regardless of mode or engine, so both are asked
         // outright.
-        let engine = self.engine();
-        if !engine.edits_rows() {
-            self.note(format!("{} rows are read-only here.", engine.label()), cx);
+        let target = self.target();
+        let engine = target.engine;
+        if !target.edits_rows() {
+            self.note(format!("{} rows are read-only here.", target.label()), cx);
             return;
         }
         if !self.require(Mode::ReadWrite, cx) {
@@ -1196,9 +1203,9 @@ impl Workspace {
         // Browsing surfaces only. A query tab's grid is a view of the user's own
         // statement, and a delete there would be dbdelve writing into a buffer to
         // destroy rows -- bar an engine that takes them there
-        // (`Engine::edits_query_rows`), where the delete is reviewed as a
+        // (`Target::edits_query_rows`), where the delete is reviewed as a
         // relation's is and the buffer is left be.
-        if !matches!(tab, Tab::Object(_)) && !engine.edits_query_rows() {
+        if !matches!(tab, Tab::Object(_)) && !target.edits_query_rows() {
             self.note(
                 "Deleting a row is offered on a table's rows, not on a query's results.".into(),
                 cx,
@@ -1563,6 +1570,16 @@ impl Workspace {
         let Some(results) = profile.session.active_results().cloned() else {
             return;
         };
+        // Asked of the profile as it is now, not of the grid: its rows, and the
+        // `edit` that opened its cells, may have been read through a driver
+        // the profile has since left.
+        if !self.target().edits_rows() {
+            self.note(
+                "Rows read through a plugin driver are read-only.".into(),
+                cx,
+            );
+            return;
+        }
         let own_review = profile.session.apply_review_covers(tab);
         let pending = results.read(cx).delegate().pending_updates();
         // Nothing partial runs: a batch missing one of its rows is not the

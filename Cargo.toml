@@ -1,8 +1,15 @@
-[package]
-name = "dbdelve"
+# First in the file: the release scripts read the version from the first line
+# that starts with `version`, and the plugin crates under plugins/ share it.
+[workspace.package]
 version = "0.6.2"
 edition = "2024"
 license = "GPL-3.0-only"
+
+[package]
+name = "dbdelve"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "A fast, native, multi-engine database client"
 publish = false
 
@@ -50,6 +57,12 @@ lsp-types = "=0.97.0"
 # already in the graph, pinned to the version gpui-component resolves so the
 # actions caught are the ones its keymap dispatches.
 gpui-base = "=0.8.0"
+
+# The pool every blocking connection, network, disk and Keychain call runs on
+# (`workspace::spawn_blocking`), so the background executor only awaits them.
+# smol's: capped, and it lowers the cap rather than panicking when the OS will
+# not start another thread. Pinned to the version already locked through GPUI.
+blocking = "=1.6.2"
 
 # Async, driven the way SQL Server's tiberius is below: each connection owns a
 # tokio current-thread runtime and blocks on it from the background executor,
@@ -309,8 +322,10 @@ encoding_rs = "=0.8.35"
 #
 # Default features off: they pull `psm`, which builds assembly through `cc`, to
 # guard against pathological nesting we do not accept from a local buffer. Off,
-# it is two pure-Rust crates and an 8.5s build instead of 28.6s.
-sqlparser = { version = "=0.63.0", default-features = false, features = ["std"] }
+# it is two pure-Rust crates and an 8.5s build instead of 28.6s. `visitor`
+# walks a parsed statement for every function it calls, which the Generic
+# Read-only gate checks against an allowlist.
+sqlparser = { version = "=0.63.0", default-features = false, features = ["std", "visitor"] }
 
 # The Format Query command, and only that. A token-level reformatter: it splits
 # the text into keywords, strings and comments and re-emits them with newlines,
@@ -324,6 +339,17 @@ sqlparser = { version = "=0.63.0", default-features = false, features = ["std"] 
 # token dump nothing here prints. Off, the only crate this adds that is not
 # already in the graph is `unicode_categories`; `winnow` is already here.
 sqlformat = { version = "=0.5.0", default-features = false }
+
+# The frames and messages an engine plugin speaks, shared with the plugins so
+# the host's reading of a frame cannot drift from theirs.
+dbdelve-plugin-protocol = { path = "plugins/protocol" }
+# A plugin's Arrow batches, turned into the text the grid shows. `arrow-cast`
+# for display formatting only; all four are already in the graph through
+# duckdb, at the version it locks.
+arrow-array = "=60.0.0"
+arrow-buffer = "=60.0.0"
+arrow-cast = { version = "=60.0.0", default-features = false }
+arrow-schema = "=60.0.0"
 
 # Profile passwords live in the platform keychain, never in profiles.toml:
 # Keychain Services on macOS, Secret Service (gnome-keyring, KWallet) on Linux,
@@ -397,10 +423,11 @@ winresource = "=0.1.31"
 # regions and every renderer (Metal, DirectX, wgpu) draws them. Every change is
 # marked `dbdelve patch`, in gpui-pre and its renderer crates alike; re-apply
 # them on a gpui bump.
-# The vendored wgpu renderer is a member only so CI can run its tests;
+# The vendored wgpu renderer is a member only so CI can run its tests, and the
+# plugin crates so they share this lockfile and target directory;
 # default-members stays the root package, so plain cargo commands are unchanged.
 [workspace]
-members = ["vendor/gpui-pre-wgpu"]
+members = ["vendor/gpui-pre-wgpu", "plugins/protocol", "plugins/echo", "plugins/odbc"]
 default-members = ["."]
 
 [patch.crates-io]

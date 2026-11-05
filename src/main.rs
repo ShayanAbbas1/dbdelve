@@ -73,7 +73,7 @@ use completion::SchemaCompletions;
 use connection_form::{ConnectionForm, default_profile_name};
 use db::{
     CancelToken, Catalog, Connection, ConnectionConfig, Databases, DbError, Engine, ExplainMode,
-    Fields, PostgresConfig, RelationKind, ServerConfig, SnowflakeConfig, SslMode,
+    Fields, PostgresConfig, RelationKind, ServerConfig, SnowflakeConfig, SslMode, Target,
 };
 use explorer::{ExplorerTarget, ObjectKind, PREVIEW_ROW_LIMIT, tree as build_explorer_tree};
 use export::{FileAs, Format};
@@ -259,6 +259,9 @@ fn panic_log_directory() -> Option<PathBuf> {
 
 fn main() {
     install_panic_log();
+    // Manifests only, ahead of the profiles that name them: no plugin process
+    // starts until one of its connections opens.
+    let plugins = db::plugin::discover();
     gpui_platform::application()
         .with_assets(Icons)
         .run(|cx: &mut App| {
@@ -286,7 +289,7 @@ fn main() {
             // here, rather than reused from `Workspace::new`'s own read of the
             // same file: nothing here can wait for a window and an entity to
             // exist first.
-            let overrides = store::peek_profiles()
+            let overrides = store::peek_profiles(&plugins)
                 .and_then(|list| list.settings)
                 .and_then(|settings| settings.custom_keybindings)
                 .unwrap_or_default();
@@ -357,7 +360,7 @@ fn main() {
             // Root must be the window's first layer or dialog and notification
             // layers panic when they look for it.
             cx.open_window(options, |window, cx| {
-                let workspace = cx.new(|cx| Workspace::new(window, cx));
+                let workspace = cx.new(|cx| Workspace::new(plugins, window, cx));
                 cx.new(|cx| Root::new(workspace, window, cx))
             })
             .expect("failed to open window");

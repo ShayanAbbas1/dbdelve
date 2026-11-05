@@ -76,3 +76,38 @@ already set up on the machine.
   dead tunnel fails the dial with what ssh last said on its stderr, rather
   than reaching whatever is now listening on that port.
 
+- **An ODBC profile tunnels by rewriting its connection string at open, and
+  refuses whenever it cannot be sure the driver dials only what it rewrote.**
+  Its address is inside the string, in driver-specific keys, so
+  `odbc_string::endpoint` finds exactly one host attribute (`HOSTNAME`,
+  `HOST`, `SERVER`, `SERVERNAME`, `ADDRESS`, `ADDR`) and one port, the tunnel
+  forwards to them, and `through_tunnel` points them at the forward. Where the
+  port goes depends on the driver, so the string must name one `DRIVER` DBDelve
+  knows: Microsoft's SQL Server drivers read it only after a comma in the host
+  (`Server=host,port`) and ignore a `PORT` key, psqlODBC, MySQL's, MariaDB's and
+  Db2's read a `PORT` key and take a comma as a host list. An unknown driver, a
+  DSN (its address is in `odbc.ini`, out of reach), a second host or port, no
+  port (no default is guessed: `Server=` alone means 5432, 3306 or 1433 by
+  driver), a host that is not one plain name (IPv6, `host:port`, a named
+  instance, a protocol prefix other than `tcp:`), a braced value a driver could
+  read differently, and any key that may name another address (`DBQ`,
+  `SOCKET`, `PQOPT`, failover partners, alternate servers, proxies: a denylist
+  that leans wide) are each refused by name. A refusal costs a connect; a guess
+  sends the driver, and the password, past the tunnel. `ponytail:` the major
+  drivers' spellings only; one more is a line in the key lists.
+- **The rewrite exists only in the `open` request.** The stored string stays
+  the user's; the rewritten one is never persisted, logged or shown. It changes
+  exactly the host and port values (to `127.0.0.1` and the forward's port, a
+  `tcp:` prefix and braces kept), and is parsed again and refused ("This
+  connection string could not be routed through the tunnel.") unless it names
+  exactly the forward with every other attribute identical, in order; the
+  rewrite and the check are one function, so no caller gets one without the
+  other. The form shows what the tunnel will do under the Connection field, and
+  `open` checks again for a hand-edited profile. `apart` dials the same tunnel.
+- **Through a tunnel an ODBC driver verifies `127.0.0.1`**, because DBDelve
+  sets no TLS on an ODBC profile and rewrites none of the driver's TLS keys. A
+  driver that checks the hostname fails loudly with its own certificate error,
+  which weakens nothing (hard rule 6): DBDelve asked for no mode it could
+  downgrade. A driver with a separate verification name (SQL Server ODBC 18's
+  `HostNameInCertificate`) can be given one by the user; Kerberos, which derives
+  the SPN from the host, fails the same loud way.

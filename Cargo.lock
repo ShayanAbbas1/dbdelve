@@ -470,6 +470,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "arrow-ipc"
+version = "60.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86c523472d22e31f984df7a44fc36e6323d3c9b05ffe53d267ee4c3aa7c128d2"
+dependencies = [
+ "arrow-array",
+ "arrow-buffer",
+ "arrow-data",
+ "arrow-schema",
+ "arrow-select",
+ "flatbuffers",
+]
+
+[[package]]
 name = "arrow-ord"
 version = "60.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2094,9 +2108,15 @@ name = "dbdelve"
 version = "0.6.2"
 dependencies = [
  "aes 0.8.4",
+ "arrow-array",
+ "arrow-buffer",
+ "arrow-cast",
+ "arrow-schema",
  "base64 0.22.1",
+ "blocking",
  "calamine",
  "cbc 0.1.2",
+ "dbdelve-plugin-protocol",
  "duckdb",
  "encoding_rs",
  "futures-util",
@@ -2150,6 +2170,43 @@ dependencies = [
  "uuid",
  "windows-sys 0.61.2",
  "winresource",
+]
+
+[[package]]
+name = "dbdelve-plugin-echo"
+version = "0.6.2"
+dependencies = [
+ "arrow-array",
+ "arrow-buffer",
+ "arrow-data",
+ "arrow-ipc",
+ "arrow-schema",
+ "dbdelve-plugin-protocol",
+ "flatbuffers",
+]
+
+[[package]]
+name = "dbdelve-plugin-odbc"
+version = "0.6.2"
+dependencies = [
+ "arrow-array",
+ "arrow-schema",
+ "dbdelve-plugin-protocol",
+ "odbc-api",
+]
+
+[[package]]
+name = "dbdelve-plugin-protocol"
+version = "0.6.2"
+dependencies = [
+ "arrow-array",
+ "arrow-buffer",
+ "arrow-data",
+ "arrow-ipc",
+ "arrow-schema",
+ "flatbuffers",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2707,6 +2764,16 @@ name = "flagset"
 version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b7ac824320a75a52197e8f2d787f6a38b6718bb6897a35142d749af3c0e8f4fe"
+
+[[package]]
+name = "flatbuffers"
+version = "25.12.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "35f6839d7b3b98adde531effaf34f0c2badc6f4735d26fe74709d8e513a96ef3"
+dependencies = [
+ "bitflags 2.13.1",
+ "rustc_version",
+]
 
 [[package]]
 name = "flate2"
@@ -6344,6 +6411,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "odbc-api"
+version = "29.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8532ca21ccfef7f60246ce4f4d25d4a46d2aa501832dfaab17e2a27e621fb52"
+dependencies = [
+ "atoi",
+ "log",
+ "odbc-sys",
+ "thiserror 2.0.20",
+ "widestring",
+]
+
+[[package]]
+name = "odbc-sys"
+version = "0.31.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "245cb4fe8236df4fd352ba96075d754233c6509d654d9f1c1482158b7d6c083d"
+dependencies = [
+ "unix-odbc",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8605,6 +8694,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3679862809bd1f92e563cf6fd820e28f39135303668001c10331d5027183e8b4"
 dependencies = [
  "log",
+ "sqlparser_derive",
+]
+
+[[package]]
+name = "sqlparser_derive"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2905ae8e8148d8f7f5748ea95d1e949fa4fc1d7f5161547b758ad118b2e4b0aa"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.3",
 ]
 
 [[package]]
@@ -10112,6 +10213,15 @@ checksum = "fc1de2c688dc15305988b563c3854064043356019f97a4b46276fe734c4f07ea"
 dependencies = [
  "crypto-common 0.1.7",
  "subtle",
+]
+
+[[package]]
+name = "unix-odbc"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26bdaf2156eebadc0dbabec5b2c2a6f92bff5cface28f3f0a367d2ee9aeca0e2"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

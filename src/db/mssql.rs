@@ -4028,7 +4028,7 @@ mod tests {
             started.elapsed()
         );
         assert!(
-            crate::db::is_cancel(Engine::SqlServer, &error),
+            crate::db::is_cancel(crate::db::Target::built_in(Engine::SqlServer), &error),
             "{}",
             error.message
         );
@@ -4802,12 +4802,13 @@ mod tests {
                 live_config(),
             ))
             .expect("connection should open"),
-            engine: Engine::SqlServer,
+            target: crate::db::Target::built_in(Engine::SqlServer),
             schema: "dbo",
             relation: "conformance",
             key: "id",
             columns: &COLUMNS,
             read: sql_read(Engine::SqlServer, "dbo"),
+            endless_rows: None,
             endless: "SELECT TOP 3000000 a.name, b.name FROM sys.all_columns a \
                       CROSS JOIN sys.all_columns b",
             runaway: "SELECT MAX(CHECKSUM(a.name, b.name, c.name)) FROM sys.all_objects a \

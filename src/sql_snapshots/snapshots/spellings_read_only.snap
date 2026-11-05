@@ -23,3 +23,5 @@ source: src/sql_snapshots.rs
 [mongodb] read_only=false => (none)
 [redis] read_only=true => (none)
 [redis] read_only=false => (none)
+[generic] read_only=true => (none)
+[generic] read_only=false => (none)

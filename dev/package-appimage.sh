@@ -29,10 +29,19 @@ APPDIR="$TARGET_DIR/linux/dbdelve-$VERSION-$ARCH.AppDir"
 APPIMAGE="$TARGET_DIR/linux/dbdelve-$VERSION-$ARCH.AppImage"
 
 cargo build --release
+# The bridge links the system's libodbc.so.2. It is deliberately not bundled:
+# the loop below only reads the app binary's dependencies, and a user needs the
+# unixodbc package (apt install unixodbc) to connect through ODBC. Without it
+# only the bridge fails to start.
+dev/plugins.sh --release
 
 rm -rf "$APPDIR"
 mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/lib" "$APPDIR/usr/share/applications"
 install -m 755 "$TARGET_DIR/release/dbdelve" "$APPDIR/usr/bin/dbdelve"
+# Beside the binary, where db::plugin::discover() looks; only odbc, as echo is
+# test code that may sit in the staging directory.
+mkdir -p "$APPDIR/usr/bin/plugins"
+cp -R "$TARGET_DIR/release/plugins/odbc" "$APPDIR/usr/bin/plugins/odbc"
 
 # The basename has to stay `dbdelve`: src/main.rs asks gpui for the app_id
 # "dbdelve", that app_id is what a Wayland compositor matches against a desktop
@@ -120,6 +129,12 @@ cat > "$APPDIR/AppRun" <<'APPRUN'
 # for the names we ship and the host supplies every other name, which is the
 # split package-appimage.sh made.
 HERE="$(dirname "$(readlink -f "$0")")"
+# Saved for the ODBC bridge, whose vendor drivers must not see the bundled libraries.
+if [ -n "${LD_LIBRARY_PATH+x}" ]; then
+  export DBDELVE_ORIGINAL_LD_LIBRARY_PATH="$LD_LIBRARY_PATH"
+else
+  export DBDELVE_ORIGINAL_LD_LIBRARY_PATH_UNSET=1
+fi
 export LD_LIBRARY_PATH="$HERE/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 exec "$HERE/usr/bin/dbdelve" "$@"
 APPRUN

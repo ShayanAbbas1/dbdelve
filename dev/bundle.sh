@@ -46,9 +46,12 @@ else
 fi
 
 cargo build --release
+# Builds the ODBC bridge, which links unixODBC statically on macOS, and stages
+# it under target/release/plugins/odbc.
+dev/plugins.sh --release
 
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/plugins/odbc" "$APP/Contents/Helpers"
 
 cp assets/macos/DBDelve.icns "$APP/Contents/Resources/DBDelve.icns"
 cp target/release/dbdelve "$APP/Contents/MacOS/$NAME"
@@ -58,6 +61,34 @@ cp target/release/dbdelve "$APP/Contents/MacOS/$NAME"
 # rather than only sitting in the repository.
 cp NOTICES.md "$APP/Contents/Resources/"
 cp -R licenses "$APP/Contents/Resources/"
+
+# The manifest goes where db::plugin::discover() reads manifests in a bundle
+# (Resources/plugins/<id>/), and the executable goes in Helpers/, where
+# codesign expects nested code: one under Resources is treated as an unsealed
+# resource rather than code to be signed.
+cp target/release/plugins/odbc/dbdelve-plugin.toml "$APP/Contents/Resources/plugins/odbc/"
+BRIDGE="$APP/Contents/Helpers/dbdelve-odbc"
+cp target/release/plugins/odbc/bin/dbdelve-odbc "$BRIDGE"
+
+# unixODBC is compiled into the bridge: one linked to a Homebrew libodbc runs
+# here and fails on every machine without it.
+#
+# otool's output is captured first so its failure fails the guard rather than
+# reading as an empty, clean list. `strings` catches a Homebrew search path
+# that otool cannot see on a statically linked library. A bare /usr/local/lib is
+# not matched: unixODBC's own default search path spells it, in a clean build.
+linked="$(otool -L "$BRIDGE")" || {
+  echo "otool could not read the bridge" >&2
+  exit 1
+}
+if printf '%s\n' "$linked" | tail -n +2 | grep -E 'odbc|/opt/homebrew|/usr/local'; then
+  echo "the bridge links a library outside the system: unixODBC must be static" >&2
+  exit 1
+fi
+if strings "$BRIDGE" | grep -E '/opt/homebrew|/usr/local/(Cellar|opt)'; then
+  echo "the bridge holds a Homebrew path: unixODBC must come from the crate" >&2
+  exit 1
+fi
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -94,8 +125,18 @@ fi
 # --identifier spelled out rather than inferred from CFBundleIdentifier: the
 # Keychain pins its "Always Allow" to the signature's identifier, so the one
 # thing that must not drift between builds is the one thing stated here.
+#
+# The bridge is signed first, under its own identifier, because signing the
+# bundle seals what is inside it as it stands.
+#
+# Once the app is notarized (hardened runtime), the bridge, and only the
+# bridge, will need the com.apple.security.cs.disable-library-validation
+# entitlement: it loads vendor ODBC drivers signed by other teams, and the app
+# must keep library validation. Not added yet: nothing here enables the
+# hardened runtime.
+codesign --force --sign "${DBDELVE_SIGN_ID:--}" --identifier "$IDENTIFIER.odbc" "$BRIDGE"
 codesign --force --sign "${DBDELVE_SIGN_ID:--}" --identifier "$IDENTIFIER" "$APP"
-codesign --verify --strict "$APP"
+codesign --verify --deep --strict "$APP"
 
 # Neither variant installs. The release reaches /Applications by the DMG's
 # drag-to-install, and the dev app runs where it was built so it can never be

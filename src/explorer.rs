@@ -7,7 +7,7 @@ use gpui_component::tree::TreeItem;
 
 use crate::db::{
     Catalog, Engine, EngineSpec, ForeignTable, MaterializedViewDrop, RelationKind, Routine,
-    RoutineKind, Schema, SelectTop, Syntax, Truncate,
+    RoutineKind, Schema, SelectTop, Syntax, Target, Truncate,
 };
 use crate::fuzzy::{Fuzzy, Query};
 use crate::{mql, redis_cmd};
@@ -430,7 +430,7 @@ impl Member {
 /// the catalog it was made from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObjectRef {
-    /// Where the catalog is one database's (`Engine::catalog_is_per_database`),
+    /// Where the catalog is one database's (`Target::catalog_is_per_database`),
     /// the database it is in: `public.users` is in every Postgres database.
     /// `None` where every database is a schema of the catalog already.
     pub database: Option<String>,
@@ -1202,13 +1202,14 @@ pub fn truncate_sql(engine: Engine, schema: &str, relation: &str) -> String {
 /// or `None` for the DDL, which only the server can give. The palette offers
 /// the same rows for the tab in front, so the two cannot disagree on which.
 pub fn relation_copies(
-    engine: Engine,
+    target: Target,
     schema: &str,
     relation: &str,
     kind: RelationKind,
 ) -> [Vec<(&'static str, Option<String>)>; 2] {
+    let engine = target.engine;
     let mut reads = Vec::new();
-    if engine.copies_ddl() {
+    if target.copies_ddl() {
         reads.push(("Copy DDL", None));
     }
     if let Some(sql) = select_top_sql(engine, schema, relation) {

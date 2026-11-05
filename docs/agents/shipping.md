@@ -48,6 +48,39 @@ Four things in the script are load-bearing:
 - **The font licences ship inside the bundle**, because the fonts are compiled
   into the binary and the OFL asks the licence to travel with them.
 
+## The ODBC bridge in each artifact
+
+Every artifact carries `plugins/odbc` (never echo, which is test code), laid
+out where `db::plugin::discover()` looks. `dev/plugins.sh --release` builds it
+(`cargo build --release -p dbdelve-plugin-odbc`) and stages it; `bundle.sh`,
+`package-linux.sh` and `package-appimage.sh` copy from that stage, while
+`package-windows.ps1` builds the bridge itself and copies from `target`. The driver manager differs per platform:
+
+| artifact | where | driver manager |
+| --- | --- | --- |
+| macOS `.app` | manifest in `Contents/Resources/plugins/odbc/`, executable in `Contents/Helpers/dbdelve-odbc` | unixODBC, compiled into the bridge |
+| Linux tarball | `plugins/odbc/` beside `dbdelve`; `install.sh` copies it to `~/.local/share/dbdelve/plugins/odbc` (the binary lands alone in `~/.local/bin`) | system `libodbc.so.2` |
+| AppImage | `usr/bin/plugins/odbc/` | system `libodbc.so.2` |
+| Windows zip | `plugins/odbc/` beside `dbdelve.exe` | system `odbc32` |
+
+- **macOS signing order.** The helper is signed first, with its own
+  identifier (`$IDENTIFIER.odbc`), then the bundle, and the bundle is verified
+  with `--deep --strict`. `bundle.sh` runs `otool -L` on the helper and fails
+  the bundle if it links anything named `odbc` or under `/opt/homebrew` or
+  `/usr/local`: a Homebrew unixODBC would run on the build machine and nowhere
+  else. Once the app is notarized, the bridge, and only the bridge, needs
+  `com.apple.security.cs.disable-library-validation`, because it loads vendor
+  drivers signed by other teams. It is not added yet, since nothing enables the
+  hardened runtime.
+- **unixODBC is LGPL-2.1-or-later**, redistributed only in the macOS bundle;
+  `NOTICES.md` and `licenses/LGPL-2.1.txt` ship with it.
+- **Linux needs the `unixodbc` package** (`apt install unixodbc`) to connect
+  through ODBC. `libodbc.so.2` is never bundled, not even in the AppImage:
+  without it only the bridge fails to start, and the rest of the app is
+  unaffected. The build runner needs `unixodbc-dev`.
+- **Windows ships the bridge untested**: it is built in CI and zipped, never
+  run. The release notes say so.
+
 ## Linux desktop identity
 
 Packagers can set `DBDELVE_APP_ID` at launch to match their installed desktop

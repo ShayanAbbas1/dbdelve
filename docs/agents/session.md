@@ -220,8 +220,13 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   was there. Two consequences are worth stating. The split costs the implicit
   transaction a single Postgres `simple_query` submission used to give a
   multi-statement selection, so a failure part way leaves the statements
-  before it committed; an explicit `BEGIN`/`COMMIT` in the selection still
-  works, since the session holds it across submissions. And a statement that
+  before it committed, and its error says how many
+  (`Queue::committed_note`), only when that is certain: no transaction open,
+  no session setting changed (one may have turned autocommit off), no
+  transaction control in the queue, and no procedure call, block or
+  statement sqlparser cannot read before the failure (`sql::runs_unseen`),
+  since its body may have done either. An explicit `BEGIN`/`COMMIT` in the
+  selection still works, since the session holds it across submissions. And a statement that
   fails raises a Stop/Continue decision (`Session::queue_failure`) rather
   than deciding for the user, while a Cancel ends the queue without asking,
   because a cancel was already the decision.
@@ -247,9 +252,10 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   never by position, because a SQL Server batch landing several sets puts
   results ahead of those still running, and only while the tab still runs
   that same run; a switch to another profile meanwhile changes nothing about
-  where it lands. Each statement's blocking call runs on a thread of its own
-  (`on_own_thread`), as a Cancel does, not on GPUI's background executor,
-  which on Linux has a thread per core and would be filled by them.
+  where it lands. Each statement's blocking call runs on `blocking`'s capped
+  pool (`spawn_blocking`), as every blocking call does, not on GPUI's
+  background executor, which has a thread per core and would be filled by
+  them; a Cancel runs on a thread of its own (`spawn_cancel`).
   `Connection::query_alongside` opens the connection the way the
   profile's was (its tunnel, password and timeout; Postgres and MySQL share
   its side session; the Read-only hold is put on it too) and drops it when the
@@ -530,6 +536,15 @@ one waiting on a column ignores whatever is typed into it.
   TOML table (`store::UnavailableProfile`), written back in its place, listed
   greyed, and can only be removed; nothing filed under its id is deleted while
   it holds that id, and a file with none decodes and saves exactly as before.
+  A plugin profile is stored as `engine = "plugin:<id>"` with its dialect in
+  `speaks` (`Engine::as_str()`) and its string as typed in `connection`, so an
+  older build reads the whole tag as an engine it lacks and holds the profile
+  back. One this build cannot open is held back the same way, with the reason
+  `unavailable_reason` gives as its hint: "Needs the odbc plugin" when no
+  discovered plugin has the id, "Made by a newer DBDelve (dialect `x`)" for a
+  dialect it does not know, the dialect's own refusal for one no plugin may
+  carry, or the string's `storable()` refusal for a hand-edited secret; a
+  `generic` engine with no plugin gets the Generic refusal.
 - **Passwords** go through `keyring`, never into `profiles.toml`: Keychain on
   macOS, Secret Service on Linux, Credential Manager on Windows.
 - **Keybindings** are spelled `secondary-`, which GPUI reads as Cmd on macOS and
@@ -547,11 +562,29 @@ one waiting on a column ignores whatever is typed into it.
 Pick the engine first, from the searchable picker the engine pill in the form's header opens; it decides which fields exist.
 Then paste a URL into the form's URL row, which fills the fields as it lands (one
 typed rather than pasted fills them on Enter), or fill the fields in. Where
-`Engine::takes_service`, a service stands in for the host and username, which
-are otherwise required; what it leaves unset fails on connect, naming the key.
+`Target::takes_service` (a built-in driver only), a service stands in for the
+host and username, which are otherwise required; what it leaves unset fails on
+connect, naming the key.
 `secondary-enter` connects, or saves an edit (`submit_connection`, scoped to
 `ConnectionForm`): it is Run Query's chord, and the unscoped Run Query reaches
 the form first, finds no handler there and lets it through
 (`keybindings::INERT_IN` is what tells the conflict check so). **Test** opens
 the connection the way **Connect** would (keychain password, Read-only hold)
 and throws it away, so a profile can be checked before it is saved.
+
+**The ODBC tile** is one tile per discovered plugin (`Target::tiles`, after the
+built-ins, wearing one generic plug icon), shown only when the bridge is
+staged or bundled. Its fields are fixed (`Fields::ConnectionString`):
+Connection (a DSN, or `key=value;` pairs, stored as typed), User, Password (the
+keychain, as everywhere) and SQL dialect, Generic first, which decides quoting,
+paging and the Read-only hold. There is no URL row and no host or database of
+DBDelve's to draw: the address is the driver's, inside the string. Picking the
+tile again keeps the dialect picked under it. Save refuses a string
+`odbc_string::storable` refuses, so no secret reaches `profiles.toml`; the
+password goes in its own field. With the SSH switch on, the line under
+Connection says what the tunnel will forward to and which keys it points at
+it, or why it cannot, from the same parser `open` uses, and Save refuses what
+it refuses. Test reports what the driver reached ("Connected to DB2/LINUXX8664
+through …") and, when that names a built-in dialect other than the one picked,
+offers it in one click, never switching unasked. An unnamed profile is called
+"ODBC (Generic SQL)", since the string can carry nothing safe to name it by.

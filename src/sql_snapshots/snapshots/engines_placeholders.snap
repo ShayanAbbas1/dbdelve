@@ -67,3 +67,9 @@ source: src/sql_snapshots.rs
 [redis] database => |0|
 [redis] user => |Optional|
 [redis] path => |/path/to/app.sqlite|
+[generic] name => |Named after the database|
+[generic] host => |localhost|
+[generic] port => ||
+[generic] database => |Optional|
+[generic] user => |Required|
+[generic] path => |/path/to/app.sqlite|

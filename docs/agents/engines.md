@@ -76,7 +76,9 @@ Decided, and not to be re-litigated:
   which is the price of not silently widening a match on a value containing
   `%`. **SQL Server has no default escape either**, but a bracket makes any
   character literal there, so its pattern brackets `%`, `_` and `[` (`[%]`)
-  and keeps `LIKE`. The regex match is Postgres `~`, MySQL `REGEXP_LIKE(col, pattern)`
+  and keeps `LIKE`. **Generic SQL** knows no server's escape, so it writes
+  plain `LIKE` and refuses a value holding `%`, `_`, `\` or `[`
+  (`SubstringMatch::LikePlain`), saying so on the bar. The regex match is Postgres `~`, MySQL `REGEXP_LIKE(col, pattern)`
   (8.0.4 and later), DuckDB `regexp_matches(col, pattern)`, MariaDB
   `REGEXP_INSTR(col, pattern) > 0` (it has no
   `REGEXP_LIKE`, and its infix `REGEXP` is not in the grammar the gate
@@ -839,3 +841,34 @@ Decided, and not to be re-litigated:
   provider id is from its source and unverified against a real file, and only
   the first entry of TablePlus's TLS dropdown is known; any other comes in as
   verify-full rather than something it may be stronger than.
+- **Generic SQL is a built-in spec with no built-in driver** (`spec::GENERIC`,
+  `built_in_driver: false`): the dialect the ODBC tile starts on, and the one
+  DBDelve writes for a server it has no spec for, Db2 LUW being the one it is
+  checked against. A `generic://` URL or a hand-written `engine = "generic"`
+  profile is refused. It is `SqlSpec::ANSI` plus what Db2 forced:
+  `LIMIT … OFFSET` paging (Db2 LUW has it since 11.1), `COUNT(*)` (Db2's is an
+  `INTEGER`, so a table past 2³¹−1 rows fails loudly rather than wrongly),
+  Copy TRUNCATE as `DELETE FROM` (Db2's bare `TRUNCATE TABLE` is a syntax
+  error), no regex, no Explain, no Read-only hold, `DECFLOAT` right-aligned,
+  and no UTC offset in timestamp literals.
+- **`LikePlain` exists because Db2, like the SQL standard, Oracle and SQL
+  Server, has no default `LIKE` escape**, so `Like`'s `'%50\%%'` would match a
+  literal backslash and widen or narrow the match silently. `ESCAPE` is not in
+  the grammar the filter gate parses, and `Instr`'s ends-with is a negative
+  `SUBSTR` start, which Db2 refuses (SQL0138N). Every SQL database has `LIKE`,
+  and none widens a pattern holding no wildcard of the user's, so refusing the
+  values that hold one is exact everywhere.
+- **Db2 edges Generic leaves documented, not handled.** Block comments nest on
+  Db2 and in sqlparser's `GenericDialect`, and the tree-sitter split does not: the gate reads any `/*`
+  inside a comment as unreadable (`gates.md`). Compound `BEGIN … END`
+  statements split on their inner `;`. `WITH UR` and other Db2-only syntax is
+  unreadable to sqlparser, so in Read-only it asks for Read-write. Db2 for z/OS
+  before V12 has no `OFFSET`, so previews and pages fail loudly there. Generic
+  writes no `SUBSTR`; a user's past the value's length is Db2's error.
+- **An engine through ODBC is its built-in spec with the plugin's driver.** The
+  form's SQL dialect picks the spec, so quoting, paging and the Read-only hold
+  are the dialect's own, while abilities are `Target`'s read-only tier
+  (`plugins.md`). After a Test the driver's `SQL_DBMS_NAME` is shown and, when
+  it names a built-in (`EngineSpec::dbms_names`), suggests that dialect, one
+  click to take it; a dialect that also has a built-in driver says the built-in
+  can edit rows.

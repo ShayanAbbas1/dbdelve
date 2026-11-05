@@ -2813,12 +2813,13 @@ mod tests {
         use crate::db::conformance::{COLUMNS, Fixture, Subject, sql_find, sql_read};
         Subject {
             connection: live_profile(),
-            engine: Engine::Postgres,
+            target: crate::db::Target::built_in(Engine::Postgres),
             schema: "public",
             relation: "conformance",
             key: "id",
             columns: &COLUMNS,
             read: sql_read(Engine::Postgres, "public"),
+            endless_rows: None,
             endless: "SELECT generate_series(1, 500000000) AS n",
             runaway: "SELECT pg_sleep(30)",
             read_only_refusal: "read-only transaction",

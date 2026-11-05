@@ -10,6 +10,7 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "vendor/**"
+      - "plugins/**"
       - "build.rs"
       - "assets/windows/**"
       - "compose.yaml"
@@ -23,6 +24,7 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "vendor/**"
+      - "plugins/**"
       - "build.rs"
       - "assets/windows/**"
       - "compose.yaml"
@@ -110,11 +112,12 @@ jobs:
           sudo apt-get update -o Acquire::Retries=3
           sudo apt-get install -y build-essential pkg-config cmake \
             libfontconfig-dev libxkbcommon-dev libxkbcommon-x11-dev \
-            libwayland-dev libdbus-1-dev sqlite3 \
+            libwayland-dev libdbus-1-dev sqlite3 unixodbc-dev odbc-postgresql \
             mesa-vulkan-drivers libvulkan1 libegl1 libgles2 libgl1-mesa-dri
       # Before rust-cache, which saves only the binaries that appear after it
       # runs: the prebuilt download is quicker than carrying it in the cache.
-      - name: install nextest
+      - &install-nextest
+        name: install nextest
         uses: taiki-e/install-action@v2.88.0
         with:
           tool: cargo-nextest@0.9.150
@@ -129,6 +132,17 @@ jobs:
         shell: bash
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
+      # The plugin crates are workspace members outside default-members, so
+      # the plain cargo commands above never build them. The ODBC bridge links
+      # unixodbc-dev's libodbc on Linux, compiles unixODBC from source with the
+      # runner's C compiler on macOS, and links the system odbc32 on Windows.
+      - &plugins
+        name: plugins
+        # bash on Windows too: pwsh fails a step only on its last command.
+        shell: bash
+        run: |
+          cargo clippy -p dbdelve-plugin-protocol -p dbdelve-plugin-echo -p dbdelve-plugin-odbc --all-targets -- -D warnings
+          cargo test -p dbdelve-plugin-protocol -p dbdelve-plugin-echo -p dbdelve-plugin-odbc
       - name: seed databases
         run: |
           sqlite3 dev/dbdelve_dev.db < dev/sqlite/001-dbdelve-demo.sql
@@ -141,7 +155,8 @@ jobs:
       - name: test
         run: >-
           cargo nextest run --run-ignored all -E 'not (test(snowflake::tests::live_)
-          | test(turso::tests::live_) | test(reads_run_at_once) | test(conformance))'
+          | test(turso::tests::live_) | test(reads_run_at_once) | test(conformance)
+          | test(external::db2::) | test(external::psqlodbc::))'
       # These time two reads run at once against the same two in turn. With
       # the rest of the suite sharing the runner's cores, a CPU-bound engine
       # like SQLite misses the margin by chance, so they run alone.
@@ -154,7 +169,21 @@ jobs:
       - name: conformance
         run: >-
           cargo nextest run --run-ignored all --test-threads 4
-          -E 'test(live_conformance) - test(turso::tests::live_)'
+          -E 'test(live_conformance) - test(turso::tests::live_) - test(external::)'
+      # Postgres through psqlODBC and the ODBC bridge, which the test builds
+      # itself. The driver is named by path: the package registers it in
+      # /etc/odbcinst.ini, but the path is what a bridge with its own unixODBC
+      # reads on every platform.
+      - name: psqlodbc conformance
+        env:
+          dbdelve_ODBC_POSTGRES: DRIVER=/usr/lib/x86_64-linux-gnu/odbc/psqlodbcw.so;Server=127.0.0.1;Port=55432;Database=dbdelve_dev
+          dbdelve_ODBC_POSTGRES_USER: dbdelve
+          dbdelve_ODBC_POSTGRES_PASSWORD: dbdelve
+        # The throughput test only measures; a debug build drains its million
+        # rows for nothing.
+        run: |
+          cargo nextest run --run-ignored all --test-threads 4 -E 'test(external::psqlodbc::)'
+          cargo test -p dbdelve-plugin-odbc --test bridge -- --ignored live_postgres_ --skip live_postgres_read_throughput
       # The one live Snowflake test that needs no account: it is what proves
       # the TLS provider is linked at run time.
       - name: snowflake tls
@@ -188,6 +217,62 @@ jobs:
         run: cargo test -p gpui-pre-wgpu --features test-support -- --test-threads=1
 
   # macOS runners have no Docker, so the live tests run on Linux alone.
+  # The bridge's live tests against Db2 through IBM's ODBC driver. Not blocking
+  # (`continue-on-error`) until it has proven stable: the image is 7 GB and its
+  # boot time on a runner is unmeasured. Drop the line once it has.
+  db2:
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    timeout-minutes: 45
+    steps:
+      - *checkout
+      # Compose rather than a `services:` container: the seed is mounted from
+      # the checkout, which a service container starts before.
+      - name: start db2
+        run: docker compose --profile db2 up -d db2
+      - name: system packages
+        run: |
+          { grep -rl packages.microsoft.com /etc/apt/sources.list.d || true; } | xargs -r sudo rm -f
+          sudo apt-get update -o Acquire::Retries=3
+          sudo apt-get install -y build-essential pkg-config cmake \
+            libfontconfig-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libdbus-1-dev unixodbc unixodbc-dev
+      - name: cache IBM driver
+        uses: actions/cache@v4
+        with:
+          path: dev/db2/.cache
+          key: ibm-clidriver-${{ hashFiles('dev/db2/driver.sh') }}
+      - name: IBM driver
+        run: dev/db2/driver.sh
+      - *install-nextest
+      - *rust-cache
+      - *dependencies-unoptimized
+      - name: wait for db2
+        run: |
+          # "Setup has completed" comes before the seed runs, so it is the
+          # health check, which reads the seed's marker, that gates the tests.
+          for _ in $(seq 1 60); do
+            status="$(docker inspect -f '{{.State.Health.Status}}' dbdelve-db2-1)"
+            [ "$status" = healthy ] && exit 0
+            sleep 10
+          done
+          docker logs dbdelve-db2-1 | tail -50
+          exit 1
+      - name: live tests
+        env:
+          dbdelve_ODBC_DB2_USER: db2inst1
+          dbdelve_ODBC_DB2_PASSWORD: dbdelve
+        run: |
+          driver="$(dev/db2/driver.sh)"
+          export dbdelve_ODBC_DB2="$driver;HOSTNAME=127.0.0.1;PORT=55000;DATABASE=dbdelve;PROTOCOL=TCPIP"
+          cargo test -p dbdelve-plugin-odbc --test bridge -- --include-ignored --skip live_postgres_
+          # The host's side: the conformance subject builds the bridge itself.
+          # No bastion in this job, so the tunnel test runs locally only. nextest
+          # because it fails when the filter matches nothing, as a renamed
+          # module would.
+          cargo nextest run --bin dbdelve --run-ignored all \
+            -E 'test(external::db2::) - test(live_db2_through_a_tunnel)'
+
   macos:
     runs-on: macos-latest
     steps:
@@ -198,6 +283,7 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: test
         run: cargo test
+      - *plugins
 
   windows:
     runs-on: windows-latest
@@ -210,6 +296,7 @@ jobs:
       # The storage tests are what exercise the APPDATA paths.
       - name: test
         run: cargo test
+      - *plugins
       - *vendor-changed
       # The backdrop blur's Direct3D WARP pixel tests live in the vendored
       # DirectX renderer, which isn't a workspace member, so `cargo test` alone

@@ -1689,7 +1689,10 @@ mod tests {
             .unwrap_err();
         thread.join().unwrap();
         assert!(error.message.contains("rolled back"), "{error:?}");
-        assert!(super::super::is_cancel(Engine::DuckDb, &error), "{error:?}");
+        assert!(
+            super::super::is_cancel(crate::db::Target::built_in(Engine::DuckDb), &error),
+            "{error:?}"
+        );
     }
 
     #[test]
@@ -1718,7 +1721,10 @@ mod tests {
         });
         let error = connection.query(RUNAWAY, Fetch::default()).unwrap_err();
         thread.join().unwrap();
-        assert!(super::super::is_cancel(Engine::DuckDb, &error), "{error:?}");
+        assert!(
+            super::super::is_cancel(crate::db::Target::built_in(Engine::DuckDb), &error),
+            "{error:?}"
+        );
         let refused = connection
             .query("SELECT 1", Fetch::default())
             .expect_err("an aborted transaction refuses everything but a ROLLBACK");
@@ -2527,12 +2533,13 @@ mod tests {
             .expect("the dev seed loads");
         Subject {
             connection,
-            engine: Engine::DuckDb,
+            target: crate::db::Target::built_in(Engine::DuckDb),
             schema: "main",
             relation: "conformance",
             key: "id",
             columns: &COLUMNS,
             read: sql_read(Engine::DuckDb, "main"),
+            endless_rows: None,
             endless: "SELECT range FROM range(1000000000)",
             runaway: "SELECT count(*) FROM range(100000000000)",
             read_only_refusal: "",

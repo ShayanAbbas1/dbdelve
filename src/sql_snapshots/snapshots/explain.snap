@@ -307,3 +307,27 @@ source: src/sql_snapshots.rs
 
 [redis] filtered · Analyze
   (none)
+[generic] plain · Plan · explainable => |ok|
+
+[generic] plain · Plan
+  (none)
+[generic] filtered · Plan · explainable => |ok|
+
+[generic] filtered · Plan
+  (none)
+[generic] delete · Plan · explainable => |ok|
+
+[generic] delete · Plan
+  (none)
+[generic] plain · Analyze · explainable => |ok|
+
+[generic] plain · Analyze
+  (none)
+[generic] filtered · Analyze · explainable => |ok|
+
+[generic] filtered · Analyze
+  (none)
+[generic] delete · Analyze · explainable => |ok|
+
+[generic] delete · Analyze
+  (none)

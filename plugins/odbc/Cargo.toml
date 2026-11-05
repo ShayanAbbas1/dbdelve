@@ -1,0 +1,30 @@
+[package]
+name = "dbdelve-plugin-odbc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The ODBC bridge: reaches any database an ODBC driver serves"
+publish = false
+
+[[bin]]
+name = "dbdelve-odbc"
+path = "src/main.rs"
+
+# `default-features = false` is load-bearing: the default `prompt` feature pulls
+# in winit for a driver's login dialog, which a headless bridge never shows.
+# `wide` so a client code page derived from a C or POSIX locale cannot mangle
+# text. No direct odbc-sys dependency: raw calls go through `odbc_api::sys`, so
+# the graph holds the one version odbc-api locks.
+[dependencies]
+dbdelve-plugin-protocol = { path = "../protocol" }
+# The versions the protocol crate links, so the batches built here are the
+# types it encodes.
+arrow-array = "=60.0.0"
+arrow-schema = "=60.0.0"
+odbc-api = { version = "=29.2.0", default-features = false, features = ["wide"] }
+
+# macOS has no system driver manager, so unixODBC is compiled from its vendored
+# source and linked statically. macOS only: odbc-sys's `static` panics in its
+# build script on Windows, and Linux links the system libodbc.so.2.
+[target.'cfg(target_os = "macos")'.dependencies]
+odbc-api = { version = "=29.2.0", default-features = false, features = ["wide", "vendored-unix-odbc"] }

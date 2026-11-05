@@ -320,18 +320,21 @@ fn ssh_args(
 /// `ssh -G` cannot distinguish a default `ask` from an explicit one, so both
 /// receive `accept-new`. If configuration evaluation fails, add no override.
 fn host_key_checking_is_ask(args: &[String]) -> bool {
-    ssh_command()
-        .arg("-G")
-        .args(args)
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .is_ok_and(|output| {
-            output.status.success()
-                && String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .any(|line| line == "stricthostkeychecking ask")
-        })
+    crate::db::spawn(
+        ssh_command()
+            .arg("-G")
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .and_then(Child::wait_with_output)
+    .is_ok_and(|output| {
+        output.status.success()
+            && String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|line| line == "stricthostkeychecking ask")
+    })
 }
 
 enum Ready {
@@ -486,8 +489,6 @@ fn spawn(local: SocketAddr, host: &str, args: &[String]) -> io::Result<Tunnel> {
 
 #[cfg(unix)]
 fn watched(program: &str, args: &[String]) -> io::Result<Child> {
-    use std::os::unix::process::CommandExt;
-
     let mut command = Command::new("/bin/sh");
     command
         .args(["-c", WATCHDOG, "sh", program])
@@ -495,10 +496,19 @@ fn watched(program: &str, args: &[String]) -> io::Result<Child> {
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    // std hands the child the spawning thread's signal mask, and the GCD
-    // worker a background connect runs on blocks every signal: ssh would
-    // ignore the watchdog's kill and outlive DBDelve. SIGTERM's disposition
-    // too, since an ignored one survives exec just the same.
+    unmask_signals(&mut command);
+    crate::db::spawn(&mut command)
+}
+
+/// std hands a child the spawning thread's signal mask, and the GCD worker a
+/// background connect runs on blocks every signal: ssh would ignore the
+/// watchdog's kill and outlive DBDelve, and a plugin would ignore every signal
+/// it did not unblock itself. SIGTERM's disposition too, since an ignored one
+/// survives exec just the same.
+#[cfg(unix)]
+pub(super) fn unmask_signals(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
     // SAFETY: sigemptyset, pthread_sigmask and signal are async-signal-safe,
     // which is all a hook between fork and exec may call.
     unsafe {
@@ -515,7 +525,6 @@ fn watched(program: &str, args: &[String]) -> io::Result<Child> {
             Ok(())
         });
     }
-    command.spawn()
 }
 
 /// Windows' own OpenSSH, when no other ssh is on PATH: it is not always put
@@ -540,12 +549,13 @@ fn ssh_command() -> Command {
 
 #[cfg(windows)]
 fn spawn(local: SocketAddr, host: &str, args: &[String]) -> io::Result<Tunnel> {
-    let mut process = ssh_command()
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()?;
+    let mut process = crate::db::spawn(
+        ssh_command()
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped()),
+    )?;
     match kill_on_close_job(&process) {
         Ok(job) => Ok(Tunnel {
             local,
@@ -565,7 +575,7 @@ fn spawn(local: SocketAddr, host: &str, args: &[String]) -> io::Result<Tunnel> {
 // ponytail: ssh runs for a moment before it joins the job, so a DBDelve killed
 // in that window leaves it behind. Upgrade: spawn suspended, assign, resume.
 #[cfg(windows)]
-fn kill_on_close_job(process: &Child) -> io::Result<std::os::windows::io::OwnedHandle> {
+pub(super) fn kill_on_close_job(process: &Child) -> io::Result<std::os::windows::io::OwnedHandle> {
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,

@@ -33,17 +33,19 @@ impl Workspace {
         //
         // ponytail: nothing orders these tasks against each other, so flipping
         // modes faster than a round trip can land them out of order and leave
-        // the session held the opposite way to the mode on screen. Survivable
-        // because `sql::gate` is the boundary and is unaffected -- what goes
-        // stale is the backstop, not the protection. Stamp each task with a
-        // per-profile counter and drop the stale ones if it ever matters.
+        // the session held the opposite way to the mode on screen. Not only a
+        // stale backstop: where `Engine::holds_read_only`, the gate runs a
+        // statement it cannot read in Read-only on the strength of this hold.
+        // Stamp each task with a per-profile counter and drop the stale ones.
+        // A connect under way has no connection here at all; its landing
+        // checks the mode again (`begin_connect`).
         let Some(connection) = self.profile().and_then(Profile::connection) else {
             return;
         };
         let entering_read_only = mode == Mode::ReadOnly;
-        let read_only_task = cx
-            .background_executor()
-            .spawn(async move { connection.set_read_only(entering_read_only) });
+        let read_only_task = spawn_blocking(cx.background_executor(), move || {
+            connection.set_read_only(entering_read_only)
+        });
         cx.spawn(async move |workspace, cx| {
             if let Err(error) = read_only_task.await {
                 // Only entering Read-only is worth a notice: a failure here

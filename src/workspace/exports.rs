@@ -270,23 +270,21 @@ impl Workspace {
             // Rendering a hundred thousand rows is not work to do on the frame
             // thread, and the write even less so, and a table's columns may
             // have to be asked for over the network first.
-            let written = cx
-                .background_executor()
-                .spawn(on_own_thread(move || {
-                    // The extension decides the format, not the row that started
-                    // this: someone who typed `.json` over the suggested `.csv`
-                    // asked for JSON. Which is why the notice says which one it
-                    // wrote -- that rename is the one thing they could have got
-                    // wrong, and the file name alone does not read it back.
-                    let format = FileAs::for_path(&path, engine);
-                    let target = match &connection {
-                        Some(connection) => knowing_the_table(connection, &target, format, engine),
-                        None => target,
-                    };
-                    let written = write_shown(&result, format, &target, engine, &path);
-                    (path, format, written)
-                }))
-                .await;
+            let written = spawn_blocking(cx.background_executor(), move || {
+                // The extension decides the format, not the row that started
+                // this: someone who typed `.json` over the suggested `.csv`
+                // asked for JSON. Which is why the notice says which one it
+                // wrote -- that rename is the one thing they could have got
+                // wrong, and the file name alone does not read it back.
+                let format = FileAs::for_path(&path, engine);
+                let target = match &connection {
+                    Some(connection) => knowing_the_table(connection, &target, format, engine),
+                    None => target,
+                };
+                let written = write_shown(&result, format, &target, engine, &path);
+                (path, format, written)
+            })
+            .await;
             _ = workspace.update(cx, |workspace, cx| {
                 // The panel is modeless, so the profile can have moved under
                 // this task while it was open. `note` writes to whichever
@@ -459,7 +457,7 @@ impl Workspace {
         })
         .detach();
 
-        let task = cx.background_executor().spawn(on_own_thread({
+        let task = spawn_blocking(cx.background_executor(), {
             let (path, progress) = (path.clone(), progress.clone());
             move || {
                 export_every_row(
@@ -472,7 +470,7 @@ impl Workspace {
                     &progress,
                 )
             }
-        }));
+        });
         let id = id.to_string();
         cx.spawn(async move |workspace, cx| {
             let ended = task.await;

@@ -154,3 +154,19 @@ source: src/sql_snapshots.rs
 [mongodb] empty => ||
 [redis] get => error: |Not formatting: a Redis command is one line, as typed.|
 [redis] empty => error: |Not formatting: a Redis command is one line, as typed.|
+[generic] plain => |select\u{a}  a,\u{a}  b\u{a}from\u{a}  t\u{a}where\u{a}  x = 1 -- keep\u{a}order by\u{a}  a|
+[generic] two statements => |select\u{a}  1;\u{a}select\u{a}  2;|
+[generic] two statements spaced => |select\u{a}  1;\u{a}\u{a}select\u{a}  2|
+[generic] comment only => |-- only a comment|
+[generic] empty => ||
+[generic] block comment => |select\u{a}  /* a ; b */\u{a}  1|
+[generic] backslash literal => error: |Not formatting: a string, quoted name or comment does not end.|
+[generic] backslash newline => |select\u{a}  'a\\nb'|
+[generic] backslash newline escape string => |select\u{a}  E'a\\nb'|
+[generic] quoted names => |select\u{a}  `a`,\u{a}  "b",\u{a}  [ c ]\u{a}from\u{a}  t|
+[generic] placeholders => |select\u{a}  *\u{a}from\u{a}  t\u{a}where\u{a}  a = $1\u{a}  and b = ?\u{a}  and c = :name\u{a}  and d = @p1\u{a}  and e = % s|
+[generic] dollar quote => error: |Not formatting: a dollar-quoted body would be rewritten.|
+[generic] unended string => error: |Not formatting: a string, quoted name or comment does not end.|
+[generic] unended comment => error: |Not formatting: a string, quoted name or comment does not end.|
+[generic] unended identifier => error: |Not formatting: a string, quoted name or comment does not end.|
+[generic] very long line => |select\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  a,\u{a}  b\u{a}from\u{a}  t|

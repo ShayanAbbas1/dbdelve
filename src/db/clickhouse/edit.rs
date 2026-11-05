@@ -594,7 +594,7 @@ pub(super) fn halted(
         // A position here would point into the guard or the describe, not
         // into the statement the user was shown.
         Halt::Failed(_, error) if total == 1 => {
-            return match is_cancel(Engine::ClickHouse, &error) {
+            return match is_cancel(crate::db::Target::built_in(Engine::ClickHouse), &error) {
                 true => plain_error(CANCELLED_UNSENT.into()),
                 false => plain_error(error.message),
             };
@@ -602,8 +602,13 @@ pub(super) fn halted(
         Halt::Refused(reason) => ("was refused", reason, None),
         Halt::Failed(Stage::Write, error) => {
             let mut reason = error.message.clone();
-            if is_cancel(Engine::ClickHouse, &error)
-                && let Some(cost) = cancel_cost(Engine::ClickHouse, &error, false, statement)
+            if is_cancel(crate::db::Target::built_in(Engine::ClickHouse), &error)
+                && let Some(cost) = cancel_cost(
+                    crate::db::Target::built_in(Engine::ClickHouse),
+                    &error,
+                    false,
+                    statement,
+                )
             {
                 reason = format!("{reason} {cost}");
             }
@@ -1521,7 +1526,10 @@ mod tests {
     #[test]
     fn a_cancel_stays_one_alone_and_says_what_a_mutation_keeps_doing_in_a_batch() {
         let lone = halted(0, 1, cancelled(Stage::Write), MUTATION_SQL, 0);
-        assert!(is_cancel(Engine::ClickHouse, &lone));
+        assert!(is_cancel(
+            crate::db::Target::built_in(Engine::ClickHouse),
+            &lone
+        ));
         let batch = halted(1, 2, cancelled(Stage::Write), MUTATION_SQL, 0);
         assert!(
             batch.message.ends_with(
@@ -1560,7 +1568,10 @@ mod tests {
             let lone = halted(0, 1, cancelled(stage), MUTATION_SQL, 0);
             assert_eq!(lone.message, CANCELLED_UNSENT, "{stage:?}");
             // The run adds what a cancel costs only to a cancel.
-            assert!(!is_cancel(Engine::ClickHouse, &lone));
+            assert!(!is_cancel(
+                crate::db::Target::built_in(Engine::ClickHouse),
+                &lone
+            ));
         }
     }
 

@@ -95,3 +95,56 @@ The renderers' pixel tests run when a PR changes `vendor/`, and on every push
 to main. `compose.yaml` and `dev/**` are in the
 workflow's own path filters, so a change to a dev container or a seed script
 runs CI too, not only a change under `src/`.
+
+## Postgres through psqlODBC
+
+The dev Postgres also runs as a conformance subject through the ODBC bridge,
+which gives the plugin path a dialect whose `BEGIN` opens a transaction and
+whose Read-only hold is a session statement. The route is a `DRIVER=/abs/path`
+in `dbdelve_ODBC_POSTGRES` (credentials in `dbdelve_ODBC_POSTGRES_USER` and
+`_PASSWORD`), because the bridge's unixODBC reads none of Homebrew's
+configuration. On macOS, `brew install psqlodbc`, then
+`DRIVER=/opt/homebrew/lib/psqlodbcw.so;Server=127.0.0.1;Port=55432;Database=dbdelve_dev`.
+On Ubuntu the `odbc-postgresql` package puts it at
+`/usr/lib/x86_64-linux-gnu/odbc/psqlodbcw.so`. Run
+`cargo test --bin dbdelve db::external::psqlodbc -- --include-ignored`, with
+`dbdelve_SSH_CONFIG` set and the bastion up for `live_external_through_a_tunnel`.
+
+## Db2
+
+Db2 is opt-in, because the image (`icr.io/db2_community/db2:12.1.5.0`) is
+amd64-only, 7 GB on disk and slow to boot emulated: plain `docker compose up -d`
+leaves it out. Start it with `docker compose --profile db2 up -d db2` on
+`127.0.0.1:55000` (`DBDELVE_DB2_PORT`), user `db2inst1`, password `dbdelve`,
+database `dbdelve` (Db2 names are at most 8 characters). The first start takes
+about 2.5 minutes under Docker Desktop's emulation with 8 GB of VM memory. The
+image prints "Setup has completed" and only then runs `/var/custom`, which is
+`dev/db2/seed.sh` applying `dev/db2/init/`; the health check therefore reads
+the `dbdelve_seeded` table, created last. A seed that failed part way is not
+retried: `docker compose --profile db2 down -v`. The seed has the conformance
+table, `scratch`, a foreign-keyed pair, a view and a materialized query table.
+
+The bridge reaches it through IBM's ODBC driver, which `dev/db2/driver.sh`
+downloads (SHA-256 pinned) into the gitignored `dev/db2/.cache` and whose path
+it prints. Nothing from IBM is committed, and the cached package is not
+redistributed. The route is a `DRIVER=/abs/path` in the connection string, with
+no `odbcinst.ini`, because the bridge's unixODBC on macOS reads none of
+Homebrew's configuration: `dbdelve_ODBC_DB2="$(dev/db2/driver.sh);HOSTNAME=127.0.0.1;PORT=55000;DATABASE=dbdelve;PROTOCOL=TCPIP"`
+with `dbdelve_ODBC_DB2_USER` and `_PASSWORD`, then `cargo test -p
+dbdelve-plugin-odbc --test bridge -- --include-ignored`. The same variables
+run Db2 as a conformance subject through the host, which builds the bridge
+itself: `cargo test --bin dbdelve db::external::db2 -- --include-ignored`. It
+creates its own `DBDELVE_HOST_*` tables, and its `live_db2_through_a_tunnel`
+also wants `dbdelve_SSH_CONFIG` and the bastion, which CI's Db2 job does not
+run. For a driver manager
+that wants the files (Homebrew's `isql` as a probe), `eval "$(dev/db2/driver.sh
+--env)"` exports `ODBCSYSINI` and `ODBCINI` at generated files under the cache
+and changes no global file; the driver is then `DRIVER=Db2`.
+
+On macOS the driver is `libdb2.dylib`, which writes 32-bit `SQLLEN` values
+into the 64-bit slots unixODBC hands it (a `SQLRowCount` of `-1` or a NULL
+indicator reads as garbage in the high half); the bridge zero-initialises and
+sign-extends them. That is also why
+`isql` shows stale values in NULL cells. Linux uses `libdb2.so`; the
+bridge handles either `SQLLEN` width. CI runs the `db2` job with `continue-on-error` until it has
+proven stable.

@@ -23,7 +23,7 @@ use crate::{
     Workspace, completion,
     db::{
         CancelToken, Catalog, Connection, ConnectionConfig, Databases, DbError, Engine,
-        ExplainMode, QueryResult, Relation, RelationKind, Routine, Row, Structure, Syntax,
+        ExplainMode, QueryResult, Relation, RelationKind, Routine, Row, Structure, Syntax, Target,
     },
     explain::{self, Plan},
     explorer::{
@@ -90,11 +90,11 @@ pub(crate) struct Profile {
 /// first: a `USE` of the user's can move the session it was read on without
 /// the profile hearing of it, and a shortcut names what the sidebar shows.
 fn shortcut_database(
-    engine: Engine,
+    target: Target,
     shown: Option<&Catalog>,
     active: impl FnOnce() -> Option<String>,
 ) -> ShortcutDatabase {
-    if !engine.catalog_is_per_database() {
+    if !target.catalog_is_per_database() {
         return ShortcutDatabase::Unnamed;
     }
     shown
@@ -121,7 +121,7 @@ impl Profile {
     /// in. None where nothing is picked and the server named none, or wasn't
     /// asked, rather than a guess at its default.
     pub(crate) fn active_schema(&self) -> Option<&str> {
-        if !self.config.engine().picks_schema() {
+        if !self.config.target().picks_schema() {
             return None;
         }
         let current = match &self.state {
@@ -157,7 +157,7 @@ impl Profile {
             CatalogState::Loaded(catalog, _) => Some(catalog),
             _ => None,
         };
-        shortcut_database(self.config.engine(), shown, || self.active_database())
+        shortcut_database(self.config.target(), shown, || self.active_database())
     }
 
     pub(crate) fn refreshing_schema(&self) -> bool {
@@ -203,6 +203,10 @@ impl Profile {
             ConnectionConfig::MongoDb(mongo) => Some(mongo),
             _ => None,
         };
+        let external = match &self.config {
+            ConnectionConfig::External(external) => Some(external),
+            _ => None,
+        };
         store::StoredProfile {
             id: self.id.clone(),
             name: self.name.clone(),
@@ -215,11 +219,19 @@ impl Profile {
             user: server
                 .map(|server| server.user.clone())
                 .or_else(|| snowflake.map(|account| account.user.clone()))
+                .or_else(|| external.map(|external| external.user.clone()))
                 .unwrap_or_default(),
             sslmode: server.map(|server| server.sslmode.as_str().to_string()),
             root_certificate: server.and_then(|server| server.root_certificate.clone()),
             service: self.config.service().map(str::to_string),
-            engine: Some(self.config.engine().as_str().to_string()),
+            // A plugin profile's engine is the plugin, and its dialect is
+            // `speaks`: `engine()` answers with the dialect.
+            engine: Some(match external {
+                Some(external) => format!("{}{}", store::PLUGIN_TAG, external.plugin.id),
+                None => engine.as_str().to_string(),
+            }),
+            speaks: external.map(|external| external.speaks.as_str().to_string()),
+            connection: external.map(|external| external.connection.clone()),
             path: match &self.config {
                 ConnectionConfig::Sqlite { path, .. }
                 | ConnectionConfig::Turso { path, .. }
@@ -253,7 +265,7 @@ impl Profile {
             // property of its tab now. Kept on the stored shape only so a
             // profile written by an older build still loads with its buffer.
             open_query: None,
-            ssh: server.and_then(|server| server.ssh.clone()),
+            ssh: self.config.ssh().cloned(),
             open_queries: self
                 .session
                 .queries
@@ -432,6 +444,9 @@ pub(crate) struct Session {
     /// has applied.
     pub(crate) pending_discard: Option<PendingDiscard>,
     pub(crate) notice: Option<String>,
+    /// What a statement's run cost beyond its result (`QueryResult::notice`),
+    /// said only while the tab it ran on is in front, under any `notice`.
+    pub(crate) tab_notice: Option<(Tab, String)>,
     /// The generated batch a relation tab is showing before it runs. That tab
     /// has no buffer to put SQL in, so the modal is where the statement is on
     /// screen — and nothing runs until Run.
@@ -867,6 +882,7 @@ impl Session {
             query_rename_needs_focus: false,
             pending_discard: None,
             notice,
+            tab_notice: None,
             apply_review: None,
             insert_form: None,
             import_rows: None,
@@ -878,6 +894,17 @@ impl Session {
             structure_requests: HashMap::new(),
             last_structure_request: 0,
         }
+    }
+
+    /// The status bar's notice: the session's, or else one about the tab in
+    /// front.
+    pub(crate) fn shown_notice(&self) -> Option<&str> {
+        self.notice.as_deref().or_else(|| {
+            self.tab_notice
+                .as_ref()
+                .filter(|(tab, _)| *tab == self.active)
+                .map(|(_, notice)| notice.as_str())
+        })
     }
 
     pub(crate) fn query_tab(&self, id: u64) -> Option<&QueryTab> {
@@ -1725,6 +1752,38 @@ pub(crate) struct Finished<G = Entity<TableState<ResultGrid>>> {
 }
 
 impl<G: Clone> Queue<G> {
+    /// How many of the statements already in `done` were committed, said
+    /// beside the failure of the one after them, which leaves them in place.
+    /// Only when that is certain: never with a transaction open, a session
+    /// setting changed (one may have turned autocommit off), or a statement
+    /// of the queue's own having opened or ended a transaction or run a
+    /// procedure or block that may have.
+    pub(crate) fn committed_note(&self, engine: Engine, uncertain: bool) -> Option<String> {
+        if uncertain
+            || self.done.iter().any(|finished| {
+                sql::leaves(engine, &finished.sql).transaction.is_some()
+                    || sql::runs_unseen(engine, &finished.sql)
+            })
+        {
+            return None;
+        }
+        let committed = self
+            .done
+            .iter()
+            .filter(|finished| {
+                matches!(
+                    finished.state,
+                    QueryState::Complete { .. } | QueryState::Explained { .. }
+                )
+            })
+            .count();
+        match committed {
+            0 => None,
+            1 => Some("1 statement before it was already committed.".into()),
+            n => Some(format!("{n} statements before it were already committed.")),
+        }
+    }
+
     /// Whether its statements are running at once and not all back yet. Each
     /// is then in a slot of its own in `done`, which is what the status bar
     /// reads and Cancel stops, where a queue run in turn has its one statement
@@ -2201,13 +2260,13 @@ pub(crate) struct ObjectTab {
 
 impl ObjectTab {
     /// Whether New row is offered here: on a relation the engine inserts into.
-    pub(crate) fn takes_inserts(&self, engine: Engine) -> bool {
-        matches!(self.kind, ObjectKind::Relation(kind) if engine.takes_inserts(kind))
+    pub(crate) fn takes_inserts(&self, target: Target) -> bool {
+        matches!(self.kind, ObjectKind::Relation(kind) if target.takes_inserts(kind))
     }
 
     /// Whether Import Rows is offered here.
-    pub(crate) fn takes_imports(&self, engine: Engine) -> bool {
-        matches!(self.kind, ObjectKind::Relation(kind) if engine.takes_imports(kind))
+    pub(crate) fn takes_imports(&self, target: Target) -> bool {
+        matches!(self.kind, ObjectKind::Relation(kind) if target.takes_imports(kind))
     }
 
     /// The `WHERE` this tab reads the relation under, and `""` for a routine
@@ -2844,6 +2903,89 @@ mod tests {
     use super::*;
     use crate::sql;
 
+    #[test]
+    fn a_failed_queue_statement_says_what_before_it_was_committed() {
+        let complete = || QueryState::Complete {
+            rows: 0,
+            bytes: 0,
+            elapsed: std::time::Duration::ZERO,
+            rows_affected: Some(1),
+            messages: Vec::new(),
+        };
+        let failed = || {
+            QueryState::Failed(DbError {
+                message: "no".into(),
+                position: None,
+            })
+        };
+        let queue = |done: Vec<(&str, QueryState)>| Queue {
+            sql: String::new(),
+            remaining: Vec::new(),
+            done: done
+                .into_iter()
+                .map(|(sql, state)| Finished {
+                    sql: sql.into(),
+                    start: 0,
+                    state,
+                    grid: (),
+                })
+                .collect(),
+            showing: 0,
+            awaiting: true,
+            spare: Vec::new(),
+        };
+        let engine = Engine::Generic;
+        let insert = "INSERT INTO t VALUES (1)";
+
+        assert_eq!(queue(vec![]).committed_note(engine, false), None);
+        assert_eq!(
+            queue(vec![(insert, complete())]).committed_note(engine, false),
+            Some("1 statement before it was already committed.".into())
+        );
+        assert_eq!(
+            queue(vec![
+                (insert, complete()),
+                (insert, failed()),
+                (insert, complete())
+            ])
+            .committed_note(engine, false),
+            Some("2 statements before it were already committed.".into())
+        );
+        // A transaction open, or a session setting that may have turned
+        // autocommit off, and nothing is claimed.
+        assert_eq!(
+            queue(vec![(insert, complete())]).committed_note(engine, true),
+            None
+        );
+        // Nor when the queue itself opened or ended one: a `ROLLBACK` took
+        // back what came before it.
+        for bracket in ["BEGIN", "ROLLBACK", "COMMIT"] {
+            assert_eq!(
+                queue(vec![(bracket, complete()), (insert, complete())])
+                    .committed_note(engine, false),
+                None,
+                "{bracket}"
+            );
+        }
+        // Nor after a procedure or block whose statements the queue does not
+        // show, which may have turned autocommit off or opened a transaction.
+        for (engine, call) in [
+            (Engine::MySql, "CALL p()"),
+            (Engine::MariaDb, "BEGIN NOT ATOMIC SET autocommit = 0; END"),
+            (Engine::SqlServer, "EXEC p"),
+            (Engine::SqlServer, "BEGIN EXEC p END"),
+            (Engine::Postgres, "CALL p()"),
+            (Engine::Postgres, "DO $$ BEGIN PERFORM 1; END $$"),
+            (Engine::Generic, "CALL DELVETEST.P()"),
+        ] {
+            assert_eq!(
+                queue(vec![(call, complete()), (insert, complete())]).committed_note(engine, false),
+                None,
+                "{engine:?} {call}"
+            );
+        }
+    }
+
     fn review_from(tab: Tab) -> ApplyReview {
         ApplyReview {
             tab,
@@ -2863,19 +3005,31 @@ mod tests {
         // A user's `USE other` then a refresh: the catalog is `other`'s,
         // whatever the profile was opened or picked on.
         assert_eq!(
-            shortcut_database(Engine::DuckDb, Some(&read_from(Some("other"))), opened_on),
+            shortcut_database(
+                Target::built_in(Engine::DuckDb),
+                Some(&read_from(Some("other"))),
+                opened_on
+            ),
             ShortcutDatabase::On("other".into())
         );
         assert_eq!(
-            shortcut_database(Engine::DuckDb, Some(&read_from(None)), opened_on),
+            shortcut_database(
+                Target::built_in(Engine::DuckDb),
+                Some(&read_from(None)),
+                opened_on
+            ),
             ShortcutDatabase::On("memory".into())
         );
         assert_eq!(
-            shortcut_database(Engine::DuckDb, None, || None),
+            shortcut_database(Target::built_in(Engine::DuckDb), None, || None),
             ShortcutDatabase::Unknown
         );
         assert_eq!(
-            shortcut_database(Engine::MySql, Some(&read_from(Some("other"))), opened_on),
+            shortcut_database(
+                Target::built_in(Engine::MySql),
+                Some(&read_from(Some("other"))),
+                opened_on
+            ),
             ShortcutDatabase::Unnamed
         );
     }

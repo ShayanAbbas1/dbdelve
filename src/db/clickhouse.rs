@@ -3202,7 +3202,10 @@ mod tests {
             connection.cancel(&cancel).unwrap();
             let error = running.join().unwrap().unwrap_err();
             assert_eq!(error.message, CANCELLED);
-            assert!(is_cancel(Engine::ClickHouse, &error));
+            assert!(is_cancel(
+                crate::db::Target::built_in(Engine::ClickHouse),
+                &error
+            ));
             assert_eq!(mock.hits("SELECT sleep"), 1);
             assert_eq!(mock.killed(), [id]);
         });
@@ -3675,7 +3678,10 @@ mod tests {
         );
         let error = run(&connection, "SELECT n").unwrap_err();
         assert_eq!(error.message, "Query was cancelled. (QUERY_WAS_CANCELLED)");
-        assert!(!is_cancel(Engine::ClickHouse, &error));
+        assert!(!is_cancel(
+            crate::db::Target::built_in(Engine::ClickHouse),
+            &error
+        ));
     }
 }
 
@@ -3896,7 +3902,11 @@ mod live {
                 .unwrap()
                 .expect_err("the run should have been cancelled")
         });
-        assert!(is_cancel(Engine::ClickHouse, &error), "{}", error.message);
+        assert!(
+            is_cancel(crate::db::Target::built_in(Engine::ClickHouse), &error),
+            "{}",
+            error.message
+        );
         assert_eq!(processes_with(&connection, &marker), 0);
         assert_eq!(text(&ran(&connection, "SELECT 1")), "1");
     }
@@ -3914,7 +3924,11 @@ mod live {
                 connection.cancel(&token).expect("the cancel should land");
                 running.join().unwrap().expect_err("cancelled")
             });
-            assert!(is_cancel(Engine::ClickHouse, &error), "{}", error.message);
+            assert!(
+                is_cancel(crate::db::Target::built_in(Engine::ClickHouse), &error),
+                "{}",
+                error.message
+            );
             let next = run(&connection, "SELECT 1");
             assert!(
                 next.is_ok(),
@@ -4381,7 +4395,11 @@ mod live {
                 .expect("the kill should reach the server");
             running.join().unwrap().unwrap_err()
         });
-        assert!(is_cancel(Engine::ClickHouse, &error), "{}", error.message);
+        assert!(
+            is_cancel(crate::db::Target::built_in(Engine::ClickHouse), &error),
+            "{}",
+            error.message
+        );
     }
 
     const FORMAT_AND_DATABASE: &str = "default_format=TSV&database=dbdelve_dev";
@@ -5009,12 +5027,13 @@ mod live {
         use crate::db::conformance::{COLUMNS, Fixture, Subject, sql_find, sql_read};
         Subject {
             connection: live_any(live_config()),
-            engine: Engine::ClickHouse,
+            target: crate::db::Target::built_in(Engine::ClickHouse),
             schema: "dbdelve_dev",
             relation: "conformance",
             key: "id",
             columns: &COLUMNS,
             read: sql_read(Engine::ClickHouse, "dbdelve_dev"),
+            endless_rows: None,
             endless: "SELECT number FROM system.numbers",
             runaway: RUNAWAY,
             read_only_refusal: "readonly mode",

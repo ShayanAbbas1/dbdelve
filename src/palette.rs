@@ -43,7 +43,7 @@ use crate::{
         PaletteHistoryFilter, PaletteHistorySort, PaletteNext, PaletteNextScope, PalettePrevious,
         PalettePreviousScope, PaletteRowActions, PaletteScopeLeft, PaletteScopeRight,
     },
-    db::{ConnectionConfig, Engine, ExplainMode, RelationKind, RoutineKind, Syntax},
+    db::{ConnectionConfig, ExplainMode, RelationKind, RoutineKind, Syntax},
     explorer::ROW_LIMITS,
     explorer::{ExplorerTarget, ObjectKind},
     export::{FileAs, Format, RowsAs},
@@ -292,7 +292,7 @@ impl Mode {
 pub enum Command {
     OpenObject(ExplorerTarget),
     OpenQuery(String),
-    SetEngine(Engine),
+    SetTarget(crate::db::Target),
     OpenScratch,
     NewQuery,
     RunQuery,
@@ -2411,8 +2411,8 @@ fn connection_items(workspace: &Workspace) -> Vec<Item> {
                     .map(|server| server.host.clone())
                     .unwrap_or_default(),
             },
-            endpoint: profile.config.endpoint(),
-            logo: profile.config.engine().logo(),
+            endpoint: profile.config.listed_endpoint(),
+            logo: profile.config.target().logo(),
             color: profile.color,
             unavailable: None,
         })
@@ -2428,7 +2428,10 @@ fn connection_items(workspace: &Workspace) -> Vec<Item> {
                     endpoint: String::new(),
                     logo: icon::DATABASE,
                     color: None,
-                    unavailable: Some((at, crate::workspace::unavailable_reason(&gone.engine))),
+                    unavailable: Some((
+                        at,
+                        crate::workspace::unavailable_reason(gone, &workspace.plugins),
+                    )),
                 }),
         )
         .collect();
@@ -2571,7 +2574,7 @@ fn connection_action_items(workspace: &Workspace, index: usize) -> Vec<Item> {
         items.push(
             row(
                 format!("Switch to {name}"),
-                profile.config.engine().logo(),
+                profile.config.target().logo(),
                 Command::SwitchProfile(index),
                 CONNECTION,
             )
@@ -3125,18 +3128,15 @@ fn database_items(profile: &Profile) -> Vec<Item> {
         .collect()
 }
 
-/// Every engine, the one the connection form is set to marked as current.
+/// Every engine, then every plugin, the one the connection form is set to
+/// marked as current: a plugin's tile whatever dialect the form picked under it.
 fn engine_items(workspace: &Workspace) -> Vec<Item> {
-    let current = workspace.form.as_ref().map(|form| form.engine);
-    Engine::ALL
-        .into_iter()
-        .map(|engine| {
-            let hint = if current == Some(engine) {
-                "current"
-            } else {
-                ""
-            };
-            Item::new(engine.label(), engine.logo(), Command::SetEngine(engine)).hint(hint)
+    let current = workspace.form.as_ref().map(|form| form.target());
+    crate::db::Target::tiles(&workspace.plugins)
+        .map(|target| {
+            let picked = current.is_some_and(|current| target.is_tile_of(current));
+            let hint = if picked { "current" } else { "" };
+            Item::new(target.label(), target.logo(), Command::SetTarget(target)).hint(hint)
         })
         .collect()
 }
@@ -3508,7 +3508,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
                 ROWS,
             ));
         }
-        if profile.config.engine().edits_query_rows() && workspace.has_nameable_row(cx) {
+        if profile.config.target().edits_query_rows() && workspace.has_nameable_row(cx) {
             items.push(command(
                 "Delete row…",
                 icon::DELETE,
@@ -3643,10 +3643,10 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
                     ROWS,
                 ));
             }
-            if tab.takes_inserts(profile.config.engine()) {
+            if tab.takes_inserts(profile.config.target()) {
                 items.push(command("Insert…", icon::PLUS, Command::NewRow, ROWS));
             }
-            if tab.takes_imports(profile.config.engine()) {
+            if tab.takes_imports(profile.config.target()) {
                 items.push(command(
                     &format!("Import Rows into {}…", tab.name),
                     icon::PLUS,
@@ -3676,18 +3676,22 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         }
         // The explorer's menu for this relation, clipboard and all.
         if let ObjectKind::Relation(kind) = tab.kind {
-            let engine = profile.config.engine();
             items.extend(
-                crate::explorer::relation_copies(engine, &tab.schema, &tab.name, kind)
-                    .into_iter()
-                    .flatten()
-                    .map(|(label, text)| {
-                        let copies = match text {
-                            Some(text) => Command::CopyText(text),
-                            None => Command::CopyDdl,
-                        };
-                        command(label, icon::COPY, copies, TAB).detail(tab.name.clone())
-                    }),
+                crate::explorer::relation_copies(
+                    profile.config.target(),
+                    &tab.schema,
+                    &tab.name,
+                    kind,
+                )
+                .into_iter()
+                .flatten()
+                .map(|(label, text)| {
+                    let copies = match text {
+                        Some(text) => Command::CopyText(text),
+                        None => Command::CopyDdl,
+                    };
+                    command(label, icon::COPY, copies, TAB).detail(tab.name.clone())
+                }),
             );
         }
         items.push(bound(
@@ -4145,7 +4149,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         Command::Reconnect,
         CONNECTION,
     ));
-    if profile.config.engine().switches_database() {
+    if profile.config.target().switches_database() {
         items.push(bound(
             command(
                 "Select database…",
@@ -4156,7 +4160,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             "select_database",
         ));
     }
-    if profile.config.engine().picks_schema() {
+    if profile.config.target().picks_schema() {
         items.push(command(
             "Select schema…",
             icon::PROJECT,
@@ -4285,6 +4289,7 @@ fn kind_label(kind: ObjectKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Engine;
 
     fn item(label: &str, scope: Scope, group: &'static str) -> Item {
         Item::new(label, icon::TABLE, Command::NewQuery)

@@ -86,9 +86,9 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let front = self.profile().map(|profile| profile.id.clone());
-        let read = cx
-            .background_executor()
-            .spawn(async move { sql.iter().map(|path| read_sql_file(path)).collect() });
+        let read = spawn_blocking(cx.background_executor(), move || {
+            sql.iter().map(|path| read_sql_file(path)).collect()
+        });
         cx.spawn_in(window, async move |workspace, cx| {
             let read: Vec<_> = read.await;
             _ = workspace.update_in(cx, |workspace, window, cx| {

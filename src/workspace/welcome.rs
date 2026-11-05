@@ -62,7 +62,10 @@ pub(crate) fn recognise(text: &str) -> Recognised {
         .map(|(scheme, _)| scheme)
         .filter(|scheme| !scheme.is_empty());
     match scheme {
-        Some(scheme) => Engine::parse(scheme).map_or(Recognised::Unknown, Recognised::Url),
+        Some(scheme) => Engine::parse(scheme)
+            .ok()
+            .filter(|engine| engine.has_built_in_driver())
+            .map_or(Recognised::Unknown, Recognised::Url),
         None => {
             let typed = text.to_ascii_lowercase();
             if Engine::schemes().any(|(spelling, _)| spelling.starts_with(&typed)) {
@@ -253,9 +256,9 @@ pub(crate) fn form_entrance_ms(backdrop_shown: bool) -> f32 {
     }
 }
 
-/// When the last piece has landed.
-pub(crate) fn entrance_ms(intro: bool) -> f32 {
-    let tiles = tile_at(intro, Engine::ALL.len() - 1) + SETTLE_MS;
+/// When the last piece has landed, the last of `tiles` among them.
+pub(crate) fn entrance_ms(intro: bool, tiles: usize) -> f32 {
+    let tiles = tile_at(intro, tiles - 1) + SETTLE_MS;
     let greeting = if intro {
         GREETING_AT_MS + GREETING_MS
     } else {
@@ -314,7 +317,7 @@ impl Workspace {
             ),
             _ => (false, f32::INFINITY),
         };
-        if elapsed < entrance_ms(intro) {
+        if elapsed < entrance_ms(intro, Target::tiles(&self.plugins).count()) {
             window.request_animation_frame();
         }
         let at = |part| pose(part, intro, elapsed);
@@ -471,26 +474,30 @@ impl Workspace {
             .grid_cols(columns)
             .gap(px(layout::WELCOME_ITEM_GAP))
             .p(px(layout::WELCOME_SECTION_PADDING))
-            .children(Engine::ALL.into_iter().enumerate().map(|(index, engine)| {
-                let brand = theme::engine_brand(engine, t, &planes);
-                let tile = item(("welcome-engine", index))
-                    .w_full()
-                    .child(
-                        item_content(t)
+            .children(
+                Target::tiles(&self.plugins)
+                    .enumerate()
+                    .map(|(index, target)| {
+                        let brand = theme::engine_brand(target.engine, t, &planes);
+                        let tile = item(("welcome-engine", index))
+                            .w_full()
                             .child(
-                                item_tile().bg(brand.alpha(layout::ACCENT_WASH)).child(
-                                    icon(engine.logo())
-                                        .size(px(layout::chrome(layout::ICON_SIZE)))
-                                        .text_color(brand),
-                                ),
+                                item_content(t)
+                                    .child(
+                                        item_tile().bg(brand.alpha(layout::ACCENT_WASH)).child(
+                                            icon(target.logo())
+                                                .size(px(layout::chrome(layout::ICON_SIZE)))
+                                                .text_color(brand),
+                                        ),
+                                    )
+                                    .child(item_label(target.label())),
                             )
-                            .child(item_label(engine.label())),
-                    )
-                    .on_click(cx.listener(move |workspace, _, window, cx| {
-                        workspace.new_connection_on(engine, window, cx);
-                    }));
-                posed(div().relative().min_w_0(), at(Part::Tile(index))).child(tile)
-            }))
+                            .on_click(cx.listener(move |workspace, _, window, cx| {
+                                workspace.new_connection_on(target, window, cx);
+                            }));
+                        posed(div().relative().min_w_0(), at(Part::Tile(index))).child(tile)
+                    }),
+            )
     }
 
     /// The projects made before any connection: each empty, each a way into
@@ -711,17 +718,17 @@ impl Workspace {
             }))
     }
 
-    /// A fresh form for `engine`, its first field focused: `set_engine` moves
-    /// focus whenever the field set changes from the form's default.
+    /// A fresh form for `target`, its first field focused: `set_target`
+    /// moves focus whenever the field set changes from the form's default.
     pub(crate) fn new_connection_on(
         &mut self,
-        engine: Engine,
+        target: Target,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.new_connection_in(None, window, cx);
         if let Some(form) = &mut self.form {
-            form.set_engine(engine);
+            form.set_target(target);
         }
     }
 
@@ -734,7 +741,7 @@ impl Workspace {
         let Some(engine) = recognised.engine() else {
             return;
         };
-        self.new_connection_on(engine, window, cx);
+        self.new_connection_on(Target::built_in(engine), window, cx);
         let Some(form) = &self.form else {
             return;
         };
@@ -943,7 +950,13 @@ mod tests {
         for text in ["p", "post", "POSTGRESQL", "mongodb+", "redi"] {
             assert_eq!(recognise(text), Recognised::Typing, "{text}");
         }
-        for text in ["localhost:5432", "http://example.com", "hello world", "xyz"] {
+        for text in [
+            "localhost:5432",
+            "http://example.com",
+            "hello world",
+            "xyz",
+            "generic://x",
+        ] {
             assert_eq!(recognise(text), Recognised::Unknown, "{text}");
         }
     }
@@ -969,9 +982,9 @@ mod tests {
     #[test]
     fn every_piece_starts_hidden_and_lands_by_the_end_of_the_entrance() {
         for intro in [true, false] {
-            let end = entrance_ms(intro);
+            let end = entrance_ms(intro, Target::tiles(&[]).count());
             let mut parts = vec![Part::Mark, Part::Title, Part::Card, Part::Backdrop];
-            parts.extend((0..Engine::ALL.len()).map(Part::Tile));
+            parts.extend((0..Target::tiles(&[]).count()).map(Part::Tile));
             for part in parts {
                 assert_eq!(pose(part, intro, 0.).opacity, 0., "{part:?}");
                 assert_eq!(
@@ -1023,8 +1036,9 @@ mod tests {
 
     #[test]
     fn a_later_visit_is_over_well_before_a_first_run() {
-        assert_eq!(entrance_ms(false), BACKDROP_AT_MS + BACKDROP_MS);
-        assert!(entrance_ms(true) > entrance_ms(false) + RISE_MS);
+        let tiles = Target::tiles(&[]).count();
+        assert_eq!(entrance_ms(false, tiles), BACKDROP_AT_MS + BACKDROP_MS);
+        assert!(entrance_ms(true, tiles) > entrance_ms(false, tiles) + RISE_MS);
     }
 
     #[test]
