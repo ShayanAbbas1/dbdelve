@@ -68,8 +68,8 @@ A DSN can't be used with an SSH tunnel, because it hides the host and port.
 1. Open a new connection and pick the **ODBC** tile.
 2. Paste the connection string into **Connection**.
 3. Fill in **User** and **Password**. The password is kept in your system's
-   keychain. A password typed into the string itself (`PWD=`, `Password=`, …)
-   is used to connect but never saved.
+   keychain. A connection string holding a password (`PWD=`, `Password=`, …)
+   is refused, so it can never end up in your saved profiles.
 4. Check **SQL dialect**. DBDelve suggests one from the database name the
    driver reports. A database DBDelve knows (Postgres, MySQL, SQL Server, …)
    gets its own dialect; anything else gets **Generic SQL**. The dialect
