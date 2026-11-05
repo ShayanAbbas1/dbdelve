@@ -58,7 +58,8 @@ Redis (and Valkey, KeyDB, Dragonfly) and ClickHouse.
 
 Other databases, such as IBM Db2, are reachable through the bundled ODBC
 bridge, with the database's own ODBC driver installed. Grid editing is off, and
-statements you type run under the connection's mode.
+statements you type run under the connection's mode. See
+[Connecting through ODBC](docs/odbc.md).
 
 More engines are planned.
 
