@@ -424,6 +424,12 @@ impl Workspace {
             workspace.follow_system_appearance(window, cx);
         })
         .detach();
+        // The desktop portal reports the button layout after the first frame,
+        // and GPUI tells observers without redrawing, so the titlebar would
+        // keep the default buttons until something else repainted it.
+        window
+            .observe_button_layout_changed(|window, _| window.refresh())
+            .detach();
 
         let mut workspace = Self {
             profiles: Vec::new(),

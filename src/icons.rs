@@ -106,9 +106,11 @@ const ICONS: [(&str, &IconData); 71] = [
 /// rather than a file.
 pub mod icon {
     pub const CHEVRON_DOWN: &str = "icons/chevron-down.svg";
-    /// Windows' caption buttons, which dbdelve draws itself there.
+    /// Windows' caption buttons, which dbdelve draws itself there, and the
+    /// same on a Linux window the compositor left undecorated.
     pub const MINIMIZE: &str = "icons/minus.svg";
     pub const MAXIMIZE: &str = "icons/square.svg";
+    pub const RESTORE: &str = "icons/copy.svg";
     pub const CLOSE_WINDOW: &str = "icons/close.svg";
     pub const CHEVRON_RIGHT: &str = "icons/chevron-right.svg";
     pub const CHEVRON_LEFT: &str = "icons/chevron-left.svg";

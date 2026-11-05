@@ -324,9 +324,10 @@ fn main() {
             //
             // ponytail: there is nothing to sit over on Linux -- no compositor
             // draws window buttons into a transparent titlebar -- so the window
-            // asks for the real one and wears the seam. The upgrade is drawing
-            // close, minimise and maximise into `ui::titlebar` there too and
-            // switching back to `WindowDecorations::Client`.
+            // asks for the real one and wears the seam. Mutter refuses it, and
+            // `ui::titlebar` then draws the buttons itself; asking for
+            // `WindowDecorations::Client` everywhere would drop the seam on KDE
+            // and Sway too, at the cost of their native bar.
             let options = WindowOptions {
                 window_background: theme.window_background(),
                 titlebar: Some(TitlebarOptions {

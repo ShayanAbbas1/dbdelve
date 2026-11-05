@@ -7,8 +7,10 @@
 //! up looking like two different applications.
 
 use gpui::{
-    AnyElement, Div, FontWeight, HighlightStyle, InteractiveElement, IntoElement, Keystroke,
-    ParentElement, SharedString, Styled, StyledText, div, prelude::FluentBuilder, px,
+    AnyElement, App, Decorations, Div, FontWeight, HighlightStyle, InteractiveElement, IntoElement,
+    Keystroke, MAX_BUTTONS_PER_SIDE, MouseButton, ParentElement, RenderOnce, SharedString,
+    StatefulInteractiveElement, Styled, StyledText, Window, WindowButton, WindowButtonLayout, div,
+    prelude::FluentBuilder, px,
 };
 use gpui_component::{
     InteractiveElementExt, POPOVER_BLUR,
@@ -307,8 +309,9 @@ pub(crate) fn update_pill(t: Theme, version: &str) -> Button {
 }
 
 /// macOS draws its window buttons over a transparent titlebar, and Windows
-/// draws none at all into one, so both leave the strip to dbdelve. Linux has no
-/// compositor that will draw buttons into it, so it keeps the system bar.
+/// draws none at all into one, so both leave the strip to dbdelve. Linux asks
+/// for the system bar, and draws its own only where the compositor declines to
+/// (see [`Titlebar`]).
 pub(crate) const CLIENT_TITLEBAR: bool = !cfg!(target_os = "linux");
 
 /// dbdelve's own titlebar, drawn where the platform's would be.
@@ -321,56 +324,203 @@ pub(crate) const CLIENT_TITLEBAR: bool = !cfg!(target_os = "linux");
 /// `leading`, outside it. macOS draws its window buttons over the row's
 /// leading inset; Windows gets `caption_buttons` at the trailing end.
 ///
-/// On Linux the window wears a real system titlebar instead, so this row keeps
-/// only the job the system one cannot do — saying, through the connection
-/// switcher in `leading`, which database is in front of you. Nothing is inset
-/// for buttons that are drawn above rather than over it, and moving the window
-/// belongs to the bar the compositor drew.
+/// On Linux the window asks for a real system titlebar, and where it gets one
+/// (KDE, Sway) this row keeps only the job the system one cannot do — saying,
+/// through the connection switcher in `leading`, which database is in front of
+/// you. Mutter grants none, so on GNOME under Wayland GPUI falls back to
+/// client-side decorations and nothing else would move the window or close it:
+/// there the row also takes the drag, the window menu and the buttons the
+/// desktop's `button-layout` asks for.
 pub(crate) fn titlebar(
     t: Theme,
     tint: Option<ConnectionColor>,
     pills: Vec<AnyElement>,
     leading: Vec<AnyElement>,
     trailing: Vec<AnyElement>,
-) -> impl IntoElement {
+) -> Titlebar {
+    Titlebar {
+        t,
+        tint,
+        pills,
+        leading,
+        trailing,
+    }
+}
+
+#[derive(IntoElement)]
+pub(crate) struct Titlebar {
+    t: Theme,
+    tint: Option<ConnectionColor>,
+    pills: Vec<AnyElement>,
+    leading: Vec<AnyElement>,
+    trailing: Vec<AnyElement>,
+}
+
+impl RenderOnce for Titlebar {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let Self {
+            t,
+            tint,
+            pills,
+            leading,
+            trailing,
+        } = self;
+        let client_drawn = cfg!(target_os = "linux")
+            && matches!(window.window_decorations(), Decorations::Client { .. });
+        let (start_buttons, end_buttons) = if client_drawn {
+            let layout = cx.button_layout().unwrap_or(WindowButtonLayout {
+                left: [None; MAX_BUTTONS_PER_SIDE],
+                right: [
+                    Some(WindowButton::Minimize),
+                    Some(WindowButton::Maximize),
+                    Some(WindowButton::Close),
+                ],
+            });
+            let controls = window.window_controls();
+            let offered = |side: [Option<WindowButton>; MAX_BUTTONS_PER_SIDE]| {
+                side.into_iter()
+                    .flatten()
+                    .filter(|button| match button {
+                        WindowButton::Minimize => controls.minimize,
+                        WindowButton::Maximize => controls.maximize,
+                        WindowButton::Close => true,
+                    })
+                    .collect::<Vec<_>>()
+            };
+            (offered(layout.left), offered(layout.right))
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        // Set by a press on the free strip and spent by the first move after
+        // it, rather than moving on the press itself: once the compositor
+        // takes the pointer for a move the release never comes back, and with
+        // it goes the double click that maximises.
+        let pressed =
+            client_drawn.then(|| window.use_keyed_state("titlebar-drag", cx, |_, _| false));
+
+        div()
+            .h(px(layout::TITLEBAR_HEIGHT))
+            .w_full()
+            .flex()
+            .flex_shrink_0()
+            .items_center()
+            .gap(px(layout::SPACE_SM))
+            .border_b_1()
+            .border_color(t.border)
+            .when_some(tint, |row, color| row.bg(color.band(t)))
+            .pl(px(if cfg!(target_os = "macos") {
+                layout::TITLEBAR_LEADING_INSET
+            } else if start_buttons.is_empty() {
+                layout::SPACE_SM
+            } else {
+                layout::SPACE_XS
+            }))
+            .when(!cfg!(target_os = "windows"), |row| {
+                row.pr(px(if end_buttons.is_empty() {
+                    layout::SPACE_SM
+                } else {
+                    layout::SPACE_XS
+                }))
+            })
+            .when(!start_buttons.is_empty(), |row| {
+                row.child(window_buttons(t, start_buttons, window))
+            })
+            .children(leading)
+            .child(
+                div()
+                    .id("titlebar")
+                    .when(CLIENT_TITLEBAR, |strip| {
+                        strip
+                            .window_control_area(gpui::WindowControlArea::Drag)
+                            .on_double_click(|_, window, _| window.titlebar_double_click())
+                    })
+                    .when_some(pressed, |strip, pressed| {
+                        strip
+                            .on_mouse_down(MouseButton::Left, {
+                                let pressed = pressed.clone();
+                                // A pill's button marks its press this way, and
+                                // a press there must stay a click. Assigned
+                                // rather than only set, so it also clears what a
+                                // release outside the strip left behind.
+                                move |_, window, cx| {
+                                    let armed = !window.default_prevented();
+                                    pressed.update(cx, |pressed, _| *pressed = armed)
+                                }
+                            })
+                            .on_mouse_up(MouseButton::Left, {
+                                let pressed = pressed.clone();
+                                move |_, _, cx| pressed.update(cx, |pressed, _| *pressed = false)
+                            })
+                            .on_mouse_down_out({
+                                let pressed = pressed.clone();
+                                move |_, _, cx| pressed.update(cx, |pressed, _| *pressed = false)
+                            })
+                            .on_mouse_move(move |event, window, cx| {
+                                if pressed.update(cx, |pressed, _| std::mem::take(pressed))
+                                    && event.pressed_button == Some(MouseButton::Left)
+                                {
+                                    window.start_window_move();
+                                }
+                            })
+                            .on_mouse_down(MouseButton::Right, |event, window, _| {
+                                window.show_window_menu(event.position)
+                            })
+                            .on_double_click(|_, window, _| window.zoom_window())
+                    })
+                    .flex_1()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(layout::SPACE_SM))
+                    .children(pills),
+            )
+            .children(trailing)
+            .when(!end_buttons.is_empty(), |row| {
+                row.child(window_buttons(t, end_buttons, window))
+            })
+            .when(cfg!(target_os = "windows"), |row| {
+                row.child(caption_buttons(t))
+            })
+    }
+}
+
+/// Minimise, maximise and close for a Linux window the compositor left
+/// undecorated, in the order the desktop's `button-layout` lists them. Unlike
+/// Windows' caption buttons nothing hit-tests these for us, so each one does
+/// its own work on click.
+fn window_buttons(t: Theme, buttons: Vec<WindowButton>, window: &Window) -> impl IntoElement {
+    let maximized = window.is_maximized();
     div()
-        .h(px(layout::TITLEBAR_HEIGHT))
-        .w_full()
         .flex()
         .flex_shrink_0()
         .items_center()
-        .gap(px(layout::SPACE_SM))
-        .border_b_1()
-        .border_color(t.border)
-        .when_some(tint, |row, color| row.bg(color.band(t)))
-        .pl(px(if cfg!(target_os = "macos") {
-            layout::TITLEBAR_LEADING_INSET
-        } else {
-            layout::SPACE_SM
-        }))
-        .when(!cfg!(target_os = "windows"), |row| {
-            row.pr(px(layout::SPACE_SM))
-        })
-        .children(leading)
-        .child(
+        .gap(px(layout::SPACE_XS))
+        .children(buttons.into_iter().map(move |button| {
+            let (path, hover): (_, gpui::Hsla) = match button {
+                WindowButton::Minimize => (icon::MINIMIZE, t.element_hover.into()),
+                WindowButton::Maximize if maximized => (icon::RESTORE, t.element_hover.into()),
+                WindowButton::Maximize => (icon::MAXIMIZE, t.element_hover.into()),
+                WindowButton::Close => (icon::CLOSE_WINDOW, t.danger.into()),
+            };
             div()
-                .id("titlebar")
-                .when(CLIENT_TITLEBAR, |strip| {
-                    strip
-                        .window_control_area(gpui::WindowControlArea::Drag)
-                        .on_double_click(|_, window, _| window.titlebar_double_click())
-                })
-                .flex_1()
-                .h_full()
+                .id(button.id())
+                .size(px(layout::CONTROL_HEIGHT_COMPACT))
                 .flex()
                 .items_center()
-                .gap(px(layout::SPACE_SM))
-                .children(pills),
-        )
-        .children(trailing)
-        .when(cfg!(target_os = "windows"), |row| {
-            row.child(caption_buttons(t))
-        })
+                .justify_center()
+                .rounded(px(layout::RADIUS_CONTROL))
+                .hover(move |style| style.bg(hover))
+                .child(
+                    icon(path)
+                        .size(px(layout::chrome(layout::ICON_SIZE)))
+                        .text_color(t.text),
+                )
+                .on_click(move |_, window, _| match button {
+                    WindowButton::Minimize => window.minimize_window(),
+                    WindowButton::Maximize => window.zoom_window(),
+                    WindowButton::Close => window.remove_window(),
+                })
+        }))
 }
 
 /// Minimise, maximise and close, for Windows, which draws none into a
