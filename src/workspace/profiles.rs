@@ -9,6 +9,7 @@ use gpui_component::menu::PopupMenuItem;
 use crate::connection_form::{ConnectionTest, duplicate_profile_name, keep_schema};
 use crate::explorer::Shortcuts;
 use crate::import::{self, Source};
+use crate::palette::SchemaPick;
 use crate::session::{STALE_ROWS, restored_shortcuts};
 use crate::sql::{Destructive, Mode};
 
@@ -1256,11 +1257,26 @@ impl Workspace {
 
     /// Offer the schemas the catalog already holds, to pick the active one.
     pub(crate) fn select_schema(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.offer_schemas(SchemaPick::Activate, window, cx);
+    }
+
+    /// The same list, to export one. Opened whether or not the engine picks an
+    /// active schema, since MySQL has schemas to export and none to switch to.
+    pub(crate) fn pick_schema_to_export(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.offer_schemas(SchemaPick::Export, window, cx);
+    }
+
+    fn offer_schemas(&mut self, pick: SchemaPick, window: &mut Window, cx: &mut Context<Self>) {
         self.clear_notice();
         let Some(profile) = self.profile() else {
             return;
         };
-        if !profile.config.engine().picks_schema() {
+        let engine = profile.config.engine();
+        let offered = match pick {
+            SchemaPick::Activate => engine.picks_schema(),
+            SchemaPick::Export => engine.exports_schema().is_some(),
+        };
+        if !offered {
             return;
         }
         let unready = match (&profile.state, &profile.catalog) {
@@ -1275,7 +1291,7 @@ impl Workspace {
         };
         match unready {
             Some(message) => self.note(message.into(), cx),
-            None => self.open_palette(PaletteMode::Schema, window, cx),
+            None => self.open_palette(PaletteMode::Schema(pick), window, cx),
         }
     }
 

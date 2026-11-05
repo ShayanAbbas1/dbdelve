@@ -42,6 +42,21 @@ it. Anything unsure is refused with its reason, leaving the rows shown. Rows
 go from the feed to a sibling `.partial` file renamed onto the chosen path
 only once whole, so a cancel or a failure leaves whatever was there.
 
+**A schema export only reads, and writes the file the engine's own way.**
+Export Schema as SQL reads each chosen table's DDL and rows (through
+`relation_refetch`, each on its own, so the file is not a snapshot) and
+never runs a write. What the file needs to load back is data in
+`EngineSpec::exports_schema`, not a branch in the exporter: Postgres and SQL
+Server create tables without their foreign keys and add them after the rows,
+MySQL and MariaDB turn checks off for the file's session and restore them,
+ClickHouse needs nothing, DuckDB refuses a cycle by name. An engine whose
+DDL does not run back as written (Snowflake's `create or replace`, SQLite's
+triggers) has none and does not offer it. Postgres sequences are created and
+set with `setval`; one the role may not read refuses the rows rather than
+set it to its start. A partitioned table is named in the dialog and the
+header, not written. The file never contains `DROP` or `TRUNCATE`, whatever
+the engine.
+
 DBDelve _does_ write SQL when the user asks it to, and only then, always
 where the user can read it:
 

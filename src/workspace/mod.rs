@@ -27,6 +27,7 @@ use std::collections::{HashMap, HashSet};
 
 use gpui_component::menu::DropdownMenu;
 
+pub(crate) use exports::SchemaExportDialog;
 pub(crate) use import_dialog::PreviewGrid;
 pub(crate) use profiles::unavailable_reason;
 pub(crate) use projects::project_name_refusal;
@@ -2286,6 +2287,7 @@ impl Render for Workspace {
                     ("import-rows", self.render_import_rows(window, cx)),
                     ("delete", self.render_delete_confirmation(cx)),
                     ("discard", self.render_discard_confirmation(cx)),
+                    ("schema-export", self.render_schema_export(cx)),
                     ("pending-export", self.render_pending_export(cx)),
                     ("pending-run", self.render_pending_run(cx)),
                     ("queue-failure", self.render_queue_failure(cx)),

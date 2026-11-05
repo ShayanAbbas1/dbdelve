@@ -34,10 +34,10 @@ use tracing::span;
 
 use super::ssh::{Tunnel, tunnelled};
 use super::{
-    Catalog, Cell, Column, DbError, EditTarget, Engine, Fetch, QueryResult, Reference,
+    Catalog, Cell, Column, DbError, EditTarget, Engine, ExportDdl, Fetch, QueryResult, Reference,
     RelationKind, Row, ServerConfig, SslMode, Stopped, Structure, assemble_catalog,
     assemble_databases, assemble_foreign_keys, assemble_references, assemble_structure,
-    create_table, plain_error, required_cell, terminated,
+    create_table, plain_error, required_cell, split_foreign_keys, terminated,
 };
 
 const DATABASES_SQL: &str = "
@@ -729,6 +729,8 @@ pub struct Connection {
     /// good rather than reconnecting, and has no session of the user's to
     /// report lost.
     alongside: bool,
+    /// The login's default schema in the database it opened on.
+    default_schema: Option<String>,
 }
 
 impl Connection {
@@ -740,6 +742,7 @@ impl Connection {
                 server: server.clone(),
                 tunnel,
                 alongside: false,
+                default_schema: None,
             };
             let mut session = connection.connect()?;
             // Asked even when the profile names one, for the server's spelling
@@ -755,6 +758,9 @@ impl Connection {
                     ),
                     false => error,
                 })?;
+            // Only where a list of schemas opens, so not worth failing a login over.
+            connection.default_schema =
+                first_value(&mut session, "SELECT SCHEMA_NAME()").unwrap_or_default();
             *connection.session.lock().expect("unshared until returned") = Some(session);
             Ok(connection)
         })
@@ -809,6 +815,10 @@ impl Connection {
             alongside: true,
             ..self.clone()
         }
+    }
+
+    pub fn current_schema(&self) -> Option<&str> {
+        self.default_schema.as_deref()
     }
 
     fn in_flight(&self) -> std::sync::MutexGuard<'_, InFlight> {
@@ -1239,6 +1249,21 @@ impl Connection {
     /// statement per such key and reading `sys.xml_indexes` /
     /// `sys.spatial_index_tessellations` are the upgrade paths.
     pub fn ddl(&self, schema: &str, relation: &str, kind: RelationKind) -> Result<String, DbError> {
+        Ok(self.render_ddl(schema, relation, kind, false)?.create)
+    }
+
+    /// A table's DDL with its foreign keys left to statements of their own.
+    pub fn export_ddl(&self, schema: &str, relation: &str) -> Result<ExportDdl, DbError> {
+        self.render_ddl(schema, relation, RelationKind::Table, true)
+    }
+
+    fn render_ddl(
+        &self,
+        schema: &str,
+        relation: &str,
+        kind: RelationKind,
+        keys_apart: bool,
+    ) -> Result<ExportDdl, DbError> {
         let name = Engine::SqlServer.qualified(schema, relation);
         if let RelationKind::View | RelationKind::MaterializedView = kind {
             let result = self.internal_query(&structure_sql(
@@ -1250,7 +1275,10 @@ impl Connection {
                 .rows
                 .first()
                 .and_then(|row| row.get(0))
-                .map(terminated)
+                .map(|definition| ExportDdl {
+                    create: terminated(definition),
+                    foreign_keys: Vec::new(),
+                })
                 .ok_or_else(|| plain_error(format!("{name} has no definition to show.")));
         }
 
@@ -1259,7 +1287,11 @@ impl Connection {
         if structure.columns.is_empty() {
             return Err(plain_error(format!("{schema} has no relation {relation}.")));
         }
-        Ok(create_table(
+        let (structure, foreign_keys) = match keys_apart {
+            true => split_foreign_keys(Engine::SqlServer, schema, relation, &structure),
+            false => (structure, Vec::new()),
+        };
+        let create = create_table(
             Engine::SqlServer,
             &format!("CREATE TABLE {name}"),
             &structure,
@@ -1271,7 +1303,11 @@ impl Connection {
                 ),
                 None => index.definition.clone(),
             },
-        ))
+        );
+        Ok(ExportDdl {
+            create,
+            foreign_keys,
+        })
     }
 }
 
@@ -2131,13 +2167,16 @@ fn ask(session: &mut Session, statement: &str) -> Result<Collected, DbError> {
 }
 
 fn current_database(session: &mut Session) -> Result<String, DbError> {
-    Ok(ask(session, "SELECT DB_NAME()")?
+    Ok(first_value(session, "SELECT DB_NAME()")?.unwrap_or_default())
+}
+
+fn first_value(session: &mut Session, sql: &str) -> Result<Option<String>, DbError> {
+    Ok(ask(session, sql)?
         .result
         .rows
         .first()
         .and_then(|row| row.get(0))
-        .map(str::to_string)
-        .unwrap_or_default())
+        .map(str::to_string))
 }
 
 fn held_to_database(session: &mut Session, database: &str) -> Result<(), DbError> {
@@ -2721,6 +2760,12 @@ mod tests {
 
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_connection_knows_the_logins_default_schema() {
+        assert_eq!(live().current_schema(), Some("dbo"));
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
     fn live_the_databases_list_flags_the_one_connected_to() {
         let databases = live().databases().expect("databases should list");
 
@@ -3012,6 +3057,54 @@ mod tests {
                 .iter()
                 .any(|schema| schema.name == "sys" || schema.name == "INFORMATION_SCHEMA")
         );
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_export_ddl_adds_foreign_keys_after_the_rows() {
+        let connection = live();
+        let setup = |sql: &str| {
+            connection
+                .query(sql, Fetch::default())
+                .expect("the fixture statements should run");
+        };
+        setup(
+            "DROP TABLE IF EXISTS dbdelve_test_export_child; \
+             DROP TABLE IF EXISTS dbdelve_test_export_parent; \
+             CREATE TABLE dbdelve_test_export_parent (id bigint NOT NULL PRIMARY KEY); \
+             CREATE TABLE dbdelve_test_export_child (id bigint NOT NULL PRIMARY KEY, \
+                 parent_id bigint NULL, \
+                 CONSTRAINT dbdelve_test_export_fk FOREIGN KEY (parent_id) \
+                     REFERENCES dbdelve_test_export_parent (id))",
+        );
+        let exported = connection.export_ddl("dbo", "dbdelve_test_export_child");
+        setup("DROP TABLE dbdelve_test_export_child; DROP TABLE dbdelve_test_export_parent");
+        let exported = exported.expect("the table's DDL should load");
+
+        assert!(
+            !exported.create.contains("FOREIGN KEY"),
+            "{}",
+            exported.create
+        );
+        assert_eq!(
+            exported.foreign_keys.len(),
+            1,
+            "{:?}",
+            exported.foreign_keys
+        );
+        assert!(exported.foreign_keys[0].starts_with(
+            "ALTER TABLE \"dbo\".\"dbdelve_test_export_child\" \
+             ADD CONSTRAINT \"dbdelve_test_export_fk\" FOREIGN KEY"
+        ));
+        setup("CREATE TABLE dbdelve_test_export_parent (id bigint NOT NULL PRIMARY KEY)");
+        let replayed = connection.query(
+            &format!("{}\n{}", exported.create, exported.foreign_keys.join("\n")),
+            Fetch::default(),
+        );
+        setup(
+            "DROP TABLE IF EXISTS dbdelve_test_export_child; DROP TABLE dbdelve_test_export_parent",
+        );
+        replayed.expect("the table and its key should run on the server");
     }
 
     #[test]
@@ -4748,6 +4841,7 @@ mod tests {
             .unwrap(),
             tunnel: None,
             alongside: false,
+            default_schema: None,
         };
         let user = connection.clone();
         let run = std::thread::spawn(move || user.query("SELECT 1", Fetch::default()));

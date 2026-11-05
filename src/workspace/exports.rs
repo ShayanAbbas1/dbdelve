@@ -418,7 +418,40 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let Some(connection) = connection else {
+        let format = FileAs::for_path(&path, engine);
+        self.run_export(
+            id,
+            generation,
+            path,
+            format,
+            move |connection, read_only, path, progress| {
+                export_every_row(
+                    connection, &refetch, &target, read_only, engine, path, progress,
+                )
+            },
+            cx,
+        );
+    }
+
+    /// Run `work` on a thread of its own against the profile's connection,
+    /// counting in the status bar while it writes to `path` and saying what it
+    /// ended in, `format` being what the notice names. Whatever could refuse
+    /// it has been asked already.
+    fn run_export(
+        &mut self,
+        id: &str,
+        generation: u64,
+        path: PathBuf,
+        format: FileAs,
+        work: impl FnOnce(&Connection, bool, &Path, &ExportProgress) -> Result<usize, Ended>
+        + Send
+        + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(profile) = self.issued_to(id, generation) else {
+            return;
+        };
+        let Some(connection) = profile.connection() else {
             return;
         };
         let read_only = profile.mode == Mode::ReadOnly;
@@ -461,17 +494,7 @@ impl Workspace {
 
         let task = cx.background_executor().spawn(on_own_thread({
             let (path, progress) = (path.clone(), progress.clone());
-            move || {
-                export_every_row(
-                    &connection,
-                    &refetch,
-                    &target,
-                    read_only,
-                    engine,
-                    &path,
-                    &progress,
-                )
-            }
+            move || work(&connection, read_only, &path, &progress)
         }));
         let id = id.to_string();
         cx.spawn(async move |workspace, cx| {
@@ -500,7 +523,7 @@ impl Workspace {
                 };
                 match ended {
                     Ok(rows) => {
-                        let message = exported(rows, FileAs::for_path(&path, engine), &path);
+                        let message = exported(rows, format, &path);
                         profile.session.notice = Some(message.clone());
                         workspace.clear_notice_later(id, generation, message, cx);
                     }
@@ -1136,6 +1159,13 @@ fn rendered(engine: Engine, columns: &[Column], rows: Vec<Row>) -> Vec<Row> {
     }
     chunk.rows
 }
+
+mod schema;
+mod schema_dialog;
+
+#[cfg(test)]
+pub(crate) use schema_dialog::Loading;
+pub(crate) use schema_dialog::SchemaExportDialog;
 
 #[cfg(test)]
 mod round_trip;

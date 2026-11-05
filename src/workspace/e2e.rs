@@ -1529,53 +1529,64 @@ fn a_clicked_box_leaves_the_ring_in_charge_of_the_keyboard(cx: &mut TestAppConte
     });
 }
 
+/// The app launched on one saved DuckDB profile over a database `schema` has
+/// been run against, with its query tab in front. Its reads and the exports
+/// run on threads the scheduler does not own, so it may park for them.
+fn launch_on_duckdb_holding<'a>(
+    cx: &'a mut TestAppContext,
+    schema: &str,
+) -> (Entity<Workspace>, &'a mut VisualTestContext) {
+    let directory = store::dbdelve_directory().expect("the test home has a data directory");
+    std::fs::create_dir_all(&directory).expect("the data directory must be creatable");
+    let database = directory.join("e2e.duckdb");
+    ::duckdb::Connection::open(&database)
+        .and_then(|connection| connection.execute_batch(schema))
+        .expect("the schema must apply");
+    std::fs::write(
+        directory.join("profiles.toml"),
+        format!(
+            "active = \"e2e\"\n\
+             [settings]\n\
+             check_for_updates = false\n\
+             [[profiles]]\n\
+             id = \"e2e\"\n\
+             name = \"E2E\"\n\
+             host = \"\"\n\
+             database = \"\"\n\
+             user = \"\"\n\
+             engine = \"duckdb\"\n\
+             path = {:?}\n",
+            database.display().to_string()
+        ),
+    )
+    .expect("profiles.toml must be writable");
+    let (workspace, cx) = launch(cx);
+    cx.executor().allow_parking();
+    workspace.update(cx, |workspace, cx| {
+        let index = workspace
+            .profiles
+            .iter()
+            .position(|profile| profile.config.engine() == Engine::DuckDb)
+            .expect("the saved DuckDB profile is restored");
+        workspace.activate(index, cx);
+    });
+    cx.run_until_parked();
+    (workspace, cx)
+}
+
 /// A session moved on behind the modeless save panel still gets its rows, under
 /// every column they hold, rather than what its connection now says of a table
 /// of that name.
 #[gpui::test]
 fn a_session_changed_behind_the_save_panel_is_not_asked_about_the_table(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_duckdb_holding(
+            cx,
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, \
+             twice INTEGER GENERATED ALWAYS AS (id * 2) VIRTUAL); \
+             INSERT INTO t (id) VALUES (1);",
+        );
         let directory = store::dbdelve_directory().expect("the test home has a data directory");
-        std::fs::create_dir_all(&directory).expect("the data directory must be creatable");
-        let database = directory.join("e2e.duckdb");
-        ::duckdb::Connection::open(&database)
-            .and_then(|connection| {
-                connection.execute_batch(
-                    "CREATE TABLE t (id INTEGER PRIMARY KEY, \
-                     twice INTEGER GENERATED ALWAYS AS (id * 2) VIRTUAL); \
-                     INSERT INTO t (id) VALUES (1);",
-                )
-            })
-            .expect("the schema must apply");
-        std::fs::write(
-            directory.join("profiles.toml"),
-            format!(
-                "active = \"e2e\"\n\
-                 [settings]\n\
-                 check_for_updates = false\n\
-                 [[profiles]]\n\
-                 id = \"e2e\"\n\
-                 name = \"E2E\"\n\
-                 host = \"\"\n\
-                 database = \"\"\n\
-                 user = \"\"\n\
-                 engine = \"duckdb\"\n\
-                 path = {:?}\n",
-                database.display().to_string()
-            ),
-        )
-        .expect("profiles.toml must be writable");
-        let (workspace, cx) = launch(cx);
-        cx.executor().allow_parking();
-        workspace.update(cx, |workspace, cx| {
-            let index = workspace
-                .profiles
-                .iter()
-                .position(|profile| profile.config.engine() == Engine::DuckDb)
-                .expect("the saved DuckDB profile is restored");
-            workspace.activate(index, cx);
-        });
-        cx.run_until_parked();
         cx.simulate_input("SELECT * FROM t");
         cx.simulate_keystrokes("secondary-enter");
         settle(cx);
@@ -1675,6 +1686,147 @@ fn the_export_question_takes_the_keyboard_and_hands_it_back_when_dismissed(
             settle(cx);
             assert_eq!(buffer(&workspace, cx), format!("{before}{typed}"));
         }
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_palette_opens_the_schema_export_through_the_schema_picker(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) =
+            launch_on_duckdb_holding(cx, "CREATE TABLE customers (id INTEGER PRIMARY KEY);");
+        let active = workspace.read_with(cx, |workspace, _| {
+            workspace
+                .profile()
+                .unwrap()
+                .active_schema()
+                .map(str::to_owned)
+        });
+        cx.simulate_keystrokes("secondary-shift-p");
+        settle(cx);
+        cx.simulate_input("Export Schema");
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        assert_eq!(
+            front_dialog(&workspace, cx),
+            None,
+            "the picker is not a dialog"
+        );
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("schema-export"));
+        workspace.read_with(cx, |workspace, _| {
+            let dialog = workspace.profile().unwrap().session.schema_export.as_ref();
+            assert_eq!(Some(dialog.unwrap().schema.as_str()), active.as_deref());
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_schema_export_dialog_takes_the_keyboard_and_hands_it_back(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_duckdb_holding(
+            cx,
+            "CREATE TABLE customers (id INTEGER PRIMARY KEY); \
+             CREATE TABLE orders (id INTEGER PRIMARY KEY, \
+             customer_id INTEGER REFERENCES customers (id));",
+        );
+        let read = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                let dialog = workspace.profile().unwrap().session.schema_export.as_ref();
+                dialog.map(|dialog| !matches!(dialog.keys, super::exports::Loading::Reading))
+            })
+        };
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.open_schema_export("main".into(), cx);
+        });
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("schema-export"));
+        assert!(dialog_has_keyboard(&workspace, cx));
+        for _ in 0..500 {
+            if read(&workspace, cx) == Some(true) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            settle(cx);
+        }
+        workspace.read_with(cx, |workspace, _| {
+            let dialog = workspace.profile().unwrap().session.schema_export.as_ref();
+            let dialog = dialog.expect("the dialog is still up");
+            assert!(
+                matches!(&dialog.keys, super::exports::Loading::Read(keys) if keys["orders"].len() == 1),
+                "the foreign keys were not read"
+            );
+            assert_eq!(
+                dialog.tables,
+                vec![("customers".to_string(), true), ("orders".to_string(), true)]
+            );
+        });
+
+        let before = buffer(&workspace, cx);
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), None, "escape left it up");
+        assert!(read(&workspace, cx).is_none());
+        assert!(editor_has_keyboard(&workspace, cx));
+        cx.simulate_input("x");
+        settle(cx);
+        assert_eq!(buffer(&workspace, cx), format!("{before}x"));
+
+        // Tab walks every control: Structure, Rows, Select all, Select none,
+        // each table, Cancel and Export. `space` unticks a table and `enter`
+        // on Export asks where, and writes what is ticked.
+        workspace.update(cx, |workspace, cx| {
+            workspace.open_schema_export("main".into(), cx);
+        });
+        settle(cx);
+        for _ in 0..500 {
+            if read(&workspace, cx) == Some(true) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            settle(cx);
+        }
+        for _ in 0..5 {
+            cx.simulate_keystrokes("tab");
+            settle(cx);
+            assert!(in_dialog(&workspace, cx));
+        }
+        press(cx, "space");
+        workspace.read_with(cx, |workspace, _| {
+            let dialog = workspace.profile().unwrap().session.schema_export.as_ref();
+            assert_eq!(
+                dialog.unwrap().tables,
+                vec![
+                    ("customers".to_string(), false),
+                    ("orders".to_string(), true)
+                ]
+            );
+        });
+        cx.simulate_keystrokes("tab tab tab");
+        settle(cx);
+        press(cx, "enter");
+        assert_eq!(front_dialog(&workspace, cx), None, "enter left it up");
+        let path = store::dbdelve_directory().unwrap().join("main.sql");
+        let chosen = path.clone();
+        cx.simulate_new_path_selection(|_| Some(chosen));
+        for _ in 0..500 {
+            settle(cx);
+            if path.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let written = std::fs::read_to_string(&path).expect("the file is written");
+        assert!(
+            written.starts_with(
+                "-- Schema \"main\" exported by DBDelve: 1 table, structure and rows.\n"
+            ),
+            "{written}"
+        );
 
         quit(workspace, cx);
     });

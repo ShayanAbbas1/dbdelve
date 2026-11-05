@@ -105,6 +105,9 @@ pub struct InsertTarget {
     pub computed: Vec<String>,
     /// The table's columns its server numbers, by their real names.
     pub numbered: Vec<String>,
+    /// The table named alone, as the `CREATE` written before these `INSERT`s
+    /// names it, so the file fills the tables it creates wherever it is run.
+    pub unqualified: bool,
 }
 
 impl InsertTarget {
@@ -147,7 +150,10 @@ impl Inserts {
     fn new(engine: Engine, target: &InsertTarget, columns: &[Column]) -> Self {
         let into = target.relation.as_ref().map_or_else(
             || "table_name".to_string(),
-            |(schema, table)| engine.qualified(schema, table),
+            |(schema, table)| match target.unqualified {
+                true => engine.quote_identifier(table),
+                false => engine.qualified(schema, table),
+            },
         );
         // A statement fetched again may have come back a different shape from
         // the result its target was read from, and a source named for the

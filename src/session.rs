@@ -40,6 +40,7 @@ use crate::{
     structure_grid::StructureGrid,
     theme::ConnectionColor,
     ui::row_readout,
+    workspace::SchemaExportDialog,
 };
 
 /// A connection and everything it owns.
@@ -129,6 +130,20 @@ impl Profile {
             _ => None,
         };
         self.config.schema().or(current)
+    }
+
+    /// The schema the session is in, for a list of schemas to open on.
+    pub(crate) fn schema_in(&self) -> Option<String> {
+        let connected = match &self.state {
+            ProfileState::Connected(connection) => connection.current_schema(),
+            _ => None,
+        };
+        schema_in(
+            self.config.engine(),
+            self.active_schema(),
+            self.active_database(),
+            connected,
+        )
     }
 
     /// The database the connection is on: as last listed, else as the
@@ -448,6 +463,11 @@ pub(crate) struct Session {
     /// An export asked for over rows that are not the whole result, held
     /// until the user says which rows it writes.
     pub(crate) pending_export: Option<PendingExport>,
+    /// The tables, structure and rows a schema export is being chosen over.
+    pub(crate) schema_export: Option<SchemaExportDialog>,
+    /// Numbered across opens, so a read the dialog it was for has closed
+    /// before landing is not taken for the reopened one's.
+    pub(crate) last_schema_export: u64,
     /// The export of every row this connection is running, at most one.
     pub(crate) exporting: Option<Exporting>,
     /// The query tab whose queue stopped on a failed statement, held until
@@ -872,6 +892,8 @@ impl Session {
             import_rows: None,
             pending_run: None,
             pending_export: None,
+            schema_export: None,
+            last_schema_export: 0,
             exporting: None,
             queue_failure: None,
             stale_edit: None,
@@ -2839,10 +2861,45 @@ pub(crate) fn result_pane_is_expanded(query: &QueryState) -> bool {
     !matches!(query, QueryState::Idle)
 }
 
+/// The active schema where the engine picks one, the database where that is
+/// the schema, else the one the server put the session in: on SQL Server, the
+/// login's default.
+fn schema_in(
+    engine: Engine,
+    active: Option<&str>,
+    database: Option<String>,
+    connected: Option<&str>,
+) -> Option<String> {
+    match engine.catalog_lists_databases() {
+        true => database,
+        false => active.or(connected).map(str::to_string),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::sql;
+
+    #[test]
+    fn the_schema_a_session_is_in_is_its_database_or_its_default_where_none_is_picked() {
+        let database = || Some("shop".to_string());
+        for engine in [Engine::MySql, Engine::MariaDb, Engine::ClickHouse] {
+            assert_eq!(
+                schema_in(engine, None, database(), None).as_deref(),
+                Some("shop"),
+                "{engine:?}"
+            );
+        }
+        assert_eq!(
+            schema_in(Engine::SqlServer, None, database(), Some("sales")).as_deref(),
+            Some("sales")
+        );
+        assert_eq!(
+            schema_in(Engine::Postgres, Some("picked"), database(), Some("public")).as_deref(),
+            Some("picked")
+        );
+    }
 
     fn review_from(tab: Tab) -> ApplyReview {
         ApplyReview {
