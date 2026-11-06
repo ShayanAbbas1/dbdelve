@@ -48,7 +48,7 @@ use crate::{
     explorer::{ExplorerTarget, ObjectKind},
     export::{ClipboardFormat, FileAs, Format, RowsAs},
     fuzzy::{Fuzzy, Query},
-    icons::icon,
+    icons::{icon, saved_query_icon},
     import::Source,
     session::{
         CatalogState, ObjectBody, Profile, QueryState, RowCount, Session, StructureState, Tab,
@@ -2281,38 +2281,33 @@ fn search_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item>
 
 /// The scratch buffer and every saved query.
 fn query_items(profile: &Profile) -> Vec<Item> {
+    let saved = saved_query_icon(profile.config.engine().syntax());
     let scratch = Item::new("Scratch query", icon::SCRATCH_QUERY, Command::OpenScratch)
         .hint("scratch")
         .scope(Scope::Queries);
     std::iter::once(scratch)
         .chain(profile.session.saved_queries.iter().map(|name| {
-            Item::new(
-                name.clone(),
-                icon::SAVED_QUERY,
-                Command::OpenQuery(name.clone()),
-            )
-            .hint("query")
-            .scope(Scope::Queries)
+            Item::new(name.clone(), saved, Command::OpenQuery(name.clone()))
+                .hint("query")
+                .scope(Scope::Queries)
         }))
         .collect()
 }
 
 /// Every saved query, open or not, each raising the delete dialog.
 fn delete_query_items(profile: &Profile) -> Vec<Item> {
+    let saved = saved_query_icon(profile.config.engine().syntax());
     profile
         .session
         .saved_queries
         .iter()
         .map(|name| {
-            Item::new(
-                name.clone(),
-                icon::SAVED_QUERY,
-                Command::DeleteQuery(name.clone()),
+            Item::new(name.clone(), saved, Command::DeleteQuery(name.clone())).hint(
+                match profile.session.tab_holding(name) {
+                    Some(_) => "open",
+                    None => "query",
+                },
             )
-            .hint(match profile.session.tab_holding(name) {
-                Some(_) => "open",
-                None => "query",
-            })
         })
         .collect()
 }

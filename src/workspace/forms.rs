@@ -22,6 +22,7 @@ use crate::explorer::{
     Landing, Member, PINNED_GROUP, Pin, QUERIES_GROUP, Shortcut, ShortcutDatabase, Shortcuts,
     is_schema_row, landing, relation_copies, saved_query,
 };
+use crate::icons::{queries_group_icon, saved_query_icon};
 use crate::scroller::{SmoothScrollable, smooth_scoped};
 use crate::session::PendingDelete;
 use crate::sql::{Destructive, Stop};
@@ -2435,6 +2436,7 @@ impl Workspace {
         let profile_id = profile.id.clone();
         let menu_leaves = leaves.clone();
         let menu_workspace = workspace.clone();
+        let syntax = profile.config.engine().syntax();
         let active_schema = profile.active_schema().map(gpui::SharedString::from);
         let menu_schema = active_schema.clone();
         let picks_schema = profile.config.target().picks_schema();
@@ -2546,7 +2548,8 @@ impl Workspace {
                                 ..
                             }),
                         ) => object_icon(object.kind),
-                        _ if query.is_some() || missing => icon::SAVED_QUERY,
+                        _ if query.is_some() || missing => saved_query_icon(syntax),
+                        _ if id == QUERIES_GROUP => queries_group_icon(syntax),
                         (None, Some(Shortcut::Folder(_)))
                             if entry.is_folder() && entry.is_expanded() =>
                         {

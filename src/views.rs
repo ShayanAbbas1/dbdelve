@@ -47,7 +47,7 @@ use crate::{
     explain::{self, LabelPart},
     explorer::ROW_LIMITS,
     filter::{Conjunction, FilterRow, Operator},
-    icons::icon,
+    icons::{icon, saved_query_icon},
     palette::Command,
     result_grid,
     result_grid::{NewValue, ResultGrid},
@@ -3223,7 +3223,10 @@ fn render_tab_strip(
                 .id(("saved-query-tab", id as usize))
                 .group(group.clone())
                 .px(px(layout::SPACE_SM))
-                .child(row_icon(t, icon::SAVED_QUERY))
+                .child(row_icon(
+                    t,
+                    saved_query_icon(profile.config.engine().syntax()),
+                ))
                 .child(name_label(name.clone()))
                 .child(
                     div()

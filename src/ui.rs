@@ -170,7 +170,10 @@ pub(crate) fn kind_color(path: &str) -> Option<ConnectionColor> {
         icon::TABLE | icon::PARTITIONED_TABLE | icon::VIEW | icon::MATERIALIZED_VIEW => {
             Some(ConnectionColor::Blue)
         }
-        icon::SCRATCH_QUERY | icon::SAVED_QUERY => Some(ConnectionColor::Red),
+        icon::SCRATCH_QUERY
+        | icon::SAVED_QUERY
+        | icon::SAVED_QUERY_MONGO
+        | icon::SAVED_QUERY_REDIS => Some(ConnectionColor::Red),
         icon::FUNCTION | icon::STRUCTURE => Some(ConnectionColor::Yellow),
         icon::PROCEDURE => Some(ConnectionColor::Orange),
         _ => None,
