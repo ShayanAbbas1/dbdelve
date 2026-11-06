@@ -607,6 +607,123 @@ fn enter_opens_a_sidebar_row_and_its_structure_takes_the_keyboard(cx: &mut TestA
     });
 }
 
+#[gpui::test]
+fn the_sidebar_selects_the_row_of_the_tab_in_front(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            "create table birds (name text); create table flocks (id integer);",
+        );
+        let selected = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                let session = &workspace.read(cx).profile().unwrap().session;
+                session
+                    .explorer_tree
+                    .read(cx)
+                    .selected_item()
+                    .map(|item| item.id.to_string())
+            })
+        };
+        let active = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                workspace.profile().unwrap().session.active
+            })
+        };
+        let open = |name: &str, cx: &mut VisualTestContext| {
+            workspace.update_in(cx, |workspace, window, cx| {
+                let leaf = workspace.profile().unwrap().session.explorer_leaves
+                    [&explorer::relation_row("main", name)];
+                workspace.open_explorer_target(leaf.target, window, cx);
+            });
+            settle(cx);
+        };
+        let birds_row = explorer::relation_row("main", "birds");
+        let flocks_row = explorer::relation_row("main", "flocks");
+        assert_eq!(selected(cx), None, "a scratch query has no row");
+
+        open("birds", cx);
+        assert_eq!(selected(cx), Some(birds_row.clone()));
+        let birds = active(cx);
+        open("flocks", cx);
+        assert_eq!(selected(cx), Some(flocks_row.clone()));
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.activate_tab(birds, window, cx);
+        });
+        settle(cx);
+        assert_eq!(
+            selected(cx),
+            Some(birds_row.clone()),
+            "a tab switch follows"
+        );
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.new_query(&crate::actions::NewQuery, window, cx);
+        });
+        settle(cx);
+        assert_eq!(selected(cx), None, "a new scratch query leaves no row lit");
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.ask_for_name(String::new(), window, cx);
+            let name = workspace.profile().unwrap().session.save_name.clone();
+            name.update(cx, |input, cx| input.set_value("daily", window, cx));
+            workspace.confirm_save(window, cx);
+        });
+        settle(cx);
+        assert_eq!(
+            selected(cx),
+            Some(explorer::query_row("daily")),
+            "saved, the query has a row of its own"
+        );
+
+        let daily = active(cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            let crate::session::Tab::Query(id) = daily else {
+                panic!("the saved query is in front");
+            };
+            workspace.close_buffer(id, window, cx);
+        });
+        settle(cx);
+        let fallback =
+            workspace.read_with(cx, |workspace, _| workspace.profile().unwrap().front_row());
+        assert!(fallback.is_some(), "a table tab came to the front");
+        assert_eq!(selected(cx), fallback, "a close follows to the tab behind");
+
+        // A pin repeats the table's row; selected, it keeps the selection.
+        workspace.update(cx, |workspace, cx| {
+            let profile = workspace.profile_mut().unwrap();
+            profile
+                .shortcuts
+                .toggle_pin(explorer::Pin::Member(explorer::Member::Object(
+                    explorer::ObjectRef {
+                        database: None,
+                        schema: "main".into(),
+                        name: "birds".into(),
+                        kind: explorer::ObjectKind::Relation(crate::db::RelationKind::Table),
+                    },
+                )));
+            let id = profile.id.clone();
+            workspace.refresh_explorer(&id, cx);
+        });
+        settle(cx);
+        let pinned = workspace.update(cx, |workspace, cx| {
+            let tree = workspace.profile().unwrap().session.explorer_tree.clone();
+            tree.update(cx, |tree, cx| {
+                let pinned = tree.entry(1).expect("the pin is listed").item().id.clone();
+                assert_ne!(pinned.as_ref(), birds_row);
+                tree.set_selected_index(Some(1), cx);
+                pinned.to_string()
+            })
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.activate_tab(birds, window, cx);
+        });
+        settle(cx);
+        assert_eq!(selected(cx), Some(pinned));
+
+        quit(workspace, cx);
+    });
+}
+
 /// A key pressed and let go: a focused button clicks on the release, which
 /// `simulate_keystrokes` never sends.
 fn press(cx: &mut VisualTestContext, key: &str) {

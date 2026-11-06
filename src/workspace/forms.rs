@@ -10,6 +10,7 @@ use gpui_component::button::Button;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::spinner::Spinner;
+use gpui_component::tooltip::Tooltip;
 use gpui_component::{ActiveTheme, Sizable};
 
 use super::folders::{DragLabel, DragShortcut};
@@ -24,7 +25,7 @@ use crate::explorer::{
 use crate::scroller::{SmoothScrollable, smooth_scoped};
 use crate::session::PendingDelete;
 use crate::sql::{Destructive, Stop};
-use crate::ui::{Status, code_lines, raised_card, row_icon_tinted};
+use crate::ui::{Status, code_lines, dot, raised_card, row_icon_tinted};
 
 impl Workspace {
     pub(crate) fn render_connection_form(
@@ -2488,18 +2489,23 @@ impl Workspace {
                         .as_ref()
                         .filter(|(row, _)| row.as_str() == id && cx.has_active_drag())
                         .map(|(_, after)| *after);
-                    let active = is_schema_row(entry.item().id.as_str())
-                        && active_schema.as_ref() == Some(&label);
+                    let schema_row = is_schema_row(id);
+                    let active = schema_row && active_schema.as_ref() == Some(&label);
                     let open = query
                         .as_ref()
                         .is_some_and(|name| open_queries.contains(name));
+                    let marker = match (active, open) {
+                        (true, _) => Some((t.accent, "Current schema")),
+                        (_, true) => Some((t.text_muted, "Open in a tab")),
+                        _ => None,
+                    };
                     let rename = renaming.as_ref().filter(|(row, ..)| row.as_str() == id);
                     let matched = highlights
                         .get(entry.item().id.as_str())
                         .map_or(&[][..], Vec::as_slice);
-                    // Three ranks, three weights: a schema owns the column, a
-                    // category only labels the run of objects under it, and the
-                    // objects themselves are what the eye is actually hunting for.
+                    // A schema is a row like any other, set apart by its icon
+                    // and a little weight; a category only labels the run of
+                    // objects under it, in the voice of the Queries group.
                     let (label, row) = match (leaf, entry.depth()) {
                         // Should be there and is not: greyed, and opens nothing.
                         _ if missing => (
@@ -2518,7 +2524,7 @@ impl Workspace {
                             highlighted(label, matched, t),
                             ListItem::new(index)
                                 .text_color(t.text)
-                                .font_weight(FontWeight::SEMIBOLD),
+                                .font_weight(FontWeight::MEDIUM),
                         ),
                         (None, _) => (
                             StyledText::new(label.to_uppercase()),
@@ -2547,6 +2553,8 @@ impl Workspace {
                             icon::FOLDER_OPEN
                         }
                         (None, Some(Shortcut::Folder(_))) => icon::FOLDER,
+                        _ if schema_row && entry.is_expanded() => icon::SCHEMA_OPEN,
+                        _ if schema_row => icon::SCHEMA,
                         _ if entry.is_expanded() => icon::CHEVRON_DOWN,
                         _ => icon::CHEVRON_RIGHT,
                     };
@@ -2606,17 +2614,6 @@ impl Workspace {
                                             .child(schema),
                                     )
                                 })
-                                .when(rename.is_none() && (active || open), |row| {
-                                    row.child(
-                                        div()
-                                            .flex_none()
-                                            .whitespace_nowrap()
-                                            .text_color(t.text_faint)
-                                            .text_size(px(layout::chrome(layout::TEXT_XS)))
-                                            .font_weight(FontWeight::NORMAL)
-                                            .child(if open { "open" } else { "active" }),
-                                    )
-                                })
                                 .when_some(leaf.and_then(|leaf| leaf.size), |row, size| {
                                     row.child(
                                         div()
@@ -2627,6 +2624,28 @@ impl Workspace {
                                             .child(human_bytes(size)),
                                     )
                                 })
+                                // In a slot as wide as the icon column, so the
+                                // dot has something to hover and sits as far
+                                // in from the right edge as the icons do from
+                                // the left.
+                                .when_some(
+                                    marker.filter(|_| rename.is_none()),
+                                    |row, (fill, tip)| {
+                                        row.child(
+                                            div()
+                                                .id("explorer-marker")
+                                                .flex_none()
+                                                .size(px(layout::chrome(layout::ICON_SIZE)))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .child(dot(fill))
+                                                .tooltip(move |window, cx| {
+                                                    Tooltip::new(tip).build(window, cx)
+                                                }),
+                                        )
+                                    },
+                                )
                                 .when_some(line, |row, after| {
                                     // Out through `ListItem`'s own `py_1` to
                                     // the row's edge.

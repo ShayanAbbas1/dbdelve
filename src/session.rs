@@ -160,6 +160,26 @@ impl Profile {
         shortcut_database(self.config.target(), shown, || self.active_database())
     }
 
+    /// The sidebar row of the tab in front: its object's, or its saved
+    /// query's. A scratch query has none, and nor has an object the catalog
+    /// does not list.
+    pub(crate) fn front_row(&self) -> Option<String> {
+        match self.session.active_object() {
+            Some(tab) => match &self.catalog {
+                CatalogState::Loaded(catalog, _) => {
+                    crate::explorer::object_row(catalog, &tab.schema, &tab.name, tab.kind)
+                }
+                _ => None,
+            },
+            None => self
+                .session
+                .active_query_tab()?
+                .open_query
+                .as_deref()
+                .map(crate::explorer::query_row),
+        }
+    }
+
     pub(crate) fn refreshing_schema(&self) -> bool {
         self.schema_refresh == Some(self.generation)
     }

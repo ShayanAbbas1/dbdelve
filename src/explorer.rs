@@ -128,6 +128,16 @@ pub fn object_row(catalog: &Catalog, schema: &str, name: &str, kind: ObjectKind)
     }
 }
 
+/// Whether the row `id` is the row `front`, or a folder's or a pin's
+/// shortcut to it.
+pub fn stands_for(id: &str, front: &str, shortcuts: &HashMap<String, Shortcut>) -> bool {
+    id == front
+        || shortcuts
+            .get(id)
+            .and_then(Shortcut::repeats)
+            .is_some_and(|row| row == front)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExplorerTarget {
     Relation {
@@ -860,6 +870,21 @@ impl Shortcut {
                 ..
             } => Some(name),
             _ => None,
+        }
+    }
+
+    /// The row in the schema tree or the Queries group it repeats.
+    fn repeats(&self) -> Option<String> {
+        match self {
+            Shortcut::Folder(_) => None,
+            Shortcut::Member {
+                member: Member::Query(name),
+                ..
+            } => Some(query_row(name)),
+            Shortcut::Member {
+                member: Member::Object(object),
+                ..
+            } => Some(object.row()),
         }
     }
 }
@@ -1934,6 +1959,79 @@ mod tests {
             explorer.shortcuts[hot.id.as_ref()],
             Shortcut::Folder("Hot".into())
         );
+    }
+
+    #[test]
+    fn a_shortcut_stands_for_the_row_of_what_it_repeats() {
+        let catalog = catalog();
+        let shortcuts = Shortcuts {
+            folders: vec![folder(
+                "Hot",
+                vec![
+                    relation("public", "accounts"),
+                    Member::Query("daily".into()),
+                ],
+            )],
+            pins: vec![Pin::Member(Member::Object(ObjectRef {
+                database: None,
+                schema: "public".into(),
+                name: "account_name(account_id bigint)".into(),
+                kind: ObjectKind::Routine(RoutineKind::Function),
+            }))],
+        };
+        let names = ["daily".to_string()];
+        let mut explorer = super::shortcuts(
+            &shortcuts,
+            Some(&catalog),
+            &names,
+            &ShortcutDatabase::Unnamed,
+            "",
+        );
+        explorer.extend(queries(&names, ""));
+        explorer.extend(tree(&catalog, ""));
+        let mut ids = Vec::new();
+        every_id(&explorer.items, &mut ids);
+
+        let accounts = object_row(
+            &catalog,
+            "public",
+            "accounts",
+            ObjectKind::Relation(RelationKind::Table),
+        )
+        .expect("the table is listed");
+        let function = object_row(
+            &catalog,
+            "public",
+            "account_name(account_id bigint)",
+            ObjectKind::Routine(RoutineKind::Function),
+        )
+        .expect("the function is listed");
+        let daily = query_row("daily");
+        for front in [&accounts, &function, &daily] {
+            assert!(ids.contains(front), "{front:?} is a row of the tree");
+        }
+
+        let standing = |front: &str| -> Vec<&str> {
+            ids.iter()
+                .map(String::as_str)
+                .filter(|id| stands_for(id, front, &explorer.shortcuts))
+                .collect()
+        };
+        let hot = &explorer.items[1];
+        let pinned = &explorer.items[0];
+        assert_eq!(
+            standing(&accounts),
+            [hot.children[0].id.as_ref(), accounts.as_str()]
+        );
+        assert_eq!(
+            standing(&daily),
+            [hot.children[1].id.as_ref(), daily.as_str()]
+        );
+        assert_eq!(
+            standing(&function),
+            [pinned.children[0].id.as_ref(), function.as_str()]
+        );
+        assert!(!stands_for(hot.id.as_ref(), &accounts, &explorer.shortcuts));
     }
 
     #[test]

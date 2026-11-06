@@ -3234,7 +3234,7 @@ fn schema_items(profile: &Profile) -> Vec<Item> {
             };
             Item::new(
                 schema.name.clone(),
-                icon::PROJECT,
+                icon::SCHEMA,
                 Command::SetSchema(schema.name.clone()),
             )
             .hint(hint)
