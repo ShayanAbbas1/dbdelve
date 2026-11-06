@@ -166,11 +166,14 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   File → Disconnect, and `disconnect`, unbound by default). Only that one:
   others open in the background stay, as a switch leaves them. It is refused,
   as Select Database is, while a grid of the profile holds unapplied cell
-  edits or an import runs into it. Otherwise the buffers are written, its
-  queues and runs are cancelled over the connection before it goes, the
-  generation moves on so a connect or an answer still out is dropped
-  (`issued_to`), and the connection is dropped, which rolls back an open
-  transaction, said in the notice. Tabs, buffers and snapshots stay, the
+  edits or an import runs into it. Otherwise the buffers are written, an
+  import dialog not yet running is closed (its column lookup answers by file,
+  not generation), data files waiting on the connect are forgotten (their
+  statements stay in their tabs), every query and relation tab's run and
+  count are cancelled over the connection before it goes, since a task left
+  going holds a clone of it, the generation moves on so a connect or an
+  answer still out is dropped (`issued_to`), and the connection is dropped,
+  which rolls back an open transaction, said in the notice. Tabs, buffers and snapshots stay, the
   relation tabs' rows marked stale, so picking it again opens where it was.
   Editing an idle profile never opens it; the edited config is used when it
   is next picked.

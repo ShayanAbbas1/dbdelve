@@ -1156,21 +1156,31 @@ impl Workspace {
             return;
         }
         let persisted = self.persist_buffer(cx);
-        // Before the connection goes: the cancel goes out over it.
-        let queries = self
+        // Not running, which was refused above: its column lookup answers by
+        // file alone, and would land on whatever the profile next opens.
+        self.abandon_import(&id, cx);
+        // Files opened while the connect was on its way would otherwise run
+        // on whichever connect lands next, over what their tabs hold by then.
+        self.runs_on_connect.retain(|(waiting, ..)| *waiting != id);
+        // Before the connection goes: the cancel goes out over it, and a run
+        // left going holds a clone of it, its session and tunnel with it.
+        let (queries, objects) = self
             .profile()
             .map(|profile| {
-                profile
-                    .session
-                    .queries
-                    .iter()
-                    .map(|tab| tab.id)
-                    .collect::<Vec<_>>()
+                let session = &profile.session;
+                (
+                    session.queries.iter().map(|tab| tab.id).collect::<Vec<_>>(),
+                    session.objects.iter().map(|tab| tab.id).collect::<Vec<_>>(),
+                )
             })
             .unwrap_or_default();
         for query in queries {
             self.stop_queue_on(Tab::Query(query), cx);
             self.stop_run(Tab::Query(query), cx);
+        }
+        for object in objects {
+            self.stop_run(Tab::Object(object), cx);
+            self.cancel_count(object, cx);
         }
         // A connect still on its way, and every answer issued to this one,
         // land on a generation that is no longer the profile's and are dropped.

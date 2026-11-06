@@ -104,7 +104,19 @@ use workspace::Workspace;
 const TRAFFIC_LIGHT_DIAMETER: f32 = 14.0;
 
 fn connection_config_from_environment() -> Result<Option<ConnectionConfig>, String> {
+    #[cfg(test)]
+    if IGNORE_ENVIRONMENT.get() {
+        return Ok(None);
+    }
     connection_config_from(&|name| std::env::var(name).ok())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Set by a test that needs the welcome surface where CI's live job sets
+    /// `PG*`. Per thread, as each test is, since the environment is the
+    /// process's and other tests read it.
+    pub(crate) static IGNORE_ENVIRONMENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// [`connection_config_from_environment`] with its variables handed in, since
