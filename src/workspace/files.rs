@@ -151,7 +151,7 @@ impl Workspace {
         }
     }
 
-    fn open_data_files(
+    pub(super) fn open_data_files(
         &mut self,
         paths: Vec<PathBuf>,
         window: &mut Window,

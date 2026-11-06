@@ -22,7 +22,7 @@ use icondata_core::IconData;
 /// The gpui-component widgets ask for their own paths — those are Lucide names
 /// too, so they resolve here as well. Add a row when something asks for one;
 /// an unlisted path simply draws nothing.
-const ICONS: [(&str, &IconData); 73] = [
+const ICONS: [(&str, &IconData); 74] = [
     ("icons/git-fork.svg", icondata_lu::LuGitFork),
     ("icons/chevron-down.svg", icondata_lu::LuChevronDown),
     ("icons/chevron-right.svg", icondata_lu::LuChevronRight),
@@ -102,6 +102,7 @@ const ICONS: [(&str, &IconData); 73] = [
     ("icons/engine-redis.svg", icondata_si::SiRedis),
     ("icons/engine-generic.svg", icondata_lu::LuDatabase),
     ("icons/plugin.svg", icondata_lu::LuPlug),
+    ("icons/unplug.svg", icondata_lu::LuUnplug),
 ];
 
 /// dbdelve's own names for the icons it draws, so a call site names a thing
@@ -139,6 +140,7 @@ pub mod icon {
     pub const DELETE: &str = "icons/trash.svg";
     pub const SEARCH: &str = "icons/search.svg";
     pub const DATABASE: &str = "icons/database.svg";
+    pub const DISCONNECT: &str = "icons/unplug.svg";
     pub const PROJECT: &str = "icons/folder.svg";
     /// A folder of shortcuts in the explorer, closed and open.
     pub const FOLDER: &str = "icons/folder.svg";

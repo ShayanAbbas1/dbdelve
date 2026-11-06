@@ -813,7 +813,10 @@ impl Workspace {
 
         let password = password_to_persist(&config, Origin::Form).map(str::to_string);
         let profile = &mut self.profiles[index];
-        let reconnect = profile.config.needs_reconnect(&config);
+        // A profile left idle, disconnected or never opened, opens on the
+        // edited config whenever it is next picked.
+        let reconnect =
+            profile.config.needs_reconnect(&config) && !matches!(profile.state, ProfileState::Idle);
         let syntax = config.engine().syntax();
         if profile.config.engine().syntax() != syntax {
             profile.session.set_syntax(syntax, window, cx);
@@ -879,7 +882,9 @@ impl Workspace {
     /// at once, so the sidebar neither blanks nor loses the rows folded open.
     /// With no session to read over, this is a connect.
     pub(crate) fn refresh_schema(&mut self, cx: &mut Context<Self>) {
-        let index = self.active;
+        let Some(index) = self.active else {
+            return;
+        };
         let Some(profile) = self.profiles.get_mut(index) else {
             return;
         };
@@ -1072,32 +1077,16 @@ impl Workspace {
         if unmoved || already_on(configured, profile.databases.current.as_deref(), &name) {
             return;
         }
-        let session = &profile.session;
-        let unapplied = |results: &Entity<gpui_component::table::TableState<ResultGrid>>| {
-            results.read(cx).delegate().has_pending()
-        };
-        if session.grids().any(unapplied) {
-            let edited = session
-                .objects
-                .iter()
-                .find(|tab| session.results(Tab::Object(tab.id)).is_some_and(unapplied));
-            let message = match edited {
-                Some(tab) => format!(
-                    "{}.{} has cell edits that have not been applied, so the database was not \
-                     switched.",
-                    tab.schema, tab.name
-                ),
-                None => "A query tab has cell edits that have not been applied, so the database \
-                         was not switched."
-                    .into(),
-            };
-            self.note(message, cx);
+        if let Some(edited) = self.unapplied_edits(cx) {
+            self.note(format!("{edited}, so the database was not switched."), cx);
             return;
         }
 
         self.leave_database(window, cx);
 
-        let index = self.active;
+        let Some(index) = self.active else {
+            return;
+        };
         let Some(profile) = self.profile_mut() else {
             return;
         };
@@ -1122,6 +1111,117 @@ impl Workspace {
             true => self.use_database(index, left, cx),
             false => self.reconnect(index, cx),
         }
+    }
+
+    /// Which grid of the profile in front holds cell edits nobody applied,
+    /// said as the start of a refusal.
+    fn unapplied_edits(&self, cx: &App) -> Option<String> {
+        let session = &self.profile()?.session;
+        let unapplied = |results: &Entity<gpui_component::table::TableState<ResultGrid>>| {
+            results.read(cx).delegate().has_pending()
+        };
+        if !session.grids().any(unapplied) {
+            return None;
+        }
+        let edited = session
+            .objects
+            .iter()
+            .find(|tab| session.results(Tab::Object(tab.id)).is_some_and(unapplied));
+        Some(match edited {
+            Some(tab) => format!(
+                "{}.{} has cell edits that have not been applied",
+                tab.schema, tab.name
+            ),
+            None => "A query tab has cell edits that have not been applied".into(),
+        })
+    }
+
+    /// Closes the connection in front and leads to the welcome surface. Its
+    /// tabs and buffers stay for the next time it is picked, the rows on them
+    /// stale; what goes is the session, and with it an open transaction.
+    pub(crate) fn disconnect(&mut self, _: &Disconnect, _: &mut Window, cx: &mut Context<Self>) {
+        self.clear_notice();
+        let Some(id) = self.profile().map(|profile| profile.id.clone()) else {
+            return;
+        };
+        if let Some(running) = self.running_import_into(&id) {
+            self.note(
+                format!("An import into {running} is running, so the connection was not closed."),
+                cx,
+            );
+            return;
+        }
+        if let Some(edited) = self.unapplied_edits(cx) {
+            self.note(format!("{edited}, so the connection was not closed."), cx);
+            return;
+        }
+        // Home has no status bar to cancel it from, and the export holds a
+        // connection of its own until it ends.
+        if let Some(exporting) = self
+            .profile()
+            .and_then(|profile| profile.session.exporting.as_ref())
+        {
+            let file = exporting.file.clone();
+            self.note(
+                format!("An export to {file} is running, so the connection was not closed."),
+                cx,
+            );
+            return;
+        }
+        let persisted = self.persist_buffer(cx);
+        // Not running, which was refused above: its column lookup answers by
+        // file alone, and would land on whatever the profile next opens.
+        self.abandon_import(&id, cx);
+        // Files opened while the connect was on its way would otherwise run
+        // on whichever connect lands next, over what their tabs hold by then.
+        self.runs_on_connect.retain(|(waiting, ..)| *waiting != id);
+        // Before the connection goes: the cancel goes out over it, and a run
+        // left going holds a clone of it, its session and tunnel with it.
+        let (queries, objects) = self
+            .profile()
+            .map(|profile| {
+                let session = &profile.session;
+                (
+                    session.queries.iter().map(|tab| tab.id).collect::<Vec<_>>(),
+                    session.objects.iter().map(|tab| tab.id).collect::<Vec<_>>(),
+                )
+            })
+            .unwrap_or_default();
+        for query in queries {
+            self.stop_queue_on(Tab::Query(query), cx);
+            self.stop_run(Tab::Query(query), cx);
+        }
+        for object in objects {
+            self.stop_run(Tab::Object(object), cx);
+            self.cancel_count(object, cx);
+        }
+        // A connect still on its way, and every answer issued to this one,
+        // land on a generation that is no longer the profile's and are dropped.
+        self.next_generation += 1;
+        let generation = self.next_generation;
+        let Some(profile) = self.profile_mut() else {
+            return;
+        };
+        let rolled_back = profile.in_transaction && profile.connection().is_some();
+        profile.generation = generation;
+        profile.state = ProfileState::Idle;
+        profile.in_transaction = false;
+        profile.session_changed = false;
+        profile.session.clear_prompts();
+        mark_rows_stale(profile);
+        let name = profile.name.clone();
+        self.active = None;
+        self.remember_profiles(cx);
+        self.refocus_front();
+        if let Err(message) = persisted {
+            self.note(message, cx);
+        } else if rolled_back {
+            self.note(
+                format!("Disconnected from {name}. Its open transaction was rolled back."),
+                cx,
+            );
+        }
+        cx.notify();
     }
 
     /// Close what the profile in front holds of the database it is leaving.
@@ -1562,8 +1662,9 @@ impl Workspace {
         if matches!(
             self.profile().map(|profile| &profile.state),
             Some(ProfileState::Idle | ProfileState::Failed(_))
-        ) {
-            self.begin_connect(self.active, cx);
+        ) && let Some(index) = self.active
+        {
+            self.begin_connect(index, cx);
         }
     }
 
@@ -2055,7 +2156,7 @@ impl Workspace {
         if let Err(message) = self.persist_buffer(cx) {
             self.note(message, cx);
         }
-        self.active = index;
+        self.active = Some(index);
         self.form = None;
         // Written here rather than at quit, so the profile in front survives a
         // crash as well as a close.
@@ -2081,7 +2182,7 @@ impl Workspace {
         }
         let position = members
             .iter()
-            .position(|index| *index == self.active)
+            .position(|index| Some(*index) == self.active)
             .unwrap_or(0) as isize;
         let next = (position + step).rem_euclid(members.len() as isize) as usize;
         self.activate(members[next], cx);
@@ -2107,7 +2208,7 @@ impl Workspace {
         };
         let id = profile.id.clone();
         let name = profile.name.clone();
-        if index == self.active
+        if self.active == Some(index)
             && let Err(message) = self.persist_buffer(cx)
         {
             self.note(message, cx);
@@ -2158,7 +2259,7 @@ impl Workspace {
         };
         self.active = active_after_removal(self.active, index, self.profiles.len());
         self.remember_profiles(cx);
-        if self.profiles.is_empty() {
+        if self.profile().is_none() {
             self.refocus_front();
         }
         self.connect_active(cx);
@@ -2196,7 +2297,7 @@ impl Workspace {
             removal_note(&removed.name, queries, removed_queries.err())
         };
         self.remember_profiles(cx);
-        if self.profiles.is_empty() {
+        if self.profile().is_none() {
             self.refocus_front();
         }
         self.note(note, cx);
@@ -2349,9 +2450,15 @@ fn already_on(configured: &str, listed_current: Option<&str>, name: &str) -> boo
 
 /// Removing an entry below the active one shifts the vector under the index,
 /// so clamping to the new length alone silently activates the wrong profile.
-pub(crate) fn active_after_removal(active: usize, removed: usize, remaining: usize) -> usize {
+/// Nothing in front stays that way, and so does removing the last profile.
+pub(crate) fn active_after_removal(
+    active: Option<usize>,
+    removed: usize,
+    remaining: usize,
+) -> Option<usize> {
+    let active = active?;
     let shifted = if removed < active { active - 1 } else { active };
-    shifted.min(remaining.saturating_sub(1))
+    (remaining > 0).then(|| shifted.min(remaining - 1))
 }
 
 fn identity_file(config: &ConnectionConfig) -> Option<&str> {
@@ -2744,12 +2851,14 @@ mod tests {
 
     #[test]
     fn removing_a_profile_keeps_the_same_one_active() {
-        assert_eq!(active_after_removal(2, 0, 3), 1);
-        assert_eq!(active_after_removal(2, 2, 3), 2);
-        assert_eq!(active_after_removal(2, 3, 3), 2);
+        assert_eq!(active_after_removal(Some(2), 0, 3), Some(1));
+        assert_eq!(active_after_removal(Some(2), 2, 3), Some(2));
+        assert_eq!(active_after_removal(Some(2), 3, 3), Some(2));
         // The active profile was last, so there is nothing at its index now.
-        assert_eq!(active_after_removal(2, 2, 2), 1);
-        assert_eq!(active_after_removal(0, 0, 0), 0);
+        assert_eq!(active_after_removal(Some(2), 2, 2), Some(1));
+        assert_eq!(active_after_removal(Some(0), 0, 0), None);
+        // A removal from the welcome surface leaves it in front.
+        assert_eq!(active_after_removal(None, 0, 2), None);
     }
 
     #[test]

@@ -56,8 +56,8 @@ use gpui_component::{
 use actions::{
     AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseTab, CommandPalette, CopyCell, CopyPlan,
     CopyResults, CopyRow, CopyRows, CopySelection, CustomRowLimit, CycleMode, DeleteRow,
-    DiscardEdits, EditCell, ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen, GoToColumn,
-    HideColumn, ImportConnections, ImportRows, ImportRowsFromClipboard, LimitTarget,
+    DiscardEdits, Disconnect, EditCell, ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen,
+    GoToColumn, HideColumn, ImportConnections, ImportRows, ImportRowsFromClipboard, LimitTarget,
     MenuImportRowsFromClipboard, Minimize, MoveTabLeft, MoveTabRight, NewConnection, NewProject,
     NewQuery, NewRow, NextEdit, NextPage, NextProfile, NextResult, NextTab, OpenReference,
     OpenSettings, PreviousEdit, PreviousPage, PreviousProfile, PreviousResult, PreviousTab, Quit,
@@ -104,7 +104,19 @@ use workspace::Workspace;
 const TRAFFIC_LIGHT_DIAMETER: f32 = 14.0;
 
 fn connection_config_from_environment() -> Result<Option<ConnectionConfig>, String> {
+    #[cfg(test)]
+    if IGNORE_ENVIRONMENT.get() {
+        return Ok(None);
+    }
     connection_config_from(&|name| std::env::var(name).ok())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Set by a test that needs the welcome surface where CI's live job sets
+    /// `PG*`. Per thread, as each test is, since the environment is the
+    /// process's and other tests read it.
+    pub(crate) static IGNORE_ENVIRONMENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// [`connection_config_from_environment`] with its variables handed in, since
@@ -433,6 +445,8 @@ pub(crate) fn app_menus(imports_rows: bool) -> Vec<Menu> {
                 MenuItem::action("Save Query", SaveQuery),
                 MenuItem::separator(),
                 MenuItem::action("Close Tab", CloseTab),
+                MenuItem::separator(),
+                MenuItem::action("Disconnect", Disconnect),
             ])
             .collect(),
         },

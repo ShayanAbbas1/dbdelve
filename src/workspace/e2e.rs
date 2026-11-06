@@ -11,12 +11,12 @@ use gpui_component::{Root, input::InputState};
 
 use super::Workspace;
 use crate::{
-    actions::{CancelQuery, ImportRowsFromClipboard},
+    actions::{CancelQuery, Disconnect, ImportRowsFromClipboard},
     connection_form::ConnectionForm,
     db::{CancelToken, ConnectionConfig, Engine, ExternalConfig, Fetch, SshTunnel},
     explorer, keybindings,
     palette::{Mode as PaletteMode, Scope},
-    session::{CatalogState, ObjectBody, QueryState, QueryTab},
+    session::{CatalogState, ObjectBody, ProfileState, QueryState, QueryTab},
     store,
     theme::{self, Fonts},
 };
@@ -3055,6 +3055,304 @@ fn refused_table_copies_preserve_the_clipboard(cx: &mut TestAppContext) {
                 );
             }
         }
+        quit(workspace, cx);
+    });
+}
+
+fn disconnect(cx: &mut VisualTestContext) {
+    cx.update(|window, cx| window.dispatch_action(Box::new(Disconnect), cx));
+    settle(cx);
+}
+
+/// What the palette up lists, whatever scope each row is in.
+fn palette_labels(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Vec<String> {
+    workspace.read_with(cx, |workspace, cx| {
+        let palette = workspace.palette.as_ref().expect("the palette is up");
+        palette
+            .read(cx)
+            .labels()
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    })
+}
+
+fn buffers_of(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Vec<String> {
+    workspace.read_with(cx, |workspace, cx| {
+        workspace.profiles[0]
+            .session
+            .queries
+            .iter()
+            .map(|tab| tab.editor.read(cx).value().to_string())
+            .collect()
+    })
+}
+
+#[gpui::test]
+fn disconnect_leads_home_and_a_relaunch_stays_there(cx: &mut TestAppContext) {
+    // CI's live job sets `PG*`, whose profile would be put in front on launch.
+    crate::IGNORE_ENVIRONMENT.set(true);
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        cx.simulate_input("select 1");
+        cx.simulate_keystrokes("secondary-shift-p");
+        settle(cx);
+        let offered = palette_labels(&workspace, cx);
+        assert!(offered.iter().any(|label| label == "Disconnect"));
+        assert!(offered.iter().any(|label| label == "Disconnect from E2E"));
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+
+        disconnect(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.profile().is_none());
+            assert!(matches!(workspace.profiles[0].state, ProfileState::Idle));
+        });
+        assert_eq!(buffers_of(&workspace, cx), ["select 1"]);
+        assert_eq!(store::peek_profiles(&[]).unwrap().active, None);
+        cx.update(|window, cx| {
+            assert!(
+                window.focused(cx).is_some(),
+                "the welcome surface takes the keyboard"
+            )
+        });
+
+        // Home lists the connections and nothing that needs one in front.
+        cx.update(|window, cx| {
+            window.dispatch_action(Box::new(crate::actions::SwitchConnection), cx)
+        });
+        settle(cx);
+        assert!(palette_mode(&workspace, cx) == Some(PaletteMode::Search(Scope::Connections)));
+        let offered = palette_labels(&workspace, cx);
+        assert!(offered.iter().any(|label| label == "E2E"));
+        assert!(!offered.iter().any(|label| label.starts_with("Disconnect")));
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+
+        // A second launch over the same home, as `launch` builds it.
+        drop(workspace);
+        let mut relaunched = None;
+        let (_, cx) = cx.cx.add_window_view(|window, cx| {
+            let entity = cx.new(|cx| Workspace::new(Vec::new(), window, cx));
+            relaunched = Some(entity.clone());
+            Root::new(entity, window, cx)
+        });
+        let workspace = relaunched.expect("the window builds the workspace");
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.profile().is_none());
+            assert!(matches!(workspace.profiles[0].state, ProfileState::Idle));
+        });
+        assert_eq!(buffers_of(&workspace, cx), ["select 1"]);
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_connection_picked_on_the_welcome_surface_comes_in_front_connected(cx: &mut TestAppContext) {
+    crate::IGNORE_ENVIRONMENT.set(true);
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        disconnect(cx);
+        let row = cx
+            .debug_bounds("welcome-connection-0")
+            .expect("the connection is listed");
+        cx.simulate_click(row.center(), gpui::Modifiers::default());
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the picked one is in front");
+            assert!(matches!(profile.state, ProfileState::Connected(_)));
+        });
+        assert_eq!(
+            store::peek_profiles(&[]).unwrap().active.as_deref(),
+            Some("e2e")
+        );
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn disconnect_is_refused_while_a_grid_holds_unapplied_edits(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            "create table birds (id integer primary key, name text); \
+             insert into birds values (1, 'wren');",
+        );
+        cx.simulate_input("select * from birds");
+        cx.simulate_keystrokes("secondary-enter");
+        settle(cx);
+        let grid = query_tab(&workspace, cx, |tab, _, _| tab.results.clone());
+        grid.update(cx, |grid, _| {
+            assert!(grid.delegate_mut().set_pending(
+                0,
+                1,
+                crate::result_grid::NewValue::Value("robin".into())
+            ));
+        });
+
+        disconnect(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the connection stays in front");
+            assert!(matches!(profile.state, ProfileState::Connected(_)));
+            let notice = profile.session.notice.as_deref().unwrap_or_default();
+            assert!(
+                notice.ends_with("so the connection was not closed."),
+                "{notice}"
+            );
+        });
+
+        grid.update(cx, |grid, _| grid.delegate_mut().discard_pending());
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn disconnect_is_refused_while_an_export_runs(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        workspace.update(cx, |workspace, _| {
+            let profile = workspace.profile_mut().expect("a connection in front");
+            profile.session.exporting = Some(crate::session::Exporting {
+                file: "birds.csv".into(),
+                started: std::time::Instant::now(),
+                progress: Default::default(),
+            });
+        });
+
+        disconnect(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the connection stays in front");
+            assert!(matches!(profile.state, ProfileState::Connected(_)));
+            let notice = profile.session.notice.as_deref().unwrap_or_default();
+            assert_eq!(
+                notice,
+                "An export to birds.csv is running, so the connection was not closed."
+            );
+        });
+
+        workspace.update(cx, |workspace, _| {
+            workspace.profile_mut().expect("in front").session.exporting = None;
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn disconnect_stops_what_a_relation_tab_holds_the_connection_for(cx: &mut TestAppContext) {
+    crate::IGNORE_ENVIRONMENT.set(true);
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        let row = explorer_row(&workspace, "relation-main\0birds", cx).center();
+        cx.simulate_click(row, gpui::Modifiers::default());
+        settle(cx);
+        // A count still out, which a run left going is the same as: a task
+        // holding a clone of the connection until the server answers.
+        workspace.update(cx, |workspace, _| {
+            let profile = workspace.profile_mut().expect("a profile is open");
+            let tab = profile
+                .session
+                .objects
+                .first_mut()
+                .expect("the table opened");
+            let ObjectBody::Relation { count, .. } = &mut tab.body else {
+                panic!("a relation tab");
+            };
+            *count = crate::session::RowCount::Counting {
+                filter: String::new(),
+                started: std::time::Instant::now(),
+                cancel: CancelToken::default(),
+                cancelling: false,
+            };
+        });
+
+        disconnect(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.profile().is_none());
+            let tab = &workspace.profiles[0].session.objects[0];
+            assert!(matches!(
+                &tab.body,
+                ObjectBody::Relation {
+                    count: crate::session::RowCount::Counting {
+                        cancelling: true,
+                        ..
+                    },
+                    ..
+                }
+            ));
+        });
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn disconnect_closes_an_import_dialog_that_is_not_running(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        let file = store::dbdelve_directory().unwrap().join("birds.csv");
+        std::fs::write(&file, "name\nwren\n").unwrap();
+        let profile = workspace.update_in(cx, |workspace, window, cx| {
+            let profile = workspace.profile().unwrap().id.clone();
+            workspace.open_import_file(
+                profile.clone(),
+                "main".into(),
+                "birds".into(),
+                file,
+                window,
+                cx,
+            );
+            profile
+        });
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("import-rows"));
+
+        disconnect(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let found = workspace.profiles.iter().find(|found| found.id == profile);
+            assert!(found.unwrap().session.import_rows.is_none());
+        });
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn files_opened_while_connecting_are_not_run_by_a_later_connect(cx: &mut TestAppContext) {
+    crate::IGNORE_ENVIRONMENT.set(true);
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch(cx);
+        settle(cx);
+        cx.executor().allow_parking();
+        let directory = store::dbdelve_directory().unwrap();
+        std::fs::create_dir_all(&directory).unwrap();
+        let file = directory.join("birds.csv");
+        std::fs::write(&file, "name\nwren\n").unwrap();
+        // In one update, so the connect the file starts cannot land between.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_data_files(vec![file], window, cx);
+            assert!(!workspace.runs_on_connect.is_empty());
+            workspace.disconnect(&Disconnect, window, cx);
+            assert!(workspace.runs_on_connect.is_empty());
+        });
+        settle(cx);
+
+        workspace.update(cx, |workspace, cx| workspace.activate(0, cx));
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the files profile is in front");
+            assert!(matches!(profile.state, ProfileState::Connected(_)));
+        });
+        query_tab(&workspace, cx, |tab, _, cx| {
+            assert!(matches!(tab.query, QueryState::Idle));
+            assert!(
+                !tab.editor.read(cx).value().is_empty(),
+                "the statement stays"
+            );
+        });
+
         quit(workspace, cx);
     });
 }

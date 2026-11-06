@@ -218,7 +218,9 @@ pub(crate) struct Workspace {
     /// Discovered once in `main`, before the profiles that name them load.
     pub(crate) plugins: Vec<&'static crate::db::Plugin>,
     pub(crate) settings: Settings,
-    pub(crate) active: usize,
+    /// The profile in front, by index; `None` is the welcome surface, which
+    /// Disconnect leads back to with connections still listed on it.
+    pub(crate) active: Option<usize>,
     pub(crate) form: Option<ConnectionForm>,
     /// Whether the menu bar last set lists Import Rows.
     menu_imports_rows: bool,
@@ -447,7 +449,7 @@ impl Workspace {
             unavailable: Vec::new(),
             plugins,
             settings: Settings::default(),
-            active: 0,
+            active: None,
             form: None,
             menu_imports_rows: false,
             import_requests: 0,
@@ -607,17 +609,15 @@ impl Workspace {
                 for stored in profiles {
                     workspace.restore_profile(stored, window, cx);
                 }
-                // Where the last session was left. An id that no longer names a
-                // profile leaves the first one in front, which is where an
-                // install with no history starts anyway.
-                if let Some(id) = active
-                    && let Some(index) = workspace
+                // Where the last session was left. With no `active` it was
+                // left on the welcome surface, and starts there connecting
+                // nothing.
+                workspace.active = active.and_then(|id| {
+                    workspace
                         .profiles
                         .iter()
                         .position(|profile| profile.id == id)
-                {
-                    workspace.active = index;
-                }
+                });
                 let live = workspace
                     .profiles
                     .iter()
@@ -641,7 +641,7 @@ impl Workspace {
                         && profile.config.server().map(|server| server.user.as_str())
                             == config.server().map(|server| server.user.as_str())
                 });
-                workspace.active = match existing {
+                workspace.active = Some(match existing {
                     Some(index) => index,
                     None => {
                         let name = default_profile_name(&config);
@@ -655,7 +655,7 @@ impl Workspace {
                             cx,
                         )
                     }
-                };
+                });
                 // The environment picked the profile, so it is the one to come
                 // back to next launch -- when there may be no environment.
                 workspace.remember_profiles(cx);
@@ -768,11 +768,11 @@ impl Workspace {
     }
 
     pub(crate) fn profile(&self) -> Option<&Profile> {
-        self.profiles.get(self.active)
+        self.profiles.get(self.active?)
     }
 
     pub(crate) fn profile_mut(&mut self) -> Option<&mut Profile> {
-        self.profiles.get_mut(self.active)
+        self.profiles.get_mut(self.active?)
     }
 
     /// The engine every statement dbdelve generates is written for. With no
@@ -1187,7 +1187,7 @@ impl Render for Workspace {
         // The name field is the welcome surface's, and whatever replaces that
         // surface ends here, so this is the one place it is put away --
         // before the focus handoff below.
-        if !(self.profiles.is_empty() && self.form.is_none()) {
+        if self.profile().is_some() || self.form.is_some() {
             self.drop_project_name();
         }
         // Every way the connection form opens ends here too. Its branch below
@@ -1303,7 +1303,7 @@ impl Render for Workspace {
         // checked against the last frame, where the field that just closed
         // still sat inside this same floor.
         if self.form.is_none()
-            && self.profiles.is_empty()
+            && self.profile().is_none()
             && std::mem::take(&mut self.welcome_needs_focus)
         {
             self.welcome_url.focus_handle(cx).focus(window, cx);
@@ -1419,6 +1419,7 @@ impl Render for Workspace {
                 .on_action(cx.listener(Self::fuzzy_open))
                 .on_action(cx.listener(Self::command_palette))
                 .on_action(cx.listener(Self::search_everything))
+                .on_action(cx.listener(Self::switch_connection))
                 .on_action(cx.listener(Self::set_default_row_limit_action))
                 .on_action(cx.listener(Self::custom_row_limit))
                 .on_action(cx.listener(Self::zoom_editor_in))
@@ -2199,6 +2200,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::search_everything))
             .on_action(cx.listener(Self::cycle_mode))
             .on_action(cx.listener(Self::switch_connection))
+            .on_action(cx.listener(Self::disconnect))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::focus_sidebar))
             .on_action(cx.listener(Self::open_settings))

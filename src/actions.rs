@@ -220,6 +220,7 @@ actions!(
         PaletteHistoryFilter,
         PaletteHistorySort,
         SwitchConnection,
+        Disconnect,
         SearchEverything,
         CycleMode,
         CloseTab,
