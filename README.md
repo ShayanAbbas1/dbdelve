@@ -10,6 +10,9 @@ introduce limits.
 
 Ideas and discussion on [Discord](https://discord.gg/7PegWzwqCm).
 
+Like DBDelve? [Support its development](https://www.patreon.com/cw/ShayanAbbas1).
+Support is voluntary and does not provide any additional benefits.
+
 
 ![DBDelve in Gruvbox Dark Glass: a SELECT on the events table in the editor and its result grid below](assets/screenshots/query-dark.png)
 
