@@ -153,7 +153,9 @@ curves, and hover states are instant. These things move:
   One wall clock (`Entrance`) drives every piece rather than an element-keyed
   animation each: the surface asks for the next frame only until
   `entrance_ms` has passed and then asks for nothing. It starts when the
-  surface comes on screen, never on a re-render, and `reduce_motion` skips it.
+  surface comes on screen, never on a re-render, so it plays again, without
+  the greeting, when Disconnect brings the surface back; `reduce_motion`
+  skips it.
   The URL field's engine logo fades in once over 160ms, keyed by the engine.
   Neither repeats, so neither is the redraw hazard in `AGENTS.md`.
 - **The connection form's card** (`workspace/forms.rs`) rises in on the same

@@ -29,11 +29,18 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   is typed. Connection rows carry their engine's logo (in their colour when
   they have one), a status dot read as the row is drawn, and the one in
   front is marked current; an empty project holds one "New connection in…"
-  row. A profile on an engine this build lacks (`Workspace::unavailable`) is
+  row. While a profile is in front, "Disconnect from <name>" heads the tree
+  whatever is typed (`palette::disconnect_row`), and is never the row the
+  list opens on unless nothing else matches: its label holds the name of the
+  connection in front, and typing that name and `enter` must not close it.
+  A profile on an engine this build lacks (`Workspace::unavailable`) is
   listed in its project greyed, its reason as the hint, with no status dot
   and never under All; `enter` goes straight to the Remove confirmation, and
   with no supported profile ⌘⇧P opens this scope to reach them
-  (`palette::without_a_connection`). `enter` on a project's row folds or unfolds it
+  (`palette::without_a_connection`). With connections but none in front, the
+  scope opens over the welcome surface too, with the lists its rows put up,
+  and any search but Commands and All lands on it. `enter` on a project's
+  row folds or unfolds it
   (`Command::ToggleProject`, the one row the palette stays up for); what is
   folded is `Workspace::collapsed_projects`, by name, kept for the session,
   starting unfolded, and the project in front is unfolded whenever a palette
@@ -65,16 +72,24 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   palette's own field (`Mode::NameProject`, checked by
   `projects::project_name_refusal` as it is typed, and offering no row for a
   rename to the name it has). File → New Project (`NewProject`, no default
-  chord) opens that, or the welcome surface's name field while there is no
-  connection.
-- **No connection is a state, not a prompt.** With no profiles and no form
-  open, the window is the welcome surface (`Workspace::render_welcome`): New
-  project, New connection, each project with an Add connection of its own, and
-  a Theme row whose button opens the theme palette, so a first launch can
-  leave the opaque default before connecting anywhere. ⌘⇧P there opens
-  Commands on the surface's own verbs (`palette::welcome_items`: new
-  connection, data file, project, imports, themes, fonts, Settings), and
-  nothing that needs a connection is listed.
+  chord) opens that, or the welcome surface's name field while no
+  connection is in front.
+- **No connection is a state, not a prompt.** With no profile in front
+  (`Workspace::active` is `None`) and no form open, the window is the welcome
+  surface (`Workspace::render_welcome`): New project, New connection, each
+  project with an Add connection of its own, and a Theme row whose button
+  opens the theme palette, so a first launch can leave the opaque default
+  before connecting anywhere. Once there are connections it is home: they are
+  listed first, ahead of the engines, grouped as the Connections scope groups
+  them (No project, then each project with its own hung beneath it), each
+  row the palette's (logo in its colour, name, endpoint, a status dot while
+  it is open in the background), and a click or `enter` on one activates it.
+  ⌘⇧P there opens Commands on the surface's own verbs
+  (`palette::welcome_items`: new connection, data file, project, imports,
+  themes, fonts, Settings), plus the connections, and nothing that needs a
+  connection in front is listed. `profiles.toml`'s `active` names the profile
+  in front; written without one, the next launch starts home and connects
+  nothing.
   Importing from DBeaver or TablePlus starts there too, or from the File menu
   and the palette once connections exist, never from over the connection form
   (its root does not answer `ImportConnections`, so nothing typed into it is
@@ -146,6 +161,19 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   a query's error, where the failure is already being read. `ui::status_dot` draws a
   profile's state the same way in the status bar and on each connection row in
   the palette.
+- **Disconnect closes the connection in front and leads home**
+  (`Workspace::disconnect`: the palette's Commands and Connections scopes,
+  File → Disconnect, and `disconnect`, unbound by default). Only that one:
+  others open in the background stay, as a switch leaves them. It is refused,
+  as Select Database is, while a grid of the profile holds unapplied cell
+  edits or an import runs into it. Otherwise the buffers are written, its
+  queues and runs are cancelled over the connection before it goes, the
+  generation moves on so a connect or an answer still out is dropped
+  (`issued_to`), and the connection is dropped, which rolls back an open
+  transaction, said in the notice. Tabs, buffers and snapshots stay, the
+  relation tabs' rows marked stale, so picking it again opens where it was.
+  Editing an idle profile never opens it; the edited config is used when it
+  is next picked.
 - **Refresh keeps the session; only a dead one is replaced.**
   `RefreshConnection`, from `Cmd+Shift+R`, the palette and the titlebar's button
   alike, runs `Workspace::refresh_schema`: the relations and routines are read
