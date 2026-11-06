@@ -2892,6 +2892,37 @@ fn the_ways_to_import_show_only_where_rows_can_be_imported(cx: &mut TestAppConte
 }
 
 #[gpui::test]
+fn file_exports_from_the_menu_ask_for_the_right_file(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) =
+            launch_on_sqlite_holding(cx, "create table birds (id integer primary key);");
+        cx.executor().allow_parking();
+        cx.simulate_input("select * from birds");
+        cx.simulate_keystrokes("secondary-enter");
+        settle(cx);
+
+        for (downs, name) in [(3, "results.csv"), (4, "results.json"), (5, "results.sql")] {
+            super::exports::SUGGESTED_NAMES.with_borrow_mut(Vec::clear);
+            let bounds = cx
+                .debug_bounds("export-results")
+                .expect("Export button is drawn");
+            cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+            settle(cx);
+            for _ in 0..downs {
+                cx.simulate_keystrokes("down");
+            }
+            press(cx, "enter");
+            cx.simulate_new_path_selection(|_| None);
+            settle(cx);
+            let asked = super::exports::SUGGESTED_NAMES.with_borrow(Clone::clone);
+            assert_eq!(asked, [name], "{downs} downs");
+        }
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn copy_results_formats_work_from_menu_and_palette_and_restore_focus(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite_holding(

@@ -674,6 +674,12 @@ impl Workspace {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The test platform's save panel drops the name it is offered.
+    pub(super) static SUGGESTED_NAMES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// The save panel, opened on the home directory with `stem` named in it.
 fn choose_path(
     stem: &str,
@@ -682,6 +688,8 @@ fn choose_path(
 ) -> impl Future<Output = Option<PathBuf>> + use<> {
     let suggested = format!("{stem}.{}", format.extension());
     let directory = crate::store::home().unwrap_or_else(|_| PathBuf::from("/"));
+    #[cfg(test)]
+    SUGGESTED_NAMES.with_borrow_mut(|names| names.push(suggested.clone()));
     let chosen = cx.prompt_for_new_path(&directory, Some(&suggested));
     async move { chosen.await.ok()?.ok()? }
 }
@@ -1148,6 +1156,30 @@ mod tests {
     use crate::db::ConnectionConfig;
     use crate::export::Format;
 
+    #[test]
+    fn export_sql_is_offered_only_for_sql_engines() {
+        let labels = |sql| {
+            let exports = ExportMenu {
+                workspace: WeakEntity::new_invalid(),
+                sql,
+            }
+            .file_exports();
+            exports
+                .into_iter()
+                .map(|(label, _)| label)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            labels(true),
+            [
+                "Export CSV\u{2026}",
+                "Export JSON\u{2026}",
+                "Export SQL\u{2026}"
+            ]
+        );
+        assert_eq!(labels(false), ["Export CSV\u{2026}", "Export JSON\u{2026}"]);
+    }
+
     fn scratch(name: &str) -> PathBuf {
         let directory =
             std::env::temp_dir().join(format!("dbdelve-export-{name}-{}", std::process::id()));
@@ -1516,7 +1548,7 @@ impl ExportMenu {
     ) -> PopupMenu {
         let formats = self.workspace.clone();
         let copy = self.workspace.clone();
-        let file = |label: &'static str, format: FileAs| {
+        let file = |(label, format): (&'static str, FileAs)| {
             let workspace = self.workspace.clone();
             PopupMenuItem::new(label).on_click(move |_, _, cx| {
                 _ = workspace.update(cx, |workspace, cx| {
@@ -1524,32 +1556,43 @@ impl ExportMenu {
                 });
             })
         };
-        menu.item(
-            PopupMenuItem::new("Copy Results").on_click(move |_, _, cx| {
-                _ = copy.update(cx, |workspace, cx| {
-                    workspace.copy_results_as(ClipboardFormat::Tsv, cx);
-                });
-            }),
-        )
-        .submenu("Copy Results As", window, cx, move |submenu, _, _| {
-            ClipboardFormat::ALL
-                .into_iter()
-                .fold(submenu, |submenu, format| {
-                    let workspace = formats.clone();
-                    submenu.item(
-                        PopupMenuItem::new(format.label()).on_click(move |_, _, cx| {
-                            _ = workspace.update(cx, |workspace, cx| {
-                                workspace.copy_results_as(format, cx);
-                            });
-                        }),
-                    )
-                })
-        })
-        .separator()
-        .item(file("Export CSV\u{2026}", FileAs::Rows(Format::Csv)))
-        .item(file("Export JSON\u{2026}", FileAs::Rows(Format::Json)))
-        .when(self.sql, |menu| {
-            menu.item(file("Export SQL\u{2026}", FileAs::Inserts))
-        })
+        let menu = menu
+            .item(
+                PopupMenuItem::new("Copy Results").on_click(move |_, _, cx| {
+                    _ = copy.update(cx, |workspace, cx| {
+                        workspace.copy_results_as(ClipboardFormat::Tsv, cx);
+                    });
+                }),
+            )
+            .submenu("Copy Results As", window, cx, move |submenu, _, _| {
+                ClipboardFormat::ALL
+                    .into_iter()
+                    .fold(submenu, |submenu, format| {
+                        let workspace = formats.clone();
+                        submenu.item(PopupMenuItem::new(format.label()).on_click(
+                            move |_, _, cx| {
+                                _ = workspace.update(cx, |workspace, cx| {
+                                    workspace.copy_results_as(format, cx);
+                                });
+                            },
+                        ))
+                    })
+            })
+            .separator();
+        self.file_exports()
+            .into_iter()
+            .map(file)
+            .fold(menu, |menu, item| menu.item(item))
+    }
+
+    pub(super) fn file_exports(&self) -> Vec<(&'static str, FileAs)> {
+        let mut exports = vec![
+            ("Export CSV\u{2026}", FileAs::Rows(Format::Csv)),
+            ("Export JSON\u{2026}", FileAs::Rows(Format::Json)),
+        ];
+        if self.sql {
+            exports.push(("Export SQL\u{2026}", FileAs::Inserts));
+        }
+        exports
     }
 }
