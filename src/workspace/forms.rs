@@ -2549,17 +2549,23 @@ impl Workspace {
                             }),
                         ) => object_icon(object.kind),
                         _ if query.is_some() || missing => saved_query_icon(syntax),
-                        _ if id == QUERIES_GROUP => queries_group_icon(syntax),
                         (None, Some(Shortcut::Folder(_)))
                             if entry.is_folder() && entry.is_expanded() =>
                         {
                             icon::FOLDER_OPEN
                         }
                         (None, Some(Shortcut::Folder(_))) => icon::FOLDER,
-                        _ if schema_row && entry.is_expanded() => icon::SCHEMA_OPEN,
-                        _ if schema_row => icon::SCHEMA,
                         _ if entry.is_expanded() => icon::CHEVRON_DOWN,
                         _ => icon::CHEVRON_RIGHT,
+                    };
+                    let heading_icon = if id == QUERIES_GROUP {
+                        Some(queries_group_icon(syntax))
+                    } else if pinned_group {
+                        Some(icon::PIN)
+                    } else if schema_row {
+                        Some(icon::SCHEMA)
+                    } else {
+                        None
                     };
                     let row = row
                         .mx(px(layout::SPACE_XS))
@@ -2584,6 +2590,7 @@ impl Workspace {
                                     }
                                     false => row_icon(t, row_icon_path).into_any_element(),
                                 })
+                                .when_some(heading_icon, |row, path| row.child(row_icon(t, path)))
                                 .child(match rename {
                                     Some((_, input, error)) => {
                                         rename_field(label, input, error.clone(), t)
@@ -2592,12 +2599,9 @@ impl Workspace {
                                     // first, which this is once anything is pinned:
                                     // the empty text keeps it a line tall rather
                                     // than an icon tall.
-                                    None if pinned_group => div()
-                                        .flex_1()
-                                        .flex()
-                                        .items_center()
-                                        .child(row_icon(t, icon::PIN))
-                                        .child("\u{200B}"),
+                                    None if pinned_group => {
+                                        div().flex_1().flex().items_center().child("\u{200B}")
+                                    }
                                     None => div()
                                         .flex_1()
                                         .min_w_0()

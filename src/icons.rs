@@ -24,7 +24,7 @@ use crate::db::Syntax;
 /// The gpui-component widgets ask for their own paths — those are Lucide names
 /// too, so they resolve here as well. Add a row when something asks for one;
 /// an unlisted path simply draws nothing.
-const ICONS: [(&str, &IconData); 81] = [
+const ICONS: [(&str, &IconData); 80] = [
     ("icons/git-fork.svg", icondata_lu::LuGitFork),
     ("icons/chevron-down.svg", icondata_lu::LuChevronDown),
     ("icons/chevron-right.svg", icondata_lu::LuChevronRight),
@@ -88,7 +88,6 @@ const ICONS: [(&str, &IconData); 81] = [
     ("icons/terminal.svg", icondata_lu::LuTerminal),
     ("icons/file-json.svg", icondata_lu::LuFileJson),
     ("icons/file-terminal.svg", icondata_lu::LuFileTerminal),
-    ("icons/package-open.svg", icondata_lu::LuPackageOpen),
     (
         "icons/sliders-horizontal.svg",
         icondata_lu::LuSlidersHorizontal,
@@ -180,10 +179,9 @@ pub mod icon {
     pub const FOLDER_OPEN: &str = "icons/folder-open.svg";
     /// The Pinned group's header, which is the icon alone.
     pub const PIN: &str = "icons/pin.svg";
-    /// A schema, which shows whether it is folded as a folder does: a box
-    /// rather than a folder, since the folders beside it are the user's own.
+    /// A schema: a box rather than a folder, since the folders beside it are
+    /// the user's own.
     pub const SCHEMA: &str = "icons/package.svg";
-    pub const SCHEMA_OPEN: &str = "icons/package-open.svg";
     pub const BROWSE: &str = "icons/folder-open.svg";
     pub const LEAVE_PROJECT: &str = "icons/folder-minus.svg";
     pub const ADD_TO_PROJECT: &str = "icons/folder-plus.svg";
