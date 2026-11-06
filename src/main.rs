@@ -56,8 +56,8 @@ use gpui_component::{
 use actions::{
     AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseTab, CommandPalette, CopyCell, CopyPlan,
     CopyResults, CopyRow, CopyRows, CopySelection, CustomRowLimit, CycleMode, DeleteRow,
-    DiscardEdits, EditCell, ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen, GoToColumn,
-    HideColumn, ImportConnections, ImportRows, ImportRowsFromClipboard, LimitTarget,
+    DiscardEdits, Disconnect, EditCell, ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen,
+    GoToColumn, HideColumn, ImportConnections, ImportRows, ImportRowsFromClipboard, LimitTarget,
     MenuImportRowsFromClipboard, Minimize, MoveTabLeft, MoveTabRight, NewConnection, NewProject,
     NewQuery, NewRow, NextEdit, NextPage, NextProfile, NextResult, NextTab, OpenReference,
     OpenSettings, PreviousEdit, PreviousPage, PreviousProfile, PreviousResult, PreviousTab, Quit,
@@ -433,6 +433,8 @@ pub(crate) fn app_menus(imports_rows: bool) -> Vec<Menu> {
                 MenuItem::action("Save Query", SaveQuery),
                 MenuItem::separator(),
                 MenuItem::action("Close Tab", CloseTab),
+                MenuItem::separator(),
+                MenuItem::action("Disconnect", Disconnect),
             ])
             .collect(),
         },

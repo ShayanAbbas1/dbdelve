@@ -10,7 +10,7 @@ use gpui::{Animation, AnimationExt, Transformation, ease_in_out, ease_out_quint,
 use super::*;
 use crate::import::Source;
 use crate::scroller::{SmoothScrollable, smooth_scoped};
-use crate::ui::{chord_for, keycaps, raised_card, search_field};
+use crate::ui::{chord_for, keycaps, raised_card, search_field, status_dot};
 
 use super::forms::{name_field, welcome_row};
 
@@ -305,7 +305,7 @@ impl Workspace {
         let width = layout::WELCOME_WIDTH
             .min(viewport.width.as_f32() - 2. * layout::SPACE_LG)
             .max(0.);
-        let top = if self.projects.is_empty() {
+        let top = if self.projects.is_empty() && self.profiles.is_empty() {
             layout::WELCOME_TOP
         } else {
             layout::WELCOME_TOP_WITH_PROJECTS
@@ -330,7 +330,10 @@ impl Workspace {
                 .whitespace_nowrap()
         };
 
-        let projects = self.render_welcome_projects(card_theme, window, cx);
+        let connections = self.render_welcome_connections(card_theme, window, cx);
+        // Once there is something to pick, it is what the surface is for, and
+        // the ways to make a new one follow it.
+        let picks_first = !self.profiles.is_empty();
         let surface = div()
             .id("welcome-scroll")
             .size_full()
@@ -387,8 +390,14 @@ impl Workspace {
                     .map(|card| raised_card(card, card_theme))
                     .overflow_hidden()
                     .child(self.render_welcome_field(card_theme, cx))
-                    .child(self.render_engine_grid(width, card_theme, &at, cx))
-                    .children(projects)
+                    .map(|card| {
+                        let engines = self.render_engine_grid(width, card_theme, &at, cx);
+                        if picks_first {
+                            card.children(connections).child(engines)
+                        } else {
+                            card.child(engines).children(connections)
+                        }
+                    })
                     .child(self.render_welcome_rows(card_theme, cx)),
             )
             .children(self.welcome_notice.clone().map(|message| {
@@ -500,8 +509,6 @@ impl Workspace {
             )
     }
 
-    /// The projects made before any connection: each empty, each a way into
-    /// the form with itself already picked.
     /// What the rename and delete of the project row at `index` sit in, which
     /// is never a tab stop: it only tells whether Tab has reached them, drawn
     /// unseen until something shows them.
@@ -513,82 +520,20 @@ impl Workspace {
         handles[index].clone()
     }
 
-    fn render_welcome_projects(
+    /// The connections, grouped as the palette groups them: those in no
+    /// project, then each project with its own beneath it. A project with
+    /// none is a way into the form with itself already picked.
+    fn render_welcome_connections(
         &self,
         t: Theme,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<gpui::Div> {
-        if self.projects.is_empty() {
-            return None;
-        }
-        let workspace = cx.entity().downgrade();
-        let mut rows = Vec::new();
-        for (index, project) in self.projects.iter().enumerate() {
-            if self.renaming_project.as_deref() == Some(project.name.as_str())
-                && let Some(input) = &self.project_name
-            {
-                rows.push(name_field(input));
-                continue;
-            }
-            let add = {
-                let workspace = workspace.clone();
-                let name = project.name.clone();
-                move |window: &mut Window, cx: &mut App| {
-                    _ = workspace.update(cx, |workspace, cx| {
-                        workspace.new_connection_in(Some(name.clone()), window, cx);
-                    });
-                }
-            };
-            let add_from_row = add.clone();
-            rows.push(
-                welcome_row(("welcome-project", index), t)
-                    .group(format!("project-row-{index}"))
-                    .child(row_icon(t, icon::PROJECT))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .child(project.name.clone()),
-                    )
-                    // Every project is empty here: with no connections at all
-                    // there is nothing for one to hold.
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .text_size(px(layout::chrome(layout::TEXT_SM)))
-                            .text_color(t.text_faint)
-                            .child("No connections yet"),
-                    )
-                    .child(self.project_actions(index, &project.name, window, t, cx))
-                    .child(
-                        button(
-                            ("welcome-add-connection", index),
-                            "Add connection",
-                            Tone::Quiet,
-                            Control::Compact,
-                            t,
-                        )
-                        .on_click(move |_, window, cx| {
-                            // The row would open the same form again.
-                            cx.stop_propagation();
-                            add(window, cx);
-                        }),
-                    )
-                    .on_click(move |_, window, cx| add_from_row(window, cx))
-                    .into_any_element(),
-            );
-        }
-        Some(
+    ) -> Vec<gpui::Div> {
+        let section = |label: &str| {
             div()
                 .flex()
                 .flex_col()
+                .gap(px(layout::WELCOME_ITEM_GAP))
                 .border_t_1()
                 .border_color(t.border)
                 .p(px(layout::WELCOME_SECTION_PADDING))
@@ -596,10 +541,169 @@ impl Workspace {
                     div()
                         .px(px(layout::SPACE_SM))
                         .py(px(layout::SPACE_XS))
-                        .child(section_label(t, "Projects")),
+                        .child(section_label(t, label)),
                 )
-                .children(rows),
-        )
+        };
+        let in_group = |group: Option<&str>| -> Vec<usize> {
+            (0..self.profiles.len())
+                .filter(|&index| self.group_of(&self.profiles[index].id) == group)
+                .collect()
+        };
+        let mut sections = Vec::new();
+        let loose: Vec<AnyElement> = in_group(None)
+            .into_iter()
+            .map(|index| self.welcome_connection(index, t, cx))
+            .collect();
+        if !loose.is_empty() {
+            sections.push(section("Connections").children(loose));
+        }
+        if self.projects.is_empty() {
+            return sections;
+        }
+        let mut rows = Vec::new();
+        for (index, project) in self.projects.iter().enumerate() {
+            let members: Vec<AnyElement> = in_group(Some(&project.name))
+                .into_iter()
+                .map(|index| self.welcome_connection(index, t, cx))
+                .collect();
+            if self.renaming_project.as_deref() == Some(project.name.as_str())
+                && let Some(input) = &self.project_name
+            {
+                rows.push(name_field(input));
+            } else {
+                rows.push(self.welcome_project_row(index, &project.name, window, t, cx));
+            }
+            if !members.is_empty() {
+                // Hung from the middle of the project's icon, as the palette
+                // hangs a project's connections from its tile.
+                rows.push(
+                    div()
+                        .ml(px(layout::SPACE_SM + layout::chrome(layout::ICON_SIZE) / 2.))
+                        .pl(px(layout::SPACE_XS))
+                        .border_l_1()
+                        .border_color(t.border)
+                        .flex()
+                        .flex_col()
+                        .gap(px(layout::WELCOME_ITEM_GAP))
+                        .children(members)
+                        .into_any_element(),
+                );
+            }
+        }
+        sections.push(section("Projects").children(rows));
+        sections
+    }
+
+    fn welcome_project_row(
+        &self,
+        index: usize,
+        name: &str,
+        window: &mut Window,
+        t: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let held = self
+            .projects
+            .get(index)
+            .map_or(0, |project| project.connections.len());
+        let add = {
+            let workspace = cx.entity().downgrade();
+            let name = name.to_string();
+            move |window: &mut Window, cx: &mut App| {
+                _ = workspace.update(cx, |workspace, cx| {
+                    workspace.new_connection_in(Some(name.clone()), window, cx);
+                });
+            }
+        };
+        let add_from_row = add.clone();
+        welcome_row(("welcome-project", index), t)
+            .group(format!("project-row-{index}"))
+            .child(row_icon(t, icon::PROJECT))
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .child(name.to_string()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_size(px(layout::chrome(layout::TEXT_SM)))
+                    .text_color(t.text_faint)
+                    .child(match held {
+                        0 => "No connections yet".to_string(),
+                        held => crate::palette::connection_count(held),
+                    }),
+            )
+            .child(self.project_actions(index, name, window, t, cx))
+            .child(
+                button(
+                    ("welcome-add-connection", index),
+                    "Add connection",
+                    Tone::Quiet,
+                    Control::Compact,
+                    t,
+                )
+                .on_click(move |_, window, cx| {
+                    // The row would open the same form again.
+                    cx.stop_propagation();
+                    add(window, cx);
+                }),
+            )
+            // A project holding connections lists them beneath it, and a
+            // click on its name opening a blank form would read as a misfire.
+            .when(held == 0, |row| {
+                row.on_click(move |_, window, cx| add_from_row(window, cx))
+            })
+            .into_any_element()
+    }
+
+    /// One connection on the welcome surface, drawn as the palette draws its
+    /// row: the engine's logo in its colour, the name, where it points, and a
+    /// dot while it is open in the background. Picking it brings it in front.
+    fn welcome_connection(&self, index: usize, t: Theme, cx: &mut Context<Self>) -> AnyElement {
+        let profile = &self.profiles[index];
+        let target = profile.config.target();
+        let tint = profile.color.map_or_else(
+            || theme::engine_brand(target.engine, t, &t.logo_planes()),
+            ConnectionColor::swatch,
+        );
+        let open = !matches!(profile.state, ProfileState::Idle);
+        item(("welcome-connection", index))
+            .debug_selector(move || format!("welcome-connection-{index}"))
+            .w_full()
+            .child(
+                item_content(t)
+                    .child(
+                        item_tile().bg(tint.alpha(layout::ACCENT_WASH)).child(
+                            icon(target.logo())
+                                .size(px(layout::chrome(layout::ICON_SIZE)))
+                                .text_color(tint),
+                        ),
+                    )
+                    .child(item_label(profile.name.clone()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .font_family(fonts(cx).family(FontSlot::Editor).clone())
+                            .text_size(px(layout::chrome(layout::TEXT_SM)))
+                            .text_color(t.text_faint)
+                            .child(profile.config.listed_endpoint()),
+                    )
+                    .children(open.then(|| status_dot(t, &profile.state))),
+            )
+            .on_click(cx.listener(move |workspace, _, _, cx| workspace.activate(index, cx)))
+            .into_any_element()
     }
 
     fn render_welcome_rows(&self, t: Theme, cx: &mut Context<Self>) -> impl IntoElement {

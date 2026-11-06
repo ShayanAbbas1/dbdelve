@@ -161,11 +161,12 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // With no connection to open, the palette opens only on what the
-        // welcome surface can use; any search reaches the connections this
-        // build cannot open, so they can be removed.
+        // With no connection in front, the palette opens only on what the
+        // welcome surface can use, and on the connections to pick from or,
+        // those this build cannot open, to remove.
+        let (profiles, unavailable) = (!self.profiles.is_empty(), !self.unavailable.is_empty());
         let mode = if self.profile().is_none() {
-            crate::palette::without_a_connection(mode, !self.unavailable.is_empty()).unwrap_or(mode)
+            crate::palette::without_a_connection(mode, profiles, unavailable).unwrap_or(mode)
         } else {
             mode
         };
@@ -200,7 +201,7 @@ impl Workspace {
         self.end_theme_preview(window, cx);
         let picks_theme = matches!(mode, PaletteMode::Theme(_) | PaletteMode::ImportTheme(..));
         let before_any_connection =
-            crate::palette::without_a_connection(mode, !self.unavailable.is_empty()).is_some();
+            crate::palette::without_a_connection(mode, profiles, unavailable).is_some();
         if stroke == Some(Stroke::Close) || (self.profile().is_none() && !before_any_connection) {
             self.close_palette(window, cx);
             return;
@@ -653,6 +654,7 @@ impl Workspace {
             Command::CopyResults(format) => self.copy_results_as(format, cx),
             Command::SwitchProfile(index) => self.activate(index, cx),
             Command::SwitchConnection => self.open_connections(window, cx),
+            Command::Disconnect => self.disconnect(&Disconnect, window, cx),
             Command::ConnectionActions(index) => {
                 self.open_palette(PaletteMode::ConnectionActions(index), window, cx)
             }
@@ -688,7 +690,11 @@ impl Workspace {
                 self.clear_notice();
                 self.refresh_schema(cx);
             }
-            Command::Reconnect => self.reconnect(self.active, cx),
+            Command::Reconnect => {
+                if let Some(index) = self.active {
+                    self.reconnect(index, cx);
+                }
+            }
             Command::SelectTheme => self.select_theme(&SelectTheme, window, cx),
             Command::SelectDatabase => self.select_database(&SelectDatabase, window, cx),
             Command::SetDatabase(name) => self.set_database(name, window, cx),

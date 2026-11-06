@@ -357,6 +357,8 @@ pub enum Command {
     SwitchProfile(usize),
     /// Narrow the palette to the Connections scope.
     SwitchConnection,
+    /// Close the connection in front and go to the welcome surface.
+    Disconnect,
     /// Put the palette back up over what can be done to this connection.
     ConnectionActions(usize),
     /// Fold or unfold a project's connections in the Connections scope. The
@@ -834,6 +836,8 @@ fn arrange(
 /// Where a row of the Connections scope stands in its tree.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Branch {
+    /// Disconnect, above the tree whatever is typed.
+    Front,
     /// A connection in no project.
     Loose,
     /// A project's own row, or a row beneath it.
@@ -842,6 +846,9 @@ enum Branch {
 }
 
 fn branch(item: &Item) -> Branch {
+    if matches!(item.command, Command::Disconnect) {
+        return Branch::Front;
+    }
     match item.group {
         Group::Project(at, _) => Branch::Project(at),
         Group::Named(MANAGE) => Branch::Manage,
@@ -886,6 +893,7 @@ fn tree(items: &[Item], query: &Query, fuzzy: &mut Fuzzy, collapsed: &HashSet<St
             .filter(|&index| branch(&items[index]) == wanted)
             .collect()
     };
+    let front = in_branch(Branch::Front);
     let loose = in_branch(Branch::Loose);
     let manage = in_branch(Branch::Manage);
 
@@ -937,18 +945,29 @@ fn tree(items: &[Item], query: &Query, fuzzy: &mut Fuzzy, collapsed: &HashSet<St
         (Some(&index), Some((best, _))) => !searching || rank[index] < Some(*best),
         _ => true,
     };
-    let mut rows: Vec<Row> = if loose_first {
-        loose_rows.chain(project_rows).collect()
+    let mut rows: Vec<Row> = front.iter().map(|&index| Row::Item(index)).collect();
+    if loose_first {
+        rows.extend(loose_rows.chain(project_rows));
     } else {
-        project_rows.chain(loose_rows).collect()
-    };
+        rows.extend(project_rows.chain(loose_rows));
+    }
     if !manage.is_empty() {
         rows.push(Row::Header(MANAGE.into()));
         rows.extend(manage.into_iter().map(Row::Item));
     }
-    let lead = match ranked.first() {
+    // Never on Disconnect while anything else is listed: its label holds the
+    // name of the connection in front, so typing that name could open on it,
+    // and an `enter` would close the connection instead of keeping it.
+    let best = ranked
+        .iter()
+        .find(|&&index| branch(&items[index]) != Branch::Front)
+        .or(ranked.first());
+    let lead = match best {
         Some(&best) if searching => rows.iter().position(|row| *row == Row::Item(best)),
-        _ => first_item(&rows),
+        _ => rows
+            .iter()
+            .position(|row| matches!(row, Row::Item(index) if !front.contains(index)))
+            .or_else(|| first_item(&rows)),
     };
     Arranged { rows, lead }
 }
@@ -990,13 +1009,15 @@ fn opening_selection(mode: Mode, lead: Option<usize>) -> Option<usize> {
 
 /// Whether a confirmed row leads the next palette under Recent. Never one
 /// that removes or deletes, which would sit selected there an `enter` or two
-/// from doing it again. Nor a connection: Recent lists one only under All and
-/// only from the project in front, so most would push out rows it does show.
+/// from doing it again, nor Disconnect, which rolls back an open transaction.
+/// Nor a connection: Recent lists one only under All and only from the
+/// project in front, so most would push out rows it does show.
 pub fn remembered(scope: Scope, command: &Command) -> bool {
     scope != Scope::Connections
         && !matches!(
             command,
             Command::Confirm(_)
+                | Command::Disconnect
                 | Command::PickProject(ProjectVerb::Delete)
                 | Command::PickQueryToDelete
                 | Command::DeleteQuery(_)
@@ -1448,6 +1469,11 @@ impl Palette {
     fn move_selection(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
         let row = step(&self.rows, self.selected, delta);
         self.select(row, true, window, cx);
+    }
+
+    #[cfg(test)]
+    pub fn labels(&self) -> Vec<&str> {
+        self.items.iter().map(|item| item.label.as_str()).collect()
     }
 
     #[cfg(test)]
@@ -2353,24 +2379,38 @@ fn row_verb(mode: Mode, item: Option<&Item>, collapsed: &HashSet<String>) -> &'s
             }
         }
         Some(item) if matches!(item.command, Command::Confirm(Target::Unavailable(_))) => "Remove",
+        Some(item) if matches!(item.command, Command::Disconnect) => "Disconnect",
         _ => mode.verb(),
     }
 }
 
-/// The palette a mode opens with no connection to open: the theme lists, the
+/// The palette a mode opens with no connection in front: the theme lists, the
 /// engine list and the font lists, as on the welcome surface, the connection
-/// form and the settings panel, the welcome surface's own verbs, and while
-/// there are connections this build cannot open, the Connections scope that
-/// lists them, and the one row that removes one.
-pub fn without_a_connection(mode: Mode, unavailable: bool) -> Option<Mode> {
+/// form and the settings panel, and the welcome surface's own verbs. With
+/// `profiles` to pick from, the Connections scope too, where any other search
+/// lands, and the lists its rows put up; while there are only connections
+/// this build cannot open, every search lands there, and the one row that
+/// removes one opens.
+pub fn without_a_connection(mode: Mode, profiles: bool, unavailable: bool) -> Option<Mode> {
     match mode {
         Mode::Theme(_)
         | Mode::ImportTheme(..)
         | Mode::Engine
         | Mode::Font(_)
         | Mode::ImportProject => Some(mode),
-        Mode::Search(_) if unavailable => Some(Mode::Search(Scope::Connections)),
+        Mode::Search(Scope::Commands | Scope::All | Scope::Connections) if profiles => Some(mode),
+        Mode::Search(_) if profiles || unavailable => Some(Mode::Search(Scope::Connections)),
         Mode::Search(Scope::Commands | Scope::All) => Some(mode),
+        Mode::ConnectionActions(_)
+        | Mode::ProjectActions(_)
+        | Mode::MoveToProject(_)
+        | Mode::Projects(_)
+        | Mode::NameProject(_)
+        | Mode::Confirm(_)
+            if profiles =>
+        {
+            Some(mode)
+        }
         Mode::Confirm(Target::Unavailable(_)) if unavailable => Some(mode),
         _ => None,
     }
@@ -2436,7 +2476,13 @@ fn connection_items(workspace: &Workspace) -> Vec<Item> {
         )
         .collect();
     let overrides = &workspace.settings.custom_keybindings;
-    let mut items = listed_connections(&listed, &workspace.projects, workspace.active);
+    let front = workspace.profile().map(|profile| profile.name.as_str());
+    let mut items: Vec<Item> = disconnect_row(front).into_iter().collect();
+    items.extend(listed_connections(
+        &listed,
+        &workspace.projects,
+        workspace.active,
+    ));
     items.push(
         Item::new("New connection…", icon::PLUS, Command::NewConnection)
             .keys(chord_for("new_connection", overrides))
@@ -2454,6 +2500,20 @@ fn connection_items(workspace: &Workspace) -> Vec<Item> {
     items
 }
 
+/// The Connections scope's way out of the connection in front, named for it.
+fn disconnect_row(front: Option<&str>) -> Option<Item> {
+    let name = front?;
+    Some(
+        Item::new(
+            format!("Disconnect from {name}"),
+            icon::DISCONNECT,
+            Command::Disconnect,
+        )
+        .scope(Scope::Connections)
+        .beyond_all(),
+    )
+}
+
 /// The connections by project: No project first, then each project in its
 /// order, its own row ahead of its members in the order the profiles are
 /// kept, which [`tree`] draws beneath it. An empty project keeps its place
@@ -2463,7 +2523,7 @@ fn connection_items(workspace: &Workspace) -> Vec<Item> {
 fn listed_connections(
     connections: &[Listed],
     projects: &[StoredProject],
-    active: usize,
+    active: Option<usize>,
 ) -> Vec<Item> {
     let project_of: Vec<Option<usize>> = connections
         .iter()
@@ -2476,7 +2536,7 @@ fn listed_connections(
             })
         })
         .collect();
-    let current = project_of.get(active).copied().flatten();
+    let current = active.and_then(|active| project_of.get(active).copied().flatten());
     let mut items = Vec::new();
     for group in std::iter::once(None).chain((0..projects.len()).map(Some)) {
         let header = match group {
@@ -2526,11 +2586,11 @@ fn listed_connections(
             .detail(connection.endpoint.clone())
             .tint(connection.color)
             .status(index)
-            .hint(if index == active { "current" } else { "" })
+            .hint(if Some(index) == active { "current" } else { "" })
             .also(vec![connection.host.clone()])
             .scope(Scope::Connections)
             .group(header.clone());
-            items.push(if index == active || group != current {
+            items.push(if Some(index) == active || group != current {
                 item.beyond_all()
             } else {
                 item
@@ -2570,7 +2630,7 @@ fn connection_action_items(workspace: &Workspace, index: usize) -> Vec<Item> {
         Item::new(label, icon, command).group(Group::Named(group))
     };
     let mut items = Vec::new();
-    if index != workspace.active {
+    if Some(index) != workspace.active {
         items.push(
             row(
                 format!("Switch to {name}"),
@@ -2763,7 +2823,7 @@ fn project_items(verb: ProjectVerb, projects: &[StoredProject]) -> Vec<Item> {
         .collect()
 }
 
-fn connection_count(count: usize) -> String {
+pub(crate) fn connection_count(count: usize) -> String {
     match count {
         0 => "empty".to_string(),
         1 => "1 connection".to_string(),
@@ -3250,13 +3310,13 @@ fn mode_icon(mode: sql::Mode) -> &'static str {
     }
 }
 
-/// The welcome surface's verbs, and the connections this build cannot open
-/// when there are any: what a palette can reach with no connection.
+/// The welcome surface's verbs, and the connections when there are any:
+/// what a palette can reach with no connection in front.
 fn welcome_items(workspace: &Workspace) -> Vec<Item> {
     let overrides = &workspace.settings.custom_keybindings;
     let mut items = starting_items(overrides);
     items.extend(appearance_items(overrides));
-    if !workspace.unavailable.is_empty() {
+    if !workspace.profiles.is_empty() || !workspace.unavailable.is_empty() {
         items.extend(connection_items(workspace));
     }
     items
@@ -4041,7 +4101,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
     items.extend(starting_items(overrides));
     // The active connection's share of what the Connections scope offers
     // every connection on its row's actions, for whoever looks for the verb.
-    let active = workspace.active;
+    let active = workspace.active.unwrap_or_default();
     items.push(bound(
         command(
             "Switch connection…",
@@ -4050,6 +4110,15 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             CONNECTION,
         ),
         "switch_connection",
+    ));
+    items.push(bound(
+        command(
+            "Disconnect",
+            icon::DISCONNECT,
+            Command::Disconnect,
+            CONNECTION,
+        ),
+        "disconnect",
     ));
     items.push(command(
         "Edit connection…",
@@ -4252,6 +4321,7 @@ fn beside_import(command: &Command) -> bool {
         command,
         Command::SwitchProfile(_)
             | Command::SwitchConnection
+            | Command::Disconnect
             | Command::EditConnection(_)
             | Command::DuplicateConnection(_)
             | Command::ChooseProject(_)
@@ -4819,7 +4889,7 @@ mod tests {
     #[test]
     fn an_unavailable_connection_is_listed_greyed_in_its_project() {
         let (rows, projects) = with_unavailable();
-        let items = listed_connections(&rows, &projects, 0);
+        let items = listed_connections(&rows, &projects, Some(0));
         let row = items.iter().find(|item| item.label == "Oracle").unwrap();
         assert!(matches!(
             row.command,
@@ -4839,7 +4909,7 @@ mod tests {
     #[test]
     fn enter_on_an_unavailable_row_says_remove() {
         let (rows, projects) = with_unavailable();
-        let items = listed_connections(&rows, &projects, 0);
+        let items = listed_connections(&rows, &projects, Some(0));
         let verb = |label: &str| {
             row_verb(
                 Mode::Search(Scope::Connections),
@@ -4854,7 +4924,7 @@ mod tests {
     #[test]
     fn with_no_connection_the_welcome_verbs_and_unavailable_ones_open_beside_themes_engines_and_fonts()
      {
-        let open = |mode, unavailable| without_a_connection(mode, unavailable);
+        let open = |mode, unavailable| without_a_connection(mode, false, unavailable);
         assert!(open(Mode::Engine, false) == Some(Mode::Engine));
         assert!(open(Mode::Theme(None), false) == Some(Mode::Theme(None)));
         assert!(open(Mode::Font(FontSlot::Grid), false) == Some(Mode::Font(FontSlot::Grid)));
@@ -4887,7 +4957,7 @@ mod tests {
     fn a_connection_row_wears_its_engines_logo() {
         let (mut listed, projects) = connections();
         listed[1].logo = Engine::Sqlite.logo();
-        let items = listed_connections(&listed, &projects, 0);
+        let items = listed_connections(&listed, &projects, Some(0));
         for item in &items {
             if let Command::SwitchProfile(index) = item.command {
                 assert_eq!(item.icon, listed[index].logo, "{}", item.label);
@@ -4941,7 +5011,7 @@ mod tests {
     #[test]
     fn the_connections_scope_is_a_tree_of_projects_with_manage_below() {
         let (listed, projects) = connections();
-        let items = with_manage(listed_connections(&listed, &projects, 0));
+        let items = with_manage(listed_connections(&listed, &projects, Some(0)));
         let (rows, lead) = tree_of(&items, "", &[]);
         assert_eq!(
             rows,
@@ -4969,9 +5039,66 @@ mod tests {
     }
 
     #[test]
+    fn disconnect_heads_the_tree_only_with_a_connection_in_front_and_never_opens_selected() {
+        let (listed, projects) = connections();
+        let tree = listed_connections(&listed, &projects, None);
+        assert!(disconnect_row(None).is_none());
+        assert!(tree.iter().all(|item| item.hint != "current"));
+
+        let items = with_manage(
+            disconnect_row(Some("Orders"))
+                .into_iter()
+                .chain(listed_connections(&listed, &projects, Some(0)))
+                .collect(),
+        );
+        let (rows, lead) = tree_of(&items, "", &[]);
+        assert_eq!(
+            rows[..3],
+            ["Disconnect from Orders", "# No project", "Scratch"]
+        );
+        assert_eq!(lead.as_deref(), Some("Scratch"));
+        // Its label holds the name, and the connection's own row is the one
+        // typing the name opens on.
+        let (rows, lead) = tree_of(&items, "orders", &[]);
+        assert_eq!(rows[0], "Disconnect from Orders");
+        assert_eq!(lead.as_deref(), Some("Orders"));
+        let (_, lead) = tree_of(&items, "disconnect", &[]);
+        assert_eq!(lead.as_deref(), Some("Disconnect from Orders"));
+        assert!(!items[0].in_all);
+    }
+
+    #[test]
+    fn with_connections_but_none_in_front_the_palette_opens_on_them_and_their_lists() {
+        let open = |mode| without_a_connection(mode, true, false);
+        for scope in [Scope::Commands, Scope::All, Scope::Connections] {
+            assert!(open(Mode::Search(scope)) == Some(Mode::Search(scope)));
+        }
+        for scope in [Scope::Objects, Scope::Queries, Scope::History] {
+            assert!(open(Mode::Search(scope)) == Some(Mode::Search(Scope::Connections)));
+        }
+        for mode in [
+            Mode::ConnectionActions(0),
+            Mode::ProjectActions(0),
+            Mode::MoveToProject(0),
+            Mode::Confirm(Target::Connection(0)),
+            Mode::NameProject(None),
+        ] {
+            assert!(open(mode) == Some(mode));
+        }
+        for mode in [
+            Mode::Schema,
+            Mode::Database,
+            Mode::Columns,
+            Mode::DeleteQuery,
+        ] {
+            assert!(open(mode).is_none());
+        }
+    }
+
+    #[test]
     fn a_folded_project_hides_its_connections_until_something_is_typed() {
         let (listed, projects) = connections();
-        let items = with_manage(listed_connections(&listed, &projects, 0));
+        let items = with_manage(listed_connections(&listed, &projects, Some(0)));
         let (rows, _) = tree_of(&items, "", &["Billing", "Empty"]);
         assert_eq!(
             rows[2..7],
@@ -4985,7 +5112,7 @@ mod tests {
     #[test]
     fn a_matching_connection_brings_its_projects_row_unmarked() {
         let (listed, projects) = connections();
-        let items = with_manage(listed_connections(&listed, &projects, 1));
+        let items = with_manage(listed_connections(&listed, &projects, Some(1)));
         let (rows, lead) = tree_of(&items, "internal", &[]);
         assert_eq!(rows, ["# Projects", "Billing", "| Orders"]);
         assert_eq!(lead.as_deref(), Some("Orders"));
@@ -5005,7 +5132,7 @@ mod tests {
     #[test]
     fn a_matching_project_brings_every_connection_it_holds() {
         let (listed, projects) = connections();
-        let items = with_manage(listed_connections(&listed, &projects, 1));
+        let items = with_manage(listed_connections(&listed, &projects, Some(1)));
         let (rows, lead) = tree_of(&items, "billing", &["Billing"]);
         assert_eq!(rows, ["# Projects", "Billing", "| Orders", "| Ledger"]);
         assert_eq!(lead.as_deref(), Some("Billing"));
@@ -5014,7 +5141,7 @@ mod tests {
     #[test]
     fn the_project_holding_the_best_match_comes_first() {
         let (listed, projects) = connections();
-        let items = with_manage(listed_connections(&listed, &projects, 1));
+        let items = with_manage(listed_connections(&listed, &projects, Some(1)));
         let (rows, _) = tree_of(&items, "warehouse", &[]);
         assert_eq!(rows, ["# Projects", "Analytics", "| Warehouse"]);
         let (rows, lead) = tree_of(&items, "an", &[]);
@@ -5025,7 +5152,7 @@ mod tests {
     #[test]
     fn an_empty_project_holds_one_row_that_adds_a_connection_to_it() {
         let (listed, projects) = connections();
-        let items = listed_connections(&listed, &projects, 0);
+        let items = listed_connections(&listed, &projects, Some(0));
         let (rows, _) = tree_of(&items, "empty", &[]);
         assert_eq!(rows, ["# Projects", "Empty", "| New connection in Empty…"]);
         let child = items
@@ -5041,7 +5168,7 @@ mod tests {
     #[test]
     fn a_projects_row_folds_on_enter_and_offers_its_actions() {
         let (listed, projects) = connections();
-        let items = listed_connections(&listed, &projects, 0);
+        let items = listed_connections(&listed, &projects, Some(0));
         let billing = items.iter().find(|item| item.label == "Billing").unwrap();
         assert!(matches!(billing.command, Command::ToggleProject(0)));
         assert!(!billing.in_all);
@@ -5066,7 +5193,7 @@ mod tests {
     #[test]
     fn with_no_projects_the_connections_are_listed_bare() {
         let (listed, _) = connections();
-        let items = listed_connections(&listed, &[], 1);
+        let items = listed_connections(&listed, &[], Some(1));
         assert_eq!(
             arranged(&items, Some(Scope::Connections), "", &[]),
             ["Orders", "Scratch", "Ledger", "Warehouse"]
@@ -5076,7 +5203,7 @@ mod tests {
     #[test]
     fn all_lists_only_the_other_connections_in_the_project_in_front() {
         let (listed, projects) = connections();
-        let items = listed_connections(&listed, &projects, 0);
+        let items = listed_connections(&listed, &projects, Some(0));
         assert_eq!(
             arranged(&items, Some(Scope::All), "", &[]),
             ["# Connections", "Ledger"]
@@ -5160,6 +5287,7 @@ mod tests {
             Command::PickProject(ProjectVerb::Delete),
             Command::RemoveConnection(0),
             Command::DeleteProject("Billing".into()),
+            Command::Disconnect,
         ] {
             assert!(!remembered(Scope::Commands, &command));
         }
@@ -5188,7 +5316,7 @@ mod tests {
     fn with_no_projects_the_connections_get_a_header_beside_manage() {
         let (mut listed, _) = connections();
         listed.push(listed_newsroom());
-        let mut items = listed_connections(&listed, &[], 0);
+        let mut items = listed_connections(&listed, &[], Some(0));
         items.push(item("New connection…", Scope::Connections, MANAGE));
         assert_eq!(
             arranged(&items, Some(Scope::Connections), "new", &[]),
@@ -5211,7 +5339,7 @@ mod tests {
             project(NO_PROJECT, &["ledger"]),
             project(MANAGE, &["warehouse"]),
         ];
-        let mut items = listed_connections(&listed, &projects, 0);
+        let mut items = listed_connections(&listed, &projects, Some(0));
         items.push(item("New connection…", Scope::Connections, MANAGE));
         assert_eq!(
             arranged(&items, Some(Scope::Connections), "", &[]),
@@ -5233,7 +5361,7 @@ mod tests {
     #[test]
     fn a_match_never_runs_from_a_connections_name_into_its_host() {
         let (listed, projects) = connections();
-        let items = listed_connections(&listed, &projects, 1);
+        let items = listed_connections(&listed, &projects, Some(1));
         // "Ledger localhost" as one text would take the r, then the l and o.
         assert!(arranged(&items, Some(Scope::Connections), "rlo", &[]).is_empty());
         assert_eq!(
@@ -5245,7 +5373,7 @@ mod tests {
     #[test]
     fn while_an_import_asks_nothing_that_names_a_project_or_a_connection_is_listed() {
         let (listed, projects) = connections();
-        let mut items = listed_connections(&listed, &projects, 0);
+        let mut items = listed_connections(&listed, &projects, Some(0));
         items.extend([
             Item::new("Run query", icon::RUN, Command::RunQuery),
             Item::new("New connection…", icon::PLUS, Command::NewConnection),

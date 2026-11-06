@@ -96,7 +96,7 @@ impl Workspace {
     }
 
     /// Names a new project: in the palette, or on the welcome surface while
-    /// there is no connection to have one.
+    /// no connection is in front.
     pub(crate) fn new_project(
         &mut self,
         _: &NewProject,
@@ -108,7 +108,7 @@ impl Workspace {
         if self.pending_import.is_some() {
             return;
         }
-        if !self.profiles.is_empty() {
+        if self.profile().is_some() {
             self.open_palette(PaletteMode::NameProject(None), window, cx);
             return;
         }
@@ -148,7 +148,7 @@ impl Workspace {
         ) else {
             return false;
         };
-        if self.profiles.is_empty() && self.form.is_none() {
+        if self.profile().is_none() && self.form.is_none() {
             self.project_name_error = Some(message);
             cx.notify();
         } else {
