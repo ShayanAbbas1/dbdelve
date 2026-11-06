@@ -2549,12 +2549,6 @@ impl Workspace {
                             }),
                         ) => object_icon(object.kind),
                         _ if query.is_some() || missing => saved_query_icon(syntax),
-                        (None, Some(Shortcut::Folder(_)))
-                            if entry.is_folder() && entry.is_expanded() =>
-                        {
-                            icon::FOLDER_OPEN
-                        }
-                        (None, Some(Shortcut::Folder(_))) => icon::FOLDER,
                         _ if entry.is_expanded() => icon::CHEVRON_DOWN,
                         _ => icon::CHEVRON_RIGHT,
                     };
@@ -2564,6 +2558,8 @@ impl Workspace {
                         Some(icon::PIN)
                     } else if schema_row {
                         Some(icon::SCHEMA)
+                    } else if matches!(shortcut, Some(Shortcut::Folder(_))) {
+                        Some(icon::FOLDER)
                     } else {
                         None
                     };

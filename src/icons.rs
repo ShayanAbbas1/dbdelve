@@ -176,7 +176,6 @@ pub mod icon {
     pub const PROJECT: &str = "icons/folder.svg";
     /// A folder of shortcuts in the explorer, closed and open.
     pub const FOLDER: &str = "icons/folder.svg";
-    pub const FOLDER_OPEN: &str = "icons/folder-open.svg";
     /// The Pinned group's header, which is the icon alone.
     pub const PIN: &str = "icons/pin.svg";
     /// A schema: a box rather than a folder, since the folders beside it are
