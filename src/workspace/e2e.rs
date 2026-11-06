@@ -2791,13 +2791,9 @@ fn copy_results_formats_work_from_menu_and_palette_and_restore_focus(cx: &mut Te
         };
         let open_menu = |cx: &mut VisualTestContext| {
             let bounds = cx
-                .debug_bounds("copy-results-format")
-                .expect("copy split button is drawn");
-            let arrow = gpui::point(
-                bounds.right() - gpui::px(crate::ui::Control::Compact.height() / 2.),
-                bounds.center().y,
-            );
-            cx.simulate_click(arrow, gpui::Modifiers::default());
+                .debug_bounds("export-results")
+                .expect("Export button is drawn");
+            cx.simulate_click(bounds.center(), gpui::Modifiers::default());
             settle(cx);
             cx.update(|window, _| {
                 assert!(
@@ -2814,44 +2810,24 @@ fn copy_results_formats_work_from_menu_and_palette_and_restore_focus(cx: &mut Te
                 let row = explorer_row(&workspace, "relation-main\0birds", cx).center();
                 cx.simulate_click(row, gpui::Modifiers::default());
                 settle(cx);
-
-                let import = cx.debug_bounds("import-rows").unwrap();
-                let copy = cx.debug_bounds("copy-results-format").unwrap();
-                let hover_background =
-                    |bounds: gpui::Bounds<gpui::Pixels>, at, cx: &mut VisualTestContext| {
-                        cx.update(|window, cx| window.simulate_mouse_move(at, cx));
-                        settle(cx);
-                        cx.update(|window, cx| {
-                            window.draw(cx).clear(cx);
-                            window
-                                .painted_quads()
-                                .into_iter()
-                                .find(|quad| quad.bounds == bounds.scale(window.scale_factor()))
-                                .expect("hover paints one background across the whole control")
-                                .background
-                        })
-                    };
-                let import_hover = hover_background(import, import.center(), cx);
-                for at in [
-                    cx.debug_bounds("copy-results").unwrap().center(),
-                    gpui::point(copy.right() - gpui::px(12.), copy.center().y),
-                ] {
-                    assert_eq!(hover_background(copy, at, cx), import_hover);
-                }
             }
-            let main = cx
-                .debug_bounds("copy-results")
-                .expect("main copy button is drawn");
-            cx.simulate_click(main.center(), gpui::Modifiers::default());
-            settle(cx);
+            open_menu(cx);
+            cx.simulate_keystrokes("down");
+            press(cx, "enter");
             assert_eq!(
                 read_clipboard(cx).0,
                 expected(crate::export::ClipboardFormat::Tsv, cx)
             );
 
             for (ix, format) in crate::export::ClipboardFormat::ALL.into_iter().enumerate() {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string("before menu".into()));
                 open_menu(cx);
-                for _ in 0..=ix {
+                cx.simulate_keystrokes("down down");
+                settle(cx);
+                // The menu hangs off the right edge, so its submenu opens leftwards.
+                cx.simulate_keystrokes("left");
+                settle(cx);
+                for _ in 0..ix {
                     cx.simulate_keystrokes("down");
                 }
                 press(cx, "enter");
@@ -2875,6 +2851,7 @@ fn copy_results_formats_work_from_menu_and_palette_and_restore_focus(cx: &mut Te
                     .map(|line| serde_json::from_str(line).unwrap())
                     .collect();
                 assert_eq!(pasted, metadata["rows"].as_array().unwrap().clone());
+                settle(cx);
                 cx.update(|window, _| {
                     assert!(
                         !window
@@ -2937,8 +2914,7 @@ fn copy_results_formats_work_from_menu_and_palette_and_restore_focus(cx: &mut Te
                 });
                 workspace.update(cx, |_, cx| cx.notify());
                 settle(cx);
-                assert!(cx.debug_bounds("copy-results").is_none());
-                assert!(cx.debug_bounds("copy-results-format").is_none());
+                assert!(cx.debug_bounds("export-results").is_none());
                 for format in crate::export::ClipboardFormat::ALL {
                     workspace.update(cx, |workspace, cx| workspace.copy_results_as(format, cx));
                     assert_eq!(read_clipboard(cx).0, expected(format, cx));

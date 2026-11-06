@@ -61,9 +61,9 @@ use crate::{
     tab_drag::{DragTab, TabStrip},
     theme::{Theme, fonts, layout, theme},
     ui::{
-        Code, Control, Tone, button, chord_hint, code_highlights, compact_count, group_thousands,
-        icon_button, key_hint, keycap_text, kind_color, object_icon, reconnect_button, row_icon,
-        section_label,
+        Code, Control, Tone, button, button_label, chord_hint, code_highlights, compact_count,
+        control, group_thousands, icon_button, key_hint, keycap_text, kind_color, object_icon,
+        reconnect_button, row_icon, section_label,
     },
     workspace::error_in_buffer,
 };
@@ -3512,12 +3512,7 @@ fn render_query_toolbar(
     let new_row = (!session.naming)
         .then(|| session.query_insert_target(cx))
         .flatten()
-        .map(|(_, table, _)| {
-            let label = format!("Insert in {table}");
-            button("new-row", label, Tone::Quiet, Control::Compact, t).on_click(|_, window, cx| {
-                window.dispatch_action(Box::new(NewRow), cx);
-            })
-        });
+        .map(|(_, table, _)| insert_button("new-row", format!("Insert in {table}"), t));
 
     let named = session.open_query().is_some();
     let save_workspace = workspace.clone();
@@ -3531,9 +3526,9 @@ fn render_query_toolbar(
         .border_color(t.border)
         .text_size(px(layout::chrome(layout::TEXT_SM)))
         .children(plan_toggle)
-        .children(new_row)
         .child(div().flex_1())
         .children(naming)
+        .children(new_row)
         // A named query is already written to disk on every swap, so there
         // is nothing for a save button to do that has not been done. What
         // it can still do is change the name.
@@ -3661,13 +3656,29 @@ fn relation_controls(
                     cx,
                 )),
         )
-        .children(takes_inserts.then(|| {
-            button("new-row", "Insert", Tone::Quiet, Control::Compact, t).on_click(
-                |_, window, cx| {
-                    window.dispatch_action(Box::new(NewRow), cx);
-                },
-            )
-        }))
+        .children(takes_inserts.then(|| insert_button("new-row", "Insert".into(), t)))
+}
+
+/// Insert reads as an action, not a third view beside Data and Plan: a plus
+/// leads it and it takes the same button box as the controls around it.
+fn insert_button(id: &'static str, label: String, t: Theme) -> Button {
+    control(id, Tone::Quiet, Control::Compact)
+        .px(px(Control::Compact.padding()))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(layout::SPACE_XS))
+                .child(
+                    icon(icon::PLUS)
+                        .size(px(layout::chrome(layout::ICON_SIZE)))
+                        .text_color(Tone::Quiet.ink(t)),
+                )
+                .child(button_label(label, Tone::Quiet, Control::Compact, t)),
+        )
+        .on_click(|_, window, cx| {
+            window.dispatch_action(Box::new(NewRow), cx);
+        })
 }
 
 /// One choice of a handful, in the row-limit chips' clothes: all of them on

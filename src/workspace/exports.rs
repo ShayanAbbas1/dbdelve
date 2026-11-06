@@ -14,7 +14,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use gpui_component::ActiveTheme;
+use gpui::WeakEntity;
+use gpui_component::{
+    ActiveTheme,
+    menu::{PopupMenu, PopupMenuItem},
+};
 
 use super::editing::Short;
 use super::*;
@@ -1491,5 +1495,61 @@ mod tests {
         }
         assert_eq!(run("SELECT * FROM notes ORDER BY id").rows, before);
         _ = std::fs::remove_dir_all(&directory);
+    }
+}
+
+/// The status bar's Export menu: the clipboard copy, then the file exports.
+/// Export SQL is left out, not greyed, on an engine whose rows are not SQL
+/// values, as its button was.
+#[derive(Clone)]
+pub(super) struct ExportMenu {
+    pub(super) workspace: WeakEntity<Workspace>,
+    pub(super) sql: bool,
+}
+
+impl ExportMenu {
+    pub(super) fn build(
+        &self,
+        menu: PopupMenu,
+        window: &mut Window,
+        cx: &mut gpui::Context<PopupMenu>,
+    ) -> PopupMenu {
+        let formats = self.workspace.clone();
+        let copy = self.workspace.clone();
+        let file = |label: &'static str, format: FileAs| {
+            let workspace = self.workspace.clone();
+            PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                _ = workspace.update(cx, |workspace, cx| {
+                    workspace.export_results(format, cx);
+                });
+            })
+        };
+        menu.item(
+            PopupMenuItem::new("Copy Results").on_click(move |_, _, cx| {
+                _ = copy.update(cx, |workspace, cx| {
+                    workspace.copy_results_as(ClipboardFormat::Tsv, cx);
+                });
+            }),
+        )
+        .submenu("Copy Results As", window, cx, move |submenu, _, _| {
+            ClipboardFormat::ALL
+                .into_iter()
+                .fold(submenu, |submenu, format| {
+                    let workspace = formats.clone();
+                    submenu.item(
+                        PopupMenuItem::new(format.label()).on_click(move |_, _, cx| {
+                            _ = workspace.update(cx, |workspace, cx| {
+                                workspace.copy_results_as(format, cx);
+                            });
+                        }),
+                    )
+                })
+        })
+        .separator()
+        .item(file("Export CSV\u{2026}", FileAs::Rows(Format::Csv)))
+        .item(file("Export JSON\u{2026}", FileAs::Rows(Format::Json)))
+        .when(self.sql, |menu| {
+            menu.item(file("Export SQL\u{2026}", FileAs::Inserts))
+        })
     }
 }
