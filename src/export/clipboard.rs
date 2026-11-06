@@ -23,6 +23,7 @@ impl ClipboardFormat {
         Self::AsciiTable,
     ];
 
+    /// The format name shared by the menu, palette and copy confirmation.
     pub fn label(self) -> &'static str {
         match self {
             Self::Tsv => "TSV",
@@ -33,6 +34,8 @@ impl ClipboardFormat {
         }
     }
 
+    /// Render clipboard text, limiting table formats to 16 MiB.
+    /// TSV and CSV retain the file renderer's unbounded output behavior.
     pub fn render(self, engine: Engine, result: &QueryResult) -> Result<String, &'static str> {
         match self {
             Self::Tsv => Ok(render(Format::Tsv, result)),
@@ -43,6 +46,8 @@ impl ClipboardFormat {
         }
     }
 
+    /// Measure escaped display widths before padding, so Unicode cells align
+    /// without truncating values. Engine type metadata determines numeric alignment.
     fn table(self, engine: Engine, result: &QueryResult) -> Result<String, fmt::Error> {
         if result.columns.is_empty() {
             return Ok(String::new());
@@ -117,6 +122,7 @@ impl ClipboardFormat {
         Ok(out.0)
     }
 
+    /// Write one padded row, keeping headers left-aligned even in numeric columns.
     fn line<'a>(
         self,
         out: &mut TableText,
@@ -148,6 +154,7 @@ impl ClipboardFormat {
         Ok(())
     }
 
+    /// Write a table rule with junctions for its top, middle or bottom position.
     fn border(
         self,
         out: &mut TableText,
@@ -169,6 +176,8 @@ impl ClipboardFormat {
         Ok(())
     }
 
+    /// Escape markup and controls so each value stays in one physical table row.
+    /// Normalize CRLF as one break and distinguish literal backslashes from escapes.
     fn cell(self, value: &str) -> Result<String, fmt::Error> {
         let markdown = self == Self::Markdown;
         let mut out = TableText::default();
@@ -211,6 +220,7 @@ impl ClipboardFormat {
 struct TableText(String);
 
 impl TableText {
+    /// Reject padding that would exceed the UTF-8 byte limit before allocating it.
     fn repeat(&mut self, ch: char, count: usize) -> fmt::Result {
         if count > (COPIED_ROWS_TEXT_LIMIT - self.0.len()) / ch.len_utf8() {
             return Err(fmt::Error);
@@ -221,6 +231,7 @@ impl TableText {
 }
 
 impl Write for TableText {
+    /// Append text only when the complete slice fits, leaving output intact on error.
     fn write_str(&mut self, text: &str) -> fmt::Result {
         if text.len() > COPIED_ROWS_TEXT_LIMIT - self.0.len() {
             return Err(fmt::Error);
@@ -235,6 +246,7 @@ mod tests {
     use super::*;
     use crate::db::{Column, rows};
 
+    /// Include numeric metadata, numeric-looking text, NULL, empty text and literal NULL.
     fn sample() -> QueryResult {
         QueryResult {
             columns: vec![
@@ -256,6 +268,7 @@ mod tests {
         }
     }
 
+    /// Lock down complete table layouts and retain the existing TSV/CSV rendering.
     #[test]
     fn table_formats_preserve_headers_values_and_numeric_alignment() {
         let result = sample();
@@ -308,6 +321,7 @@ mod tests {
         }
     }
 
+    /// Exercise the same escaping for headers and values without adding physical rows.
     #[test]
     fn escaping_keeps_markup_and_control_characters_inside_one_physical_line() {
         let value = "|\\<b>&*x*_`[a]~\r\nnext\rtab\t\0\u{1b}\u{2028}\u{202e}";
@@ -344,6 +358,7 @@ mod tests {
         }
     }
 
+    /// Catch byte- or character-count padding that misaligns wide and combining text.
     #[test]
     fn padding_uses_display_width_for_cjk_emoji_and_combining_marks() {
         let mut result = sample();
@@ -360,6 +375,7 @@ mod tests {
         );
     }
 
+    /// Preserve column positions when names cannot identify them and there are no rows.
     #[test]
     fn empty_and_duplicate_headers_keep_their_positions_even_without_rows() {
         let mut result = sample();
@@ -388,6 +404,7 @@ mod tests {
         }
     }
 
+    /// Check the inclusive byte boundary, including escaping growth and multibyte text.
     #[test]
     fn table_output_accepts_exactly_sixteen_mib_and_refuses_one_more_byte() {
         let width = (COPIED_ROWS_TEXT_LIMIT - 24) / 5;
