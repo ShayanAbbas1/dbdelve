@@ -25,11 +25,7 @@ use crate::{
     ui::{Control, Tone, icon_button},
 };
 
-/// Past this much text, a copy carries its columns but not its rows: the rows
-/// beside it are a second rendering of the same rows, built on the UI thread
-/// and held on the clipboard twice over. A paste of it then reads the text,
-/// which loses NULL against empty and each value's own type.
-pub const COPIED_ROWS_TEXT_LIMIT: usize = 16 * 1024 * 1024;
+pub use crate::export::COPIED_ROWS_TEXT_LIMIT;
 
 /// `text` for the clipboard, with `result`'s rows beside it for a paste back
 /// into DBDelve ([`export::CopiedRows`]).

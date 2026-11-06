@@ -46,7 +46,7 @@ use crate::{
     db::{ConnectionConfig, ExplainMode, RelationKind, RoutineKind, Syntax},
     explorer::ROW_LIMITS,
     explorer::{ExplorerTarget, ObjectKind},
-    export::{FileAs, Format, RowsAs},
+    export::{ClipboardFormat, FileAs, Format, RowsAs},
     fuzzy::{Fuzzy, Query},
     icons::icon,
     import::Source,
@@ -353,7 +353,7 @@ pub enum Command {
     /// Stop the export of every row this connection is running.
     CancelExport,
     CopyRow,
-    CopyResults(Format),
+    CopyResults(ClipboardFormat),
     SwitchProfile(usize),
     /// Narrow the palette to the Connections scope.
     SwitchConnection,
@@ -3779,17 +3779,19 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             command(
                 "Copy results as TSV",
                 icon::COPY,
-                Command::CopyResults(Format::Tsv),
+                Command::CopyResults(ClipboardFormat::Tsv),
                 RESULTS,
             ),
             "copy_results",
         ));
-        items.push(command(
-            "Copy results as CSV",
-            icon::COPY,
-            Command::CopyResults(Format::Csv),
-            RESULTS,
-        ));
+        for format in ClipboardFormat::ALL.into_iter().skip(1) {
+            items.push(command(
+                &format!("Copy results as {}", format.label()),
+                icon::COPY,
+                Command::CopyResults(format),
+                RESULTS,
+            ));
+        }
     }
 
     // The switcher's chips, where it is drawn.

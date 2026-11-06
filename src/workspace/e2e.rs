@@ -2753,3 +2753,308 @@ fn the_ways_to_import_show_only_where_rows_can_be_imported(cx: &mut TestAppConte
         quit(workspace, cx);
     });
 }
+
+#[gpui::test]
+fn copy_results_formats_work_from_menu_and_palette_and_restore_focus(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            "create table birds (id integer primary key, note text);
+             insert into birds values (1, null), (2, ''), (3, 'NULL');",
+        );
+        cx.executor().allow_parking();
+        let sql = "select * from birds order by id";
+        cx.simulate_input(sql);
+        cx.simulate_keystrokes("secondary-enter");
+        settle(cx);
+
+        let read_clipboard = |cx: &mut VisualTestContext| {
+            let item = cx.read_from_clipboard().expect("copy writes the clipboard");
+            let metadata = item.entries().iter().find_map(|entry| match entry {
+                gpui::ClipboardEntry::String(string) => string.metadata.clone(),
+                _ => None,
+            });
+            (item.text().unwrap(), metadata)
+        };
+        let expected = |format: crate::export::ClipboardFormat, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, cx| {
+                let grid = workspace
+                    .profile()
+                    .unwrap()
+                    .session
+                    .active_results()
+                    .unwrap()
+                    .read(cx)
+                    .delegate();
+                format.render(Engine::Sqlite, grid.result()).unwrap()
+            })
+        };
+        let open_menu = |cx: &mut VisualTestContext| {
+            let bounds = cx
+                .debug_bounds("copy-results-format")
+                .expect("copy split button is drawn");
+            let arrow = gpui::point(
+                bounds.right() - gpui::px(crate::ui::Control::Compact.height() / 2.),
+                bounds.center().y,
+            );
+            cx.simulate_click(arrow, gpui::Modifiers::default());
+            settle(cx);
+            cx.update(|window, _| {
+                assert!(
+                    window
+                        .context_stack()
+                        .iter()
+                        .any(|context| context.contains("PopupMenu"))
+                )
+            });
+        };
+
+        for object_tab in [false, true] {
+            if object_tab {
+                let row = explorer_row(&workspace, "relation-main\0birds", cx).center();
+                cx.simulate_click(row, gpui::Modifiers::default());
+                settle(cx);
+
+                let import = cx.debug_bounds("import-rows").unwrap();
+                let copy = cx.debug_bounds("copy-results-format").unwrap();
+                let hover_background =
+                    |bounds: gpui::Bounds<gpui::Pixels>, at, cx: &mut VisualTestContext| {
+                        cx.update(|window, cx| window.simulate_mouse_move(at, cx));
+                        settle(cx);
+                        cx.update(|window, cx| {
+                            window.draw(cx).clear(cx);
+                            window
+                                .painted_quads()
+                                .into_iter()
+                                .find(|quad| quad.bounds == bounds.scale(window.scale_factor()))
+                                .expect("hover paints one background across the whole control")
+                                .background
+                        })
+                    };
+                let import_hover = hover_background(import, import.center(), cx);
+                for at in [
+                    cx.debug_bounds("copy-results").unwrap().center(),
+                    gpui::point(copy.right() - gpui::px(12.), copy.center().y),
+                ] {
+                    assert_eq!(hover_background(copy, at, cx), import_hover);
+                }
+            }
+            let main = cx
+                .debug_bounds("copy-results")
+                .expect("main copy button is drawn");
+            cx.simulate_click(main.center(), gpui::Modifiers::default());
+            settle(cx);
+            assert_eq!(
+                read_clipboard(cx).0,
+                expected(crate::export::ClipboardFormat::Tsv, cx)
+            );
+
+            for (ix, format) in crate::export::ClipboardFormat::ALL.into_iter().enumerate() {
+                open_menu(cx);
+                for _ in 0..=ix {
+                    cx.simulate_keystrokes("down");
+                }
+                press(cx, "enter");
+                let (text, metadata) = read_clipboard(cx);
+                assert_eq!(text, expected(format, cx), "menu {format:?}");
+                let metadata = metadata.expect("all successful table copies carry original rows");
+                let metadata: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+                assert_eq!(metadata["rows"][0]["note"], serde_json::Value::Null);
+                assert_eq!(metadata["rows"][1]["note"], "");
+                assert_eq!(metadata["rows"][2]["note"], "NULL");
+                assert!(metadata["columns"][0]["type"].is_string());
+                let (_, bytes, _) = crate::import_rows::pasted(
+                    &text,
+                    Some(&serde_json::to_string(&metadata).unwrap()),
+                    false,
+                )
+                .unwrap();
+                let pasted: Vec<serde_json::Value> = String::from_utf8(bytes)
+                    .unwrap()
+                    .lines()
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .collect();
+                assert_eq!(pasted, metadata["rows"].as_array().unwrap().clone());
+                cx.update(|window, _| {
+                    assert!(
+                        !window
+                            .context_stack()
+                            .iter()
+                            .any(|context| context.contains("PopupMenu"))
+                    )
+                });
+
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string("before palette".into()));
+                cx.simulate_keystrokes("secondary-shift-p");
+                settle(cx);
+                cx.simulate_input(&format!("Copy results as {}", format.label()));
+                press(cx, "enter");
+                assert_eq!(read_clipboard(cx).0, text, "palette {format:?}");
+            }
+            open_menu(cx);
+            press(cx, "escape");
+            cx.update(|window, cx| {
+                assert!(
+                    !window
+                        .context_stack()
+                        .iter()
+                        .any(|context| context.contains("PopupMenu"))
+                );
+                assert!(
+                    window.focused(cx).is_some(),
+                    "Escape returns a live dispatch path"
+                );
+            });
+            // The existing copy action still defaults to TSV after a table format was used.
+            cx.simulate_keystrokes("secondary-k r");
+            settle(cx);
+            cx.update(|window, cx| {
+                window.dispatch_action(Box::new(crate::actions::CopyResults), cx);
+            });
+            assert_eq!(
+                read_clipboard(cx).0,
+                expected(crate::export::ClipboardFormat::Tsv, cx)
+            );
+            if !object_tab {
+                assert_eq!(buffer(&workspace, cx), sql);
+            } else {
+                let grid = workspace.read_with(cx, |workspace, _| {
+                    workspace
+                        .profile()
+                        .unwrap()
+                        .session
+                        .active_results()
+                        .unwrap()
+                        .clone()
+                });
+                grid.update(cx, |grid, cx| {
+                    assert!(grid.delegate_mut().set_pending(
+                        0,
+                        1,
+                        crate::result_grid::NewValue::Value("pending".into())
+                    ));
+                    cx.notify();
+                });
+                workspace.update(cx, |_, cx| cx.notify());
+                settle(cx);
+                assert!(cx.debug_bounds("copy-results").is_none());
+                assert!(cx.debug_bounds("copy-results-format").is_none());
+                for format in crate::export::ClipboardFormat::ALL {
+                    workspace.update(cx, |workspace, cx| workspace.copy_results_as(format, cx));
+                    assert_eq!(read_clipboard(cx).0, expected(format, cx));
+                    assert!(!read_clipboard(cx).0.contains("pending"));
+                }
+                grid.update(cx, |grid, _| grid.delegate_mut().discard_pending());
+            }
+        }
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn refused_table_copies_preserve_the_clipboard(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let grid = workspace.read_with(cx, |workspace, _| {
+            workspace
+                .profile()
+                .unwrap()
+                .session
+                .active_results()
+                .unwrap()
+                .clone()
+        });
+        let column = crate::db::Column {
+            name: "v".into(),
+            data_type: Some("text".into()),
+        };
+        let result = crate::db::QueryResult {
+            columns: vec![column.clone()],
+            rows: crate::db::rows(vec![vec![Some(
+                "x".repeat(crate::result_grid::COPIED_ROWS_TEXT_LIMIT),
+            )]]),
+            ..Default::default()
+        };
+        grid.update(cx, |grid, _| {
+            *grid.delegate_mut() =
+                crate::result_grid::ResultGrid::new(result, crate::sql::Mode::ReadOnly);
+        });
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string("previous clipboard".into()));
+        for format in crate::export::ClipboardFormat::ALL.into_iter().skip(2) {
+            workspace.update(cx, |workspace, cx| workspace.copy_results_as(format, cx));
+            assert_eq!(
+                cx.read_from_clipboard().unwrap().text().as_deref(),
+                Some("previous clipboard")
+            );
+            workspace.read_with(cx, |workspace, _| {
+                assert_eq!(
+                    workspace.profile().unwrap().session.notice.as_deref(),
+                    Some("Table output exceeds 16 MiB. Copy as TSV/CSV or export to a file.")
+                );
+            });
+        }
+        let width = (crate::result_grid::COPIED_ROWS_TEXT_LIMIT - 24) / 5;
+        let value = format!("{}\u{301}", "x".repeat(width));
+        grid.update(cx, |grid, _| {
+            *grid.delegate_mut() = crate::result_grid::ResultGrid::new(
+                crate::db::QueryResult {
+                    columns: vec![column.clone()],
+                    rows: crate::db::rows(vec![vec![Some(value.clone())]]),
+                    ..Default::default()
+                },
+                crate::sql::Mode::ReadOnly,
+            );
+        });
+        workspace.update(cx, |workspace, cx| {
+            workspace.copy_results_as(crate::export::ClipboardFormat::AsciiTable, cx);
+        });
+        let item = cx.read_from_clipboard().unwrap();
+        assert_eq!(
+            item.text().unwrap().len(),
+            crate::result_grid::COPIED_ROWS_TEXT_LIMIT
+        );
+        let metadata = item
+            .entries()
+            .iter()
+            .find_map(|entry| match entry {
+                gpui::ClipboardEntry::String(string) => string.metadata.as_deref(),
+                _ => None,
+            })
+            .unwrap();
+        let metadata: serde_json::Value = serde_json::from_str(metadata).unwrap();
+        assert_eq!(metadata["rows"][0]["v"], value);
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string("previous clipboard".into()));
+        for result in [
+            crate::result_grid::ResultGrid::new(
+                crate::db::QueryResult::default(),
+                crate::sql::Mode::ReadOnly,
+            ),
+            crate::result_grid::ResultGrid::new(
+                crate::db::QueryResult {
+                    columns: vec![column.clone()],
+                    capped_from: Some(10),
+                    ..Default::default()
+                },
+                crate::sql::Mode::ReadOnly,
+            ),
+            crate::result_grid::ResultGrid::new(
+                crate::db::QueryResult {
+                    columns: vec![column],
+                    ..Default::default()
+                },
+                crate::sql::Mode::ReadOnly,
+            )
+            .streaming(0),
+        ] {
+            grid.update(cx, |grid, _| *grid.delegate_mut() = result);
+            for format in crate::export::ClipboardFormat::ALL {
+                workspace.update(cx, |workspace, cx| workspace.copy_results_as(format, cx));
+                assert_eq!(
+                    cx.read_from_clipboard().unwrap().text().as_deref(),
+                    Some("previous clipboard")
+                );
+            }
+        }
+        quit(workspace, cx);
+    });
+}

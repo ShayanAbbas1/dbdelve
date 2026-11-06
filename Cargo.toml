@@ -278,6 +278,10 @@ nucleo-matcher = "=0.3.1"
 # back into the text they cover. Already in the graph through it; pinned to the
 # locked version so naming it links no second copy.
 unicode-segmentation = "=1.13.3"
+# Display-cell widths for the copied text tables, so CJK and combining marks
+# pad to the same column. Already in the graph through gpui-component; pinned
+# to the locked version so naming it links no second copy.
+unicode-width = "=0.2.2"
 # ClickHouse's result reader: `memmem` finds the exception frame a server
 # appends to a body across read boundaries, and `memchr_iter` counts the rows
 # of a result being drained. Already in the graph through nucleo-matcher and
