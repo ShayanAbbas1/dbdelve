@@ -3210,6 +3210,37 @@ fn disconnect_is_refused_while_a_grid_holds_unapplied_edits(cx: &mut TestAppCont
 }
 
 #[gpui::test]
+fn disconnect_is_refused_while_an_export_runs(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        workspace.update(cx, |workspace, _| {
+            let profile = workspace.profile_mut().expect("a connection in front");
+            profile.session.exporting = Some(crate::session::Exporting {
+                file: "birds.csv".into(),
+                started: std::time::Instant::now(),
+                progress: Default::default(),
+            });
+        });
+
+        disconnect(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the connection stays in front");
+            assert!(matches!(profile.state, ProfileState::Connected(_)));
+            let notice = profile.session.notice.as_deref().unwrap_or_default();
+            assert_eq!(
+                notice,
+                "An export to birds.csv is running, so the connection was not closed."
+            );
+        });
+
+        workspace.update(cx, |workspace, _| {
+            workspace.profile_mut().expect("in front").session.exporting = None;
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn disconnect_stops_what_a_relation_tab_holds_the_connection_for(cx: &mut TestAppContext) {
     crate::IGNORE_ENVIRONMENT.set(true);
     store::tests::with_home(|| {

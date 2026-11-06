@@ -1155,6 +1155,19 @@ impl Workspace {
             self.note(format!("{edited}, so the connection was not closed."), cx);
             return;
         }
+        // Home has no status bar to cancel it from, and the export holds a
+        // connection of its own until it ends.
+        if let Some(exporting) = self
+            .profile()
+            .and_then(|profile| profile.session.exporting.as_ref())
+        {
+            let file = exporting.file.clone();
+            self.note(
+                format!("An export to {file} is running, so the connection was not closed."),
+                cx,
+            );
+            return;
+        }
         let persisted = self.persist_buffer(cx);
         // Not running, which was refused above: its column lookup answers by
         // file alone, and would land on whatever the profile next opens.

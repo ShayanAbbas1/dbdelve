@@ -166,7 +166,8 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   File → Disconnect, and `disconnect`, unbound by default). Only that one:
   others open in the background stay, as a switch leaves them. It is refused,
   as Select Database is, while a grid of the profile holds unapplied cell
-  edits or an import runs into it. Otherwise the buffers are written, an
+  edits, an import runs into it, or an export of every row runs on it (home
+  has no status bar to cancel it from). Otherwise the buffers are written, an
   import dialog not yet running is closed (its column lookup answers by file,
   not generation), data files waiting on the connect are forgotten (their
   statements stay in their tabs), every query and relation tab's run and
