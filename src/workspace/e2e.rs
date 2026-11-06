@@ -2281,8 +2281,6 @@ fn the_ways_to_import_show_only_where_rows_can_be_imported(cx: &mut TestAppConte
     });
 }
 
-/// Exercise query and object copies through real controls, including hover,
-/// clipboard metadata and the keyboard dispatch path after menus close.
 #[gpui::test]
 fn copy_results_formats_work_from_menu_and_palette_and_restore_focus(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
@@ -2413,6 +2411,7 @@ fn copy_results_formats_work_from_menu_and_palette_and_restore_focus(cx: &mut Te
                     )
                 });
 
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string("before palette".into()));
                 cx.simulate_keystrokes("secondary-shift-p");
                 settle(cx);
                 cx.simulate_input(&format!("Copy results as {}", format.label()));
@@ -2479,7 +2478,6 @@ fn copy_results_formats_work_from_menu_and_palette_and_restore_focus(cx: &mut Te
     });
 }
 
-/// Keep prior clipboard contents on refusal and retain row metadata at the exact limit.
 #[gpui::test]
 fn refused_table_copies_preserve_the_clipboard(cx: &mut TestAppContext) {
     store::tests::with_home(|| {

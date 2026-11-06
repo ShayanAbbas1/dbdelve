@@ -3,7 +3,7 @@ use std::fmt::{self, Write};
 use unicode_width::UnicodeWidthStr;
 
 use super::{COPIED_ROWS_TEXT_LIMIT, Format, render};
-use crate::db::{Engine, QueryResult};
+use crate::db::{Engine, MISSING, QueryResult};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClipboardFormat {
@@ -23,7 +23,6 @@ impl ClipboardFormat {
         Self::AsciiTable,
     ];
 
-    /// The format name shared by the menu, palette and copy confirmation.
     pub fn label(self) -> &'static str {
         match self {
             Self::Tsv => "TSV",
@@ -72,9 +71,17 @@ impl ClipboardFormat {
             };
             widths.push(UnicodeWidthStr::width(header.as_str()).max(minimum));
         }
-        for row in &result.rows {
-            for (ix, width) in widths.iter_mut().enumerate() {
-                let cell = self.cell(row.get(ix).unwrap_or("NULL"))?;
+        // Every escaped cell lands in the output whole, so their sum is a floor
+        // on its size: past the limit, the rest of the result is not worth
+        // escaping only to be refused.
+        let mut floor = 0usize;
+        for row_ix in 0..result.rows.len() {
+            for (col_ix, width) in widths.iter_mut().enumerate() {
+                let cell = self.cell(shown(result, row_ix, col_ix))?;
+                floor += cell.len();
+                if floor > COPIED_ROWS_TEXT_LIMIT {
+                    return Err(fmt::Error);
+                }
                 *width = (*width).max(UnicodeWidthStr::width(cell.as_str()));
             }
         }
@@ -105,14 +112,14 @@ impl ClipboardFormat {
         } else {
             self.border(&mut out, &widths, true, false)?;
         }
-        for row in &result.rows {
+        for row_ix in 0..result.rows.len() {
             out.write_char('\n')?;
             self.line(
                 &mut out,
                 &widths,
                 &numeric,
                 false,
-                (0..widths.len()).map(|ix| row.get(ix).unwrap_or("NULL")),
+                (0..widths.len()).map(|col_ix| shown(result, row_ix, col_ix)),
             )?;
         }
         if self != Self::Markdown {
@@ -154,7 +161,6 @@ impl ClipboardFormat {
         Ok(())
     }
 
-    /// Write a table rule with junctions for its top, middle or bottom position.
     fn border(
         self,
         out: &mut TableText,
@@ -214,6 +220,20 @@ impl ClipboardFormat {
     }
 }
 
+/// A document's absent field shows blank, as the grid paints it, rather than
+/// as a NULL it does not hold.
+fn shown(result: &QueryResult, row_ix: usize, col_ix: usize) -> &str {
+    if result
+        .cell_types
+        .get(row_ix)
+        .and_then(|types| types.get(col_ix))
+        == Some(&MISSING)
+    {
+        return "";
+    }
+    result.rows[row_ix].get(col_ix).unwrap_or("NULL")
+}
+
 /// Both escaped cells and the final padded table must fit before clipboard
 /// metadata can safely carry their original rows.
 #[derive(Default)]
@@ -246,7 +266,6 @@ mod tests {
     use super::*;
     use crate::db::{Column, rows};
 
-    /// Include numeric metadata, numeric-looking text, NULL, empty text and literal NULL.
     fn sample() -> QueryResult {
         QueryResult {
             columns: vec![
@@ -268,7 +287,6 @@ mod tests {
         }
     }
 
-    /// Lock down complete table layouts and retain the existing TSV/CSV rendering.
     #[test]
     fn table_formats_preserve_headers_values_and_numeric_alignment() {
         let result = sample();
@@ -321,7 +339,6 @@ mod tests {
         }
     }
 
-    /// Exercise the same escaping for headers and values without adding physical rows.
     #[test]
     fn escaping_keeps_markup_and_control_characters_inside_one_physical_line() {
         let value = "|\\<b>&*x*_`[a]~\r\nnext\rtab\t\0\u{1b}\u{2028}\u{202e}";
@@ -358,7 +375,19 @@ mod tests {
         }
     }
 
-    /// Catch byte- or character-count padding that misaligns wide and combining text.
+    #[test]
+    fn an_absent_field_is_blank_where_a_null_says_null() {
+        let mut result = sample();
+        result.rows = rows(vec![vec![None, None], vec![None, Some("x".into())]]);
+        result.cell_types = vec![vec!["null", MISSING], vec![MISSING, "string"]];
+        assert_eq!(
+            ClipboardFormat::AsciiTable
+                .render(Engine::MongoDb, &result)
+                .unwrap(),
+            "+------+------+\n| n    | text |\n+------+------+\n| NULL |      |\n|      | x    |\n+------+------+"
+        );
+    }
+
     #[test]
     fn padding_uses_display_width_for_cjk_emoji_and_combining_marks() {
         let mut result = sample();
@@ -375,7 +404,6 @@ mod tests {
         );
     }
 
-    /// Preserve column positions when names cannot identify them and there are no rows.
     #[test]
     fn empty_and_duplicate_headers_keep_their_positions_even_without_rows() {
         let mut result = sample();
@@ -404,7 +432,6 @@ mod tests {
         }
     }
 
-    /// Check the inclusive byte boundary, including escaping growth and multibyte text.
     #[test]
     fn table_output_accepts_exactly_sixteen_mib_and_refuses_one_more_byte() {
         let width = (COPIED_ROWS_TEXT_LIMIT - 24) / 5;

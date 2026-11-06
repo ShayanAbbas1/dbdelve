@@ -1142,8 +1142,6 @@ impl Workspace {
 }
 
 impl Render for Workspace {
-    /// Compose the active session and its controls, hiding result actions while
-    /// pending edits need review so copied server values cannot be mistaken for edits.
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = *theme(cx);
         let imports_rows = self.profile().is_some_and(|profile| {
