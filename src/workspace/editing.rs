@@ -1366,13 +1366,13 @@ impl Workspace {
     }
 
     pub(crate) fn copy_results(&mut self, _: &CopyResults, _: &mut Window, cx: &mut Context<Self>) {
-        self.copy_results_as(Format::Tsv, cx);
+        self.copy_results_as(ClipboardFormat::Tsv, cx);
     }
 
     /// The export's text on the clipboard rather than in a file, under the same
     /// rules: the rows the server returned, no pending edits, and a capped
     /// snapshot refused rather than copied short.
-    pub(crate) fn copy_results_as(&mut self, format: Format, cx: &mut Context<Self>) {
+    pub(crate) fn copy_results_as(&mut self, format: ClipboardFormat, cx: &mut Context<Self>) {
         if !self.has_results(cx) || self.refuse_capped("copying", cx) {
             return;
         }
@@ -1387,7 +1387,13 @@ impl Workspace {
             return;
         }
         let rows = result.rows.len();
-        let text = export::render(format, result);
+        let text = match format.render(self.engine(), result) {
+            Ok(text) => text,
+            Err(message) => {
+                self.note(message.into(), cx);
+                return;
+            }
+        };
         cx.write_to_clipboard(result_grid::copied_rows(text, result));
         // A copy changes nothing on screen, and a whole result set is too much
         // to take on trust. Unlike a refusal, the confirmation goes by itself.
@@ -1396,7 +1402,7 @@ impl Workspace {
                 "Copied {} {} as {}.",
                 group_thousands(rows as u64),
                 if rows == 1 { "row" } else { "rows" },
-                format.extension().to_uppercase()
+                format.label()
             ),
             cx,
         );

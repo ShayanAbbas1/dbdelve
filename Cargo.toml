@@ -14,6 +14,8 @@ publish = false
 # republish of zed main. gpui-component depends on it under the name `gpui`, so
 # taking it here is what keeps one copy of the framework in the graph.
 [dependencies]
+# Display-cell widths for clipboard tables, including CJK and combining marks.
+unicode-width = "=0.2.2"
 gpui = { package = "gpui-pre", version = "=0.3.9" }
 gpui-component = { version = "=0.8.0", features = ["tree-sitter-sql", "tree-sitter-javascript", "tree-sitter-bash"] }
 

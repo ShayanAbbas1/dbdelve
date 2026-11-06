@@ -2145,6 +2145,7 @@ dependencies = [
  "turso_core",
  "turso_sdk_kit",
  "unicode-segmentation",
+ "unicode-width 0.2.2",
  "ureq",
  "url",
  "uuid",

@@ -1,4 +1,4 @@
-//! Rendering a `QueryResult` to a file format for "Export Results".
+//! Rendering query results for files and the clipboard.
 //!
 //! The format is decided once, from the file extension the user picked in the
 //! save dialog (`FileAs::for_path`), and every caller routes through it rather
@@ -13,6 +13,15 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
+
+mod clipboard;
+pub use clipboard::ClipboardFormat;
+
+/// Past this much text, a copy carries its columns but not its rows: the rows
+/// beside it are a second rendering of the same rows, built on the UI thread
+/// and held on the clipboard twice over. A paste of it then reads the text,
+/// which loses NULL against empty and each value's own type.
+pub const COPIED_ROWS_TEXT_LIMIT: usize = 16 * 1024 * 1024;
 
 use crate::db::{
     Column, ColumnDefinition, EditTarget, Engine, IdentityInsert, MISSING, QueryResult, Row, Syntax,
