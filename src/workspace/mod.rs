@@ -9,6 +9,7 @@ mod commands;
 mod e2e;
 mod editing;
 mod exports;
+use exports::ExportMenu;
 mod files;
 mod filters;
 mod folders;
@@ -26,11 +27,7 @@ mod welcome;
 use std::collections::{HashMap, HashSet};
 
 use crate::export::ClipboardFormat;
-use gpui_component::{
-    ActiveTheme, Sizable,
-    button::{ButtonCustomVariant, ButtonVariants, DropdownButton},
-    menu::{DropdownMenu, PopupMenuItem},
-};
+use gpui_component::menu::DropdownMenu;
 
 pub(crate) use import_dialog::PreviewGrid;
 pub(crate) use profiles::unavailable_reason;
@@ -1746,11 +1743,7 @@ impl Render for Workspace {
         let discard_workspace = apply_workspace.clone();
         let previous_workspace = apply_workspace.clone();
         let next_workspace = apply_workspace.clone();
-        let copy_workspace = apply_workspace.clone();
         let copy_menu_workspace = apply_workspace.clone();
-        let csv_workspace = apply_workspace.clone();
-        let json_workspace = apply_workspace.clone();
-        let sql_workspace = apply_workspace.clone();
         let refresh_workspace = apply_workspace.clone();
         let ddl_workspace = apply_workspace.clone();
         let insert_workspace = apply_workspace.clone();
@@ -1874,95 +1867,21 @@ impl Render for Workspace {
                         // fetched, not the values on screen, and the review
                         // controls need the room.
                         .children(show_result_actions.then(|| {
-                            let hover = gpui::Background::from(cx.theme().tokens.accent)
-                                .opacity(if cx.theme().mode.is_dark() { 0.5 } else { 1. });
-                            let copy = button(
-                                "copy-results",
-                                "Copy Results",
-                                Tone::Quiet,
-                                Control::Compact,
-                                t,
-                            )
-                            .debug_selector(|| "copy-results".into())
-                            .on_click(move |_, _, cx| {
-                                _ = copy_workspace.update(cx, |workspace, cx| {
-                                    workspace.copy_results_as(ClipboardFormat::Tsv, cx);
-                                });
-                            });
-                            let copy = DropdownButton::new("copy-results-dropdown")
-                                .button(copy)
-                                // Paint one hover behind both halves, at the same strength as Import.
-                                .custom(
-                                    ButtonCustomVariant::new(cx).active(t.element_active.into()),
+                            let export = ExportMenu {
+                                workspace: copy_menu_workspace.clone(),
+                                sql: engine.syntax() == db::Syntax::Sql,
+                            };
+                            button("export-results", "Export", Tone::Quiet, Control::Compact, t)
+                                .debug_selector(|| "export-results".into())
+                                .child(
+                                    icon(icon::CHEVRON_DOWN)
+                                        .size(px(layout::chrome(layout::ICON_SIZE)))
+                                        .text_color(t.text_faint),
                                 )
-                                .with_size(px(Control::Compact.height()))
-                                .menu_accessibility_label("Copy results as…")
-                                .dropdown_menu(move |menu, _, _| {
-                                    ClipboardFormat::ALL.into_iter().fold(menu, |menu, format| {
-                                        let workspace = copy_menu_workspace.clone();
-                                        menu.item(PopupMenuItem::new(format.label()).on_click(
-                                            move |_, _, cx| {
-                                                _ = workspace.update(cx, |workspace, cx| {
-                                                    workspace.copy_results_as(format, cx);
-                                                });
-                                            },
-                                        ))
-                                    })
-                                });
-                            div()
-                                .id("copy-results-control")
-                                .debug_selector(|| "copy-results-format".into())
-                                .rounded(px(layout::RADIUS_CONTROL))
-                                .hover(move |style| style.bg(hover))
-                                .child(copy)
-                        }))
-                        // Named, not one button over a menu: the choice is
-                        // between a few things, and a control that opens
-                        // another control to ask which is a click spent on
-                        // nothing. It also puts the format on screen, which
-                        // a lone "Export" left to the file extension.
-                        .children(show_result_actions.then(|| {
-                            button("export-csv", "Export CSV", Tone::Quiet, Control::Compact, t)
-                                .on_click(move |_, _, cx| {
-                                    _ = csv_workspace.update(cx, |workspace, cx| {
-                                        workspace.export_results(FileAs::Rows(Format::Csv), cx);
-                                    });
+                                .dropdown_menu(move |menu, window, cx| {
+                                    export.build(menu, window, cx)
                                 })
                         }))
-                        .children(show_result_actions.then(|| {
-                            button(
-                                "export-json",
-                                "Export JSON",
-                                Tone::Quiet,
-                                Control::Compact,
-                                t,
-                            )
-                            .on_click(move |_, _, cx| {
-                                _ = json_workspace.update(cx, |workspace, cx| {
-                                    workspace.export_results(FileAs::Rows(Format::Json), cx);
-                                });
-                            })
-                        }))
-                        .children(
-                            (show_result_actions && engine.syntax() == db::Syntax::Sql).then(
-                                || {
-                                    button(
-                                        "export-sql",
-                                        "Export SQL",
-                                        Tone::Quiet,
-                                        Control::Compact,
-                                        t,
-                                    )
-                                    .on_click(
-                                        move |_, _, cx| {
-                                            _ = sql_workspace.update(cx, |workspace, cx| {
-                                                workspace.export_results(FileAs::Inserts, cx);
-                                            });
-                                        },
-                                    )
-                                },
-                            ),
-                        )
                         .children(structure_copies.map(|(ddl, insert)| {
                             div()
                                 .flex()

@@ -607,6 +607,143 @@ fn enter_opens_a_sidebar_row_and_its_structure_takes_the_keyboard(cx: &mut TestA
     });
 }
 
+#[gpui::test]
+fn the_sidebar_selects_the_row_of_the_tab_in_front(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            "create table birds (name text); create table flocks (id integer);",
+        );
+        let selected = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                let session = &workspace.read(cx).profile().unwrap().session;
+                session
+                    .explorer_tree
+                    .read(cx)
+                    .selected_item()
+                    .map(|item| item.id.to_string())
+            })
+        };
+        let active = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                workspace.profile().unwrap().session.active
+            })
+        };
+        let open = |name: &str, cx: &mut VisualTestContext| {
+            workspace.update_in(cx, |workspace, window, cx| {
+                let leaf = workspace.profile().unwrap().session.explorer_leaves
+                    [&explorer::relation_row("main", name)];
+                workspace.open_explorer_target(leaf.target, window, cx);
+            });
+            settle(cx);
+        };
+        let birds_row = explorer::relation_row("main", "birds");
+        let flocks_row = explorer::relation_row("main", "flocks");
+        assert_eq!(selected(cx), None, "a scratch query has no row");
+
+        open("birds", cx);
+        assert_eq!(selected(cx), Some(birds_row.clone()));
+        let birds = active(cx);
+        open("flocks", cx);
+        assert_eq!(selected(cx), Some(flocks_row.clone()));
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.activate_tab(birds, window, cx);
+        });
+        settle(cx);
+        assert_eq!(
+            selected(cx),
+            Some(birds_row.clone()),
+            "a tab switch follows"
+        );
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.new_query(&crate::actions::NewQuery, window, cx);
+        });
+        settle(cx);
+        assert_eq!(selected(cx), None, "a new scratch query leaves no row lit");
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.ask_for_name(String::new(), window, cx);
+            let name = workspace.profile().unwrap().session.save_name.clone();
+            name.update(cx, |input, cx| input.set_value("daily", window, cx));
+            workspace.confirm_save(window, cx);
+        });
+        settle(cx);
+        assert_eq!(
+            selected(cx),
+            Some(explorer::query_row("daily")),
+            "saved, the query has a row of its own"
+        );
+
+        let daily = active(cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            let crate::session::Tab::Query(id) = daily else {
+                panic!("the saved query is in front");
+            };
+            workspace.close_buffer(id, window, cx);
+        });
+        settle(cx);
+        let fallback =
+            workspace.read_with(cx, |workspace, _| workspace.profile().unwrap().front_row());
+        assert!(fallback.is_some(), "a table tab came to the front");
+        assert_eq!(selected(cx), fallback, "a close follows to the tab behind");
+
+        // A pin repeats the table's row; selected, it keeps the selection.
+        workspace.update(cx, |workspace, cx| {
+            let profile = workspace.profile_mut().unwrap();
+            profile
+                .shortcuts
+                .toggle_pin(explorer::Pin::Member(explorer::Member::Object(
+                    explorer::ObjectRef {
+                        database: None,
+                        schema: "main".into(),
+                        name: "birds".into(),
+                        kind: explorer::ObjectKind::Relation(crate::db::RelationKind::Table),
+                    },
+                )));
+            let id = profile.id.clone();
+            workspace.refresh_explorer(&id, cx);
+        });
+        settle(cx);
+        let pinned = workspace.update(cx, |workspace, cx| {
+            let tree = workspace.profile().unwrap().session.explorer_tree.clone();
+            tree.update(cx, |tree, cx| {
+                let pinned = tree.entry(1).expect("the pin is listed").item().id.clone();
+                assert_ne!(pinned.as_ref(), birds_row);
+                tree.set_selected_index(Some(1), cx);
+                pinned.to_string()
+            })
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.activate_tab(birds, window, cx);
+        });
+        settle(cx);
+        assert_eq!(selected(cx), Some(pinned));
+
+        // Arrowed off the tab's row, the selection outlives a rebuild that
+        // lands in the background, as table sizes and folder changes do.
+        workspace.update(cx, |workspace, cx| {
+            let profile = workspace.profile().unwrap();
+            let tree = profile.session.explorer_tree.clone();
+            let id = profile.id.clone();
+            tree.update(cx, |tree, cx| {
+                let flocks = tree.index_of(&flocks_row.clone().into());
+                assert!(flocks.is_some(), "flocks is listed");
+                tree.set_selected_index(flocks, cx);
+            });
+            workspace.refresh_query_library(&id, cx);
+        });
+        settle(cx);
+        assert_eq!(
+            selected(cx),
+            Some(flocks_row.clone()),
+            "a background rebuild keeps the row the user moved to"
+        );
+
+        quit(workspace, cx);
+    });
+}
+
 /// A key pressed and let go: a focused button clicks on the release, which
 /// `simulate_keystrokes` never sends.
 fn press(cx: &mut VisualTestContext, key: &str) {
@@ -2755,6 +2892,37 @@ fn the_ways_to_import_show_only_where_rows_can_be_imported(cx: &mut TestAppConte
 }
 
 #[gpui::test]
+fn file_exports_from_the_menu_ask_for_the_right_file(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) =
+            launch_on_sqlite_holding(cx, "create table birds (id integer primary key);");
+        cx.executor().allow_parking();
+        cx.simulate_input("select * from birds");
+        cx.simulate_keystrokes("secondary-enter");
+        settle(cx);
+
+        for (downs, name) in [(3, "results.csv"), (4, "results.json"), (5, "results.sql")] {
+            super::exports::SUGGESTED_NAMES.with_borrow_mut(Vec::clear);
+            let bounds = cx
+                .debug_bounds("export-results")
+                .expect("Export button is drawn");
+            cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+            settle(cx);
+            for _ in 0..downs {
+                cx.simulate_keystrokes("down");
+            }
+            press(cx, "enter");
+            cx.simulate_new_path_selection(|_| None);
+            settle(cx);
+            let asked = super::exports::SUGGESTED_NAMES.with_borrow(Clone::clone);
+            assert_eq!(asked, [name], "{downs} downs");
+        }
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn copy_results_formats_work_from_menu_and_palette_and_restore_focus(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite_holding(
@@ -2791,13 +2959,9 @@ fn copy_results_formats_work_from_menu_and_palette_and_restore_focus(cx: &mut Te
         };
         let open_menu = |cx: &mut VisualTestContext| {
             let bounds = cx
-                .debug_bounds("copy-results-format")
-                .expect("copy split button is drawn");
-            let arrow = gpui::point(
-                bounds.right() - gpui::px(crate::ui::Control::Compact.height() / 2.),
-                bounds.center().y,
-            );
-            cx.simulate_click(arrow, gpui::Modifiers::default());
+                .debug_bounds("export-results")
+                .expect("Export button is drawn");
+            cx.simulate_click(bounds.center(), gpui::Modifiers::default());
             settle(cx);
             cx.update(|window, _| {
                 assert!(
@@ -2814,44 +2978,24 @@ fn copy_results_formats_work_from_menu_and_palette_and_restore_focus(cx: &mut Te
                 let row = explorer_row(&workspace, "relation-main\0birds", cx).center();
                 cx.simulate_click(row, gpui::Modifiers::default());
                 settle(cx);
-
-                let import = cx.debug_bounds("import-rows").unwrap();
-                let copy = cx.debug_bounds("copy-results-format").unwrap();
-                let hover_background =
-                    |bounds: gpui::Bounds<gpui::Pixels>, at, cx: &mut VisualTestContext| {
-                        cx.update(|window, cx| window.simulate_mouse_move(at, cx));
-                        settle(cx);
-                        cx.update(|window, cx| {
-                            window.draw(cx).clear(cx);
-                            window
-                                .painted_quads()
-                                .into_iter()
-                                .find(|quad| quad.bounds == bounds.scale(window.scale_factor()))
-                                .expect("hover paints one background across the whole control")
-                                .background
-                        })
-                    };
-                let import_hover = hover_background(import, import.center(), cx);
-                for at in [
-                    cx.debug_bounds("copy-results").unwrap().center(),
-                    gpui::point(copy.right() - gpui::px(12.), copy.center().y),
-                ] {
-                    assert_eq!(hover_background(copy, at, cx), import_hover);
-                }
             }
-            let main = cx
-                .debug_bounds("copy-results")
-                .expect("main copy button is drawn");
-            cx.simulate_click(main.center(), gpui::Modifiers::default());
-            settle(cx);
+            open_menu(cx);
+            cx.simulate_keystrokes("down");
+            press(cx, "enter");
             assert_eq!(
                 read_clipboard(cx).0,
                 expected(crate::export::ClipboardFormat::Tsv, cx)
             );
 
             for (ix, format) in crate::export::ClipboardFormat::ALL.into_iter().enumerate() {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string("before menu".into()));
                 open_menu(cx);
-                for _ in 0..=ix {
+                cx.simulate_keystrokes("down down");
+                settle(cx);
+                // The menu hangs off the right edge, so its submenu opens leftwards.
+                cx.simulate_keystrokes("left");
+                settle(cx);
+                for _ in 0..ix {
                     cx.simulate_keystrokes("down");
                 }
                 press(cx, "enter");
@@ -2875,6 +3019,7 @@ fn copy_results_formats_work_from_menu_and_palette_and_restore_focus(cx: &mut Te
                     .map(|line| serde_json::from_str(line).unwrap())
                     .collect();
                 assert_eq!(pasted, metadata["rows"].as_array().unwrap().clone());
+                settle(cx);
                 cx.update(|window, _| {
                     assert!(
                         !window
@@ -2937,8 +3082,7 @@ fn copy_results_formats_work_from_menu_and_palette_and_restore_focus(cx: &mut Te
                 });
                 workspace.update(cx, |_, cx| cx.notify());
                 settle(cx);
-                assert!(cx.debug_bounds("copy-results").is_none());
-                assert!(cx.debug_bounds("copy-results-format").is_none());
+                assert!(cx.debug_bounds("export-results").is_none());
                 for format in crate::export::ClipboardFormat::ALL {
                     workspace.update(cx, |workspace, cx| workspace.copy_results_as(format, cx));
                     assert_eq!(read_clipboard(cx).0, expected(format, cx));

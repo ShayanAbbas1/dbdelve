@@ -1551,6 +1551,7 @@ impl Workspace {
         if let Tab::Object(id) = tab {
             self.load_relation(id, cx);
         }
+        self.select_front_row(cx);
         self.remember_profiles(cx);
         cx.notify();
     }
@@ -1572,6 +1573,7 @@ impl Workspace {
                     profile.session.clear_prompts();
                     profile.session.editor_needs_focus = true;
                 }
+                self.select_front_row(cx);
             }
         }
     }

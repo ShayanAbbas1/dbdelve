@@ -5,11 +5,30 @@
 
 use super::*;
 use crate::actions::{FocusSidebar, OpenSidebarItem, ToggleResultsFocus};
+use crate::explorer::Shortcut;
 use crate::session::PendingDiscard;
 use crate::tab_drag::{self, Drag, Slot};
 
 /// How tall an Edit mode input grows before it scrolls instead.
 const ROW_INPUT_MAX_LINES: usize = 8;
+
+/// Where the sidebar's selection goes for the tab in front, whose row is
+/// `front`. A selected shortcut to that row keeps it, so opening a pin from
+/// the keyboard does not send the selection off to the schema tree's copy.
+pub(super) fn front_index(
+    tree: &gpui_component::tree::TreeState,
+    front: Option<&str>,
+    shortcuts: &HashMap<String, Shortcut>,
+) -> Option<usize> {
+    let front = front?;
+    tree.selected_index()
+        .filter(|&ix| {
+            tree.entry(ix).is_some_and(|entry| {
+                crate::explorer::stands_for(&entry.item().id, front, shortcuts)
+            })
+        })
+        .or_else(|| tree.index_of(&front.to_string().into()))
+}
 
 impl Workspace {
     pub(crate) fn toggle_sidebar(
@@ -58,17 +77,8 @@ impl Workspace {
         if !super::forms::explorer_drawn(profile) {
             return;
         }
-        let session = &profile.session;
-        let front = match session.active_object() {
-            Some(tab) => self.catalog().and_then(|catalog| {
-                crate::explorer::object_row(catalog, &tab.schema, &tab.name, tab.kind)
-            }),
-            None => session
-                .active_query_tab()
-                .and_then(|tab| tab.open_query.as_deref())
-                .map(crate::explorer::query_row),
-        };
-        let tree = session.explorer_tree.clone();
+        let front = profile.front_row();
+        let tree = profile.session.explorer_tree.clone();
         tree.update(cx, |tree, cx| {
             let front = front.map(gpui::SharedString::from).and_then(|id| {
                 tree.reveal_item(&id, gpui::ScrollStrategy::Center, cx);
@@ -86,6 +96,21 @@ impl Workspace {
         if let Some(profile) = self.profile_mut() {
             profile.session.editor_needs_focus = false;
         }
+    }
+
+    /// The sidebar's selection moved onto the row of the tab in front, or
+    /// off every row when that tab has none listed. Never unfolds a group to
+    /// reach it: that is for `focus_sidebar`, which the user asked for.
+    pub(crate) fn select_front_row(&self, cx: &mut Context<Self>) {
+        let Some(profile) = self.profile() else {
+            return;
+        };
+        let front = profile.front_row();
+        let shortcuts = profile.session.explorer_shortcuts.clone();
+        profile.session.explorer_tree.update(cx, |tree, cx| {
+            let row = front_index(tree, front.as_deref(), &shortcuts);
+            tree.set_selected_index(row, cx);
+        });
     }
 
     /// `enter` on the sidebar's selected row: what a click on it does.

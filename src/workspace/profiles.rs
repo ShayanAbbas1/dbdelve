@@ -2117,6 +2117,7 @@ impl Workspace {
         if let Some(catalog) = catalog {
             explorer.extend(build_explorer_tree(catalog, &filter));
         }
+        let front = profile.front_row();
         let tree = profile.session.explorer_tree.clone();
         let (items, selected) = match keep {
             true => {
@@ -2135,17 +2136,20 @@ impl Workspace {
             false => (explorer.items, None),
         };
 
+        let shortcuts = Arc::new(explorer.shortcuts);
         if let Some(profile) = self.profiles.iter_mut().find(|profile| profile.id == id) {
             profile.session.explorer_leaves = Arc::new(explorer.leaves);
             profile.session.explorer_highlights = Arc::new(explorer.highlights);
-            profile.session.explorer_shortcuts = Arc::new(explorer.shortcuts);
+            profile.session.explorer_shortcuts = shortcuts.clone();
         }
         tree.update(cx, |tree, cx| {
             tree.set_items(items, cx);
-            if let Some(selected) = selected {
-                let at = tree.index_of(&selected);
-                tree.set_selected_index(at, cx);
-            }
+            // A row the user moved to stays over the tab in front: a rebuild
+            // landing in the background must not send Enter elsewhere.
+            let row = selected
+                .and_then(|selected| tree.index_of(&selected))
+                .or_else(|| super::tabs::front_index(tree, front.as_deref(), &shortcuts));
+            tree.set_selected_index(row, cx);
         });
     }
 

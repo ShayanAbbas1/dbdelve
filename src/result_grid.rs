@@ -113,11 +113,7 @@ const DIGIT_WIDTH: f32 = 8.0;
 /// A gutter cell: the row number's box, evenly padded. It draws no divider of
 /// its own -- the library closes a fixed column with one.
 fn gutter_cell() -> Div {
-    div()
-        .flex()
-        .items_center()
-        .justify_center()
-        .px(px(layout::SPACE_SM))
+    div().flex().items_center().px(px(layout::SPACE_SM))
 }
 
 /// The relations pointing at a column: an index into the structure's
@@ -264,6 +260,10 @@ pub struct ResultGrid {
     /// Per column, read for every visible cell on every frame, and
     /// `db::is_numeric_type` lowercases the type name to answer.
     numeric: Vec<bool>,
+    /// Per column, whether its numbers paint with their digits grouped: a
+    /// numeric column that is not a key. Worked out where `numeric` and the
+    /// keys change, for the reason `numeric` is.
+    grouped: Vec<bool>,
     /// The keys the rows are in order by, as column indices: a readout of the
     /// statement's `ORDER BY` when the server sorted them, or the view's own
     /// keys when `sort_in_memory` did.
@@ -533,6 +533,7 @@ impl ResultGrid {
             fetched: Vec::new(),
             result,
             numeric,
+            grouped: Vec::new(),
             active: None,
             laid_out_width: Pixels::ZERO,
             painted_x: Pixels::ZERO,
@@ -560,6 +561,7 @@ impl ResultGrid {
             takes_imports: false,
             focus: None,
         };
+        grid.regroup();
         grid.refit();
         grid
     }
@@ -567,6 +569,7 @@ impl ResultGrid {
     pub fn with_engine(mut self, engine: db::Engine) -> Self {
         self.engine = engine;
         self.numeric = numeric_columns(engine, &self.result.columns);
+        self.regroup();
         self
     }
 
@@ -683,6 +686,7 @@ impl ResultGrid {
     pub fn set_column_types(&mut self, columns: Vec<db::Column>) {
         self.numeric = numeric_columns(self.engine, &columns);
         self.result.columns = columns;
+        self.regroup();
         self.refit_from_the_top();
     }
 
@@ -898,8 +902,7 @@ impl ResultGrid {
             .get(col)
             .and_then(|column| column.data_type.as_deref())
             .map_or(0., |data_type| {
-                layout::SPACE_XS
-                    + data_type.to_uppercase().chars().count() as f32 * self.advances.data_type
+                layout::SPACE_XS + self.data_type_width(&data_type.to_uppercase())
             });
         // `data_th`'s own padding, and the room the library keeps on the right
         // of every header for a sort icon of its own.
@@ -911,6 +914,10 @@ impl ResultGrid {
             + self.columns[col].name.chars().count() as f32 * self.advances.name
             + data_type
             + icon
+    }
+
+    fn data_type_width(&self, label: &str) -> f32 {
+        label.chars().count() as f32 * self.advances.data_type
     }
 
     /// The widest value fitted to so far, with the cell's padding and border
@@ -1177,6 +1184,7 @@ impl ResultGrid {
             .iter()
             .map(|col| SharedString::from(format!("follow-key-{col}")))
             .collect();
+        self.regroup();
         self.refit();
     }
 
@@ -1305,6 +1313,7 @@ impl ResultGrid {
 
     pub fn mark_primary_key(&mut self, columns: &[String]) {
         self.primary_key = self.columns_named(columns);
+        self.regroup();
         self.refit();
     }
 
@@ -1418,7 +1427,7 @@ impl ResultGrid {
     /// copied again on every frame it is on screen.
     fn shown(&self, row_ix: usize, col_ix: usize) -> Option<SharedString> {
         let value = self.cell(row_ix, col_ix)?;
-        let shown = match self.is_numeric_column(col_ix) && value.len() <= CELL_DISPLAY_LIMIT {
+        let shown = match self.groups_digits(col_ix) && value.len() <= CELL_DISPLAY_LIMIT {
             true => clip(&grouped_digits(value)),
             false => clip(value),
         };
@@ -1857,6 +1866,41 @@ impl ResultGrid {
         self.numeric.get(col).copied().unwrap_or(false)
     }
 
+    fn groups_digits(&self, col: usize) -> bool {
+        self.grouped.get(col).copied().unwrap_or(false)
+    }
+
+    /// An id is a label rather than a quantity, and `3,841` reads as a count
+    /// of something, so a key column paints its numbers as fetched. A row
+    /// named by every value has no key columns, only every column.
+    fn regroup(&mut self) {
+        let edit_keys = match &self.result.edit {
+            Some(EditTarget {
+                keys,
+                row_match: db::RowMatch::Key,
+                ..
+            }) => keys.as_slice(),
+            _ => &[],
+        };
+        let keys = [self.primary_key.as_slice(), &self.foreign_keys, edit_keys];
+        let was = std::mem::replace(
+            &mut self.grouped,
+            self.numeric
+                .iter()
+                .enumerate()
+                .map(|(col, &numeric)| numeric && !keys.iter().any(|keys| keys.contains(&col)))
+                .collect(),
+        );
+        // A staged cell keeps the text worked out when it was staged, so keys
+        // arriving after it would leave it painted the old way.
+        for edit in &mut self.pending {
+            let grouped = self.grouped.get(edit.col).copied().unwrap_or(false);
+            if was.get(edit.col).copied().unwrap_or(false) != grouped {
+                edit.shown = pending_shown(&edit.value, grouped);
+            }
+        }
+    }
+
     /// Whether the cell menu offers each of the three staged values. Written
     /// here rather than read off the menu, so the gating is testable without a
     /// window: a menu is the one thing in the grid a test cannot open.
@@ -1984,30 +2028,7 @@ impl ResultGrid {
             return false;
         }
 
-        // Bytes, not characters: it only has to be cheap and never under-count,
-        // and `clip` is a no-op on anything that turns out to fit. Grouped the
-        // same way a fetched value is, on the same column check `shown`
-        // uses, so a pending edit does not stand out from the rows around it
-        // by losing its separators -- the value staged for the `UPDATE` stays
-        // exactly as typed, since this is what the cell paints and nothing else.
-        let shown = match &value {
-            NewValue::Value(value) if self.is_numeric_column(col) => {
-                let grouped = grouped_digits(value);
-                Some(
-                    match grouped.len() > CELL_DISPLAY_LIMIT || grouped.contains(['\n', '\r']) {
-                        true => SharedString::from(clip(&grouped)),
-                        false => SharedString::from(grouped),
-                    },
-                )
-            }
-            NewValue::Value(value) => Some(
-                match value.len() > CELL_DISPLAY_LIMIT || value.contains(['\n', '\r']) {
-                    true => SharedString::from(clip(value)),
-                    false => value.clone(),
-                },
-            ),
-            NewValue::Null | NewValue::Default => None,
-        };
+        let shown = pending_shown(&value, self.groups_digits(col));
         match self
             .pending
             .iter_mut()
@@ -2559,6 +2580,31 @@ fn step_target(
     Some(to)
 }
 
+/// What a staged cell paints: grouped as a fetched value in a `grouped`
+/// column is, so it does not stand out from the rows around it, and clipped
+/// the same way. The value the `UPDATE` carries stays exactly as typed.
+///
+/// Bytes, not characters: it only has to be cheap and never under-count, and
+/// `clip` is a no-op on anything that turns out to fit.
+fn pending_shown(value: &NewValue, grouped: bool) -> Option<SharedString> {
+    let NewValue::Value(value) = value else {
+        return None;
+    };
+    Some(match grouped {
+        true => {
+            let grouped = grouped_digits(value);
+            match grouped.len() > CELL_DISPLAY_LIMIT || grouped.contains(['\n', '\r']) {
+                true => SharedString::from(clip(&grouped)),
+                false => SharedString::from(grouped),
+            }
+        }
+        false => match value.len() > CELL_DISPLAY_LIMIT || value.contains(['\n', '\r']) {
+            true => SharedString::from(clip(value)),
+            false => value.clone(),
+        },
+    })
+}
+
 /// A plain number with its integer digits in threes, `1723858791` as
 /// `1,723,858,791`, as the status bar groups its counts. Display only: `shown` is what the cell paints and the
 /// copy, the inspector and every statement read the value as fetched. Anything
@@ -2793,6 +2839,7 @@ impl TableDelegate for ResultGrid {
                 let faint = theme(cx).text_faint;
                 gutter_cell()
                     .size_full()
+                    .justify_center()
                     // The library reserves a sort icon's room on the right of
                     // every header, which leaves this one off-centre unless
                     // the left side reserves the same.
@@ -2826,6 +2873,7 @@ impl TableDelegate for ResultGrid {
                     .id(("row-number", row_ix))
                     .debug_selector(move || format!("row-number-{row_ix}"))
                     .size_full()
+                    .justify_end()
                     .when(selected, |cell| cell.bg(selected_bg))
                     .text_color(if selected { text } else { faint })
                     .child((row_ix + 1).to_string())
@@ -2984,6 +3032,7 @@ impl ResultGrid {
             .iter()
             .position(|(column, _)| *column == col_ix)
             .map(|position| (position, self.sort[position].1));
+        let numeric = self.is_numeric_column(col_ix);
 
         let base = div()
             .id(("column-header", col_ix))
@@ -2999,6 +3048,7 @@ impl ResultGrid {
             .pr(px(layout::SPACE_SM))
             .flex()
             .items_center()
+            .when(numeric, |header| header.justify_end())
             .gap(px(layout::SPACE_XS))
             .overflow_hidden()
             .whitespace_nowrap()
@@ -3025,6 +3075,7 @@ impl ResultGrid {
                     .get(col_ix)
                     .and_then(|column| column.data_type.clone())
                     .map(|data_type| {
+                        let label = data_type.to_uppercase();
                         // Only the room the name leaves: from no width of its
                         // own, the type ellipsizes and goes before the name
                         // gives up a character. Both shrinking from their full
@@ -3037,12 +3088,22 @@ impl ResultGrid {
                             .text_size(px(layout::grid(layout::TEXT_XS)))
                             .font_weight(gpui::FontWeight::NORMAL)
                             .text_color(faint)
-                            .child(data_type.to_uppercase())
+                            // Over a right-aligned column the type stops
+                            // growing at its own width, so the header's spare
+                            // room falls to the left of the name. The extra
+                            // pixel keeps a layout rounded down from cutting
+                            // the label that fits.
+                            .when(numeric, |data_type| {
+                                data_type
+                                    .max_w(px(self.data_type_width(&label).ceil() + 1.))
+                                    .text_right()
+                            })
+                            .child(label)
                     }),
             )
             .child(
                 div()
-                    .ml_auto()
+                    .when(!numeric, |control| control.ml_auto())
                     .flex_shrink_0()
                     .flex()
                     .items_center()
@@ -3102,6 +3163,7 @@ impl ResultGrid {
                 *t,
             )
         };
+        let numeric = self.is_numeric_column(col_ix);
         let base = div()
             .id(("cell", row_ix * self.columns.len() + col_ix))
             .relative()
@@ -3192,7 +3254,8 @@ impl ResultGrid {
                             // sized for a standalone field and overflows the
                             // row.
                             .h_full()
-                            .text_size(px(layout::grid(layout::TEXT_MD))),
+                            .text_size(px(layout::grid(layout::TEXT_MD)))
+                            .when(numeric, |input| input.text_right()),
                     ),
                 )
                 // The library's row click would reselect the row under the
@@ -3276,7 +3339,7 @@ impl ResultGrid {
         base.overflow_hidden()
             .whitespace_nowrap()
             .text_ellipsis()
-            .text_color(match (cell.is_some(), self.is_numeric_column(col_ix)) {
+            .text_color(match (cell.is_some(), numeric) {
                 (false, _) => faint,
                 (true, true) => number,
                 (true, false) => text,
@@ -3296,6 +3359,7 @@ impl ResultGrid {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
+                    .when(numeric, |value| value.text_right())
                     .child(cell.unwrap_or(keyword)),
             )
             // A NULL is referenced by nothing, so it has no arrow either.
@@ -4922,6 +4986,107 @@ mod tests {
         assert_eq!(pending.shown.as_deref(), Some("7,654,321"));
         assert_eq!(pending.value, value("7654321"));
         assert_eq!(grid.pending_updates()[0].sets[0].1, value("7654321"));
+    }
+
+    /// `id, account_id, amount`, all numbers, the first named as the row's key
+    /// as `row_match` says.
+    fn numbered_grid(row_match: db::RowMatch) -> ResultGrid {
+        ResultGrid::new(
+            QueryResult {
+                columns: vec![
+                    typed("id", "int8"),
+                    typed("account_id", "int8"),
+                    typed("amount", "numeric"),
+                ],
+                rows: rows(vec![vec![
+                    Some("3841".into()),
+                    Some("42000".into()),
+                    Some("1234567.5".into()),
+                ]]),
+                edit: Some(EditTarget {
+                    schema: "public".into(),
+                    table: "orders".into(),
+                    columns: vec![
+                        Some("id".into()),
+                        Some("account_id".into()),
+                        Some("amount".into()),
+                    ],
+                    keys: vec![0],
+                    row_match,
+                    ..Default::default()
+                }),
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        )
+    }
+
+    fn painted(grid: &ResultGrid) -> Vec<Option<String>> {
+        (0..3)
+            .map(|col| grid.shown(0, col).map(String::from))
+            .collect()
+    }
+
+    #[test]
+    fn key_columns_paint_their_numbers_ungrouped_and_measures_grouped() {
+        let mut grid = numbered_grid(db::RowMatch::Key);
+        assert_eq!(
+            painted(&grid),
+            [
+                Some("3841".into()),
+                Some("42,000".into()),
+                Some("1,234,567.5".into())
+            ]
+        );
+
+        grid.mark_foreign_keys(&["account_id".to_string()]);
+        assert_eq!(
+            painted(&grid),
+            [
+                Some("3841".into()),
+                Some("42000".into()),
+                Some("1,234,567.5".into())
+            ]
+        );
+        // A staged value paints the way the column's fetched ones do.
+        assert!(grid.set_pending(0, 1, value("51234")));
+        assert_eq!(
+            grid.pending_at(0, 1).unwrap().shown.as_deref(),
+            Some("51234")
+        );
+    }
+
+    #[test]
+    fn a_cell_staged_before_the_keys_arrive_is_repainted_with_them() {
+        let mut grid = numbered_grid(db::RowMatch::Key);
+        assert!(grid.set_pending(0, 1, value("51234")));
+        assert!(grid.set_pending(0, 2, value("7654321")));
+        assert_eq!(
+            grid.pending_at(0, 1).unwrap().shown.as_deref(),
+            Some("51,234")
+        );
+
+        grid.mark_foreign_keys(&["account_id".to_string()]);
+        assert_eq!(
+            grid.pending_at(0, 1).unwrap().shown.as_deref(),
+            Some("51234")
+        );
+        assert_eq!(grid.pending_at(0, 1).unwrap().value, value("51234"));
+        assert_eq!(
+            grid.pending_at(0, 2).unwrap().shown.as_deref(),
+            Some("7,654,321")
+        );
+    }
+
+    #[test]
+    fn a_primary_key_marked_from_the_structure_is_left_ungrouped() {
+        // An object tab's key arrives with its structure, apart from the rows.
+        let mut grid = numbered_grid(db::RowMatch::EveryColumn { fixed: vec![] });
+        assert_eq!(grid.shown(0, 0).as_deref(), Some("3,841"));
+
+        grid.mark_primary_key(&["id".into()]);
+        assert_eq!(grid.shown(0, 0).as_deref(), Some("3841"));
+        assert_eq!(grid.shown(0, 1).as_deref(), Some("42,000"));
     }
 
     #[test]

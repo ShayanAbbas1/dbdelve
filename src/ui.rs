@@ -170,7 +170,10 @@ pub(crate) fn kind_color(path: &str) -> Option<ConnectionColor> {
         icon::TABLE | icon::PARTITIONED_TABLE | icon::VIEW | icon::MATERIALIZED_VIEW => {
             Some(ConnectionColor::Blue)
         }
-        icon::SCRATCH_QUERY | icon::SAVED_QUERY => Some(ConnectionColor::Red),
+        icon::SCRATCH_QUERY
+        | icon::SAVED_QUERY
+        | icon::SAVED_QUERY_MONGO
+        | icon::SAVED_QUERY_REDIS => Some(ConnectionColor::Red),
         icon::FUNCTION | icon::STRUCTURE => Some(ConnectionColor::Yellow),
         icon::PROCEDURE => Some(ConnectionColor::Orange),
         _ => None,
@@ -239,6 +242,12 @@ pub(crate) fn status_dot(t: Theme, status: impl Into<Status>) -> Div {
         Status::Connected => t.success,
         Status::Failed => t.danger,
     };
+    dot(fill)
+}
+
+/// A state marked beside what it is about, small enough to sit by a label
+/// without reading as part of it.
+pub(crate) fn dot(fill: Srgb) -> Div {
     div()
         .flex_shrink_0()
         .size(px(layout::SPACE_XS + 2.))

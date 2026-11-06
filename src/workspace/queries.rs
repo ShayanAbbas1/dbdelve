@@ -1426,6 +1426,9 @@ impl Workspace {
                     }
                     profile.session.editor_needs_focus = true;
                 }
+                // The library was rebuilt above while the tab was still a
+                // scratch, with no row to select.
+                self.select_front_row(cx);
             }
         }
         self.note(
