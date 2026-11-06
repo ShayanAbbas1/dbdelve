@@ -2144,10 +2144,11 @@ impl Workspace {
         }
         tree.update(cx, |tree, cx| {
             tree.set_items(items, cx);
-            let kept = selected.and_then(|selected| tree.index_of(&selected));
-            // Put back first, so a kept pin of the tab in front stays put.
-            tree.set_selected_index(kept, cx);
-            let row = super::tabs::front_index(tree, front.as_deref(), &shortcuts).or(kept);
+            // A row the user moved to stays over the tab in front: a rebuild
+            // landing in the background must not send Enter elsewhere.
+            let row = selected
+                .and_then(|selected| tree.index_of(&selected))
+                .or_else(|| super::tabs::front_index(tree, front.as_deref(), &shortcuts));
             tree.set_selected_index(row, cx);
         });
     }

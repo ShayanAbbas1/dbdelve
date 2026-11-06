@@ -1883,12 +1883,22 @@ impl ResultGrid {
             _ => &[],
         };
         let keys = [self.primary_key.as_slice(), &self.foreign_keys, edit_keys];
-        self.grouped = self
-            .numeric
-            .iter()
-            .enumerate()
-            .map(|(col, &numeric)| numeric && !keys.iter().any(|keys| keys.contains(&col)))
-            .collect();
+        let was = std::mem::replace(
+            &mut self.grouped,
+            self.numeric
+                .iter()
+                .enumerate()
+                .map(|(col, &numeric)| numeric && !keys.iter().any(|keys| keys.contains(&col)))
+                .collect(),
+        );
+        // A staged cell keeps the text worked out when it was staged, so keys
+        // arriving after it would leave it painted the old way.
+        for edit in &mut self.pending {
+            let grouped = self.grouped.get(edit.col).copied().unwrap_or(false);
+            if was.get(edit.col).copied().unwrap_or(false) != grouped {
+                edit.shown = pending_shown(&edit.value, grouped);
+            }
+        }
     }
 
     /// Whether the cell menu offers each of the three staged values. Written
@@ -2018,30 +2028,7 @@ impl ResultGrid {
             return false;
         }
 
-        // Bytes, not characters: it only has to be cheap and never under-count,
-        // and `clip` is a no-op on anything that turns out to fit. Grouped the
-        // same way a fetched value is, on the same column check `shown`
-        // uses, so a pending edit does not stand out from the rows around it
-        // by losing its separators -- the value staged for the `UPDATE` stays
-        // exactly as typed, since this is what the cell paints and nothing else.
-        let shown = match &value {
-            NewValue::Value(value) if self.groups_digits(col) => {
-                let grouped = grouped_digits(value);
-                Some(
-                    match grouped.len() > CELL_DISPLAY_LIMIT || grouped.contains(['\n', '\r']) {
-                        true => SharedString::from(clip(&grouped)),
-                        false => SharedString::from(grouped),
-                    },
-                )
-            }
-            NewValue::Value(value) => Some(
-                match value.len() > CELL_DISPLAY_LIMIT || value.contains(['\n', '\r']) {
-                    true => SharedString::from(clip(value)),
-                    false => value.clone(),
-                },
-            ),
-            NewValue::Null | NewValue::Default => None,
-        };
+        let shown = pending_shown(&value, self.groups_digits(col));
         match self
             .pending
             .iter_mut()
@@ -2591,6 +2578,31 @@ fn step_target(
         Step::Cols(by) => (row, col.checked_add_signed(by).filter(|&c| c < cols)?),
     };
     Some(to)
+}
+
+/// What a staged cell paints: grouped as a fetched value in a `grouped`
+/// column is, so it does not stand out from the rows around it, and clipped
+/// the same way. The value the `UPDATE` carries stays exactly as typed.
+///
+/// Bytes, not characters: it only has to be cheap and never under-count, and
+/// `clip` is a no-op on anything that turns out to fit.
+fn pending_shown(value: &NewValue, grouped: bool) -> Option<SharedString> {
+    let NewValue::Value(value) = value else {
+        return None;
+    };
+    Some(match grouped {
+        true => {
+            let grouped = grouped_digits(value);
+            match grouped.len() > CELL_DISPLAY_LIMIT || grouped.contains(['\n', '\r']) {
+                true => SharedString::from(clip(&grouped)),
+                false => SharedString::from(grouped),
+            }
+        }
+        false => match value.len() > CELL_DISPLAY_LIMIT || value.contains(['\n', '\r']) {
+            true => SharedString::from(clip(value)),
+            false => value.clone(),
+        },
+    })
 }
 
 /// A plain number with its integer digits in threes, `1723858791` as
@@ -5041,6 +5053,28 @@ mod tests {
         assert_eq!(
             grid.pending_at(0, 1).unwrap().shown.as_deref(),
             Some("51234")
+        );
+    }
+
+    #[test]
+    fn a_cell_staged_before_the_keys_arrive_is_repainted_with_them() {
+        let mut grid = numbered_grid(db::RowMatch::Key);
+        assert!(grid.set_pending(0, 1, value("51234")));
+        assert!(grid.set_pending(0, 2, value("7654321")));
+        assert_eq!(
+            grid.pending_at(0, 1).unwrap().shown.as_deref(),
+            Some("51,234")
+        );
+
+        grid.mark_foreign_keys(&["account_id".to_string()]);
+        assert_eq!(
+            grid.pending_at(0, 1).unwrap().shown.as_deref(),
+            Some("51234")
+        );
+        assert_eq!(grid.pending_at(0, 1).unwrap().value, value("51234"));
+        assert_eq!(
+            grid.pending_at(0, 2).unwrap().shown.as_deref(),
+            Some("7,654,321")
         );
     }
 

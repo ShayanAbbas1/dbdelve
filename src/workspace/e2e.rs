@@ -720,6 +720,26 @@ fn the_sidebar_selects_the_row_of_the_tab_in_front(cx: &mut TestAppContext) {
         settle(cx);
         assert_eq!(selected(cx), Some(pinned));
 
+        // Arrowed off the tab's row, the selection outlives a rebuild that
+        // lands in the background, as table sizes and folder changes do.
+        workspace.update(cx, |workspace, cx| {
+            let profile = workspace.profile().unwrap();
+            let tree = profile.session.explorer_tree.clone();
+            let id = profile.id.clone();
+            tree.update(cx, |tree, cx| {
+                let flocks = tree.index_of(&flocks_row.clone().into());
+                assert!(flocks.is_some(), "flocks is listed");
+                tree.set_selected_index(flocks, cx);
+            });
+            workspace.refresh_query_library(&id, cx);
+        });
+        settle(cx);
+        assert_eq!(
+            selected(cx),
+            Some(flocks_row.clone()),
+            "a background rebuild keeps the row the user moved to"
+        );
+
         quit(workspace, cx);
     });
 }
