@@ -155,14 +155,15 @@ seven are kept, beside `panic.log`:
 | Linux   | `$XDG_STATE_HOME/dbdelve/`, or `~/.local/state/dbdelve/`  |
 | Windows | `%LOCALAPPDATA%\dbdelve\`                                   |
 
-It never contains your queries, result rows or values, passwords, tokens or
-connection strings. By default it records the version and OS, which kind of
+DBDelve never writes your queries, result rows or values, passwords, tokens or
+connection strings to it. By default it records the version and OS, which kind of
 database each connection is and whether connecting, running, cancelling,
 tunnels, exports and imports worked and how long they took, but no hostnames,
 usernames, database names, connection names or error text from the server.
 **Verbose logging** in Settings adds hostnames, database names, connection
 errors (which can include the username) and the messages database drivers log
-themselves (SQL Server's `PRINT` output among them).
+themselves (SQL Server's `PRINT` output among them). DBDelve doesn't filter
+those driver messages, so they can carry anything the server sends.
 
 To attach it to an issue, use **Help → Copy Diagnostics** (or Copy diagnostics
 in the command palette, `Ctrl+Shift+P`, `⌘⇧P` on macOS) and paste: it copies
