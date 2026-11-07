@@ -66,6 +66,7 @@ impl Workspace {
             color_titlebar: Some(self.settings.color_titlebar),
             client_sort: Some(self.settings.client_sort),
             qualify_completions: Some(self.settings.qualify_completions),
+            verbose_logging: Some(self.settings.verbose_logging),
             welcomed: Some(self.settings.welcomed),
             custom_keybindings: Some(self.settings.custom_keybindings.clone()),
             theme_opacity: Some(self.settings.theme_opacity.clone()),
@@ -756,23 +757,36 @@ impl Workspace {
             .map_or(form.mode, |profile| profile.mode);
         form.error = None;
 
+        let engine = config.target().label();
         let probe = spawn_blocking(cx.background_executor(), move || {
-            // A blank password on an existing profile means "keep the saved
-            // one", which is what the connect would use.
-            if let Some(id) = editing
-                && let Some(slot) = config.password_mut()
-                && slot.is_empty()
-                && let Some(password) = store::password(&id)?
-            {
-                *slot = password;
+            let started = std::time::Instant::now();
+            let tested = (|| {
+                // A blank password on an existing profile means "keep the saved
+                // one", which is what the connect would use.
+                if let Some(id) = editing
+                    && let Some(slot) = config.password_mut()
+                    && slot.is_empty()
+                    && let Some(password) = store::password(&id)?
+                {
+                    *slot = password;
+                }
+                let connection = Connection::open(config).map_err(|error| error.message)?;
+                if mode == Mode::ReadOnly {
+                    connection
+                        .set_read_only(true)
+                        .map_err(|error| error.message)?;
+                }
+                Ok::<_, String>(Reported::of(&connection))
+            })();
+            let elapsed = started.elapsed();
+            match &tested {
+                Ok(_) => tracing::info!(engine, ?elapsed, "connection test passed"),
+                Err(message) => {
+                    tracing::info!(engine, ?elapsed, "connection test failed");
+                    tracing::debug!("connection test failed: {message}");
+                }
             }
-            let connection = Connection::open(config).map_err(|error| error.message)?;
-            if mode == Mode::ReadOnly {
-                connection
-                    .set_read_only(true)
-                    .map_err(|error| error.message)?;
-            }
-            Ok::<_, String>(Reported::of(&connection))
+            tested
         });
         let task = cx.spawn(async move |workspace, cx| {
             let result = probe.await;
@@ -1203,6 +1217,13 @@ impl Workspace {
             return;
         };
         let rolled_back = profile.in_transaction && profile.connection().is_some();
+        tracing::info!(
+            connection = crate::logging::connection_number(&profile.id),
+            engine = profile.config.target().label(),
+            was_connected = profile.connection().is_some(),
+            rolled_back,
+            "disconnected"
+        );
         profile.generation = generation;
         profile.state = ProfileState::Idle;
         profile.in_transaction = false;
@@ -1698,9 +1719,31 @@ impl Workspace {
         self.refresh_explorer(&id, cx);
         cx.notify();
 
+        let number = crate::logging::connection_number(&id);
+        let engine = config.target().label();
+        tracing::info!(connection = number, engine, "connecting");
+        tracing::debug!(
+            connection = number,
+            endpoint = config.endpoint(),
+            database = config.database_name().unwrap_or_default(),
+            "connecting"
+        );
         let connection_task = spawn_blocking(cx.background_executor(), {
             let id = id.clone();
             move || {
+                let started = std::time::Instant::now();
+                let failed = |stage: &str, message: String| {
+                    let elapsed = started.elapsed();
+                    tracing::info!(
+                        connection = number,
+                        engine,
+                        stage,
+                        ?elapsed,
+                        "connect failed"
+                    );
+                    tracing::debug!(connection = number, "connect failed: {message}");
+                    message
+                };
                 // A file engine has nothing to authenticate to, so it never
                 // reaches the Keychain — and never triggers its prompt.
                 if let Some(slot) = config.password_mut()
@@ -1711,10 +1754,11 @@ impl Workspace {
                         // No keychain item is not a missing password: a blank
                         // one is valid, so this connects with what it has.
                         Ok(None) => {}
-                        Err(message) => return Err(message),
+                        Err(message) => return Err(failed("keychain", message)),
                     }
                 }
-                let connection = Connection::open(config).map_err(|error| error.message)?;
+                let connection =
+                    Connection::open(config).map_err(|error| failed("open", error.message))?;
                 // Only Read-only asks the server for anything here: the
                 // servers already default to read-write, and a redundant
                 // switch to it risks a pooler or proxy that rejects the
@@ -1725,9 +1769,11 @@ impl Workspace {
                 if mode == Mode::ReadOnly {
                     connection
                         .set_read_only(true)
-                        .map_err(|error| error.message)?;
+                        .map_err(|error| failed("read-only hold", error.message))?;
                 }
                 connection.warm();
+                let elapsed = started.elapsed();
+                tracing::info!(connection = number, engine, ?elapsed, "connected");
                 Ok(connection)
             }
         });

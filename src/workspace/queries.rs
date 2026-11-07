@@ -190,6 +190,21 @@ impl Workspace {
             cancels
         };
         cx.notify();
+        let (number, engine) = self
+            .profile()
+            .map(|profile| {
+                (
+                    crate::logging::connection_number(&profile.id),
+                    profile.config.target().label(),
+                )
+            })
+            .unwrap_or_default();
+        tracing::info!(
+            connection = number,
+            engine,
+            statements = cancels.len(),
+            "cancel requested"
+        );
         let cancel_task = spawn_cancel(cx.background_executor(), move || {
             cancels
                 .iter()
@@ -199,6 +214,8 @@ impl Workspace {
 
         cx.spawn(async move |workspace, cx| {
             if let Err(error) = cancel_task.await {
+                tracing::warn!(connection = number, engine, "cancel failed");
+                tracing::debug!(connection = number, "cancel failed: {}", error.message);
                 _ = workspace.update(cx, |workspace, cx| workspace.note(error.message, cx));
             }
         })
@@ -2359,9 +2376,50 @@ impl Workspace {
         // behind it on the same session block on its lock, so none of them
         // may hold one of the executor's threads (`spawn_blocking`).
         let query_task = spawn_blocking(cx.background_executor(), work);
+        let number = crate::logging::connection_number(&id);
 
         cx.spawn(async move |workspace, cx| {
             let (result, lost) = query_task.await;
+            // Outcome and duration only. Not even at debug the server's text:
+            // some engines quote the statement back in a syntax error.
+            let (origin, elapsed) = (
+                if generated { "dbdelve" } else { "user" },
+                started.elapsed(),
+            );
+            let engine_label = target.label();
+            match &result {
+                Ok(_) => tracing::info!(
+                    connection = number,
+                    engine = engine_label,
+                    origin,
+                    ?elapsed,
+                    "statement ran"
+                ),
+                Err(error) if db::is_cancel(target, error) => {
+                    tracing::info!(
+                        connection = number,
+                        engine = engine_label,
+                        origin,
+                        ?elapsed,
+                        "statement cancelled"
+                    )
+                }
+                Err(_) => tracing::info!(
+                    connection = number,
+                    engine = engine_label,
+                    origin,
+                    ?elapsed,
+                    lost,
+                    "statement failed"
+                ),
+            }
+            if lost {
+                tracing::warn!(
+                    connection = number,
+                    engine = engine_label,
+                    "connection lost"
+                );
+            }
             // Told before anything below asks whether the session or the tab
             // the run was for is still there: a run closed or reconnected under
             // still ran, and what it came to is history. The tab's own outcome,

@@ -639,6 +639,15 @@ impl Workspace {
         let Some(plan) = dialog.plan.clone() else {
             return;
         };
+        tracing::info!(
+            format = ?dialog.options.format,
+            from = match dialog.source {
+                ImportSource::File(_) => "file",
+                ImportSource::Clipboard(_) => "clipboard",
+            },
+            rows = plan.chunks.iter().map(|chunk| chunk.len()).sum::<usize>(),
+            "import started"
+        );
         let started = Instant::now();
         dialog.error = None;
         dialog.phase = ImportPhase::Running {
@@ -671,6 +680,8 @@ impl Workspace {
                             workspace.import_step(id, started, cx);
                         }
                         Err(error) => {
+                            tracing::warn!("import failed: its own connection did not open");
+                            tracing::debug!("import failed: {}", error.message);
                             dialog.phase = ImportPhase::Editing;
                             dialog.error = Some(error.message);
                             cx.notify();
@@ -834,6 +845,19 @@ impl Workspace {
             return;
         };
         let summary = outcome.summary(plan);
+        let format = dialog.options.format;
+        match &outcome {
+            Outcome::Imported { rows, .. } => tracing::info!(?format, rows, "import finished"),
+            Outcome::Cancelled { committed } => {
+                tracing::info!(?format, committed, "import cancelled")
+            }
+            Outcome::Failed {
+                message, committed, ..
+            } => {
+                tracing::warn!(?format, committed, "import failed");
+                tracing::debug!("import failed: {message}");
+            }
+        }
         let (schema, table) = (dialog.schema.clone(), dialog.table.clone());
         let (changed, closes) = match outcome {
             Outcome::Imported { .. } => (true, true),

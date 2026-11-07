@@ -486,6 +486,8 @@ pub struct StoredSettings {
     pub client_sort: Option<bool>,
     #[serde(default)]
     pub qualify_completions: Option<bool>,
+    #[serde(default)]
+    pub verbose_logging: Option<bool>,
     /// Whether the first-run greeting has played. Absent in a file written
     /// before there was one.
     #[serde(default)]
@@ -3682,6 +3684,7 @@ open_objects = []
                 color_titlebar: Some(false),
                 client_sort: Some(true),
                 qualify_completions: Some(true),
+                verbose_logging: Some(true),
                 welcomed: Some(true),
                 custom_keybindings: Some(HashMap::from([(
                     "apply_edits".to_string(),

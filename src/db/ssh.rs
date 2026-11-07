@@ -73,17 +73,45 @@ impl Tunnel {
     /// Forward a local port to `target_host:target_port` as seen from the SSH
     /// host.
     pub fn open(ssh: &SshTunnel, target_host: &str, target_port: u16) -> Result<Self, DbError> {
+        let started = Instant::now();
+        tracing::debug!(ssh_host = ssh.host, "opening ssh tunnel");
+        let opened = Self::opened(ssh, target_host, target_port);
+        let elapsed = started.elapsed();
+        match opened {
+            Ok(tunnel) => {
+                tracing::info!(?elapsed, "ssh tunnel up");
+                Ok(tunnel)
+            }
+            Err((kind, error)) => {
+                tracing::warn!(kind, ?elapsed, "ssh tunnel failed");
+                tracing::debug!("ssh tunnel failed: {}", error.message);
+                Err(error)
+            }
+        }
+    }
+
+    /// A failure comes with its kind, for the log, which may not say what ssh
+    /// said or where it was going.
+    fn opened(
+        ssh: &SshTunnel,
+        target_host: &str,
+        target_port: u16,
+    ) -> Result<Self, (&'static str, DbError)> {
         let mut attempt = 1;
         loop {
             let port = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
                 .and_then(|listener| listener.local_addr())
                 .map_err(|error| {
-                    plain_error(format!(
-                        "Could not reserve a local port for the SSH tunnel: {error}"
-                    ))
+                    (
+                        "local port",
+                        plain_error(format!(
+                            "Could not reserve a local port for the SSH tunnel: {error}"
+                        )),
+                    )
                 })?
                 .port();
-            let mut args = ssh_args(ssh, port, target_host, target_port)?;
+            let mut args = ssh_args(ssh, port, target_host, target_port)
+                .map_err(|error| ("arguments", error))?;
             // Tests never read the real ~/.ssh.
             if cfg!(test)
                 && let Ok(config) = std::env::var("dbdelve_SSH_CONFIG")
@@ -103,8 +131,11 @@ impl Tunnel {
             let local = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
             let mut tunnel =
                 spawn(local, &ssh.host, &args).map_err(|error| match error.kind() {
-                    io::ErrorKind::NotFound => no_ssh(),
-                    _ => plain_error(format!("Could not start ssh: {error}")),
+                    io::ErrorKind::NotFound => ("no ssh", no_ssh()),
+                    _ => (
+                        "spawn",
+                        plain_error(format!("Could not start ssh: {error}")),
+                    ),
                 })?;
             let process = tunnel
                 .process
@@ -119,10 +150,10 @@ impl Tunnel {
             match wait_ready(process, &tunnel.said) {
                 Ready::Listening => return Ok(tunnel),
                 Ready::HostKeyNotSaved(message) => {
-                    return Err(plain_error(format!(
-                        "SSH tunnel through {} failed: {message}",
-                        ssh.host
-                    )));
+                    return Err((
+                        "host key not saved",
+                        plain_error(format!("SSH tunnel through {} failed: {message}", ssh.host)),
+                    ));
                 }
                 Ready::Exited(status) => {
                     let _ = draining.join();
@@ -131,14 +162,17 @@ impl Tunnel {
                         attempt += 1;
                         continue;
                     }
-                    return Err(failure(&ssh.host, status, &said));
+                    return Err(("ssh exited", failure(&ssh.host, status, &said)));
                 }
                 Ready::TimedOut => {
-                    return Err(plain_error(format!(
-                        "SSH tunnel through {} did not come up within {} seconds.",
-                        ssh.host,
-                        READY_WITHIN.as_secs()
-                    )));
+                    return Err((
+                        "timed out",
+                        plain_error(format!(
+                            "SSH tunnel through {} did not come up within {} seconds.",
+                            ssh.host,
+                            READY_WITHIN.as_secs()
+                        )),
+                    ));
                 }
             }
         }
@@ -157,6 +191,7 @@ impl Tunnel {
         if running {
             return Ok(self.local);
         }
+        tracing::warn!("ssh tunnel found closed");
         let said = self.shown();
         Err(plain_error(if said.is_empty() {
             format!("SSH tunnel through {} closed.", self.host)
@@ -228,6 +263,7 @@ pub(super) fn tunnelled<C>(
 
 impl Drop for Tunnel {
     fn drop(&mut self) {
+        tracing::info!("ssh tunnel down");
         let process = self
             .process
             .get_mut()

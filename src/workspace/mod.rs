@@ -75,6 +75,9 @@ pub(crate) struct Settings {
     /// Whether completing a relation writes it as `schema.relation`, for
     /// databases whose search path does not reach every schema.
     pub(crate) qualify_completions: bool,
+    /// Whether the diagnostic log takes DBDelve's debug lines and other
+    /// crates' info, applied as it changes (`logging::set_verbose`).
+    pub(crate) verbose_logging: bool,
     /// Whether the first-run greeting has played on the welcome surface.
     pub(crate) welcomed: bool,
     /// Keybinding overrides, keyed by action id. Applied to the keymap on
@@ -112,6 +115,7 @@ impl Default for Settings {
             color_titlebar: true,
             client_sort: false,
             qualify_completions: false,
+            verbose_logging: false,
             welcomed: false,
             custom_keybindings: HashMap::new(),
         }
@@ -592,6 +596,9 @@ impl Workspace {
                 workspace.settings.client_sort = stored_settings.client_sort.unwrap_or(false);
                 workspace.settings.qualify_completions =
                     stored_settings.qualify_completions.unwrap_or(false);
+                workspace.settings.verbose_logging =
+                    stored_settings.verbose_logging.unwrap_or(false);
+                crate::logging::set_verbose(workspace.settings.verbose_logging);
                 workspace.settings.welcomed = welcome::welcomed(
                     stored_settings.welcomed,
                     !profiles.is_empty() || !unavailable.is_empty(),
@@ -1013,6 +1020,16 @@ impl Workspace {
             return;
         }
         self.settings.check_for_updates = check;
+        self.remember_profiles(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn set_verbose_logging(&mut self, verbose: bool, cx: &mut Context<Self>) {
+        if self.settings.verbose_logging == verbose {
+            return;
+        }
+        self.settings.verbose_logging = verbose;
+        crate::logging::set_verbose(verbose);
         self.remember_profiles(cx);
         cx.notify();
     }

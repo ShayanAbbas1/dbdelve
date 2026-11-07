@@ -303,6 +303,10 @@ Hard-won and easy to rediscover. The ones only animation work reaches are in
 - Non-trivial logic leaves one runnable check behind: the smallest test that
   fails if the logic breaks. No fixture scaffolding.
 - Match surrounding code's naming, density and idiom.
+- **Log through `tracing`, never `eprintln!`**, and only what the module doc of
+  `src/logging.rs` allows: no query text, rows, secrets or connection strings
+  at any level, and no host, user or database names or server error text
+  below debug. A user attaches this log to a public issue.
 - Commit messages and PR titles are `type(scope): summary`; the types and
   scopes are listed in `CONTRIBUTING.md`.
 - **This file holds what every task needs; `docs/agents/` holds the rest.** A

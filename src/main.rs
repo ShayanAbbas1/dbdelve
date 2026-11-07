@@ -32,6 +32,7 @@ mod workspace;
 
 mod icons;
 mod keybindings;
+mod logging;
 mod theme;
 mod tls;
 mod ui;
@@ -197,80 +198,9 @@ fn connection_config_from(
     })))
 }
 
-/// Where a panic goes when nobody is watching stderr. A `.app` is spawned by
-/// launchd, so a panic message lands in the unified log and the abort that
-/// follows writes an `.ips` trace that does not carry it -- every stranger's
-/// bug report would read "it closed" with nothing to read after it. Installed
-/// first thing in `main`, because the deaths hardest to guess at from outside
-/// are the ones before a window exists.
-///
-/// ponytail: one appended file, never rotated. A few kilobytes per crash; if
-/// that ever becomes a real number, truncate on open past some size.
-fn install_panic_log() {
-    let Some(directory) = panic_log_directory() else {
-        return;
-    };
-    let previous = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        // Nothing in here may panic: a panic inside the hook aborts with less
-        // to read than the one it was called for. Hence every result dropped
-        // rather than unwrapped.
-        use std::io::Write as _;
-        let at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|since| since.as_secs())
-            .unwrap_or_default();
-        if std::fs::create_dir_all(&directory).is_ok()
-            && let Ok(mut file) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(directory.join("panic.log"))
-        {
-            let _ = writeln!(
-                file,
-                "--- {at} (unix seconds)\n{info}\n{}",
-                std::backtrace::Backtrace::force_capture()
-            );
-        }
-        previous(info);
-    }));
-}
-
-/// A crash log is state, not cache. macOS uses `Logs`, Linux the XDG state
-/// directory — a cache cleaner is entitled to delete anything in the other
-/// one. Windows uses LocalAppData for the same reason: it stays on this machine.
-fn panic_log_directory() -> Option<PathBuf> {
-    #[cfg(target_os = "macos")]
-    {
-        let home = std::env::var_os("HOME").filter(|home| !home.is_empty())?;
-        Some(PathBuf::from(home).join("Library/Logs/dbdelve"))
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let root = std::env::var_os("LOCALAPPDATA")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| {
-                std::env::var_os("USERPROFILE")
-                    .filter(|value| !value.is_empty())
-                    .map(|profile| PathBuf::from(profile).join("AppData").join("Local"))
-            })?;
-        Some(root.join("dbdelve"))
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        let home = std::env::var_os("HOME").filter(|home| !home.is_empty())?;
-        Some(
-            match std::env::var_os("XDG_STATE_HOME").filter(|value| !value.is_empty()) {
-                Some(state_home) => PathBuf::from(state_home).join("dbdelve"),
-                None => PathBuf::from(home).join(".local/state/dbdelve"),
-            },
-        )
-    }
-}
-
 fn main() {
-    install_panic_log();
+    logging::install_panic_log();
+    logging::install();
     // Manifests only, ahead of the profiles that name them: no plugin process
     // starts until one of its connections opens.
     let plugins = db::plugin::discover();
