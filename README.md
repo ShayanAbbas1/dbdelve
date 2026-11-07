@@ -160,14 +160,18 @@ connection strings. By default it records the version and OS, which kind of
 database each connection is and whether connecting, running, cancelling,
 tunnels, exports and imports worked and how long they took, but no hostnames,
 usernames, database names, connection names or error text from the server.
-**Verbose logging** in Settings adds hostnames, database names, server error
-text and the messages database drivers log themselves (SQL Server's `PRINT`
-output among them).
+**Verbose logging** in Settings adds hostnames, database names, connection
+error text and the messages database drivers log themselves (SQL Server's
+`PRINT` output among them).
 
 To attach it to an issue, use **Help → Copy Diagnostics** (or Copy diagnostics
 in the command palette, `Ctrl+Shift+P`, `⌘⇧P` on macOS) and paste: it copies
 the version, OS, plugins and the last 200 lines of today's log. **Help → Open
-Logs Folder** shows the files. Read what you paste before posting it.
+Logs Folder** shows the files.
+
+**Before you post a log, read it and remove anything sensitive**: hostnames,
+database or table names, data values, file paths. A verbose log in particular
+can hold some.
 
 ## License
 

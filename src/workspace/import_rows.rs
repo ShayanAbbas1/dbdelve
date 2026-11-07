@@ -851,11 +851,9 @@ impl Workspace {
             Outcome::Cancelled { committed } => {
                 tracing::info!(?format, committed, "import cancelled")
             }
-            Outcome::Failed {
-                message, committed, ..
-            } => {
+            // Its message can quote the cell values of the row that failed.
+            Outcome::Failed { committed, .. } => {
                 tracing::warn!(?format, committed, "import failed");
-                tracing::debug!("import failed: {message}");
             }
         }
         let (schema, table) = (dialog.schema.clone(), dialog.table.clone());

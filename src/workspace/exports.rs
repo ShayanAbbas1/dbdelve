@@ -773,16 +773,13 @@ pub(crate) fn refetch_refusal(
 }
 
 /// The file's name and the failure's text stay out of the info line: either
-/// can carry a path through the user's home, and a failure the server's words.
+/// can carry a path through the user's home, and a failure quotes the SQL.
 fn log_export(format: FileAs, ended: Result<usize, &Ended>) {
     let format = format.extension();
     match ended {
         Ok(rows) => tracing::info!(format, rows, "export finished"),
         Err(Ended::Cancelled) => tracing::info!(format, "export cancelled"),
-        Err(Ended::Failed(message)) => {
-            tracing::warn!(format, "export failed");
-            tracing::debug!("export failed: {message}");
-        }
+        Err(Ended::Failed(_)) => tracing::warn!(format, "export failed"),
     }
 }
 

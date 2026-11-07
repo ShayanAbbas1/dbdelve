@@ -16,11 +16,13 @@
 //!   with the outcome, the stage a failure happened at, and durations; tunnels;
 //!   cancels; exports and imports by format with row counts.
 //! - **At debug**, which only Verbose logging or `DBDELVE_LOG` turns on:
-//!   hostnames, database names and server error text, each in a `debug!` line
+//!   hostnames, database names and connect error text, each in a `debug!` line
 //!   beside the info line it explains.
 //!
-//! Third-party crates are held to warn, or info when verbose, and never lower
-//! than that: a driver's debug output can carry the SQL it sends.
+//! Third-party crates log nothing by default: a driver's events carry the
+//! server's own words (tiberius logs a failed login's message, username and
+//! all, at error). Verbose logging lets them in at info and never above, since
+//! a driver's debug output carries the SQL it sends.
 
 use std::{
     collections::BTreeMap,
@@ -35,8 +37,9 @@ use std::{
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{EnvFilter, Registry, fmt, layer::SubscriberExt as _, reload};
 
-/// An EnvFilter directive that replaces both the defaults and the Settings
-/// toggle, for a developer or a bug that needs one crate louder.
+/// A level name that replaces both the defaults and the Settings toggle, for a
+/// developer chasing a bug. Only DBDelve's own level: a directive naming a
+/// driver would lift the ceiling that keeps server text out of the log.
 const ENVIRONMENT: &str = "DBDELVE_LOG";
 
 const PREFIX: &str = "dbdelve";
@@ -51,7 +54,7 @@ const TAIL_BYTES: u64 = 256 * 1024;
 
 struct Installed {
     filter: reload::Handle<EnvFilter, Registry>,
-    from_environment: bool,
+    from_environment: Option<&'static str>,
 }
 
 static INSTALLED: OnceLock<Installed> = OnceLock::new();
@@ -85,14 +88,13 @@ pub(crate) fn install() {
     let opened = file.is_some();
     let requested = std::env::var(ENVIRONMENT)
         .ok()
-        .filter(|directive| !directive.trim().is_empty());
-    let (filter, refused) = match requested.map(EnvFilter::try_new) {
-        Some(Ok(filter)) => (Some(filter), None),
-        Some(Err(error)) => (None, Some(error)),
-        None => (None, None),
-    };
-    let from_environment = filter.is_some();
-    let (filter, handle) = reload::Layer::new(filter.unwrap_or_else(|| levels(false)));
+        .filter(|level| !level.trim().is_empty());
+    let from_environment = requested.as_deref().and_then(environment_level);
+    let refused = requested.is_some() && from_environment.is_none();
+    let (filter, handle) = reload::Layer::new(match from_environment {
+        Some(level) => filter_for(level),
+        None => levels(false),
+    });
     let subscriber = tracing_subscriber::registry()
         .with(filter)
         .with(file.map(|file| fmt::layer().with_ansi(false).with_writer(file)))
@@ -111,24 +113,32 @@ pub(crate) fn install() {
         arch = std::env::consts::ARCH,
         "dbdelve started"
     );
-    if let Some(error) = refused {
-        tracing::warn!(
-            "{ENVIRONMENT} is not a filter this build reads, so it was ignored: {error}"
-        );
+    if refused {
+        tracing::warn!("{ENVIRONMENT} is not a level name this build reads, so it was ignored");
     }
     if !opened {
         tracing::warn!("the log file could not be opened, so nothing is written to it");
     }
 }
 
-/// The default levels: DBDelve's own lines at info, everything else at warn,
-/// one step louder each when verbose.
+/// The default levels: DBDelve's own lines at info and nothing from anyone
+/// else; verbose adds DBDelve's debug lines and other crates' info.
 fn levels(verbose: bool) -> EnvFilter {
-    let (own, others) = match verbose {
-        true => ("debug", "info"),
-        false => ("info", "warn"),
-    };
-    EnvFilter::new(format!("{others},dbdelve={own}"))
+    match verbose {
+        true => EnvFilter::new("info,dbdelve=debug"),
+        false => filter_for("info"),
+    }
+}
+
+fn filter_for(level: &str) -> EnvFilter {
+    EnvFilter::new(format!("off,dbdelve={level}"))
+}
+
+/// The level a `DBDELVE_LOG` value names, if it is only a level name.
+fn environment_level(value: &str) -> Option<&'static str> {
+    ["trace", "debug", "info", "warn", "error", "off"]
+        .into_iter()
+        .find(|level| value.trim().eq_ignore_ascii_case(level))
 }
 
 /// The Settings toggle, applied at once. `DBDELVE_LOG`, when it was set,
@@ -140,7 +150,7 @@ pub(crate) fn set_verbose(verbose: bool) {
     let Some(installed) = INSTALLED.get() else {
         return;
     };
-    if installed.from_environment {
+    if installed.from_environment.is_some() {
         tracing::info!(
             verbose,
             "verbose logging changed; {ENVIRONMENT} still decides"
@@ -159,14 +169,11 @@ pub(crate) fn set_verbose(verbose: bool) {
 
 /// What the log's level is, as Copy Diagnostics reports it.
 fn verbosity() -> String {
-    if INSTALLED
+    if let Some(level) = INSTALLED
         .get()
-        .is_some_and(|installed| installed.from_environment)
+        .and_then(|installed| installed.from_environment)
     {
-        return format!(
-            "{ENVIRONMENT}={}",
-            std::env::var(ENVIRONMENT).unwrap_or_default()
-        );
+        return format!("{ENVIRONMENT}={level}");
     }
     match VERBOSE.load(Ordering::Relaxed) {
         true => "on".to_string(),
@@ -372,7 +379,49 @@ fn tail(text: &str, count: usize) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{report, tail};
+    use super::{environment_level, report, tail};
+    use std::future::Future as _;
+    use tracing::instrument::WithSubscriber as _;
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    #[test]
+    fn the_environment_names_a_level_and_nothing_louder_than_that() {
+        assert_eq!(environment_level(" Trace "), Some("trace"));
+        assert_eq!(environment_level("off"), Some("off"));
+        assert_eq!(environment_level("tiberius=trace"), None);
+        assert_eq!(environment_level("dbdelve=debug,tiberius=trace"), None);
+        assert_eq!(environment_level("verbose"), None);
+    }
+
+    #[test]
+    fn a_scoped_subscriber_hears_what_the_log_filter_turns_off() {
+        struct Count(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+        impl tracing::Subscriber for Count {
+            fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn event(&self, _: &tracing::Event<'_>) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+        }
+        let heard = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (filter, _) = tracing_subscriber::reload::Layer::new(super::levels(false));
+        let outer = tracing_subscriber::registry().with(filter);
+        tracing::subscriber::with_default(outer, || {
+            let drained = async { tracing::info!(target: "tiberius::elsewhere", "PRINT") }
+                .with_subscriber(Count(heard.clone()));
+            let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+            let _ = std::pin::pin!(drained).poll(&mut context);
+        });
+        assert_eq!(heard.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
 
     #[test]
     fn a_report_is_one_fence_the_log_cannot_close() {
