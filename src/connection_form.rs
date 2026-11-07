@@ -22,6 +22,7 @@ use crate::{
     session::Profile,
     sql::Mode,
     theme::ConnectionColor,
+    ui::Status,
 };
 
 pub(crate) struct ConnectionForm {
@@ -91,6 +92,10 @@ pub(crate) struct ConnectionForm {
     pub(crate) needs_focus: Option<Entity<InputState>>,
     pub(crate) error: Option<String>,
     pub(crate) test: Option<ConnectionTest>,
+    /// What a Help command said while the form was up, which hides the status
+    /// bar it would go to. Drawn over `error` and `test` for a few seconds
+    /// rather than written into either, so both still stand once it goes.
+    pub(crate) notice: Option<(Status, String)>,
     /// The id of the profile being edited, or `None` for a new connection.
     pub(crate) editing: Option<String>,
     /// The project the connection is saved into, or `None` for No project.
@@ -384,6 +389,7 @@ impl ConnectionForm {
             statement_timeout,
             error: None,
             test: None,
+            notice: None,
             editing: None,
             project: None,
             naming_project: false,

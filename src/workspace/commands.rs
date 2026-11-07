@@ -6,6 +6,7 @@
 use super::*;
 use crate::actions::{CopyDiagnostics, FocusSidebar, OpenLogsFolder, ToggleResultsFocus};
 use crate::keybindings;
+use crate::ui::Status;
 
 impl Workspace {
     /// Help > Open Logs Folder: the diagnostic log and `panic.log`, in the
@@ -17,7 +18,8 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let Some(directory) = crate::logging::directory() else {
-            self.note(
+            self.help_notice(
+                Status::Failed,
                 "There is no logs folder: the home directory is not set.".into(),
                 cx,
             );
@@ -27,7 +29,8 @@ impl Workspace {
         // manager opens nothing for one that is not there.
         match std::fs::create_dir_all(&directory) {
             Ok(()) => cx.open_with_system(&directory),
-            Err(error) => self.note(
+            Err(error) => self.help_notice(
+                Status::Failed,
                 format!("Could not open {}: {error}", directory.display()),
                 cx,
             ),
@@ -45,10 +48,47 @@ impl Workspace {
         cx.write_to_clipboard(ClipboardItem::new_string(crate::logging::diagnostics(
             &self.plugins,
         )));
-        self.confirm(
+        self.help_notice(
+            Status::Idle,
             "Diagnostics copied. Remove anything sensitive before posting.".into(),
             cx,
         );
+    }
+
+    /// The Help commands answer from the connection form too, which hides the
+    /// status bar `note` writes to, so there the answer goes in the form's
+    /// footer for a few seconds instead.
+    fn help_notice(&mut self, status: Status, message: String, cx: &mut Context<Self>) {
+        let Some(form) = &mut self.form else {
+            if status == Status::Failed {
+                self.note(message, cx);
+            } else {
+                self.confirm(message, cx);
+            }
+            return;
+        };
+        form.notice = Some((status, message.clone()));
+        let opened = form.opened;
+        cx.notify();
+        cx.spawn(async move |workspace, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(3))
+                .await;
+            let _ = workspace.update(cx, |workspace, cx| {
+                // Only this form's, and only while no later notice replaced it.
+                if let Some(form) = &mut workspace.form
+                    && form.opened == opened
+                    && form
+                        .notice
+                        .as_ref()
+                        .is_some_and(|(_, notice)| *notice == message)
+                {
+                    form.notice = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     pub(crate) fn fuzzy_open(
