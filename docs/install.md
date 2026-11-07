@@ -148,8 +148,11 @@ DBDelve doesn't bundle any.
 
 ## Updating
 
-`brew upgrade --cask dbdelve`, if you installed it that way. On Windows, run
-the next installer over the previous one; it upgrades in place. Otherwise the
+`brew upgrade --cask dbdelve`, if you installed it that way. If you used the
+Windows installer, run the next one over it; it upgrades in place. The zip has
+no upgrade: each version unzips to its own folder, so delete the old one.
+Connections and any plugins you added live in `%APPDATA%\dbdelve`, not there.
+Otherwise the
 status bar links to [the latest release][releases] once there is a newer one.
 
 There is no telemetry. The only request DBDelve makes on its own is one to
