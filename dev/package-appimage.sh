@@ -34,6 +34,7 @@ cargo build --release
 # unixodbc package (apt install unixodbc) to connect through ODBC. Without it
 # only the bridge fails to start.
 dev/plugins.sh --release
+dev/check-linux-floor.sh "$TARGET_DIR/release/dbdelve" "$TARGET_DIR"/release/plugins/odbc/bin/*
 
 rm -rf "$APPDIR"
 mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/lib" "$APPDIR/usr/share/applications"
@@ -75,6 +76,15 @@ cp -R licenses "$APPDIR/"
 #     failing to start. The build runs on Ubuntu 22.04 for exactly this reason:
 #     glibc is forward-compatible, so the oldest build host is the floor.
 #
+#   libstdc++ and libgcc_s
+#     Backward-compatible the same way glibc is, and needed by the host's GPU
+#     stack as much as by us: Mesa's Vulkan drivers link SPIRV-Tools and LLVM,
+#     both C++, built against the host's libstdc++. A process holds one copy
+#     of it, so a bundled older one is the copy the driver gets, and on any
+#     distribution newer than the build host the driver then fails to load
+#     and the window never opens (#213). dev/check-linux-floor.sh keeps the
+#     binary from needing a newer one than 22.04 ships.
+#
 #   GL, EGL, GLX, GLdispatch, GLES, glapi, gbm, libdrm, Vulkan loader and ICDs
 #     These have to be the ones that match the running kernel's DRM driver.
 #     A bundled libGL loads the build machine's Mesa against the user's
@@ -101,11 +111,10 @@ cp -R licenses "$APPDIR/"
 #
 # Everything else is fair game, because it talks to files and sockets over
 # formats and protocols that do not care what kernel is underneath:
-# libxkbcommon, libstdc++ and libgcc_s today, and fontconfig, freetype,
-# libwayland-client and libdbus-1 the day a build stops linking them
-# statically -- which is where they are now, vendored into the binary, so the
-# loop below never sees them.
-HOST_ONLY='^(ld-linux.*|libc|libm|libdl|libpthread|librt|libresolv|libnsl|libutil|libanl|libBrokenLocale|libGL|libGLX|libGLdispatch|libGLESv[0-9]|libOpenGL|libEGL|libglapi|libgbm|libdrm|libvulkan|libX11|libX11-xcb|libxcb|libXau|libXdmcp|libbsd|libmd|libwayland-egl)\.so'
+# libxkbcommon today, and fontconfig, freetype, libwayland-client and
+# libdbus-1 the day a build stops linking them statically -- which is where
+# they are now, vendored into the binary, so the loop below never sees them.
+HOST_ONLY='^(ld-linux.*|libc|libm|libdl|libpthread|librt|libresolv|libnsl|libutil|libanl|libBrokenLocale|libstdc\+\+|libgcc_s|libGL|libGLX|libGLdispatch|libGLESv[0-9]|libOpenGL|libEGL|libglapi|libgbm|libdrm|libvulkan|libX11|libX11-xcb|libxcb|libXau|libXdmcp|libbsd|libmd|libwayland-egl)\.so'
 
 ldd "$APPDIR/usr/bin/dbdelve" |
   sed -n 's/^.* => \(\/[^ ]*\) (0x[0-9a-f]*)$/\1/p' |

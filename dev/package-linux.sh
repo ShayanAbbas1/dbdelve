@@ -27,6 +27,7 @@ cargo build --release
 # user needs the unixodbc package to connect through it, and the app itself
 # does not link ODBC.
 dev/plugins.sh --release
+dev/check-linux-floor.sh "$TARGET_DIR/release/dbdelve" "$TARGET_DIR"/release/plugins/odbc/bin/*
 
 rm -rf "$STAGE"
 mkdir -p "$STAGE/icons"
