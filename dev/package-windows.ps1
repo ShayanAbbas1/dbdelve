@@ -31,6 +31,10 @@ $Version = $VersionLine.Matches.Groups[1].Value
 # binary somewhere else, and reading target/ regardless is how a stale exe
 # from an earlier build ends up in the zip.
 $TargetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $Root "target" }
+# Absolute, because iscc resolves a relative path against the .iss file's
+# directory, not ours. Not [IO.Path]::GetFullPath: that resolves against the
+# process directory, which Set-Location does not move.
+$TargetDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($TargetDir)
 
 # windows-latest reports AMD64. The asset uses the same x86_64 spelling as the
 # Linux tarballs, so a release lists one architecture vocabulary.

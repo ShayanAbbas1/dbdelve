@@ -85,6 +85,11 @@ PrivilegesRequiredOverrideAllUsersRecommended=&All users (Program Files, require
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
+[InstallDelete]
+; An upgrade only adds and overwrites. A plugin a later release drops or
+; renames would otherwise linger here, and discover() prefers this directory.
+Type: filesandordirs; Name: "{app}\plugins"
+
 [Files]
 Source: "{#StageDir}\dbdelve.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; Beside the executable, where db::plugin::discover() looks.
