@@ -1430,6 +1430,8 @@ impl Render for Workspace {
                 .on_action(cx.listener(Self::new_project))
                 .on_action(cx.listener(Self::import_from))
                 .on_action(cx.listener(Self::open_settings))
+                .on_action(cx.listener(Self::open_logs_folder))
+                .on_action(cx.listener(Self::copy_diagnostics))
                 .on_action(cx.listener(Self::fuzzy_open))
                 .on_action(cx.listener(Self::command_palette))
                 .on_action(cx.listener(Self::search_everything))
@@ -2140,6 +2142,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::focus_sidebar))
             .on_action(cx.listener(Self::open_settings))
+            .on_action(cx.listener(Self::open_logs_folder))
+            .on_action(cx.listener(Self::copy_diagnostics))
             // Unregistered under the import dialog, which stops only the
             // mouse: these act on the tab it covers, out of sight, and their
             // menu items grey out with them.

@@ -4,10 +4,53 @@
 //! impl live in as many modules as it has concerns; they moved out whole.
 
 use super::*;
-use crate::actions::{FocusSidebar, ToggleResultsFocus};
+use crate::actions::{CopyDiagnostics, FocusSidebar, OpenLogsFolder, ToggleResultsFocus};
 use crate::keybindings;
 
 impl Workspace {
+    /// Help > Open Logs Folder: the diagnostic log and `panic.log`, in the
+    /// system's file manager.
+    pub(crate) fn open_logs_folder(
+        &mut self,
+        _: &OpenLogsFolder,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(directory) = crate::logging::directory() else {
+            self.note(
+                "There is no logs folder: the home directory is not set.".into(),
+                cx,
+            );
+            return;
+        };
+        // Made first: a log that never opened left no folder, and the file
+        // manager opens nothing for one that is not there.
+        match std::fs::create_dir_all(&directory) {
+            Ok(()) => cx.open_with_system(&directory),
+            Err(error) => self.note(
+                format!("Could not open {}: {error}", directory.display()),
+                cx,
+            ),
+        }
+    }
+
+    /// Help > Copy Diagnostics: what a bug report needs, as a block to paste
+    /// into the issue.
+    pub(crate) fn copy_diagnostics(
+        &mut self,
+        _: &CopyDiagnostics,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.write_to_clipboard(ClipboardItem::new_string(crate::logging::diagnostics(
+            &self.plugins,
+        )));
+        self.confirm(
+            "Copied the diagnostics and the end of the log. Read them before posting.".into(),
+            cx,
+        );
+    }
+
     pub(crate) fn fuzzy_open(
         &mut self,
         _: &FuzzyOpen,
@@ -736,6 +779,8 @@ impl Workspace {
             Command::ResetConfirmations => {
                 self.reset_confirmations(&ResetConfirmations, window, cx)
             }
+            Command::OpenLogsFolder => self.open_logs_folder(&OpenLogsFolder, window, cx),
+            Command::CopyDiagnostics => self.copy_diagnostics(&CopyDiagnostics, window, cx),
             Command::HideColumn => self.hide_column(&HideColumn, window, cx),
             Command::TogglePinColumn => self.toggle_pin_column(&TogglePinColumn, window, cx),
             Command::ShowAllColumns => self.show_all_columns(&ShowAllColumns, window, cx),

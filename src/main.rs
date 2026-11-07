@@ -55,20 +55,21 @@ use gpui_component::{
 };
 
 use actions::{
-    AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseTab, CommandPalette, CopyCell, CopyPlan,
-    CopyResults, CopyRow, CopyRows, CopySelection, CustomRowLimit, CycleMode, DeleteRow,
-    DiscardEdits, Disconnect, EditCell, ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen,
-    GoToColumn, HideColumn, ImportConnections, ImportRows, ImportRowsFromClipboard, LimitTarget,
-    MenuImportRowsFromClipboard, Minimize, MoveTabLeft, MoveTabRight, NewConnection, NewProject,
-    NewQuery, NewRow, NextEdit, NextPage, NextProfile, NextResult, NextTab, OpenReference,
-    OpenSettings, PreviousEdit, PreviousPage, PreviousProfile, PreviousResult, PreviousTab, Quit,
-    RefreshConnection, RefreshRelation, RemoveFilter, RequestWriteMode, ResetConfirmations,
-    ResetEditorZoom, RunQuery, SaveQuery, SearchEverything, SelectDatabase, SelectTheme,
-    SetDefault, SetDefaultRowLimit, SetEmpty, SetFilterColumn, SetFilterOperator, SetFilterRaw,
-    SetMode, SetNull, SetQueryLimit, SetRowLimit, ShowAllColumns, ShowEditor, ShowMessages,
-    ShowReferences, SortActiveColumn, SortColumn, SubmitConnection, SwitchConnection,
-    ToggleComment, ToggleFilterJoin, ToggleNextJoin, TogglePinColumn, ToggleRowEdit,
-    ToggleRowPanel, ToggleSidebar, ToggleStructure, ZoomEditorIn, ZoomEditorOut,
+    AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseTab, CommandPalette, CopyCell,
+    CopyDiagnostics, CopyPlan, CopyResults, CopyRow, CopyRows, CopySelection, CustomRowLimit,
+    CycleMode, DeleteRow, DiscardEdits, Disconnect, EditCell, ExplainQuery, FollowForeignKey,
+    FormatQuery, FuzzyOpen, GoToColumn, HideColumn, ImportConnections, ImportRows,
+    ImportRowsFromClipboard, LimitTarget, MenuImportRowsFromClipboard, Minimize, MoveTabLeft,
+    MoveTabRight, NewConnection, NewProject, NewQuery, NewRow, NextEdit, NextPage, NextProfile,
+    NextResult, NextTab, OpenLogsFolder, OpenReference, OpenSettings, PreviousEdit, PreviousPage,
+    PreviousProfile, PreviousResult, PreviousTab, Quit, RefreshConnection, RefreshRelation,
+    RemoveFilter, RequestWriteMode, ResetConfirmations, ResetEditorZoom, RunQuery, SaveQuery,
+    SearchEverything, SelectDatabase, SelectTheme, SetDefault, SetDefaultRowLimit, SetEmpty,
+    SetFilterColumn, SetFilterOperator, SetFilterRaw, SetMode, SetNull, SetQueryLimit, SetRowLimit,
+    ShowAllColumns, ShowEditor, ShowMessages, ShowReferences, SortActiveColumn, SortColumn,
+    SubmitConnection, SwitchConnection, ToggleComment, ToggleFilterJoin, ToggleNextJoin,
+    TogglePinColumn, ToggleRowEdit, ToggleRowPanel, ToggleSidebar, ToggleStructure, ZoomEditorIn,
+    ZoomEditorOut,
 };
 use completion::SchemaCompletions;
 use connection_form::{ConnectionForm, default_profile_name};
@@ -412,6 +413,14 @@ pub(crate) fn app_menus(imports_rows: bool) -> Vec<Menu> {
         disabled: false,
         items: vec![MenuItem::action("Minimize", Minimize)],
     }))
+    .chain([Menu {
+        name: "Help".into(),
+        disabled: false,
+        items: vec![
+            MenuItem::action("Copy Diagnostics", CopyDiagnostics),
+            MenuItem::action("Open Logs Folder", OpenLogsFolder),
+        ],
+    }])
     .collect()
 }
 

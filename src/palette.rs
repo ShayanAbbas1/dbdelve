@@ -431,6 +431,8 @@ pub enum Command {
     CycleMode,
     SetMode(sql::Mode),
     ResetConfirmations,
+    OpenLogsFolder,
+    CopyDiagnostics,
     /// The cell menu's column verbs, on the active cell's column.
     HideColumn,
     TogglePinColumn,
@@ -3390,7 +3392,7 @@ fn import_connection_items(overrides: &HashMap<String, String>) -> Vec<Item> {
     .collect()
 }
 
-/// The theme and font lists, and Settings.
+/// The theme and font lists, Settings, and the Help menu's two.
 fn appearance_items(overrides: &HashMap<String, String>) -> Vec<Item> {
     let mut items = vec![with_chord(
         command(
@@ -3419,6 +3421,26 @@ fn appearance_items(overrides: &HashMap<String, String>) -> Vec<Item> {
         "open_settings",
         overrides,
     ));
+    items.push(with_chord(
+        command(
+            "Copy diagnostics",
+            icon::COPY,
+            Command::CopyDiagnostics,
+            HELP,
+        ),
+        "copy_diagnostics",
+        overrides,
+    ));
+    items.push(with_chord(
+        command(
+            "Open logs folder",
+            icon::FOLDER,
+            Command::OpenLogsFolder,
+            HELP,
+        ),
+        "open_logs_folder",
+        overrides,
+    ));
     items
 }
 
@@ -3432,6 +3454,7 @@ const CONNECTION: &str = "Connection";
 const PROJECT: &str = "Project";
 const APPEARANCE: &str = "Appearance";
 const WINDOW: &str = "Window";
+const HELP: &str = "Help";
 
 /// The verbs, filtered to the ones that mean something from where the user is
 /// standing. A palette that lists what it cannot do is a palette to read past.
@@ -4336,6 +4359,8 @@ fn beside_import(command: &Command) -> bool {
             | Command::CycleMode
             | Command::SetMode(_)
             | Command::ResetConfirmations
+            | Command::OpenLogsFolder
+            | Command::CopyDiagnostics
             | Command::DownloadUpdate(_)
     )
 }

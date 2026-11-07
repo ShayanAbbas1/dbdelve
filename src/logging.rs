@@ -24,7 +24,8 @@
 
 use std::{
     collections::BTreeMap,
-    path::PathBuf,
+    io::{Read as _, Seek as _, SeekFrom},
+    path::{Path, PathBuf},
     sync::{
         Mutex, OnceLock, PoisonError,
         atomic::{AtomicBool, Ordering},
@@ -41,6 +42,12 @@ const ENVIRONMENT: &str = "DBDELVE_LOG";
 const PREFIX: &str = "dbdelve";
 const SUFFIX: &str = "log";
 const KEPT_FILES: usize = 7;
+
+/// What Copy Diagnostics carries of the log: the last lines, read from no more
+/// than the last bytes of the file, so a verbose day's log is not read whole
+/// on the frame thread.
+const TAIL_LINES: usize = 200;
+const TAIL_BYTES: u64 = 256 * 1024;
 
 struct Installed {
     filter: reload::Handle<EnvFilter, Registry>,
@@ -125,7 +132,7 @@ fn levels(verbose: bool) -> EnvFilter {
 }
 
 /// The Settings toggle, applied at once. `DBDELVE_LOG`, when it was set,
-/// outranks it.
+/// outranks it, and the flag is only remembered for Copy Diagnostics.
 pub(crate) fn set_verbose(verbose: bool) {
     if VERBOSE.swap(verbose, Ordering::Relaxed) == verbose {
         return;
@@ -147,6 +154,23 @@ pub(crate) fn set_verbose(verbose: bool) {
     let _ = installed.filter.reload(levels(verbose));
     if verbose {
         tracing::info!("verbose logging on");
+    }
+}
+
+/// What the log's level is, as Copy Diagnostics reports it.
+fn verbosity() -> String {
+    if INSTALLED
+        .get()
+        .is_some_and(|installed| installed.from_environment)
+    {
+        return format!(
+            "{ENVIRONMENT}={}",
+            std::env::var(ENVIRONMENT).unwrap_or_default()
+        );
+    }
+    match VERBOSE.load(Ordering::Relaxed) {
+        true => "on".to_string(),
+        false => "off".to_string(),
     }
 }
 
@@ -233,5 +257,138 @@ pub(crate) fn directory() -> Option<PathBuf> {
                 None => PathBuf::from(home).join(".local/state/dbdelve"),
             },
         )
+    }
+}
+
+/// The file being written today: the dates in the names sort as text.
+fn current_log(directory: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(directory)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.starts_with(&format!("{PREFIX}.")) && name.ends_with(&format!(".{SUFFIX}"))
+                })
+        })
+        .max()
+}
+
+/// The end of `path`, from a line boundary.
+fn read_end(path: &Path) -> std::io::Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let length = file.metadata()?.len();
+    let from = length.saturating_sub(TAIL_BYTES);
+    file.seek(SeekFrom::Start(from))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    let text = String::from_utf8_lossy(&bytes);
+    Ok(match from {
+        0 => text.into_owned(),
+        // Begun mid-line, and maybe mid-character: the first line is a part.
+        _ => text
+            .split_once('\n')
+            .map_or_else(String::new, |(_, rest)| rest.to_string()),
+    })
+}
+
+/// What Copy Diagnostics puts on the clipboard, read now.
+pub(crate) fn diagnostics(plugins: &[&crate::db::Plugin]) -> String {
+    let current = directory().and_then(|directory| current_log(&directory));
+    let log = current.as_ref().map(|path| {
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        (name, read_end(path).map_err(|error| error.to_string()))
+    });
+    let plugins = plugins
+        .iter()
+        .map(|plugin| format!("{} {} ({})", plugin.name, plugin.version, plugin.id))
+        .collect::<Vec<_>>();
+    report(
+        &[
+            ("DBDelve", env!("CARGO_PKG_VERSION").to_string()),
+            (
+                "OS",
+                format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
+            ),
+            (
+                "Plugins",
+                match plugins.is_empty() {
+                    true => "none".to_string(),
+                    false => plugins.join(", "),
+                },
+            ),
+            ("Verbose logging", verbosity()),
+        ],
+        log.as_ref()
+            .map(|(name, text)| (name.as_str(), text.as_deref().map_err(String::as_str))),
+    )
+}
+
+/// The facts, then the last [`TAIL_LINES`] of the log, as one fenced block for
+/// a GitHub issue. The fence is longer than any run of backticks the log holds,
+/// so a line quoting one cannot close it early.
+fn report(facts: &[(&str, String)], log: Option<(&str, Result<&str, &str>)>) -> String {
+    let mut body = facts
+        .iter()
+        .map(|(name, value)| format!("{name}: {value}\n"))
+        .collect::<String>();
+    match log {
+        Some((name, Ok(text))) => {
+            let lines = tail(text, TAIL_LINES);
+            body.push_str(&format!(
+                "\nLast {} lines of {name}:\n{lines}",
+                lines.lines().count()
+            ));
+        }
+        Some((name, Err(error))) => {
+            body.push_str(&format!("\n{name} could not be read: {error}\n"))
+        }
+        None => body.push_str("\nNo log file was found.\n"),
+    }
+    if !body.ends_with('\n') {
+        body.push('\n');
+    }
+    let longest = body.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(longest.max(2) + 1);
+    format!("{fence}text\n{body}{fence}\n")
+}
+
+/// The last `count` lines of `text`.
+fn tail(text: &str, count: usize) -> &str {
+    if count == 0 {
+        return "";
+    }
+    let text = text.strip_suffix('\n').unwrap_or(text);
+    match text.rmatch_indices('\n').nth(count - 1) {
+        Some((at, _)) => &text[at + 1..],
+        None => text,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{report, tail};
+
+    #[test]
+    fn a_report_is_one_fence_the_log_cannot_close() {
+        assert_eq!(tail("a\nb\nc\n", 2), "b\nc");
+        assert_eq!(tail("a\nb", 5), "a\nb");
+        let log = (1..=250)
+            .map(|n| format!("line {n}\n"))
+            .chain(["```\n".to_string()])
+            .collect::<String>();
+        let report = report(
+            &[("DBDelve", "1.2.3".to_string())],
+            Some(("dbdelve.2026-11-08.log", Ok(&log))),
+        );
+        assert!(report.starts_with("````text\nDBDelve: 1.2.3\n"));
+        assert!(report.ends_with("```\n````\n"));
+        assert!(report.contains("Last 200 lines of dbdelve.2026-11-08.log:\nline 52\n"));
+        assert!(!report.contains("line 51\n"));
     }
 }
