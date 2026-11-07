@@ -145,35 +145,13 @@ off. Method and full results in [BENCHMARKS.md](BENCHMARKS.md).
 
 ## Logs and bug reports
 
-DBDelve keeps a diagnostic log on your machine and never sends it anywhere.
-One file per day, `dbdelve.YYYY-MM-DD.log` (the date in UTC), and the last
-seven are kept, beside `panic.log`:
+DBDelve keeps a diagnostic log on your machine and never sends it anywhere. To
+attach it to an issue, use **Help → Copy Diagnostics** and paste; **Help → Open
+Logs Folder** shows the files. If the default log doesn't show the problem, turn
+on **Verbose logging** in Settings and reproduce it.
 
-| OS      | Folder                                                    |
-| ------- | --------------------------------------------------------- |
-| macOS   | `~/Library/Logs/dbdelve/`                                 |
-| Linux   | `$XDG_STATE_HOME/dbdelve/`, or `~/.local/state/dbdelve/`  |
-| Windows | `%LOCALAPPDATA%\dbdelve\`                                   |
-
-By default it records the version and OS, which kind of database each
-connection is and whether connecting, running, cancelling, tunnels, exports and
-imports worked and how long they took, and leaves out your queries, result rows
-or values, passwords, tokens, connection strings, hostnames, usernames,
-database names, connection names and error text from the server. **Verbose
-logging** in Settings adds hostnames, database names, connection errors (which
-can include the username) and the messages database drivers log themselves
-(SQL Server's `PRINT` output among them). DBDelve doesn't filter those driver
-messages, so they can carry anything the server sends, queries and data
-included.
-
-To attach it to an issue, use **Help → Copy Diagnostics** (or Copy diagnostics
-in the command palette, `Ctrl+Shift+P`, `⌘⇧P` on macOS) and paste: it copies
-the version, OS, plugins and the last 200 lines of today's log. **Help → Open
-Logs Folder** shows the files.
-
-**Before you post a log, read it and remove anything sensitive**: hostnames,
-database or table names, data values, file paths. A verbose log in particular
-can hold some.
+Read a log before you post it and remove anything sensitive. A verbose one can
+hold hostnames, database names and anything a database driver logs.
 
 ## License
 
