@@ -62,6 +62,7 @@ out where `db::plugin::discover()` looks. `dev/plugins.sh --release` builds it
 | Linux tarball | `plugins/odbc/` beside `dbdelve`; `install.sh` copies it to `~/.local/share/dbdelve/plugins/odbc` (the binary lands alone in `~/.local/bin`) | system `libodbc.so.2` |
 | AppImage | `usr/bin/plugins/odbc/` | system `libodbc.so.2` |
 | Windows zip | `plugins/odbc/` beside `dbdelve.exe` | system `odbc32` |
+| Windows installer | `plugins/odbc/` beside `dbdelve.exe` | system `odbc32` |
 
 - **macOS signing order.** The helper is signed first, with its own
   identifier (`$IDENTIFIER.odbc`), then the bundle, and the bundle is verified
@@ -78,8 +79,8 @@ out where `db::plugin::discover()` looks. `dev/plugins.sh --release` builds it
   through ODBC. `libodbc.so.2` is never bundled, not even in the AppImage:
   without it only the bridge fails to start, and the rest of the app is
   unaffected. The build runner needs `unixodbc-dev`.
-- **Windows ships the bridge untested**: it is built in CI and zipped, never
-  run. The release notes say so.
+- **Windows ships the bridge untested**: it is built in CI and packed into
+  both the zip and the installer, never run. The release notes say so.
 
 ## Linux desktop identity
 
@@ -101,7 +102,12 @@ version must run from main. It builds, in parallel:
   release runs on;
 - the macOS DMG: `dev/bundle.sh` with `DBDELVE_CHANNEL=release DBDELVE_SIGN_ID=-`,
   plus an `/Applications` symlink;
-- the Windows zip (`dev/package-windows.ps1`), unsigned.
+- the Windows zip and installer (`dev/package-windows.ps1`), unsigned. The
+  installer is Inno Setup: per-user it writes `%LOCALAPPDATA%\Programs\DBDelve`,
+  all-users `Program Files\DBDelve`. AppId
+  `{300CEAF2-D7A2-4D97-B94B-20ED16631AF4}` is how upgrades find the previous
+  copy; changing it stacks a second install. SmartScreen warns because nothing
+  is signed, the same trade as the macOS ad-hoc signature.
 
 Only once every asset exists does it tag the commit `v$VERSION` and publish,
 then it rewrites `Casks/dbdelve.rb` in the `ShayanAbbas1/homebrew-dbdelve` tap
