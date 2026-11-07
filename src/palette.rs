@@ -3421,26 +3421,7 @@ fn appearance_items(overrides: &HashMap<String, String>) -> Vec<Item> {
         "open_settings",
         overrides,
     ));
-    items.push(with_chord(
-        command(
-            "Copy diagnostics",
-            icon::COPY,
-            Command::CopyDiagnostics,
-            HELP,
-        ),
-        "copy_diagnostics",
-        overrides,
-    ));
-    items.push(with_chord(
-        command(
-            "Open logs folder",
-            icon::FOLDER,
-            Command::OpenLogsFolder,
-            HELP,
-        ),
-        "open_logs_folder",
-        overrides,
-    ));
+    items.extend(help_items(overrides));
     items
 }
 
@@ -3458,6 +3439,39 @@ const HELP: &str = "Help";
 
 /// The verbs, filtered to the ones that mean something from where the user is
 /// standing. A palette that lists what it cannot do is a palette to read past.
+/// Found by the group's name too, which no row is otherwise matched on.
+fn help_items(overrides: &HashMap<String, String>) -> Vec<Item> {
+    let words = || {
+        ["help", "log", "logs", "bug", "report", "diagnostics"]
+            .map(String::from)
+            .to_vec()
+    };
+    vec![
+        with_chord(
+            command(
+                "Copy diagnostics",
+                icon::COPY,
+                Command::CopyDiagnostics,
+                HELP,
+            )
+            .also(words()),
+            "copy_diagnostics",
+            overrides,
+        ),
+        with_chord(
+            command(
+                "Open logs folder",
+                icon::FOLDER,
+                Command::OpenLogsFolder,
+                HELP,
+            )
+            .also(words()),
+            "open_logs_folder",
+            overrides,
+        ),
+    ]
+}
+
 fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item> {
     let session = &profile.session;
     // Every cap here is the chord the action actually holds, so a rebind shows
@@ -4399,6 +4413,16 @@ mod tests {
                 Row::Item(index) => items[*index].label.clone(),
             })
             .collect()
+    }
+
+    #[test]
+    fn the_help_commands_are_found_by_help_and_by_log() {
+        let items = help_items(&HashMap::new());
+        for query in ["help", "log"] {
+            let found = arranged(&items, None, query, &[]);
+            assert!(found.contains(&"Copy diagnostics".to_string()), "{query}");
+            assert!(found.contains(&"Open logs folder".to_string()), "{query}");
+        }
     }
 
     fn arranged(

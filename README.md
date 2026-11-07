@@ -161,8 +161,8 @@ database each connection is and whether connecting, running, cancelling,
 tunnels, exports and imports worked and how long they took, but no hostnames,
 usernames, database names, connection names or error text from the server.
 **Verbose logging** in Settings adds hostnames, database names, connection
-error text and the messages database drivers log themselves (SQL Server's
-`PRINT` output among them).
+errors (which can include the username) and the messages database drivers log
+themselves (SQL Server's `PRINT` output among them).
 
 To attach it to an issue, use **Help → Copy Diagnostics** (or Copy diagnostics
 in the command palette, `Ctrl+Shift+P`, `⌘⇧P` on macOS) and paste: it copies

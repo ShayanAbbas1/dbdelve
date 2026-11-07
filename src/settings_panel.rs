@@ -201,11 +201,10 @@ fn setting_rows() -> Vec<SettingRow> {
             SettingsTab::General,
             "Diagnostics",
             "Verbose logging",
-            "Write more detail to the log a bug report attaches, from the \
-             moment it is switched on. Verbose logs include hostnames, \
-             database names and the error text servers send. Queries, rows \
-             and passwords are never written. Help > Open Logs Folder shows \
-             the files.",
+            "Adds hostnames, database names and connection errors (which \
+             can include the username) to the log, from the moment it is \
+             switched on. Queries, rows and passwords are never written. \
+             Open Logs Folder in the Help menu shows the files.",
             &[
                 "log",
                 "logs",

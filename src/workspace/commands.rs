@@ -46,7 +46,7 @@ impl Workspace {
             &self.plugins,
         )));
         self.confirm(
-            "Copied the diagnostics and the end of the log. Check them for sensitive information (hostnames, names, values, paths) before posting.".into(),
+            "Diagnostics copied. Remove anything sensitive before posting.".into(),
             cx,
         );
     }
