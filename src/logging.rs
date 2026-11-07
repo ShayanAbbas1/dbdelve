@@ -97,6 +97,7 @@ pub(crate) fn install() {
     });
     let subscriber = tracing_subscriber::registry()
         .with(filter)
+        .with(no_driver_errors())
         .with(file.map(|file| fmt::layer().with_ansi(false).with_writer(file)))
         // `cargo run` keeps a console, which is where a developer looks.
         .with(cfg!(debug_assertions).then(|| fmt::layer().with_writer(std::io::stderr)));
@@ -128,6 +129,19 @@ fn levels(verbose: bool) -> EnvFilter {
         true => EnvFilter::new("info,dbdelve=debug"),
         false => filter_for("info"),
     }
+}
+
+/// tiberius logs the server's error message at error, and a message can quote
+/// the user's SQL. Preflight and describe trips run without the scoped
+/// Messages subscriber, so without this the verbose log would record it. Its
+/// info events (PRINT output, environment changes) stay.
+fn no_driver_errors<S>() -> impl tracing_subscriber::Layer<S>
+where
+    S: tracing::Subscriber,
+{
+    tracing_subscriber::filter::filter_fn(|metadata| {
+        !(metadata.target().starts_with("tiberius") && *metadata.level() <= tracing::Level::WARN)
+    })
 }
 
 fn filter_for(level: &str) -> EnvFilter {
@@ -421,6 +435,36 @@ mod tests {
             let _ = std::pin::pin!(drained).poll(&mut context);
         });
         assert_eq!(heard.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn the_log_drops_driver_errors_and_keeps_driver_info() {
+        use tracing_subscriber::fmt;
+        #[derive(Clone, Default)]
+        struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Sink {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let sink = Sink::default();
+        let writer = sink.clone();
+        let (filter, _) = tracing_subscriber::reload::Layer::new(super::levels(true));
+        let subscriber = tracing_subscriber::registry()
+            .with(filter)
+            .with(super::no_driver_errors())
+            .with(fmt::layer().with_writer(move || writer.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::error!(target: "tiberius::tds::stream::token", "quoted SQL");
+            tracing::info!(target: "tiberius::tds::stream::token", "PRINT text");
+        });
+        let written = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+        assert!(!written.contains("quoted SQL"));
+        assert!(written.contains("PRINT text"));
     }
 
     #[test]
