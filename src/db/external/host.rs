@@ -115,8 +115,8 @@ struct Process {
 impl Host {
     pub(super) fn start(plugin: &'static Plugin) -> Result<Arc<Self>, DbError> {
         let mut command = Command::new(&plugin.executable);
-        // The AppImage's bundled libstdc++ would otherwise shadow the one a vendor's
-        // C++ driver was built against.
+        // The AppImage's bundled libraries would otherwise shadow the ones a vendor's
+        // driver was built against.
         match original_ld_library_path(|name| std::env::var_os(name)) {
             Some(Some(value)) => {
                 command.env("LD_LIBRARY_PATH", value);

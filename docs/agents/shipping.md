@@ -99,7 +99,9 @@ version must run from main. It builds, in parallel:
 - Linux x86_64 and aarch64 tarballs and AppImages (`dev/package-linux.sh`,
   `dev/package-appimage.sh`) on Ubuntu 22.04, never `ubuntu-latest`: glibc is
   forward-compatible only, so the oldest runner is the oldest system the
-  release runs on;
+  release runs on. libstdc++ and libgcc_s come from the host too, and
+  `dev/check-linux-floor.sh` fails the build if either binary needs symbol
+  versions newer than 22.04 ships;
 - the macOS DMG: `dev/bundle.sh` with `DBDELVE_CHANNEL=release DBDELVE_SIGN_ID=-`,
   plus an `/Applications` symlink;
 - the Windows zip and installer (`dev/package-windows.ps1`), unsigned. The
