@@ -45,8 +45,9 @@ until the quarantine flag is cleared.
 **Linux** (x86_64 or aarch64): `yay -S dbdelve-bin` from the AUR, or the
 tarball or AppImage from [the latest release][releases].
 
-**Windows** (x86_64): unzip the zip from [the latest release][releases] and run
-`dbdelve.exe`.
+**Windows** (x86_64): run the installer from [the latest release][releases],
+or unzip the zip and run `dbdelve.exe`. The installer asks for AppData (just
+for you) or Program Files (all users).
 
 Updating, the `.dmg`, Linux requirements, building from source and where your
 data lives are all in [docs/install.md](docs/install.md).

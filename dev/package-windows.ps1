@@ -1,11 +1,18 @@
-# Builds DBDelve for Windows and wraps the release binary in a zip.
+# Builds DBDelve for Windows and wraps the release binary in a zip, then an
+# installer from the same staged tree.
 #
-# The zip is the portable build: unzip it and run dbdelve.exe. Nothing is
-# installed, and nothing is signed from here.
+# The zip is the portable build: unzip it and run dbdelve.exe. The installer
+# (Inno Setup) is the other half: it offers AppData (just for me) or Program
+# Files (all users), a Start Menu shortcut, and an uninstaller that leaves
+# connections and query history alone. Nothing is signed from here.
 #
 # The fonts are compiled into the binary, and the OFL asks that their licence
-# travel with them, so NOTICES.md and licenses/ go in the zip rather than
-# staying only in the repository.
+# travel with them, so NOTICES.md and licenses/ go in both artifacts rather
+# than staying only in the repository.
+#
+# Inno Setup is a packaging tool, not a build dependency of the app. Locally
+# the installer is skipped when iscc is missing; GitHub Actions installs it
+# first and this script fails if it still cannot find it.
 #
 # Usage: powershell -File dev/package-windows.ps1
 
@@ -67,3 +74,55 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 $Sha = (Get-FileHash $Zip -Algorithm SHA256).Hash.ToLower()
 Write-Output "built $Zip (v$Version)"
 Write-Output "sha256 $Sha"
+
+# iscc is not always on PATH after a Chocolatey install, so the well-known
+# Inno Setup 6 locations are tried too.
+function Find-Iscc {
+    $Command = Get-Command iscc -ErrorAction SilentlyContinue
+    if ($Command) {
+        return $Command.Source
+    }
+    foreach ($Candidate in @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "${env:ProgramFiles}\Inno Setup 6\ISCC.exe",
+            "${env:LOCALAPPDATA}\Programs\Inno Setup 6\ISCC.exe",
+            "${env:ProgramFiles(x86)}\Inno Setup 7\ISCC.exe",
+            "${env:ProgramFiles}\Inno Setup 7\ISCC.exe",
+            "${env:LOCALAPPDATA}\Programs\Inno Setup 7\ISCC.exe"
+        )) {
+        if (Test-Path $Candidate) {
+            return $Candidate
+        }
+    }
+    $null
+}
+
+$SetupName = "$Name-setup"
+$Setup = Join-Path $OutDir "$SetupName.exe"
+if (Test-Path $Setup) { Remove-Item -Force $Setup }
+
+$Iscc = Find-Iscc
+if (-not $Iscc) {
+    if ($env:GITHUB_ACTIONS) {
+        throw "Inno Setup (iscc) is required in CI. The release workflow installs it before this script."
+    }
+    Write-Output "skipping installer: Inno Setup (iscc) not found"
+    return
+}
+
+# Each /D is one argument, so a CARGO_TARGET_DIR with spaces stays one value
+# and is not wrapped in extra quotes -- those would become part of the path.
+& $Iscc /Q `
+    "/DMyAppVersion=$Version" `
+    "/DStageDir=$Stage" `
+    "/DOutputDir=$OutDir" `
+    "/DOutputBase=$SetupName" `
+    (Join-Path $Root "assets\windows\dbdelve.iss")
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+if (-not (Test-Path $Setup)) {
+    throw "Inno Setup reported success but $Setup is missing."
+}
+
+$SetupSha = (Get-FileHash $Setup -Algorithm SHA256).Hash.ToLower()
+Write-Output "built $Setup (v$Version)"
+Write-Output "sha256 $SetupSha"

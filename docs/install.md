@@ -100,8 +100,21 @@ to `$XDG_DATA_HOME/dbdelve`, or `~/.local/share/dbdelve`.
 
 ## Windows
 
-A zip, x86_64, from [the latest release][releases]. Unzip it and run
-`dbdelve.exe`. Nothing is installed. There is no installer.
+x86_64, from [the latest release][releases]. The installer is the
+recommended way. It asks whether to put DBDelve in AppData (just for you, no
+administrator) or Program Files (all users). Connections and query history
+stay in `%APPDATA%\dbdelve` either way, and uninstall leaves them there.
+
+```text
+dbdelve-<version>-windows-x86_64-setup.exe
+```
+
+The installer is unsigned, so SmartScreen will warn on the first run: More
+info, then Run anyway. A Start Menu shortcut is created; a desktop one is
+offered and off by default.
+
+Failing that, the zip is the portable build: unzip it and run `dbdelve.exe`.
+Nothing is installed.
 
 To build it yourself instead, the build needs the MSVC toolchain and the
 Windows SDK, which is what compiles the bundled SQLite and GPUI's shaders:
@@ -110,10 +123,11 @@ Windows SDK, which is what compiles the bundled SQLite and GPUI's shaders:
 cargo build --release
 ```
 
-The binary is `target\release\dbdelve.exe`. Connections and query history go
-to `%APPDATA%\dbdelve`. Passwords go in Credential Manager. The window draws
-its own title bar, buttons included. Chords are the same as macOS with Ctrl in
-place of Cmd.
+The binary is `target\release\dbdelve.exe`. `dev/package-windows.ps1` wraps
+that same build into the zip above, and into the installer if [Inno Setup][]
+is on the machine (`choco install innosetup`). Passwords go in Credential
+Manager. The window draws its own title bar, buttons included. Chords are
+the same as macOS with Ctrl in place of Cmd.
 
 ## Other databases through ODBC
 
@@ -134,10 +148,12 @@ DBDelve doesn't bundle any.
 
 ## Updating
 
-`brew upgrade --cask dbdelve`, if you installed it that way. Otherwise the
+`brew upgrade --cask dbdelve`, if you installed it that way. On Windows, run
+the next installer over the previous one; it upgrades in place. Otherwise the
 status bar links to [the latest release][releases] once there is a newer one.
 
 There is no telemetry. The only request DBDelve makes on its own is one to
 GitHub at startup to check for updates, which you can turn off in Settings.
 
 [releases]: https://github.com/ShayanAbbas1/dbdelve/releases/latest
+[Inno Setup]: https://jrsoftware.org/isinfo.php
