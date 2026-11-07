@@ -136,15 +136,19 @@ jobs:
       - uses: actions/checkout@v7
 
       # The hosted image already has MSVC, the Windows SDK (GPUI's shaders)
-      # and rc.exe (the icon resource). If CI needs something more, the
-      # README is wrong too. The ODBC bridge builds here against the system's
-      # odbc32, and is packaged without ever being run.
+      # and rc.exe (the icon resource). Inno Setup is only for wrapping the
+      # staged tree into the installer; the app itself does not need it, so
+      # it is not a README build dependency. The ODBC bridge builds here
+      # against the system's odbc32, and is packaged without ever being run.
+      - run: choco install innosetup --no-progress --yes
       - run: powershell -File dev/package-windows.ps1
 
       - uses: actions/upload-artifact@v7
         with:
           name: windows
-          path: target/windows/dbdelve-*.zip
+          path: |
+            target/windows/dbdelve-*.zip
+            target/windows/dbdelve-*-setup.exe
           if-no-files-found: error
 
   release:
@@ -165,7 +169,8 @@ jobs:
           for ASSET in "DBDelve-$VERSION.dmg" \
             "dbdelve-$VERSION-linux-x86_64.tar.gz" "dbdelve-$VERSION-x86_64.AppImage" \
             "dbdelve-$VERSION-linux-aarch64.tar.gz" "dbdelve-$VERSION-aarch64.AppImage" \
-            "dbdelve-$VERSION-windows-x86_64.zip"; do
+            "dbdelve-$VERSION-windows-x86_64.zip" \
+            "dbdelve-$VERSION-windows-x86_64-setup.exe"; do
             if [[ ! -f "dist/$ASSET" ]]; then
               echo "no $ASSET among the built assets" >&2
               ls dist >&2
