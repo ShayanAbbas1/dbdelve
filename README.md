@@ -143,6 +143,31 @@ runs each (2026-10-11, M1 Pro, 32 GB):
 \* The whole 1M-row table pulled into memory on purpose, with the row limit
 off. Method and full results in [BENCHMARKS.md](BENCHMARKS.md).
 
+## Logs and bug reports
+
+DBDelve keeps a diagnostic log on your machine and never sends it anywhere.
+One file per day, `dbdelve.YYYY-MM-DD.log` (the date in UTC), and the last
+seven are kept, beside `panic.log`:
+
+| OS      | Folder                                                    |
+| ------- | --------------------------------------------------------- |
+| macOS   | `~/Library/Logs/dbdelve/`                                 |
+| Linux   | `$XDG_STATE_HOME/dbdelve/`, or `~/.local/state/dbdelve/`  |
+| Windows | `%LOCALAPPDATA%\dbdelve\`                                   |
+
+It never contains your queries, result rows or values, passwords, tokens or
+connection strings. By default it records the version and OS, which kind of
+database each connection is and whether connecting, running, cancelling,
+tunnels, exports and imports worked and how long they took, but no hostnames,
+usernames, database names, connection names or error text from the server.
+**Verbose logging** in Settings adds hostnames, database names, server error
+text and the messages database drivers log themselves (SQL Server's `PRINT`
+output among them).
+
+To attach it to an issue, use **Help → Copy Diagnostics** (or Copy diagnostics
+in the command palette, `Ctrl+Shift+P`, `⌘⇧P` on macOS) and paste: it copies
+the version, OS, plugins and the last 200 lines of today's log. **Help → Open
+Logs Folder** shows the files. Read what you paste before posting it.
 
 ## License
 
