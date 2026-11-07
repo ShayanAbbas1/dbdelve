@@ -60,7 +60,7 @@ body:
         - Linux: `$XDG_STATE_HOME/dbdelve/`, or `~/.local/state/dbdelve/`
         - Windows: `%LOCALAPPDATA%\dbdelve\`
 
-        If the default log doesn't show the problem, turn on **Verbose logging** in Settings, reproduce it, and copy again. DBDelve never writes queries, rows or passwords to the log, but a verbose one includes hostnames, database names, connection errors (which can include the username), file paths and unfiltered messages from database drivers.
+        If the default log doesn't show the problem, turn on **Verbose logging** in Settings, reproduce it, and copy again. A verbose log adds hostnames, database names, connection errors (which can include the username), file paths and database drivers' own messages, which DBDelve doesn't filter and which can contain anything the server sends, queries and data included.
 
         **Read the log and remove anything sensitive before you post it:** hostnames, database or table names, data values, file paths.
   - type: checkboxes

@@ -201,9 +201,10 @@ fn setting_rows() -> Vec<SettingRow> {
             SettingsTab::General,
             "Diagnostics",
             "Verbose logging",
-            "Adds hostnames, database names and connection errors (which \
-             can include the username) to the log, from the moment it is \
-             switched on. Queries, rows and passwords are never written. \
+            "Adds hostnames, database names, connection errors (which \
+             can include the username) and database drivers' own messages \
+             to the log, from the moment it is switched on. Driver messages \
+             aren't filtered and can contain anything the server sends. \
              Open Logs Folder in the Help menu shows the files.",
             &[
                 "log",
