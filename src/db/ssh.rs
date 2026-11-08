@@ -885,10 +885,17 @@ fn watched(program: &str, args: &[String]) -> io::Result<Child> {
 
 #[cfg(unix)]
 fn watched_bridge(program: &str, args: &[String]) -> io::Result<Process> {
-    use std::os::fd::AsRawFd;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::process::CommandExt;
 
     let (alive, watchdog) = io::pipe()?;
+    // Above 0 to 2, which std fills with the child's stdio before `pre_exec`
+    // runs: with a std descriptor closed, the pipe could have been given one.
+    // SAFETY: F_DUPFD_CLOEXEC returns a new descriptor nothing else owns.
+    let alive = match unsafe { libc::fcntl(alive.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 10) } {
+        -1 => return Err(io::Error::last_os_error()),
+        fd => unsafe { OwnedFd::from_raw_fd(fd) },
+    };
     let alive_fd = alive.as_raw_fd();
     let mut command = Command::new("/bin/sh");
     command
@@ -898,21 +905,12 @@ fn watched_bridge(program: &str, args: &[String]) -> io::Result<Process> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     unmask_signals(&mut command);
-    // SAFETY: dup2 and fcntl are async-signal-safe, which is all a hook
-    // between fork and exec may call.
+    // SAFETY: dup2 is async-signal-safe, which is all a hook between fork
+    // and exec may call. The copy on fd 3 is the one end not close-on-exec.
     unsafe {
-        command.pre_exec(move || {
-            // Both ends are close-on-exec; dup2 clears it on the copy, but
-            // onto itself it is a no-op and the flag stays.
-            let moved = if alive_fd == 3 {
-                libc::fcntl(3, libc::F_SETFD, 0)
-            } else {
-                libc::dup2(alive_fd, 3)
-            };
-            if moved == -1 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
+        command.pre_exec(move || match libc::dup2(alive_fd, 3) {
+            -1 => Err(io::Error::last_os_error()),
+            _ => Ok(()),
         });
     }
     let child = crate::db::spawn(&mut command)?;
