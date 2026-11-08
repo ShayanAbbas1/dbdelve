@@ -60,18 +60,55 @@ fn built_in_directories() -> Vec<PathBuf> {
         let root = std::env::var_os(variable).filter(|value| !value.is_empty())?;
         Some(PathBuf::from(root).join(install).join("resources\\app"))
     });
-    // The .deb and .rpm, the AUR's visual-studio-code-bin, then the snap.
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    let installs = [
+    {
+        linux_directories(
+            std::env::var_os("PATH").as_deref(),
+            store::data_root().ok().as_deref(),
+        )
+    }
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    installs.map(|app| app.join("extensions")).collect()
+}
+
+#[cfg(any(not(any(target_os = "macos", target_os = "windows")), all(test, unix)))]
+fn linux_directories(path: Option<&std::ffi::OsStr>, data_home: Option<&Path>) -> Vec<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut directories: Vec<_> = [
         "/usr/share/code",
         "/opt/visual-studio-code",
         "/snap/code/current/usr/share/code",
     ]
-    .map(|install| PathBuf::from(install).join("resources/app"));
-    installs
-        .into_iter()
-        .map(|app| app.join("extensions"))
-        .collect()
+    .map(|install| PathBuf::from(install).join("resources/app/extensions"))
+    .into();
+    // Homebrew and tarball installs can live anywhere; resolve their symlinked
+    // launcher without executing it.
+    if let Some(extensions) = path.and_then(|path| {
+        std::env::split_paths(path).find_map(|directory| {
+            let launcher = directory.join("code").canonicalize().ok()?;
+            let metadata = launcher.metadata().ok()?;
+            if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+                return None;
+            }
+            let extensions = launcher
+                .parent()?
+                .parent()?
+                .join("resources/app/extensions");
+            extensions.is_dir().then_some(extensions)
+        })
+    }) && !directories.contains(&extensions)
+    {
+        directories.push(extensions);
+    }
+    for root in std::iter::once(PathBuf::from("/var/lib/flatpak"))
+        .chain(data_home.map(|data_home| data_home.join("flatpak")))
+    {
+        directories.push(root.join(
+            "app/com.visualstudio.code/current/active/files/extra/vscode/resources/app/extensions",
+        ));
+    }
+    directories
 }
 
 fn extension_directories() -> Vec<PathBuf> {
@@ -341,6 +378,66 @@ fn foreground(rules: &[Value], scope: &str) -> Option<Rgba> {
 mod tests {
     use super::*;
     use crate::theme::color::Srgb;
+
+    #[cfg(unix)]
+    #[test]
+    fn linux_theme_discovery_follows_the_launcher_and_reads_flatpak_installs() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        store::tests::with_home(|| {
+            let home = store::home().unwrap().canonicalize().unwrap();
+            let install = home.join("Caskroom/visual-studio-code-linux/1.145.2/vscode");
+            let extensions = install.join("resources/app/extensions");
+            let theme = extensions.join("theme-defaults");
+            let bin = home.join("bin");
+            std::fs::create_dir_all(&theme).unwrap();
+            std::fs::create_dir_all(install.join("bin")).unwrap();
+            std::fs::create_dir_all(&bin).unwrap();
+            let launcher = install.join("bin/code");
+            std::fs::write(&launcher, "").unwrap();
+            std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755)).unwrap();
+            symlink(&launcher, bin.join("code-link")).unwrap();
+            symlink("code-link", bin.join("code")).unwrap();
+            std::fs::write(
+                theme.join("package.json"),
+                r#"{ "contributes": { "themes": [{
+                    "label": "Launcher Light", "uiTheme": "vs", "path": "./light.json"
+                }] } }"#,
+            )
+            .unwrap();
+            std::fs::write(theme.join("light.json"), "{}").unwrap();
+            let data_home = home.join("custom-data");
+            let flatpak = data_home.join(
+                "flatpak/app/com.visualstudio.code/current/active/files/extra/vscode/resources/app/extensions/theme-flatpak",
+            );
+            std::fs::create_dir_all(&flatpak).unwrap();
+            std::fs::write(
+                flatpak.join("package.json"),
+                r#"{ "contributes": { "themes": [{
+                    "label": "Flatpak Dark", "uiTheme": "vs-dark", "path": "./dark.json"
+                }] } }"#,
+            )
+            .unwrap();
+            std::fs::write(flatpak.join("dark.json"), "{}").unwrap();
+            let path = std::env::join_paths([home.join("missing"), bin]).unwrap();
+            let found: Vec<_> = linux_directories(Some(&path), Some(&data_home))
+                .into_iter()
+                .filter(|root| root.starts_with(&home))
+                .flat_map(|root| sorted_entries(&root))
+                .flat_map(|extension| extension_themes(&extension))
+                .map(|theme| (theme.name, theme.appearance))
+                .collect();
+            assert_eq!(
+                found,
+                [
+                    ("Launcher Light", super::super::Appearance::Light),
+                    ("Flatpak Dark", super::super::Appearance::Dark),
+                ]
+            );
+            std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(!linux_directories(Some(&path), None).contains(&extensions));
+        });
+    }
 
     #[test]
     fn a_vscode_theme_folds_in_its_include_and_matches_scopes_textmate_style() {

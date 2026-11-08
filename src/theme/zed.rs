@@ -37,18 +37,25 @@ struct Entry {
     style: Value,
 }
 
-/// Every Zed theme on this machine, unglassed. A name goes to whichever has it
-/// first: Zed's themes directory, its extensions, then its defaults, so a
-/// user's own copy of a default wins.
+/// Every Zed theme on this machine, unglassed. Native themes precede Flatpak
+/// themes; within each installation, user themes precede extensions. Bundled
+/// defaults come last, so a user's own copy of a default wins.
 pub(super) fn discover() -> Vec<Theme> {
-    let user = store::zed_theme_directory()
-        .into_iter()
-        .flat_map(|directory| json_files(&directory));
-    let extensions = store::zed_extension_directory()
-        .into_iter()
-        .flat_map(|root| sorted_entries(&root))
-        .flat_map(|extension| json_files(&extension.join("themes")));
-    let mut themes = read(user.chain(extensions), parse_zed);
+    let user = store::zed_theme_directories().unwrap_or_default();
+    let extensions = store::zed_extension_directories().unwrap_or_default();
+    let files = (0..user.len().max(extensions.len())).flat_map(|installation| {
+        let user = user
+            .get(installation)
+            .into_iter()
+            .flat_map(|directory| json_files(directory));
+        let extensions = extensions
+            .get(installation)
+            .into_iter()
+            .flat_map(|root| sorted_entries(root))
+            .flat_map(|extension| json_files(&extension.join("themes")));
+        user.chain(extensions)
+    });
+    let mut themes = read(files, parse_zed);
     themes.extend(
         BUNDLED
             .iter()
@@ -374,6 +381,74 @@ pub(super) fn hex(text: &str) -> Option<Rgba> {
 mod tests {
     use super::*;
     use crate::theme::Appearance;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn flatpak_themes_and_extensions_are_imported_beside_native_themes() {
+        struct ConfigHome(Option<std::ffi::OsString>);
+
+        impl Drop for ConfigHome {
+            fn drop(&mut self) {
+                // SAFETY: with_home holds the environment lock until this drops.
+                unsafe {
+                    match self.0.take() {
+                        Some(config) => std::env::set_var("XDG_CONFIG_HOME", config),
+                        None => std::env::remove_var("XDG_CONFIG_HOME"),
+                    }
+                }
+            }
+        }
+
+        store::tests::with_home(|| {
+            let home = store::home().unwrap();
+            let _config_home = ConfigHome(std::env::var_os("XDG_CONFIG_HOME"));
+            // SAFETY: with_home serializes the tests that touch these roots.
+            unsafe { std::env::set_var("XDG_CONFIG_HOME", home.join("custom-config")) };
+            let native = store::zed_theme_directories().unwrap().remove(0);
+            let flatpak = home.join(".var/app/dev.zed.Zed");
+            for (directory, text) in [
+                (
+                    native,
+                    r##"{ "themes": [{ "name": "Shared Test", "style": { "text": "#123456" } }] }"##,
+                ),
+                (
+                    store::zed_extension_directories()
+                        .unwrap()
+                        .remove(0)
+                        .join("test-theme/themes"),
+                    r##"{ "themes": [{ "name": "Shared Extension", "style": { "text": "#654321" } }] }"##,
+                ),
+                (
+                    flatpak.join("config/zed/themes"),
+                    r##"{ "themes": [
+                        { "name": "Shared Test", "style": { "text": "#abcdef" } },
+                        { "name": "Shared Extension", "style": { "text": "#abcdef" } },
+                        { "name": "Flatpak Theme", "appearance": "light", "style": {} }
+                    ] }"##,
+                ),
+                (
+                    flatpak.join("data/zed/extensions/installed/test-theme/themes"),
+                    r#"{ "themes": [{ "name": "Flatpak Extension", "style": {} }] }"#,
+                ),
+            ] {
+                std::fs::create_dir_all(&directory).unwrap();
+                std::fs::write(directory.join("theme.json"), text).unwrap();
+            }
+            let themes = discover();
+            let named = |name| themes.iter().find(|theme| theme.name == name).unwrap();
+            assert_eq!(named("Shared Test").text, Srgb::from_hex(0x123456));
+            assert_eq!(named("Shared Extension").text, Srgb::from_hex(0x654321));
+            assert_eq!(named("Flatpak Theme").appearance, Appearance::Light);
+            assert_eq!(named("Flatpak Extension").appearance, Appearance::Dark);
+            assert_eq!(
+                themes
+                    .iter()
+                    .filter(|theme| theme.name == "Shared Test")
+                    .count(),
+                1
+            );
+        });
+    }
 
     #[test]
     fn a_zed_theme_maps_onto_its_appearance_base() {
