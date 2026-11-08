@@ -916,6 +916,10 @@ pub struct SshTunnel {
     /// keys and agent only.
     #[serde(default)]
     pub identity_file: Option<String>,
+    /// The OS user `sudo` opens a Unix socket as on the SSH host, for peer
+    /// authentication. None, or blank, opens it as the SSH user.
+    #[serde(default)]
+    pub run_as: Option<String>,
 }
 
 impl SshTunnel {

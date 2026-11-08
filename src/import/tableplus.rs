@@ -481,6 +481,7 @@ fn ssh(row: &Row, notes: &mut Vec<String>) -> Option<SshTunnel> {
         port: port("SSH port", filled(&row.ssh_port), notes),
         user: row.ssh_user.clone(),
         identity_file,
+        run_as: None,
     })
 }
 
@@ -1006,6 +1007,7 @@ mod tests {
                 port: Some(2222),
                 user: "deploy".into(),
                 identity_file: identity_file.map(str::to_string),
+                run_as: None,
             })
         };
         let unlocated = vec![

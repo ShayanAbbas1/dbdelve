@@ -1031,6 +1031,7 @@ fn ssh_tunnel(
         port: parse_port("SSH port", &port)?,
         user,
         identity_file,
+        run_as: None,
     }))
 }
 
@@ -1219,6 +1220,7 @@ mod tests {
                 port: None,
                 user: String::new(),
                 identity_file: None,
+                run_as: None,
             }))
         );
         assert_eq!(
@@ -1256,6 +1258,7 @@ mod tests {
             port: Some(2222),
             user: "deploy".into(),
             identity_file: Some("~/.ssh/id_ed25519".into()),
+            run_as: None,
         };
         assert_eq!(ssh_tunnel(true, ssh_fields(Some(&saved))), Ok(Some(saved)));
     }

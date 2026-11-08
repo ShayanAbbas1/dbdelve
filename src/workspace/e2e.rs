@@ -2392,6 +2392,7 @@ fn an_odbc_profile_saves_and_restores_as_it_was(cx: &mut TestAppContext) {
                         port: Some(2222),
                         user: "me".into(),
                         identity_file: None,
+                        run_as: None,
                     })
                 ),
             ]

@@ -709,6 +709,7 @@ mod tests {
             port: Some(2222),
             user: "deploy@corp".to_owned(),
             identity_file: Some("~/.ssh/100%.key".to_owned()),
+            run_as: None,
         };
         let mut expected = OPTIONS.to_vec();
         expected.extend([
