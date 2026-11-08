@@ -125,7 +125,9 @@ It is not a forward.
   to connect to it once and accepts only the connection whose address is that
   client's own, dropping any other. ssh's stdio is copied to and from that
   pair (a pair rather than a socket handed to the child, because Windows
-  cannot).
+  cannot) by a read and write loop, never `io::copy`: on Linux that splices,
+  and a blocking splice from a socket into a pipe holds the pipe's lock while
+  it waits, so ssh never reads the startup message (`pump`).
 - **A `/` Host is the socket directory, as in libpq, and Port picks the
   file** (`<dir>/.s.PGSQL.<port>`). `Run as` is the user `sudo -n -u` opens it
   as; blank is the SSH user. `-n` because under `BatchMode` a sudo that wants a

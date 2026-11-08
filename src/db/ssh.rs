@@ -414,20 +414,7 @@ impl SocketBridge {
                 )),
             )
         };
-        let (driver, ours) = socket_pair().map_err(unopened)?;
-        let mut to_driver = ours.try_clone().map_err(unopened)?;
-        let mut from_driver = ours;
-        let mut stdout = process.child.stdout.take().expect("stdout is piped");
-        let mut stdin = process.child.stdin.take().expect("stdin is piped");
-        thread::spawn(move || {
-            let _ = io::copy(&mut stdout, &mut to_driver);
-            let _ = to_driver.shutdown(Shutdown::Write);
-        });
-        thread::spawn(move || {
-            let _ = io::copy(&mut from_driver, &mut stdin);
-            // ssh's EOF, which ends socat on the SSH host and then ssh.
-            drop(stdin);
-        });
+        let driver = piped_to(&mut process.child).map_err(unopened)?;
         Ok((
             driver,
             Bridged {
@@ -557,6 +544,41 @@ fn bridge_args(ssh: &SshTunnel, socket: &str) -> Result<Vec<String>, DbError> {
 /// drops whatever else connects first.
 fn socket_pair() -> io::Result<(TcpStream, TcpStream)> {
     paired_through(TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?)
+}
+
+/// The driver's end of a socket pair whose other end is copied to `child`'s
+/// stdin and from its stdout.
+fn piped_to(child: &mut Child) -> io::Result<TcpStream> {
+    let (driver, ours) = socket_pair()?;
+    let mut to_driver = ours.try_clone()?;
+    let mut from_driver = ours;
+    let mut stdout = child.stdout.take().expect("stdout is piped");
+    let mut stdin = child.stdin.take().expect("stdin is piped");
+    thread::spawn(move || {
+        let _ = pump(&mut stdout, &mut to_driver);
+        let _ = to_driver.shutdown(Shutdown::Write);
+    });
+    thread::spawn(move || {
+        let _ = pump(&mut from_driver, &mut stdin);
+        // ssh's EOF, which ends socat on the SSH host and then ssh.
+        drop(stdin);
+    });
+    Ok(driver)
+}
+
+/// `io::copy` without its Linux `splice`: a blocking splice from a socket into
+/// a pipe holds the pipe's lock while it waits for more, so ssh could not read
+/// what the last one delivered, the driver's startup message among it.
+fn pump(from: &mut impl Read, to: &mut impl io::Write) -> io::Result<()> {
+    let mut chunk = [0; 16 * 1024];
+    loop {
+        match from.read(&mut chunk) {
+            Ok(0) => return Ok(()),
+            Ok(read) => to.write_all(&chunk[..read])?,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn paired_through(listener: TcpListener) -> io::Result<(TcpStream, TcpStream)> {
@@ -1578,6 +1600,22 @@ mod tests {
             .read_to_string(&mut echoed)
             .unwrap();
         assert_eq!(echoed, "ping");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_bridged_child_answers_the_driver_while_its_stream_stays_open() {
+        use std::io::Write;
+
+        let mut process = watched_bridge("cat", &[]).unwrap();
+        let mut driver = piped_to(&mut process.child).unwrap();
+        driver.write_all(b"ping").unwrap();
+        driver
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut echoed = [0; 4];
+        driver.read_exact(&mut echoed).unwrap();
+        assert_eq!(&echoed, b"ping");
     }
 
     #[cfg(unix)]
