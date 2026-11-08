@@ -1482,6 +1482,36 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn a_dropped_bridge_whose_ssh_never_exits_is_ended_once_its_grace_is_out() {
+        let mut process = watched_bridge("sleep", &["30".to_owned()]).unwrap();
+        let shell = process.child.id() as libc::pid_t;
+        let draining = drain(process.child.stderr.take().unwrap(), Arc::default(), None);
+        // Until it is reaped: a zombie still answers.
+        // SAFETY: signal 0 only asks whether the process exists.
+        let alive = || unsafe { libc::kill(shell, 0) } == 0;
+
+        let dropped = Instant::now();
+        drop(Bridged {
+            host: "bastion".to_owned(),
+            said: Arc::default(),
+            draining,
+            process: Some(process),
+        });
+
+        thread::sleep(Duration::from_secs(1));
+        assert!(alive(), "ended before what it was sending had its grace");
+        while alive() {
+            assert!(
+                dropped.elapsed() < CLOSED_WITHIN + Duration::from_secs(3),
+                "still running well past its grace"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(dropped.elapsed() >= CLOSED_WITHIN);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn a_missing_ssh_is_named_as_missing() {
         let mut child = watched("dbdelve-no-such-ssh", &[]).unwrap();
         // Held, because `wait` would close it and the watchdog would race the
