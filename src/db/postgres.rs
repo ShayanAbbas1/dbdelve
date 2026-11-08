@@ -16,7 +16,7 @@ use tokio_postgres::{
 
 use crate::tls;
 
-use super::ssh::{Tunnel, tunnelled};
+use super::ssh::{self, Bridged, SocketBridge, Tunnel, tunnelled};
 use super::{
     Catalog, Column, DbError, EditTarget, Engine, Feed, Fetch, QueryResult, Reference,
     RelationKind, Row, RowBuilder, ServerConfig, Sizes, Stopped, Structure, assemble_catalog,
@@ -602,7 +602,7 @@ fn set_search_path_sql(schema: &str) -> String {
 /// poolers refuse a connection that sends `options` at all.
 fn set_search_path(client: &mut Client, schema: &str) -> Result<(), DbError> {
     let set = set_search_path_sql(schema);
-    let Client { client, driver } = client;
+    let Client { client, driver, .. } = client;
     let messages = driver
         .block_on(client.simple_query(&set))
         .and_then(|done| done)
@@ -651,12 +651,115 @@ fn tunnelled_string(server: &ServerConfig, dial: SocketAddr) -> String {
     format!("{} hostaddr={}", connection_string(&dialled), dial.ip())
 }
 
+/// Where a Host naming a directory finds the server's socket, as libpq looks
+/// for it.
+fn socket_path(server: &ServerConfig) -> String {
+    format!(
+        "{}/.s.PGSQL.{}",
+        server.host.trim_end_matches('/'),
+        server.port.unwrap_or(DEFAULT_PORT)
+    )
+}
+
+/// Why `server` cannot be reached over SSH as it says, if it cannot. Asked as
+/// a connection opens, so a profile edited by hand meets it too.
+///
+/// A Host starting with `/` is the socket directory on the SSH host, libpq's
+/// convention. Postgres offers TLS only over TCP, so a socket cannot honour a
+/// mode that insists on it (AGENTS.md, hard rule 6); SSH is what encrypts
+/// the way there.
+pub fn ssh_socket_error(server: &ServerConfig) -> Option<String> {
+    let ssh_tunnel = server.ssh.as_ref()?;
+    if !server.host.starts_with('/') {
+        return ssh::run_as_needs_a_socket(ssh_tunnel);
+    }
+    if matches!(
+        server.sslmode,
+        tls::SslMode::Require | tls::SslMode::VerifyCa | tls::SslMode::VerifyFull
+    ) {
+        return Some(format!(
+            "sslmode={} cannot be honoured through a Unix socket: Postgres offers TLS only \
+             over TCP. SSH encrypts the connection to the SSH host; choose disable or prefer.",
+            server.sslmode.as_str()
+        ));
+    }
+    ssh::socket_bridge_error(ssh_tunnel, &socket_path(server))
+}
+
 fn quote(value: &str) -> String {
     let escaped = value.replace('\\', r"\\").replace('\'', r"\'");
     format!("'{escaped}'")
 }
 
 type Error = tokio_postgres::Error;
+
+/// Two branches rather than a boxed connector: `Client::connect` is generic
+/// over it, and `NoTls` is a distinct type whose entire purpose is to refuse.
+/// Building one at all is what `disable` means.
+fn over_tcp(
+    runtime: &Runtime,
+    string: &str,
+    connector: Option<&tls::MakeRustlsConnect>,
+) -> Result<(tokio_postgres::Client, Socket), Error> {
+    match connector {
+        None => runtime
+            .block_on(tokio_postgres::connect(string, NoTls))
+            .map(|(client, mut connection)| {
+                let socket = stream::poll_fn(move |cx| connection.poll_message(cx));
+                (client, Box::pin(socket) as Socket)
+            }),
+        Some(connector) => runtime
+            .block_on(tokio_postgres::connect(string, connector.clone()))
+            .map(|(client, mut connection)| {
+                let socket = stream::poll_fn(move |cx| connection.poll_message(cx));
+                (client, Box::pin(socket) as Socket)
+            }),
+    }
+}
+
+/// The driver over a bridge's stream, with `NoTls`: `ssh_socket_error` has
+/// refused every mode that needs TLS, and `prefer` with a connector that
+/// cannot do it sends no SSLRequest at all, as libpq does on a socket.
+/// `connect_raw` applies no `connect_timeout`, so the handshake is bounded
+/// here; ssh has already logged in by now.
+fn through_bridge(
+    runtime: &Runtime,
+    string: &str,
+    stream: std::net::TcpStream,
+    failed: impl Fn(Error) -> DbError,
+) -> Result<(tokio_postgres::Client, Socket), DbError> {
+    let config: tokio_postgres::Config = string.parse().map_err(&failed)?;
+    let stream = {
+        let _entered = runtime.enter();
+        tokio_stream(stream)
+            .map_err(|error| plain_error(format!("Could not start the connection: {error}")))?
+    };
+    // Built inside the runtime: a timer outside one has no clock to read.
+    let handshake = runtime.block_on(async {
+        tokio::time::timeout(
+            Duration::from_secs(CONNECT_TIMEOUT_SECONDS),
+            config.connect_raw(stream, NoTls),
+        )
+        .await
+    });
+    match handshake {
+        Ok(Ok((client, mut connection))) => {
+            let socket = stream::poll_fn(move |cx| connection.poll_message(cx));
+            Ok((client, Box::pin(socket) as Socket))
+        }
+        Ok(Err(error)) => Err(failed(error)),
+        Err(_) => Err(plain_error(format!(
+            "The server did not answer through the SSH bridge within \
+             {CONNECT_TIMEOUT_SECONDS} seconds."
+        ))),
+    }
+}
+
+/// Called inside the runtime that will drive it: that is where it registers.
+fn tokio_stream(stream: std::net::TcpStream) -> std::io::Result<tokio::net::TcpStream> {
+    stream.set_nonblocking(true)?;
+    tokio::net::TcpStream::from_std(stream)
+}
 /// The driver's half of a connection, whose type differs with the TLS stream.
 /// Read as a stream of its messages rather than awaited as a future: awaiting
 /// it logs each notice and drops it.
@@ -671,6 +774,8 @@ struct Client {
     // polls it long enough to.
     client: tokio_postgres::Client,
     driver: Driver,
+    /// After `driver`, so ssh outlives the stream it carries.
+    _bridged: Option<Bridged>,
 }
 
 struct Driver {
@@ -774,9 +879,8 @@ pub struct Connection {
     /// is needed and kept, so a run does not pay for a connect. Never in a
     /// transaction of the user's, which is what makes it safe to describe on.
     side: Arc<Mutex<Option<Connection>>>,
-    /// Held so ssh runs as long as any clone does. The cancel token dials the
-    /// address the client connected to, so a cancel goes through it too.
-    tunnel: Option<Arc<Tunnel>>,
+    /// How every session and cancel of this profile reaches the server.
+    route: Route,
     /// What [`Self::sizes`] opens its own connection with. Kept for the reason
     /// MySQL keeps its copy: the password is already held by the live client,
     /// and nothing above `src/db/` may learn which engines want a second one
@@ -785,9 +889,30 @@ pub struct Connection {
     server: Arc<Mutex<ServerConfig>>,
 }
 
+#[derive(Clone)]
+enum Route {
+    Direct,
+    /// Held so ssh runs as long as any clone does. The cancel token dials the
+    /// address the client connected to, so a cancel goes through it too.
+    Tunnel(Arc<Tunnel>),
+    /// A new ssh for every session and every cancel, each to the socket.
+    Socket(Arc<SocketBridge>),
+}
+
 impl Connection {
     pub fn open(server: &ServerConfig) -> Result<Self, DbError> {
-        tunnelled(server, DEFAULT_PORT, |tunnel| Self::connect(server, tunnel))
+        if let Some(error) = ssh_socket_error(server) {
+            return Err(plain_error(error));
+        }
+        match &server.ssh {
+            Some(ssh) if server.host.starts_with('/') => {
+                let bridge = SocketBridge::new(ssh, &socket_path(server))?;
+                Self::connect(server, Route::Socket(Arc::new(bridge)))
+            }
+            _ => tunnelled(server, DEFAULT_PORT, |tunnel| {
+                Self::connect(server, tunnel.map_or(Route::Direct, Route::Tunnel))
+            }),
+        }
     }
 
     pub fn current_database(&self) -> &str {
@@ -801,10 +926,7 @@ impl Connection {
         std::thread::spawn(move || this.aside(Duration::ZERO, |_| Some(())));
     }
 
-    fn connect(server: &ServerConfig, tunnel: Option<Arc<Tunnel>>) -> Result<Self, DbError> {
-        // Two branches rather than a boxed connector: `Client::connect` is
-        // generic over it, and `NoTls` is a distinct type whose entire purpose
-        // is to refuse. Building one at all is what `disable` means.
+    fn connect(server: &ServerConfig, route: Route) -> Result<Self, DbError> {
         let connector = tls::connector(server.sslmode, server.root_certificate.as_deref())
             .map_err(|message| DbError {
                 message,
@@ -820,29 +942,11 @@ impl Connection {
             },
             _ => server,
         };
-        let string = match &tunnel {
-            None => connection_string(signing_in),
-            Some(tunnel) => tunnelled_string(signing_in, tunnel.dial()?),
-        };
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|error| plain_error(format!("Could not start the connection: {error}")))?;
-        let (client, connection) = match &connector {
-            None => runtime
-                .block_on(tokio_postgres::connect(&string, NoTls))
-                .map(|(client, mut connection)| {
-                    let socket = stream::poll_fn(move |cx| connection.poll_message(cx));
-                    (client, Box::pin(socket) as Socket)
-                }),
-            Some(connector) => runtime
-                .block_on(tokio_postgres::connect(&string, connector.clone()))
-                .map(|(client, mut connection)| {
-                    let socket = stream::poll_fn(move |cx| connection.poll_message(cx));
-                    (client, Box::pin(socket) as Socket)
-                }),
-        }
-        .map_err(|error| {
+        let failed = |error: Error| {
             let mut failure = connect_error(&error, server);
             if let Some(note) = password_file
                 .as_ref()
@@ -852,7 +956,28 @@ impl Connection {
                 failure.message.push_str(&note);
             }
             failure
-        })?;
+        };
+        let (client, connection, bridged) = match &route {
+            Route::Socket(bridge) => {
+                let (stream, bridged) = bridge.connect()?;
+                match through_bridge(&runtime, &connection_string(signing_in), stream, failed) {
+                    Ok((client, connection)) => (client, connection, Some(bridged)),
+                    Err(error) => return Err(bridged.explain(error)),
+                }
+            }
+            Route::Tunnel(tunnel) => {
+                let string = tunnelled_string(signing_in, tunnel.dial()?);
+                let (client, connection) =
+                    over_tcp(&runtime, &string, connector.as_ref()).map_err(failed)?;
+                (client, connection, None)
+            }
+            Route::Direct => {
+                let string = connection_string(signing_in);
+                let (client, connection) =
+                    over_tcp(&runtime, &string, connector.as_ref()).map_err(failed)?;
+                (client, connection, None)
+            }
+        };
         let mut client = Client {
             client,
             driver: Driver {
@@ -860,6 +985,7 @@ impl Connection {
                 connection: Some(connection),
                 notices: Vec::new(),
             },
+            _bridged: bridged,
         };
         let row =
             client
@@ -889,7 +1015,7 @@ impl Connection {
             side: Arc::default(),
             connector,
             client: Arc::new(Mutex::new(client)),
-            tunnel,
+            route,
             server: Arc::new(Mutex::new(server.clone())),
         })
     }
@@ -949,7 +1075,7 @@ impl Connection {
         Ok(Self {
             side: self.side.clone(),
             server: self.server.clone(),
-            ..Self::connect(&self.server(), self.tunnel.clone())?
+            ..Self::connect(&self.server(), self.route.clone())?
         })
     }
 
@@ -966,7 +1092,7 @@ impl Connection {
     /// request was delivered, never that anything stopped -- what the query
     /// eventually returned is the only account dbdelve gives of that.
     pub fn cancel(&self) -> Result<(), DbError> {
-        if let Some(tunnel) = &self.tunnel {
+        if let Route::Tunnel(tunnel) = &self.route {
             tunnel.dial()?;
         }
         // Its own runtime: the connection's is blocked on the very statement
@@ -975,9 +1101,20 @@ impl Connection {
             .enable_all()
             .build()
             .map_err(|error| plain_error(format!("Could not ask the server to cancel: {error}")))?;
-        match &self.connector {
-            None => runtime.block_on(self.cancel.cancel_query(NoTls)),
-            Some(connector) => runtime.block_on(self.cancel.cancel_query(connector.clone())),
+        match (&self.route, &self.connector) {
+            // Dropped once sent, which lets ssh deliver it before it exits.
+            (Route::Socket(bridge), _) => {
+                let (stream, _bridged) = bridge.connect()?;
+                let stream = {
+                    let _entered = runtime.enter();
+                    tokio_stream(stream).map_err(|error| {
+                        plain_error(format!("Could not ask the server to cancel: {error}"))
+                    })?
+                };
+                runtime.block_on(self.cancel.cancel_query_raw(stream, NoTls))
+            }
+            (_, None) => runtime.block_on(self.cancel.cancel_query(NoTls)),
+            (_, Some(connector)) => runtime.block_on(self.cancel.cancel_query(connector.clone())),
         }
         .map_err(|error| DbError {
             message: format!("Could not ask the server to cancel: {error}"),
@@ -1019,6 +1156,7 @@ impl Connection {
         let Client {
             client: inner,
             driver,
+            ..
         } = &mut *client;
         let failed = |error: Error| query_error(&error, sql);
         driver.notices.clear();
@@ -1128,7 +1266,7 @@ impl Connection {
                 statement_timeout: SIDE_TIMEOUT_SECONDS,
                 ..self.server()
             };
-            *side = Self::connect(&server, self.tunnel.clone()).ok();
+            *side = Self::connect(&server, self.route.clone()).ok();
         }
         ask(side.as_ref()?)
     }
@@ -1229,7 +1367,7 @@ impl Connection {
     /// waiting on a relation's lock never holds the mutex a user's query waits
     /// on. The side connection is dropped on return.
     pub fn sizes(&self) -> Result<Sizes, DbError> {
-        let side = Self::connect(&self.server(), self.tunnel.clone())?;
+        let side = Self::connect(&self.server(), self.route.clone())?;
         assemble_sizes(side.internal_query(SIZES_SQL)?)
     }
 
@@ -2279,6 +2417,114 @@ mod tests {
             ["127.0.0.1".parse::<std::net::IpAddr>().unwrap()]
         );
         assert_eq!(parsed.get_ports(), [40000]);
+    }
+
+    fn over_ssh(host: &str, sslmode: SslMode, run_as: Option<&str>) -> ServerConfig {
+        ServerConfig {
+            host: host.into(),
+            port: Some(5433),
+            sslmode,
+            ssh: Some(crate::db::SshTunnel {
+                host: "bastion".into(),
+                run_as: run_as.map(str::to_string),
+                ..crate::db::SshTunnel::default()
+            }),
+            ..config()
+        }
+    }
+
+    #[test]
+    fn a_socket_directory_over_ssh_refuses_what_it_cannot_honour() {
+        for (host, sslmode, run_as) in [
+            ("/var/run/postgresql", SslMode::Prefer, Some("postgres")),
+            ("/var/run/postgresql/", SslMode::Disable, None),
+            ("db.internal", SslMode::VerifyFull, None),
+        ] {
+            assert_eq!(
+                ssh_socket_error(&over_ssh(host, sslmode, run_as)),
+                None,
+                "{host}"
+            );
+        }
+        for mode in [SslMode::Require, SslMode::VerifyCa, SslMode::VerifyFull] {
+            let error = ssh_socket_error(&over_ssh("/var/run/postgresql", mode, None)).unwrap();
+            assert!(
+                error.starts_with(&format!("sslmode={} cannot be honoured", mode.as_str())),
+                "{error}"
+            );
+        }
+        assert_eq!(
+            ssh_socket_error(&over_ssh("db.internal", SslMode::Prefer, Some("postgres"))).unwrap(),
+            "Run as needs Host to be the socket directory on the SSH host, such as /var/run/postgresql."
+        );
+        let error = ssh_socket_error(&over_ssh("/var/run/my db", SslMode::Prefer, None)).unwrap();
+        assert!(
+            error.starts_with("Unix socket /var/run/my db/.s.PGSQL.5433 "),
+            "{error}"
+        );
+        let error = ssh_socket_error(&over_ssh(
+            "/var/run/postgresql",
+            SslMode::Prefer,
+            Some("a b"),
+        ))
+        .unwrap();
+        assert!(error.starts_with("Run as a b "), "{error}");
+    }
+
+    #[test]
+    fn prefer_over_a_bridge_opens_with_the_startup_message_not_an_ssl_request() {
+        use std::io::Read;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        let first_bytes = std::thread::spawn(move || {
+            let mut first = [0; 8];
+            server.read_exact(&mut first).unwrap();
+            first
+        });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let string = connection_string(&over_ssh("/var/run/postgresql", SslMode::Prefer, None));
+        let _ = through_bridge(&runtime, &string, stream, |error| {
+            plain_error(error.to_string())
+        });
+
+        // Protocol 3.0's version, where an SSLRequest has its 80877103.
+        assert_eq!(first_bytes.join().unwrap()[4..], [0, 3, 0, 0]);
+    }
+
+    #[test]
+    fn a_socket_is_looked_for_where_libpq_looks() {
+        let server = ServerConfig {
+            host: "/var/run/postgresql/".into(),
+            port: None,
+            ..config()
+        };
+        assert_eq!(socket_path(&server), "/var/run/postgresql/.s.PGSQL.5432");
+        assert_eq!(
+            socket_path(&over_ssh("/tmp", SslMode::Prefer, None)),
+            "/tmp/.s.PGSQL.5433"
+        );
+    }
+
+    /// What a socket directory meant before SSH could reach one, and still does.
+    #[cfg(unix)]
+    #[test]
+    fn without_ssh_a_socket_directory_is_a_local_socket_and_refuses_nothing() {
+        let server = ServerConfig {
+            host: "/var/run/postgresql".into(),
+            sslmode: SslMode::VerifyFull,
+            ..config()
+        };
+        assert_eq!(ssh_socket_error(&server), None);
+        let parsed: tokio_postgres::Config = connection_string(&server).parse().unwrap();
+        assert_eq!(
+            parsed.get_hosts(),
+            [Host::Unix("/var/run/postgresql".into())]
+        );
     }
 
     #[test]
