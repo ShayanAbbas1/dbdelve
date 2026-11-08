@@ -469,16 +469,12 @@ impl Workspace {
             // Host and Port are the far end of the forward, which is easy to
             // read as this machine's view of the network.
             let socket = form.target().reaches_socket_over_ssh();
-            let hint = match socket {
-                false => {
-                    "Host and port are as the SSH host sees them: localhost is the SSH host \
-                          itself."
-                }
-                true => {
-                    "Host and port are as the SSH host sees them: localhost is the SSH host \
-                         itself. A directory such as /var/run/postgresql is a Unix socket there, \
-                         opened as Run as: the OS user sudo uses, for peer authentication."
-                }
+            let hint = if socket {
+                "Host and port are as the SSH host sees them: localhost is the SSH host \
+                 itself. A Host such as /var/run/postgresql is its Unix socket directory; \
+                 Run as is the OS user sudo opens the socket as, for peer authentication."
+            } else {
+                "Host and port are as the SSH host sees them: localhost is the SSH host itself."
             };
             security.push(
                 ui::option_row(
