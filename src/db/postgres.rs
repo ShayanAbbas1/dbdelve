@@ -2049,6 +2049,22 @@ mod tests {
         }
     }
 
+    /// The compose database's Unix socket, in the directory the bastions
+    /// share with it, opened on the SSH host as `run_as`.
+    fn live_socket(alias: &str, run_as: Option<&str>) -> ServerConfig {
+        let mut ssh = crate::db::ssh::live_bastion(alias);
+        if let Some(ssh) = &mut ssh {
+            ssh.run_as = run_as.map(str::to_string);
+        }
+        ServerConfig {
+            host: "/var/run/postgresql".into(),
+            port: Some(5432),
+            sslmode: SslMode::Prefer,
+            ssh,
+            ..live_config()
+        }
+    }
+
     fn names(result: &QueryResult) -> Vec<&str> {
         result
             .columns
@@ -3236,6 +3252,107 @@ mod tests {
             .expect_err("the statement should be cancelled");
         assert!(error.message.contains("cancel"), "{}", error.message);
         assert!(connection.query("SELECT 1", Fetch::default()).is_ok());
+    }
+
+    #[test]
+    #[ignore = "requires the dev bastions and Postgres configured through dbdelve_SSH_CONFIG and PG*"]
+    fn live_ssh_a_query_runs_over_the_socket_as_the_user_sudo_opens_it_as() {
+        for alias in ["dbdelve-bastion", "dbdelve-inner"] {
+            let connection = Connection::open(&live_socket(alias, Some("postgres")))
+                .unwrap_or_else(|error| panic!("{alias}: {}", error.message));
+            let result = connection
+                .query(
+                    "SELECT pg_catalog.inet_server_addr() IS NULL AS over_a_socket",
+                    Fetch::default(),
+                )
+                .expect("query should succeed");
+            assert_eq!(result.rows, vec![vec![Some("t".into())]], "{alias}");
+            let sizes = connection
+                .sizes()
+                .expect("sizes should load through a bridge of their own");
+            assert!(sizes["public"].contains_key("accounts"));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the dev bastions and Postgres configured through dbdelve_SSH_CONFIG and PG*"]
+    fn live_ssh_a_cancel_reaches_the_server_over_the_socket() {
+        let connection = Connection::open(&live_socket("dbdelve-bastion", Some("postgres")))
+            .expect("connection should open");
+        let canceller = connection.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            canceller.cancel().expect("the cancel request should send");
+        });
+
+        let error = connection
+            .query("SELECT pg_sleep(30)", Fetch::default())
+            .expect_err("the statement should be cancelled");
+        assert!(error.message.contains("cancel"), "{}", error.message);
+        assert!(connection.query("SELECT 1", Fetch::default()).is_ok());
+    }
+
+    #[test]
+    #[ignore = "requires the dev bastions and Postgres configured through dbdelve_SSH_CONFIG and PG*"]
+    fn live_ssh_a_run_as_user_sudo_refuses_fails_with_sudo_s_reason() {
+        let Err(error) = Connection::open(&live_socket("dbdelve-bastion", Some("root"))) else {
+            panic!("sudo opened the socket as a user the bastion does not allow");
+        };
+        // Whether ssh is seen exiting before or after the driver's handshake
+        // fails is a race, and either way names the bridge and sudo's reason.
+        assert!(
+            error.message.contains("SSH bridge through dbdelve-bastion")
+                && error.message.contains("sudo: a password is required"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the dev bastions and Postgres configured through dbdelve_SSH_CONFIG and PG*"]
+    fn live_ssh_a_socket_directory_that_does_not_exist_fails_with_socat_s_reason() {
+        let Err(error) = Connection::open(&ServerConfig {
+            host: "/var/run/no-such-postgresql".into(),
+            ..live_socket("dbdelve-bastion", Some("postgres"))
+        }) else {
+            panic!("a socket that does not exist connected");
+        };
+        assert!(
+            error.message.contains("SSH bridge through dbdelve-bastion")
+                && error.message.contains("No such file or directory"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the dev bastions and Postgres configured through dbdelve_SSH_CONFIG and PG*"]
+    fn live_ssh_dropping_a_connection_ends_every_ssh_it_started() {
+        // The doubled slash names the same socket in a way no other test's
+        // ssh does, so pgrep finds only this one's.
+        let socket = "UNIX-CONNECT:/var/run//postgresql/";
+        let running = || {
+            std::process::Command::new("pgrep")
+                .args(["-f", socket])
+                .status()
+                .unwrap()
+                .success()
+        };
+        let connection = Connection::open(&ServerConfig {
+            host: "/var/run//postgresql".into(),
+            ..live_socket("dbdelve-bastion", Some("postgres"))
+        })
+        .expect("connection should open");
+        connection.sizes().expect("sizes should load");
+        assert!(running());
+
+        drop(connection);
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while running() {
+            assert!(Instant::now() < deadline, "ssh outlived its connection");
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     #[test]
