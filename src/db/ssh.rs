@@ -519,7 +519,10 @@ fn bridge_args(ssh: &SshTunnel, socket: &str) -> Result<Vec<String>, DbError> {
 /// everywhere. The listener lives until its own connect is accepted, and
 /// drops whatever else connects first.
 fn socket_pair() -> io::Result<(TcpStream, TcpStream)> {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+    paired_through(TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?)
+}
+
+fn paired_through(listener: TcpListener) -> io::Result<(TcpStream, TcpStream)> {
     let driver = TcpStream::connect(listener.local_addr()?)?;
     let expected = driver.local_addr()?;
     loop {
@@ -1224,6 +1227,27 @@ mod tests {
         assert_eq!(&read, b"ping");
         driver.read_exact(&mut read).unwrap();
         assert_eq!(&read, b"pong");
+    }
+
+    #[test]
+    fn a_connection_that_reaches_the_pairs_listener_first_is_not_its_other_end() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let mut stranger = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+
+        let (driver, ours) = paired_through(listener).unwrap();
+
+        assert_eq!(ours.peer_addr().unwrap(), driver.local_addr().unwrap());
+        stranger
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let closed = stranger.read(&mut [0; 1]);
+        assert!(
+            matches!(closed, Ok(0))
+                || closed
+                    .as_ref()
+                    .is_err_and(|error| error.kind() == io::ErrorKind::ConnectionReset),
+            "the stranger's connection was kept: {closed:?}"
+        );
     }
 
     #[test]
