@@ -305,9 +305,12 @@ pub struct Bridged {
     process: Option<Process>,
 }
 
-/// Killed and waited for on drop.
+/// Ended and waited for on drop.
 struct Process {
     child: Child,
+    /// The write end of the watchdog's pipe, which only DBDelve holds.
+    #[cfg(unix)]
+    watchdog: Option<io::PipeWriter>,
     #[cfg(windows)]
     _job: std::os::windows::io::OwnedHandle,
 }
@@ -346,6 +349,11 @@ impl SocketBridge {
             Ready::Exited(status) => {
                 drained(draining);
                 let said = said.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                // The watchdog shell's "command not found". Once the command
+                // is sent, a 127 is the SSH host's: no socat, or no sudo.
+                if cfg!(unix) && status.code() == Some(127) && !said.ready {
+                    return Err(no_ssh());
+                }
                 return Err(plain_error(if said.lines.is_empty() {
                     format!(
                         "SSH bridge through {} failed: ssh exited ({status}).",
@@ -438,6 +446,10 @@ impl Drop for Bridged {
 
 impl Drop for Process {
     fn drop(&mut self) {
+        // Closing the watchdog's pipe is the same teardown a crash gets.
+        #[cfg(unix)]
+        drop(self.watchdog.take());
+        #[cfg(windows)]
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -520,21 +532,9 @@ fn socket_pair() -> io::Result<(TcpStream, TcpStream)> {
     }
 }
 
-/// ssh itself rather than under the watchdog shell, whose stdin a bridge's
-/// data needs: if DBDelve dies, ssh reads EOF there instead, which ends
-/// socat, then ssh.
 #[cfg(unix)]
 fn spawn_bridge(args: &[String]) -> io::Result<Process> {
-    let mut command = ssh_command();
-    command
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    unmask_signals(&mut command);
-    Ok(Process {
-        child: crate::db::spawn(&mut command)?,
-    })
+    watched_bridge("ssh", args)
 }
 
 #[cfg(windows)]
@@ -841,6 +841,17 @@ const WATCHDOG: &str = "exec 3<&0 4>&2 2>/dev/null; \
     (read _ <&3; kill $pid) >/dev/null 4>&- & watcher=$!; \
     wait $pid; status=$?; kill $watcher; exit $status";
 
+/// `WATCHDOG` for a session whose stdin and stdout are its data: the pipe
+/// arrives as fd 3 instead, put there by `watched_bridge`, and ssh is handed
+/// the shell's stdin (kept as fd 5, past the asynchronous list's /dev/null)
+/// and stdout. A bridge's ssh reads no stdin until it has logged in, which
+/// can wait on a hardware key's touch, so EOF there cannot stand in for it.
+#[cfg(unix)]
+const BRIDGE_WATCHDOG: &str = "exec 4>&2 2>/dev/null 5<&0; \
+    \"$@\" <&5 2>&4 3<&- 4>&- 5<&- & pid=$!; \
+    (read _ <&3; kill $pid) </dev/null >/dev/null 4>&- 5<&- & watcher=$!; \
+    wait $pid; status=$?; kill $watcher; exit $status";
+
 #[cfg(unix)]
 fn ssh_command() -> Command {
     Command::new("ssh")
@@ -867,6 +878,45 @@ fn watched(program: &str, args: &[String]) -> io::Result<Child> {
         .stderr(Stdio::piped());
     unmask_signals(&mut command);
     crate::db::spawn(&mut command)
+}
+
+#[cfg(unix)]
+fn watched_bridge(program: &str, args: &[String]) -> io::Result<Process> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+
+    let (alive, watchdog) = io::pipe()?;
+    let alive_fd = alive.as_raw_fd();
+    let mut command = Command::new("/bin/sh");
+    command
+        .args(["-c", BRIDGE_WATCHDOG, "sh", program])
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    unmask_signals(&mut command);
+    // SAFETY: dup2 and fcntl are async-signal-safe, which is all a hook
+    // between fork and exec may call.
+    unsafe {
+        command.pre_exec(move || {
+            // Both ends are close-on-exec; dup2 clears it on the copy, but
+            // onto itself it is a no-op and the flag stays.
+            let moved = if alive_fd == 3 {
+                libc::fcntl(3, libc::F_SETFD, 0)
+            } else {
+                libc::dup2(alive_fd, 3)
+            };
+            if moved == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let child = crate::db::spawn(&mut command)?;
+    Ok(Process {
+        child,
+        watchdog: Some(watchdog),
+    })
 }
 
 /// std hands a child the spawning thread's signal mask, and the GCD worker a
@@ -1365,6 +1415,45 @@ mod tests {
             }
             thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_bridge_watchdog_ends_what_it_runs_before_it_reads_stdin() {
+        let mut process = on_a_thread_blocking_every_signal(|| {
+            watched_bridge("sleep", &["30".to_owned()]).unwrap()
+        });
+        // Held open, as for an ssh still waiting on a login.
+        let _stdin = process.child.stdin.take();
+        drop(process.watchdog.take());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while process.child.try_wait().unwrap().is_none() {
+            if Instant::now() > deadline {
+                let _ = process.child.kill();
+                panic!("closing the watchdog's pipe did not end what it ran");
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_bridge_watchdog_hands_what_it_runs_its_stdin_and_stdout() {
+        use std::io::Write;
+
+        let mut process = watched_bridge("cat", &[]).unwrap();
+        let mut stdin = process.child.stdin.take().unwrap();
+        stdin.write_all(b"ping").unwrap();
+        drop(stdin);
+        let mut echoed = String::new();
+        process
+            .child
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut echoed)
+            .unwrap();
+        assert_eq!(echoed, "ping");
     }
 
     #[cfg(unix)]
