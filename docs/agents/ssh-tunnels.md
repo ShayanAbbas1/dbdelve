@@ -130,9 +130,11 @@ It is not a forward.
   file** (`<dir>/.s.PGSQL.<port>`). `Run as` is the user `sudo -n -u` opens it
   as; blank is the SSH user. `-n` because under `BatchMode` a sudo that wants a
   password must fail saying so rather than wait for one nobody can type. A set
-  Run as with a non-socket Host, or on a forward, is refused for every engine
-  rather than quietly connecting as the SSH user (`ssh_socket_error`,
-  `ssh_args`); the form refuses the same on Save and Test.
+  Run as with a non-socket Host, or on a forward, is refused at connect for
+  every engine rather than quietly connecting as the SSH user
+  (`ssh_socket_error`, `ssh_args`), which is what catches a hand-edited
+  profile. The form shows Run as only on a target that reaches a socket, drops
+  a hidden one on save, and there refuses a non-socket Host on Save and Test.
 - **Run as and the path are validated to a narrow character set, not
   quoted.** They reach the remote login shell, and the path's `:`, `,` and `!`
   reach socat's address parser a second time, so quoting would have to be right
