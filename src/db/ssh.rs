@@ -155,7 +155,7 @@ impl Tunnel {
                     ));
                 }
                 Ready::Exited(status) => {
-                    let _ = draining.join();
+                    drained(draining);
                     let said = tunnel.shown();
                     if our_port_was_taken(&said, port) && attempt < ATTEMPTS {
                         attempt += 1;
@@ -344,7 +344,7 @@ impl SocketBridge {
                 )));
             }
             Ready::Exited(status) => {
-                let _ = draining.join();
+                drained(draining);
                 let said = said.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 return Err(plain_error(if said.lines.is_empty() {
                     format!(
@@ -733,6 +733,20 @@ fn failure(host: &str, status: ExitStatus, said: &str) -> DbError {
         ))
     } else {
         plain_error(format!("SSH tunnel through {host} failed: {said}"))
+    }
+}
+
+/// Waits, briefly, for the drain to read the stderr of an ssh that has
+/// exited: a `ProxyCommand` that left a process holding stderr would
+/// otherwise keep it open, and the connect waiting, indefinitely. What it
+/// has read by then is what the error shows.
+fn drained(draining: JoinHandle<()>) {
+    let deadline = Instant::now() + EXPLAINED_WITHIN;
+    while !draining.is_finished() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    if draining.is_finished() {
+        let _ = draining.join();
     }
 }
 
@@ -1281,6 +1295,26 @@ mod tests {
             .read_to_string(&mut said)
             .unwrap();
         assert_eq!(said, "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_exited_ssh_whose_stderr_another_process_holds_still_says_what_it_said() {
+        let mut child = Command::new("sh")
+            .args(["-c", "echo 'no route to host' >&2; sleep 3 & exit 255"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let said = Arc::<Mutex<Said>>::default();
+        let draining = drain(child.stderr.take().unwrap(), said.clone(), None);
+        child.wait().unwrap();
+
+        let started = Instant::now();
+        drained(draining);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(said.lock().unwrap().shown(), "no route to host");
     }
 
     #[test]
