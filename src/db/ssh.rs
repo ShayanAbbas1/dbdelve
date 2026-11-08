@@ -1484,19 +1484,41 @@ mod tests {
         }
     }
 
+    /// A bridge watchdog's `sleep` and its pid: a kill aimed at the watchdog
+    /// shell instead would end the shell and leave the `sleep` running.
+    #[cfg(unix)]
+    fn watched_sleep() -> (Process, libc::pid_t) {
+        use std::io::BufRead;
+
+        let script = "echo $$; exec sleep 30".to_owned();
+        let mut process = watched_bridge("sh", &["-c".to_owned(), script]).unwrap();
+        let mut pid = String::new();
+        io::BufReader::new(process.child.stdout.take().unwrap())
+            .read_line(&mut pid)
+            .unwrap();
+        (process, pid.trim().parse().unwrap())
+    }
+
+    /// Ended and reaped: a zombie still answers.
+    #[cfg(unix)]
+    fn gone(pid: libc::pid_t) -> bool {
+        // SAFETY: signal 0 only asks whether the process exists.
+        let failed = unsafe { libc::kill(pid, 0) } == -1;
+        failed && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_bridge_watchdog_ends_what_it_runs_before_it_reads_stdin() {
-        let mut process = on_a_thread_blocking_every_signal(|| {
-            watched_bridge("sleep", &["30".to_owned()]).unwrap()
-        });
+        let (mut process, sleeping) = on_a_thread_blocking_every_signal(watched_sleep);
         // Held open, as for an ssh still waiting on a login.
         let _stdin = process.child.stdin.take();
         drop(process.watchdog.take());
         let deadline = Instant::now() + Duration::from_secs(5);
-        while process.child.try_wait().unwrap().is_none() {
+        while !gone(sleeping) {
             if Instant::now() > deadline {
-                let _ = process.child.kill();
+                // SAFETY: SIGKILL to the pid the sleep reported.
+                unsafe { libc::kill(sleeping, libc::SIGKILL) };
                 panic!("closing the watchdog's pipe did not end what it ran");
             }
             thread::sleep(Duration::from_millis(20));
@@ -1526,12 +1548,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_dropped_bridge_whose_ssh_never_exits_is_ended_once_its_grace_is_out() {
-        let mut process = watched_bridge("sleep", &["30".to_owned()]).unwrap();
-        let shell = process.child.id() as libc::pid_t;
+        let (mut process, sleeping) = watched_sleep();
         let draining = drain(process.child.stderr.take().unwrap(), Arc::default(), None);
-        // Until it is reaped: a zombie still answers.
-        // SAFETY: signal 0 only asks whether the process exists.
-        let alive = || unsafe { libc::kill(shell, 0) } == 0;
 
         let dropped = Instant::now();
         drop(Bridged {
@@ -1542,8 +1560,11 @@ mod tests {
         });
 
         thread::sleep(Duration::from_secs(1));
-        assert!(alive(), "ended before what it was sending had its grace");
-        while alive() {
+        assert!(
+            !gone(sleeping),
+            "ended before what it was sending had its grace"
+        );
+        while !gone(sleeping) {
             assert!(
                 dropped.elapsed() < CLOSED_WITHIN + Duration::from_secs(3),
                 "still running well past its grace"
