@@ -111,3 +111,64 @@ already set up on the machine.
   downgrade. A driver with a separate verification name (SQL Server ODBC 18's
   `HostNameInCertificate`) can be given one by the user; Kerberos, which derives
   the SPN from the host, fails the same loud way.
+
+## Unix socket bridge
+
+A Postgres profile whose Host starts with `/` and has an SSH tunnel reaches a
+Unix socket on the SSH host (`ssh::SocketBridge`, `postgres::Route::Socket`).
+It is not a forward.
+
+- **The stream is a private loopback socket pair with a peer check, never a
+  listener.** With peer authentication the server trusts whoever opens the
+  socket, so a port anyone on this machine could dial would hand them that
+  login: the bridge is the authentication. `socket_pair` binds a listener only
+  to connect to it once and accepts only the connection whose address is that
+  client's own, dropping any other. ssh's stdio is copied to and from that
+  pair (a pair rather than a socket handed to the child, because Windows
+  cannot) by a read and write loop, never `io::copy`: on Linux that splices,
+  and a blocking splice from a socket into a pipe holds the pipe's lock while
+  it waits, so ssh never reads the startup message (`pump`).
+- **A `/` Host is the socket directory, as in libpq, and Port picks the
+  file** (`<dir>/.s.PGSQL.<port>`). `Run as` is the user `sudo -n -u` opens it
+  as; blank is the SSH user. `-n` because under `BatchMode` a sudo that wants a
+  password must fail saying so rather than wait for one nobody can type. A set
+  Run as with a non-socket Host, or on a forward, is refused at connect for
+  every engine rather than quietly connecting as the SSH user
+  (`ssh_socket_error`, `ssh_args`), which is what catches a hand-edited
+  profile. The form shows Run as only on a target that reaches a socket, drops
+  a hidden one on save, and there refuses a non-socket Host on Save and Test.
+- **Run as and the path are validated to a narrow character set, not
+  quoted.** They reach the remote login shell, and the path's `:`, `,` and `!`
+  reach socat's address parser a second time, so quoting would have to be right
+  for both grammars. `socket_bridge_error` admits letters, digits, `.`, `_`,
+  `-` (and `/` in the path, an absolute one; a user name cannot start with
+  `-`). `ponytail:` a space or comma in a path is refused; quoting for both is
+  the upgrade.
+- **The watchdog's pipe moves to fd 3, because stdin and stdout are the
+  data** (`BRIDGE_WATCHDOG`, `watched_bridge`). EOF on the data cannot stand
+  in for it: ssh reads no stdin until it has logged in, which can wait on a
+  hardware key's touch, so a DBDelve that died then would leave ssh behind.
+  On drop, `Bridged` does not kill at once: `cancel_query_raw` writes and returns without waiting, so a
+  kill would lose a cancel (or a Terminate) still in flight. A thread waits up
+  to `CLOSED_WITHIN` for ssh to exit on its own, then `Process`'s drop kills
+  it; nothing blocks on drop. Windows keeps the Job Object.
+- **Readiness is `-v`'s `debug1: Sending command: `, not `Entering
+  interactive session.`** A `ProxyJump` hop prints the latter before the last
+  login. `connect` waits for it (`READY_WITHIN`, long enough for a hardware-key
+  touch) before handing out the stream, so auth, DNS and host-key failures
+  read `SSH bridge through X failed: ...` like a tunnel's and the driver's
+  handshake keeps its own 10 s. sudo's or socat's refusal arrives either before
+  that wait ends or, racing it, appended after a failed handshake by
+  `Bridged::explain`. Exit status 127 means no local ssh only before
+  `Sending command`; after it, it is the SSH host's "command not found" for
+  socat or sudo.
+- **The driver gets `NoTls`, and `require`, `verify-ca` and `verify-full` are
+  refused by name** (hard rule 6): Postgres offers TLS only over TCP, and SSH
+  already encrypts to the SSH host. `disable` and `prefer` connect; `prefer`
+  over a connector that cannot do TLS sends no SSLRequest, as libpq does on a
+  socket (`prefer_over_a_bridge_opens_with_the_startup_message_not_an_ssl_request`).
+- **Every connection is its own ssh login** (the session, the side session,
+  sizes, each cancel), since `ControlMaster=no` stays load-bearing.
+  `ponytail:` the upgrade is a DBDelve-owned master (`-M -S <private path>
+  -o ControlPersist=no`, watched like a tunnel) the bridges multiplex over;
+  Windows' OpenSSH cannot multiplex.

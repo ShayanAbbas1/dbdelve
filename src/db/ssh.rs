@@ -1,4 +1,5 @@
-//! A local port forward over the system `ssh` binary.
+//! A local port forward over the system `ssh` binary, or a private stream to a
+//! Unix socket on the SSH host over the same binary's stdio.
 //!
 //! The binary rather than an SSH library, because it brings `~/.ssh/config`
 //! (aliases, `ProxyJump`, `IdentityFile`, `User`), ssh-agent, agent-backed
@@ -6,8 +7,8 @@
 //! keeps the server's own name for TLS.
 
 use std::collections::VecDeque;
-use std::io::{self, BufRead, BufReader, Read};
-use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+use std::io::{self, Read};
+use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::process::{Child, ChildStderr, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
@@ -28,7 +29,7 @@ const KEPT_LINES: usize = 20;
 const SHOWN_LINES: usize = 3;
 
 /// The longest line read whole; a longer one arrives in pieces.
-const LINE_LIMIT: u64 = 1024;
+const LINE_LIMIT: usize = 1024;
 
 /// What `-v` prints once every forward is bound, `ExitOnForwardFailure`
 /// having exited ssh before this for any that could not be. "Local forwarding
@@ -41,6 +42,17 @@ const OPEN_FAILED: &str = "open failed: ";
 
 /// How long an engine's failed connect waits for ssh to say why.
 const EXPLAINED_WITHIN: Duration = Duration::from_millis(500);
+
+/// What `-v` prints once ssh has logged in and sent the remote command. Not
+/// `SESSION_STARTED`: a `ProxyJump` hop prints that before the last login.
+const COMMAND_SENT: &str = "debug1: Sending command: ";
+
+/// How long a dropped bridge's ssh has to deliver what the driver last wrote
+/// and exit before it is killed.
+const CLOSED_WITHIN: Duration = Duration::from_secs(5);
+
+const RUN_AS_NEEDS_A_SOCKET: &str =
+    "Run as needs Host to be the socket directory on the SSH host, such as /var/run/postgresql.";
 
 /// A running `ssh -L`. Dropping it ends ssh and returns once it has exited.
 pub struct Tunnel {
@@ -67,6 +79,8 @@ struct Said {
     listening: bool,
     /// ... and gone on to the session, so it is bound.
     ready: bool,
+    /// A line read so far whose newline has not arrived.
+    unfinished: String,
 }
 
 impl Tunnel {
@@ -110,23 +124,10 @@ impl Tunnel {
                     )
                 })?
                 .port();
-            let mut args = ssh_args(ssh, port, target_host, target_port)
-                .map_err(|error| ("arguments", error))?;
-            // Tests never read the real ~/.ssh.
-            if cfg!(test)
-                && let Ok(config) = std::env::var("dbdelve_SSH_CONFIG")
-            {
-                args.splice(0..0, ["-F".to_owned(), config]);
-            }
-            if host_key_checking_is_ask(&args) {
-                args.splice(
-                    0..0,
-                    [
-                        "-o".to_owned(),
-                        "StrictHostKeyChecking=accept-new".to_owned(),
-                    ],
-                );
-            }
+            let args = configured(
+                ssh_args(ssh, port, target_host, target_port)
+                    .map_err(|error| ("arguments", error))?,
+            );
 
             let local = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
             let mut tunnel =
@@ -144,7 +145,7 @@ impl Tunnel {
             let draining = drain(
                 process.stderr.take().expect("stderr is piped"),
                 tunnel.said.clone(),
-                port,
+                Some(port),
             );
 
             match wait_ready(process, &tunnel.said) {
@@ -156,7 +157,7 @@ impl Tunnel {
                     ));
                 }
                 Ready::Exited(status) => {
-                    let _ = draining.join();
+                    drained(draining, &tunnel.said);
                     let said = tunnel.shown();
                     if our_port_was_taken(&said, port) && attempt < ATTEMPTS {
                         attempt += 1;
@@ -230,11 +231,16 @@ impl Tunnel {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    fn shown(&self) -> String {
+        self.said().shown()
+    }
+}
+
+impl Said {
     /// The last few lines ssh said, for an error.
     fn shown(&self) -> String {
-        let said = self.said();
-        let skip = said.lines.len().saturating_sub(SHOWN_LINES);
-        said.lines
+        let skip = self.lines.len().saturating_sub(SHOWN_LINES);
+        self.lines
             .iter()
             .skip(skip)
             .map(String::as_str)
@@ -277,12 +283,375 @@ impl Drop for Tunnel {
     }
 }
 
-/// ssh's arguments, bar the program name and what `Tunnel::open` adds.
+/// A Unix socket on the SSH host, reached through a fresh ssh per connection
+/// whose stdio is the stream, never through a local listener: when the server
+/// trusts whoever opens the socket (peer authentication), a port anyone on
+/// this machine could dial would hand them that login.
+///
+/// ponytail: one ssh login per connection (the session, the side session,
+/// sizes, every cancel), since `ControlMaster=no`. Upgrade: a DBDelve-owned
+/// master (`-M -S <private path> -o ControlPersist=no`, watched like a
+/// tunnel) the bridges multiplex over; Windows' OpenSSH cannot multiplex.
+pub struct SocketBridge {
+    host: String,
+    args: Vec<String>,
+}
+
+/// One bridged connection's ssh. Dropping it lets ssh deliver what the driver
+/// last wrote, then ends it.
+pub struct Bridged {
+    host: String,
+    said: Arc<Mutex<Said>>,
+    draining: JoinHandle<()>,
+    /// Taken by `Drop`, which hands it to a thread of its own.
+    process: Option<Process>,
+}
+
+/// Ended and waited for on drop.
+struct Process {
+    child: Child,
+    /// The write end of the watchdog's pipe, which only DBDelve holds.
+    #[cfg(unix)]
+    watchdog: Option<io::PipeWriter>,
+    #[cfg(windows)]
+    _job: std::os::windows::io::OwnedHandle,
+}
+
+impl SocketBridge {
+    /// Checks everything and asks `ssh -G` once; runs nothing until
+    /// [`Self::connect`].
+    pub fn new(ssh: &SshTunnel, socket: &str) -> Result<Self, DbError> {
+        Ok(Self {
+            host: ssh.host.clone(),
+            args: configured(bridge_args(ssh, socket)?),
+        })
+    }
+
+    /// A new ssh session to the socket, once it has logged in, and the
+    /// driver's end of it.
+    pub fn connect(&self) -> Result<(TcpStream, Bridged), DbError> {
+        let started = Instant::now();
+        tracing::debug!(ssh_host = self.host, "opening ssh bridge");
+        let opened = self.connected();
+        let elapsed = started.elapsed();
+        match opened {
+            Ok(bridge) => {
+                tracing::info!(?elapsed, "ssh bridge up");
+                Ok(bridge)
+            }
+            Err((kind, error)) => {
+                tracing::warn!(kind, ?elapsed, "ssh bridge failed");
+                tracing::debug!("ssh bridge failed: {}", error.message);
+                Err(error)
+            }
+        }
+    }
+
+    /// A failure comes with its kind, for the log, which may not say what ssh
+    /// said, where it was going or who it ran as.
+    fn connected(&self) -> Result<(TcpStream, Bridged), (&'static str, DbError)> {
+        let mut process = spawn_bridge(&self.args).map_err(|error| match error.kind() {
+            io::ErrorKind::NotFound => ("no ssh", no_ssh()),
+            _ => (
+                "spawn",
+                plain_error(format!("Could not start ssh: {error}")),
+            ),
+        })?;
+        let said = Arc::<Mutex<Said>>::default();
+        let draining = drain(
+            process.child.stderr.take().expect("stderr is piped"),
+            said.clone(),
+            None,
+        );
+        match wait_ready(&mut process.child, &said) {
+            Ready::Listening => {}
+            Ready::HostKeyNotSaved(message) => {
+                return Err((
+                    "host key",
+                    plain_error(format!(
+                        "SSH bridge through {} failed: {message}",
+                        self.host
+                    )),
+                ));
+            }
+            Ready::Exited(status) => {
+                drained(draining, &said);
+                let said = said.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                // The watchdog shell's "command not found". Once the command
+                // is sent, a 127 is the SSH host's: no socat, or no sudo.
+                if cfg!(unix) && status.code() == Some(127) && !said.ready {
+                    return Err(("no ssh", no_ssh()));
+                }
+                return Err((
+                    "ssh exited",
+                    plain_error(if said.lines.is_empty() {
+                        format!(
+                            "SSH bridge through {} failed: ssh exited ({status}).",
+                            self.host
+                        )
+                    } else {
+                        format!("SSH bridge through {} failed: {}", self.host, said.shown())
+                    }),
+                ));
+            }
+            Ready::TimedOut => {
+                return Err((
+                    "timed out",
+                    plain_error(format!(
+                        "SSH bridge through {} did not come up within {} seconds.",
+                        self.host,
+                        READY_WITHIN.as_secs()
+                    )),
+                ));
+            }
+        }
+
+        let unopened = |error: io::Error| {
+            (
+                "socket pair",
+                plain_error(format!(
+                    "Could not open a stream for the SSH bridge: {error}"
+                )),
+            )
+        };
+        let driver = piped_to(&mut process.child).map_err(unopened)?;
+        Ok((
+            driver,
+            Bridged {
+                host: self.host.clone(),
+                said,
+                draining,
+                process: Some(process),
+            },
+        ))
+    }
+}
+
+impl Bridged {
+    /// `error`, from an engine whose connect through this bridge failed, with
+    /// what ssh last said once it has exited: sudo's or socat's reason arrives
+    /// there, and the engine can only say that the connection closed.
+    pub fn explain(&self, mut error: DbError) -> DbError {
+        let deadline = Instant::now() + EXPLAINED_WITHIN;
+        while !self.draining.is_finished() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        let said = self
+            .said
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .shown();
+        if self.draining.is_finished() && !said.is_empty() {
+            error.message = format!(
+                "{}\nSSH bridge through {}: {said}",
+                error.message, self.host
+            );
+        }
+        error
+    }
+}
+
+impl Drop for Bridged {
+    fn drop(&mut self) {
+        // Not killed at once: a cancel request or a Terminate may still be on
+        // its way through ssh, which exits by itself once the driver's end has
+        // closed and socat has delivered it.
+        let Some(mut process) = self.process.take() else {
+            return;
+        };
+        thread::spawn(move || {
+            let deadline = Instant::now() + CLOSED_WITHIN;
+            while matches!(process.child.try_wait(), Ok(None)) && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(20));
+            }
+        });
+    }
+}
+
+impl Drop for Process {
+    fn drop(&mut self) {
+        // Closing the watchdog's pipe is the same teardown a crash gets.
+        #[cfg(unix)]
+        drop(self.watchdog.take());
+        #[cfg(windows)]
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// `ssh.run_as`, when it says something.
+fn run_as(ssh: &SshTunnel) -> Option<&str> {
+    ssh.run_as.as_deref().filter(|user| !user.is_empty())
+}
+
+/// Why `ssh` cannot bridge to `socket`, if it cannot. Both reach the remote
+/// command, which the SSH host's login shell parses and whose `:`, `,` and `!`
+/// socat parses again, so they are checked rather than quoted.
+///
+/// ponytail: a path outside these characters (a space, a comma) is refused.
+/// Quoting for both the remote shell and socat's address grammar is the
+/// upgrade, if anyone needs one.
+pub(super) fn socket_bridge_error(ssh: &SshTunnel, socket: &str) -> Option<String> {
+    if let Some(user) = run_as(ssh)
+        && (user.starts_with('-')
+            || !user
+                .chars()
+                .all(|char| char.is_ascii_alphanumeric() || "._-".contains(char)))
+    {
+        return Some(format!(
+            "Run as {user} must be a user name of letters, digits, '.', '_' and '-', \
+             not starting with '-'."
+        ));
+    }
+    if !socket.starts_with('/')
+        || !socket
+            .chars()
+            .all(|char| char.is_ascii_alphanumeric() || "._-/".contains(char))
+    {
+        return Some(format!(
+            "Unix socket {socket} must be an absolute path of letters, digits, '.', '_', '-' and '/'."
+        ));
+    }
+    None
+}
+
+/// The message a forward refuses Run as with, for a caller to refuse it first.
+pub(super) fn run_as_needs_a_socket(ssh: &SshTunnel) -> Option<String> {
+    run_as(ssh).map(|_| RUN_AS_NEEDS_A_SOCKET.to_owned())
+}
+
+/// ssh's arguments for a bridge, bar the program name and what `configured`
+/// adds.
+fn bridge_args(ssh: &SshTunnel, socket: &str) -> Result<Vec<String>, DbError> {
+    if let Some(error) = socket_bridge_error(ssh, socket) {
+        return Err(plain_error(error));
+    }
+    // No escape character: stdin is the driver's bytes.
+    let mut args = session_args(ssh, ["-e".to_owned(), "none".to_owned()])?;
+    let open = format!("socat STDIO UNIX-CONNECT:{socket}");
+    args.push(match run_as(ssh) {
+        // -n: under BatchMode, a sudo that wants a password fails saying so
+        // rather than waiting for one nobody can type.
+        Some(user) => format!("sudo -n -u {user} {open}"),
+        None => open,
+    });
+    Ok(args)
+}
+
+/// Two connected loopback sockets, for a stream between the driver and ssh's
+/// stdio: Windows cannot hand a child a socket as stdio, so this is the same
+/// everywhere. The listener lives until its own connect is accepted, and
+/// drops whatever else connects first.
+fn socket_pair() -> io::Result<(TcpStream, TcpStream)> {
+    paired_through(TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?)
+}
+
+/// The driver's end of a socket pair whose other end is copied to `child`'s
+/// stdin and from its stdout.
+fn piped_to(child: &mut Child) -> io::Result<TcpStream> {
+    let (driver, ours) = socket_pair()?;
+    let mut to_driver = ours.try_clone()?;
+    let mut from_driver = ours;
+    let mut stdout = child.stdout.take().expect("stdout is piped");
+    let mut stdin = child.stdin.take().expect("stdin is piped");
+    thread::spawn(move || {
+        let _ = pump(&mut stdout, &mut to_driver);
+        let _ = to_driver.shutdown(Shutdown::Write);
+    });
+    thread::spawn(move || {
+        let _ = pump(&mut from_driver, &mut stdin);
+        // ssh's EOF, which ends socat on the SSH host and then ssh.
+        drop(stdin);
+    });
+    Ok(driver)
+}
+
+/// `io::copy` without its Linux `splice`: a blocking splice from a socket into
+/// a pipe holds the pipe's lock while it waits for more, so ssh could not read
+/// what the last one delivered, the driver's startup message among it.
+fn pump(from: &mut impl Read, to: &mut impl io::Write) -> io::Result<()> {
+    let mut chunk = [0; 16 * 1024];
+    loop {
+        match from.read(&mut chunk) {
+            Ok(0) => return Ok(()),
+            Ok(read) => to.write_all(&chunk[..read])?,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn paired_through(listener: TcpListener) -> io::Result<(TcpStream, TcpStream)> {
+    let driver = TcpStream::connect(listener.local_addr()?)?;
+    let expected = driver.local_addr()?;
+    loop {
+        let (ours, peer) = listener.accept()?;
+        if peer == expected {
+            driver.set_nodelay(true)?;
+            ours.set_nodelay(true)?;
+            return Ok((driver, ours));
+        }
+    }
+}
+
+#[cfg(unix)]
+fn spawn_bridge(args: &[String]) -> io::Result<Process> {
+    watched_bridge("ssh", args)
+}
+
+#[cfg(windows)]
+fn spawn_bridge(args: &[String]) -> io::Result<Process> {
+    let mut child = crate::db::spawn(
+        ssh_command()
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )?;
+    match kill_on_close_job(&child) {
+        Ok(job) => Ok(Process { child, _job: job }),
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            Err(error)
+        }
+    }
+}
+
+/// ssh's arguments for a forward, bar the program name and what `configured`
+/// adds.
 fn ssh_args(
     ssh: &SshTunnel,
     local_port: u16,
     target_host: &str,
     target_port: u16,
+) -> Result<Vec<String>, DbError> {
+    // A forward would connect as the SSH user, never as the one asked for.
+    if run_as(ssh).is_some() {
+        return Err(plain_error(RUN_AS_NEEDS_A_SOCKET.to_owned()));
+    }
+    let target_host = if target_host.contains(':') && !target_host.starts_with('[') {
+        format!("[{target_host}]")
+    } else {
+        target_host.to_owned()
+    };
+    session_args(
+        ssh,
+        [
+            "-N".to_owned(),
+            "-o".to_owned(),
+            "ExitOnForwardFailure=yes".to_owned(),
+            "-L".to_owned(),
+            format!("127.0.0.1:{local_port}:{target_host}:{target_port}"),
+        ],
+    )
+}
+
+/// What every session of ours passes ssh, around `session`'s own options, up
+/// to and including the host.
+fn session_args(
+    ssh: &SshTunnel,
+    session: impl IntoIterator<Item = String>,
 ) -> Result<Vec<String>, DbError> {
     if ssh.host.starts_with('-') {
         return Err(plain_error(format!(
@@ -294,14 +663,8 @@ fn ssh_args(
     if let Some(error) = identity.and_then(|path| SshTunnel::identity_file_error(path)) {
         return Err(plain_error(error));
     }
-    let target_host = if target_host.contains(':') && !target_host.starts_with('[') {
-        format!("[{target_host}]")
-    } else {
-        target_host.to_owned()
-    };
 
     let mut args: Vec<String> = [
-        "-N",
         "-T",
         // What readiness is read from, and it outranks a config `LogLevel`
         // quiet enough to hide "open failed" too.
@@ -309,25 +672,20 @@ fn ssh_args(
         "-o",
         "BatchMode=yes",
         "-o",
-        "ExitOnForwardFailure=yes",
-        "-o",
         "ServerAliveInterval=15",
         "-o",
         "ServerAliveCountMax=3",
         // A config's ControlPersist would fork ssh into the background past
         // Drop and the watchdog, and an existing master would take the
-        // forward over from a process we do not hold.
+        // session over from a process we do not hold.
         "-o",
         "ControlMaster=no",
         "-o",
         "ControlPath=none",
-        "-L",
     ]
     .map(String::from)
     .into();
-    args.push(format!(
-        "127.0.0.1:{local_port}:{target_host}:{target_port}"
-    ));
+    args.extend(session);
     if let Some(port) = ssh.port {
         args.extend(["-p".to_owned(), port.to_string()]);
     }
@@ -351,6 +709,25 @@ fn ssh_args(
     }
     args.extend(["--".to_owned(), ssh.host.clone()]);
     Ok(args)
+}
+
+fn configured(mut args: Vec<String>) -> Vec<String> {
+    // Tests never read the real ~/.ssh.
+    if cfg!(test)
+        && let Ok(config) = std::env::var("dbdelve_SSH_CONFIG")
+    {
+        args.splice(0..0, ["-F".to_owned(), config]);
+    }
+    if host_key_checking_is_ask(&args) {
+        args.splice(
+            0..0,
+            [
+                "-o".to_owned(),
+                "StrictHostKeyChecking=accept-new".to_owned(),
+            ],
+        );
+    }
+    args
 }
 
 /// `ssh -G` cannot distinguish a default `ask` from an explicit one, so both
@@ -421,44 +798,85 @@ fn failure(host: &str, status: ExitStatus, said: &str) -> DbError {
     }
 }
 
+/// Waits, briefly, for the drain to read the stderr of an ssh that has
+/// exited: a `ProxyCommand` that left a process holding stderr would
+/// otherwise keep it open, and the connect waiting, indefinitely. What it
+/// has read by then, a line it never ended included, is what the error shows.
+fn drained(draining: JoinHandle<()>, said: &Mutex<Said>) {
+    let deadline = Instant::now() + EXPLAINED_WITHIN;
+    while !draining.is_finished() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    if draining.is_finished() {
+        let _ = draining.join();
+        return;
+    }
+    let mut said = said.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let unfinished = std::mem::take(&mut said.unfinished);
+    if !unfinished.starts_with("debug") && !chatter(&unfinished) {
+        said.lines.push_back(unfinished);
+    }
+}
+
 fn no_ssh() -> DbError {
     plain_error("No ssh executable was found.".to_owned())
 }
 
 /// Reads stderr to the end, so ssh never blocks on a full pipe, a line at a
-/// time into `said`.
-fn drain(stderr: ChildStderr, said: Arc<Mutex<Said>>, port: u16) -> JoinHandle<()> {
+/// time into `said`. `port` is a forward's; a session without one is ready
+/// once ssh has sent its command.
+fn drain(mut stderr: ChildStderr, said: Arc<Mutex<Said>>, port: Option<u16>) -> JoinHandle<()> {
     thread::spawn(move || {
-        let listening = format!("debug1: Local forwarding listening on 127.0.0.1 port {port}.");
-        let mut reader = BufReader::new(stderr);
+        let listening = port
+            .map(|port| format!("debug1: Local forwarding listening on 127.0.0.1 port {port}."));
+        let mut chunk = [0; LINE_LIMIT];
         let mut raw = Vec::new();
         loop {
-            raw.clear();
-            match (&mut reader).take(LINE_LIMIT).read_until(b'\n', &mut raw) {
-                Ok(0) => break,
-                Ok(_) => {}
+            let read = match stderr.read(&mut chunk) {
+                Ok(read) => read,
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(_) => break,
-            }
-            let line = printable(&String::from_utf8_lossy(&raw));
+                Err(_) => 0,
+            };
+            raw.extend_from_slice(&chunk[..read]);
             let mut said = said.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            if line.starts_with("Failed to add the host to the list of known hosts (") {
-                said.host_key_error.get_or_insert_with(|| line.clone());
+            while let Some(end) = line_end(&raw, read == 0) {
+                let line = printable(&String::from_utf8_lossy(&raw[..end]));
+                raw.drain(..end);
+                if line.starts_with("Failed to add the host to the list of known hosts (") {
+                    said.host_key_error.get_or_insert_with(|| line.clone());
+                }
+                if line.starts_with("debug") {
+                    if listening.as_ref() == Some(&line) {
+                        said.listening = true;
+                    } else if said.listening && line == SESSION_STARTED
+                        || listening.is_none() && line.starts_with(COMMAND_SENT)
+                    {
+                        said.ready = true;
+                    }
+                } else if !chatter(&line) {
+                    said.lines.push_back(line);
+                    if said.lines.len() > KEPT_LINES {
+                        said.lines.pop_front();
+                    }
+                }
             }
-            if line.starts_with("debug") {
-                if line == listening {
-                    said.listening = true;
-                } else if said.listening && line == SESSION_STARTED {
-                    said.ready = true;
-                }
-            } else if !chatter(&line) {
-                said.lines.push_back(line);
-                if said.lines.len() > KEPT_LINES {
-                    said.lines.pop_front();
-                }
+            said.unfinished = printable(&String::from_utf8_lossy(&raw));
+            if read == 0 {
+                break;
             }
         }
     })
+}
+
+/// Where the first line in `raw` ends: past its newline, at `LINE_LIMIT`, or,
+/// once stderr has closed, wherever it stops.
+fn line_end(raw: &[u8], closed: bool) -> Option<usize> {
+    let limit = raw.len().min(LINE_LIMIT);
+    match raw[..limit].iter().position(|&byte| byte == b'\n') {
+        Some(at) => Some(at + 1),
+        None if limit == LINE_LIMIT || closed && limit > 0 => Some(limit),
+        None => None,
+    }
 }
 
 /// A line without its terminal escapes or control characters, which a
@@ -508,6 +926,17 @@ const WATCHDOG: &str = "exec 3<&0 4>&2 2>/dev/null; \
     (read _ <&3; kill $pid) >/dev/null 4>&- & watcher=$!; \
     wait $pid; status=$?; kill $watcher; exit $status";
 
+/// `WATCHDOG` for a session whose stdin and stdout are its data: the pipe
+/// arrives as fd 3 instead, put there by `watched_bridge`, and ssh is handed
+/// the shell's stdin (kept as fd 5, past the asynchronous list's /dev/null)
+/// and stdout. A bridge's ssh reads no stdin until it has logged in, which
+/// can wait on a hardware key's touch, so EOF there cannot stand in for it.
+#[cfg(unix)]
+const BRIDGE_WATCHDOG: &str = "exec 4>&2 2>/dev/null 5<&0; \
+    \"$@\" <&5 2>&4 3<&- 4>&- 5<&- & pid=$!; \
+    (read _ <&3; kill $pid) </dev/null >/dev/null 4>&- 5<&- & watcher=$!; \
+    wait $pid; status=$?; kill $watcher; exit $status";
+
 #[cfg(unix)]
 fn ssh_command() -> Command {
     Command::new("ssh")
@@ -534,6 +963,43 @@ fn watched(program: &str, args: &[String]) -> io::Result<Child> {
         .stderr(Stdio::piped());
     unmask_signals(&mut command);
     crate::db::spawn(&mut command)
+}
+
+#[cfg(unix)]
+fn watched_bridge(program: &str, args: &[String]) -> io::Result<Process> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::process::CommandExt;
+
+    let (alive, watchdog) = io::pipe()?;
+    // Above 0 to 2, which std fills with the child's stdio before `pre_exec`
+    // runs: with a std descriptor closed, the pipe could have been given one.
+    // SAFETY: F_DUPFD_CLOEXEC returns a new descriptor nothing else owns.
+    let alive = match unsafe { libc::fcntl(alive.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 10) } {
+        -1 => return Err(io::Error::last_os_error()),
+        fd => unsafe { OwnedFd::from_raw_fd(fd) },
+    };
+    let alive_fd = alive.as_raw_fd();
+    let mut command = Command::new("/bin/sh");
+    command
+        .args(["-c", BRIDGE_WATCHDOG, "sh", program])
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    unmask_signals(&mut command);
+    // SAFETY: dup2 is async-signal-safe, which is all a hook between fork
+    // and exec may call. The copy on fd 3 is the one end not close-on-exec.
+    unsafe {
+        command.pre_exec(move || match libc::dup2(alive_fd, 3) {
+            -1 => Err(io::Error::last_os_error()),
+            _ => Ok(()),
+        });
+    }
+    let child = crate::db::spawn(&mut command)?;
+    Ok(Process {
+        child,
+        watchdog: Some(watchdog),
+    })
 }
 
 /// std hands a child the spawning thread's signal mask, and the GCD worker a
@@ -667,14 +1133,11 @@ mod tests {
         }
     }
 
-    const OPTIONS: [&str; 15] = [
-        "-N",
+    const OPTIONS: [&str; 12] = [
         "-T",
         "-v",
         "-o",
         "BatchMode=yes",
-        "-o",
-        "ExitOnForwardFailure=yes",
         "-o",
         "ServerAliveInterval=15",
         "-o",
@@ -685,11 +1148,14 @@ mod tests {
         "ControlPath=none",
     ];
 
+    const FORWARD: [&str; 4] = ["-N", "-o", "ExitOnForwardFailure=yes", "-L"];
+
     #[test]
     fn what_the_config_leaves_blank_is_left_to_ssh() {
         let args = ssh_args(&tunnel("bastion"), 40000, "db.internal", 5432).unwrap();
         let mut expected = OPTIONS.to_vec();
-        expected.extend(["-L", "127.0.0.1:40000:db.internal:5432", "--", "bastion"]);
+        expected.extend(FORWARD);
+        expected.extend(["127.0.0.1:40000:db.internal:5432", "--", "bastion"]);
         assert_eq!(args, expected);
 
         let blank_identity = SshTunnel {
@@ -709,10 +1175,11 @@ mod tests {
             port: Some(2222),
             user: "deploy@corp".to_owned(),
             identity_file: Some("~/.ssh/100%.key".to_owned()),
+            run_as: None,
         };
         let mut expected = OPTIONS.to_vec();
+        expected.extend(FORWARD);
         expected.extend([
-            "-L",
             "127.0.0.1:40000:10.0.0.5:3306",
             "-p",
             "2222",
@@ -745,6 +1212,121 @@ mod tests {
             error.message.contains("starts with '-'"),
             "{}",
             error.message
+        );
+    }
+
+    #[test]
+    fn a_bridge_runs_socat_on_the_ssh_host_as_the_user_asked_for() {
+        let ssh = SshTunnel {
+            host: "bastion.example.com".to_owned(),
+            port: Some(2222),
+            user: "deploy@corp".to_owned(),
+            identity_file: Some("~/.ssh/id_ed25519".to_owned()),
+            run_as: Some("postgres".to_owned()),
+        };
+        let mut expected = OPTIONS.to_vec();
+        expected.extend([
+            "-e",
+            "none",
+            "-p",
+            "2222",
+            "-l",
+            "deploy@corp",
+            "-i",
+            "~/.ssh/id_ed25519",
+            "--",
+            "bastion.example.com",
+            "sudo -n -u postgres socat STDIO UNIX-CONNECT:/var/run/postgresql/.s.PGSQL.5432",
+        ]);
+        assert_eq!(
+            bridge_args(&ssh, "/var/run/postgresql/.s.PGSQL.5432").unwrap(),
+            expected
+        );
+
+        for run_as in [None, Some(String::new())] {
+            let as_the_ssh_user = SshTunnel {
+                run_as,
+                ..tunnel("bastion")
+            };
+            let args = bridge_args(&as_the_ssh_user, "/tmp/.s.PGSQL.5433").unwrap();
+            assert_eq!(
+                args.last().unwrap(),
+                "socat STDIO UNIX-CONNECT:/tmp/.s.PGSQL.5433"
+            );
+        }
+    }
+
+    #[test]
+    fn what_the_remote_shell_or_socat_would_read_is_refused() {
+        for user in ["-u", "post gres", "postgres;id", "$(id)", "a,b", "a'b"] {
+            let ssh = SshTunnel {
+                run_as: Some(user.to_owned()),
+                ..tunnel("bastion")
+            };
+            let error = bridge_args(&ssh, "/tmp/.s.PGSQL.5432").unwrap_err();
+            assert!(error.message.starts_with("Run as "), "{}", error.message);
+        }
+        for socket in [
+            "tmp/.s.PGSQL.5432",
+            "/var/run/my db/.s.PGSQL.5432",
+            "/tmp/a,fork/.s.PGSQL.5432",
+            "/tmp/a:b/.s.PGSQL.5432",
+            "/tmp/a!!b/.s.PGSQL.5432",
+            "/tmp/$(id)/.s.PGSQL.5432",
+        ] {
+            let error = bridge_args(&tunnel("bastion"), socket).unwrap_err();
+            assert!(
+                error.message.starts_with("Unix socket "),
+                "{}",
+                error.message
+            );
+        }
+    }
+
+    #[test]
+    fn a_forward_refuses_run_as_rather_than_connecting_as_the_ssh_user() {
+        let ssh = SshTunnel {
+            run_as: Some("postgres".to_owned()),
+            ..tunnel("bastion")
+        };
+        assert_eq!(
+            ssh_args(&ssh, 40000, "db", 5432).unwrap_err().message,
+            RUN_AS_NEEDS_A_SOCKET
+        );
+    }
+
+    #[test]
+    fn a_socket_pair_carries_bytes_both_ways() {
+        use std::io::Write;
+
+        let (mut driver, mut ours) = socket_pair().unwrap();
+        driver.write_all(b"ping").unwrap();
+        ours.write_all(b"pong").unwrap();
+        let mut read = [0; 4];
+        ours.read_exact(&mut read).unwrap();
+        assert_eq!(&read, b"ping");
+        driver.read_exact(&mut read).unwrap();
+        assert_eq!(&read, b"pong");
+    }
+
+    #[test]
+    fn a_connection_that_reaches_the_pairs_listener_first_is_not_its_other_end() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let mut stranger = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+
+        let (driver, ours) = paired_through(listener).unwrap();
+
+        assert_eq!(ours.peer_addr().unwrap(), driver.local_addr().unwrap());
+        stranger
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let closed = stranger.read(&mut [0; 1]);
+        assert!(
+            matches!(closed, Ok(0))
+                || closed
+                    .as_ref()
+                    .is_err_and(|error| error.kind() == io::ErrorKind::ConnectionReset),
+            "the stranger's connection was kept: {closed:?}"
         );
     }
 
@@ -804,7 +1386,11 @@ mod tests {
             ),
         };
         let process = tunnel.process.get_mut().unwrap();
-        let draining = drain(process.stderr.take().unwrap(), tunnel.said.clone(), port);
+        let draining = drain(
+            process.stderr.take().unwrap(),
+            tunnel.said.clone(),
+            Some(port),
+        );
         // Both the failure and readiness must have arrived before we decide.
         let deadline = Instant::now() + Duration::from_secs(5);
         while !tunnel.said.lock().unwrap().ready {
@@ -865,6 +1451,46 @@ mod tests {
         assert_eq!(said, "");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn an_exited_ssh_whose_stderr_another_process_holds_still_says_what_it_said() {
+        let mut child = Command::new("sh")
+            .args(["-c", "echo 'no route to host' >&2; sleep 3 & exit 255"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let said = Arc::<Mutex<Said>>::default();
+        let draining = drain(child.stderr.take().unwrap(), said.clone(), None);
+        child.wait().unwrap();
+
+        let started = Instant::now();
+        drained(draining, &said);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(said.lock().unwrap().shown(), "no route to host");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_exited_ssh_whose_stderr_another_process_holds_still_says_what_it_left_unended() {
+        let mut child = Command::new("sh")
+            .args(["-c", "printf 'no route to host' >&2; sleep 3 & exit 255"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let said = Arc::<Mutex<Said>>::default();
+        let draining = drain(child.stderr.take().unwrap(), said.clone(), None);
+        child.wait().unwrap();
+
+        let started = Instant::now();
+        drained(draining, &said);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(said.lock().unwrap().shown(), "no route to host");
+    }
+
     #[test]
     fn only_a_collision_on_our_own_port_is_retried() {
         let taken = |port| {
@@ -913,6 +1539,112 @@ mod tests {
             }
             thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// A bridge watchdog's `sleep` and its pid: a kill aimed at the watchdog
+    /// shell instead would end the shell and leave the `sleep` running.
+    #[cfg(unix)]
+    fn watched_sleep() -> (Process, libc::pid_t) {
+        use std::io::BufRead;
+
+        let script = "echo $$; exec sleep 30".to_owned();
+        let mut process = watched_bridge("sh", &["-c".to_owned(), script]).unwrap();
+        let mut pid = String::new();
+        io::BufReader::new(process.child.stdout.take().unwrap())
+            .read_line(&mut pid)
+            .unwrap();
+        (process, pid.trim().parse().unwrap())
+    }
+
+    /// Ended and reaped: a zombie still answers.
+    #[cfg(unix)]
+    fn gone(pid: libc::pid_t) -> bool {
+        // SAFETY: signal 0 only asks whether the process exists.
+        let failed = unsafe { libc::kill(pid, 0) } == -1;
+        failed && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_bridge_watchdog_ends_what_it_runs_before_it_reads_stdin() {
+        let (mut process, sleeping) = on_a_thread_blocking_every_signal(watched_sleep);
+        // Held open, as for an ssh still waiting on a login.
+        let _stdin = process.child.stdin.take();
+        drop(process.watchdog.take());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !gone(sleeping) {
+            if Instant::now() > deadline {
+                // SAFETY: SIGKILL to the pid the sleep reported.
+                unsafe { libc::kill(sleeping, libc::SIGKILL) };
+                panic!("closing the watchdog's pipe did not end what it ran");
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_bridge_watchdog_hands_what_it_runs_its_stdin_and_stdout() {
+        use std::io::Write;
+
+        let mut process = watched_bridge("cat", &[]).unwrap();
+        let mut stdin = process.child.stdin.take().unwrap();
+        stdin.write_all(b"ping").unwrap();
+        drop(stdin);
+        let mut echoed = String::new();
+        process
+            .child
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut echoed)
+            .unwrap();
+        assert_eq!(echoed, "ping");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_bridged_child_answers_the_driver_while_its_stream_stays_open() {
+        use std::io::Write;
+
+        let mut process = watched_bridge("cat", &[]).unwrap();
+        let mut driver = piped_to(&mut process.child).unwrap();
+        driver.write_all(b"ping").unwrap();
+        driver
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut echoed = [0; 4];
+        driver.read_exact(&mut echoed).unwrap();
+        assert_eq!(&echoed, b"ping");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dropped_bridge_whose_ssh_never_exits_is_ended_once_its_grace_is_out() {
+        let (mut process, sleeping) = watched_sleep();
+        let draining = drain(process.child.stderr.take().unwrap(), Arc::default(), None);
+
+        let dropped = Instant::now();
+        drop(Bridged {
+            host: "bastion".to_owned(),
+            said: Arc::default(),
+            draining,
+            process: Some(process),
+        });
+
+        thread::sleep(Duration::from_secs(1));
+        assert!(
+            !gone(sleeping),
+            "ended before what it was sending had its grace"
+        );
+        while !gone(sleeping) {
+            assert!(
+                dropped.elapsed() < CLOSED_WITHIN + Duration::from_secs(3),
+                "still running well past its grace"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(dropped.elapsed() >= CLOSED_WITHIN);
     }
 
     #[cfg(unix)]

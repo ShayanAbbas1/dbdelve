@@ -3211,6 +3211,7 @@ folder = "Hot"
                 port: Some(2222),
                 user: "tunnel".into(),
                 identity_file: Some("/home/dbdelve/.ssh/id_ed25519".into()),
+                run_as: Some("postgres".into()),
             }),
             ..a_stored_profile()
         };
@@ -3236,6 +3237,7 @@ folder = "Hot"
                 port: None,
                 user: String::new(),
                 identity_file: None,
+                run_as: None,
             }),
             ..a_stored_profile()
         };
@@ -3251,6 +3253,8 @@ folder = "Hot"
         let decoded: ProfileFile = toml::from_str(&text).expect("profiles must decode");
 
         assert_eq!(decoded.profiles, vec![profile]);
+        // So a tunnel without Run as saves as it did before the field existed.
+        assert!(!text.contains("run_as"), "{text}");
     }
 
     #[test]

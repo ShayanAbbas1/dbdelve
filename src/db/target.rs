@@ -6,8 +6,8 @@
 use super::plugin::Plugin;
 use super::spec::Abilities;
 use super::{
-    DbError, Engine, Fields, RelationKind, Syntax, clickhouse, duckdb, external, mssql, redis,
-    turso,
+    DbError, Engine, Fields, RelationKind, ServerConfig, Syntax, clickhouse, duckdb, external,
+    mssql, postgres, redis, turso,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,6 +77,21 @@ impl Target {
     /// driver as typed.
     pub fn takes_service(self) -> bool {
         self.driver == Driver::BuiltIn && self.engine.takes_service()
+    }
+
+    /// Whether a profile's SSH tunnel may end at a Unix socket on the SSH host,
+    /// opened as another OS user: a Host starting with `/` is its directory.
+    pub fn reaches_socket_over_ssh(self) -> bool {
+        self.driver == Driver::BuiltIn && self.engine == Engine::Postgres
+    }
+
+    /// Why `server`'s SSH settings cannot reach where they point, if they
+    /// cannot: the refusal the connection itself would give.
+    pub fn ssh_socket_error(self, server: &ServerConfig) -> Option<String> {
+        if !self.reaches_socket_over_ssh() {
+            return None;
+        }
+        postgres::ssh_socket_error(server)
     }
 
     /// ponytail: every plugin wears one generic plug, since no manifest names
@@ -321,6 +336,22 @@ mod tests {
             .label(),
             "Generic SQL via ODBC"
         );
+    }
+
+    #[test]
+    fn only_a_built_in_postgres_reaches_a_socket_over_ssh() {
+        for engine in Engine::ALL {
+            assert_eq!(
+                Target::built_in(engine).reaches_socket_over_ssh(),
+                engine == Engine::Postgres,
+                "{engine:?}"
+            );
+        }
+        let plugin = Target {
+            engine: Engine::Postgres,
+            driver: Driver::Plugin(odbc()),
+        };
+        assert!(!plugin.reaches_socket_over_ssh());
     }
 
     #[test]

@@ -380,6 +380,7 @@ fn ssh(handler: &Value, login: Option<&Value>, notes: &mut Vec<String>) -> Optio
             .or_else(|| text(handler.get("user")))
             .unwrap_or_default(),
         identity_file,
+        run_as: None,
     })
 }
 
@@ -866,6 +867,7 @@ mod tests {
                     port: Some(2222),
                     user: "deploy".into(),
                     identity_file: Some("~/.ssh/id_ed25519".into()),
+                    run_as: None,
                 }),
                 vec![]
             )
@@ -878,6 +880,7 @@ mod tests {
                     port: None,
                     user: "deploy".into(),
                     identity_file: None,
+                    run_as: None,
                 }),
                 vec![]
             )

@@ -42,6 +42,7 @@ pg Postgres(
                     identity_file: Some(
                         "~/.ssh/id_ed25519",
                     ),
+                    run_as: None,
                 },
             ),
             schema: Some(
@@ -214,6 +215,7 @@ clk ClickHouse(
                 port: None,
                 user: "jump",
                 identity_file: None,
+                run_as: None,
             },
         ),
         schema: None,
