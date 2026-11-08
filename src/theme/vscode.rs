@@ -64,7 +64,7 @@ fn built_in_directories() -> Vec<PathBuf> {
     {
         linux_directories(
             std::env::var_os("PATH").as_deref(),
-            store::home().ok().as_deref(),
+            store::data_root().ok().as_deref(),
         )
     }
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -72,7 +72,7 @@ fn built_in_directories() -> Vec<PathBuf> {
 }
 
 #[cfg(any(not(any(target_os = "macos", target_os = "windows")), all(test, unix)))]
-fn linux_directories(path: Option<&std::ffi::OsStr>, home: Option<&Path>) -> Vec<PathBuf> {
+fn linux_directories(path: Option<&std::ffi::OsStr>, data_home: Option<&Path>) -> Vec<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
 
     let mut directories: Vec<_> = [
@@ -102,7 +102,7 @@ fn linux_directories(path: Option<&std::ffi::OsStr>, home: Option<&Path>) -> Vec
         directories.push(extensions);
     }
     for root in std::iter::once(PathBuf::from("/var/lib/flatpak"))
-        .chain(home.map(|home| home.join(".local/share/flatpak")))
+        .chain(data_home.map(|data_home| data_home.join("flatpak")))
     {
         directories.push(root.join(
             "app/com.visualstudio.code/current/active/files/extra/vscode/resources/app/extensions",
@@ -406,8 +406,9 @@ mod tests {
             )
             .unwrap();
             std::fs::write(theme.join("light.json"), "{}").unwrap();
-            let flatpak = home.join(
-                ".local/share/flatpak/app/com.visualstudio.code/current/active/files/extra/vscode/resources/app/extensions/theme-flatpak",
+            let data_home = home.join("custom-data");
+            let flatpak = data_home.join(
+                "flatpak/app/com.visualstudio.code/current/active/files/extra/vscode/resources/app/extensions/theme-flatpak",
             );
             std::fs::create_dir_all(&flatpak).unwrap();
             std::fs::write(
@@ -419,7 +420,7 @@ mod tests {
             .unwrap();
             std::fs::write(flatpak.join("dark.json"), "{}").unwrap();
             let path = std::env::join_paths([home.join("missing"), bin]).unwrap();
-            let found: Vec<_> = linux_directories(Some(&path), Some(&home))
+            let found: Vec<_> = linux_directories(Some(&path), Some(&data_home))
                 .into_iter()
                 .filter(|root| root.starts_with(&home))
                 .flat_map(|root| sorted_entries(&root))
