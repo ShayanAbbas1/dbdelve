@@ -2489,7 +2489,8 @@ fn duplicating_an_odbc_profile_keeps_its_password(cx: &mut TestAppContext) {
 }
 
 /// What Save and Test read the form as refuses Run as beside a host that is
-/// no socket directory, as a connect would.
+/// no socket directory, as a connect would, and leaves a blank one beside a
+/// service to the connect, since the service may name a socket directory.
 #[gpui::test]
 fn the_forms_save_and_test_refuse_run_as_without_a_socket_directory(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
@@ -2497,10 +2498,10 @@ fn the_forms_save_and_test_refuse_run_as_without_a_socket_directory(cx: &mut Tes
         std::fs::create_dir_all(&directory).unwrap();
         let database = directory.join("e2e.db");
         std::fs::write(&database, b"").unwrap();
-        let postgres = |id: &str, host: &str| {
+        let postgres = |id: &str, host: &str, service: &str| {
             format!(
                 "[[profiles]]\nid = \"{id}\"\nname = \"{id}\"\nhost = \"{host}\"\n\
-                 database = \"d\"\nuser = \"u\"\nengine = \"postgres\"\n\
+                 database = \"d\"\nuser = \"u\"\nengine = \"postgres\"\n{service}\
                  [profiles.ssh]\nhost = \"bastion\"\nrun_as = \"postgres\"\n"
             )
         };
@@ -2510,10 +2511,11 @@ fn the_forms_save_and_test_refuse_run_as_without_a_socket_directory(cx: &mut Tes
                 "active = \"e2e\"\n\
                  [settings]\ncheck_for_updates = false\n\
                  [[profiles]]\nid = \"e2e\"\nname = \"E2E\"\nhost = \"\"\ndatabase = \"\"\n\
-                 user = \"\"\nengine = \"sqlite\"\npath = {:?}\n{}{}",
+                 user = \"\"\nengine = \"sqlite\"\npath = {:?}\n{}{}{}",
                 database.display().to_string(),
-                postgres("tcp", "db.internal"),
-                postgres("socket", "/var/run/postgresql"),
+                postgres("tcp", "db.internal", ""),
+                postgres("socket", "/var/run/postgresql", ""),
+                postgres("service", "", "service = \"socketed\"\n"),
             ),
         )
         .unwrap();
@@ -2535,6 +2537,7 @@ fn the_forms_save_and_test_refuse_run_as_without_a_socket_directory(cx: &mut Tes
         let refused = read_as(cx, "tcp").unwrap_err();
         assert!(refused.starts_with("Run as needs Host"), "{refused}");
         assert_eq!(read_as(cx, "socket"), Ok(()));
+        assert_eq!(read_as(cx, "service"), Ok(()));
         quit(workspace, cx);
     });
 }

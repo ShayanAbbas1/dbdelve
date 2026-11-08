@@ -743,6 +743,11 @@ impl ConnectionForm {
             ssh: self.ssh_tunnel(cx)?,
             schema: None,
         };
+        // A blank Host beside a service is whatever the service names, which
+        // may be a socket directory; connect checks the Host it resolves to.
+        if server.host.is_empty() && service.is_some() {
+            return Ok(server);
+        }
         match self.target().ssh_socket_error(&server) {
             Some(error) => Err(error),
             None => Ok(server),
