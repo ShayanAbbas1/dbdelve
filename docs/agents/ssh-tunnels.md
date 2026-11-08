@@ -140,10 +140,11 @@ It is not a forward.
   `-` (and `/` in the path, an absolute one; a user name cannot start with
   `-`). `ponytail:` a space or comma in a path is refused; quoting for both is
   the upgrade.
-- **There is no watchdog shell, because stdin is the data.** ssh is spawned
-  directly (signal mask cleared as for a tunnel). If DBDelve dies, ssh reads
-  EOF on stdin, which ends socat and then ssh. On drop, `Bridged` does not
-  kill at once: `cancel_query_raw` writes and returns without waiting, so a
+- **The watchdog's pipe moves to fd 3, because stdin and stdout are the
+  data** (`BRIDGE_WATCHDOG`, `watched_bridge`). EOF on the data cannot stand
+  in for it: ssh reads no stdin until it has logged in, which can wait on a
+  hardware key's touch, so a DBDelve that died then would leave ssh behind.
+  On drop, `Bridged` does not kill at once: `cancel_query_raw` writes and returns without waiting, so a
   kill would lose a cancel (or a Terminate) still in flight. A thread waits up
   to `CLOSED_WITHIN` for ssh to exit on its own, then `Process`'s drop kills
   it; nothing blocks on drop. Windows keeps the Job Object.
@@ -154,9 +155,9 @@ It is not a forward.
   read `SSH bridge through X failed: ...` like a tunnel's and the driver's
   handshake keeps its own 10 s. sudo's or socat's refusal arrives either before
   that wait ends or, racing it, appended after a failed handshake by
-  `Bridged::explain`. Exit status 127 is not read as "no ssh": with no
-  watchdog it is the remote shell's "command not found" for socat or sudo; a
-  missing local ssh is the spawn's `NotFound`.
+  `Bridged::explain`. Exit status 127 means no local ssh only before
+  `Sending command`; after it, it is the SSH host's "command not found" for
+  socat or sudo.
 - **The driver gets `NoTls`, and `require`, `verify-ca` and `verify-full` are
   refused by name** (hard rule 6): Postgres offers TLS only over TCP, and SSH
   already encrypts to the SSH host. `disable` and `prefer` connect; `prefer`
