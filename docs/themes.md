@@ -25,8 +25,9 @@ Code…** at the end of the list.
   (`~/.config/zed/themes`, under `$XDG_CONFIG_HOME` on Linux if set, or
   `%APPDATA%\Zed\themes` on Windows) and those of every installed Zed
   extension. Linux also reads the Flathub build's themes and extensions under
-  `~/.var/app/dev.zed.Zed/`, after their native counterparts. Themes with a
-  blurred or transparent background come out as glass.
+  `~/.var/app/dev.zed.Zed/`, after all native themes. Within each installation,
+  user themes take precedence over extensions. Themes with a blurred or
+  transparent background come out as glass.
 - VS Code: the themes VS Code ships with, read from its install, and those of
   every extension in `~/.vscode/extensions`. On Linux, DBDelve also follows
   the `code` launcher on `PATH` to find Homebrew and tarball installs, and
