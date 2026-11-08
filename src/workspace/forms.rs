@@ -468,14 +468,22 @@ impl Workspace {
         if matches!(fields, Fields::Server | Fields::ConnectionString) {
             // Host and Port are the far end of the forward, which is easy to
             // read as this machine's view of the network.
+            let socket = form.target().reaches_socket_over_ssh();
+            let hint = match socket {
+                false => {
+                    "Host and port are as the SSH host sees them: localhost is the SSH host \
+                          itself."
+                }
+                true => {
+                    "Host and port are as the SSH host sees them: localhost is the SSH host \
+                         itself. A directory such as /var/run/postgresql is a Unix socket there, \
+                         opened as Run as: the OS user sudo uses, for peer authentication."
+                }
+            };
             security.push(
                 ui::option_row(
                     "SSH tunnel",
-                    Some(
-                        "Host and port are as the SSH host sees them: localhost is the SSH host \
-                         itself."
-                            .into(),
-                    ),
+                    Some(hint.into()),
                     ui::switch("ssh-tunnel", form.ssh, t)
                         .on_click(cx.listener(Self::toggle_ssh_tunnel)),
                     t,
@@ -490,7 +498,7 @@ impl Workspace {
                               control: Input| {
                     nested_field_row(layout::SPACE_MD, id, label, input, control, t)
                 };
-                let rows = [
+                let mut rows = vec![
                     nested("ssh-host", "SSH host", &form.ssh_host, bare(&form.ssh_host))
                         .child(port_field(&form.ssh_port, t)),
                     nested("ssh-user", "SSH user", &form.ssh_user, bare(&form.ssh_user)),
@@ -507,6 +515,14 @@ impl Workspace {
                         cx,
                     )),
                 ];
+                if socket {
+                    rows.push(nested(
+                        "ssh-run-as",
+                        "Run as",
+                        &form.ssh_run_as,
+                        bare(&form.ssh_run_as),
+                    ));
+                }
                 security.extend(
                     rows.into_iter()
                         .enumerate()
@@ -788,6 +804,7 @@ impl Workspace {
             &form.ssh_port,
             &form.ssh_user,
             &form.ssh_identity_file,
+            &form.ssh_run_as,
         ]
         .iter()
         .any(|input| input.focus_handle(cx).is_focused(window))
