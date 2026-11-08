@@ -7,7 +7,7 @@
 //! keeps the server's own name for TLS.
 
 use std::collections::VecDeque;
-use std::io::{self, BufRead, BufReader, Read};
+use std::io::{self, Read};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::process::{Child, ChildStderr, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -29,7 +29,7 @@ const KEPT_LINES: usize = 20;
 const SHOWN_LINES: usize = 3;
 
 /// The longest line read whole; a longer one arrives in pieces.
-const LINE_LIMIT: u64 = 1024;
+const LINE_LIMIT: usize = 1024;
 
 /// What `-v` prints once every forward is bound, `ExitOnForwardFailure`
 /// having exited ssh before this for any that could not be. "Local forwarding
@@ -79,6 +79,8 @@ struct Said {
     listening: bool,
     /// ... and gone on to the session, so it is bound.
     ready: bool,
+    /// A line read so far whose newline has not arrived.
+    unfinished: String,
 }
 
 impl Tunnel {
@@ -155,7 +157,7 @@ impl Tunnel {
                     ));
                 }
                 Ready::Exited(status) => {
-                    drained(draining);
+                    drained(draining, &tunnel.said);
                     let said = tunnel.shown();
                     if our_port_was_taken(&said, port) && attempt < ATTEMPTS {
                         attempt += 1;
@@ -347,7 +349,7 @@ impl SocketBridge {
                 )));
             }
             Ready::Exited(status) => {
-                drained(draining);
+                drained(draining, &said);
                 let said = said.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 // The watchdog shell's "command not found". Once the command
                 // is sent, a 127 is the SSH host's: no socat, or no sudo.
@@ -742,14 +744,20 @@ fn failure(host: &str, status: ExitStatus, said: &str) -> DbError {
 /// Waits, briefly, for the drain to read the stderr of an ssh that has
 /// exited: a `ProxyCommand` that left a process holding stderr would
 /// otherwise keep it open, and the connect waiting, indefinitely. What it
-/// has read by then is what the error shows.
-fn drained(draining: JoinHandle<()>) {
+/// has read by then, a line it never ended included, is what the error shows.
+fn drained(draining: JoinHandle<()>, said: &Mutex<Said>) {
     let deadline = Instant::now() + EXPLAINED_WITHIN;
     while !draining.is_finished() && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(20));
     }
     if draining.is_finished() {
         let _ = draining.join();
+        return;
+    }
+    let mut said = said.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let unfinished = std::mem::take(&mut said.unfinished);
+    if !unfinished.starts_with("debug") && !chatter(&unfinished) {
+        said.lines.push_back(unfinished);
     }
 }
 
@@ -760,41 +768,58 @@ fn no_ssh() -> DbError {
 /// Reads stderr to the end, so ssh never blocks on a full pipe, a line at a
 /// time into `said`. `port` is a forward's; a session without one is ready
 /// once ssh has sent its command.
-fn drain(stderr: ChildStderr, said: Arc<Mutex<Said>>, port: Option<u16>) -> JoinHandle<()> {
+fn drain(mut stderr: ChildStderr, said: Arc<Mutex<Said>>, port: Option<u16>) -> JoinHandle<()> {
     thread::spawn(move || {
         let listening = port
             .map(|port| format!("debug1: Local forwarding listening on 127.0.0.1 port {port}."));
-        let mut reader = BufReader::new(stderr);
+        let mut chunk = [0; LINE_LIMIT];
         let mut raw = Vec::new();
         loop {
-            raw.clear();
-            match (&mut reader).take(LINE_LIMIT).read_until(b'\n', &mut raw) {
-                Ok(0) => break,
-                Ok(_) => {}
+            let read = match stderr.read(&mut chunk) {
+                Ok(read) => read,
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(_) => break,
-            }
-            let line = printable(&String::from_utf8_lossy(&raw));
+                Err(_) => 0,
+            };
+            raw.extend_from_slice(&chunk[..read]);
             let mut said = said.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            if line.starts_with("Failed to add the host to the list of known hosts (") {
-                said.host_key_error.get_or_insert_with(|| line.clone());
+            while let Some(end) = line_end(&raw, read == 0) {
+                let line = printable(&String::from_utf8_lossy(&raw[..end]));
+                raw.drain(..end);
+                if line.starts_with("Failed to add the host to the list of known hosts (") {
+                    said.host_key_error.get_or_insert_with(|| line.clone());
+                }
+                if line.starts_with("debug") {
+                    if listening.as_ref() == Some(&line) {
+                        said.listening = true;
+                    } else if said.listening && line == SESSION_STARTED
+                        || listening.is_none() && line.starts_with(COMMAND_SENT)
+                    {
+                        said.ready = true;
+                    }
+                } else if !chatter(&line) {
+                    said.lines.push_back(line);
+                    if said.lines.len() > KEPT_LINES {
+                        said.lines.pop_front();
+                    }
+                }
             }
-            if line.starts_with("debug") {
-                if listening.as_ref() == Some(&line) {
-                    said.listening = true;
-                } else if said.listening && line == SESSION_STARTED
-                    || listening.is_none() && line.starts_with(COMMAND_SENT)
-                {
-                    said.ready = true;
-                }
-            } else if !chatter(&line) {
-                said.lines.push_back(line);
-                if said.lines.len() > KEPT_LINES {
-                    said.lines.pop_front();
-                }
+            said.unfinished = printable(&String::from_utf8_lossy(&raw));
+            if read == 0 {
+                break;
             }
         }
     })
+}
+
+/// Where the first line in `raw` ends: past its newline, at `LINE_LIMIT`, or,
+/// once stderr has closed, wherever it stops.
+fn line_end(raw: &[u8], closed: bool) -> Option<usize> {
+    let limit = raw.len().min(LINE_LIMIT);
+    match raw[..limit].iter().position(|&byte| byte == b'\n') {
+        Some(at) => Some(at + 1),
+        None if limit == LINE_LIMIT || closed && limit > 0 => Some(limit),
+        None => None,
+    }
 }
 
 /// A line without its terminal escapes or control characters, which a
@@ -1384,7 +1409,27 @@ mod tests {
         child.wait().unwrap();
 
         let started = Instant::now();
-        drained(draining);
+        drained(draining, &said);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(said.lock().unwrap().shown(), "no route to host");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_exited_ssh_whose_stderr_another_process_holds_still_says_what_it_left_unended() {
+        let mut child = Command::new("sh")
+            .args(["-c", "printf 'no route to host' >&2; sleep 3 & exit 255"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let said = Arc::<Mutex<Said>>::default();
+        let draining = drain(child.stderr.take().unwrap(), said.clone(), None);
+        child.wait().unwrap();
+
+        let started = Instant::now();
+        drained(draining, &said);
         assert!(started.elapsed() < Duration::from_secs(2));
         assert_eq!(said.lock().unwrap().shown(), "no route to host");
     }
