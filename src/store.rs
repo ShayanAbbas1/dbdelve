@@ -1867,16 +1867,15 @@ pub(crate) fn theme_directory() -> Result<PathBuf, String> {
     Ok(dbdelve_directory()?.join("themes"))
 }
 
-/// Zed's own themes directory, as Zed's `paths::themes_dir` places it. On
-/// macOS that is `~/.config/zed` whatever `XDG_CONFIG_HOME` says.
-pub(crate) fn zed_theme_directory() -> Result<PathBuf, String> {
+/// Zed's native themes directory, then its Flatpak's on Linux.
+pub(crate) fn zed_theme_directories() -> Result<Vec<PathBuf>, String> {
     #[cfg(target_os = "macos")]
     {
-        Ok(home()?.join(".config/zed/themes"))
+        Ok(vec![home()?.join(".config/zed/themes")])
     }
     #[cfg(target_os = "windows")]
     {
-        Ok(data_root()?.join("Zed").join("themes"))
+        Ok(vec![data_root()?.join("Zed").join("themes")])
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
@@ -1884,14 +1883,21 @@ pub(crate) fn zed_theme_directory() -> Result<PathBuf, String> {
             Some(config_home) => PathBuf::from(config_home),
             None => home()?.join(".config"),
         };
-        Ok(config.join("zed").join("themes"))
+        let directories = std::iter::once(config.join("zed").join("themes"));
+        #[cfg(target_os = "linux")]
+        let directories = directories.chain(
+            home()
+                .ok()
+                .map(|home| home.join(".var/app/dev.zed.Zed/config/zed/themes")),
+        );
+        Ok(directories.collect())
     }
 }
 
 /// Where Zed installs extensions, each one a directory that may carry a
 /// `themes/` of its own. Unlike the config, Windows keeps these under the local
 /// profile rather than the roaming one.
-pub(crate) fn zed_extension_directory() -> Result<PathBuf, String> {
+pub(crate) fn zed_extension_directories() -> Result<Vec<PathBuf>, String> {
     #[cfg(target_os = "macos")]
     let root = data_root()?.join("Zed");
     #[cfg(target_os = "windows")]
@@ -1902,7 +1908,14 @@ pub(crate) fn zed_extension_directory() -> Result<PathBuf, String> {
     .join("Zed");
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let root = data_root()?.join("zed");
-    Ok(root.join("extensions").join("installed"))
+    let directories = std::iter::once(root.join("extensions").join("installed"));
+    #[cfg(target_os = "linux")]
+    let directories = directories.chain(
+        home()
+            .ok()
+            .map(|home| home.join(".var/app/dev.zed.Zed/data/zed/extensions/installed")),
+    );
+    Ok(directories.collect())
 }
 
 /// Where a private key another client kept in its own store is written, since

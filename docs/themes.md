@@ -24,9 +24,13 @@ Code…** at the end of the list.
 - Zed: its own defaults, the ones in Zed's themes folder
   (`~/.config/zed/themes`, under `$XDG_CONFIG_HOME` on Linux if set, or
   `%APPDATA%\Zed\themes` on Windows) and those of every installed Zed
-  extension. Themes with a blurred or transparent background come out as glass.
+  extension. Linux also reads the Flathub build's themes and extensions under
+  `~/.var/app/dev.zed.Zed/`, after their native counterparts. Themes with a
+  blurred or transparent background come out as glass.
 - VS Code: the themes VS Code ships with, read from its install, and those of
-  every extension in `~/.vscode/extensions`.
+  every extension in `~/.vscode/extensions`. On Linux, DBDelve also follows
+  the `code` launcher on `PATH` to find Homebrew and tarball installs, and
+  checks the system-wide and per-user Flatpak installs.
 
 Each is previewed as you move through the list, and Enter imports it: DBDelve
 converts it into a theme file of its own and switches to it. The imported
