@@ -330,9 +330,32 @@ impl SocketBridge {
     /// A new ssh session to the socket, once it has logged in, and the
     /// driver's end of it.
     pub fn connect(&self) -> Result<(TcpStream, Bridged), DbError> {
+        let started = Instant::now();
+        tracing::debug!(ssh_host = self.host, "opening ssh bridge");
+        let opened = self.connected();
+        let elapsed = started.elapsed();
+        match opened {
+            Ok(bridge) => {
+                tracing::info!(?elapsed, "ssh bridge up");
+                Ok(bridge)
+            }
+            Err((kind, error)) => {
+                tracing::warn!(kind, ?elapsed, "ssh bridge failed");
+                tracing::debug!("ssh bridge failed: {}", error.message);
+                Err(error)
+            }
+        }
+    }
+
+    /// A failure comes with its kind, for the log, which may not say what ssh
+    /// said, where it was going or who it ran as.
+    fn connected(&self) -> Result<(TcpStream, Bridged), (&'static str, DbError)> {
         let mut process = spawn_bridge(&self.args).map_err(|error| match error.kind() {
-            io::ErrorKind::NotFound => no_ssh(),
-            _ => plain_error(format!("Could not start ssh: {error}")),
+            io::ErrorKind::NotFound => ("no ssh", no_ssh()),
+            _ => (
+                "spawn",
+                plain_error(format!("Could not start ssh: {error}")),
+            ),
         })?;
         let said = Arc::<Mutex<Said>>::default();
         let draining = drain(
@@ -343,10 +366,13 @@ impl SocketBridge {
         match wait_ready(&mut process.child, &said) {
             Ready::Listening => {}
             Ready::HostKeyNotSaved(message) => {
-                return Err(plain_error(format!(
-                    "SSH bridge through {} failed: {message}",
-                    self.host
-                )));
+                return Err((
+                    "host key",
+                    plain_error(format!(
+                        "SSH bridge through {} failed: {message}",
+                        self.host
+                    )),
+                ));
             }
             Ready::Exited(status) => {
                 drained(draining, &said);
@@ -354,30 +380,39 @@ impl SocketBridge {
                 // The watchdog shell's "command not found". Once the command
                 // is sent, a 127 is the SSH host's: no socat, or no sudo.
                 if cfg!(unix) && status.code() == Some(127) && !said.ready {
-                    return Err(no_ssh());
+                    return Err(("no ssh", no_ssh()));
                 }
-                return Err(plain_error(if said.lines.is_empty() {
-                    format!(
-                        "SSH bridge through {} failed: ssh exited ({status}).",
-                        self.host
-                    )
-                } else {
-                    format!("SSH bridge through {} failed: {}", self.host, said.shown())
-                }));
+                return Err((
+                    "ssh exited",
+                    plain_error(if said.lines.is_empty() {
+                        format!(
+                            "SSH bridge through {} failed: ssh exited ({status}).",
+                            self.host
+                        )
+                    } else {
+                        format!("SSH bridge through {} failed: {}", self.host, said.shown())
+                    }),
+                ));
             }
             Ready::TimedOut => {
-                return Err(plain_error(format!(
-                    "SSH bridge through {} did not come up within {} seconds.",
-                    self.host,
-                    READY_WITHIN.as_secs()
-                )));
+                return Err((
+                    "timed out",
+                    plain_error(format!(
+                        "SSH bridge through {} did not come up within {} seconds.",
+                        self.host,
+                        READY_WITHIN.as_secs()
+                    )),
+                ));
             }
         }
 
         let unopened = |error: io::Error| {
-            plain_error(format!(
-                "Could not open a stream for the SSH bridge: {error}"
-            ))
+            (
+                "socket pair",
+                plain_error(format!(
+                    "Could not open a stream for the SSH bridge: {error}"
+                )),
+            )
         };
         let (driver, ours) = socket_pair().map_err(unopened)?;
         let mut to_driver = ours.try_clone().map_err(unopened)?;
