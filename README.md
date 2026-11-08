@@ -124,6 +124,10 @@ statements you type run under the connection's mode. See
 
 - **Your SSH, not a reimplementation.** Tunnels run through your own `ssh`, so
   your config, agent and hardware keys just work.
+  For Postgres, a Host that is a directory (`/var/run/postgresql`) reaches that
+  Unix socket on the SSH host, optionally as another user (Run as); the server
+  needs `socat`, and passwordless `sudo` for it when Run as is set. TLS modes
+  other than `disable` and `prefer` are refused there.
 
 Free and open source, nothing behind a paywall, and no telemetry: the only
 request DBDelve makes on its own is an update check, which you can turn off.

@@ -96,6 +96,19 @@ to main. `compose.yaml` and `dev/**` are in the
 workflow's own path filters, so a change to a dev container or a seed script
 runs CI too, not only a change under `src/`.
 
+## Postgres's Unix socket, for the SSH socket bridge
+
+`compose.yaml` mounts one volume (`dbdelve-postgres-socket`) at
+`/var/run/postgresql` in `postgres`, `bastion` and `bastion2`, so the bastions
+see the server's socket as its own host would. The bastion image has `socat`
+and `sudo`, a `postgres` user with the Postgres image's uid 999 (so the socket's
+owner matches), and `dev ALL=(postgres) NOPASSWD: /usr/bin/socat`, which is
+what `Run as postgres` needs. The `live_ssh_*` socket tests use these. The
+image's default `pg_hba` trusts `local`, so peer authentication itself is not
+exercised, only the bridge. A stack created before the volume existed needs
+`docker compose up -d --build --force-recreate postgres bastion bastion2` to
+pick it up.
+
 ## Postgres through psqlODBC
 
 The dev Postgres also runs as a conformance subject through the ODBC bridge,
