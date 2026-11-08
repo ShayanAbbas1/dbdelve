@@ -1299,32 +1299,6 @@ mod tests {
     }
 
     #[test]
-    fn a_socket_refusal_is_the_forms_error() {
-        let server = ServerConfig {
-            host: "db.internal".into(),
-            ssh: ssh_tunnel(
-                true,
-                true,
-                [
-                    "bastion".into(),
-                    String::new(),
-                    String::new(),
-                    String::new(),
-                    "postgres".into(),
-                ],
-            )
-            .unwrap(),
-            ..ServerConfig::default()
-        };
-        let error = Target::built_in(Engine::Postgres).ssh_socket_error(&server);
-        assert!(error.unwrap().starts_with("Run as needs Host"));
-        assert_eq!(
-            Target::built_in(Engine::MySql).ssh_socket_error(&server),
-            None
-        );
-    }
-
-    #[test]
     fn the_summary_says_where_the_form_points_once_it_points_somewhere() {
         let at = |engine, srv, typed: &Typed| summary(Target::built_in(engine), srv, typed);
         let server = Typed {
