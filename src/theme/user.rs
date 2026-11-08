@@ -94,6 +94,7 @@ pub(crate) fn load() {
         &mut themes,
         &mut Theme::built_in().map(|theme| theme.name).to_vec(),
     );
+    tracing::info!(count = themes.len(), "user themes loaded");
     *USER_THEMES.write().unwrap_or_else(PoisonError::into_inner) = themes;
 }
 

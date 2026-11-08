@@ -281,11 +281,17 @@ impl Workspace {
                 // wrote -- that rename is the one thing they could have got
                 // wrong, and the file name alone does not read it back.
                 let format = FileAs::for_path(&path, engine);
+                tracing::info!(
+                    format = format.extension(),
+                    rows,
+                    "export of shown rows started"
+                );
                 let target = match &connection {
                     Some(connection) => knowing_the_table(connection, &target, format, engine),
                     None => target,
                 };
                 let written = write_shown(&result, format, &target, engine, &path);
+                log_export(format, written.as_ref().map(|()| rows));
                 (path, format, written)
             })
             .await;
@@ -464,7 +470,9 @@ impl Workspace {
         let task = spawn_blocking(cx.background_executor(), {
             let (path, progress) = (path.clone(), progress.clone());
             move || {
-                export_every_row(
+                let format = FileAs::for_path(&path, engine);
+                tracing::info!(format = format.extension(), "export of every row started");
+                let ended = export_every_row(
                     &connection,
                     &refetch,
                     &target,
@@ -472,7 +480,9 @@ impl Workspace {
                     engine,
                     &path,
                     &progress,
-                )
+                );
+                log_export(format, ended.as_ref().copied());
+                ended
             }
         });
         let id = id.to_string();
@@ -760,6 +770,17 @@ pub(crate) fn refetch_refusal(
         );
     }
     None
+}
+
+/// The file's name and the failure's text stay out of the info line: either
+/// can carry a path through the user's home, and a failure quotes the SQL.
+fn log_export(format: FileAs, ended: Result<usize, &Ended>) {
+    let format = format.extension();
+    match ended {
+        Ok(rows) => tracing::info!(format, rows, "export finished"),
+        Err(Ended::Cancelled) => tracing::info!(format, "export cancelled"),
+        Err(Ended::Failed(_)) => tracing::warn!(format, "export failed"),
+    }
 }
 
 fn exported(rows: usize, format: FileAs, path: &Path) -> String {

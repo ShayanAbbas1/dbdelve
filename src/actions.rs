@@ -234,6 +234,8 @@ actions!(
         AcceptCompletion,
         OpenSettings,
         ResetConfirmations,
+        OpenLogsFolder,
+        CopyDiagnostics,
         SubmitConnection,
         Quit,
         Minimize,

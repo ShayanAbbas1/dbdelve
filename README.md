@@ -144,6 +144,15 @@ runs each (2026-10-11, M1 Pro, 32 GB):
 \* The whole 1M-row table pulled into memory on purpose, with the row limit
 off. Method and full results in [BENCHMARKS.md](BENCHMARKS.md).
 
+## Logs and bug reports
+
+DBDelve keeps a diagnostic log on your machine and never sends it anywhere. To
+attach it to an issue, use **Help → Copy Diagnostics** and paste; **Help → Open
+Logs Folder** shows the files. If the default log doesn't show the problem, turn
+on **Verbose logging** in Settings and reproduce it.
+
+Read a log before you post it and remove anything sensitive. A verbose one can
+hold hostnames, database names and anything a database driver logs.
 
 ## License
 

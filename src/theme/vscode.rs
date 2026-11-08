@@ -7,7 +7,7 @@ use serde_json::{Map, Value};
 
 use super::color::{Rgba, contrast_ratio};
 use super::zed::{
-    apart_from, hex, keep_untaken, on_accent, read_text, see_through, sorted_entries,
+    apart_from, hex, keep_untaken, on_accent, read_text, see_through, skipped, sorted_entries,
 };
 use super::{PALETTE_EDITED_ALPHA, Theme};
 use crate::store;
@@ -115,7 +115,7 @@ fn extension_themes(extension: &Path) -> Vec<Theme> {
                     &source,
                 )),
                 Err(error) => {
-                    eprintln!("skipping theme file {}: {error}", path.display());
+                    skipped(&path, &error);
                     None
                 }
             }

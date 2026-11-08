@@ -234,6 +234,13 @@ futures-util = { version = "=0.3.34", default-features = false }
 # naming it adds no copy.
 tracing = "=0.1.44"
 
+# The diagnostic log (`src/logging.rs`): a level filter the Settings toggle
+# reloads, written to a daily file a bug report can attach. Both pinned to the
+# versions turso_sdk_kit already links, so naming them adds no copy; the
+# features listed are the ones the log needs, the rest arrive through turso.
+tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt", "env-filter"] }
+tracing-appender = { version = "=0.2.5", default-features = false }
+
 # MongoDB. The official driver, async on tokio like tiberius and driven the
 # same way: each connection owns a runtime and every call is a `block_on` on
 # the background thread it already runs on. A multi-thread runtime of one

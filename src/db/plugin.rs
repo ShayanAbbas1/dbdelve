@@ -61,7 +61,7 @@ pub fn discover() -> Vec<&'static Plugin> {
 }
 
 /// Reads manifests only; the executable is not checked until it is opened.
-/// A bad manifest is reported on stderr and skipped, never fatal.
+/// A bad manifest is logged and skipped, never fatal.
 pub fn discover_in(dirs: &[(PathBuf, Layout)]) -> Vec<&'static Plugin> {
     let mut found: Vec<&'static Plugin> = Vec::new();
     for (dir, layout) in dirs {
@@ -79,15 +79,30 @@ pub fn discover_in(dirs: &[(PathBuf, Layout)]) -> Vec<&'static Plugin> {
             if !manifest.is_file() {
                 continue;
             }
+            // The folder's name only at info: the path runs through the
+            // user's home, which names them.
+            let named = folder
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            tracing::debug!(manifest = %manifest.display(), "reading plugin manifest");
             match load(&folder, &manifest, *layout, cfg!(windows)) {
-                Ok(plugin) if found.iter().any(|known| known.id == plugin.id) => eprintln!(
-                    "plugin {}: skipped, id `{}` is already loaded from an earlier directory",
-                    manifest.display(),
+                Ok(plugin) if found.iter().any(|known| known.id == plugin.id) => tracing::warn!(
+                    folder = named,
+                    "plugin skipped: id `{}` is already loaded from an earlier directory",
                     plugin.id
                 ),
-                // Leaked so a `Target` can stay `Copy`; a handful, once per run.
-                Ok(plugin) => found.push(Box::leak(Box::new(plugin))),
-                Err(reason) => eprintln!("plugin {}: skipped, {reason}", manifest.display()),
+                Ok(plugin) => {
+                    tracing::info!(
+                        folder = named,
+                        id = plugin.id,
+                        version = plugin.version,
+                        "plugin loaded"
+                    );
+                    // Leaked so a `Target` can stay `Copy`; a handful, once per run.
+                    found.push(Box::leak(Box::new(plugin)));
+                }
+                Err(reason) => tracing::warn!(folder = named, "plugin skipped: {reason}"),
             }
         }
     }

@@ -629,22 +629,11 @@ impl Workspace {
     /// Test and what it last said, then the way out and the way in.
     fn render_form_footer(&self, t: Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let form = self.form.as_ref().expect("drawn only on the form");
-        let status = match (&form.error, &form.test) {
-            (Some(error), _) => Some((Status::Failed, one_line(error))),
-            (None, Some(ConnectionTest::Running(_))) => {
-                Some((Status::Connecting, "Testing connection…".to_string()))
-            }
-            (None, Some(ConnectionTest::Passed(reported))) => Some((
-                Status::Connected,
-                reported
-                    .as_ref()
-                    .map_or_else(|| "Connection succeeded.".to_string(), Reported::sentence),
-            )),
-            (None, Some(ConnectionTest::Failed(message))) => {
-                Some((Status::Failed, one_line(message)))
-            }
-            (None, None) => None,
-        };
+        let status = footer_status(
+            form.notice.as_ref(),
+            form.error.as_ref(),
+            form.test.as_ref(),
+        );
         let commit = if form.editing.is_some() {
             "Save"
         } else {
@@ -3491,4 +3480,58 @@ pub(super) fn explorer_drawn(profile: &Profile) -> bool {
     matches!(&profile.catalog, CatalogState::Loaded(catalog, _) if !catalog.schemas.is_empty())
         || !profile.session.saved_queries.is_empty()
         || profile.shortcuts != Shortcuts::default()
+}
+
+/// What the form's footer says beside Test: a Help command's notice while it
+/// lasts, then the form's error, then the last test.
+fn footer_status(
+    notice: Option<&(Status, String)>,
+    error: Option<&String>,
+    test: Option<&ConnectionTest>,
+) -> Option<(Status, String)> {
+    if let Some((status, message)) = notice {
+        return Some((*status, one_line(message)));
+    }
+    match (error, test) {
+        (Some(error), _) => Some((Status::Failed, one_line(error))),
+        (None, Some(ConnectionTest::Running(_))) => {
+            Some((Status::Connecting, "Testing connection…".to_string()))
+        }
+        (None, Some(ConnectionTest::Passed(reported))) => Some((
+            Status::Connected,
+            reported
+                .as_ref()
+                .map_or_else(|| "Connection succeeded.".to_string(), Reported::sentence),
+        )),
+        (None, Some(ConnectionTest::Failed(message))) => Some((Status::Failed, one_line(message))),
+        (None, None) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_help_notice_covers_the_form_status_without_replacing_it() {
+        let error = "password authentication failed".to_string();
+        let notice = (Status::Idle, "Diagnostics copied.".to_string());
+        assert_eq!(
+            footer_status(Some(&notice), Some(&error), None),
+            Some(notice.clone())
+        );
+        assert_eq!(
+            footer_status(None, Some(&error), None),
+            Some((Status::Failed, error))
+        );
+        let failed = ConnectionTest::Failed("timed out".into());
+        assert_eq!(
+            footer_status(Some(&notice), None, Some(&failed)),
+            Some(notice)
+        );
+        assert_eq!(
+            footer_status(None, None, Some(&failed)),
+            Some((Status::Failed, "timed out".into()))
+        );
+    }
 }

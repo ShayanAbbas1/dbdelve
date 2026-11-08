@@ -1,0 +1,72 @@
+name: Bug report
+description: Something in DBDelve doesn't work.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead. Screenshots help.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Connect to ...
+        2. Run ...
+        3. See ...
+    validations:
+      required: true
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Engine
+      description: Which databases it happens with.
+      multiple: true
+      options:
+        - Not specific to one
+        - PostgreSQL
+        - MySQL
+        - MariaDB
+        - SQLite
+        - DuckDB
+        - Turso
+        - Snowflake
+        - SQL Server
+        - MongoDB
+        - Redis
+        - ClickHouse
+        - ODBC plugin
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: DBDelve version and OS
+      placeholder: DBDelve 0.7.0 on macOS 15.1, Apple Silicon
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: |
+        Use **Help → Copy Diagnostics** (or Copy diagnostics in the command palette) and paste here. It copies the version, OS, plugins and the end of today's log.
+
+        Or attach the log file. **Help → Open Logs Folder** opens the folder, or find it at:
+        - macOS: `~/Library/Logs/dbdelve/`
+        - Linux: `$XDG_STATE_HOME/dbdelve/`, or `~/.local/state/dbdelve/`
+        - Windows: `%LOCALAPPDATA%\dbdelve\`
+
+        If the default log doesn't show the problem, turn on **Verbose logging** in Settings, reproduce it, and copy again. A verbose log adds hostnames, database names, connection errors (which can include the username), file paths and database drivers' own messages, which DBDelve doesn't filter and which can contain anything the server sends, queries and data included.
+
+        **Read the log and remove anything sensitive before you post it:** hostnames, database or table names, data values, file paths.
+  - type: checkboxes
+    id: checked
+    attributes:
+      label: Sensitive information
+      options:
+        - label: I've checked any diagnostics or logs I'm sharing for sensitive information
+          required: true

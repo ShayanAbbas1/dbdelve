@@ -81,8 +81,8 @@ impl SettingsTab {
     fn description(self) -> &'static str {
         match self {
             Self::General => {
-                "How much a query brings back, how a header click sorts, and \
-                 whether DBDelve looks for a new release."
+                "How much a query brings back, how a header click sorts, \
+                 whether DBDelve looks for a new release, and how much it logs."
             }
             Self::Appearance => {
                 "What DBDelve looks like, and how much of the desktop shows \
@@ -110,6 +110,7 @@ enum SettingId {
     DefaultSorting,
     QualifyCompletions,
     CheckForUpdates,
+    VerboseLogging,
     MatchSystemAppearance,
     Theme,
     SystemTheme(Appearance),
@@ -194,6 +195,26 @@ fn setting_rows() -> Vec<SettingRow> {
             "One request to GitHub at launch to see whether a newer release \
              exists. Nothing is sent about you or your databases.",
             &["update", "release", "version", "github"],
+        ),
+        row(
+            SettingId::VerboseLogging,
+            SettingsTab::General,
+            "Diagnostics",
+            "Verbose logging",
+            "Adds hostnames, database names, connection errors (which \
+             can include the username) and database drivers' own messages \
+             to the log, from the moment it is switched on. Driver messages \
+             aren't filtered and can contain anything the server sends. \
+             Open Logs Folder in the Help menu shows the files.",
+            &[
+                "log",
+                "logs",
+                "debug",
+                "diagnostics",
+                "bug",
+                "report",
+                "verbose",
+            ],
         ),
         row(
             SettingId::MatchSystemAppearance,
@@ -776,6 +797,12 @@ fn render_control(
                 workspace.set_check_for_updates(check, cx);
             }))
             .into_any_element(),
+        SettingId::VerboseLogging => switch("verbose-logging", settings.verbose_logging, t)
+            .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
+                let verbose = !workspace.settings.verbose_logging;
+                workspace.set_verbose_logging(verbose, cx);
+            }))
+            .into_any_element(),
         SettingId::QualifyCompletions => {
             switch("qualify-completions", settings.qualify_completions, t)
                 .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
@@ -1106,7 +1133,7 @@ mod tests {
                 SettingId::Keybinding("sort_active_column"),
             ]
         );
-        assert_eq!(found("!keyboard").len(), 13);
+        assert_eq!(found("!keyboard").len(), 14);
     }
 
     #[test]

@@ -263,6 +263,7 @@ chore(release): bump version to 0.3.8
 | `export`      | Exporting results                                                       |
 | `update`      | The in-app updater                                                      |
 | `settings`    | The settings panel                                                      |
+| `logs`        | The diagnostic log, Copy Diagnostics and the bug report form            |
 | `release`     | Packaging and release scripts                                           |
 | `dev`         | `compose.yaml`, seeds and scripts under `dev/`                          |
 

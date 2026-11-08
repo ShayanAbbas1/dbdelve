@@ -87,10 +87,22 @@ pub(super) fn read(
     for path in files {
         match read_text(&path).and_then(|text| parse(&text)) {
             Ok(parsed) => themes.extend(parsed),
-            Err(error) => eprintln!("skipping theme file {}: {error}", path.display()),
+            Err(error) => skipped(&path, &error),
         }
     }
     themes
+}
+
+/// By file name at warn, since the path runs through the user's home; the
+/// whole path and the error only when verbose, since a parse error quotes
+/// the file's contents.
+pub(super) fn skipped(path: &Path, error: &str) {
+    let file = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    tracing::warn!(file, "theme file skipped");
+    tracing::debug!(path = %path.display(), "theme file skipped: {error}");
 }
 
 pub(super) fn read_text(path: &Path) -> Result<String, String> {

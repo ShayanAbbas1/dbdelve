@@ -709,6 +709,7 @@ impl Workspace {
     ) {
         match theme::user::import(source, index) {
             Ok(theme) => {
+                tracing::info!(source = source.name(), theme = theme.name, "theme imported");
                 // `set_theme` skips a theme already picked by name, and a
                 // re-import may have brought the one on screen new colours.
                 if theme.name == theme::theme(cx).name {
@@ -721,7 +722,12 @@ impl Workspace {
                 }
                 self.set_theme(side, theme, window, cx);
             }
-            Err(message) => self.note(message, cx),
+            Err(message) => {
+                // The message can carry a path through the user's home.
+                tracing::warn!(source = source.name(), "theme import failed");
+                tracing::debug!("theme import failed: {message}");
+                self.note(message, cx);
+            }
         }
     }
 

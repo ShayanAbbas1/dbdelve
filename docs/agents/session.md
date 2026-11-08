@@ -558,7 +558,8 @@ one waiting on a column ignores whatever is typed into it.
 
 - **Storage** is decided in `store.rs`: Application Support on macOS,
   `XDG_DATA_HOME` (or `~/.local/share`) on Linux, `APPDATA` on Windows. Crash
-  logs are state, not cache: `~/Library/Logs`, `XDG_STATE_HOME`, `LOCALAPPDATA`.
+  and diagnostic logs are state, not cache: `~/Library/Logs`, `XDG_STATE_HOME`,
+  `LOCALAPPDATA` (`logging::directory`).
   A `profiles.toml` that will not load, whether it would not read or would not
   parse, is moved aside to `profiles.toml.broken` before anything can save
   over it; if it cannot be moved, nothing is saved for the rest of the session
