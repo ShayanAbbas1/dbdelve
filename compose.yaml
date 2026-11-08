@@ -14,6 +14,7 @@ services:
       - "${DBDELVE_POSTGRES_PORT:-55432}:5432"
     volumes:
       - dbdelve-postgres-data:/var/lib/postgresql/data
+      - dbdelve-postgres-socket:/var/run/postgresql
       - ./dev/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U dbdelve -d dbdelve_dev"]
@@ -182,12 +183,15 @@ services:
   # services rather than a profile so local dev and CI stay identical.
   # `dev/ssh/setup.sh` writes the key and ssh_config they read; `docker compose
   # up` alone starts them fine with no key mounted, just nobody can log in yet.
+  # Both see `postgres`'s Unix socket directory, as a server's own host would,
+  # for the socket bridge's live tests.
   bastion:
     build: ./dev/ssh
     ports:
       - "${DBDELVE_SSH_PORT:-52222}:22"
     volumes:
       - ./dev/ssh/.generated:/keys:ro
+      - dbdelve-postgres-socket:/var/run/postgresql
     healthcheck:
       test: ["CMD", "nc", "-z", "127.0.0.1", "22"]
       interval: 2s
@@ -198,6 +202,7 @@ services:
     build: ./dev/ssh
     volumes:
       - ./dev/ssh/.generated:/keys:ro
+      - dbdelve-postgres-socket:/var/run/postgresql
     healthcheck:
       test: ["CMD", "nc", "-z", "127.0.0.1", "22"]
       interval: 2s
@@ -206,6 +211,7 @@ services:
 
 volumes:
   dbdelve-postgres-data:
+  dbdelve-postgres-socket:
   dbdelve-mysql-data:
   dbdelve-mariadb-data:
   dbdelve-mssql-data:
