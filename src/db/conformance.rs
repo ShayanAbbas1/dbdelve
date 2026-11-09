@@ -514,6 +514,7 @@ pub(super) fn generated_writes_round_trip(subject: &Subject) {
     let at = format!("{scenario} on {:?}", subject.target.engine);
     let engine = subject.target.engine;
     let (schema, relation, key) = (subject.schema, subject.relation, subject.key);
+    let label = subject.columns[1];
     let structure = subject
         .connection
         .structure(schema, relation)
@@ -581,7 +582,7 @@ pub(super) fn generated_writes_round_trip(subject: &Subject) {
             engine,
             schema,
             relation,
-            &[(key, Some("901")), ("label", Some("inserted"))],
+            &[(key, Some("901")), (label, Some("inserted"))],
             &types,
         )
         .unwrap_or_else(|error| panic!("{at}: insert_row: {error}"));
@@ -599,7 +600,7 @@ pub(super) fn generated_writes_round_trip(subject: &Subject) {
 
     let label_type = types
         .iter()
-        .find(|(name, _)| name == "label")
+        .find(|(name, _)| name == label)
         .map(|(_, data_type)| data_type.as_str())
         .unwrap_or_else(|| panic!("{at}: no label column"));
     if subject.target.edits_rows()
@@ -609,10 +610,10 @@ pub(super) fn generated_writes_round_trip(subject: &Subject) {
         let row = PendingRow {
             schema: schema.to_string(),
             table: relation.to_string(),
-            sets: vec![("label".into(), NewValue::Value("updated".into()))],
+            sets: vec![(label.into(), NewValue::Value("updated".into()))],
             keys: vec![(key.to_string(), "901".to_string())],
             types: types.clone(),
-            held: vec![("label".into(), "inserted".into())],
+            held: vec![(label.into(), "inserted".into())],
             // The spelling is the preview's to say, as on an object tab.
             update: if engine == Engine::ClickHouse {
                 generated(&format!(
