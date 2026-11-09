@@ -114,8 +114,9 @@ A DSN can't be used with an SSH tunnel, because it hides the host and port.
   It refuses anything it can't prove is a read, including calls to functions
   it doesn't know are safe. A query that calls one of your own functions needs
   Read-write.
-- **Every statement you run commits as it runs.** A `BEGIN … COMMIT` typed
-  across several statements isn't supported yet.
+- **Manual transactions aren't supported yet.** A `BEGIN … COMMIT` you type
+  reaches the server only as the driver passes it on: psqlODBC keeps the
+  transaction open, while a driver that commits each statement itself doesn't.
 - **A `;` can't appear in the user name or password.**
 - **psqlODBC changes some dates and timestamps** on the way through: BC dates,
   `infinity`, years past 9999 and `timestamptz` offsets. Cast them to `::text`,
