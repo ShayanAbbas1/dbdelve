@@ -216,7 +216,8 @@ fn live_psqlodbc_generic_sql_writes_rows_through_one_transaction() {
 
 /// Postgres reads a bare `current_schema` as the function even beside a
 /// column by that name, and psqlODBC reads it back as that column's type, so
-/// only DBDelve's own reading stops an edit landing on the row keyed `public`.
+/// only the driver naming no base table for it stops an edit landing on the
+/// row keyed `public`.
 #[test]
 #[ignore = "needs a Postgres and psqlODBC: set dbdelve_ODBC_POSTGRES, _USER and _PASSWORD"]
 fn live_psqlodbc_a_function_read_as_the_key_column_is_never_a_key() {
@@ -241,7 +242,10 @@ fn live_psqlodbc_a_function_read_as_the_key_column_is_never_a_key() {
     assert_eq!(read.rows[0].get(0), Some("public"));
     assert!(read.edit.is_none());
     let reason = read.read_only_reason.unwrap_or_default();
-    assert!(reason.contains("is also a value the server"), "{reason}");
+    assert!(
+        reason.starts_with("The driver does not say current_schema"),
+        "{reason}"
+    );
     let quoted = run(
         &connection,
         "SELECT \"current_schema\", label FROM public.dbdelve_odbc_niladic",

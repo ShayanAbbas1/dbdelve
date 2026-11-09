@@ -1,6 +1,7 @@
 //! Which table the rows a plugin read are rows of, worked out on the host from
-//! the statement and the plugin's `structure`, since a driver need not say
-//! where a result column came from. Where it does, the reading must agree.
+//! the statement and the plugin's `structure`, and held to the driver's word
+//! on where each column came from: every key column must have one, and where
+//! any column has one, it must be DBDelve's reading.
 //!
 //! Getting a name wrong here writes to the wrong table, so every doubt
 //! refuses: a name the session would resolve through a search path DBDelve
@@ -58,20 +59,6 @@ pub(super) fn target(
         .any(|projected| matches!(projected, Projected::Computed))
     {
         return refused(Unread::Projection.reason().into());
-    }
-    if let Some(word) = read
-        .columns
-        .iter()
-        .zip(&quoting.columns)
-        .find_map(|(projected, quoted)| match projected {
-            Projected::Column(word) if !quoted && computed(engine, word) => Some(word),
-            _ => None,
-        })
-    {
-        return refused(format!(
-            "{word} is also a value the server works out itself, so DBDelve cannot tell it reads \
-             a column and these rows cannot be edited. Quote the column's name to edit them."
-        ));
     }
 
     // The statement succeeded, so the server found the table under one of the
@@ -157,6 +144,16 @@ pub(super) fn target(
             return refused(format!(
                 "The key column {key} is not read as it is typed, so DBDelve cannot tell it is \
                  the column and these rows cannot be edited."
+            ));
+        }
+        // A name the server reads as a value of its own rather than the
+        // column (`current_schema`, `@@SPID`, a special register) reads back
+        // typed as the column, and no list of such names is ever complete:
+        // only the driver can say the key is the column.
+        if said.get(position).is_none_or(|said| said.base.is_none()) {
+            return refused(format!(
+                "The driver does not say which table column the key {key} is read from, so \
+                 these rows are read-only."
             ));
         }
         keys.push(position);
@@ -261,50 +258,11 @@ fn origins(
     Ok(origins)
 }
 
-/// Whether `word`, written bare in a select list, may read as a value the
-/// server works out rather than as a column of that name: a function the
-/// standard calls without parentheses, which a server takes over a column by
-/// the same name (Postgres's `current_schema`; sqlparser reads some of these
-/// as identifiers), and on Generic SQL the pseudo-columns and special
-/// registers of the servers it reaches (Oracle's `ROWNUM`, Db2's `CURRENT
-/// SCHEMA`, whose `CURRENT` reads as a column with an alias).
-fn computed(engine: Engine, word: &str) -> bool {
-    const STANDARD: &[&str] = &[
-        "CURRENT_CATALOG",
-        "CURRENT_DATE",
-        "CURRENT_PATH",
-        "CURRENT_ROLE",
-        "CURRENT_SCHEMA",
-        "CURRENT_TIME",
-        "CURRENT_TIMESTAMP",
-        "CURRENT_USER",
-        "LOCALTIME",
-        "LOCALTIMESTAMP",
-        "SESSION_USER",
-        "SYSTEM_USER",
-        "USER",
-    ];
-    const GENERIC: &[&str] = &[
-        "CURRENT",
-        "CURRENT_SERVER",
-        "CURRENT_TIMEZONE",
-        "LEVEL",
-        "ROWID",
-        "ROWNUM",
-        "SYSDATE",
-        "SYSTIMESTAMP",
-        "UID",
-    ];
-    let listed = |list: &[&str]| list.iter().any(|name| name.eq_ignore_ascii_case(word));
-    listed(STANDARD) || (engine != Engine::Postgres && listed(GENERIC))
-}
-
 /// Whether the driver's own word on where each column is read from, where it
 /// gave one, is DBDelve's reading. A driver that names a base for any column
 /// of the result names one for every column read from a table, so one with
 /// none there is something else (psqlODBC names none for `current_schema`).
-/// Without a word on any column, a driver that never says, DBDelve's reading
-/// stands alone.
+/// Without a word on any column the key check refuses instead.
 ///
 /// Compared exactly: both are the catalog's spelling, and a server that keeps
 /// case may hold `Id` and `id` both.
@@ -326,7 +284,8 @@ fn agrees(
         });
         if !named {
             return Err(format!(
-                "The driver does not say {} is read from the column {origin} of {schema}.{table},                  so DBDelve cannot tell it is that column and these rows cannot be edited.",
+                "The driver does not say {} is read from the column {origin} of {schema}.{table}, \
+                 so DBDelve cannot tell it is that column and these rows cannot be edited.",
                 column.name
             ));
         }
@@ -392,6 +351,31 @@ mod tests {
         super::target(engine, sql, columns, &said, describe)
     }
 
+    /// [`target`] of a plugin that also names each column's base as the
+    /// column of `table` its result is named for.
+    fn based(
+        engine: Engine,
+        sql: &str,
+        columns: &[Column],
+        exact: &[bool],
+        table: &str,
+        describe: impl Fn(&str, &str) -> Result<WireStructure, DbError>,
+    ) -> (Option<EditTarget>, Option<String>) {
+        let said: Vec<Said> = columns
+            .iter()
+            .zip(exact)
+            .map(|(column, &exact)| Said {
+                exact,
+                base: Some(Base {
+                    schema: None,
+                    table: table.into(),
+                    column: column.name.clone(),
+                }),
+            })
+            .collect();
+        super::target(engine, sql, columns, &said, describe)
+    }
+
     fn structure(columns: &[(&str, &str)], key: &[&str]) -> WireStructure {
         WireStructure {
             columns: columns
@@ -447,8 +431,14 @@ mod tests {
             "SELECT \"id\", label FROM \"app\".\"accounts\"",
             "SELECT accounts.id, label FROM app.accounts",
         ] {
-            let (target, reason) =
-                target(Engine::Postgres, sql, &columns, &[true, false], &describe);
+            let (target, reason) = based(
+                Engine::Postgres,
+                sql,
+                &columns,
+                &[true, false],
+                "accounts",
+                &describe,
+            );
             let target = target.unwrap_or_else(|| panic!("{sql}: {reason:?}"));
             assert_eq!(
                 (target.schema.as_str(), target.table.as_str()),
@@ -544,6 +534,14 @@ mod tests {
                 "Label is not a column of accounts, so these rows cannot be edited.".into(),
             ),
             (
+                "SELECT id, label FROM app.accounts",
+                &both,
+                &[true, true],
+                "The driver does not say which table column the key id is read from, so these \
+                 rows are read-only."
+                    .into(),
+            ),
+            (
                 "SELECT a.id FROM app.accounts a JOIN app.keyless k ON a.id = k.id",
                 &result(&[("id", "int4")]),
                 &[true],
@@ -559,49 +557,51 @@ mod tests {
         }
     }
 
+    /// Only the driver can tell a column from a value the server works out
+    /// under the same name, so a qualified name is a column like any other.
     #[test]
-    fn a_bare_name_the_server_may_read_as_its_own_value_is_never_a_column() {
+    fn a_column_named_like_a_value_the_server_works_out_is_one_the_driver_names() {
         let keyed = structure(
             &[("current_schema", "name"), ("label", "varchar(20)")],
             &["current_schema"],
         );
         let describe = catalog(vec![("public", "t", keyed)]);
         let columns = result(&[("current_schema", "name"), ("label", "varchar")]);
-        let postgres = |sql| target(Engine::Postgres, sql, &columns, &[true, true], &describe);
-        for sql in [
-            "SELECT current_schema, label FROM public.t WHERE \"current_schema\" = 'victim'",
-            "SELECT CURRENT_SCHEMA AS \"current_schema\", label FROM public.t",
-        ] {
-            let (none, reason) = postgres(sql);
-            assert_eq!(none, None, "{sql}");
-            let reason = reason.unwrap();
-            assert!(
-                reason.contains("is also a value the server"),
-                "{sql}: {reason}"
-            );
-        }
-        let (quoted, reason) = postgres("SELECT \"current_schema\", label FROM public.t");
-        assert!(quoted.is_some(), "{reason:?}");
-
-        // Db2's special register: `CURRENT` read as a column aliased `SCHEMA`.
-        let keyed = structure(
-            &[("CURRENT", "VARCHAR"), ("LABEL", "VARCHAR")],
-            &["CURRENT"],
+        let sql = "SELECT t.current_schema, t.label FROM public.t AS t";
+        let (qualified, reason) = based(
+            Engine::Postgres,
+            sql,
+            &columns,
+            &[true, true],
+            "t",
+            &describe,
         );
-        let describe = catalog(vec![("S", "T", keyed)]);
-        let columns = result(&[("SCHEMA", "VARCHAR"), ("LABEL", "VARCHAR")]);
-        let sql = "SELECT CURRENT SCHEMA, LABEL FROM S.T";
-        let (none, reason) = target(Engine::Generic, sql, &columns, &[true, true], &describe);
-        assert_eq!(none, None, "{reason:?}");
+        assert_eq!(qualified.unwrap_or_else(|| panic!("{reason:?}")).keys, [0]);
 
-        let levels = structure(&[("id", "int4"), ("level", "int4")], &["id"]);
-        let describe = catalog(vec![("public", "t", levels)]);
-        let columns = result(&[("id", "int4"), ("level", "int4")]);
-        let sql = "SELECT id, level FROM public.t";
-        let (postgres, reason) = target(Engine::Postgres, sql, &columns, &[true, true], &describe);
-        assert!(postgres.is_some(), "{reason:?}");
-        let (generic, _) = target(Engine::Generic, sql, &columns, &[true, true], &describe);
-        assert_eq!(generic, None);
+        // psqlODBC names no base for the function `current_schema` reads.
+        let label = Base {
+            schema: Some("public".into()),
+            table: "t".into(),
+            column: "label".into(),
+        };
+        let said = [
+            Said {
+                exact: true,
+                base: None,
+            },
+            Said {
+                exact: true,
+                base: Some(label),
+            },
+        ];
+        let sql = "SELECT current_schema, label FROM public.t";
+        let (function, reason) = super::target(Engine::Postgres, sql, &columns, &said, &describe);
+        assert_eq!(function, None);
+        assert!(
+            reason
+                .unwrap()
+                .starts_with("The driver does not say current_schema")
+        );
     }
 
     #[test]
@@ -629,7 +629,6 @@ mod tests {
             )
         };
         let agreeing = [
-            [None, None],
             [
                 base(Some("app"), "accounts", "id"),
                 base(Some("app"), "accounts", "label"),
@@ -644,6 +643,7 @@ mod tests {
             assert!(target.is_some(), "{bases:?}: {reason:?}");
         }
         let disagreeing = [
+            [None, None],
             [None, base(Some("app"), "accounts", "label")],
             [
                 base(Some("app"), "accounts", "ID"),
@@ -707,19 +707,21 @@ mod tests {
             ("app", "accounts", accounts()),
             ("APP", "ACCOUNTS", upper),
         ]);
-        let (lower, _) = target(
+        let (lower, _) = based(
             Engine::Postgres,
             "SELECT * FROM APP.Accounts",
             &columns,
             &[true, true],
+            "accounts",
             &describe,
         );
         assert_eq!(lower.unwrap().schema, "app");
-        let (exact, _) = target(
+        let (exact, _) = based(
             Engine::Postgres,
             "SELECT \"ID\", label FROM \"APP\".\"ACCOUNTS\"",
-            &columns,
+            &result(&[("ID", "int4"), ("label", "varchar")]),
             &[true, true],
+            "ACCOUNTS",
             &describe,
         );
         let exact = exact.unwrap();
@@ -739,9 +741,18 @@ mod tests {
             ("db2inst1", "both", items.clone()),
             ("DB2INST1", "BOTH", items),
         ]);
-        let generic = |sql| target(Engine::Generic, sql, &columns, &[true, true], &describe);
+        let generic = |sql, table| {
+            based(
+                Engine::Generic,
+                sql,
+                &columns,
+                &[true, true],
+                table,
+                &describe,
+            )
+        };
 
-        let (upper, reason) = generic("SELECT id, label FROM db2inst1.items");
+        let (upper, reason) = generic("SELECT id, label FROM db2inst1.items", "ITEMS");
         let upper = upper.unwrap_or_else(|| panic!("{reason:?}"));
         assert_eq!(
             (upper.schema.as_str(), upper.table.as_str()),
@@ -749,7 +760,7 @@ mod tests {
         );
         assert_eq!(upper.columns, [Some("ID".into()), Some("LABEL".into())]);
 
-        let (none, reason) = generic("SELECT * FROM db2inst1.both");
+        let (none, reason) = generic("SELECT * FROM db2inst1.both", "both");
         assert_eq!(none, None);
         assert_eq!(
             reason.unwrap(),
@@ -757,7 +768,7 @@ mod tests {
              server read, so these rows cannot be edited. Quote the name exactly to say which."
         );
 
-        let (quoted, _) = generic("SELECT * FROM \"db2inst1\".\"both\"");
+        let (quoted, _) = generic("SELECT * FROM \"db2inst1\".\"both\"", "both");
         assert_eq!(quoted.unwrap().table, "both");
     }
 
@@ -769,7 +780,16 @@ mod tests {
         let upper = structure(&[("ID", "INTEGER"), ("LABEL", "VARCHAR")], &["ID"]);
         let describe = catalog(vec![("app", "Accounts", cased), ("APP", "ACCOUNTS", upper)]);
         let columns = result(&[("id", "INTEGER"), ("Label", "VARCHAR")]);
-        let generic = |sql| target(Engine::Generic, sql, &columns, &[true, true], &describe);
+        let generic = |sql| {
+            based(
+                Engine::Generic,
+                sql,
+                &columns,
+                &[true, true],
+                "Accounts",
+                &describe,
+            )
+        };
 
         let (none, reason) = generic("SELECT id, Label FROM app.Accounts");
         assert_eq!(none, None);
@@ -808,7 +828,14 @@ mod tests {
             "mixed has both a column label and a column LABEL, and DBDelve cannot tell which one \
              label is, so these rows cannot be edited. Quote the name exactly to say which."
         );
-        let (postgres, _) = target(Engine::Postgres, sql, &columns, &[true, true], &describe);
+        let (postgres, _) = based(
+            Engine::Postgres,
+            sql,
+            &columns,
+            &[true, true],
+            "mixed",
+            &describe,
+        );
         assert_eq!(postgres.unwrap().columns[1].as_deref(), Some("label"));
     }
 }

@@ -104,7 +104,8 @@ pub const EXACT: &str = "dbdelve.exact";
 /// and only where the driver names both a table and a column, with
 /// [`BASE_SCHEMA`] beside them where it names a schema too. A column without
 /// them may still be read from a table. A host that finds them on any column
-/// of a result holds every column it writes back to them.
+/// of a result holds every column it writes back to them, and edits no rows
+/// whose key columns lack them.
 pub const BASE_TABLE: &str = "dbdelve.base_table";
 /// See [`BASE_TABLE`].
 pub const BASE_COLUMN: &str = "dbdelve.base_column";

@@ -30,25 +30,24 @@ plugin that ships. Where the code is:
   edits and inserts, never imports, Copy DDL or database switching; every
   other dialect is `Abilities::NONE`. Abilities are asked of `Target`; asking
   `Engine` would hand a plugin profile its dialect's writes.
-- **The edit target is DBDelve's own reading** (`external/edit.rs`), since a
-  driver need not say where a column came from, and only on a connection
+- **The edit target is DBDelve's own reading** (`external/edit.rs`), held to
+  the driver's word on where each column came from, and only on a connection
   whose plugin offered `write`. One plain `SELECT` of a schema-qualified table
   (the session's schema is not known to DBDelve), resolved through the
   plugin's `structure`: a quoted name as written, an unquoted one folded as
   the server would: lower on Postgres; on Generic SQL as written, upper and
   lower, since a server may keep case, refusing a name more than one finds.
   `structure` answers only a relation named exactly as asked (the bridge
-  filters the driver's rows by name), so two found are two relations. A bare name a server may read as its own value
-  instead of a column (`current_schema`, which sqlparser reads as an
-  identifier and Postgres as the function, typed as the column; on Generic
-  SQL also `ROWNUM`, Db2's `CURRENT SCHEMA`) refuses the lot until quoted
-  (`edit::computed`). The key must be whole in the result, every key column
-  `dbdelve.exact`, and read as the catalog types it; other columns' types are
-  not compared, since drivers spell them differently in a result and in the
-  catalog (psqlODBC: `unknown` for `json`). Where the driver names a base
-  for any column (`dbdelve.base_*`), every column must name exactly the one
-  DBDelve read, compared case and all (`edit::agrees`); a result with none
-  anywhere, Db2's unmeasured, rests on the reading alone. A lookup that fails
+  filters the driver's rows by name), so two found are two relations. The key
+  must be whole in the result, every key column `dbdelve.exact`, read as the
+  catalog types it, and named by the driver (`dbdelve.base_*`) as the very
+  table column DBDelve read: only the driver can tell a column from a value
+  the server works out under its name (`current_schema`, `@@SPID`, a special
+  register), so a driver that reports no base metadata gets no editing. Other
+  columns' types are not compared, since drivers spell them differently in a
+  result and in the catalog (psqlODBC: `unknown` for `json`). Where the driver
+  names a base for any column, every column must name exactly the one DBDelve
+  read, compared case and all (`edit::agrees`). A lookup that fails
   leaves the rows read-only and the query succeeded.
 - **The grid's writes are one `write`.** `Connection::generated` sends a batch
   the gate admits as `write`, its statements cut from the gate's own tree
@@ -155,7 +154,8 @@ them in a `WHERE`. A key column without it does not make rows editable.
 with `dbdelve.base_schema` beside them where there is one) name the table
 column a result column is read from, set together and only where the driver
 names both: psqlODBC (`SQL_DESC_BASE_COLUMN_NAME`) repeats an expression's
-label as its base column, `current_schema` included, and names no table.
+label as its base column, `current_schema` included, and names no table. A key
+column without them does not make rows editable either.
 
 ## Opening
 

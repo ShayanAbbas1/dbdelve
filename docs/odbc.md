@@ -95,11 +95,12 @@ A DSN can't be used with an SSH tunnel, because it hides the host and port.
   edited only when DBDelve can tell which rows they are: one plain `SELECT` of
   one table named with its schema (`SELECT * FROM sales.orders`; previews
   always are), a primary key, every key column in the result, and a key the
-  driver reads back exactly (integers, decimals, character columns, GUIDs).
-  With Generic SQL an unquoted name is looked up as written, in upper case
-  and in lower case; if more than one exists, quote it. So does a column named like a value the server
-  works out itself, such as `current_schema` or `user`. Otherwise the grid
-  stays read-only and says why.
+  driver reads back exactly (integers, decimals, character columns, GUIDs)
+  and reports the table column it is read from (ODBC's base column and base
+  table name); a driver that does not report them leaves every result
+  read-only. With Generic SQL an unquoted name is looked up as written, in
+  upper case and in lower case; if more than one exists, quote it. Otherwise
+  the grid stays read-only and says why.
   Other dialects are read-only for now, and Import Rows is off for every ODBC
   connection.
 - **Saved edits are all or nothing.** A batch of edits runs as one transaction

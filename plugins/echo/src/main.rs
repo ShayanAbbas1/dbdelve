@@ -27,7 +27,7 @@
 //! | `pid`          | echo's own process id, as one cell                                     |
 //! | `sets N`       | one row, and `end {more_sets: N - 1}`                                  |
 //! | `cancels`      | how many `cancel` frames it has received, as one cell                  |
-//! | `SELECT … FROM s.t …` | one row of the select list over a table `structure` knows, every column Utf8 tagged with its type, and those of a type that reads back exactly marked [`EXACT`] |
+//! | `SELECT … FROM s.t …` | one row of the select list over a table `structure` knows, every column Utf8 tagged with its type, those of a type that reads back exactly marked [`EXACT`], and those naming a column of the table given its [`BASE_TABLE`] |
 //!
 //! `structure` of a relation named `fail` or `lost` answers as those
 //! statements do; `sleep` waits up to 60 s for a `cancel`; `hang` is as above.
@@ -83,8 +83,8 @@ use dbdelve_plugin_protocol as wire;
 use dbdelve_plugin_protocol::arrow::{encode_batch, encode_schema};
 use dbdelve_plugin_protocol::limits::{BATCH_ROWS, MAX_FRAME, WINDOW, credit_cost};
 use dbdelve_plugin_protocol::{
-    EXACT, ErrorKind, Kind, PROTOCOL, REFERENCES, Request, Response, Tls, WRITE, read_frame,
-    write_frame,
+    BASE_COLUMN, BASE_SCHEMA, BASE_TABLE, EXACT, ErrorKind, Kind, PROTOCOL, REFERENCES, Request,
+    Response, Tls, WRITE, read_frame, write_frame,
 };
 
 const CLOSING: Duration = Duration::from_millis(200);
@@ -822,15 +822,26 @@ fn selected(sql: &str) -> Option<RecordBatch> {
         Some(quoted) => vec![quoted.to_owned()],
         None => vec![part.to_owned(), part.to_uppercase(), part.to_lowercase()],
     };
-    let (columns, _) = spellings(schema)
+    let candidates: Vec<(String, String)> = spellings(schema)
         .iter()
         .flat_map(|schema| {
             spellings(relation)
                 .into_iter()
                 .map(move |relation| (schema.clone(), relation))
         })
-        .find_map(|(schema, relation)| table(&schema, &relation))?;
-    let typed = |written: &str| {
+        .collect();
+    // A relation echo names exactly before one any schema but `main` answers,
+    // so the base it reports is the one the host looked up.
+    let (schema, relation) = candidates
+        .iter()
+        .find(|(schema, relation)| TABLES.iter().any(|(s, r, _)| s == schema && r == relation))
+        .or_else(|| {
+            candidates
+                .iter()
+                .find(|(schema, relation)| table(schema, relation).is_some())
+        })?;
+    let (columns, _) = table(schema, relation)?;
+    let column = |written: &str| {
         let name = written.rsplit('.').next().unwrap_or(written);
         let unquoted = name.trim_matches('"');
         columns
@@ -841,17 +852,14 @@ fn selected(sql: &str) -> Option<RecordBatch> {
                     .iter()
                     .find(|(column, _)| column.eq_ignore_ascii_case(unquoted))
             })
-            .map_or("integer", |(_, data_type)| data_type)
-            .to_owned()
     };
-    let mut fields: Vec<(String, String)> = Vec::new();
+    // `(name, type, the table column it is read from)`.
+    let mut fields: Vec<(String, String, Option<&str>)> = Vec::new();
     for item in list.split(',').map(str::trim) {
         if item == "*" {
-            fields.extend(
-                columns
-                    .iter()
-                    .map(|(name, data_type)| ((*name).to_owned(), (*data_type).to_owned())),
-            );
+            fields.extend(columns.iter().map(|(name, data_type)| {
+                ((*name).to_owned(), (*data_type).to_owned(), Some(*name))
+            }));
             continue;
         }
         let (expression, alias) = match item.to_ascii_uppercase().find(" AS ") {
@@ -859,11 +867,17 @@ fn selected(sql: &str) -> Option<RecordBatch> {
             None => (item, None),
         };
         let named = alias.unwrap_or_else(|| expression.rsplit('.').next().unwrap_or(expression));
-        fields.push((named.trim_matches('"').to_owned(), typed(expression)));
+        let read = column(expression);
+        fields.push((
+            named.trim_matches('"').to_owned(),
+            read.map_or("integer", |(_, data_type)| data_type)
+                .to_owned(),
+            read.map(|(name, _)| *name),
+        ));
     }
     let (fields, cells): (Vec<Field>, Vec<ArrayRef>) = fields
         .into_iter()
-        .map(|(name, data_type)| {
+        .map(|(name, data_type, read_from)| {
             let base = data_type.split('(').next().unwrap_or_default().to_owned();
             let exact = !base.eq_ignore_ascii_case("double");
             let value = match exact && !base.to_ascii_lowercase().contains("char") && base != "text"
@@ -874,6 +888,13 @@ fn selected(sql: &str) -> Option<RecordBatch> {
             let mut metadata = HashMap::from([("dbdelve.type".to_owned(), base)]);
             if exact {
                 metadata.insert(EXACT.to_owned(), "true".to_owned());
+            }
+            if let Some(read_from) = read_from {
+                metadata.extend([
+                    (BASE_SCHEMA.to_owned(), schema.clone()),
+                    (BASE_TABLE.to_owned(), relation.clone()),
+                    (BASE_COLUMN.to_owned(), read_from.to_owned()),
+                ]);
             }
             let field = Field::new(name, DataType::Utf8, true).with_metadata(metadata);
             let cell: ArrayRef = Arc::new(StringArray::from(vec![value]));
