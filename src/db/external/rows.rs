@@ -11,6 +11,7 @@ use arrow_array::{
 use arrow_buffer::NullBuffer;
 use arrow_cast::display::{ArrayFormatter, FormatOptions};
 use arrow_schema::{DataType, SchemaRef};
+use dbdelve_plugin_protocol::EXACT;
 
 use super::host::failure;
 use crate::db::{Column, DbError, Row, RowBuilder};
@@ -31,6 +32,10 @@ const SPELLING: FormatOptions<'static> = FormatOptions::new()
 /// from row to row.
 pub(super) struct Rows {
     columns: Vec<Column>,
+    /// Which columns the plugin sends as text the server reads back as the
+    /// same value, so a row can be found by them. Kept here rather than on
+    /// [`Column`], since nothing outside the plugin host asks.
+    exact: Vec<bool>,
     row: RowBuilder,
     cell: String,
 }
@@ -51,8 +56,19 @@ impl Rows {
                 ),
             })
             .collect();
+        let exact = schema
+            .fields()
+            .iter()
+            .map(|field| {
+                field
+                    .metadata()
+                    .get(EXACT)
+                    .is_some_and(|value| value == "true")
+            })
+            .collect();
         Self {
             columns,
+            exact,
             row: RowBuilder::default(),
             cell: String::new(),
         }
@@ -60,6 +76,10 @@ impl Rows {
 
     pub(super) fn columns(&self) -> &[Column] {
         &self.columns
+    }
+
+    pub(super) fn exact(&self) -> &[bool] {
+        &self.exact
     }
 
     /// Every row of `batch`, in order, each handed to `keep`; the rows seen.
@@ -378,6 +398,21 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn only_a_column_marked_exact_reads_back_exactly() {
+        let field = |name: &str, exact: Option<&str>| {
+            let metadata = exact.map(|value| (EXACT.to_owned(), value.to_owned()));
+            Field::new(name, DataType::Utf8, true)
+                .with_metadata(metadata.into_iter().collect::<HashMap<_, _>>())
+        };
+        let schema = Arc::new(Schema::new(vec![
+            field("marked", Some("true")),
+            field("other", Some("yes")),
+            field("plain", None),
+        ]));
+        assert_eq!(Rows::new(&schema).exact(), [true, false, false]);
     }
 
     #[test]

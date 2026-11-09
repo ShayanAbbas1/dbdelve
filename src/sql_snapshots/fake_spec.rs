@@ -84,9 +84,7 @@ fn a_fake_engine_spec_writes_sql_through_the_shared_strategies() {
 }
 
 #[test]
-fn an_engine_in_the_read_only_tier_edits_and_inserts_nothing() {
-    assert!(!FAKE.writes_back(["text"]));
-    assert!(!FAKE.writes_back([]), "a cell no driver typed");
+fn an_engine_in_the_read_only_tier_inserts_nothing() {
     for kind in [RelationKind::Table, RelationKind::View] {
         assert!(!FAKE.abilities.takes_inserts(kind), "{kind:?}");
     }
@@ -99,10 +97,16 @@ fn an_engine_in_the_read_only_tier_edits_and_inserts_nothing() {
         },
         ..FAKE
     };
-    assert!(WRITES.writes_back(["text"]) && WRITES.writes_back([]));
-    assert!(!WRITES.writes_back(["text", "bytea"]));
     assert!(WRITES.abilities.takes_inserts(RelationKind::Table));
     assert!(!WRITES.abilities.takes_inserts(RelationKind::View));
+}
+
+/// Whether rows are written back at all is the target's question, so a cell's
+/// type answers the same in the read-only tier as anywhere.
+#[test]
+fn a_cell_writes_back_by_its_type_alone() {
+    assert!(FAKE.writes_back(["text"]) && FAKE.writes_back([]));
+    assert!(!FAKE.writes_back(["text", "bytea"]));
 }
 
 #[test]

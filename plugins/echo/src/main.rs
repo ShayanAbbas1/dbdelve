@@ -27,9 +27,17 @@
 //! | `pid`          | echo's own process id, as one cell                                     |
 //! | `sets N`       | one row, and `end {more_sets: N - 1}`                                  |
 //! | `cancels`      | how many `cancel` frames it has received, as one cell                  |
+//! | `SELECT … FROM s.t …` | one row of the select list over a table `structure` knows, every column Utf8 tagged with its type, and those of a type that reads back exactly marked [`EXACT`] |
 //!
 //! `structure` of a relation named `fail` or `lost` answers as those
 //! statements do; `sleep` waits up to 60 s for a `cancel`; `hang` is as above.
+//! In the schemas `main` and `MAIN` it knows only [`TABLES`], answering an
+//! empty structure for anything else, as the ODBC bridge does for a relation
+//! that does not exist; in any other schema every relation is `accounts`.
+//!
+//! `write` runs its statements as one fake transaction: each changes one row,
+//! but one holding `'missing'` changes none, which fails the lot with nothing
+//! kept. `last` then answers with the statements, one a line.
 //!
 //! `stop` ends a read early only when the query was `eligible` and the fake
 //! transaction is closed; otherwise echo stops sending and answers with the
@@ -37,7 +45,8 @@
 //!
 //! Environment: `DBDELVE_ECHO_PROTOCOL=<n>` makes `hello` claim protocol n;
 //! `DBDELVE_ECHO_STDERR=<text>` writes the text to stderr and exits before
-//! `hello`; `DBDELVE_ECHO_PLAIN=1` leaves `references` out of `optional`;
+//! `hello`; `DBDELVE_ECHO_PLAIN=1` leaves `references` and `write` out of
+//! `optional`;
 //! `DBDELVE_ECHO_DRAINS=1` opens with `stops_early: false`;
 //! `DBDELVE_ECHO_REFUSE_SET=1` answers every `SET …` as `fail` does;
 //! `DBDELVE_ECHO_WEDGED=1` never answers `catalog`, `structure` or
@@ -74,7 +83,8 @@ use dbdelve_plugin_protocol as wire;
 use dbdelve_plugin_protocol::arrow::{encode_batch, encode_schema};
 use dbdelve_plugin_protocol::limits::{BATCH_ROWS, MAX_FRAME, WINDOW, credit_cost};
 use dbdelve_plugin_protocol::{
-    ErrorKind, Kind, PROTOCOL, REFERENCES, Request, Response, Tls, read_frame, write_frame,
+    EXACT, ErrorKind, Kind, PROTOCOL, REFERENCES, Request, Response, Tls, WRITE, read_frame,
+    write_frame,
 };
 
 const CLOSING: Duration = Duration::from_millis(200);
@@ -132,6 +142,7 @@ fn main() {
                     if matches!(
                         request,
                         Request::Query { .. }
+                            | Request::Write { .. }
                             | Request::Catalog
                             | Request::Structure { .. }
                             | Request::References { .. }
@@ -168,9 +179,77 @@ fn catalog() -> Vec<wire::Schema> {
     ]
 }
 
+/// A table echo knows by its exact name: its columns, as `(name, type)`, and
+/// its key.
+type Table = (
+    &'static [(&'static str, &'static str)],
+    &'static [&'static str],
+);
+
+/// Every relation of the schemas `main` and `MAIN`, as `(schema, name, table)`.
+/// Folded the two ways a Generic SQL server may fold `main.items`, only one
+/// exists; `main.both` both ways.
+const TABLES: [(&str, &str, Table); 7] = [
+    ("main", "accounts", (ACCOUNTS, &["id"])),
+    ("main", "keyless", (ACCOUNTS, &[])),
+    (
+        "main",
+        "inexact",
+        (&[("id", "double"), ("label", "text")], &["id"]),
+    ),
+    (
+        "main",
+        "mixed",
+        (
+            &[("id", "bigint"), ("label", "text"), ("LABEL", "text")],
+            &["id"],
+        ),
+    ),
+    ("main", "both", (ACCOUNTS, &["id"])),
+    ("MAIN", "BOTH", (ITEMS, &["ID"])),
+    ("MAIN", "ITEMS", (ITEMS, &["ID"])),
+];
+
+const ACCOUNTS: &[(&str, &str)] = &[("id", "bigint"), ("label", "text")];
+const ITEMS: &[(&str, &str)] = &[("ID", "INTEGER"), ("LABEL", "VARCHAR(20)")];
+
+/// The table `schema.relation` names, or `None` where there is none.
+fn table(schema: &str, relation: &str) -> Option<Table> {
+    if !matches!(schema, "main" | "MAIN") {
+        return Some((ACCOUNTS, &["id"]));
+    }
+    TABLES
+        .iter()
+        .find(|(s, r, _)| *s == schema && *r == relation)
+        .map(|(_, _, table)| *table)
+}
+
 /// Echoes the schema and relation asked about into the foreign key, so a test
 /// sees both arrive.
 fn structure(schema: &str, relation: &str) -> wire::Structure {
+    let detailed = !matches!(schema, "main" | "MAIN") || (schema, relation) == ("main", "accounts");
+    match table(schema, relation) {
+        None => wire::Structure::default(),
+        Some(_) if detailed => accounts(schema, relation),
+        Some((columns, key)) => wire::Structure {
+            columns: columns
+                .iter()
+                .map(|(name, data_type)| wire::Column {
+                    name: (*name).into(),
+                    data_type: (*data_type).into(),
+                    nullable: true,
+                    default: None,
+                })
+                .collect(),
+            primary_key: key.iter().map(|name| (*name).into()).collect(),
+            ..wire::Structure::default()
+        },
+    }
+}
+
+/// The table every relation outside `main` and `MAIN` is, with an index and
+/// a foreign key.
+fn accounts(schema: &str, relation: &str) -> wire::Structure {
     let column = |name: &str, data_type: &str, nullable, default: Option<&str>| wire::Column {
         name: name.into(),
         data_type: data_type.into(),
@@ -324,7 +403,7 @@ impl Echo {
             last: String::new(),
             optional: match plain {
                 true => Vec::new(),
-                false => vec![REFERENCES.to_string()],
+                false => vec![REFERENCES.to_string(), WRITE.to_string()],
             },
         }
     }
@@ -384,6 +463,7 @@ impl Echo {
                 },
             ),
             Request::Query { sql, eligible } => self.query(id, &sql, eligible),
+            Request::Write { statements } => self.write_rows(id, statements),
             Request::Catalog => self.reply(id, Response::Catalog { schemas: catalog() }),
             Request::Structure { schema, relation } => match relation.as_str() {
                 "fail" => self.error(
@@ -559,6 +639,16 @@ impl Echo {
                 let cancels = self.control.cancels.load(Ordering::SeqCst) as i64;
                 self.one_cell(id, "cancels", Arc::new(Int64Array::from(vec![cancels])), 0);
             }
+            select if select.eq_ignore_ascii_case("select") => match selected(sql) {
+                Some(batch) => self.stream(id, batch.schema(), [batch], 1, eligible, 0),
+                None => self.error(
+                    id,
+                    ErrorKind::Server,
+                    "echo found no such table".into(),
+                    Some("42S02".into()),
+                    false,
+                ),
+            },
             _ => self.error(
                 id,
                 ErrorKind::Server,
@@ -567,6 +657,28 @@ impl Echo {
                 false,
             ),
         }
+    }
+
+    /// One fake transaction: committed, as nothing, only if every statement
+    /// changed one row.
+    fn write_rows(&mut self, id: u64, statements: Vec<String>) {
+        self.last = statements.join("\n");
+        if let Some(at) = statements
+            .iter()
+            .position(|statement| statement.contains("'missing'"))
+        {
+            let message = format!("Statement {} changed 0 rows, so nothing was saved.", at + 1);
+            self.error(id, ErrorKind::Server, message, None, false);
+            return;
+        }
+        let end = Response::End {
+            rows: 0,
+            rows_affected: Some(statements.len() as u64),
+            stopped: false,
+            messages: Vec::new(),
+            more_sets: 0,
+        };
+        self.reply(id, end);
     }
 
     fn one_cell(&mut self, id: u64, name: &str, column: ArrayRef, more_sets: u32) {
@@ -680,6 +792,89 @@ impl Echo {
             process::exit(1);
         }
     }
+}
+
+/// One row of `SELECT <list> FROM <schema>.<table> …`, its table read as a
+/// server would: a quoted part as written, an unquoted one as written or
+/// folded either way. `None` where there is no such table.
+fn selected(sql: &str) -> Option<RecordBatch> {
+    let upper = sql.to_ascii_uppercase();
+    let from = upper.find(" FROM ")?;
+    let list = sql["SELECT".len()..from].trim();
+    let name = sql[from + " FROM ".len()..]
+        .split_whitespace()
+        .next()?
+        .trim_end_matches(';');
+    let parts: Vec<&str> = name.split('.').collect();
+    // A bare name is read from `main`, as a session's search path would.
+    let (schema, relation) = match parts.as_slice() {
+        [schema, relation] => (*schema, *relation),
+        [relation] => ("main", *relation),
+        _ => return None,
+    };
+    let spellings = |part: &str| match part.strip_prefix('"').and_then(|p| p.strip_suffix('"')) {
+        Some(quoted) => vec![quoted.to_owned()],
+        None => vec![part.to_owned(), part.to_uppercase(), part.to_lowercase()],
+    };
+    let (columns, _) = spellings(schema)
+        .iter()
+        .flat_map(|schema| {
+            spellings(relation)
+                .into_iter()
+                .map(move |relation| (schema.clone(), relation))
+        })
+        .find_map(|(schema, relation)| table(&schema, &relation))?;
+    let typed = |written: &str| {
+        let name = written.rsplit('.').next().unwrap_or(written);
+        let unquoted = name.trim_matches('"');
+        columns
+            .iter()
+            .find(|(column, _)| *column == unquoted)
+            .or_else(|| {
+                columns
+                    .iter()
+                    .find(|(column, _)| column.eq_ignore_ascii_case(unquoted))
+            })
+            .map_or("integer", |(_, data_type)| data_type)
+            .to_owned()
+    };
+    let mut fields: Vec<(String, String)> = Vec::new();
+    for item in list.split(',').map(str::trim) {
+        if item == "*" {
+            fields.extend(
+                columns
+                    .iter()
+                    .map(|(name, data_type)| ((*name).to_owned(), (*data_type).to_owned())),
+            );
+            continue;
+        }
+        let (expression, alias) = match item.to_ascii_uppercase().find(" AS ") {
+            Some(at) => (&item[..at], Some(item[at + " AS ".len()..].trim())),
+            None => (item, None),
+        };
+        let named = alias.unwrap_or_else(|| expression.rsplit('.').next().unwrap_or(expression));
+        fields.push((named.trim_matches('"').to_owned(), typed(expression)));
+    }
+    let (fields, cells): (Vec<Field>, Vec<ArrayRef>) = fields
+        .into_iter()
+        .map(|(name, data_type)| {
+            let base = data_type.split('(').next().unwrap_or_default().to_owned();
+            let exact = !base.eq_ignore_ascii_case("double");
+            let value = match exact && !base.to_ascii_lowercase().contains("char") && base != "text"
+            {
+                true => "1",
+                false => "a",
+            };
+            let mut metadata = HashMap::from([("dbdelve.type".to_owned(), base)]);
+            if exact {
+                metadata.insert(EXACT.to_owned(), "true".to_owned());
+            }
+            let field = Field::new(name, DataType::Utf8, true).with_metadata(metadata);
+            let cell: ArrayRef = Arc::new(StringArray::from(vec![value]));
+            (field, cell)
+        })
+        .unzip();
+    RecordBatch::try_new(Arc::new(Schema::new(fields)), cells).ok()
 }
 
 fn numbered_schema() -> SchemaRef {

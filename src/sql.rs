@@ -1098,6 +1098,40 @@ pub fn is_generated_write_on(engine: Engine, statement: &str) -> bool {
     }
 }
 
+/// The statements of a write [`is_generated_write_on`] admits, each as its own
+/// text, the transaction bracket the gate sees through dropped: for a driver
+/// that brackets them in a transaction of its own rather than in text. Each
+/// passes the gate alone too. `None` for anything the gate refuses, for a lone
+/// bracket, which writes no row, and for a statement the gate reads as other
+/// text than it is ([`as_written`]).
+///
+/// Cut from the tree the gate reads, since the grammar holds `BEGIN; …;
+/// COMMIT` as one statement a splitter of the buffer would never separate.
+pub(crate) fn generated_writes(engine: Engine, sql: &str) -> Option<Vec<String>> {
+    if engine.syntax() != Syntax::Sql || is_transaction_bracket(sql) {
+        return None;
+    }
+    let spec = &engine.spec().sql;
+    let Cow::Borrowed(text) = as_written(spec, sql)? else {
+        return None;
+    };
+    if !generated_write(spec, text) {
+        return None;
+    }
+    let tree = parse_write(text, spec.backslash_escapes)?;
+    let statements: Vec<String> = generated_statements(&tree.root_node())?
+        .iter()
+        .map(|statement| {
+            let statement = text[statement.byte_range()].trim();
+            statement.strip_suffix(';').unwrap_or(statement).to_owned()
+        })
+        .collect();
+    statements
+        .iter()
+        .all(|statement| !is_transaction_bracket(statement) && generated_write(spec, statement))
+        .then_some(statements)
+}
+
 /// [`delete_matches_key`] for the engine the statement is bound for.
 pub fn delete_matches_key_on(engine: Engine, statement: &str, keys: &[&str]) -> bool {
     match engine.syntax() {
@@ -3827,6 +3861,52 @@ pub(crate) enum Unread {
     Other,
 }
 
+impl Unread {
+    /// Why rows read this way cannot be written back, in the user's words.
+    pub(crate) fn reason(self) -> &'static str {
+        match self {
+            Self::Unparsed => {
+                "DBDelve cannot read this statement whole, so it cannot tell which table its rows \
+                 are from."
+            }
+            Self::NotAQuery => "Only the rows of a SELECT can be edited.",
+            Self::With => "These rows are read through WITH, so they cannot be edited.",
+            Self::NotOneSelect => {
+                "These rows are not from one SELECT of a table, so they cannot be edited."
+            }
+            Self::Settings => {
+                "A SETTINGS clause can change how values are shown, so rows read with one cannot \
+                 be edited."
+            }
+            Self::Format => "Rows read in a FORMAT of their own cannot be edited.",
+            Self::Distinct => "DISTINCT merges identical rows, so these rows cannot be edited.",
+            Self::Grouped => "Grouped rows are not rows of the table, so they cannot be edited.",
+            Self::Filled => {
+                "WITH FILL adds rows the table does not hold, so these rows cannot be edited."
+            }
+            Self::Join => "These rows come from a join, so they cannot be edited.",
+            Self::ArrayJoin => {
+                "ARRAY JOIN repeats a row once for each element, so these rows cannot be edited."
+            }
+            Self::NotATable => "These rows are not read from a table, so they cannot be edited.",
+            Self::Projection => {
+                "Only rows selected as the table's own columns, or *, can be edited."
+            }
+            Self::Other => "DBDelve edits the rows of a plain SELECT of one table only.",
+        }
+    }
+}
+
+/// Whether each name a [`TableRead`] holds was written quoted, which says
+/// whether the server folds its case: one entry per part of the table's name,
+/// and one per entry of the select list, `false` for all but a
+/// [`Projected::Column`].
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Quoting {
+    pub(crate) table: Vec<bool>,
+    pub(crate) columns: Vec<bool>,
+}
+
 /// [`TableRead`] for the last statement of `sql`, when it is a plain select of
 /// one table: no join, subquery, table function, CTE, set operation,
 /// `DISTINCT`, grouping or window clause, and no table alias renaming the
@@ -3847,6 +3927,14 @@ pub(crate) fn table_read_or_why(
     engine: Engine,
     sql: &str,
 ) -> Result<(TableRead, Vec<String>), Unread> {
+    table_read_quoted(engine, sql).map(|(read, shadows, _)| (read, shadows))
+}
+
+/// [`table_read_or_why`], and which of the names it read were quoted.
+pub(crate) fn table_read_quoted(
+    engine: Engine,
+    sql: &str,
+) -> Result<(TableRead, Vec<String>, Quoting), Unread> {
     use sqlparser::ast::{
         GroupByExpr, JoinOperator, ObjectName, OrderByKind, SelectFlavor, SelectItem,
         SelectItemQualifiedWildcardKind, TableFactor, WildcardAdditionalOptions,
@@ -3961,6 +4049,17 @@ pub(crate) fn table_read_or_why(
             .collect()
     };
     let table = parts(name).ok_or(Unread::NotATable)?;
+    let mut quoting = Quoting {
+        table: name
+            .0
+            .iter()
+            .map(|part| {
+                part.as_ident()
+                    .is_some_and(|ident| ident.quote_style.is_some())
+            })
+            .collect(),
+        columns: Vec::with_capacity(select.projection.len().max(1)),
+    };
     // Once aliased, the table is named by its alias alone. Unaliased, by any
     // tail of the name it was written with.
     let qualifiers: Vec<&[String]> = match alias {
@@ -3992,7 +4091,10 @@ pub(crate) fn table_read_or_why(
     };
     let mut shadows = Vec::new();
     let mut column = |expr: &Expr| match expr {
-        Expr::Identifier(ident) => Projected::Column(ident.value.clone()),
+        Expr::Identifier(ident) => (
+            Projected::Column(ident.value.clone()),
+            ident.quote_style.is_some(),
+        ),
         Expr::CompoundIdentifier(idents) => match idents.split_last() {
             Some((last, qualifier))
                 if qualifies(
@@ -4003,42 +4105,48 @@ pub(crate) fn table_read_or_why(
                 ) =>
             {
                 shadows.push(qualifier[0].value.clone());
-                Projected::Column(last.value.clone())
+                (
+                    Projected::Column(last.value.clone()),
+                    last.quote_style.is_some(),
+                )
             }
             // A struct's field, read off a column of the table.
-            _ => Projected::Computed,
+            _ => (Projected::Computed, false),
         },
-        _ => Projected::Computed,
+        _ => (Projected::Computed, false),
     };
 
     let mut columns = Vec::with_capacity(select.projection.len().max(1));
     let mut aliases = Vec::new();
     if select.projection.is_empty() && select.flavor == SelectFlavor::FromFirstNoSelect {
         columns.push(Projected::Every);
+        quoting.columns.push(false);
     }
     for item in &select.projection {
-        columns.push(match item {
-            SelectItem::Wildcard(options) if bare(options) => Projected::Every,
+        let (projected, quoted) = match item {
+            SelectItem::Wildcard(options) if bare(options) => (Projected::Every, false),
             SelectItem::QualifiedWildcard(
                 SelectItemQualifiedWildcardKind::ObjectName(name),
                 options,
             ) if bare(options) && parts(name).is_some_and(|name| qualifies(&name)) => {
                 aliases.extend(parts(name).and_then(|name| name.into_iter().next()));
-                Projected::Every
+                (Projected::Every, false)
             }
             SelectItem::UnnamedExpr(expr) => column(expr),
             SelectItem::ExprWithAlias { expr, alias } => {
-                let projected = column(expr);
+                let (projected, quoted) = column(expr);
                 if !matches!(&projected, Projected::Column(name) if *name == alias.value) {
                     aliases.push(alias.value.clone());
                 }
-                projected
+                (projected, quoted)
             }
             _ => return Err(Unread::Projection),
-        });
+        };
+        columns.push(projected);
+        quoting.columns.push(quoted);
     }
     aliases.extend(shadows);
-    Ok((TableRead { table, columns }, aliases))
+    Ok((TableRead { table, columns }, aliases, quoting))
 }
 
 /// Every unquoted word of `sql`, in order, outside strings and comments; `None`
@@ -5989,6 +6097,32 @@ mod tests {
             insert_template(Engine::SqlServer, "dbo", "orders", &columns[..2]),
             None
         );
+    }
+
+    #[test]
+    fn a_gated_batch_splits_into_its_writes_without_the_bracket() {
+        let update = "UPDATE \"s\".\"t\" SET \"a\" = '1' WHERE \"id\" = '2'";
+        assert_eq!(
+            generated_writes(
+                Engine::Generic,
+                &format!("BEGIN;\n{update};\n{update};\nCOMMIT;")
+            ),
+            Some(vec![update.to_owned(), update.to_owned()])
+        );
+        assert_eq!(
+            generated_writes(Engine::Postgres, &format!("{update};")),
+            Some(vec![update.to_owned()])
+        );
+        for sql in [
+            "BEGIN".to_owned(),
+            "COMMIT;".to_owned(),
+            "SELECT * FROM \"s\".\"t\"".to_owned(),
+            format!("{update};\nSELECT 1;"),
+            format!("BEGIN;\n{update};\nROLLBACK;"),
+            format!("{update};\nCOMMIT;"),
+        ] {
+            assert_eq!(generated_writes(Engine::Generic, &sql), None, "{sql}");
+        }
     }
 
     #[test]

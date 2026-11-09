@@ -218,8 +218,9 @@ impl Host {
     ) -> Result<(InFlight<'_>, Receiver<Routed>), DbError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (sender, answers) = mpsc::channel();
-        let query = matches!(request, Request::Query { .. });
-        let credit = query.then_some(WINDOW as i64);
+        // A write is cancelled as a query is, and carries no rows to credit.
+        let query = matches!(request, Request::Query { .. } | Request::Write { .. });
+        let credit = matches!(request, Request::Query { .. }).then_some(WINDOW as i64);
         {
             let mut routing = lock(&self.shared.routing);
             if let Some(cause) = &routing.reset {

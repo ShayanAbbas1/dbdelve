@@ -389,7 +389,7 @@ fn render_query_surface(
         &tab.editor,
         editor_font_size,
         &tab.query,
-        render_query_toolbar(&profile.session, profile.config.engine(), custom_limit, cx),
+        render_query_toolbar(&profile.session, profile.config.target(), custom_limit, cx),
         bottom,
         cx,
     )
@@ -3440,10 +3440,11 @@ fn render_tab_strip(
 /// the Data/Plan pair on the left, saving and running it on the right.
 fn render_query_toolbar(
     session: &Session,
-    engine: Engine,
+    target: Target,
     custom_limit: Option<&(LimitTarget, Entity<InputState>)>,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
+    let engine = target.engine;
     let t = *theme(cx);
     let workspace = cx.entity().downgrade();
     let confirm_workspace = workspace.clone();
@@ -3513,7 +3514,7 @@ fn render_query_toolbar(
     // writes its edits back to is what the new row is inserted into. Named,
     // since a queue's results can each be a different table.
     let new_row = (!session.naming)
-        .then(|| session.query_insert_target(cx))
+        .then(|| session.query_insert_target(target, cx))
         .flatten()
         .map(|(_, table, _)| insert_button("new-row", format!("Insert in {table}"), t));
 

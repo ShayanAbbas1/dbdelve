@@ -762,11 +762,12 @@ impl Engine {
     }
 
     /// Whether a cell whose type is known as each of `types` -- none, where
-    /// no driver named one -- holds what an edit of it would write back: on an
-    /// engine that edits rows at all, not bytes ([`Engine::is_binary_type`]),
-    /// and on Redis only text that is the whole of its value, never the start
-    /// of a long one, a collection's size or the spelling of bytes that are
-    /// not text.
+    /// no driver named one -- holds what an edit of it would write back: not
+    /// bytes ([`Engine::is_binary_type`]), and on Redis only text that is the
+    /// whole of its value, never the start of a long one, a collection's size
+    /// or the spelling of bytes that are not text. Whether rows are written
+    /// back at all is the target's to say ([`Target::edits_rows`]): Generic
+    /// SQL edits nothing built in and does through a plugin.
     pub fn writes_back<'a>(self, types: impl IntoIterator<Item = &'a str>) -> bool {
         self.spec().writes_back(types)
     }
@@ -1565,6 +1566,8 @@ impl Connection {
     /// where a write that changed nothing, a `RENAMENX` onto a name that is
     /// taken, is an error rather than a `0`. And Snowflake, which sends it
     /// without the active schema, a field only the user's statements carry.
+    /// And a plugin, which runs a batch of writes as one transaction of its
+    /// driver's, each statement changing exactly one row or none saved.
     ///
     /// A `feed` takes its rows as they arrive, as for [`Connection::query`];
     /// the statement carries its own `LIMIT`, so nothing else of [`Fetch`]
@@ -1613,13 +1616,21 @@ impl Connection {
                     ..Fetch::default()
                 },
             ),
+            Self::External(connection) => connection.generated(
+                sql,
+                cancel,
+                Fetch {
+                    feed,
+                    limit,
+                    ..Fetch::default()
+                },
+            ),
             Self::Postgres(_)
             | Self::MySql(_)
             | Self::Sqlite(_)
             | Self::Turso(_)
             | Self::DuckDb(_)
-            | Self::MongoDb(_)
-            | Self::External(_) => self.query(
+            | Self::MongoDb(_) => self.query(
                 sql,
                 cancel,
                 Fetch {

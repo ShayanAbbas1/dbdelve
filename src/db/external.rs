@@ -10,6 +10,7 @@
 mod db2;
 #[cfg(test)]
 pub(crate) mod echo;
+mod edit;
 mod host;
 #[cfg(test)]
 mod psqlodbc;
@@ -30,7 +31,7 @@ use dbdelve_plugin_protocol::limits::{
 };
 use dbdelve_plugin_protocol::{
     ErrorKind, PROTOCOL, Password, REFERENCES, RelationKind as WireKind, Request, Response,
-    Structure as WireStructure,
+    Structure as WireStructure, WRITE,
 };
 
 use super::odbc_string::{self, Refusal};
@@ -41,10 +42,34 @@ use super::{
     IndexKind, NamedDefinition, QueryResult, Reference, Relation, RelationKind, Schema, SshTunnel,
     Stopped, Structure,
 };
+use crate::sql;
 use host::{Host, Routed, failure};
 use rows::Rows;
 
 pub const CANCELLED: &str = "Cancelled.";
+
+/// The dialects whose rows a plugin driver may write back: those with a
+/// conformance subject passing `generated_writes_round_trip` through a real
+/// driver (Postgres through psqlODBC, Generic SQL through Db2's driver and
+/// psqlODBC). Every other dialect is read-only through a plugin, whatever it
+/// can do built in, until a subject proves it. The driver earns the rest per
+/// connection: the plugin offers `write`, and marks the key columns it reads
+/// back exactly.
+pub(super) fn writes_rows(engine: Engine) -> bool {
+    matches!(engine, Engine::Generic | Engine::Postgres)
+}
+
+/// Why rows read through a plugin speaking `engine` are never written back,
+/// when they are not.
+pub(super) fn unwritable(engine: Engine) -> Option<String> {
+    (!writes_rows(engine)).then(|| {
+        format!(
+            "Editing rows through a plugin driver is not supported for {} yet, so these rows \
+             are read-only.",
+            engine.label()
+        )
+    })
+}
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct ExternalConfig {
@@ -271,8 +296,84 @@ impl Connection {
         cancel: &CancelToken,
         fetch: Fetch,
     ) -> Result<QueryResult, DbError> {
+        let read = {
+            let _session = self.host.session();
+            self.read_held(sql, cancel, fetch)?
+        };
+        Ok(self.editable(sql, read))
+    }
+
+    /// A statement DBDelve wrote: a preview, count or lookup runs as
+    /// [`Self::query`] does, and a batch of the grid's writes as one
+    /// [`Request::Write`] ([`Self::write`]), the transaction its brackets
+    /// asked for being the driver's own rather than their text.
+    pub fn generated(
+        &self,
+        sql: &str,
+        cancel: &CancelToken,
+        fetch: Fetch,
+    ) -> Result<QueryResult, DbError> {
+        match sql::generated_writes(self.config.speaks, sql) {
+            Some(statements) => self.write(statements, cancel),
+            None => self.query(sql, cancel, fetch),
+        }
+    }
+
+    /// Whether the plugin runs DBDelve's writes, all or none, through its
+    /// driver's own transaction: only then are its rows offered for editing.
+    fn writes(&self) -> bool {
+        self.opened.optional.iter().any(|name| name == WRITE)
+    }
+
+    /// `statements` as one transaction of the driver's, committed only if
+    /// each changed exactly one row. Sent like a query, so a Cancel under
+    /// `cancel` reaches it, and refused unsent by a plugin that did not offer
+    /// `write` or speaks a dialect DBDelve does not write through a plugin.
+    fn write(&self, statements: Vec<String>, cancel: &CancelToken) -> Result<QueryResult, DbError> {
+        if let Some(reason) = unwritable(self.config.speaks) {
+            return Err(failure(reason));
+        }
+        if !self.writes() {
+            return Err(failure(format!(
+                "This version of the {} plugin cannot save edits, so nothing was sent.",
+                self.host.plugin.name
+            )));
+        }
         let _session = self.host.session();
-        self.query_held(sql, cancel, fetch)
+        let started = Instant::now();
+        let (result, _) = self.send(
+            Request::Write { statements },
+            cancel,
+            Fetch::default(),
+            started,
+        )?;
+        Ok(result)
+    }
+
+    /// The edit target of the rows `sql` read, or why it has none, put on
+    /// the result. Asked of the plugin only for a dialect DBDelve writes
+    /// through a plugin, on a connection whose plugin offered `write`.
+    fn editable(&self, sql: &str, read: (QueryResult, Vec<bool>)) -> QueryResult {
+        let (mut result, exact) = read;
+        if result.columns.is_empty() {
+            return result;
+        }
+        let speaks = self.config.speaks;
+        if let Some(reason) = unwritable(speaks) {
+            result.read_only_reason = Some(reason);
+            return result;
+        }
+        if !self.writes() {
+            result.read_only_reason = Some(format!(
+                "This version of the {} plugin cannot save edits, so these rows are read-only.",
+                self.host.plugin.name
+            ));
+            return result;
+        }
+        let describe = |schema: &str, relation: &str| self.described(schema, relation);
+        (result.edit, result.read_only_reason) =
+            edit::target(speaks, sql, &result.columns, &exact, describe);
+        result
     }
 
     /// [`Self::query`] with the session already held.
@@ -282,6 +383,17 @@ impl Connection {
         cancel: &CancelToken,
         fetch: Fetch,
     ) -> Result<QueryResult, DbError> {
+        self.read_held(sql, cancel, fetch).map(|(result, _)| result)
+    }
+
+    /// [`Self::query_held`], with which of the result's columns the plugin
+    /// marked as reading back exactly.
+    fn read_held(
+        &self,
+        sql: &str,
+        cancel: &CancelToken,
+        fetch: Fetch,
+    ) -> Result<(QueryResult, Vec<bool>), DbError> {
         fetch.hold()?;
         let started = Instant::now();
         let eligible = fetch.reads_only && fetch.limit.is_some() && self.opened.stops_early;
@@ -289,6 +401,19 @@ impl Connection {
             sql: sql.to_owned(),
             eligible,
         };
+        self.send(query, cancel, fetch, started)
+    }
+
+    /// A query or write, sent and read under `cancel`, with the session
+    /// already held.
+    fn send(
+        &self,
+        request: Request,
+        cancel: &CancelToken,
+        fetch: Fetch,
+        started: Instant,
+    ) -> Result<(QueryResult, Vec<bool>), DbError> {
+        let eligible = matches!(request, Request::Query { eligible: true, .. });
         // Sent and claimed under the run's lock, so a Cancel either finds the
         // run asked before anything went out, or finds the id with its request
         // already queued ahead of the cancel's frame.
@@ -297,7 +422,7 @@ impl Connection {
             if run.asked {
                 return Err(failure("Cancelled before it was sent.".into()));
             }
-            let sent = self.host.request(query)?;
+            let sent = self.host.request(request)?;
             run.handles.push(sent.0.id.to_string());
             sent
         };
@@ -356,12 +481,18 @@ impl Connection {
     }
 
     pub fn structure(&self, schema: &str, relation: &str) -> Result<Structure, DbError> {
+        self.described(schema, relation).map(structure_from)
+    }
+
+    /// The plugin's own answer to `structure`, its key's names as the
+    /// catalog holds them.
+    fn described(&self, schema: &str, relation: &str) -> Result<WireStructure, DbError> {
         let request = Request::Structure {
             schema: schema.to_owned(),
             relation: relation.to_owned(),
         };
         match self.call(request)? {
-            Response::Structure(wire) => Ok(structure_from(wire)),
+            Response::Structure(wire) => Ok(wire),
             _ => Err(self
                 .host
                 .violated("an answer to `structure` that is not `structure`", false)),
@@ -468,7 +599,7 @@ impl Connection {
         id: u64,
         answers: &Receiver<Routed>,
         mut read: Read<'_>,
-    ) -> Result<QueryResult, DbError> {
+    ) -> Result<(QueryResult, Vec<bool>), DbError> {
         loop {
             let Ok(routed) = answers.recv() else {
                 return Err(self.host.reset_error(true));
@@ -715,7 +846,7 @@ impl<'a> Read<'a> {
     /// The result, timed as Postgres's is: to the last kept row when rows
     /// past the limit came after it. `Err` is a plugin claiming to have ended
     /// early a statement it was never allowed to.
-    fn finish(mut self, end: End) -> Result<QueryResult, String> {
+    fn finish(mut self, end: End) -> Result<(QueryResult, Vec<bool>), String> {
         if end.stopped && !(self.eligible && self.stop_sent) {
             return Err("`end` saying it stopped a statement it was not asked to stop".into());
         }
@@ -750,9 +881,12 @@ impl<'a> Read<'a> {
                 end.more_sets
             ));
         }
-        self.result.read_only_reason =
-            Some("Rows read through a plugin driver are read-only.".into());
-        Ok(self.result)
+        let exact = self
+            .set
+            .as_ref()
+            .map(|(_, rows)| rows.exact().to_vec())
+            .unwrap_or_default();
+        Ok((self.result, exact))
     }
 }
 
@@ -854,7 +988,7 @@ mod tests {
                 dbms_version: env!("CARGO_PKG_VERSION").to_owned(),
                 driver: "dbdelve-echo".to_owned(),
                 stops_early: true,
-                optional: vec!["references".to_owned()],
+                optional: vec!["references".to_owned(), "write".to_owned()],
             }
         );
         let pid = connection.host.pid().unwrap();
@@ -892,7 +1026,7 @@ mod tests {
     }
 
     #[test]
-    fn a_plugin_connection_answers_through_the_engine_enum_and_never_edits() {
+    fn a_plugin_connection_answers_through_the_engine_enum() {
         let connection = through_the_engine_enum(config());
         let cancel = crate::db::CancelToken::default();
         let read = connection
@@ -908,11 +1042,215 @@ mod tests {
             assert!(result.edit.is_none());
             assert_eq!(
                 result.read_only_reason.as_deref(),
-                Some("Rows read through a plugin driver are read-only.")
+                Some(crate::sql::Unread::Unparsed.reason())
             );
         }
         assert_eq!(connection.reported_dbms(), Some("Echo"));
         assert!(connection.stops_at_limit());
+    }
+
+    fn speaking(speaks: Engine) -> crate::db::Connection {
+        through_the_engine_enum(ExternalConfig { speaks, ..config() })
+    }
+
+    fn read(connection: &crate::db::Connection, sql: &str) -> QueryResult {
+        connection
+            .query(sql, &CancelToken::default(), Fetch::default())
+            .unwrap_or_else(|error| panic!("{sql}: {error}"))
+    }
+
+    #[test]
+    fn a_preview_and_a_query_of_a_keyed_table_name_their_rows_by_its_key() {
+        let connection = speaking(Engine::Postgres);
+        let preview = connection
+            .generated(
+                "SELECT * FROM \"main\".\"accounts\" LIMIT 10",
+                &CancelToken::default(),
+                None,
+                None,
+            )
+            .unwrap();
+        let typed = read(&connection, "SELECT ID, Label FROM Main.Accounts");
+        for result in [preview, typed] {
+            let edit = result
+                .edit
+                .unwrap_or_else(|| panic!("{:?}", result.read_only_reason));
+            assert_eq!(
+                (edit.schema.as_str(), edit.table.as_str()),
+                ("main", "accounts")
+            );
+            assert_eq!(edit.columns, [Some("id".into()), Some("label".into())]);
+            assert_eq!(edit.keys, [0]);
+        }
+    }
+
+    #[test]
+    fn generic_sql_finds_the_one_table_a_bare_name_folds_to() {
+        let connection = speaking(Engine::Generic);
+        let items = read(&connection, "SELECT id, label FROM main.items")
+            .edit
+            .unwrap();
+        assert_eq!(
+            (items.schema.as_str(), items.table.as_str()),
+            ("MAIN", "ITEMS")
+        );
+        assert_eq!(items.columns, [Some("ID".into()), Some("LABEL".into())]);
+        let accounts = read(&connection, "SELECT * FROM main.accounts")
+            .edit
+            .unwrap();
+        assert_eq!(accounts.schema, "main");
+    }
+
+    #[test]
+    fn rows_whose_table_or_key_is_in_doubt_stay_read_only_and_say_why() {
+        let connection = speaking(Engine::Generic);
+        for (sql, starts) in [
+            ("SELECT * FROM accounts", "Name the table with its schema"),
+            (
+                "SELECT * FROM main.both",
+                "Both MAIN.BOTH and main.both exist",
+            ),
+            (
+                "SELECT * FROM main.keyless",
+                "main.keyless has no primary key",
+            ),
+            (
+                "SELECT label FROM main.accounts",
+                "The key column id is not among",
+            ),
+            (
+                "SELECT * FROM main.inexact",
+                "The driver does not read the key column id",
+            ),
+            (
+                "SELECT id, upper(label) FROM main.accounts",
+                "Only rows selected as",
+            ),
+            (
+                "SELECT id, label FROM main.mixed",
+                "mixed has both a column LABEL",
+            ),
+        ] {
+            let result = read(&connection, sql);
+            assert!(result.edit.is_none(), "{sql}");
+            let reason = result.read_only_reason.unwrap_or_default();
+            assert!(reason.starts_with(starts), "{sql}: {reason}");
+        }
+    }
+
+    #[test]
+    fn a_dialect_not_proven_through_a_plugin_or_a_plugin_without_write_reads_only() {
+        let reason = |connection: &crate::db::Connection| {
+            read(connection, "SELECT * FROM main.accounts").read_only_reason
+        };
+        let mysql = speaking(Engine::MySql);
+        assert_eq!(reason(&mysql), unwritable(Engine::MySql));
+        let refused = mysql
+            .generated(
+                &update_batch(Engine::MySql, &["1"]),
+                &CancelToken::default(),
+                None,
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(Some(refused.message), unwritable(Engine::MySql));
+        let plain = open_with(&[("DBDELVE_ECHO_PLAIN", "1")]).unwrap();
+        let result = plain
+            .query(
+                "SELECT * FROM main.accounts",
+                &CancelToken::default(),
+                Fetch::default(),
+            )
+            .unwrap();
+        assert!(result.edit.is_none());
+        assert_eq!(
+            result.read_only_reason.as_deref(),
+            Some("This version of the Echo plugin cannot save edits, so these rows are read-only.")
+        );
+    }
+
+    fn update_batch(engine: Engine, ids: &[&str]) -> String {
+        use crate::result_grid::{NewValue, PendingRow};
+        let rows: Vec<PendingRow> = ids
+            .iter()
+            .map(|id| PendingRow {
+                schema: "main".into(),
+                table: "accounts".into(),
+                sets: vec![("label".into(), NewValue::Value("new".into()))],
+                keys: vec![("id".into(), (*id).into())],
+                ..PendingRow::default()
+            })
+            .collect();
+        let batch = crate::sql::update_batch(engine, &rows).unwrap();
+        assert!(crate::sql::is_generated_write_on(engine, &batch), "{batch}");
+        batch
+    }
+
+    fn last(connection: &crate::db::Connection) -> String {
+        one_cell(&read(connection, "last"))
+    }
+
+    #[test]
+    fn a_batch_of_writes_is_one_write_request_without_its_brackets() {
+        let connection = speaking(Engine::Generic);
+        let batch = update_batch(Engine::Generic, &["1", "2"]);
+        assert!(batch.starts_with("BEGIN;"), "{batch}");
+        let written = connection
+            .generated(&batch, &CancelToken::default(), None, None)
+            .unwrap();
+        assert_eq!(written.rows_affected, Some(2));
+        assert_eq!(
+            last(&connection),
+            "UPDATE \"main\".\"accounts\" SET \"label\" = 'new' WHERE \"id\" = '1'\n\
+             UPDATE \"main\".\"accounts\" SET \"label\" = 'new' WHERE \"id\" = '2'"
+        );
+
+        let postgres = speaking(Engine::Postgres);
+        let delete =
+            crate::sql::delete_row(Engine::Postgres, "main", "accounts", &[("id", "1")], &[])
+                .unwrap();
+        let deleted = postgres
+            .generated(&delete, &CancelToken::default(), None, None)
+            .unwrap();
+        assert_eq!(deleted.rows_affected, Some(1));
+        assert_eq!(last(&postgres), delete.trim_end_matches(';'));
+    }
+
+    #[test]
+    fn a_write_that_changes_no_row_saves_nothing_and_says_so() {
+        let connection = speaking(Engine::Postgres);
+        let batch = update_batch(Engine::Postgres, &["1", "missing"]);
+        let error = connection
+            .generated(&batch, &CancelToken::default(), None, None)
+            .unwrap_err();
+        assert_eq!(
+            error.message,
+            "Statement 2 changed 0 rows, so nothing was saved."
+        );
+        assert!(!connection.is_lost());
+    }
+
+    #[test]
+    fn a_write_the_plugin_did_not_offer_is_never_sent() {
+        let connection = open_with(&[("DBDELVE_ECHO_PLAIN", "1")]).unwrap();
+        connection
+            .query("echo before", &CancelToken::default(), Fetch::default())
+            .unwrap();
+        let error = connection
+            .generated(
+                &update_batch(Engine::Postgres, &["1"]),
+                &CancelToken::default(),
+                Fetch::default(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.message,
+            "This version of the Echo plugin cannot save edits, so nothing was sent."
+        );
+        let last = connection
+            .query("last", &CancelToken::default(), Fetch::default())
+            .unwrap();
+        assert_eq!(cell(&last), Some("echo before"));
     }
 
     #[test]

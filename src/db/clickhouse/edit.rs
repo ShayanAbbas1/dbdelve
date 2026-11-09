@@ -288,8 +288,6 @@ impl Table {
     }
 }
 
-const SELECT_LIST: &str = "Only rows selected as the table's own columns, or *, can be edited.";
-
 const FINAL: &str = "FINAL merges rows as they are read, so these rows cannot be edited.";
 
 pub(super) const SESSION_SET: &str = "This session ran a SET, which can change how values are \
@@ -315,40 +313,7 @@ pub(super) fn query_shape(sql: &str) -> Result<(TableRead, Vec<String>), &'stati
     {
         return Err(FINAL);
     }
-    table_read_or_why(Engine::ClickHouse, sql).map_err(unread)
-}
-
-/// Why a user's query has no edit target, by what [`table_read_or_why`]
-/// found in it.
-pub(super) fn unread(why: Unread) -> &'static str {
-    match why {
-        Unread::Unparsed => {
-            "DBDelve cannot read this statement whole, so it cannot tell which table its rows are \
-             from."
-        }
-        Unread::NotAQuery => "Only the rows of a SELECT can be edited.",
-        Unread::With => "These rows are read through WITH, so they cannot be edited.",
-        Unread::NotOneSelect => {
-            "These rows are not from one SELECT of a table, so they cannot be edited."
-        }
-        Unread::Settings => {
-            "A SETTINGS clause can change how values are shown, so rows read with one cannot be \
-             edited."
-        }
-        Unread::Format => "Rows read in a FORMAT of their own cannot be edited.",
-        Unread::Distinct => "DISTINCT merges identical rows, so these rows cannot be edited.",
-        Unread::Grouped => "Grouped rows are not rows of the table, so they cannot be edited.",
-        Unread::Filled => {
-            "WITH FILL adds rows the table does not hold, so these rows cannot be edited."
-        }
-        Unread::Join => "These rows come from a join, so they cannot be edited.",
-        Unread::ArrayJoin => {
-            "ARRAY JOIN repeats a row once for each element, so these rows cannot be edited."
-        }
-        Unread::NotATable => "These rows are not read from a table, so they cannot be edited.",
-        Unread::Projection => SELECT_LIST,
-        Unread::Other => "DBDelve edits the rows of a plain SELECT of one table only.",
-    }
+    table_read_or_why(Engine::ClickHouse, sql).map_err(Unread::reason)
 }
 
 /// The column of `table` (named `name`) behind each of `columns`, the result
@@ -397,7 +362,7 @@ pub(super) fn origins(
                 origins.extend(columns[at..at + spread].iter().map(|c| c.name.clone()));
             }
             Projected::Column(written) => origins.push(written.clone()),
-            Projected::Computed => return Err(SELECT_LIST.into()),
+            Projected::Computed => return Err(Unread::Projection.reason().into()),
         }
     }
     if origins.len() != columns.len() {
@@ -1240,49 +1205,52 @@ mod tests {
             ("SELECT * FROM t AS x FINAL", FINAL),
             (
                 "SELECT * FROM t JOIN u ON t.id = u.id",
-                unread(Unread::Join),
+                Unread::Join.reason(),
             ),
-            ("SELECT * FROM t, u", unread(Unread::Join)),
+            ("SELECT * FROM t, u", Unread::Join.reason()),
             (
                 "SELECT id, count() FROM t GROUP BY id",
-                unread(Unread::Grouped),
+                Unread::Grouped.reason(),
             ),
             (
                 "SELECT id FROM t ARRAY JOIN tags",
-                unread(Unread::ArrayJoin),
+                Unread::ArrayJoin.reason(),
             ),
             (
                 "SELECT id FROM t LEFT ARRAY JOIN tags AS tag",
-                unread(Unread::ArrayJoin),
+                Unread::ArrayJoin.reason(),
             ),
             (
                 "WITH x AS (SELECT * FROM t) SELECT * FROM x",
-                unread(Unread::With),
+                Unread::With.reason(),
             ),
-            ("SELECT * FROM (SELECT * FROM t)", unread(Unread::NotATable)),
-            ("SELECT * FROM numbers(10)", unread(Unread::NotATable)),
-            ("SELECT 1", unread(Unread::NotATable)),
+            (
+                "SELECT * FROM (SELECT * FROM t)",
+                Unread::NotATable.reason(),
+            ),
+            ("SELECT * FROM numbers(10)", Unread::NotATable.reason()),
+            ("SELECT 1", Unread::NotATable.reason()),
             (
                 "SELECT * FROM t SETTINGS session_timezone = 'Asia/Tokyo'",
-                unread(Unread::Settings),
+                Unread::Settings.reason(),
             ),
             (
                 "SELECT * FROM t SETTINGS max_threads = 1",
-                unread(Unread::Settings),
+                Unread::Settings.reason(),
             ),
-            ("SELECT * FROM t FORMAT JSON", unread(Unread::Format)),
-            ("SELECT DISTINCT * FROM t", unread(Unread::Distinct)),
+            ("SELECT * FROM t FORMAT JSON", Unread::Format.reason()),
+            ("SELECT DISTINCT * FROM t", Unread::Distinct.reason()),
             (
                 "SELECT * FROM t UNION ALL SELECT * FROM t",
-                unread(Unread::NotOneSelect),
+                Unread::NotOneSelect.reason(),
             ),
             (
                 "SELECT * FROM t ORDER BY id WITH FILL",
-                unread(Unread::Filled),
+                Unread::Filled.reason(),
             ),
-            ("SHOW TABLES", unread(Unread::NotAQuery)),
-            ("SELECT * FROM t WHERE", unread(Unread::Unparsed)),
-            ("SELECT * EXCEPT (id) FROM t", unread(Unread::Projection)),
+            ("SHOW TABLES", Unread::NotAQuery.reason()),
+            ("SELECT * FROM t WHERE", Unread::Unparsed.reason()),
+            ("SELECT * EXCEPT (id) FROM t", Unread::Projection.reason()),
         ] {
             assert_eq!(query_shape(sql).map(drop), Err(reason), "{sql}");
         }
@@ -1388,7 +1356,7 @@ mod tests {
             (
                 "SELECT id + 1 FROM t",
                 vec!["plus(id, 1)"],
-                SELECT_LIST.to_string(),
+                Unread::Projection.reason().to_string(),
             ),
             ("SELECT id, label FROM t", vec!["id"], UNMAPPED.to_string()),
         ] {

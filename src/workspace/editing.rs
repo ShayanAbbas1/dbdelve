@@ -80,13 +80,7 @@ impl Workspace {
             // The grid's own columns, where its rows are written back to: one
             // table, which is never so for a join or a computed result.
             Tab::Query(_) => {
-                // The grid's `edit` was set by whichever driver read its rows,
-                // and the profile may have moved to a plugin's since.
-                if !self.target().takes_inserts(db::RelationKind::Table) {
-                    self.note("These rows take no new row.".into(), cx);
-                    return;
-                }
-                let Some(target) = profile.session.query_insert_target(cx) else {
+                let Some(target) = profile.session.query_insert_target(self.target(), cx) else {
                     self.note("These rows take no new row.".into(), cx);
                     return;
                 };
@@ -194,12 +188,13 @@ impl Workspace {
             return;
         }
 
+        let notes = self.target().review_notes(&statement);
         if let Some(profile) = self.profile_mut() {
             profile.session.insert_form = None;
             profile.session.apply_review = Some(ApplyReview {
                 tab,
                 title: "Insert",
-                notes: engine.review_notes(&statement),
+                notes,
                 sql: statement,
             });
         }
@@ -1174,8 +1169,8 @@ impl Workspace {
         // outright.
         let target = self.target();
         let engine = target.engine;
-        if !target.edits_rows() {
-            self.note(format!("{} rows are read-only here.", target.label()), cx);
+        if let Some(reason) = target.unwritable() {
+            self.note(reason, cx);
             return;
         }
         if !self.require(Mode::ReadWrite, cx) {
@@ -1277,7 +1272,7 @@ impl Workspace {
             profile.session.apply_review = Some(ApplyReview {
                 tab,
                 title: "Delete row",
-                notes: engine.review_notes(&statement),
+                notes: target.review_notes(&statement),
                 sql: statement,
             });
         }
@@ -1555,7 +1550,7 @@ impl Workspace {
 
     /// Turn the grid's pending edits into SQL and put it where the user can read
     /// it: the query tab's buffer, or the review modal on a relation tab and on
-    /// a query tab whose engine reviews them (`Engine::reviews_query_edits`).
+    /// a query tab whose target reviews them (`Target::reviews_query_edits`).
     ///
     /// Binds to `cmd+s` -- a deliberate departure from `cmd+enter` ("run the
     /// statement under the cursor"), which stays unrelated so neither
@@ -1579,11 +1574,9 @@ impl Workspace {
         // Asked of the profile as it is now, not of the grid: its rows, and the
         // `edit` that opened its cells, may have been read through a driver
         // the profile has since left.
-        if !self.target().edits_rows() {
-            self.note(
-                "Rows read through a plugin driver are read-only.".into(),
-                cx,
-            );
+        let target = self.target();
+        if let Some(reason) = target.unwritable() {
+            self.note(reason, cx);
             return;
         }
         let own_review = profile.session.apply_review_covers(tab);
@@ -1609,9 +1602,9 @@ impl Workspace {
             return;
         }
 
-        let notes = self.engine().review_notes(&batch);
+        let notes = target.review_notes(&batch);
         match tab {
-            Tab::Query(_) if !self.engine().reviews_query_edits() => {
+            Tab::Query(_) if !target.reviews_query_edits() => {
                 if !own_review {
                     self.apply_in_buffer(batch, window, cx);
                 }

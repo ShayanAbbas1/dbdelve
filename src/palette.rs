@@ -3592,7 +3592,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
     // engine that takes inserts, and a deleted one where the engine deletes
     // them there as well as on a relation's.
     if session.active_query_tab().is_some() {
-        if let Some((_, table, _)) = session.query_insert_target(cx) {
+        if let Some((_, table, _)) = session.query_insert_target(profile.config.target(), cx) {
             items.push(command(
                 &format!("Insert in {table}…"),
                 icon::PLUS,
