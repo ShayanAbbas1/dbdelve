@@ -354,6 +354,7 @@ impl Connection {
         let (result, _) = self.send(
             Request::Write { statements },
             None,
+            false,
             cancel,
             Fetch::default(),
             started,
@@ -413,16 +414,19 @@ impl Connection {
             eligible,
         };
         let leaves = sql::leaves(self.config.speaks, sql).transaction;
-        self.send(query, leaves, cancel, fetch, started)
+        let uncertain = sql::transaction_uncertain(self.config.speaks, sql);
+        self.send(query, leaves, uncertain, cancel, fetch, started)
     }
 
     /// A query or write, sent and read under `cancel`, with the session
     /// already held. `leaves` is whether the request leaves a transaction
-    /// open, where it says.
+    /// open, where it says, and `uncertain` that it may leave one open
+    /// whatever `leaves` says.
     fn send(
         &self,
         request: Request,
         leaves: Option<bool>,
+        uncertain: bool,
         cancel: &CancelToken,
         fetch: Fetch,
         started: Instant,
@@ -441,7 +445,7 @@ impl Connection {
             // `read`): a request sent is only queued, and a plugin answers
             // one cancelled before it ran without running it, so a COMMIT
             // cancelled unsent or unrun leaves the user's transaction open.
-            if leaves == Some(true) {
+            if leaves == Some(true) || uncertain {
                 self.host.in_transaction.store(true, Ordering::Relaxed);
             }
             run.handles.push(sent.0.id.to_string());
@@ -1295,6 +1299,25 @@ mod tests {
             read(&connection, end);
             assert_eq!(write().unwrap().rows_affected, Some(1));
         }
+    }
+
+    #[test]
+    fn an_opening_sqlparser_cannot_read_refuses_writes_until_it_ends() {
+        let connection = speaking(Engine::Postgres);
+        let batch = update_batch(Engine::Postgres, &["1"]);
+        let write = || connection.generated(&batch, &CancelToken::default(), None, None);
+        let _ = connection.query(
+            "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ WRITE DEFERRABLE",
+            &CancelToken::default(),
+            Fetch::default(),
+        );
+        let refused = write().unwrap_err();
+        assert!(
+            refused.message.starts_with("Commit or roll back"),
+            "{refused}"
+        );
+        read(&connection, "rollback");
+        assert_eq!(write().unwrap().rows_affected, Some(1));
     }
 
     #[test]

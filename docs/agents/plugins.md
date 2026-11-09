@@ -67,10 +67,12 @@ plugin that ships. Where the code is:
   (`Host::in_transaction`, read off each statement as `sql::leaves` reads it,
   checked in `Connection::write`, which every grid write reaches): the driver's
   commit would commit the user's changes, and its rollback lose them. Opening
-  is marked once the statement is sent; ending only once it is answered with
-  an `end` or a server error, since a sent request is only queued and a plugin
-  answers one cancelled before it ran without running it. Any other answer
-  leaves it marked, and the user's own `COMMIT` or `ROLLBACK` clears it.
+  is marked once the statement is sent, as is anything that may open one
+  where `sql::leaves` cannot say (`sql::transaction_uncertain`); ending only
+  once it is answered with an `end` or a server error, since a sent request is
+  only queued and a plugin answers one cancelled before it ran without running
+  it. Any other answer leaves it marked, and the user's own `COMMIT` or
+  `ROLLBACK` clears it.
 - **What v1 leaves out:** `routines`, `sizes` and `databases` answer empty,
   Copy DDL is off, and only a statement's first result set crosses (the rest
   are counted, and the result says how many were not shown).

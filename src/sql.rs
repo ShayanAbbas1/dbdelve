@@ -4307,6 +4307,36 @@ pub(crate) fn leaves(engine: Engine, sql: &str) -> Leaves {
     leaves
 }
 
+/// Whether `sql` may leave a transaction open where [`leaves`] cannot say:
+/// text sqlparser cannot read that names a `BEGIN` or `START TRANSACTION`
+/// the server may well read.
+pub(crate) fn transaction_uncertain(engine: Engine, sql: &str) -> bool {
+    let Some(dialect) = dialect(engine).filter(|_| !engine.spec().sql.stateless_requests) else {
+        return false;
+    };
+    if SqlParser::parse_sql(dialect.as_ref(), sql).is_ok() {
+        return false;
+    }
+    let tokens = Tokenizer::new(dialect.as_ref(), sql)
+        .tokenize()
+        .unwrap_or_default();
+    let keywords: Vec<Keyword> = tokens
+        .iter()
+        .filter_map(|token| match token {
+            Token::Word(word) => Some(word.keyword),
+            _ => None,
+        })
+        .collect();
+    keywords
+        .iter()
+        .enumerate()
+        .any(|(at, keyword)| match keyword {
+            Keyword::BEGIN => true,
+            Keyword::START => keywords.get(at + 1) == Some(&Keyword::TRANSACTION),
+            _ => false,
+        })
+}
+
 impl Leaves {
     fn add(&mut self, statement: &Statement) {
         match statement {
@@ -9490,6 +9520,33 @@ mod tests {
         assert!(plain_read(Engine::Postgres, "SELECT nextval FROM t"));
         assert!(plain_read(Engine::MySql, "SELECT @x, 1"));
         assert!(plain_read(Engine::SqlServer, "SELECT @@VERSION"));
+    }
+
+    #[test]
+    fn an_opening_sqlparser_cannot_read_leaves_the_transaction_uncertain() {
+        for statement in [
+            "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ WRITE DEFERRABLE",
+            "START TRANSACTION READ ONLY NOT DEFERRABLE",
+            "BEGIN\nselec 1",
+        ] {
+            assert_eq!(leaves(Engine::Postgres, statement).transaction, None);
+            assert!(
+                transaction_uncertain(Engine::Postgres, statement),
+                "{statement}"
+            );
+        }
+        for statement in [
+            "BEGIN",
+            "SELECT 1",
+            "selec 1",
+            "SELECT * FROM t START WITH a = 1 CONNECT BY PRIOR a = b",
+            "DO $$ BEGIN NULL; END $$",
+        ] {
+            assert!(
+                !transaction_uncertain(Engine::Postgres, statement),
+                "{statement}"
+            );
+        }
     }
 
     #[test]
