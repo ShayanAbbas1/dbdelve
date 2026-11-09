@@ -31,7 +31,7 @@ plugin that ships. Where the code is:
   other dialect is `Abilities::NONE`. Abilities are asked of `Target`; asking
   `Engine` would hand a plugin profile its dialect's writes.
 - **The edit target is DBDelve's own reading** (`external/edit.rs`), since a
-  driver says nothing of where a column came from, and only on a connection
+  driver need not say where a column came from, and only on a connection
   whose plugin offered `write`. One plain `SELECT` of a schema-qualified table
   (the session's schema is not known to DBDelve), resolved through the
   plugin's `structure`: a quoted name as written, an unquoted one folded as
@@ -43,8 +43,11 @@ plugin that ships. Where the code is:
   (`edit::computed`). The key must be whole in the result, every key column
   `dbdelve.exact`, and read as the catalog types it; other columns' types are
   not compared, since drivers spell them differently in a result and in the
-  catalog (psqlODBC: `unknown` for `json`). A lookup that fails leaves the
-  rows read-only and the query succeeded.
+  catalog (psqlODBC: `unknown` for `json`). Where the driver names a base
+  for any column (`dbdelve.base_*`), every column must name exactly the one
+  DBDelve read, compared case and all (`edit::agrees`); a result with none
+  anywhere, Db2's unmeasured, rests on the reading alone. A lookup that fails
+  leaves the rows read-only and the query succeeded.
 - **The grid's writes are one `write`.** `Connection::generated` sends a batch
   the gate admits as `write`, its statements cut from the gate's own tree
   (`sql::generated_writes`) with the `BEGIN`/`COMMIT` bracket dropped; anything
@@ -141,6 +144,11 @@ Field metadata: `dbdelve.type` is the driver's name for the column's type, and
 `dbdelve.exact` (`EXACT`), `"true"` on a column whose values travel as the
 server's own text that reads back as the same value, says a row can be found by
 them in a `WHERE`. A key column without it does not make rows editable.
+`dbdelve.base_table` and `dbdelve.base_column` (`BASE_TABLE`, `BASE_COLUMN`,
+with `dbdelve.base_schema` beside them where there is one) name the table
+column a result column is read from, set together and only where the driver
+names both: psqlODBC (`SQL_DESC_BASE_COLUMN_NAME`) repeats an expression's
+label as its base column, `current_schema` included, and names no table.
 
 ## Opening
 

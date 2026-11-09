@@ -18,8 +18,8 @@ use arrow_schema::SchemaRef;
 use dbdelve_plugin_protocol::arrow::{decode_batch, decode_schema};
 use dbdelve_plugin_protocol::limits::{CANCEL_DEADLINE, credit_cost};
 use dbdelve_plugin_protocol::{
-    EXACT, ErrorKind, Frame, Kind, PROTOCOL, Password, Reference, RelationKind, Request, Response,
-    WRITE, read_frame, write_frame,
+    BASE_COLUMN, BASE_SCHEMA, BASE_TABLE, EXACT, ErrorKind, Frame, Kind, PROTOCOL, Password,
+    Reference, RelationKind, Request, Response, WRITE, read_frame, write_frame,
 };
 
 struct Bridge {
@@ -1361,4 +1361,58 @@ fn live_only_text_and_exact_numbers_are_exact() {
             true, true, true, true, true, true, false, false, false, false, false
         ]
     );
+}
+
+/// psqlODBC names the table column behind a column read from one, under any
+/// alias, and repeats the label of anything else with no table, which is why
+/// the bridge reports a base only beside a table.
+#[test]
+#[ignore = "needs psqlODBC and a Postgres: set dbdelve_ODBC_POSTGRES, _USER and _PASSWORD"]
+fn live_postgres_a_column_names_the_table_column_it_is_read_from() {
+    let mut bridge = Bridge::open_postgres();
+    for sql in [
+        "DROP TABLE IF EXISTS public.dbdelve_odbc_base",
+        "CREATE TABLE public.dbdelve_odbc_base (\"current_schema\" name PRIMARY KEY, \"Label\" text)",
+    ] {
+        bridge.query(sql);
+    }
+    let bases = |bridge: &mut Bridge, sql: &str| -> Vec<Option<[String; 3]>> {
+        let outcome = bridge.query(sql);
+        let schema = outcome.schema.expect("a result set");
+        schema
+            .fields()
+            .iter()
+            .map(|field| {
+                let said = |key| field.metadata().get(key).cloned();
+                Some([said(BASE_SCHEMA)?, said(BASE_TABLE)?, said(BASE_COLUMN)?])
+            })
+            .collect()
+    };
+    let base = |column: &str| {
+        Some([
+            "public".to_string(),
+            "dbdelve_odbc_base".to_string(),
+            column.to_string(),
+        ])
+    };
+    let cases = [
+        (
+            "SELECT * FROM public.dbdelve_odbc_base",
+            vec![base("current_schema"), base("Label")],
+        ),
+        (
+            "SELECT \"Label\" AS current_schema, b.\"current_schema\" AS \"Label\" \
+             FROM public.dbdelve_odbc_base b",
+            vec![base("Label"), base("current_schema")],
+        ),
+        (
+            "SELECT current_schema, upper(\"Label\") AS \"Label\", 1 AS one \
+             FROM public.dbdelve_odbc_base",
+            vec![None, None, None],
+        ),
+    ];
+    for (sql, expected) in cases {
+        assert_eq!(bases(&mut bridge, sql), expected, "{sql}");
+    }
+    bridge.query("DROP TABLE public.dbdelve_odbc_base");
 }

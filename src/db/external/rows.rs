@@ -11,7 +11,7 @@ use arrow_array::{
 use arrow_buffer::NullBuffer;
 use arrow_cast::display::{ArrayFormatter, FormatOptions};
 use arrow_schema::{DataType, SchemaRef};
-use dbdelve_plugin_protocol::EXACT;
+use dbdelve_plugin_protocol::{BASE_COLUMN, BASE_SCHEMA, BASE_TABLE, EXACT};
 
 use super::host::failure;
 use crate::db::{Column, DbError, Row, RowBuilder};
@@ -28,14 +28,30 @@ const SPELLING: FormatOptions<'static> = FormatOptions::new()
     .with_timestamp_tz_format(Some("%Y-%m-%d %H:%M:%S%.f%:z"))
     .with_time_format(Some("%H:%M:%S%.f"));
 
+/// What a plugin says of one result column besides its name and type. Kept
+/// here rather than on [`Column`], since nothing outside the plugin host asks.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct Said {
+    /// Its values travel as text the server reads back as the same value, so
+    /// a row can be found by them.
+    pub(super) exact: bool,
+    /// The table column it is read from, as the driver names it.
+    pub(super) base: Option<Base>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Base {
+    /// `None` where the driver names no schema.
+    pub(super) schema: Option<String>,
+    pub(super) table: String,
+    pub(super) column: String,
+}
+
 /// One result set's columns, and the buffers its rows are built in, reused
 /// from row to row.
 pub(super) struct Rows {
     columns: Vec<Column>,
-    /// Which columns the plugin sends as text the server reads back as the
-    /// same value, so a row can be found by them. Kept here rather than on
-    /// [`Column`], since nothing outside the plugin host asks.
-    exact: Vec<bool>,
+    said: Vec<Said>,
     row: RowBuilder,
     cell: String,
 }
@@ -56,19 +72,26 @@ impl Rows {
                 ),
             })
             .collect();
-        let exact = schema
+        let said = schema
             .fields()
             .iter()
             .map(|field| {
-                field
-                    .metadata()
-                    .get(EXACT)
-                    .is_some_and(|value| value == "true")
+                let metadata = field.metadata();
+                Said {
+                    exact: metadata.get(EXACT).is_some_and(|value| value == "true"),
+                    base: metadata.get(BASE_TABLE).zip(metadata.get(BASE_COLUMN)).map(
+                        |(table, column)| Base {
+                            schema: metadata.get(BASE_SCHEMA).cloned(),
+                            table: table.clone(),
+                            column: column.clone(),
+                        },
+                    ),
+                }
             })
             .collect();
         Self {
             columns,
-            exact,
+            said,
             row: RowBuilder::default(),
             cell: String::new(),
         }
@@ -78,8 +101,8 @@ impl Rows {
         &self.columns
     }
 
-    pub(super) fn exact(&self) -> &[bool] {
-        &self.exact
+    pub(super) fn said(&self) -> &[Said] {
+        &self.said
     }
 
     /// Every row of `batch`, in order, each handed to `keep`; the rows seen.
@@ -412,7 +435,34 @@ mod tests {
             field("other", Some("yes")),
             field("plain", None),
         ]));
-        assert_eq!(Rows::new(&schema).exact(), [true, false, false]);
+        let exact: Vec<bool> = Rows::new(&schema).said().iter().map(|s| s.exact).collect();
+        assert_eq!(exact, [true, false, false]);
+    }
+
+    #[test]
+    fn a_base_is_a_table_and_a_column_together() {
+        let field = |pairs: &[(&str, &str)]| {
+            let metadata = pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()));
+            Field::new("c", DataType::Utf8, true).with_metadata(metadata.collect::<HashMap<_, _>>())
+        };
+        let schema = Arc::new(Schema::new(vec![
+            field(&[(BASE_TABLE, "t"), (BASE_COLUMN, "a")]),
+            field(&[(BASE_SCHEMA, "s"), (BASE_TABLE, "t"), (BASE_COLUMN, "a")]),
+            field(&[(BASE_SCHEMA, "s"), (BASE_COLUMN, "a")]),
+        ]));
+        let bases: Vec<Option<Base>> = Rows::new(&schema)
+            .said()
+            .iter()
+            .map(|said| said.base.clone())
+            .collect();
+        let base = |schema: Option<&str>| Base {
+            schema: schema.map(Into::into),
+            table: "t".into(),
+            column: "a".into(),
+        };
+        assert_eq!(bases, [Some(base(None)), Some(base(Some("s"))), None]);
     }
 
     #[test]

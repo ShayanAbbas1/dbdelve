@@ -15,9 +15,12 @@ use dbdelve_plugin_protocol::arrow::{encode_batch, encode_schema};
 use dbdelve_plugin_protocol::limits::{
     BATCH_AGE, BATCH_ROWS, BATCH_TARGET, MAX_BATCH_CELLS, WINDOW, credit_cost,
 };
-use dbdelve_plugin_protocol::{EXACT, ErrorKind, Kind, MAX_PAYLOAD, Response, write_frame};
+use dbdelve_plugin_protocol::{
+    BASE_COLUMN, BASE_SCHEMA, BASE_TABLE, EXACT, ErrorKind, Kind, MAX_PAYLOAD, Response,
+    write_frame,
+};
 use odbc_api::handles::{Statement as _, StatementImpl};
-use odbc_api::sys::{HStmt, SqlDataType, SqlReturn};
+use odbc_api::sys::{Desc, HStmt, SqlDataType, SqlReturn};
 
 use crate::connect::Session;
 use crate::failure;
@@ -356,6 +359,7 @@ impl<W: Write> Run<'_, W> {
                 type_name,
                 described.data_type,
                 read,
+                base(self.statement, column),
             ));
             fetched.push(read);
         }
@@ -671,7 +675,13 @@ impl Cell {
     }
 }
 
-fn column_field(name: String, type_name: String, sql_type: i16, read: Read) -> Field {
+fn column_field(
+    name: String,
+    type_name: String,
+    sql_type: i16,
+    read: Read,
+    base: Option<Base>,
+) -> Field {
     let data_type = match read {
         Read::Chunked(Fetched::Binary) => DataType::Binary,
         _ => DataType::Utf8,
@@ -681,7 +691,34 @@ fn column_field(name: String, type_name: String, sql_type: i16, read: Read) -> F
     if exact {
         metadata.insert(EXACT.to_string(), "true".to_string());
     }
+    if let Some(base) = base {
+        metadata.insert(BASE_TABLE.to_string(), base.table);
+        metadata.insert(BASE_COLUMN.to_string(), base.column);
+        if !base.schema.is_empty() {
+            metadata.insert(BASE_SCHEMA.to_string(), base.schema);
+        }
+    }
     Field::new(name, data_type, true).with_metadata(metadata)
+}
+
+/// The table column a result column is read from, as the driver reports it.
+#[derive(Debug, Default)]
+struct Base {
+    schema: String,
+    table: String,
+    column: String,
+}
+
+/// Only where the driver names a table as well as a column: psqlODBC repeats
+/// an expression's label as its base column, `current_schema` included, and
+/// names no table for it.
+fn base(statement: &StatementImpl, column: u16) -> Option<Base> {
+    let named = |field| raw::text_attribute(statement, column, field).filter(|n| !n.is_empty());
+    Some(Base {
+        table: named(Desc::BaseTableName)?,
+        column: named(Desc::BaseColumnName)?,
+        schema: named(Desc::SchemaName).unwrap_or_default(),
+    })
 }
 
 /// Text and exact numbers read whole as the driver's text, which is the
@@ -1090,7 +1127,7 @@ mod tests {
         let reads = [Read::Chunked(Fetched::Binary), Read::Chunked(Fetched::Text)];
         let fields: Vec<Field> = reads
             .iter()
-            .map(|&read| column_field("c".to_string(), "t".to_string(), 12, read))
+            .map(|&read| column_field("c".to_string(), "t".to_string(), 12, read, None))
             .collect();
         let schema: SchemaRef = Arc::new(Schema::new(fields));
         let rows = vec![
@@ -1121,12 +1158,12 @@ mod tests {
         assert!(!exact(4, "t", Read::Double));
         assert!(!exact(12, "bool", text));
         assert!(!exact(1, "BOOLEAN", text));
-        let field = column_field("c".to_string(), "int4".to_string(), 4, text);
+        let field = column_field("c".to_string(), "int4".to_string(), 4, text, None);
         assert_eq!(
             field.metadata().get(EXACT).map(String::as_str),
             Some("true")
         );
-        let field = column_field("c".to_string(), "float8".to_string(), 8, Read::Double);
+        let field = column_field("c".to_string(), "float8".to_string(), 8, Read::Double, None);
         assert_eq!(field.metadata().get(EXACT), None);
     }
 

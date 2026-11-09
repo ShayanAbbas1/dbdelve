@@ -95,6 +95,18 @@ pub const WRITE: &str = "write";
 /// found by them: a key column without it does not make rows editable.
 pub const EXACT: &str = "dbdelve.exact";
 
+/// Arrow field metadata naming the table column a result column is read
+/// from, as the driver reports it in the catalog's own spelling: set together,
+/// and only where the driver names both a table and a column, with
+/// [`BASE_SCHEMA`] beside them where it names a schema too. A column without
+/// them may still be read from a table. A host that finds them on any column
+/// of a result holds every column it writes back to them.
+pub const BASE_TABLE: &str = "dbdelve.base_table";
+/// See [`BASE_TABLE`].
+pub const BASE_COLUMN: &str = "dbdelve.base_column";
+/// See [`BASE_TABLE`].
+pub const BASE_SCHEMA: &str = "dbdelve.base_schema";
+
 /// What a plugin answers.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

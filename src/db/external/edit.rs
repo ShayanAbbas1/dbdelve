@@ -1,6 +1,6 @@
 //! Which table the rows a plugin read are rows of, worked out on the host from
-//! the statement and the plugin's `structure`, since a driver says nothing
-//! about where a result column came from.
+//! the statement and the plugin's `structure`, since a driver need not say
+//! where a result column came from. Where it does, the reading must agree.
 //!
 //! Getting a name wrong here writes to the wrong table, so every doubt
 //! refuses: a name the session would resolve through a search path DBDelve
@@ -11,6 +11,7 @@ use std::collections::HashSet;
 
 use dbdelve_plugin_protocol::Structure as WireStructure;
 
+use super::rows::Said;
 use crate::db::{Column, DbError, EditTarget, Engine};
 use crate::sql::{Projected, Quoting, TableRead, Unread, table_read_quoted};
 
@@ -24,15 +25,14 @@ const UNMAPPED: &str = "DBDelve could not tell which column of the table each re
                         so these rows cannot be edited.";
 
 /// The edit target of `columns`, the result of `sql`, or why there is none.
-/// `exact` says which of `columns` the plugin marked as reading back exactly,
-/// and `describe` asks the plugin for one relation's structure; a relation
+/// `said` is what the plugin said of each of `columns`, and `describe` asks the plugin for one relation's structure; a relation
 /// with no columns is one that does not exist. A lookup that fails answers
 /// neither, since the statement has already succeeded.
 pub(super) fn target(
     engine: Engine,
     sql: &str,
     columns: &[Column],
-    exact: &[bool],
+    said: &[Said],
     describe: impl Fn(&str, &str) -> Result<WireStructure, DbError>,
 ) -> (Option<EditTarget>, Option<String>) {
     if columns.is_empty() {
@@ -121,6 +121,9 @@ pub(super) fn target(
         Ok(origins) => origins,
         Err(reason) => return refused(reason),
     };
+    if let Err(reason) = agrees(said, columns, &origins, &schema, &table) {
+        return refused(reason);
+    }
     let mut keys = Vec::with_capacity(structure.primary_key.len());
     for key in &structure.primary_key {
         let Some(position) = origins.iter().position(|origin| origin == key) else {
@@ -129,7 +132,7 @@ pub(super) fn target(
                  a row to change it."
             ));
         };
-        if !exact.get(position).copied().unwrap_or(false) {
+        if !said.get(position).is_some_and(|said| said.exact) {
             return refused(format!(
                 "The driver does not read the key column {key} back exactly, so DBDelve cannot \
                  name a row by it and these rows cannot be edited."
@@ -294,6 +297,41 @@ fn computed(engine: Engine, word: &str) -> bool {
     listed(STANDARD) || (engine != Engine::Postgres && listed(GENERIC))
 }
 
+/// Whether the driver's own word on where each column is read from, where it
+/// gave one, is DBDelve's reading. A driver that names a base for any column
+/// of the result names one for every column read from a table, so one with
+/// none there is something else (psqlODBC names none for `current_schema`).
+/// Without a word on any column, a driver that never says, DBDelve's reading
+/// stands alone.
+///
+/// Compared exactly: both are the catalog's spelling, and a server that keeps
+/// case may hold `Id` and `id` both.
+fn agrees(
+    said: &[Said],
+    columns: &[Column],
+    origins: &[String],
+    schema: &str,
+    table: &str,
+) -> Result<(), String> {
+    if said.iter().all(|said| said.base.is_none()) {
+        return Ok(());
+    }
+    for ((origin, column), said) in origins.iter().zip(columns).zip(said) {
+        let named = said.base.as_ref().is_some_and(|base| {
+            base.table == table
+                && base.column == *origin
+                && base.schema.as_deref().is_none_or(|named| named == schema)
+        });
+        if !named {
+            return Err(format!(
+                "The driver does not say {} is read from the column {origin} of {schema}.{table},                  so DBDelve cannot tell it is that column and these rows cannot be edited.",
+                column.name
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// A type's name without the size or precision a catalog adds to it, which a
 /// result's description leaves out: `VARCHAR(20)` is `VARCHAR`.
 fn base_type(name: &str) -> &str {
@@ -333,6 +371,22 @@ mod tests {
     use dbdelve_plugin_protocol::Column as WireColumn;
 
     use super::*;
+    use crate::db::external::rows::Base;
+
+    /// [`super::target`] of a plugin that marks `exact` and names no base.
+    fn target(
+        engine: Engine,
+        sql: &str,
+        columns: &[Column],
+        exact: &[bool],
+        describe: impl Fn(&str, &str) -> Result<WireStructure, DbError>,
+    ) -> (Option<EditTarget>, Option<String>) {
+        let said: Vec<Said> = exact
+            .iter()
+            .map(|&exact| Said { exact, base: None })
+            .collect();
+        super::target(engine, sql, columns, &said, describe)
+    }
 
     fn structure(columns: &[(&str, &str)], key: &[&str]) -> WireStructure {
         WireStructure {
@@ -544,6 +598,74 @@ mod tests {
         assert!(postgres.is_some(), "{reason:?}");
         let (generic, _) = target(Engine::Generic, sql, &columns, &[true, true], &describe);
         assert_eq!(generic, None);
+    }
+
+    #[test]
+    fn where_the_driver_names_a_base_it_must_be_the_column_read() {
+        let describe = catalog(vec![("app", "accounts", accounts())]);
+        let columns = result(&[("id", "int4"), ("label", "varchar")]);
+        let base = |schema: Option<&str>, table: &str, column: &str| {
+            Some(Base {
+                schema: schema.map(Into::into),
+                table: table.into(),
+                column: column.into(),
+            })
+        };
+        let read = |bases: [Option<Base>; 2]| {
+            let said: Vec<Said> = bases
+                .into_iter()
+                .map(|base| Said { exact: true, base })
+                .collect();
+            super::target(
+                Engine::Postgres,
+                "SELECT id, label FROM app.accounts",
+                &columns,
+                &said,
+                &describe,
+            )
+        };
+        let agreeing = [
+            [None, None],
+            [
+                base(Some("app"), "accounts", "id"),
+                base(Some("app"), "accounts", "label"),
+            ],
+            [
+                base(None, "accounts", "id"),
+                base(None, "accounts", "label"),
+            ],
+        ];
+        for bases in agreeing {
+            let (target, reason) = read(bases.clone());
+            assert!(target.is_some(), "{bases:?}: {reason:?}");
+        }
+        let disagreeing = [
+            [None, base(Some("app"), "accounts", "label")],
+            [
+                base(Some("app"), "accounts", "ID"),
+                base(Some("app"), "accounts", "label"),
+            ],
+            [
+                base(Some("app"), "accounts", "label"),
+                base(Some("app"), "accounts", "id"),
+            ],
+            [
+                base(Some("other"), "accounts", "id"),
+                base(Some("other"), "accounts", "label"),
+            ],
+            [
+                base(Some("app"), "accounts", "id"),
+                base(Some("app"), "Accounts", "label"),
+            ],
+        ];
+        for bases in disagreeing {
+            let (target, reason) = read(bases.clone());
+            assert_eq!(target, None, "{bases:?}");
+            assert!(
+                reason.unwrap().starts_with("The driver does not say"),
+                "{bases:?}"
+            );
+        }
     }
 
     #[test]

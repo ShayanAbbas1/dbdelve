@@ -44,7 +44,7 @@ use super::{
 };
 use crate::sql;
 use host::{Host, Routed, failure};
-use rows::Rows;
+use rows::{Rows, Said};
 
 pub const CANCELLED: &str = "Cancelled.";
 
@@ -353,8 +353,8 @@ impl Connection {
     /// The edit target of the rows `sql` read, or why it has none, put on
     /// the result. Asked of the plugin only for a dialect DBDelve writes
     /// through a plugin, on a connection whose plugin offered `write`.
-    fn editable(&self, sql: &str, read: (QueryResult, Vec<bool>)) -> QueryResult {
-        let (mut result, exact) = read;
+    fn editable(&self, sql: &str, read: (QueryResult, Vec<Said>)) -> QueryResult {
+        let (mut result, said) = read;
         if result.columns.is_empty() {
             return result;
         }
@@ -372,7 +372,7 @@ impl Connection {
         }
         let describe = |schema: &str, relation: &str| self.described(schema, relation);
         (result.edit, result.read_only_reason) =
-            edit::target(speaks, sql, &result.columns, &exact, describe);
+            edit::target(speaks, sql, &result.columns, &said, describe);
         result
     }
 
@@ -386,14 +386,14 @@ impl Connection {
         self.read_held(sql, cancel, fetch).map(|(result, _)| result)
     }
 
-    /// [`Self::query_held`], with which of the result's columns the plugin
-    /// marked as reading back exactly.
+    /// [`Self::query_held`], with what the plugin said of each of the
+    /// result's columns.
     fn read_held(
         &self,
         sql: &str,
         cancel: &CancelToken,
         fetch: Fetch,
-    ) -> Result<(QueryResult, Vec<bool>), DbError> {
+    ) -> Result<(QueryResult, Vec<Said>), DbError> {
         fetch.hold()?;
         let started = Instant::now();
         let eligible = fetch.reads_only && fetch.limit.is_some() && self.opened.stops_early;
@@ -412,7 +412,7 @@ impl Connection {
         cancel: &CancelToken,
         fetch: Fetch,
         started: Instant,
-    ) -> Result<(QueryResult, Vec<bool>), DbError> {
+    ) -> Result<(QueryResult, Vec<Said>), DbError> {
         let eligible = matches!(request, Request::Query { eligible: true, .. });
         // Sent and claimed under the run's lock, so a Cancel either finds the
         // run asked before anything went out, or finds the id with its request
@@ -599,7 +599,7 @@ impl Connection {
         id: u64,
         answers: &Receiver<Routed>,
         mut read: Read<'_>,
-    ) -> Result<(QueryResult, Vec<bool>), DbError> {
+    ) -> Result<(QueryResult, Vec<Said>), DbError> {
         loop {
             let Ok(routed) = answers.recv() else {
                 return Err(self.host.reset_error(true));
@@ -846,7 +846,7 @@ impl<'a> Read<'a> {
     /// The result, timed as Postgres's is: to the last kept row when rows
     /// past the limit came after it. `Err` is a plugin claiming to have ended
     /// early a statement it was never allowed to.
-    fn finish(mut self, end: End) -> Result<(QueryResult, Vec<bool>), String> {
+    fn finish(mut self, end: End) -> Result<(QueryResult, Vec<Said>), String> {
         if end.stopped && !(self.eligible && self.stop_sent) {
             return Err("`end` saying it stopped a statement it was not asked to stop".into());
         }
@@ -881,12 +881,12 @@ impl<'a> Read<'a> {
                 end.more_sets
             ));
         }
-        let exact = self
+        let said = self
             .set
             .as_ref()
-            .map(|(_, rows)| rows.exact().to_vec())
+            .map(|(_, rows)| rows.said().to_vec())
             .unwrap_or_default();
-        Ok((self.result, exact))
+        Ok((self.result, said))
     }
 }
 

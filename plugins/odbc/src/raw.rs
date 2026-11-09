@@ -493,6 +493,11 @@ pub fn describe_col(statement: &StatementImpl, column: u16) -> Option<Described>
 
 /// The driver's own name for the column's type (`SQL_DESC_TYPE_NAME`).
 pub fn type_name(statement: &StatementImpl, column: u16) -> Option<String> {
+    text_attribute(statement, column, Desc::TypeName)
+}
+
+/// A text field of a result column's descriptor, `None` where the call fails.
+pub fn text_attribute(statement: &StatementImpl, column: u16, field: Desc) -> Option<String> {
     let mut buffer = vec![0u16; 64];
     loop {
         let capacity = i16::try_from(buffer.len() * 2).unwrap_or(i16::MAX);
@@ -506,7 +511,7 @@ pub fn type_name(statement: &StatementImpl, column: u16) -> Option<String> {
             SQLColAttributeW(
                 statement.as_sys(),
                 column,
-                Desc::TypeName,
+                field,
                 buffer.as_mut_ptr() as Pointer,
                 capacity,
                 &mut bytes,
