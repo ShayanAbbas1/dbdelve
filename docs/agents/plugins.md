@@ -36,7 +36,11 @@ plugin that ships. Where the code is:
   (the session's schema is not known to DBDelve), resolved through the
   plugin's `structure`: a quoted name as written, an unquoted one folded as
   the server would, lower on Postgres and both ways on Generic SQL, refusing a
-  name both folds find. The key must be whole in the result, every key column
+  name both folds find. A bare name a server may read as its own value
+  instead of a column (`current_schema`, which sqlparser reads as an
+  identifier and Postgres as the function, typed as the column; on Generic
+  SQL also `ROWNUM`, Db2's `CURRENT SCHEMA`) refuses the lot until quoted
+  (`edit::computed`). The key must be whole in the result, every key column
   `dbdelve.exact`, and read as the catalog types it; other columns' types are
   not compared, since drivers spell them differently in a result and in the
   catalog (psqlODBC: `unknown` for `json`). A lookup that fails leaves the

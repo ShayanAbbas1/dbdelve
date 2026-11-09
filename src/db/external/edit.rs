@@ -59,6 +59,20 @@ pub(super) fn target(
     {
         return refused(Unread::Projection.reason().into());
     }
+    if let Some(word) = read
+        .columns
+        .iter()
+        .zip(&quoting.columns)
+        .find_map(|(projected, quoted)| match projected {
+            Projected::Column(word) if !quoted && computed(engine, word) => Some(word),
+            _ => None,
+        })
+    {
+        return refused(format!(
+            "{word} is also a value the server works out itself, so DBDelve cannot tell it reads \
+             a column and these rows cannot be edited. Quote the column's name to edit them."
+        ));
+    }
 
     // The statement succeeded, so the server found the table under one of the
     // names it may have folded this one to: where only one exists, that is it.
@@ -240,6 +254,44 @@ fn origins(
         return Err(TWICE.into());
     }
     Ok(origins)
+}
+
+/// Whether `word`, written bare in a select list, may read as a value the
+/// server works out rather than as a column of that name: a function the
+/// standard calls without parentheses, which a server takes over a column by
+/// the same name (Postgres's `current_schema`; sqlparser reads some of these
+/// as identifiers), and on Generic SQL the pseudo-columns and special
+/// registers of the servers it reaches (Oracle's `ROWNUM`, Db2's `CURRENT
+/// SCHEMA`, whose `CURRENT` reads as a column with an alias).
+fn computed(engine: Engine, word: &str) -> bool {
+    const STANDARD: &[&str] = &[
+        "CURRENT_CATALOG",
+        "CURRENT_DATE",
+        "CURRENT_PATH",
+        "CURRENT_ROLE",
+        "CURRENT_SCHEMA",
+        "CURRENT_TIME",
+        "CURRENT_TIMESTAMP",
+        "CURRENT_USER",
+        "LOCALTIME",
+        "LOCALTIMESTAMP",
+        "SESSION_USER",
+        "SYSTEM_USER",
+        "USER",
+    ];
+    const GENERIC: &[&str] = &[
+        "CURRENT",
+        "CURRENT_SERVER",
+        "CURRENT_TIMEZONE",
+        "LEVEL",
+        "ROWID",
+        "ROWNUM",
+        "SYSDATE",
+        "SYSTIMESTAMP",
+        "UID",
+    ];
+    let listed = |list: &[&str]| list.iter().any(|name| name.eq_ignore_ascii_case(word));
+    listed(STANDARD) || (engine != Engine::Postgres && listed(GENERIC))
 }
 
 /// A type's name without the size or precision a catalog adds to it, which a
@@ -447,6 +499,51 @@ mod tests {
                 "{sql}"
             );
         }
+    }
+
+    #[test]
+    fn a_bare_name_the_server_may_read_as_its_own_value_is_never_a_column() {
+        let keyed = structure(
+            &[("current_schema", "name"), ("label", "varchar(20)")],
+            &["current_schema"],
+        );
+        let describe = catalog(vec![("public", "t", keyed)]);
+        let columns = result(&[("current_schema", "name"), ("label", "varchar")]);
+        let postgres = |sql| target(Engine::Postgres, sql, &columns, &[true, true], &describe);
+        for sql in [
+            "SELECT current_schema, label FROM public.t WHERE \"current_schema\" = 'victim'",
+            "SELECT CURRENT_SCHEMA AS \"current_schema\", label FROM public.t",
+        ] {
+            let (none, reason) = postgres(sql);
+            assert_eq!(none, None, "{sql}");
+            let reason = reason.unwrap();
+            assert!(
+                reason.contains("is also a value the server"),
+                "{sql}: {reason}"
+            );
+        }
+        let (quoted, reason) = postgres("SELECT \"current_schema\", label FROM public.t");
+        assert!(quoted.is_some(), "{reason:?}");
+
+        // Db2's special register: `CURRENT` read as a column aliased `SCHEMA`.
+        let keyed = structure(
+            &[("CURRENT", "VARCHAR"), ("LABEL", "VARCHAR")],
+            &["CURRENT"],
+        );
+        let describe = catalog(vec![("S", "T", keyed)]);
+        let columns = result(&[("SCHEMA", "VARCHAR"), ("LABEL", "VARCHAR")]);
+        let sql = "SELECT CURRENT SCHEMA, LABEL FROM S.T";
+        let (none, reason) = target(Engine::Generic, sql, &columns, &[true, true], &describe);
+        assert_eq!(none, None, "{reason:?}");
+
+        let levels = structure(&[("id", "int4"), ("level", "int4")], &["id"]);
+        let describe = catalog(vec![("public", "t", levels)]);
+        let columns = result(&[("id", "int4"), ("level", "int4")]);
+        let sql = "SELECT id, level FROM public.t";
+        let (postgres, reason) = target(Engine::Postgres, sql, &columns, &[true, true], &describe);
+        assert!(postgres.is_some(), "{reason:?}");
+        let (generic, _) = target(Engine::Generic, sql, &columns, &[true, true], &describe);
+        assert_eq!(generic, None);
     }
 
     #[test]
