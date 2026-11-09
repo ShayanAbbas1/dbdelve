@@ -140,11 +140,10 @@ fn conformance_subject() -> Subject {
     }
 }
 
-// Not taken, each for its reason: capped_read_keeps_the_users_transaction,
-// because the bridge leaves autocommit on and no Db2 statement opens a
-// transaction, so there is none for a capped read to keep (echo's
-// `a_capped_read_keeps_the_users_transaction` covers the host's side);
-// generated_writes_round_trip, because a plugin target has no write ability.
+// Not taken: capped_read_keeps_the_users_transaction, because the bridge
+// leaves autocommit on and no Db2 statement opens a transaction, so there is
+// none for a capped read to keep (echo's
+// `a_capped_read_keeps_the_users_transaction` covers the host's side).
 crate::db::conformance::suite!(
     live_conformance,
     "needs a Db2 and IBM's driver: set dbdelve_ODBC_DB2, _USER and _PASSWORD",
@@ -159,6 +158,7 @@ crate::db::conformance::suite!(
     row_limit_drains_an_ineligible_read,
     read_only_session_refuses_a_write,
     generated_reads_run,
+    generated_writes_round_trip,
 );
 
 /// The bridge never ends a read early, so the cap is reached by draining the
@@ -314,37 +314,37 @@ fn live_db2_structure_reads_a_composite_key_an_index_and_foreign_keys() {
     assert_eq!(referrers("DBDELVE_HOST_CHILD"), [leaf]);
 }
 
-/// A plugin target is the read-only tier: nothing DBDelve offers writes
-/// through it, and no result it returns carries anything to edit. A write the
-/// user types still runs as typed, and its count crosses the driver's SQLLEN
-/// intact, which IBM's macOS driver writes only half of.
+/// Through a plugin, Generic SQL edits, deletes and inserts rows and nothing
+/// else. A bare name is found under the case Db2 folds it to, the upper, and
+/// edited under the catalog's own. A write the user types still runs as typed,
+/// and its count crosses the driver's SQLLEN intact, which IBM's macOS driver
+/// writes only half of.
 #[test]
 #[ignore = "needs a Db2 and IBM's driver: set dbdelve_ODBC_DB2, _USER and _PASSWORD"]
-fn live_db2_offers_no_write_and_counts_a_typed_one() {
+fn live_db2_edits_rows_imports_nothing_and_counts_a_typed_write() {
     let target = target();
-    assert!(!target.edits_rows());
-    assert!(!target.edits_query_rows());
-    assert!(!target.takes_inserts(RelationKind::Table));
+    assert!(target.edits_rows());
+    assert!(target.edits_query_rows());
+    assert!(target.takes_inserts(RelationKind::Table));
     assert!(!target.takes_imports(RelationKind::Table));
     assert!(!target.copies_ddl());
 
     let connection = open();
-    let preview = connection
-        .generated(
-            &crate::explorer::preview_sql(
-                Engine::Generic,
-                schema(),
-                "CONFORMANCE",
-                "",
-                Some(10),
-                0,
-            ),
-            &CancelToken::default(),
-            None,
-            None,
-        )
-        .unwrap();
-    assert!(preview.edit.is_none());
+    let typed = run(
+        &connection,
+        &format!(
+            "SELECT id, label FROM {}.conformance",
+            schema().to_lowercase()
+        ),
+    );
+    let edit = typed
+        .edit
+        .unwrap_or_else(|| panic!("read-only: {:?}", typed.read_only_reason));
+    assert_eq!(
+        (edit.schema.as_str(), edit.table.as_str()),
+        (schema(), "CONFORMANCE")
+    );
+    assert_eq!(edit.columns, [Some("ID".into()), Some("LABEL".into())]);
 
     let scratch = Engine::Generic.qualified(schema(), "SCRATCH");
     let delete = format!("DELETE FROM {scratch} WHERE {} = 970", quoted("ID"));
