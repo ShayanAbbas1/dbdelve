@@ -2105,7 +2105,7 @@ checksum = "c286de4e81ea2590afc24d754e0f83810c566f50a1388fa75ebd57928c0d9745"
 
 [[package]]
 name = "dbdelve"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "aes 0.8.4",
  "arrow-array",
@@ -2177,7 +2177,7 @@ dependencies = [
 
 [[package]]
 name = "dbdelve-plugin-echo"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -2190,7 +2190,7 @@ dependencies = [
 
 [[package]]
 name = "dbdelve-plugin-odbc"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -2200,7 +2200,7 @@ dependencies = [
 
 [[package]]
 name = "dbdelve-plugin-protocol"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
