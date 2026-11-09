@@ -49,6 +49,10 @@ pub enum Request {
     /// `error { kind: cancelled }`; a plugin that does neither is killed.
     Cancel,
     Catalog,
+    /// The relation named exactly `schema`.`relation`, never one whose name
+    /// only matches it some other way (in another case, or as a pattern):
+    /// the host reads two names answered as two relations. Empty where there
+    /// is none.
     Structure {
         schema: String,
         relation: String,

@@ -96,8 +96,8 @@ A DSN can't be used with an SSH tunnel, because it hides the host and port.
   one table named with its schema (`SELECT * FROM sales.orders`; previews
   always are), a primary key, every key column in the result, and a key the
   driver reads back exactly (integers, decimals, character columns, GUIDs).
-  With Generic SQL an unquoted name is looked up in upper and in lower case;
-  if both exist, quote it. So does a column named like a value the server
+  With Generic SQL an unquoted name is looked up as written, in upper case
+  and in lower case; if more than one exists, quote it. So does a column named like a value the server
   works out itself, such as `current_schema` or `user`. Otherwise the grid
   stays read-only and says why.
   Other dialects are read-only for now, and Import Rows is off for every ODBC

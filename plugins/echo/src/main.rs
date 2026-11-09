@@ -188,8 +188,8 @@ type Table = (
 
 /// Every relation of the schemas `main` and `MAIN`, as `(schema, name, table)`.
 /// Folded the two ways a Generic SQL server may fold `main.items`, only one
-/// exists; `main.both` both ways.
-const TABLES: [(&str, &str, Table); 7] = [
+/// exists; `main.both` both ways, and `main.Cased` as written and folded up.
+const TABLES: [(&str, &str, Table); 9] = [
     ("main", "accounts", (ACCOUNTS, &["id"])),
     ("main", "keyless", (ACCOUNTS, &[])),
     (
@@ -208,6 +208,12 @@ const TABLES: [(&str, &str, Table); 7] = [
     ("main", "both", (ACCOUNTS, &["id"])),
     ("MAIN", "BOTH", (ITEMS, &["ID"])),
     ("MAIN", "ITEMS", (ITEMS, &["ID"])),
+    (
+        "main",
+        "Cased",
+        (&[("id", "bigint"), ("Label", "text")], &["id"]),
+    ),
+    ("MAIN", "CASED", (ITEMS, &["ID"])),
 ];
 
 const ACCOUNTS: &[(&str, &str)] = &[("id", "bigint"), ("label", "text")];

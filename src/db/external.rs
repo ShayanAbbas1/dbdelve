@@ -1099,6 +1099,13 @@ mod tests {
             .edit
             .unwrap();
         assert_eq!(accounts.schema, "main");
+        let cased = read(&connection, "SELECT id, Label FROM \"main\".Cased")
+            .edit
+            .unwrap();
+        assert_eq!(
+            (cased.table.as_str(), cased.columns.as_slice()),
+            ("Cased", &[Some("id".into()), Some("Label".into())][..])
+        );
     }
 
     #[test]
@@ -1108,7 +1115,11 @@ mod tests {
             ("SELECT * FROM accounts", "Name the table with its schema"),
             (
                 "SELECT * FROM main.both",
-                "Both MAIN.BOTH and main.both exist",
+                "Both main.both and MAIN.BOTH exist",
+            ),
+            (
+                "SELECT * FROM main.Cased",
+                "Both main.Cased and MAIN.CASED exist",
             ),
             (
                 "SELECT * FROM main.keyless",
@@ -1128,7 +1139,7 @@ mod tests {
             ),
             (
                 "SELECT id, label FROM main.mixed",
-                "mixed has both a column LABEL",
+                "mixed has both a column label and a column LABEL",
             ),
         ] {
             let result = read(&connection, sql);

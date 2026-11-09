@@ -76,6 +76,8 @@ pub(super) fn target(
 
     // The statement succeeded, so the server found the table under one of the
     // names it may have folded this one to: where only one exists, that is it.
+    // `structure` answers only a relation named exactly as asked, so two
+    // candidates found are two relations.
     let mut found = Vec::new();
     let mut tried = HashSet::new();
     for fold in folds(engine) {
@@ -340,6 +342,7 @@ fn base_type(name: &str) -> &str {
 
 #[derive(Clone, Copy)]
 enum Fold {
+    AsWritten,
     Upper,
     Lower,
 }
@@ -348,7 +351,7 @@ impl Fold {
     /// `name` as the server stores it under this fold: as written when quoted.
     fn apply(self, name: &str, quoted: bool) -> String {
         match (quoted, self) {
-            (true, _) => name.to_owned(),
+            (true, _) | (false, Self::AsWritten) => name.to_owned(),
             (false, Self::Upper) => name.to_uppercase(),
             (false, Self::Lower) => name.to_lowercase(),
         }
@@ -356,13 +359,14 @@ impl Fold {
 }
 
 /// How `engine`'s server may store an unquoted name. Postgres folds it to
-/// lower case. A server spoken to as Generic SQL may be either kind: Db2 and
-/// Oracle fold up, as the standard does, and most others down, so both are
-/// looked up and a name both find is refused.
+/// lower case. A server spoken to as Generic SQL may be any kind: Db2 and
+/// Oracle fold up, as the standard does, others down, and some keep the case
+/// as written (SQL Server under a case-sensitive collation), so all three are
+/// looked up and a name more than one finds is refused.
 fn folds(engine: Engine) -> &'static [Fold] {
     match engine {
         Engine::Postgres => &[Fold::Lower],
-        _ => &[Fold::Upper, Fold::Lower],
+        _ => &[Fold::AsWritten, Fold::Upper, Fold::Lower],
     }
 }
 
@@ -727,7 +731,7 @@ mod tests {
     }
 
     #[test]
-    fn generic_takes_the_one_fold_that_exists_and_refuses_when_both_do() {
+    fn generic_takes_the_one_spelling_that_exists_and_refuses_when_more_do() {
         let columns = result(&[("ID", "INTEGER"), ("LABEL", "VARCHAR")]);
         let items = structure(&[("ID", "INTEGER"), ("LABEL", "VARCHAR(20)")], &["ID"]);
         let describe = catalog(vec![
@@ -749,12 +753,39 @@ mod tests {
         assert_eq!(none, None);
         assert_eq!(
             reason.unwrap(),
-            "Both DB2INST1.BOTH and db2inst1.both exist, and DBDelve cannot tell which one the \
+            "Both db2inst1.both and DB2INST1.BOTH exist, and DBDelve cannot tell which one the \
              server read, so these rows cannot be edited. Quote the name exactly to say which."
         );
 
         let (quoted, _) = generic("SELECT * FROM \"db2inst1\".\"both\"");
         assert_eq!(quoted.unwrap().table, "both");
+    }
+
+    /// A server that keeps an unquoted name's case reads `app.Accounts` as
+    /// written, one that folds it up as `APP.ACCOUNTS`.
+    #[test]
+    fn generic_looks_a_name_up_as_written_too() {
+        let cased = structure(&[("id", "INTEGER"), ("Label", "VARCHAR")], &["id"]);
+        let upper = structure(&[("ID", "INTEGER"), ("LABEL", "VARCHAR")], &["ID"]);
+        let describe = catalog(vec![("app", "Accounts", cased), ("APP", "ACCOUNTS", upper)]);
+        let columns = result(&[("id", "INTEGER"), ("Label", "VARCHAR")]);
+        let generic = |sql| target(Engine::Generic, sql, &columns, &[true, true], &describe);
+
+        let (none, reason) = generic("SELECT id, Label FROM app.Accounts");
+        assert_eq!(none, None);
+        assert!(
+            reason
+                .unwrap()
+                .starts_with("Both app.Accounts and APP.ACCOUNTS exist"),
+        );
+
+        let (written, reason) = generic("SELECT id, Label FROM \"app\".Accounts");
+        let written = written.unwrap_or_else(|| panic!("{reason:?}"));
+        assert_eq!(
+            (written.schema.as_str(), written.table.as_str()),
+            ("app", "Accounts")
+        );
+        assert_eq!(written.columns, [Some("id".into()), Some("Label".into())]);
     }
 
     #[test]
@@ -774,7 +805,7 @@ mod tests {
         assert_eq!(none, None);
         assert_eq!(
             reason.unwrap(),
-            "mixed has both a column LABEL and a column label, and DBDelve cannot tell which one \
+            "mixed has both a column label and a column LABEL, and DBDelve cannot tell which one \
              label is, so these rows cannot be edited. Quote the name exactly to say which."
         );
         let (postgres, _) = target(Engine::Postgres, sql, &columns, &[true, true], &describe);

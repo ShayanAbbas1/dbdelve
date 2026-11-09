@@ -35,8 +35,10 @@ plugin that ships. Where the code is:
   whose plugin offered `write`. One plain `SELECT` of a schema-qualified table
   (the session's schema is not known to DBDelve), resolved through the
   plugin's `structure`: a quoted name as written, an unquoted one folded as
-  the server would, lower on Postgres and both ways on Generic SQL, refusing a
-  name both folds find. A bare name a server may read as its own value
+  the server would: lower on Postgres; on Generic SQL as written, upper and
+  lower, since a server may keep case, refusing a name more than one finds.
+  `structure` answers only a relation named exactly as asked (the bridge
+  filters the driver's rows by name), so two found are two relations. A bare name a server may read as its own value
   instead of a column (`current_schema`, which sqlparser reads as an
   identifier and Postgres as the function, typed as the column; on Generic
   SQL also `ROWNUM`, Db2's `CURRENT SCHEMA`) refuses the lot until quoted
