@@ -353,6 +353,7 @@ impl Connection {
         let started = Instant::now();
         let (result, _) = self.send(
             Request::Write { statements },
+            None,
             cancel,
             Fetch::default(),
             started,
@@ -405,25 +406,23 @@ impl Connection {
         fetch: Fetch,
     ) -> Result<(QueryResult, Vec<Said>), DbError> {
         fetch.hold()?;
-        // Marked on the way out, as the workspace marks a profile: a
-        // statement that failed part way may still have opened one.
-        if let Some(open) = sql::leaves(self.config.speaks, sql).transaction {
-            self.host.in_transaction.store(open, Ordering::Relaxed);
-        }
         let started = Instant::now();
         let eligible = fetch.reads_only && fetch.limit.is_some() && self.opened.stops_early;
         let query = Request::Query {
             sql: sql.to_owned(),
             eligible,
         };
-        self.send(query, cancel, fetch, started)
+        let leaves = sql::leaves(self.config.speaks, sql).transaction;
+        self.send(query, leaves, cancel, fetch, started)
     }
 
     /// A query or write, sent and read under `cancel`, with the session
-    /// already held.
+    /// already held. `leaves` is whether the request leaves a transaction
+    /// open, where it says.
     fn send(
         &self,
         request: Request,
+        leaves: Option<bool>,
         cancel: &CancelToken,
         fetch: Fetch,
         started: Instant,
@@ -438,6 +437,13 @@ impl Connection {
                 return Err(failure("Cancelled before it was sent.".into()));
             }
             let sent = self.host.request(request)?;
+            // Marked once sent and never before: a COMMIT cancelled unsent
+            // leaves the user's transaction open. One sent that then fails
+            // is still marked, as the workspace marks a profile, since the
+            // server may have ended or opened one part way.
+            if let Some(open) = leaves {
+                self.host.in_transaction.store(open, Ordering::Relaxed);
+            }
             run.handles.push(sent.0.id.to_string());
             sent
         };
@@ -1273,6 +1279,27 @@ mod tests {
             read(&connection, end);
             assert_eq!(write().unwrap().rows_affected, Some(1));
         }
+    }
+
+    #[test]
+    fn a_commit_cancelled_unsent_leaves_writes_refused() {
+        let connection = speaking(Engine::Postgres);
+        read(&connection, "begin");
+        let cancelled = CancelToken::alongside();
+        connection.cancel(&cancelled).unwrap();
+        let unsent = connection
+            .query("commit", &cancelled, Fetch::default())
+            .unwrap_err();
+        assert_eq!(unsent.message, "Cancelled before it was sent.");
+        let batch = update_batch(Engine::Postgres, &["1"]);
+        let refused = connection
+            .generated(&batch, &CancelToken::default(), None, None)
+            .unwrap_err();
+        assert!(
+            refused.message.starts_with("Commit or roll back"),
+            "{refused}"
+        );
+        assert_eq!(last(&connection), "begin");
     }
 
     #[test]
