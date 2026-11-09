@@ -4,7 +4,7 @@
 //   modifier    := a | i
 //   motion      := [<count>] <motion-keys>
 //   text-object := [<count>] <modifier> <text-object-keys>
-//   mode-change := i
+//   mode-change := i | v
 //   shorthand   := x | X | D | C | s | S | Y
 //   paste       := [<count>] <paste-keys>
 //   command     := <motion>
@@ -14,6 +14,13 @@
 //                | [<count>] <operator> <motion>
 //                | [<count>] <operator> <text-object>
 //                | [<count>] <operator> <operator>
+//
+// Visual mode's, parsed one step at a time while the mode lasts:
+//
+//   visual-selection := <motion> | <text-object>
+//   visual           := <visual-selection> | <operator>
+//
+// so a whole Visual command is  v {<visual-selection>} <operator>
 // https://www.jameswhanlon.com/vim-command-composition.html
 
 use strum::{EnumIter, IntoEnumIterator};
@@ -81,16 +88,36 @@ pub(super) enum MotionKeys {
     Down,
     /// `w`
     NextWord,
+    /// `W`
+    NextWORD,
     /// `b`
-    PreviousWord,
+    PreviousWordStart,
+    /// `B`
+    PreviousWORDStart,
+    /// `e`
+    WordEnd,
+    /// `E`
+    WORDEnd,
     /// `0`
     LineStart,
+    /// `^`
+    TextStart,
     /// `$`
     LineEnd,
     /// `gg`
     BufferStart,
     /// `G`
     BufferEnd,
+    /// `t{char}`
+    MoveTill(char),
+    /// `T{char}`
+    MoveBackTill(char),
+    /// `f{char}`
+    MoveTo(char),
+    /// `F{char}`
+    MoveBackTo(char),
+    /// `%`
+    MatchingPair,
 }
 
 impl MotionKeys {
@@ -102,11 +129,21 @@ impl MotionKeys {
             Self::Up => "k",
             Self::Down => "j",
             Self::NextWord => "w",
-            Self::PreviousWord => "b",
+            Self::NextWORD => "W",
+            Self::PreviousWordStart => "b",
+            Self::PreviousWORDStart => "B",
+            Self::WordEnd => "e",
+            Self::WORDEnd => "E",
             Self::LineStart => "0",
+            Self::TextStart => "^",
             Self::LineEnd => "$",
             Self::BufferStart => "gg",
             Self::BufferEnd => "G",
+            Self::MoveTill(_) => todo!(),
+            Self::MoveBackTill(_) => todo!(),
+            Self::MoveTo(_) => todo!(),
+            Self::MoveBackTo(_) => todo!(),
+            Self::MatchingPair => todo!(),
         }
     }
 }
@@ -116,12 +153,15 @@ impl MotionKeys {
 pub(super) enum ModeChange {
     /// `i`
     Insert,
+    /// `v`
+    Visual,
 }
 
 impl ModeChange {
     fn key(self) -> char {
         match self {
             Self::Insert => 'i',
+            Self::Visual => 'v',
         }
     }
 
@@ -218,12 +258,18 @@ pub(super) struct Motion {
 pub(super) enum TextObjectKeys {
     /// `p`
     Paragraph,
+    /// `'`
+    SingleQuotes,
+    /// `"`
+    DoubleQuotes,
 }
 
 impl TextObjectKeys {
     fn key(self) -> char {
         match self {
             Self::Paragraph => 'p',
+            Self::SingleQuotes => '\'',
+            Self::DoubleQuotes => '"',
         }
     }
 
@@ -270,11 +316,27 @@ pub(super) enum Command {
     Operate(Operate),
 }
 
+/// `<motion> | <text-object>`: grows the selection, and Visual stays.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum VisualSelection {
+    Motion(Motion),
+    TextObject(TextObject),
+}
+
+/// What Visual mode parses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Visual {
+    /// `<visual-selection>`
+    Select(VisualSelection),
+    /// `<operator>`: acts on the selection and ends Visual.
+    Operate(Operator),
+}
+
 /// What the keys typed so far amount to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Parse {
+pub(super) enum Parse<C> {
     /// A whole command, to run.
-    Complete(Command),
+    Complete(C),
     /// Valid so far, waiting for more keys.
     More,
     /// Can never become a command, so the keys are dropped.
@@ -328,7 +390,7 @@ fn modifier(keys: &str) -> Result<(Modifier, &str), Stop> {
     Ok((modifier, chars.as_str()))
 }
 
-/// `mode-change := i`
+/// `mode-change := i | v`
 fn mode_change(keys: &str) -> Result<(ModeChange, &str), Stop> {
     let mut chars = keys.chars();
     let change = match chars.next() {
@@ -499,11 +561,75 @@ fn command(keys: &str) -> Result<(Command, &str), Stop> {
     }
 }
 
-/// `command`, with no keys left over.
-pub(super) fn parse(keys: &str) -> Parse {
-    match command(keys) {
+/// `visual-selection := <motion> | <text-object>`
+fn visual_selection(keys: &str) -> Result<(VisualSelection, &str), Stop> {
+    let not_motion = match motion(keys) {
+        Ok((motion, rest)) => return Ok((VisualSelection::Motion(motion), rest)),
+        Err(stop) => stop,
+    };
+    match text_object(keys) {
+        Ok((object, rest)) => Ok((VisualSelection::TextObject(object), rest)),
+        Err(not_object) => Err(none_matched([not_motion, not_object])),
+    }
+}
+
+/// `visual := <visual-selection> | <operator>`
+fn visual(keys: &str) -> Result<(Visual, &str), Stop> {
+    let not_selection = match visual_selection(keys) {
+        Ok((selection, rest)) => return Ok((Visual::Select(selection), rest)),
+        Err(stop) => stop,
+    };
+    match operator(keys) {
+        Ok((operator, rest)) => Ok((Visual::Operate(operator), rest)),
+        Err(not_operator) => Err(none_matched([not_selection, not_operator])),
+    }
+}
+
+/// A rule's match, with no keys left over.
+fn whole<C>(matched: Result<(C, &str), Stop>) -> Parse<C> {
+    match matched {
         Ok((command, "")) => Parse::Complete(command),
         Ok(_) | Err(Stop::Invalid) => Parse::Invalid,
         Err(Stop::Pending) => Parse::More,
+    }
+}
+
+/// `command`, with no keys left over.
+pub(super) fn parse(keys: &str) -> Parse<Command> {
+    whole(command(keys))
+}
+
+/// `visual`, with no keys left over.
+pub(super) fn parse_visual(keys: &str) -> Parse<Visual> {
+    whole(visual(keys))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn visual_is_a_selection_or_an_operator() {
+        assert_eq!(
+            parse_visual("3w"),
+            Parse::Complete(Visual::Select(VisualSelection::Motion(Motion {
+                count: Some(Count(3)),
+                keys: MotionKeys::NextWord,
+            })))
+        );
+        assert_eq!(
+            parse_visual("ip"),
+            Parse::Complete(Visual::Select(VisualSelection::TextObject(TextObject {
+                count: None,
+                modifier: Modifier::Inner,
+                keys: TextObjectKeys::Paragraph,
+            })))
+        );
+        assert_eq!(
+            parse_visual("d"),
+            Parse::Complete(Visual::Operate(Operator::Delete))
+        );
+        assert_eq!(parse_visual("g"), Parse::More);
+        assert_eq!(parse_visual("q"), Parse::Invalid);
     }
 }

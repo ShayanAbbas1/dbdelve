@@ -8,7 +8,7 @@ use super::{
     Mode,
     grammar::{
         Command, Count, ModeChange, Modifier, Motion, MotionKeys, Operate, Operator, Paste,
-        PasteKeys, Target, TextObject, TextObjectKeys,
+        PasteKeys, Target, TextObject, TextObjectKeys, Visual, VisualSelection,
     },
 };
 use crate::{session::QueryTab, workspace::Workspace};
@@ -33,7 +33,24 @@ impl Run for Command {
 impl Run for Operate {
     fn run(self, tab: &mut QueryTab, window: &mut Window, cx: &mut Context<Workspace>) {
         self.select(tab, window, cx);
-        self.apply(tab, window, cx);
+        self.operator.apply(tab, window, cx);
+    }
+}
+
+/// ponytail: Vim's selection takes in the character under the cursor; the
+/// editor's ends before it, so `vd` deletes nothing and `vld` one character.
+impl Run for Visual {
+    fn run(self, tab: &mut QueryTab, window: &mut Window, cx: &mut Context<Workspace>) {
+        match self {
+            Visual::Select(VisualSelection::Motion(motion)) => dispatch(
+                motion.keys.to_select().as_ref(),
+                times(motion.count),
+                window,
+                cx,
+            ),
+            Visual::Select(VisualSelection::TextObject(object)) => object.select(1, tab, cx),
+            Visual::Operate(operator) => operator.apply(tab, window, cx),
+        }
     }
 }
 
@@ -60,6 +77,7 @@ impl Run for ModeChange {
     fn run(self, tab: &mut QueryTab, _: &mut Window, cx: &mut Context<Workspace>) {
         match self {
             ModeChange::Insert => tab.vim = Mode::Insert,
+            ModeChange::Visual => tab.vim = Mode::Visual,
         }
         cx.notify();
     }
@@ -75,11 +93,21 @@ impl MotionKeys {
             MotionKeys::Up => Box::new(input::MoveUp),
             MotionKeys::Down => Box::new(input::MoveDown),
             MotionKeys::NextWord => Box::new(input::MoveToNextWord),
-            MotionKeys::PreviousWord => Box::new(input::MoveToPreviousWord),
+            MotionKeys::PreviousWordStart => Box::new(input::MoveToPreviousWord),
             MotionKeys::LineStart => Box::new(input::MoveToStartOfLine),
             MotionKeys::LineEnd => Box::new(input::MoveToEndOfLine),
             MotionKeys::BufferStart => Box::new(input::MoveToStart),
             MotionKeys::BufferEnd => Box::new(input::MoveToEnd),
+            MotionKeys::NextWORD => todo!(),
+            MotionKeys::PreviousWORDStart => todo!(),
+            MotionKeys::WordEnd => todo!(),
+            MotionKeys::WORDEnd => todo!(),
+            MotionKeys::TextStart => todo!(),
+            MotionKeys::MoveTill(_) => todo!(),
+            MotionKeys::MoveBackTill(_) => todo!(),
+            MotionKeys::MoveTo(_) => todo!(),
+            MotionKeys::MoveBackTo(_) => todo!(),
+            MotionKeys::MatchingPair => todo!(),
         }
     }
 
@@ -92,11 +120,21 @@ impl MotionKeys {
             MotionKeys::Up => Box::new(SelectUp),
             MotionKeys::Down => Box::new(SelectDown),
             MotionKeys::NextWord => Box::new(input::SelectToNextWordEnd),
-            MotionKeys::PreviousWord => Box::new(input::SelectToPreviousWordStart),
+            MotionKeys::PreviousWordStart => Box::new(input::SelectToPreviousWordStart),
             MotionKeys::LineStart => Box::new(input::SelectToStartOfLine),
             MotionKeys::LineEnd => Box::new(input::SelectToEndOfLine),
             MotionKeys::BufferStart => Box::new(input::SelectToStart),
             MotionKeys::BufferEnd => Box::new(input::SelectToEnd),
+            MotionKeys::NextWORD => todo!(),
+            MotionKeys::PreviousWORDStart => todo!(),
+            MotionKeys::WordEnd => todo!(),
+            MotionKeys::WORDEnd => todo!(),
+            MotionKeys::TextStart => todo!(),
+            MotionKeys::MoveTill(_) => todo!(),
+            MotionKeys::MoveBackTill(_) => todo!(),
+            MotionKeys::MoveTo(_) => todo!(),
+            MotionKeys::MoveBackTo(_) => todo!(),
+            MotionKeys::MatchingPair => todo!(),
         }
     }
 }
@@ -114,30 +152,7 @@ impl Operate {
                 window,
                 cx,
             ),
-            Target::TextObject(TextObject {
-                count: object_count,
-                modifier,
-                keys,
-            }) => match (modifier, keys) {
-                (Modifier::Around, TextObjectKeys::Paragraph) => {
-                    tab.editor.update(cx, |editor, cx| {
-                        let text = editor.text();
-                        let row = text.offset_to_point(editor.cursor()).row;
-                        let count = times(self.count) * times(object_count);
-                        let range = around_paragraph(text, row, count);
-                        editor.set_selected_range(range, cx);
-                    })
-                }
-                (Modifier::Inner, TextObjectKeys::Paragraph) => {
-                    tab.editor.update(cx, |editor, cx| {
-                        let text = editor.text();
-                        let row = text.offset_to_point(editor.cursor()).row;
-                        let count = times(self.count) * times(object_count);
-                        let range = inner_paragraph(text, row, count);
-                        editor.set_selected_range(range, cx);
-                    })
-                }
-            },
+            Target::TextObject(object) => object.select(times(self.count), tab, cx),
             // ponytail: `cc` takes the newline too, so Insert starts on the
             // line below; Vim's keeps an empty line to type into.
             Target::Line => tab.editor.update(cx, |editor, cx| {
@@ -149,19 +164,46 @@ impl Operate {
             }),
         }
     }
+}
 
-    /// The operator acts on the selection. Cut, like Vim's delete, also puts
-    /// what it took on the clipboard.
+impl TextObject {
+    /// Selects the object, `count` times over on top of its own count.
+    fn select(self, count: u32, tab: &QueryTab, cx: &mut Context<Workspace>) {
+        tab.editor.update(cx, |editor, cx| {
+            let text = editor.text();
+            let row = text.offset_to_point(editor.cursor()).row;
+            let count = count * times(self.count);
+            let range = match (self.modifier, self.keys) {
+                (Modifier::Around, TextObjectKeys::Paragraph) => around_paragraph(text, row, count),
+                (Modifier::Inner, TextObjectKeys::Paragraph) => inner_paragraph(text, row, count),
+            };
+            editor.set_selected_range(range, cx);
+        })
+    }
+}
+
+impl Operator {
+    /// Acts on the selection, and says which mode that leaves. Cut, like
+    /// Vim's delete, also puts what it took on the clipboard.
     fn apply(self, tab: &mut QueryTab, window: &mut Window, cx: &mut Context<Workspace>) {
-        match self.operator {
-            Operator::Delete => dispatch(&input::Cut, 1, window, cx),
-            Operator::Yank => dispatch(&input::Copy, 1, window, cx),
+        match self {
+            Operator::Delete => {
+                dispatch(&input::Cut, 1, window, cx);
+                tab.vim = Mode::Normal;
+            }
+            Operator::Yank => {
+                dispatch(&input::Copy, 1, window, cx);
+                // On a selection this lands on its start, where Vim's yank
+                // leaves the cursor.
+                dispatch(&input::MoveLeft, 1, window, cx);
+                tab.vim = Mode::Normal;
+            }
             Operator::Change => {
                 dispatch(&input::Cut, 1, window, cx);
                 tab.vim = Mode::Insert;
-                cx.notify();
             }
         }
+        cx.notify();
     }
 }
 

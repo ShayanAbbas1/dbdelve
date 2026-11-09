@@ -427,7 +427,7 @@ fn render_query_surface(
         )),
         &tab.editor,
         editor_font_size,
-        vim_mode && tab.vim == vim::Mode::Normal,
+        vim_mode && tab.vim != vim::Mode::Insert,
         &tab.query,
         render_query_toolbar(
             &profile.session,
@@ -3808,6 +3808,7 @@ fn render_query_toolbar(
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(match tab.vim {
                 vim::Mode::Normal => t.accent,
+                vim::Mode::Visual => t.syntax_keyword,
                 vim::Mode::Insert => t.text_faint,
             })
             .child(tab.vim.label())

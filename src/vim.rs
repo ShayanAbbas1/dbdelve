@@ -13,7 +13,7 @@ use gpui::{
 use gpui_component::input;
 
 use self::{
-    grammar::{Parse, parse},
+    grammar::{Parse, parse, parse_visual},
     run::Run,
 };
 use crate::{session::QueryTab, workspace::Workspace};
@@ -21,6 +21,7 @@ use crate::{session::QueryTab, workspace::Workspace};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Mode {
     Normal,
+    Visual,
     /// Where a buffer starts, so one is typed into as it always was until
     /// `escape` is pressed in it.
     #[default]
@@ -31,6 +32,7 @@ impl Mode {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Normal => "NORMAL",
+            Self::Visual => "VISUAL",
             Self::Insert => "INSERT",
         }
     }
@@ -143,7 +145,7 @@ pub(crate) fn key_down(
     };
     match tab.vim {
         Mode::Insert => return,
-        Mode::Normal => {}
+        Mode::Normal | Mode::Visual => {}
     }
     let key = match event.keystroke.key_char.as_deref() {
         None => return,
@@ -156,7 +158,22 @@ pub(crate) fn key_down(
         None => key.to_string(),
         Some(pending) => pending.keys + key,
     };
-    match parse(&keys) {
+    match tab.vim {
+        Mode::Normal => run(parse(&keys), keys, tab, window, cx),
+        Mode::Visual => run(parse_visual(&keys), keys, tab, window, cx),
+        Mode::Insert => {}
+    }
+}
+
+/// Runs a whole command, or keeps the keys of a half-typed one.
+fn run<C: Run>(
+    parsed: Parse<C>,
+    keys: String,
+    tab: &mut QueryTab,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    match parsed {
         Parse::Complete(command) => command.run(tab, window, cx),
         Parse::More => {
             tab.vim_pending = Some(Pending {
