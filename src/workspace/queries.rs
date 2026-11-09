@@ -2266,7 +2266,7 @@ impl Workspace {
         // the count that guards it. Its outcome is written as it lands, under
         // the same rules, since only a run recorded here has one to record.
         let recorded = match &statement {
-            Some(statement) if !(generated && engine.reviews_query_edits()) => {
+            Some(statement) if !(generated && target.reviews_query_edits()) => {
                 self.issued_to(&id, generation).map(|profile| {
                     let entry = store::HistoryEntry::started(statement.as_str());
                     // A line that could not be written is not worth a notice

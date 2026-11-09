@@ -12,6 +12,7 @@ mod connect;
 mod failure;
 mod raw;
 mod run;
+mod write;
 
 use std::collections::BTreeMap;
 use std::io::{self, BufWriter, Read, Write};
@@ -22,7 +23,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
 use dbdelve_plugin_protocol::{
-    ErrorKind, Kind, MAX_PAYLOAD, PROTOCOL, REFERENCES, Request, Response, Tls, Violation,
+    ErrorKind, Kind, MAX_PAYLOAD, PROTOCOL, REFERENCES, Request, Response, Tls, Violation, WRITE,
     read_frame,
 };
 use odbc_api::handles;
@@ -130,6 +131,7 @@ fn serve(input: &mut impl Read, jobs: &Sender<Job>, control: &Control) -> Result
                             | Request::Catalog
                             | Request::Structure { .. }
                             | Request::References { .. }
+                            | Request::Write { .. }
                     ) {
                         control.start(id);
                     }
@@ -189,7 +191,7 @@ impl<W: Write> Bridge<W> {
             Request::Hello { .. } => Response::Hello {
                 protocol: PROTOCOL,
                 implementation: format!("dbdelve-odbc {}", env!("CARGO_PKG_VERSION")),
-                optional: vec![REFERENCES.to_string()],
+                optional: vec![REFERENCES.to_string(), WRITE.to_string()],
             },
             // The driver verifies whatever host the string names, and the
             // bridge has no way to give it another name to check.
@@ -209,6 +211,10 @@ impl<W: Write> Bridge<W> {
             // `eligible` is not read: the bridge always drains (`stops_early`).
             Request::Query { sql, .. } => match &self.session {
                 Some(session) => run::query(session, &self.control, &mut self.out, id, &sql),
+                None => not_open(),
+            },
+            Request::Write { statements } => match &self.session {
+                Some(session) => write::write(session, &self.control, &statements),
                 None => not_open(),
             },
             Request::Catalog => self.catalog(catalog::catalog),
@@ -346,15 +352,22 @@ mod tests {
             panic!("a hello, got {responses:?}");
         };
         assert_eq!(*protocol, PROTOCOL);
-        assert_eq!(optional, &[REFERENCES.to_string()]);
+        assert_eq!(optional, &[REFERENCES.to_string(), WRITE.to_string()]);
     }
 
     #[test]
-    fn an_unknown_request_is_unsupported_and_data_or_a_catalog_unopened_is_a_protocol_error() {
+    fn an_unknown_request_is_unsupported_and_data_a_catalog_or_a_write_unopened_is_a_protocol_error()
+     {
         let input = [
             frame(Kind::Control, 2, br#"{"type":"databases"}"#),
             frame(Kind::Data, 3, b"rows"),
             request(4, Request::Catalog),
+            request(
+                5,
+                Request::Write {
+                    statements: vec!["UPDATE t SET a = 1 WHERE id = 2".to_string()],
+                },
+            ),
         ]
         .concat();
         let responses = exchange(input);
@@ -368,6 +381,7 @@ mod tests {
                 (2, Some(ErrorKind::Unsupported)),
                 (3, Some(ErrorKind::Protocol)),
                 (4, Some(ErrorKind::Protocol)),
+                (5, Some(ErrorKind::Protocol)),
             ]
         );
     }

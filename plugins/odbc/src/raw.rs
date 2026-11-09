@@ -146,6 +146,27 @@ pub fn info_u32(connection: &handles::Connection, info: InfoType) -> Option<u32>
     succeeded(result).then_some(value)
 }
 
+/// The driver runs statements in transactions it is told to end:
+/// `SQL_TXN_CAPABLE` is other than `SQL_TC_NONE`. `false` when it cannot say.
+pub fn transactions(connection: &handles::Connection) -> bool {
+    const SQL_TC_NONE: u16 = 0;
+    let mut value: u16 = SQL_TC_NONE;
+    let mut bytes: i16 = 0;
+    // SAFETY: a live connection handle the caller borrows; the driver writes
+    // one `SQLUSMALLINT` into `value`, the size it is given, and the length
+    // out is an `SQLSMALLINT`.
+    let result = unsafe {
+        SQLGetInfoW(
+            connection.as_sys(),
+            InfoType::TransactionCapable,
+            &mut value as *mut u16 as Pointer,
+            2,
+            &mut bytes,
+        )
+    };
+    succeeded(result) && value != SQL_TC_NONE
+}
+
 fn get_info(handle: HDbc, info: InfoType, buffer: &mut [u16]) -> Option<usize> {
     let capacity = i16::try_from(buffer.len() * 2).unwrap_or(i16::MAX);
     let mut bytes: i16 = 0;
@@ -472,6 +493,11 @@ pub fn describe_col(statement: &StatementImpl, column: u16) -> Option<Described>
 
 /// The driver's own name for the column's type (`SQL_DESC_TYPE_NAME`).
 pub fn type_name(statement: &StatementImpl, column: u16) -> Option<String> {
+    text_attribute(statement, column, Desc::TypeName)
+}
+
+/// A text field of a result column's descriptor, `None` where the call fails.
+pub fn text_attribute(statement: &StatementImpl, column: u16, field: Desc) -> Option<String> {
     let mut buffer = vec![0u16; 64];
     loop {
         let capacity = i16::try_from(buffer.len() * 2).unwrap_or(i16::MAX);
@@ -485,7 +511,7 @@ pub fn type_name(statement: &StatementImpl, column: u16) -> Option<String> {
             SQLColAttributeW(
                 statement.as_sys(),
                 column,
-                Desc::TypeName,
+                field,
                 buffer.as_mut_ptr() as Pointer,
                 capacity,
                 &mut bytes,

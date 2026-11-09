@@ -23,6 +23,7 @@ use crate::db::{
     CancelToken, Connection, ConnectionConfig, Engine, ExternalConfig, Fetch, QueryResult, Target,
     is_cancel,
 };
+use crate::result_grid::{NewValue, PendingRow};
 
 /// A finite read, since the bridge drains a capped read to its end rather than
 /// ending it early.
@@ -73,14 +74,21 @@ fn run(connection: &Connection, sql: &str) -> QueryResult {
 }
 
 fn conformance_subject() -> Subject {
+    speaking(Engine::Postgres)
+}
+
+fn speaking(speaks: Engine) -> Subject {
     Subject {
-        connection: open(),
-        target: target(),
+        connection: open_as(ExternalConfig { speaks, ..config() }),
+        target: Target {
+            engine: speaks,
+            ..target()
+        },
         schema: "public",
         relation: "conformance",
         key: "id",
         columns: &COLUMNS,
-        read: sql_read(Engine::Postgres, "public"),
+        read: sql_read(speaks, "public"),
         endless_rows: Some(1_000_000),
         endless: MILLION,
         runaway: "SELECT pg_sleep(30)",
@@ -98,14 +106,12 @@ fn conformance_subject() -> Subject {
                 "bytea",
             ],
             renders: &[],
-            find: Box::new(|key| sql_find(Engine::Postgres, "public", key)),
+            find: Box::new(move |key| sql_find(speaks, "public", key)),
         }),
         _guard: None,
     }
 }
 
-// Not taken: generated_writes_round_trip, because a plugin target has no
-// write ability.
 crate::db::conformance::suite!(
     live_conformance,
     "needs a Postgres and psqlODBC: set dbdelve_ODBC_POSTGRES, _USER and _PASSWORD",
@@ -121,7 +127,135 @@ crate::db::conformance::suite!(
     capped_read_keeps_the_users_transaction,
     read_only_session_refuses_a_write,
     generated_reads_run,
+    generated_writes_round_trip,
 );
+
+/// The same server spoken to as Generic SQL, so the dialect Db2 is edited in
+/// writes through a real driver wherever CI runs psqlODBC. On a table of the
+/// test's own, since the Postgres subject's round trip writes the same id into
+/// `conformance` at the same time.
+#[test]
+#[ignore = "needs a Postgres and psqlODBC: set dbdelve_ODBC_POSTGRES, _USER and _PASSWORD"]
+fn live_psqlodbc_generic_sql_writes_rows_through_one_transaction() {
+    let subject = Subject {
+        relation: "dbdelve_odbc_generic",
+        fixture: Some(Fixture {
+            types: &[],
+            renders: &[],
+            find: Box::new(|key| {
+                format!("SELECT label FROM public.dbdelve_odbc_generic WHERE id = {key}")
+            }),
+        }),
+        ..speaking(Engine::Generic)
+    };
+    let connection = &subject.connection;
+    run(
+        connection,
+        "DROP TABLE IF EXISTS public.dbdelve_odbc_generic",
+    );
+    run(
+        connection,
+        "CREATE TABLE public.dbdelve_odbc_generic (id integer PRIMARY KEY, label varchar(40) NOT NULL)",
+    );
+    run(
+        connection,
+        "INSERT INTO public.dbdelve_odbc_generic VALUES (1, 'one'), (2, 'two')",
+    );
+
+    crate::db::conformance::generated_writes_round_trip(&subject);
+
+    // Generic SQL looks a bare name up folded both ways; Postgres holds only
+    // the lower.
+    let typed = run(
+        connection,
+        "SELECT ID, Label FROM Public.Dbdelve_Odbc_Generic",
+    );
+    let edit = typed
+        .edit
+        .unwrap_or_else(|| panic!("read-only: {:?}", typed.read_only_reason));
+    assert_eq!(
+        (edit.schema.as_str(), edit.table.as_str()),
+        ("public", "dbdelve_odbc_generic")
+    );
+    assert_eq!(edit.columns, [Some("id".into()), Some("label".into())]);
+    let bare = run(connection, "SELECT * FROM dbdelve_odbc_generic");
+    assert!(bare.edit.is_none());
+    let reason = bare.read_only_reason.unwrap_or_default();
+    assert!(
+        reason.starts_with("Name the table with its schema"),
+        "{reason}"
+    );
+
+    // The second row is not there, so the first one's change is rolled back.
+    let rows: Vec<PendingRow> = ["1", "99"]
+        .into_iter()
+        .map(|id| PendingRow {
+            schema: "public".into(),
+            table: "dbdelve_odbc_generic".into(),
+            sets: vec![("label".into(), NewValue::Value("changed".into()))],
+            keys: vec![("id".into(), id.into())],
+            ..PendingRow::default()
+        })
+        .collect();
+    let batch = crate::sql::update_batch(Engine::Generic, &rows).unwrap();
+    let refused = connection
+        .generated(&batch, &CancelToken::default(), None, None)
+        .expect_err("a write of a missing row was saved");
+    assert!(
+        refused.message.contains("nothing was saved"),
+        "{}",
+        refused.message
+    );
+    let label = run(
+        connection,
+        "SELECT label FROM public.dbdelve_odbc_generic WHERE id = 1",
+    );
+    assert_eq!(label.rows[0].get(0), Some("one"));
+    run(connection, "DROP TABLE public.dbdelve_odbc_generic");
+}
+
+/// Postgres reads a bare `current_schema` as the function even beside a
+/// column by that name, and psqlODBC reads it back as that column's type, so
+/// only the driver naming no base table for it stops an edit landing on the
+/// row keyed `public`.
+#[test]
+#[ignore = "needs a Postgres and psqlODBC: set dbdelve_ODBC_POSTGRES, _USER and _PASSWORD"]
+fn live_psqlodbc_a_function_read_as_the_key_column_is_never_a_key() {
+    let connection = open();
+    run(
+        &connection,
+        "DROP TABLE IF EXISTS public.dbdelve_odbc_niladic",
+    );
+    run(
+        &connection,
+        "CREATE TABLE public.dbdelve_odbc_niladic (\"current_schema\" name PRIMARY KEY, label text)",
+    );
+    run(
+        &connection,
+        "INSERT INTO public.dbdelve_odbc_niladic VALUES ('victim', 'v'), ('public', 'p')",
+    );
+    let read = run(
+        &connection,
+        "SELECT current_schema, label FROM public.dbdelve_odbc_niladic \
+         WHERE \"current_schema\" = 'victim'",
+    );
+    assert_eq!(read.rows[0].get(0), Some("public"));
+    assert!(read.edit.is_none());
+    let reason = read.read_only_reason.unwrap_or_default();
+    assert!(
+        reason.starts_with("The driver does not say current_schema"),
+        "{reason}"
+    );
+    let quoted = run(
+        &connection,
+        "SELECT \"current_schema\", label FROM public.dbdelve_odbc_niladic",
+    );
+    let edit = quoted
+        .edit
+        .unwrap_or_else(|| panic!("read-only: {:?}", quoted.read_only_reason));
+    assert_eq!(edit.keys, [0]);
+    run(&connection, "DROP TABLE public.dbdelve_odbc_niladic");
+}
 
 /// The Postgres dialect holds Read-only with a session statement; sent through
 /// the bridge it must still make the server, not DBDelve, refuse the write.

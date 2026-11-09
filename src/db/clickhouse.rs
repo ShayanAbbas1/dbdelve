@@ -26,7 +26,7 @@ use ureq::{Agent, Body, Timeout};
 
 use self::edit::{
     DESCRIBE_COLUMNS_SQL, DESCRIBE_SETTINGS_SQL, DESCRIBE_TABLE_SQL, Described, Halt, Stage, Table,
-    TableFacts, UNCOUNTED, Write, count_refusal, explained, halted, hinted, query_shape, unread,
+    TableFacts, UNCOUNTED, Write, count_refusal, explained, halted, hinted, query_shape,
 };
 pub(super) use self::edit::{match_value, review_notes};
 use self::http::{Bounds, Scheme, Stop, Watch};
@@ -551,7 +551,7 @@ impl Connection {
                 Ok(None) => return refused(edit::TEMPORARY),
                 Err(_) => return (None, None),
             },
-            _ => return refused(unread(Unread::NotATable)),
+            _ => return refused(Unread::NotATable.reason()),
         };
         let described = match self.describe(&schema, &table) {
             Ok(Some(described)) => described,

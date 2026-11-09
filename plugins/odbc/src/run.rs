@@ -15,9 +15,12 @@ use dbdelve_plugin_protocol::arrow::{encode_batch, encode_schema};
 use dbdelve_plugin_protocol::limits::{
     BATCH_AGE, BATCH_ROWS, BATCH_TARGET, MAX_BATCH_CELLS, WINDOW, credit_cost,
 };
-use dbdelve_plugin_protocol::{ErrorKind, Kind, MAX_PAYLOAD, Response, write_frame};
+use dbdelve_plugin_protocol::{
+    BASE_COLUMN, BASE_SCHEMA, BASE_TABLE, EXACT, ErrorKind, Kind, MAX_PAYLOAD, Response,
+    write_frame,
+};
 use odbc_api::handles::{Statement as _, StatementImpl};
-use odbc_api::sys::{HStmt, SqlDataType, SqlReturn};
+use odbc_api::sys::{Desc, HStmt, SqlDataType, SqlReturn};
 
 use crate::connect::Session;
 use crate::failure;
@@ -351,7 +354,13 @@ impl<W: Write> Run<'_, W> {
             {
                 plan.push((column, bound));
             }
-            fields.push(column_field(described.name, type_name, read));
+            fields.push(column_field(
+                described.name,
+                type_name,
+                described.data_type,
+                read,
+                base(self.statement, column),
+            ));
             fetched.push(read);
         }
         let schema: SchemaRef = Arc::new(Schema::new(fields));
@@ -531,13 +540,7 @@ impl<W: Write> Run<'_, W> {
     }
 
     fn keep(&mut self, records: Vec<Record>) {
-        for message in failure::messages(&records) {
-            if self.messages.len() < MOST_MESSAGES
-                && !self.messages.iter().any(|kept| kept == message)
-            {
-                self.messages.push(message.to_string());
-            }
-        }
+        keep(&mut self.messages, &records);
     }
 
     fn failure(&self, function: &str) -> Response {
@@ -551,6 +554,15 @@ impl<W: Write> Run<'_, W> {
             stopped: false,
             messages: mem::take(&mut self.messages),
             more_sets,
+        }
+    }
+}
+
+/// Adds the records' messages to `messages`, each once, up to `MOST_MESSAGES`.
+pub fn keep(messages: &mut Vec<String>, records: &[Record]) {
+    for message in failure::messages(records) {
+        if messages.len() < MOST_MESSAGES && !messages.iter().any(|kept| kept == message) {
+            messages.push(message.to_string());
         }
     }
 }
@@ -663,13 +675,78 @@ impl Cell {
     }
 }
 
-fn column_field(name: String, type_name: String, read: Read) -> Field {
+fn column_field(
+    name: String,
+    type_name: String,
+    sql_type: i16,
+    read: Read,
+    base: Option<Base>,
+) -> Field {
     let data_type = match read {
         Read::Chunked(Fetched::Binary) => DataType::Binary,
         _ => DataType::Utf8,
     };
-    Field::new(name, data_type, true)
-        .with_metadata(HashMap::from([("dbdelve.type".to_string(), type_name)]))
+    let exact = exact(sql_type, &type_name, read);
+    let mut metadata = HashMap::from([("dbdelve.type".to_string(), type_name)]);
+    if exact {
+        metadata.insert(EXACT.to_string(), "true".to_string());
+    }
+    if let Some(base) = base {
+        metadata.insert(BASE_TABLE.to_string(), base.table);
+        metadata.insert(BASE_COLUMN.to_string(), base.column);
+        if !base.schema.is_empty() {
+            metadata.insert(BASE_SCHEMA.to_string(), base.schema);
+        }
+    }
+    Field::new(name, data_type, true).with_metadata(metadata)
+}
+
+/// The table column a result column is read from, as the driver reports it.
+#[derive(Debug, Default)]
+struct Base {
+    schema: String,
+    table: String,
+    column: String,
+}
+
+/// Only where the driver names a table as well as a column: psqlODBC repeats
+/// an expression's label as its base column, `current_schema` included, and
+/// names no table for it.
+fn base(statement: &StatementImpl, column: u16) -> Option<Base> {
+    let named = |field| raw::text_attribute(statement, column, field).filter(|n| !n.is_empty());
+    Some(Base {
+        table: named(Desc::BaseTableName)?,
+        column: named(Desc::BaseColumnName)?,
+        schema: named(Desc::SchemaName).unwrap_or_default(),
+    })
+}
+
+/// Text and exact numbers read whole as the driver's text, which is the
+/// server's own and reads back as the same value, so a row can be found by
+/// it. Not floats, which the bridge reformats; nor dates, times and
+/// intervals, which each driver renders its own way and psqlODBC alters;
+/// nor booleans, which a driver may show as `1` for a `true`, even one it
+/// reports as text (psqlODBC's `BoolsAsChar`, on by default, makes a `bool`
+/// a varchar), so a boolean is told by its type name too; nor long text,
+/// which a server may refuse to compare.
+fn exact(sql_type: i16, type_name: &str, read: Read) -> bool {
+    read == Read::Chunked(Fetched::Text)
+        && !type_name.eq_ignore_ascii_case("bool")
+        && !type_name.eq_ignore_ascii_case("boolean")
+        && matches!(
+            SqlDataType(sql_type),
+            SqlDataType::CHAR
+                | SqlDataType::VARCHAR
+                | SqlDataType::EXT_W_CHAR
+                | SqlDataType::EXT_W_VARCHAR
+                | SqlDataType::EXT_TINY_INT
+                | SqlDataType::SMALLINT
+                | SqlDataType::INTEGER
+                | SqlDataType::EXT_BIG_INT
+                | SqlDataType::DECIMAL
+                | SqlDataType::NUMERIC
+                | SqlDataType::EXT_GUID
+        )
 }
 
 /// UTF-16 code units, as `Fetched::Text` reads them.
@@ -1050,7 +1127,7 @@ mod tests {
         let reads = [Read::Chunked(Fetched::Binary), Read::Chunked(Fetched::Text)];
         let fields: Vec<Field> = reads
             .iter()
-            .map(|&read| column_field("c".to_string(), "t".to_string(), read))
+            .map(|&read| column_field("c".to_string(), "t".to_string(), 12, read, None))
             .collect();
         let schema: SchemaRef = Arc::new(Schema::new(fields));
         let rows = vec![
@@ -1066,6 +1143,30 @@ mod tests {
         assert_eq!(batch.column(0).null_count(), 1);
     }
 
+    #[test]
+    fn only_text_and_exact_numbers_read_whole_are_exact() {
+        let text = Read::Chunked(Fetched::Text);
+        for exact_type in [1, 12, -8, -9, -6, 5, 4, -5, 3, 2, -11] {
+            assert!(exact(exact_type, "t", text), "{exact_type}");
+        }
+        // Float, real and double; date, time, timestamp and an interval;
+        // bit, long text, binary and a driver's own type.
+        for other in [6, 7, 8, 91, 92, 93, 103, -7, -1, -10, -3, -99, -370] {
+            assert!(!exact(other, "t", text), "{other}");
+        }
+        assert!(!exact(12, "t", Read::Chunked(Fetched::Binary)));
+        assert!(!exact(4, "t", Read::Double));
+        assert!(!exact(12, "bool", text));
+        assert!(!exact(1, "BOOLEAN", text));
+        let field = column_field("c".to_string(), "int4".to_string(), 4, text, None);
+        assert_eq!(
+            field.metadata().get(EXACT).map(String::as_str),
+            Some("true")
+        );
+        let field = column_field("c".to_string(), "float8".to_string(), 8, Read::Double, None);
+        assert_eq!(field.metadata().get(EXACT), None);
+    }
+
     /// Review focus 9, at grep level: every value is read through `raw.rs`.
     #[test]
     fn no_odbc_api_value_reader_is_used_outside_raw() {
@@ -1075,6 +1176,7 @@ mod tests {
             ("connect.rs", include_str!("connect.rs")),
             ("failure.rs", include_str!("failure.rs")),
             ("run.rs", include_str!("run.rs")),
+            ("write.rs", include_str!("write.rs")),
         ];
         // Spelled in halves so this list does not match itself.
         let banned = [

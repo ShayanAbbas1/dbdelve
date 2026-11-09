@@ -867,8 +867,9 @@ Decided, and not to be re-litigated:
   writes no `SUBSTR`; a user's past the value's length is Db2's error.
 - **An engine through ODBC is its built-in spec with the plugin's driver.** The
   form's SQL dialect picks the spec, so quoting, paging and the Read-only hold
-  are the dialect's own, while abilities are `Target`'s read-only tier
-  (`plugins.md`). After a Test the driver's `SQL_DBMS_NAME` is shown and, when
-  it names a built-in (`EngineSpec::dbms_names`), suggests that dialect, one
-  click to take it; a dialect that also has a built-in driver says the built-in
-  can edit rows.
+  are the dialect's own, while abilities are `Target`'s, for a plugin only
+  those proven through a real driver (`plugins.md`). After a Test the
+  driver's `SQL_DBMS_NAME` is shown and, when it names a built-in
+  (`EngineSpec::dbms_names`), suggests that dialect, one click to take it; a
+  dialect that also has a built-in driver says what the built-in does that
+  the plugin cannot.

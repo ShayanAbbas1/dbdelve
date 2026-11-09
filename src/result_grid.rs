@@ -1947,17 +1947,12 @@ impl ResultGrid {
 
     /// What a new row of this grid's own is written into: where its rows are
     /// written back to, and each column that names, typed as the first row's
-    /// cell is. `None` where its rows are written back nowhere, or into a
-    /// table on an engine that takes no inserts.
+    /// cell is. `None` where its rows are written back nowhere. Whether the
+    /// target takes inserts at all is the profile's to say
+    /// (`Session::query_insert_target`): the grid caches its engine alone,
+    /// not the driver that read its rows.
     pub fn insert_target(&self) -> Option<InsertTarget> {
         let edit = self.result.edit.as_ref()?;
-        // Only a built-in driver's result carries `edit`: one read through a
-        // plugin never does, so the grid caches the engine alone. A grid that
-        // outlives its profile's move to a plugin driver keeps its `edit`, so
-        // the workspace asks the profile's own Target before New row or Apply.
-        if !db::Target::built_in(self.engine).takes_inserts(db::RelationKind::Table) {
-            return None;
-        }
         let columns = edit
             .columns
             .iter()

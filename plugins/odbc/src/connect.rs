@@ -1,7 +1,7 @@
 use std::mem::ManuallyDrop;
 use std::ops::Deref;
 
-use dbdelve_plugin_protocol::{REFERENCES, Response};
+use dbdelve_plugin_protocol::{REFERENCES, Response, WRITE};
 use odbc_api::handles::{self, SqlResult, SqlText, StatementImpl};
 use odbc_api::sys::{AttrOdbcVersion, InfoType};
 
@@ -171,6 +171,10 @@ impl Session {
             raw::info_string(&self.handle, kind)
                 .ok_or_else(|| failure::from(self.handle(), "SQLGetInfo"))
         };
+        let mut optional = vec![REFERENCES.to_string()];
+        if raw::transactions(&self.handle) {
+            optional.push(WRITE.to_string());
+        }
         Ok(Response::Opened {
             dbms_name: info(InfoType::DbmsName)?,
             dbms_version: info(InfoType::DbmsVer)?,
@@ -178,7 +182,20 @@ impl Session {
             // ODBC cannot say whether a transaction is open, so ending a read
             // early is never provably safe: the bridge always drains.
             stops_early: false,
-            optional: vec![REFERENCES.to_string()],
+            optional,
+        })
+    }
+
+    /// Autocommit on or off, through the driver's own transaction control.
+    pub fn set_autocommit(&self, on: bool) -> bool {
+        succeeded(self.handle.set_autocommit(on))
+    }
+
+    /// Commits or rolls back the transaction autocommit being off opened.
+    pub fn end(&self, commit: bool) -> bool {
+        succeeded(match commit {
+            true => self.handle.commit(),
+            false => self.handle.rollback(),
         })
     }
 }

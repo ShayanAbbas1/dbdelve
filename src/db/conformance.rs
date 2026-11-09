@@ -11,7 +11,8 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::db::{
-    CancelToken, Connection, Engine, Fetch, QueryResult, RelationKind, Stopped, Target, is_cancel,
+    CancelToken, Connection, Driver, Engine, Fetch, QueryResult, RelationKind, Stopped, Target,
+    is_cancel,
 };
 use crate::explorer;
 use crate::filter::{self, Operator};
@@ -513,6 +514,7 @@ pub(super) fn generated_writes_round_trip(subject: &Subject) {
     let at = format!("{scenario} on {:?}", subject.target.engine);
     let engine = subject.target.engine;
     let (schema, relation, key) = (subject.schema, subject.relation, subject.key);
+    let label = subject.columns[1];
     let structure = subject
         .connection
         .structure(schema, relation)
@@ -528,6 +530,37 @@ pub(super) fn generated_writes_round_trip(subject: &Subject) {
             .generated(sql, &CancelToken::default(), None, None)
             .unwrap_or_else(|error| panic!("{at}: `{sql}` failed: {error}"))
     };
+
+    // A plugin's driver says nothing of where a column came from, so its rows
+    // are editable only by DBDelve's own reading of the preview and the
+    // relation's structure, which a built-in's driver reports itself.
+    if let Driver::Plugin(_) = subject.target.driver {
+        let preview = generated(&explorer::preview_sql(
+            engine,
+            schema,
+            relation,
+            "",
+            Some(10),
+            0,
+        ));
+        let edit = preview.edit.unwrap_or_else(|| {
+            panic!(
+                "{at}: the preview is read-only: {:?}",
+                preview.read_only_reason
+            )
+        });
+        assert_eq!(
+            (edit.schema.as_str(), edit.table.as_str()),
+            (schema, relation),
+            "{at}"
+        );
+        let keys: Vec<_> = edit
+            .keys
+            .iter()
+            .map(|&at| edit.columns[at].as_deref())
+            .collect();
+        assert_eq!(keys, [Some(key)], "{at}");
+    }
 
     let cleanup = sql::delete_row(engine, schema, relation, &[(key, "901")], &types);
     let _cleanup = Cleanup {
@@ -549,7 +582,7 @@ pub(super) fn generated_writes_round_trip(subject: &Subject) {
             engine,
             schema,
             relation,
-            &[(key, Some("901")), ("label", Some("inserted"))],
+            &[(key, Some("901")), (label, Some("inserted"))],
             &types,
         )
         .unwrap_or_else(|error| panic!("{at}: insert_row: {error}"));
@@ -567,17 +600,20 @@ pub(super) fn generated_writes_round_trip(subject: &Subject) {
 
     let label_type = types
         .iter()
-        .find(|(name, _)| name == "label")
+        .find(|(name, _)| name == label)
         .map(|(_, data_type)| data_type.as_str())
         .unwrap_or_else(|| panic!("{at}: no label column"));
-    if engine.writes_back([label_type]) && !structure.primary_key().is_empty() {
+    if subject.target.edits_rows()
+        && engine.writes_back([label_type])
+        && !structure.primary_key().is_empty()
+    {
         let row = PendingRow {
             schema: schema.to_string(),
             table: relation.to_string(),
-            sets: vec![("label".into(), NewValue::Value("updated".into()))],
+            sets: vec![(label.into(), NewValue::Value("updated".into()))],
             keys: vec![(key.to_string(), "901".to_string())],
             types: types.clone(),
-            held: vec![("label".into(), "inserted".into())],
+            held: vec![(label.into(), "inserted".into())],
             // The spelling is the preview's to say, as on an object tab.
             update: if engine == Engine::ClickHouse {
                 generated(&format!(

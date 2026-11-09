@@ -32,8 +32,9 @@ require it, stop and raise it instead.
    splices its `ORDER BY` into the buffer (one sorted in memory reorders its
    rows and writes nothing); grid edits are appended to the buffer (`sql::appended_statement`),
    or shown in a review dialog on an object tab, which has no buffer, and on
-   a query tab of an engine whose rows are named by every value, whose writes
-   must run behind their guard (`Engine::reviews_query_edits`); Import
+   a query tab of an engine whose rows are named by every value, or of a
+   plugin, whose writes must run behind their guard
+   (`Target::reviews_query_edits`); Import
    Rows shows every statement before any runs; Explain prefixes a copy, never
    the buffer; Format Query rewrites on command only, at the token level
    (`sqlformat`, or `mql::format` on MongoDB), never an AST round-trip, which
@@ -97,7 +98,8 @@ require it, stop and raise it instead.
    them, through their methods, and never match on them: spelling is asked of
    `Engine`, and abilities (editing, inserting, importing, switching database,
    picking a schema, Copy DDL) of `Target`, never of `Engine`, because a plugin
-   target is the read-only tier whatever its dialect could do. Where a question
+   target has only the abilities proven through a real driver, whatever its
+   dialect could do. Where a question
    is missing, add a method rather than a `match` at the caller. `sql.rs`,
    `filter.rs` and `explorer.rs` branch on `Engine::syntax()` and read the
    engine's `EngineSpec`; they never name an engine. The only places above

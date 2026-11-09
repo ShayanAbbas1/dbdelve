@@ -1,7 +1,7 @@
 //! What a profile connects to: the engine whose SQL it speaks, and the driver
 //! that carries it there. The abilities to write, switch and pick are asked of
 //! a `Target` rather than an `Engine`, because a plugin driver speaking a
-//! dialect DBDelve knows has none of them, whatever that dialect could do.
+//! dialect DBDelve knows has few of them, whatever that dialect could do.
 
 use super::plugin::Plugin;
 use super::spec::Abilities;
@@ -54,11 +54,20 @@ impl Target {
             }))
     }
 
-    /// A plugin is the read-only tier whatever it speaks: none of the write
-    /// paths has been proven against a driver DBDelve does not ship.
+    /// A plugin edits, deletes and inserts rows only in a dialect proven
+    /// through a real driver (`external::writes_rows`), and nothing else
+    /// whatever it speaks: no import, no Copy DDL, no moving between
+    /// databases or schemas. Even then a connection's rows are editable only
+    /// once its plugin offers transactional writes and reads their key back
+    /// exactly, which each result says.
     pub fn abilities(self) -> Abilities {
         match self.driver {
             Driver::BuiltIn => self.engine.spec().abilities,
+            Driver::Plugin(_) if external::writes_rows(self.engine) => Abilities {
+                edits: true,
+                inserts: true,
+                ..Abilities::NONE
+            },
             Driver::Plugin(_) => Abilities::NONE,
         }
     }
@@ -117,18 +126,54 @@ impl Target {
         self.abilities().edits
     }
 
+    /// Why no grid's rows are written back on this target, when none are,
+    /// said when an edit is asked of one anyway.
+    pub fn unwritable(self) -> Option<String> {
+        match self.driver {
+            Driver::Plugin(_) => external::unwritable(self.engine),
+            Driver::BuiltIn => {
+                (!self.edits_rows()).then(|| format!("{} rows are read-only here.", self.label()))
+            }
+        }
+    }
+
+    /// Whether a query tab's edits are shown in the review dialog an object
+    /// tab's are, rather than appended to its buffer, because what runs is
+    /// not the text alone: an engine whose rows are named by every value
+    /// ([`Engine::reviews_query_edits`]), and a plugin, whose batch runs in a
+    /// transaction of its driver's that holds each statement to one row.
+    /// Either way a copy left in the buffer would run without that guard.
+    pub fn reviews_query_edits(self) -> bool {
+        match self.driver {
+            Driver::BuiltIn => self.engine.reviews_query_edits(),
+            Driver::Plugin(_) => true,
+        }
+    }
+
+    /// What the review of a generated write says beyond its statements.
+    pub fn review_notes(self, sql: &str) -> Vec<String> {
+        match self.driver {
+            Driver::BuiltIn => self.engine.review_notes(sql),
+            Driver::Plugin(_) => vec![
+                "Runs as one transaction through the driver. Each statement must change exactly \
+                 one row, or nothing is saved."
+                    .into(),
+            ],
+        }
+    }
+
     /// Whether a query tab's grid takes a deleted row, as a relation's preview
     /// does, shown for review before it runs and never written into the
     /// buffer. Redis opens a key as a query tab of its own, its contents having
     /// no relation to open, and that is where its fields, items and members
-    /// are taken out; an engine that reviews a query tab's edits
-    /// ([`Engine::reviews_query_edits`]) takes them there too. A new row needs
+    /// are taken out; a target that reviews a query tab's edits
+    /// ([`Self::reviews_query_edits`]) takes them there too. A new row needs
     /// no such gate: any grid written back to one table takes one.
     pub fn edits_query_rows(self) -> bool {
         self.edits_rows()
             && match self.engine.syntax() {
                 Syntax::Redis => true,
-                Syntax::Sql => self.engine.reviews_query_edits(),
+                Syntax::Sql => self.reviews_query_edits(),
                 Syntax::Mongo => false,
             }
     }
@@ -301,7 +346,7 @@ mod tests {
     }
 
     #[test]
-    fn plugin_targets_are_the_read_only_tier() {
+    fn plugin_targets_write_rows_only_in_a_proven_dialect_and_nothing_else() {
         let plugin = odbc();
         // Every engine, not only the dialects a plugin is offered: the clamp
         // is the driver's, so no engine's own abilities may leak through it.
@@ -310,10 +355,17 @@ mod tests {
                 engine,
                 driver: Driver::Plugin(plugin),
             };
-            let kinds = [RelationKind::Table, RelationKind::View];
-            let abilities = [
+            let writes = matches!(engine, Engine::Generic | Engine::Postgres);
+            let rows = [
                 target.edits_rows(),
                 target.edits_query_rows(),
+                target.takes_inserts(RelationKind::Table),
+            ];
+            assert_eq!(rows, [writes; 3], "{engine:?}");
+            assert_eq!(target.unwritable().is_none(), writes, "{engine:?}");
+            assert!(target.reviews_query_edits(), "{engine:?}");
+            let others = [
+                target.takes_inserts(RelationKind::View),
                 target.copies_ddl(),
                 target.switches_database(),
                 target.switches_database_in_session(),
@@ -323,11 +375,24 @@ mod tests {
                 target.takes_service(),
             ]
             .into_iter()
-            .chain(kinds.iter().map(|&kind| target.takes_inserts(kind)))
-            .chain(kinds.iter().map(|&kind| target.takes_imports(kind)));
-            assert!(abilities.into_iter().all(|on| !on), "{engine:?}");
+            .chain(
+                [RelationKind::Table, RelationKind::View]
+                    .iter()
+                    .map(|&kind| target.takes_imports(kind)),
+            );
+            assert!(others.into_iter().all(|on| !on), "{engine:?}");
             assert!(target.label().ends_with(" via ODBC"), "{engine:?}");
         }
+        assert_eq!(
+            Target {
+                engine: Engine::MySql,
+                driver: Driver::Plugin(plugin),
+            }
+            .unwritable()
+            .unwrap(),
+            "Editing rows through a plugin driver is not supported for MySQL yet, so these rows \
+             are read-only."
+        );
         assert_eq!(
             Target {
                 engine: Engine::Generic,

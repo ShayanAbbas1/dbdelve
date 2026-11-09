@@ -166,14 +166,12 @@ impl EngineSpec {
         super::is_numeric_type(&name) || self.numeric_types.contains(&base)
     }
 
-    /// [`Engine::writes_back`](super::Engine::writes_back). The ability is
-    /// asked apart from the types, so a cell nobody typed is no way past it.
+    /// [`Engine::writes_back`](super::Engine::writes_back).
     pub fn writes_back<'a>(&self, types: impl IntoIterator<Item = &'a str>) -> bool {
-        self.abilities.edits
-            && types.into_iter().all(|data_type| match self.syntax {
-                Syntax::Redis => crate::redis_cmd::edit::writes_back(data_type),
-                Syntax::Sql | Syntax::Mongo => !self.is_binary_type(data_type),
-            })
+        types.into_iter().all(|data_type| match self.syntax {
+            Syntax::Redis => crate::redis_cmd::edit::writes_back(data_type),
+            Syntax::Sql | Syntax::Mongo => !self.is_binary_type(data_type),
+        })
     }
 
     /// [`Engine::generates`](super::Engine::generates).
