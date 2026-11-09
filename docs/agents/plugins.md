@@ -23,18 +23,38 @@ plugin that ships. Where the code is:
   has one, is a statement the plugin can run on its one session. ClickHouse is
   left out, since its hold rides on each request and nothing a plugin is sent
   carries it. A plugin defines no engine, no fields and no spelling.
-- **A plugin target is the read-only tier whatever it speaks**
-  (`Target::abilities` is `Abilities::NONE`): none of the write paths has been
-  proven against a driver DBDelve does not ship. Every result carries
-  `edit: None` and says "Rows read through a plugin driver are read-only.", so
-  no cell, row or new-row path opens. Abilities are asked of `Target`; asking
+- **A plugin writes rows only in a proven dialect, and nothing else.**
+  `external::writes_rows` is the allowlist, Postgres and Generic SQL, each
+  with a conformance subject passing `generated_writes_round_trip` through a
+  real driver; adding a dialect means adding its subject first. Those get
+  edits and inserts, never imports, Copy DDL or database switching; every
+  other dialect is `Abilities::NONE`. Abilities are asked of `Target`; asking
   `Engine` would hand a plugin profile its dialect's writes.
+- **The edit target is DBDelve's own reading** (`external/edit.rs`), since a
+  driver says nothing of where a column came from, and only on a connection
+  whose plugin offered `write`. One plain `SELECT` of a schema-qualified table
+  (the session's schema is not known to DBDelve), resolved through the
+  plugin's `structure`: a quoted name as written, an unquoted one folded as
+  the server would, lower on Postgres and both ways on Generic SQL, refusing a
+  name both folds find. The key must be whole in the result, every key column
+  `dbdelve.exact`, and read as the catalog types it; other columns' types are
+  not compared, since drivers spell them differently in a result and in the
+  catalog (psqlODBC: `unknown` for `json`). A lookup that fails leaves the
+  rows read-only and the query succeeded.
+- **The grid's writes are one `write`.** `Connection::generated` sends a batch
+  the gate admits as `write`, its statements cut from the gate's own tree
+  (`sql::generated_writes`) with the `BEGIN`/`COMMIT` bracket dropped; anything
+  else runs as `query`. A plugin target reviews query-tab edits in the dialog
+  (`Target::reviews_query_edits`), since a copy in the buffer would run
+  without the one-row rule.
 - **Autocommit only.** The bridge leaves the driver in autocommit and protocol 1
-  has no `begin` or `commit`. A typed `BEGIN … COMMIT` is the user's text and
-  reaches the server only as the driver passes it on (psqlODBC does, and its
-  conformance subject keeps such a transaction across a capped read); a driver
-  that commits each statement itself does not, so manual transactions are not
-  supported through the bridge. They come with protocol messages for them.
+  has no `begin` or `commit`; `write` turns autocommit off for its own
+  statements alone and back on before it answers. A typed `BEGIN … COMMIT` is
+  the user's text and reaches the server only as the driver passes it on
+  (psqlODBC does, and its conformance subject keeps such a transaction across a
+  capped read); a driver that commits each statement itself does not, so manual
+  transactions are not supported through the bridge. They come with protocol
+  messages for them.
 - **What v1 leaves out:** `routines`, `sizes` and `databases` answer empty,
   Copy DDL is off, and only a statement's first result set crosses (the rest
   are counted, and the result says how many were not shown).
@@ -50,7 +70,8 @@ allocated for it.
 
 **Messages** (`plugins/protocol/src/message.rs`, `tag = "type"`). Host to
 plugin: `hello`, `prepare`, `open`, `query { sql, eligible }`, `credit`,
-`stop`, `cancel`, `catalog`, `structure`, `references`, `close`. Plugin to host:
+`stop`, `cancel`, `catalog`, `structure`, `references`, `write { statements }`,
+`close`. Plugin to host:
 `hello`, `prepared`, `opened`, `end`, `error { kind, message, sqlstate,
 position, lost }`, `catalog`, `structure`, `references`, `closed`. `credit`,
 `stop` and `cancel` carry the id of the query they target and get no answer of
@@ -58,10 +79,18 @@ their own: that query's terminal frame is the answer. Unknown fields are
 ignored; an unknown `type` is a violation on the host and `error { kind:
 unsupported }` from a plugin.
 
-- **Optional messages exist only once something sends them.** v1 defines one,
-  `references`, sent only when both the host's `hello` and the plugin's
-  `opened` list it. A later one is added beside it with no protocol bump,
-  because a host never sends what a plugin did not list.
+- **Optional messages exist only once something sends them.** v1 defines two,
+  `references` and `write`, each sent only when both the host's `hello` and
+  the plugin's `opened` list it. A later one is added beside them with no
+  protocol bump, because a host never sends what a plugin did not list.
+- **`write` is the grid's edits, one transaction.** Statements DBDelve wrote,
+  each meant to change exactly one row, run through the driver's own
+  transaction control, never as `BEGIN` text, which a driver that commits each
+  statement itself would run as a no-op. Committed only if every statement
+  changed exactly one row, rolled back otherwise; answered as `query` is, by
+  `end { rows: 0, rows_affected: total }` or by `error`, and a `cancel` rolls
+  the lot back. The session is in autocommit again either way, and an `error {
+  lost: true }` says it could not be rolled back or put back in autocommit.
 - **The password travels only in `open`**, never in `prepare`, and in its own
   `Password` type whose `Debug` prints nothing, so no log of a request can carry
   it.
@@ -103,6 +132,11 @@ first rendered value. Decoding runs under `catch_unwind`, because `arrow-ipc`
 has panicked on malformed input, and a plugin's bad frame is a violation, never
 a crash of DBDelve. Arrow arrays become `db::Row` in `external/rows.rs` and go
 no further (hard rule 4).
+
+Field metadata: `dbdelve.type` is the driver's name for the column's type, and
+`dbdelve.exact` (`EXACT`), `"true"` on a column whose values travel as the
+server's own text that reads back as the same value, says a row can be found by
+them in a `WHERE`. A key column without it does not make rows editable.
 
 ## Opening
 
@@ -330,6 +364,24 @@ driver printing to stdout would corrupt them (`ponytail:` not on Windows).
   on every statement handle, catalog calls included. Diagnostics are joined, at
   most 16 records, with the password blanked in every spelling the string could
   carry; `IM002` gets one sentence naming `DRIVER=/path/to/library`.
+- **`write`** is offered in `opened` only when `SQL_TXN_CAPABLE` is other than
+  `SQL_TC_NONE`. It sets `SQL_ATTR_AUTOCOMMIT` off, runs each statement on one
+  handle through the query path's publishing, so `cancel` reaches it, and
+  requires an `SQLRowCount` of exactly 1 (`SQL_NO_DATA` counts 0), no result
+  set and no further result from `SQLMoreResults`; then `SQLEndTran` commits,
+  or rolls back on any refusal, error or cancel, and autocommit goes back on.
+  A transaction that would not roll back is left in manual commit and the
+  session lost, since turning autocommit on would commit it. Refusals say
+  which statement and why ("The 2nd of 3 statements changed 0 rows, not one,
+  so DBDelve rolled back every change and nothing was saved."); a server's
+  error keeps its text and SQLSTATE with that line after it.
+- **`dbdelve.exact`** marks a column read whole as text whose SQL type is
+  character (`CHAR`, `VARCHAR` and their wide forms), an exact number
+  (`TINYINT` to `BIGINT`, `DECIMAL`, `NUMERIC`) or `GUID`, and whose type name
+  is not `bool`/`boolean`: psqlODBC's default `BoolsAsChar` reports a `bool` as
+  a varchar reading `1`. Not floats, which the bridge reformats; not dates,
+  times or intervals, which drivers render their own way; not long text or
+  binary.
 - **Catalog:** `SQLTables`, `SQLColumns`, `SQLPrimaryKeys`, `SQLStatistics`,
   `SQLForeignKeys`. Names are trimmed of trailing blanks, since Db2 returns them
   as padded `CHAR` (`ponytail:` a delimited name really ending in a space shows

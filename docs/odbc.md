@@ -86,19 +86,32 @@ A DSN can't be used with an SSH tunnel, because it hides the host and port.
 - Running queries, with Cancel and the row limit.
 - Paging, sorting by column header, filters, row counts and previews.
 - Exporting results and whole tables.
+- Editing cells, New Row and Delete Row, when the SQL dialect is Generic SQL
+  or PostgreSQL (see below).
 
 ## What's different from a built-in engine
 
-- **The grid is read-only.** Cell edits, New Row, Delete Row and Import Rows
-  are off for ODBC connections. To change data, set **Access** to Read-write
-  and run `INSERT`, `UPDATE` or `DELETE` in the query editor.
+- **Editing needs a named table and an exact key.** The grid's rows can be
+  edited only when DBDelve can tell which rows they are: one plain `SELECT` of
+  one table named with its schema (`SELECT * FROM sales.orders`; previews
+  always are), a primary key, every key column in the result, and a key the
+  driver reads back exactly (integers, decimals, character columns, GUIDs).
+  With Generic SQL an unquoted name is looked up in upper and in lower case;
+  if both exist, quote it. Otherwise the grid stays read-only and says why.
+  Other dialects are read-only for now, and Import Rows is off for every ODBC
+  connection.
+- **Saved edits are all or nothing.** A batch of edits runs as one transaction
+  through the driver, and each statement must change exactly one row: if one
+  changes none or several, every change is rolled back and nothing is saved.
+  Edits made in a query tab are shown for review rather than added to the
+  buffer.
 - **New ODBC connections start in Read-only.** With Generic SQL, the server
   isn't asked to enforce Read-only, so DBDelve checks each statement itself.
   It refuses anything it can't prove is a read, including calls to functions
   it doesn't know are safe. A query that calls one of your own functions needs
   Read-write.
-- **Every statement commits as it runs.** A `BEGIN … COMMIT` typed across
-  several statements isn't supported yet.
+- **Every statement you run commits as it runs.** A `BEGIN … COMMIT` typed
+  across several statements isn't supported yet.
 - **A `;` can't appear in the user name or password.**
 - **psqlODBC changes some dates and timestamps** on the way through: BC dates,
   `infinity`, years past 9999 and `timestamptz` offsets. Cast them to `::text`,
