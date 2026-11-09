@@ -749,10 +749,18 @@ impl Workspace {
         };
         let engine = suggested_dialect(form.engine, reported)?;
         // Only the overlap with a built-in is worth a sentence: the built-in
-        // can edit rows, which nothing through a plugin can.
+        // does what a plugin speaking the same dialect cannot.
+        let through_plugin = Target {
+            engine,
+            ..form.target()
+        };
         let built_in = engine.has_built_in_driver().then(|| {
+            let more = match through_plugin.edits_rows() {
+                true => "imports rows and copies DDL",
+                false => "can edit rows",
+            };
             format!(
-                "DBDelve also has a built-in {} driver, which can edit rows.",
+                "DBDelve also has a built-in {} driver, which {more}.",
                 engine.label()
             )
             .into()
