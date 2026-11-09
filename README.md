@@ -59,8 +59,11 @@ data lives are all in [docs/install.md](docs/install.md).
 Postgres, MySQL, MariaDB, SQLite, Turso, DuckDB, Snowflake, SQL Server, MongoDB,
 Redis (and Valkey, KeyDB, Dragonfly) and ClickHouse.
 
-Other databases, such as IBM Db2, are reachable through the bundled ODBC
-bridge, with the database's own ODBC driver installed. Grid editing is off, and
+Any other database with an ODBC driver is reachable through the bundled ODBC
+bridge, with that driver installed: IBM Db2, Oracle, SAP HANA, SAP ASE
+(Sybase), Informix, Teradata, Vertica, Exasol, Firebird, Amazon Redshift,
+Google BigQuery, Databricks, Apache Hive, Trino and Presto, Dremio,
+InterSystems IRIS, Microsoft Access and more. Grid editing is off, and
 statements you type run under the connection's mode. See
 [Connecting through ODBC](docs/odbc.md).
 
