@@ -20,6 +20,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::net::SocketAddr;
 use std::panic::{self, AssertUnwindSafe};
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -328,7 +329,9 @@ impl Connection {
     /// `statements` as one transaction of the driver's, committed only if
     /// each changed exactly one row. Sent like a query, so a Cancel under
     /// `cancel` reaches it, and refused unsent by a plugin that did not offer
-    /// `write` or speaks a dialect DBDelve does not write through a plugin.
+    /// `write` or speaks a dialect DBDelve does not write through a plugin,
+    /// and while the user's own statements have left a transaction open:
+    /// the driver's commit or rollback would end theirs with it.
     fn write(&self, statements: Vec<String>, cancel: &CancelToken) -> Result<QueryResult, DbError> {
         if let Some(reason) = unwritable(self.config.speaks) {
             return Err(failure(reason));
@@ -340,6 +343,13 @@ impl Connection {
             )));
         }
         let _session = self.host.session();
+        if self.host.in_transaction.load(Ordering::Relaxed) {
+            return Err(failure(
+                "Commit or roll back the open transaction first: an edit through a plugin driver \
+                 runs as a transaction of its own, so nothing was sent."
+                    .into(),
+            ));
+        }
         let started = Instant::now();
         let (result, _) = self.send(
             Request::Write { statements },
@@ -395,6 +405,11 @@ impl Connection {
         fetch: Fetch,
     ) -> Result<(QueryResult, Vec<Said>), DbError> {
         fetch.hold()?;
+        // Marked on the way out, as the workspace marks a profile: a
+        // statement that failed part way may still have opened one.
+        if let Some(open) = sql::leaves(self.config.speaks, sql).transaction {
+            self.host.in_transaction.store(open, Ordering::Relaxed);
+        }
         let started = Instant::now();
         let eligible = fetch.reads_only && fetch.limit.is_some() && self.opened.stops_early;
         let query = Request::Query {
@@ -1239,6 +1254,25 @@ mod tests {
             "Statement 2 changed 0 rows, so nothing was saved."
         );
         assert!(!connection.is_lost());
+    }
+
+    #[test]
+    fn a_write_waits_for_the_users_own_transaction_to_end() {
+        let connection = speaking(Engine::Postgres);
+        let batch = update_batch(Engine::Postgres, &["1"]);
+        let write = || connection.generated(&batch, &CancelToken::default(), None, None);
+        for end in ["commit", "rollback"] {
+            read(&connection, "begin");
+            let refused = write().unwrap_err();
+            assert_eq!(
+                refused.message,
+                "Commit or roll back the open transaction first: an edit through a plugin driver \
+                 runs as a transaction of its own, so nothing was sent."
+            );
+            assert_eq!(last(&connection), "begin");
+            read(&connection, end);
+            assert_eq!(write().unwrap().rows_affected, Some(1));
+        }
     }
 
     #[test]

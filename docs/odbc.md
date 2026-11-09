@@ -106,7 +106,8 @@ A DSN can't be used with an SSH tunnel, because it hides the host and port.
   through the driver, and each statement must change exactly one row: if one
   changes none or several, every change is rolled back and nothing is saved.
   Edits made in a query tab are shown for review rather than added to the
-  buffer.
+  buffer. While a transaction you opened with `BEGIN` is still open, saving is
+  refused: commit or roll it back first.
 - **New ODBC connections start in Read-only.** With Generic SQL, the server
   isn't asked to enforce Read-only, so DBDelve checks each statement itself.
   It refuses anything it can't prove is a read, including calls to functions

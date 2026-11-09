@@ -57,6 +57,10 @@ pub(super) struct Host {
     running: Mutex<Option<u64>>,
     /// A plugin said the session is gone while the process lives on.
     lost: AtomicBool,
+    /// Whether the statements sent have left a transaction open, as
+    /// `sql::leaves` reads them, the way the workspace tracks it for a
+    /// profile. Kept with the session, so a write on any path sees it.
+    pub(super) in_transaction: AtomicBool,
 }
 
 /// What the reader thread shares with the handle.
@@ -206,6 +210,7 @@ impl Host {
             session: Mutex::new(()),
             running: Mutex::new(None),
             lost: AtomicBool::new(false),
+            in_transaction: AtomicBool::new(false),
         }))
     }
 
