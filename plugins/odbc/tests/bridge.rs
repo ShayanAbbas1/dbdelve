@@ -18,8 +18,8 @@ use arrow_schema::SchemaRef;
 use dbdelve_plugin_protocol::arrow::{decode_batch, decode_schema};
 use dbdelve_plugin_protocol::limits::{CANCEL_DEADLINE, credit_cost};
 use dbdelve_plugin_protocol::{
-    ErrorKind, Frame, Kind, PROTOCOL, Password, Reference, RelationKind, Request, Response,
-    read_frame, write_frame,
+    EXACT, ErrorKind, Frame, Kind, PROTOCOL, Password, Reference, RelationKind, Request, Response,
+    WRITE, read_frame, write_frame,
 };
 
 struct Bridge {
@@ -114,6 +114,12 @@ impl Bridge {
         let frame = self.receive();
         assert_eq!((frame.kind, frame.request), (Kind::Control, id));
         Response::from_payload(&frame.payload).unwrap()
+    }
+
+    fn write(&mut self, statements: &[&str]) -> Response {
+        self.request(Request::Write {
+            statements: statements.iter().map(|sql| sql.to_string()).collect(),
+        })
     }
 
     fn query(&mut self, sql: &str) -> Outcome {
@@ -238,6 +244,44 @@ fn ended(outcome: &Outcome) -> (u64, Option<u64>, bool) {
         } => (*rows, *rows_affected, *stopped),
         other => panic!("an end, got {other:?}"),
     }
+}
+
+/// A write's refusal: its message, SQLSTATE and whether it lost the session.
+fn write_error(response: &Response) -> (&str, Option<&str>, bool) {
+    match response {
+        Response::Error {
+            message,
+            sqlstate,
+            lost,
+            ..
+        } => (message.as_str(), sqlstate.as_deref(), *lost),
+        other => panic!("an error, got {other:?}"),
+    }
+}
+
+/// Which of a result's columns are marked exact.
+fn exact_columns(outcome: &Outcome) -> Vec<bool> {
+    outcome
+        .schema
+        .as_ref()
+        .expect("a result set")
+        .fields()
+        .iter()
+        .map(|field| {
+            field
+                .metadata()
+                .get(EXACT)
+                .is_some_and(|value| value == "true")
+        })
+        .collect()
+}
+
+/// A row typed after a write outlives a typed `ROLLBACK` only when the write
+/// put the session back in autocommit.
+fn still_autocommits(bridge: &mut Bridge, insert: &str, count: &str) {
+    ended(&bridge.query(insert));
+    ended(&bridge.query("ROLLBACK"));
+    assert_eq!(bridge.query(count).rows, [vec![Some("1".to_string())]]);
 }
 
 fn error_of(outcome: &Outcome) -> (ErrorKind, Option<String>) {
@@ -993,4 +1037,328 @@ fn live_a_value_outgrowing_its_bound_buffer_arrives_whole() {
         panic!("an end, got {:?}", outcome.terminal);
     };
     assert!(messages.is_empty(), "{messages:?}");
+}
+
+#[test]
+#[ignore = "needs psqlODBC and a Postgres: set dbdelve_ODBC_POSTGRES, _USER and _PASSWORD"]
+fn live_postgres_opened_offers_write() {
+    let user = env::var("dbdelve_ODBC_POSTGRES_USER").unwrap_or_default();
+    let password = env::var("dbdelve_ODBC_POSTGRES_PASSWORD").unwrap_or_default();
+    let mut bridge = Bridge::spawn();
+    let Response::Opened { optional, .. } = bridge.open_postgres_as(&user, &password) else {
+        panic!("opened");
+    };
+    assert!(optional.contains(&WRITE.to_string()), "{optional:?}");
+}
+
+const POSTGRES_ROWS: &[&str] = &[
+    "CREATE TEMP TABLE written (id integer PRIMARY KEY, v varchar(10))",
+    "INSERT INTO written VALUES (1, 'a'), (2, 'b'), (3, 'c')",
+];
+
+fn written(bridge: &mut Bridge) -> Vec<Vec<Option<String>>> {
+    bridge.query("SELECT id, v FROM written ORDER BY id").rows
+}
+
+fn row(id: &str, v: &str) -> Vec<Option<String>> {
+    vec![Some(id.to_string()), Some(v.to_string())]
+}
+
+/// The session is idle afterwards, not idle in a transaction the write left
+/// open, which only another session can see.
+#[test]
+#[ignore = "needs psqlODBC and a Postgres: set dbdelve_ODBC_POSTGRES, _USER and _PASSWORD"]
+fn live_postgres_a_write_commits_when_each_statement_changes_one_row() {
+    let mut bridge = Bridge::open_postgres();
+    run_all(&mut bridge, POSTGRES_ROWS);
+    let saved = bridge.write(&[
+        "UPDATE written SET v = 'x' WHERE id = 1",
+        "INSERT INTO written VALUES (4, 'd')",
+        "DELETE FROM written WHERE id = 2",
+    ]);
+    assert_eq!(
+        saved,
+        Response::End {
+            rows: 0,
+            rows_affected: Some(3),
+            stopped: false,
+            messages: Vec::new(),
+            more_sets: 0,
+        }
+    );
+    assert_eq!(
+        written(&mut bridge),
+        [row("1", "x"), row("3", "c"), row("4", "d")]
+    );
+    let pid = bridge.query("SELECT pg_backend_pid()").rows[0][0]
+        .clone()
+        .unwrap();
+    let mut observer = Bridge::open_postgres();
+    let state = observer.query(&format!(
+        "SELECT state FROM pg_stat_activity WHERE pid = {pid}"
+    ));
+    assert_eq!(state.rows, [vec![Some("idle".to_string())]]);
+}
+
+#[test]
+#[ignore = "needs psqlODBC and a Postgres: set dbdelve_ODBC_POSTGRES, _USER and _PASSWORD"]
+fn live_postgres_a_write_rolls_back_unless_every_statement_changes_one_row() {
+    let mut bridge = Bridge::open_postgres();
+    run_all(&mut bridge, POSTGRES_ROWS);
+    let first = "UPDATE written SET v = 'x' WHERE id = 1";
+    let cases = [
+        (
+            "UPDATE written SET v = 'x' WHERE id = 99",
+            "The 2nd of 2 statements changed 0 rows, not one, so DBDelve rolled back every change and nothing was saved.",
+        ),
+        (
+            "UPDATE written SET v = 'x' WHERE id IN (2, 3)",
+            "The 2nd of 2 statements changed 2 rows, not one, so DBDelve rolled back every change and nothing was saved.",
+        ),
+        (
+            "SELECT 1",
+            "The 2nd of 2 statements returned rows instead of changing one, so DBDelve rolled back every change and nothing was saved.",
+        ),
+        (
+            "UPDATE written SET v = 'x' WHERE id = 2; UPDATE written SET v = 'x' WHERE id = 3",
+            "The 2nd of 2 statements held more than one statement, so DBDelve rolled back every change and nothing was saved.",
+        ),
+    ];
+    for (second, said) in cases {
+        let refused = bridge.write(&[first, second]);
+        assert_eq!(write_error(&refused), (said, None, false), "{second}");
+        assert_eq!(
+            written(&mut bridge),
+            [row("1", "a"), row("2", "b"), row("3", "c")],
+            "{second}"
+        );
+    }
+
+    let failed = bridge.write(&[first, "UPDATE written SET id = 1 / 0 WHERE id = 2"]);
+    let (message, sqlstate, lost) = write_error(&failed);
+    assert_eq!((sqlstate, lost), (Some("22012"), false), "{message}");
+    assert!(
+        message.ends_with(
+            "\nThe 2nd of 2 statements failed, so DBDelve rolled back every change and nothing was saved."
+        ),
+        "{message}"
+    );
+    assert_eq!(written(&mut bridge)[0], row("1", "a"));
+
+    let empty = bridge.write(&[]);
+    assert!(
+        matches!(
+            empty,
+            Response::Error {
+                kind: ErrorKind::Protocol,
+                ..
+            }
+        ),
+        "{empty:?}"
+    );
+    still_autocommits(
+        &mut bridge,
+        "INSERT INTO written VALUES (5, 'e')",
+        "SELECT count(*) FROM written WHERE id = 5",
+    );
+}
+
+#[test]
+#[ignore = "needs psqlODBC and a Postgres: set dbdelve_ODBC_POSTGRES, _USER and _PASSWORD"]
+fn live_postgres_cancel_rolls_a_write_back() {
+    let mut bridge = Bridge::open_postgres();
+    run_all(&mut bridge, POSTGRES_ROWS);
+    let id = bridge.next;
+    bridge.next += 1;
+    bridge.send(
+        id,
+        Request::Write {
+            statements: vec![
+                "UPDATE written SET v = 'x' WHERE id = 1".to_string(),
+                "UPDATE written SET v = 'y' WHERE id = (SELECT 2 FROM pg_sleep(30))".to_string(),
+            ],
+        },
+    );
+    thread::sleep(Duration::from_secs(1));
+    let sent = Instant::now();
+    bridge.send(id, Request::Cancel);
+    let frame = bridge.receive();
+    assert!(sent.elapsed() < CANCEL_DEADLINE, "{:?}", sent.elapsed());
+    assert_eq!((frame.kind, frame.request), (Kind::Control, id));
+    let cancelled = Response::from_payload(&frame.payload).unwrap();
+    let Response::Error {
+        kind,
+        message,
+        lost,
+        ..
+    } = &cancelled
+    else {
+        panic!("an error, got {cancelled:?}");
+    };
+    assert_eq!((*kind, *lost), (ErrorKind::Cancelled, false));
+    assert_eq!(
+        message,
+        "The write was cancelled, so DBDelve rolled back every change and nothing was saved."
+    );
+    assert_eq!(written(&mut bridge)[..2], [row("1", "a"), row("2", "b")]);
+    still_autocommits(
+        &mut bridge,
+        "INSERT INTO written VALUES (5, 'e')",
+        "SELECT count(*) FROM written WHERE id = 5",
+    );
+}
+
+/// psqlODBC reads a `bool` as `1` or `0` and reformats dates, and the bridge
+/// reformats floats, so none of those finds its row again.
+#[test]
+#[ignore = "needs psqlODBC and a Postgres: set dbdelve_ODBC_POSTGRES, _USER and _PASSWORD"]
+fn live_postgres_only_text_and_exact_numbers_are_exact() {
+    let mut bridge = Bridge::open_postgres();
+    let outcome = bridge.query(
+        "SELECT 1::int4, 2::int8, 3::int2, 'a'::varchar(5), 'b'::char(3), 1.25::numeric(10, 2), \
+         1.5::float8, 1.5::float4, timestamp '2024-01-01 00:00:00', date '2024-01-01', true",
+    );
+    assert_eq!(
+        exact_columns(&outcome),
+        [
+            true, true, true, true, true, true, false, false, false, false, false
+        ]
+    );
+}
+
+#[test]
+#[ignore = "needs a Db2 and IBM's driver: set dbdelve_ODBC_DB2, _USER and _PASSWORD"]
+fn live_opened_offers_write() {
+    let mut bridge = Bridge::spawn();
+    let opened = bridge.request(Request::Open {
+        fields: live_fields(),
+        password: Password(env::var("dbdelve_ODBC_DB2_PASSWORD").unwrap_or_default()),
+        statement_timeout: 0,
+    });
+    let Response::Opened { optional, .. } = opened else {
+        panic!("opened, got {opened:?}");
+    };
+    assert!(optional.contains(&WRITE.to_string()), "{optional:?}");
+}
+
+/// `table` dropped and created afresh with rows 1 to 3, `a` to `c`.
+fn db2_rows(bridge: &mut Bridge, table: &str) {
+    run_all(
+        bridge,
+        &[
+            &format!("DROP TABLE IF EXISTS {table}"),
+            &format!("CREATE TABLE {table} (ID INTEGER NOT NULL PRIMARY KEY, V VARCHAR(10))"),
+            &format!("INSERT INTO {table} VALUES (1, 'a'), (2, 'b'), (3, 'c')"),
+        ],
+    );
+}
+
+fn db2_written(bridge: &mut Bridge, table: &str) -> Vec<Vec<Option<String>>> {
+    bridge
+        .query(&format!("SELECT ID, V FROM {table} ORDER BY ID"))
+        .rows
+}
+
+#[test]
+#[ignore = "needs a Db2 and IBM's driver: set dbdelve_ODBC_DB2, _USER and _PASSWORD"]
+fn live_a_write_commits_when_each_statement_changes_one_row() {
+    const TABLE: &str = "DBDELVE_WRITE_COMMIT";
+    let mut bridge = Bridge::open(0);
+    db2_rows(&mut bridge, TABLE);
+    let saved = bridge.write(&[
+        &format!("UPDATE {TABLE} SET V = 'x' WHERE ID = 1"),
+        &format!("INSERT INTO {TABLE} VALUES (4, 'd')"),
+        &format!("DELETE FROM {TABLE} WHERE ID = 2"),
+    ]);
+    assert!(
+        matches!(
+            saved,
+            Response::End {
+                rows: 0,
+                rows_affected: Some(3),
+                ..
+            }
+        ),
+        "{saved:?}"
+    );
+    assert_eq!(
+        db2_written(&mut bridge, TABLE),
+        [row("1", "x"), row("3", "c"), row("4", "d")]
+    );
+    still_autocommits(
+        &mut bridge,
+        &format!("INSERT INTO {TABLE} VALUES (5, 'e')"),
+        &format!("SELECT COUNT(*) FROM {TABLE} WHERE ID = 5"),
+    );
+    run_all(&mut bridge, &[&format!("DROP TABLE {TABLE}")]);
+}
+
+#[test]
+#[ignore = "needs a Db2 and IBM's driver: set dbdelve_ODBC_DB2, _USER and _PASSWORD"]
+fn live_a_write_rolls_back_unless_every_statement_changes_one_row() {
+    const TABLE: &str = "DBDELVE_WRITE_ROLLBACK";
+    let mut bridge = Bridge::open(0);
+    db2_rows(&mut bridge, TABLE);
+    let first = format!("UPDATE {TABLE} SET V = 'x' WHERE ID = 1");
+    let cases = [
+        (
+            format!("UPDATE {TABLE} SET V = 'x' WHERE ID = 99"),
+            "The 2nd of 2 statements changed 0 rows, not one, so DBDelve rolled back every change and nothing was saved.",
+        ),
+        (
+            format!("UPDATE {TABLE} SET V = 'x' WHERE ID IN (2, 3)"),
+            "The 2nd of 2 statements changed 2 rows, not one, so DBDelve rolled back every change and nothing was saved.",
+        ),
+        (
+            "SELECT 1 FROM SYSIBM.SYSDUMMY1".to_string(),
+            "The 2nd of 2 statements returned rows instead of changing one, so DBDelve rolled back every change and nothing was saved.",
+        ),
+    ];
+    for (second, said) in &cases {
+        let refused = bridge.write(&[&first, second]);
+        assert_eq!(write_error(&refused), (*said, None, false), "{second}");
+        assert_eq!(
+            db2_written(&mut bridge, TABLE)[0],
+            row("1", "a"),
+            "{second}"
+        );
+    }
+    let failed = bridge.write(&[
+        &first,
+        &format!("UPDATE {TABLE} SET ID = 1 / 0 WHERE ID = 2"),
+    ]);
+    let (message, sqlstate, lost) = write_error(&failed);
+    assert!(sqlstate.is_some() && !lost, "{failed:?}");
+    assert!(
+        message.ends_with(
+            "\nThe 2nd of 2 statements failed, so DBDelve rolled back every change and nothing was saved."
+        ),
+        "{message}"
+    );
+    assert_eq!(db2_written(&mut bridge, TABLE)[0], row("1", "a"));
+    still_autocommits(
+        &mut bridge,
+        &format!("INSERT INTO {TABLE} VALUES (5, 'e')"),
+        &format!("SELECT COUNT(*) FROM {TABLE} WHERE ID = 5"),
+    );
+    run_all(&mut bridge, &[&format!("DROP TABLE {TABLE}")]);
+}
+
+#[test]
+#[ignore = "needs a Db2 and IBM's driver: set dbdelve_ODBC_DB2, _USER and _PASSWORD"]
+fn live_only_text_and_exact_numbers_are_exact() {
+    let mut bridge = Bridge::open(0);
+    let outcome = bridge.query(
+        "SELECT CAST(1 AS INTEGER), CAST(2 AS BIGINT), CAST(3 AS SMALLINT), \
+         CAST('a' AS VARCHAR(5)), CAST('b' AS CHAR(3)), CAST(1.25 AS DECIMAL(10, 2)), \
+         CAST(1.5E0 AS DOUBLE), CURRENT TIMESTAMP, CURRENT DATE, CAST(1 AS BOOLEAN), \
+         CAST(X'00FF' AS VARBINARY(4)) \
+         FROM SYSIBM.SYSDUMMY1",
+    );
+    assert_eq!(
+        exact_columns(&outcome),
+        [
+            true, true, true, true, true, true, false, false, false, false, false
+        ]
+    );
 }

@@ -58,6 +58,16 @@ pub enum Request {
         schema: String,
         relation: String,
     },
+    /// Optional, as `references` is. Statements DBDelve wrote, each meant to
+    /// change one row, run as one transaction through the driver's own
+    /// transaction control, never as `BEGIN` text: committed only if every
+    /// statement changed exactly one row, rolled back otherwise. Answered as
+    /// `query` is, by `end` with `rows_affected` the total, or by `error`; a
+    /// `cancel` rolls the lot back. The session is in autocommit again
+    /// either way.
+    Write {
+        statements: Vec<String>,
+    },
     Close,
 }
 
@@ -76,6 +86,14 @@ impl fmt::Debug for Password {
 /// negotiated the same way, with no protocol bump, because a host never sends
 /// what a plugin did not list.
 pub const REFERENCES: &str = "references";
+
+/// The optional `write` request.
+pub const WRITE: &str = "write";
+
+/// Arrow field metadata a plugin sets to `"true"` on a column whose values it
+/// sends as text the server reads back as the same value, so a row can be
+/// found by them: a key column without it does not make rows editable.
+pub const EXACT: &str = "dbdelve.exact";
 
 /// What a plugin answers.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -279,6 +297,9 @@ mod tests {
             Request::References {
                 schema: "s".to_string(),
                 relation: "r".to_string(),
+            },
+            Request::Write {
+                statements: vec!["UPDATE t SET a = 1 WHERE id = 2".to_string()],
             },
             Request::Close,
         ];
