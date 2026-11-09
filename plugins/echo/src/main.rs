@@ -49,6 +49,9 @@
 //! `optional`;
 //! `DBDELVE_ECHO_DRAINS=1` opens with `stops_early: false`;
 //! `DBDELVE_ECHO_REFUSE_SET=1` answers every `SET …` as `fail` does;
+//! `DBDELVE_ECHO_HELD_ENDS=1` holds `commit` and `rollback` up to 60 s for a
+//! `cancel`, answering one with `error {kind: cancelled}` and the transaction
+//! still open, as the ODBC bridge answers a call cancelled before it ran;
 //! `DBDELVE_ECHO_WEDGED=1` never answers `catalog`, `structure` or
 //! `references` while reading stdin on, as a driver stuck in a catalog call;
 //! `DBDELVE_ECHO_LINGER=<ms>` only sleeps that long, which is what `orphan`
@@ -392,6 +395,7 @@ struct Echo {
     transaction: bool,
     optional: Vec<String>,
     refuses_set: bool,
+    holds_ends: bool,
     wedged: bool,
     last: String,
 }
@@ -405,6 +409,7 @@ impl Echo {
             drains: env::var("DBDELVE_ECHO_DRAINS").is_ok_and(|value| value == "1"),
             transaction: false,
             refuses_set: env::var("DBDELVE_ECHO_REFUSE_SET").is_ok_and(|value| value == "1"),
+            holds_ends: env::var("DBDELVE_ECHO_HELD_ENDS").is_ok_and(|value| value == "1"),
             wedged: env::var("DBDELVE_ECHO_WEDGED").is_ok_and(|value| value == "1"),
             last: String::new(),
             optional: match plain {
@@ -595,6 +600,11 @@ impl Echo {
             "begin" => {
                 self.transaction = true;
                 self.end(id, 0, false, 0);
+            }
+            "commit" | "rollback"
+                if self.holds_ends && self.control.cancelled_within(Duration::from_secs(60)) =>
+            {
+                self.cancelled(id);
             }
             "commit" | "rollback" => {
                 self.transaction = false;

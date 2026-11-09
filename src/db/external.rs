@@ -437,12 +437,12 @@ impl Connection {
                 return Err(failure("Cancelled before it was sent.".into()));
             }
             let sent = self.host.request(request)?;
-            // Marked once sent and never before: a COMMIT cancelled unsent
-            // leaves the user's transaction open. One sent that then fails
-            // is still marked, as the workspace marks a profile, since the
-            // server may have ended or opened one part way.
-            if let Some(open) = leaves {
-                self.host.in_transaction.store(open, Ordering::Relaxed);
+            // Opening is marked once sent, ending only once answered (in
+            // `read`): a request sent is only queued, and a plugin answers
+            // one cancelled before it ran without running it, so a COMMIT
+            // cancelled unsent or unrun leaves the user's transaction open.
+            if leaves == Some(true) {
+                self.host.in_transaction.store(true, Ordering::Relaxed);
             }
             run.handles.push(sent.0.id.to_string());
             sent
@@ -451,7 +451,13 @@ impl Connection {
             cancel,
             handle: in_flight.id.to_string(),
         };
-        self.read(in_flight.id, &answers, Read::new(fetch, eligible, started))
+        let ends = leaves == Some(false);
+        self.read(
+            in_flight.id,
+            &answers,
+            Read::new(fetch, eligible, started),
+            ends,
+        )
     }
 
     /// The user's Cancel, which may abort an open transaction, as cancelling
@@ -615,11 +621,15 @@ impl Connection {
         }
     }
 
+    /// `ends` clears the open transaction once the statement has run: on its
+    /// `end`, or on a server's error, since a server ends a transaction whose
+    /// COMMIT fails. Every other way out leaves it marked.
     fn read(
         &self,
         id: u64,
         answers: &Receiver<Routed>,
         mut read: Read<'_>,
+        ends: bool,
     ) -> Result<(QueryResult, Vec<Said>), DbError> {
         loop {
             let Ok(routed) = answers.recv() else {
@@ -645,6 +655,9 @@ impl Connection {
                     messages,
                     more_sets,
                 }) => {
+                    if ends {
+                        self.host.in_transaction.store(false, Ordering::Relaxed);
+                    }
                     let end = End {
                         rows,
                         rows_affected,
@@ -663,6 +676,9 @@ impl Connection {
                     lost,
                     ..
                 }) => {
+                    if ends && kind == ErrorKind::Server && !lost {
+                        self.host.in_transaction.store(false, Ordering::Relaxed);
+                    }
                     return Err(self.plugin_error(kind, message, position, lost));
                 }
                 Routed::Control(_) => {
@@ -1300,6 +1316,33 @@ mod tests {
             "{refused}"
         );
         assert_eq!(last(&connection), "begin");
+    }
+
+    /// Sent is only queued: a plugin answers a COMMIT cancelled before it ran
+    /// without running it, and the user's transaction is still open.
+    #[test]
+    fn a_commit_cancelled_before_it_ran_leaves_writes_refused() {
+        let connection = open_with(&[("DBDELVE_ECHO_HELD_ENDS", "1")]).unwrap();
+        connection
+            .query("begin", &CancelToken::default(), Fetch::default())
+            .unwrap();
+        let (error, _) = cancelled(&connection, "commit", Duration::from_millis(200));
+        assert!(error.message.starts_with(CANCELLED), "{error}");
+        let refused = connection
+            .generated(
+                &update_batch(Engine::Postgres, &["1"]),
+                &CancelToken::default(),
+                Fetch::default(),
+            )
+            .unwrap_err();
+        assert!(
+            refused.message.starts_with("Commit or roll back"),
+            "{refused}"
+        );
+        let last = connection
+            .query("last", &CancelToken::default(), Fetch::default())
+            .unwrap();
+        assert_eq!(cell(&last), Some("commit"));
     }
 
     #[test]
