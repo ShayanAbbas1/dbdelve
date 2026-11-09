@@ -4309,13 +4309,28 @@ pub(crate) fn leaves(engine: Engine, sql: &str) -> Leaves {
 
 /// Whether `sql` may leave a transaction open where [`leaves`] cannot say:
 /// text sqlparser cannot read that names a `BEGIN` or `START TRANSACTION`
-/// the server may well read.
+/// the server may well read, or transaction control among other statements,
+/// which an error part way through stops short of a `COMMIT` that would end
+/// it.
 pub(crate) fn transaction_uncertain(engine: Engine, sql: &str) -> bool {
     let Some(dialect) = dialect(engine).filter(|_| !engine.spec().sql.stateless_requests) else {
         return false;
     };
-    if SqlParser::parse_sql(dialect.as_ref(), sql).is_ok() {
-        return false;
+    if let Ok(statements) = SqlParser::parse_sql(dialect.as_ref(), sql) {
+        return statements.len() > 1
+            && statements.iter().any(|statement| {
+                matches!(
+                    statement,
+                    Statement::StartTransaction {
+                        has_end_keyword: false,
+                        ..
+                    } | Statement::Commit { .. }
+                        | Statement::Rollback {
+                            savepoint: None,
+                            ..
+                        }
+                )
+            });
     }
     let tokens = Tokenizer::new(dialect.as_ref(), sql)
         .tokenize()
@@ -9523,7 +9538,7 @@ mod tests {
     }
 
     #[test]
-    fn an_opening_sqlparser_cannot_read_leaves_the_transaction_uncertain() {
+    fn an_opening_unread_or_amid_other_statements_leaves_the_transaction_uncertain() {
         for statement in [
             "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ WRITE DEFERRABLE",
             "START TRANSACTION READ ONLY NOT DEFERRABLE",
@@ -9536,8 +9551,19 @@ mod tests {
             );
         }
         for statement in [
+            "BEGIN;\nUPDATE t SET a = 1;\nCOMMIT",
+            "UPDATE t SET a = 1; COMMIT",
+        ] {
+            assert!(
+                transaction_uncertain(Engine::Postgres, statement),
+                "{statement}"
+            );
+        }
+        for statement in [
             "BEGIN",
+            "COMMIT",
             "SELECT 1",
+            "SELECT 1; SELECT 2",
             "selec 1",
             "SELECT * FROM t START WITH a = 1 CONNECT BY PRIOR a = b",
             "DO $$ BEGIN NULL; END $$",

@@ -461,6 +461,7 @@ impl Connection {
             &answers,
             Read::new(fetch, eligible, started),
             ends,
+            ends && !uncertain,
         )
     }
 
@@ -625,15 +626,16 @@ impl Connection {
         }
     }
 
-    /// `ends` clears the open transaction once the statement has run: on its
-    /// `end`, or on a server's error, since a server ends a transaction whose
-    /// COMMIT fails. Every other way out leaves it marked.
+    /// `ends` clears the open transaction once the statement has run, on its
+    /// `end`, and `fails_ended` on a server's error, since a server ends a
+    /// transaction whose COMMIT fails. Every other way out leaves it marked.
     fn read(
         &self,
         id: u64,
         answers: &Receiver<Routed>,
         mut read: Read<'_>,
         ends: bool,
+        fails_ended: bool,
     ) -> Result<(QueryResult, Vec<Said>), DbError> {
         loop {
             let Ok(routed) = answers.recv() else {
@@ -680,7 +682,7 @@ impl Connection {
                     lost,
                     ..
                 }) => {
-                    if ends && kind == ErrorKind::Server && !lost {
+                    if fails_ended && kind == ErrorKind::Server && !lost {
                         self.host.in_transaction.store(false, Ordering::Relaxed);
                     }
                     return Err(self.plugin_error(kind, message, position, lost));
@@ -1311,6 +1313,28 @@ mod tests {
             &CancelToken::default(),
             Fetch::default(),
         );
+        let refused = write().unwrap_err();
+        assert!(
+            refused.message.starts_with("Commit or roll back"),
+            "{refused}"
+        );
+        read(&connection, "rollback");
+        assert_eq!(write().unwrap().rows_affected, Some(1));
+    }
+
+    #[test]
+    fn a_transaction_block_failing_part_way_refuses_writes() {
+        let connection = speaking(Engine::Postgres);
+        let batch = update_batch(Engine::Postgres, &["1"]);
+        let write = || connection.generated(&batch, &CancelToken::default(), None, None);
+        let failed = connection
+            .query(
+                "begin; update t set a = 1; commit",
+                &CancelToken::default(),
+                Fetch::default(),
+            )
+            .unwrap_err();
+        assert!(failed.message.starts_with("echo does not know"), "{failed}");
         let refused = write().unwrap_err();
         assert!(
             refused.message.starts_with("Commit or roll back"),
