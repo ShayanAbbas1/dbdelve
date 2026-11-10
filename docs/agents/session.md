@@ -464,7 +464,8 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   how Collapse All Schemas (the filter row's button and the palette, no
   default chord) and Set as Active Schema show at once: Set as Active Schema
   records the schema it picks as open and the one it leaves as it was, since
-  that one was open only for being active. Nothing is recorded while the
+  that one was open only for being active, and its rebuild opens the picked
+  row over what was kept, so it opens under a filter too. Nothing is recorded while the
   filter has text: a filter opens every row it keeps so that matches show,
   and those are not the user's folds. Clearing it rebuilds from `folds` and
   the defaults; Collapse All Schemas clears it first, or nothing would close.
