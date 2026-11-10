@@ -7,6 +7,7 @@
 //! This was a plain type at the crate root. It moved out whole; nothing changed
 //! but its visibility.
 
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 use gpui::{App, AppContext, Context, Entity, SharedString, Subscription, Task, TextAlign, Window};
@@ -118,6 +119,7 @@ pub(crate) struct ConnectionForm {
     pub(crate) last_url: SharedString,
     /// What a duplicate takes from the connection it copies, given on save.
     pub(crate) shortcuts: Shortcuts,
+    pub(crate) folds: BTreeMap<String, bool>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -402,6 +404,7 @@ impl ConnectionForm {
             placeholders_for: None,
             last_url: SharedString::default(),
             shortcuts: Shortcuts::default(),
+            folds: BTreeMap::new(),
             _subscriptions: subscriptions,
         };
         // The form is the whole window while it is open, and a window with
@@ -459,6 +462,7 @@ impl ConnectionForm {
         form.color = profile.color;
         form.mode = starting_mode(Some(profile.mode));
         form.shortcuts = profile.shortcuts.duplicated();
+        form.folds = profile.folds.clone();
         form.name.update(cx, |input, cx| {
             input.set_value(name, window, cx);
         });

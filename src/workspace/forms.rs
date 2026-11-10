@@ -2472,6 +2472,10 @@ impl Workspace {
             }
             CatalogState::Loaded(..) => None,
         };
+        let lists_schemas = matches!(
+            &profile.catalog,
+            CatalogState::Loaded(catalog, _) if !catalog.schemas.is_empty()
+        );
         let tree = explorer_drawn(profile).then(|| {
             render_tree(
                 &profile.session.explorer_tree,
@@ -2983,9 +2987,42 @@ impl Workspace {
                                 .min_w_0()
                                 .appearance(false),
                         ),
-                    ),
+                    )
+                    .when(lists_schemas, |row| {
+                        row.child(self.render_fold_schemas(true, t))
+                            .child(self.render_fold_schemas(false, t))
+                    }),
             )
             .child(div().flex_1().min_h_0().child(content))
+    }
+
+    /// Dispatches what a bound shortcut does, so the two cannot come apart.
+    fn render_fold_schemas(&self, open: bool, t: Theme) -> Button {
+        let (id, glyph, label, chord) = match open {
+            true => (
+                "expand-schemas",
+                icon::EXPAND_ALL,
+                "Expand all schemas",
+                "expand_all_schemas",
+            ),
+            false => (
+                "collapse-schemas",
+                icon::COLLAPSE_ALL,
+                "Collapse all schemas",
+                "collapse_all_schemas",
+            ),
+        };
+        let hint = ui::chord_hint(chord, &self.settings.custom_keybindings);
+        let tooltip = match hint.is_empty() {
+            true => label.to_string(),
+            false => format!("{label}  {hint}"),
+        };
+        icon_button(id, glyph, Tone::Quiet, Control::Inline, t)
+            .tooltip(tooltip)
+            .on_click(move |_, window, cx| match open {
+                true => window.dispatch_action(Box::new(ExpandAllSchemas), cx),
+                false => window.dispatch_action(Box::new(CollapseAllSchemas), cx),
+            })
     }
 }
 

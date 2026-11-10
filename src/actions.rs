@@ -230,6 +230,8 @@ actions!(
         ToggleStructure,
         ToggleResultsFocus,
         FocusSidebar,
+        CollapseAllSchemas,
+        ExpandAllSchemas,
         OpenSidebarItem,
         AcceptCompletion,
         OpenSettings,

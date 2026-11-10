@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     ops::Range,
 };
 
@@ -51,6 +51,40 @@ pub fn is_schema_row(id: &str) -> bool {
 }
 
 const SCHEMA_ROW: &str = "schema-";
+
+/// The row id of a schema.
+pub fn schema_row(name: &str) -> String {
+    format!("{SCHEMA_ROW}{name}")
+}
+
+/// Whether each top-level row of an unfiltered sidebar opens: as `saved`
+/// says where it names the row, and otherwise a schema only when it is
+/// `within`, the one the connection works in (`Profile::explorer_opens_on`),
+/// or, when `within` names none listed, the only schema there is. So a
+/// database of many schemas opens on the one being worked in, and one of a
+/// single schema is not a lone closed row. Any other row `saved` does not
+/// name is left as built.
+pub fn root_folds(
+    items: &[TreeItem],
+    saved: &BTreeMap<String, bool>,
+    within: Option<&str>,
+) -> HashMap<String, bool> {
+    let schemas: Vec<&str> = items
+        .iter()
+        .filter_map(|item| item.id.strip_prefix(SCHEMA_ROW))
+        .collect();
+    let lone = schemas.len() == 1 && !schemas.iter().any(|schema| Some(*schema) == within);
+    items
+        .iter()
+        .filter_map(|item| {
+            let open = saved.get(item.id.as_ref()).copied().or_else(|| {
+                let schema = item.id.strip_prefix(SCHEMA_ROW)?;
+                Some(lone || within == Some(schema))
+            })?;
+            Some((item.id.to_string(), open))
+        })
+        .collect()
+}
 
 /// Whether each folder in `items` is open, by row id, to put back on a
 /// rebuild with [`with_folds`].
@@ -271,7 +305,7 @@ pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
         .by_name()
         .into_iter()
         .filter_map(|(schema_index, schema)| {
-            let id = format!("{SCHEMA_ROW}{}", schema.name);
+            let id = schema_row(&schema.name);
             let schema_matches = builder.name_matches(&id, &schema.name);
             let mut groups = Vec::new();
 
@@ -1734,6 +1768,68 @@ mod tests {
         let group = &explorer.items[0];
         assert!(!is_schema_row(&group.children[0].id));
         assert!(!is_schema_row(&explorer.items[1].children[0].id));
+    }
+
+    #[test]
+    fn only_the_active_schema_opens_or_the_only_one_there_is() {
+        // Each root of a sidebar built afresh, as `root_folds` leaves it. Built
+        // expanded, so a schema it failed to close would show here as open.
+        let shown = |catalog: &Catalog, saved: &BTreeMap<String, bool>, active| {
+            let mut explorer = queries(&["daily".to_string()], "");
+            explorer.extend(tree(catalog, ""));
+            let folds = root_folds(&explorer.items, saved, active);
+            with_folds(explorer.items, &folds)
+                .iter()
+                .map(|item| (item.id.to_string(), item.is_expanded()))
+                .collect::<Vec<_>>()
+        };
+        let row = |id: &str, open| (id.to_string(), open);
+        let none = BTreeMap::new();
+        assert_eq!(
+            shown(&catalog(), &none, Some("analytics")),
+            [
+                row(QUERIES_GROUP, true),
+                row("schema-analytics", true),
+                row("schema-public", false)
+            ]
+        );
+        for active in [Some("gone"), None] {
+            assert_eq!(
+                shown(&catalog(), &none, active),
+                [
+                    row(QUERIES_GROUP, true),
+                    row("schema-analytics", false),
+                    row("schema-public", false)
+                ],
+                "two schemas, neither active"
+            );
+        }
+
+        let saved = BTreeMap::from([
+            ("schema-analytics".to_string(), false),
+            ("schema-public".to_string(), true),
+            (QUERIES_GROUP.to_string(), false),
+            ("schema-dropped".to_string(), true),
+        ]);
+        assert_eq!(
+            shown(&catalog(), &saved, Some("analytics")),
+            [
+                row(QUERIES_GROUP, false),
+                row("schema-analytics", false),
+                row("schema-public", true)
+            ],
+            "what the user left open or closed outranks the active schema"
+        );
+
+        let mut single = catalog();
+        single.schemas.truncate(1);
+        for within in [None, Some("gone")] {
+            assert_eq!(
+                shown(&single, &none, within),
+                [row(QUERIES_GROUP, true), row("schema-analytics", true)],
+                "the only schema, whatever names one not listed"
+            );
+        }
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -170,6 +170,11 @@ pub struct StoredProfile {
         deserialize_with = "readable_entries"
     )]
     pub pins: Vec<StoredShortcut>,
+    /// Whether each of the explorer's top-level rows was left open, by row
+    /// id. A table, so last; left out when empty. A row it does not name
+    /// opens as `explorer::root_folds` says.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub folds: BTreeMap<String, bool>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -2874,6 +2879,7 @@ user = "shayan"
                 open_objects: Vec::new(),
                 folders: Vec::new(),
                 pins: Vec::new(),
+                folds: BTreeMap::new(),
             };
 
             save_profiles(&ProfileList {
@@ -2956,6 +2962,7 @@ user = "shayan"
             ],
             folders: Vec::new(),
             pins: Vec::new(),
+            folds: BTreeMap::new(),
         };
         let file = ProfileFile {
             fonts: None,
@@ -3063,6 +3070,7 @@ open_objects = []
             open_objects: Vec::new(),
             folders: Vec::new(),
             pins: Vec::new(),
+            folds: BTreeMap::new(),
         }
     }
 
@@ -3145,6 +3153,32 @@ open_objects = []
         let text = written_alone(profile.clone());
         assert!(
             text.find("[[profiles.open_objects]]") < text.find("[[profiles.folders]]"),
+            "{text}"
+        );
+        assert_eq!(decode_profiles(&text, &[]).unwrap().profiles, [profile]);
+    }
+
+    #[test]
+    fn explorer_folds_are_left_out_until_there_are_some_and_survive_the_round_trip() {
+        let text = written_alone(a_stored_profile());
+        assert!(!text.contains("folds"), "{text}");
+        let old = decode_profiles(&text, &[]).unwrap().profiles.remove(0);
+        assert!(old.folds.is_empty());
+
+        let profile = StoredProfile {
+            folders: vec![StoredFolder {
+                name: "a/b".into(),
+                members: Vec::new(),
+            }],
+            folds: BTreeMap::from([
+                ("schema-public".into(), false),
+                ("folder:3:a/b".into(), true),
+            ]),
+            ..a_stored_profile()
+        };
+        let text = written_alone(profile.clone());
+        assert!(
+            text.contains("[profiles.folds]\n\"folder:3:a/b\" = true\nschema-public = false\n"),
             "{text}"
         );
         assert_eq!(decode_profiles(&text, &[]).unwrap().profiles, [profile]);
@@ -3381,6 +3415,7 @@ folder = "Hot"
             }],
             folders: Vec::new(),
             pins: Vec::new(),
+            folds: BTreeMap::new(),
         };
         let file = ProfileFile {
             fonts: None,
@@ -3460,6 +3495,7 @@ folder = "Hot"
             }],
             folders: Vec::new(),
             pins: Vec::new(),
+            folds: BTreeMap::new(),
         };
         let file = ProfileFile {
             active: None,
@@ -3513,6 +3549,7 @@ folder = "Hot"
             open_objects: Vec::new(),
             folders: Vec::new(),
             pins: Vec::new(),
+            folds: BTreeMap::new(),
         };
         let file = ProfileFile {
             active: None,
@@ -3639,6 +3676,7 @@ open_objects = []
             }],
             folders: Vec::new(),
             pins: Vec::new(),
+            folds: BTreeMap::new(),
         };
         let text = toml::to_string_pretty(&ProfileFile {
             active: None,
@@ -3754,6 +3792,7 @@ open_objects = []
                     open_objects: Vec::new(),
                     folders: Vec::new(),
                     pins: Vec::new(),
+                    folds: BTreeMap::new(),
                 },
                 StoredProfile {
                     id: "local".into(),
@@ -3789,6 +3828,7 @@ open_objects = []
                     open_objects: Vec::new(),
                     folders: Vec::new(),
                     pins: Vec::new(),
+                    folds: BTreeMap::new(),
                 },
             ],
         };
@@ -4447,6 +4487,7 @@ open_objects = []
             }],
             folders: Vec::new(),
             pins: Vec::new(),
+            folds: BTreeMap::new(),
         };
         let text = toml::to_string_pretty(&ProfileFile {
             active: Some("dev".into()),
@@ -4820,6 +4861,7 @@ name = \"accounts\"
             ],
             folders: Vec::new(),
             pins: Vec::new(),
+            folds: BTreeMap::new(),
         };
         let file = ProfileFile {
             fonts: None,
@@ -4902,6 +4944,7 @@ name = \"accounts\"
             open_objects: vec![object],
             folders: Vec::new(),
             pins: Vec::new(),
+            folds: BTreeMap::new(),
         };
         let text = toml::to_string_pretty(&ProfileFile {
             fonts: None,
