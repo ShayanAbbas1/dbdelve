@@ -444,7 +444,7 @@ fn failure(status: ExitStatus, said: &str) -> DbError {
             "a desktop launcher"
         };
         let mut message = format!(
-            "The password command's program was not found. Give its full path: an app \
+            "The password command's program was not found. If it is installed, give its full path: an app \
              opened from {opened_from} does not see the PATH your shell sets."
         );
         if !said.is_empty() {
@@ -704,7 +704,7 @@ mod tests {
         assert!(
             error
                 .message
-                .starts_with("The password command's program was not found. Give its full path"),
+                .starts_with("The password command's program was not found. If it is installed, give its full path"),
             "{}",
             error.message
         );
