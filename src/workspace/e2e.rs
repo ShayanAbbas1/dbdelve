@@ -588,9 +588,16 @@ fn a_schema_folded_without_a_filter_is_saved_and_collapse_all_closes_it(cx: &mut
         assert!(!schema_open(cx));
         assert_eq!(saved(), Some(false));
 
-        fold_schema(cx);
-        assert_eq!(saved(), Some(true));
+        // Picked as the active schema while folded under a filter, it opens
+        // there and then, not once the filter is cleared.
         filter_to("birds", cx);
+        fold_schema(cx);
+        assert!(!schema_open(cx));
+        workspace.update(cx, |workspace, cx| workspace.set_schema("main".into(), cx));
+        settle(cx);
+        assert!(schema_open(cx));
+        assert_eq!(saved(), Some(true));
+
         cx.dispatch_action(crate::actions::CollapseAllSchemas);
         settle(cx);
         let filter = cx.update(|_, cx| {

@@ -1460,13 +1460,14 @@ impl Workspace {
         if let Some(leaving) = profile.active_schema().map(explorer::schema_row) {
             profile.folds.entry(leaving).or_insert(true);
         }
-        profile.folds.insert(explorer::schema_row(&name), true);
+        let picked = explorer::schema_row(&name);
+        profile.folds.insert(picked.clone(), true);
         let previous = profile.config.schema().map(str::to_string);
         profile.config.set_schema(Some(name.clone()));
         let (id, generation) = (profile.id.clone(), profile.generation);
         let connection = profile.connection();
         self.remember_profiles(cx);
-        self.rebuild_explorer(&id, true, cx);
+        self.rebuild_explorer_opening(&id, true, Some(picked), cx);
         cx.notify();
         let Some(connection) = connection else {
             return;
@@ -2228,6 +2229,18 @@ impl Workspace {
     }
 
     fn rebuild_explorer(&mut self, id: &str, keep: bool, cx: &mut Context<Self>) {
+        self.rebuild_explorer_opening(id, keep, None, cx);
+    }
+
+    /// `rebuild_explorer`, with the row `opening` open whatever was kept,
+    /// even under a filter, which otherwise keeps how each row was left.
+    fn rebuild_explorer_opening(
+        &mut self,
+        id: &str,
+        keep: bool,
+        opening: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(profile) = self.profiles.iter().find(|profile| profile.id == id) else {
             return;
         };
@@ -2273,6 +2286,7 @@ impl Workspace {
                 profile.active_schema(),
             ));
         }
+        folds.extend(opening.map(|row| (row, true)));
         let items = explorer::with_folds(explorer.items, &folds);
 
         let shortcuts = Arc::new(explorer.shortcuts);
