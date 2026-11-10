@@ -372,8 +372,8 @@ mod tests {
     }
 
     #[test]
-    fn each_placeholder_is_replaced_once_quoted_and_others_are_left_alone() {
-        let server = server("%PORT%", "", 0);
+    fn each_placeholder_is_replaced_quoted_and_others_are_left_alone() {
+        let server = server("me", "", 0);
         let line = command_line(
             "token --host %HOSTNAME% --port %PORT% --user %USERNAME% %PATH% 100%",
             &server,
@@ -387,9 +387,18 @@ mod tests {
                 "token --host {} --port {} --user {} %PATH% 100%",
                 quote("db.example.test"),
                 quote("5432"),
-                quote("%PORT%"),
+                quote("me"),
             )
         );
+    }
+
+    /// Unix only: cmd is never given a value with a `%` in it.
+    #[cfg(unix)]
+    #[test]
+    fn a_value_that_spells_a_placeholder_stays_as_written() {
+        let server = server("%PORT%", "", 0);
+        let line = command_line("token --user %USERNAME%", &server, Engine::Postgres).unwrap();
+        assert_eq!(line, "token --user '%PORT%'");
     }
 
     #[test]
