@@ -454,8 +454,9 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   sharing the database's name on another engine is not taken for it. When
   neither names a listed row, the only schema there is opens. So a database
   of many schemas is not a wall of open trees, and one of a single schema is
-  not a lone closed row; every other row starts open (`explorer::root_folds`). Opening or closing a
-  top-level row (a schema, a folder, Pinned, Queries) is recorded from the
+  not a lone closed row. Every other schema starts closed, and every row
+  that is not a schema (Pinned, folders, Queries) open
+  (`explorer::root_folds`). Opening or closing a top-level row (a schema, a folder, Pinned, Queries) is recorded from the
   tree's own `TreeEvent` (`Workspace::remember_fold`), keyboard, click and
   `reveal_item` alike, in the profile's `folds`, row id to open, saved as
   `[profiles.folds]` and left out when empty. A row it does not name gets the
