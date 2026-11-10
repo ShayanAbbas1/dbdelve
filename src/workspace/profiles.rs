@@ -793,7 +793,10 @@ impl Workspace {
                 Ok(_) => tracing::info!(engine, ?elapsed, "connection test passed"),
                 Err(message) => {
                     tracing::info!(engine, ?elapsed, "connection test failed");
-                    tracing::debug!("connection test failed: {message}");
+                    tracing::debug!(
+                        "connection test failed: {}",
+                        crate::db::loggable_error(message)
+                    );
                 }
             }
             tested
@@ -1759,7 +1762,11 @@ impl Workspace {
                         ?elapsed,
                         "connect failed"
                     );
-                    tracing::debug!(connection = number, "connect failed: {message}");
+                    tracing::debug!(
+                        connection = number,
+                        "connect failed: {}",
+                        crate::db::loggable_error(&message)
+                    );
                     message
                 };
                 // A file engine has nothing to authenticate to, so it never

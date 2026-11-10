@@ -36,6 +36,10 @@ const SAID_LINES: usize = 3;
 /// lines of stderr need, while a runaway command cannot fill memory.
 const KEPT_BYTES: usize = 64 * 1024;
 
+/// How every error from running the command begins, so a log can leave one
+/// out even where another error wraps it.
+const SAID_BY_US: &str = "The password command";
+
 /// pgAdmin's spellings, so a command copied from it works unchanged.
 const PLACEHOLDERS: [&str; 3] = ["%HOSTNAME%", "%PORT%", "%USERNAME%"];
 
@@ -86,6 +90,17 @@ impl ServerConfig {
         if let Ok(line) = command_line(&command.command, self, engine) {
             cache().remove(&line);
         }
+    }
+}
+
+/// An error's text as a log may carry it. A password command's can quote its
+/// stderr, which can echo the secret it printed (`set -x` does), so none of
+/// it is logged at any level, unlike a server's connect error.
+pub fn loggable_error(message: &str) -> &str {
+    if message.contains(SAID_BY_US) {
+        "(a password command's error, not logged)"
+    } else {
+        message
     }
 }
 
@@ -254,10 +269,7 @@ fn run(line: &str, within: Duration) -> Result<String, DbError> {
     let elapsed = started.elapsed();
     match &ran {
         Ok(_) => tracing::info!(?elapsed, "password command ran"),
-        Err(error) => {
-            tracing::warn!(?elapsed, "password command failed");
-            tracing::debug!("password command failed: {}", error.message);
-        }
+        Err(_) => tracing::warn!(?elapsed, "password command failed"),
     }
     ran
 }
@@ -654,6 +666,15 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.message, "The password command failed: y\ny\nlast");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failure_quoting_stderr_is_never_logged() {
+        let error = run("set -x; printf %s secret-token; exit 1", FINISH_WITHIN).unwrap_err();
+        assert!(error.message.contains("secret-token"), "{}", error.message);
+        assert!(!loggable_error(&error.message).contains("secret-token"));
+        assert_eq!(loggable_error("server said no"), "server said no");
     }
 
     #[cfg(unix)]

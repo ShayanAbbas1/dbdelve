@@ -215,7 +215,11 @@ impl Workspace {
         cx.spawn(async move |workspace, cx| {
             if let Err(error) = cancel_task.await {
                 tracing::warn!(connection = number, engine, "cancel failed");
-                tracing::debug!(connection = number, "cancel failed: {}", error.message);
+                tracing::debug!(
+                    connection = number,
+                    "cancel failed: {}",
+                    crate::db::loggable_error(&error.message)
+                );
                 _ = workspace.update(cx, |workspace, cx| workspace.note(error.message, cx));
             }
         })

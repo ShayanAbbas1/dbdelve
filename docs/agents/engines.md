@@ -243,8 +243,12 @@ Decided, and not to be re-litigated:
   Each stream is read to its end, so a command never blocks on a full pipe,
   but only its last 64 KiB is kept: a runaway command cannot fill memory, and
   more than that on stdout is an error, never a truncated password.
-  The command line, its output and its stderr are never logged above debug,
-  and the output at no level.
+  The command line, its output and its stderr are never logged, at any level.
+  Stderr's last lines stay in the error the user sees, since that is how they
+  learn the helper found no credentials, but stderr can echo the secret
+  (`set -x` does), so every log line that carries an error's text (connect,
+  Test, cancel, import) passes it through `db::loggable_error`, which leaves
+  out any error a password command's run produced.
 - **Postgres's side session** (describe, and the check before a stop at the
   limit) opens with a 2-second `statement_timeout`, and neither ever blocks
   the run on it: a describe waits its turn there on a thread of its own, and a
