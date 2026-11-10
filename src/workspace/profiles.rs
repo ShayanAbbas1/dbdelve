@@ -5,6 +5,7 @@
 
 use super::*;
 use gpui_component::menu::PopupMenuItem;
+use gpui_component::tree::{TreeEvent, TreeState};
 
 use crate::connection_form::{ConnectionTest, Reported, duplicate_profile_name, keep_schema};
 use crate::db::{ExternalConfig, Plugin};
@@ -13,6 +14,7 @@ use crate::import::{self, Source};
 use crate::session::{STALE_ROWS, restored_shortcuts};
 use crate::sql::{Destructive, Mode};
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 /// The rows on an object tab were read from what the server held then. Their
@@ -205,6 +207,7 @@ impl Workspace {
             databases: Databases::default(),
             left_database: false,
             shortcuts: restored_shortcuts(&stored.folders, &stored.pins),
+            folds: stored.folds,
             session,
         });
         // The saved queries are listed before anything has connected.
@@ -262,6 +265,7 @@ impl Workspace {
             databases: Databases::default(),
             left_database: false,
             shortcuts: Shortcuts::default(),
+            folds: BTreeMap::new(),
             session,
         });
         if let Some(password) = password
@@ -658,6 +662,7 @@ impl Workspace {
         let color = form.color;
         let mode = form.mode;
         let shortcuts = form.shortcuts.clone();
+        let folds = form.folds.clone();
         let editing = form.editing.clone();
         let typed = form
             .naming_project
@@ -714,8 +719,9 @@ impl Workspace {
             None => {
                 let index =
                     self.create_profile(name, config, color, mode, Origin::Form, window, cx);
-                if shortcuts != Shortcuts::default() {
+                if shortcuts != Shortcuts::default() || !folds.is_empty() {
                     self.profiles[index].shortcuts = shortcuts;
+                    self.profiles[index].folds = folds;
                     self.remember_profiles(cx);
                     let id = self.profiles[index].id.clone();
                     self.refresh_query_library(&id, cx);
@@ -1449,11 +1455,18 @@ impl Workspace {
         let Some(profile) = self.profile_mut() else {
             return;
         };
+        // The schema left behind was open only for being the active one, and
+        // would otherwise close under the user.
+        if let Some(leaving) = profile.active_schema().map(explorer::schema_row) {
+            profile.folds.entry(leaving).or_insert(true);
+        }
+        profile.folds.insert(explorer::schema_row(&name), true);
         let previous = profile.config.schema().map(str::to_string);
         profile.config.set_schema(Some(name.clone()));
         let (id, generation) = (profile.id.clone(), profile.generation);
         let connection = profile.connection();
         self.remember_profiles(cx);
+        self.rebuild_explorer(&id, true, cx);
         cx.notify();
         let Some(connection) = connection else {
             return;
@@ -2143,6 +2156,44 @@ impl Workspace {
         self.rebuild_explorer(id, true, cx);
     }
 
+    /// A top-level row of the sidebar the user opened or closed, kept for the
+    /// next launch. Not under a filter, which opens every row it keeps
+    /// whatever the user left them as.
+    pub(crate) fn remember_fold(
+        &mut self,
+        id: &str,
+        tree: &Entity<TreeState>,
+        event: &TreeEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let (row, open) = match event {
+            TreeEvent::Expanded(row) => (row, true),
+            TreeEvent::Collapsed(row) => (row, false),
+        };
+        let state = tree.read(cx);
+        let root = state
+            .index_of(row)
+            .and_then(|ix| state.entry(ix))
+            .is_some_and(|entry| entry.is_root());
+        let Some(profile) = self.profiles.iter_mut().find(|profile| profile.id == id) else {
+            return;
+        };
+        if !root
+            || !profile
+                .session
+                .explorer_filter
+                .read(cx)
+                .value()
+                .trim()
+                .is_empty()
+        {
+            return;
+        }
+        if profile.folds.insert(row.to_string(), open) != Some(open) {
+            self.remember_profiles(cx);
+        }
+    }
+
     fn rebuild_explorer(&mut self, id: &str, keep: bool, cx: &mut Context<Self>) {
         let Some(profile) = self.profiles.iter().find(|profile| profile.id == id) else {
             return;
@@ -2165,21 +2216,29 @@ impl Workspace {
         }
         let front = profile.front_row();
         let tree = profile.session.explorer_tree.clone();
-        // A filter opens every row it keeps, so that what matched shows.
-        let mut folds = match filter.trim().is_empty() {
-            true => explorer::root_folds(&explorer.items, profile.active_schema()),
-            false => HashMap::new(),
+        let (mut folds, selected) = match keep {
+            true => {
+                let state = tree.read(cx);
+                let roots: Vec<_> = (0..)
+                    .map_while(|ix| state.entry(ix))
+                    .filter(|entry| entry.depth() == 0)
+                    .map(|entry| entry.item().clone())
+                    .collect();
+                let selected = state.selected_item().map(|item| item.id.clone());
+                (explorer::folds(&roots), selected)
+            }
+            false => (HashMap::new(), None),
         };
-        let mut selected = None;
-        if keep {
-            let state = tree.read(cx);
-            let roots: Vec<_> = (0..)
-                .map_while(|ix| state.entry(ix))
-                .filter(|entry| entry.depth() == 0)
-                .map(|entry| entry.item().clone())
-                .collect();
-            selected = state.selected_item().map(|item| item.id.clone());
-            folds.extend(explorer::folds(&roots));
+        // Over what was kept: every fold of a top-level row made without a
+        // filter is in `profile.folds` already, and a change made to them
+        // there, Collapse All Schemas's, has to show. A filter opens every row
+        // it keeps, so that what matched shows.
+        if filter.trim().is_empty() {
+            folds.extend(explorer::root_folds(
+                &explorer.items,
+                &profile.folds,
+                profile.active_schema(),
+            ));
         }
         let items = explorer::with_folds(explorer.items, &folds);
 

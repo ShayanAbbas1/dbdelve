@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     ops::Range,
 };
 
@@ -57,18 +57,26 @@ pub fn schema_row(name: &str) -> String {
     format!("{SCHEMA_ROW}{name}")
 }
 
-/// Whether each schema row of an unfiltered sidebar opens: only the `active`
-/// one, or with none active the only schema listed, so a database of many
-/// schemas opens on the one being worked in and one of a single schema is not
-/// a lone closed row.
-pub fn root_folds(items: &[TreeItem], active: Option<&str>) -> HashMap<String, bool> {
+/// Whether each top-level row of an unfiltered sidebar opens: as `saved`
+/// says where it names the row, and otherwise a schema only when it is the
+/// `active` one, or with none active the only schema listed, so a database of
+/// many schemas opens on the one being worked in and one of a single schema is
+/// not a lone closed row. Any other row `saved` does not name is left as built.
+pub fn root_folds(
+    items: &[TreeItem],
+    saved: &BTreeMap<String, bool>,
+    active: Option<&str>,
+) -> HashMap<String, bool> {
     let schemas = items.iter().filter(|item| is_schema_row(&item.id)).count();
     let lone = active.is_none() && schemas == 1;
     items
         .iter()
         .filter_map(|item| {
-            let schema = item.id.strip_prefix(SCHEMA_ROW)?;
-            Some((item.id.to_string(), lone || active == Some(schema)))
+            let open = saved.get(item.id.as_ref()).copied().or_else(|| {
+                let schema = item.id.strip_prefix(SCHEMA_ROW)?;
+                Some(lone || active == Some(schema))
+            })?;
+            Some((item.id.to_string(), open))
         })
         .collect()
 }
@@ -1761,26 +1769,46 @@ mod tests {
     fn only_the_active_schema_opens_or_the_only_one_there_is() {
         let mut explorer = queries(&["daily".to_string()], "");
         explorer.extend(tree(&catalog(), ""));
-        let open = |active| {
-            let mut open: Vec<_> = root_folds(&explorer.items, active)
+        let open = |saved: &BTreeMap<String, bool>, active| {
+            let mut open: Vec<_> = root_folds(&explorer.items, saved, active)
                 .into_iter()
                 .filter_map(|(row, open)| open.then_some(row))
                 .collect();
             open.sort();
             open
         };
-        assert_eq!(open(Some("analytics")), ["schema-analytics"]);
-        assert!(open(Some("gone")).is_empty());
-        assert!(open(None).is_empty(), "two schemas, neither active");
+        let none = BTreeMap::new();
+        assert_eq!(open(&none, Some("analytics")), ["schema-analytics"]);
+        assert!(open(&none, Some("gone")).is_empty());
+        assert!(open(&none, None).is_empty(), "two schemas, neither active");
         assert!(
-            !root_folds(&explorer.items, None).contains_key(QUERIES_GROUP),
+            !root_folds(&explorer.items, &none, None).contains_key(QUERIES_GROUP),
             "every other row keeps how it was built"
+        );
+
+        let saved = BTreeMap::from([
+            ("schema-analytics".to_string(), false),
+            ("schema-public".to_string(), true),
+            (QUERIES_GROUP.to_string(), false),
+            ("schema-dropped".to_string(), true),
+        ]);
+        assert_eq!(
+            open(&saved, Some("analytics")),
+            ["schema-public"],
+            "what the user left open or closed outranks the active schema"
+        );
+        assert_eq!(
+            root_folds(&explorer.items, &saved, None).get(QUERIES_GROUP),
+            Some(&false)
         );
 
         let mut single = catalog();
         single.schemas.truncate(1);
         let lone = tree(&single, "").items;
-        assert_eq!(root_folds(&lone, None).get("schema-analytics"), Some(&true));
+        assert_eq!(
+            root_folds(&lone, &none, None).get("schema-analytics"),
+            Some(&true)
+        );
     }
 
     #[test]

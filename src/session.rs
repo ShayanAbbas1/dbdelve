@@ -9,14 +9,20 @@
 //! These were plain types at the crate root. They moved out whole; nothing
 //! changed but their visibility.
 
-use std::{collections::HashMap, ops::Range, path::PathBuf, rc::Rc, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    ops::Range,
+    path::PathBuf,
+    rc::Rc,
+    sync::Arc,
+};
 
 use gpui::{App, AppContext, Context, Entity, SharedString, Window};
 use gpui_component::{
     input::{CompletionProvider, EditorState, InputEvent, InputState},
     resizable::ResizableState,
     table::TableState,
-    tree::TreeState,
+    tree::{TreeEvent, TreeState},
 };
 
 use crate::{
@@ -83,6 +89,9 @@ pub(crate) struct Profile {
     pub(crate) left_database: bool,
     /// The explorer's folders and pins.
     pub(crate) shortcuts: Shortcuts,
+    /// Whether the user left each of the explorer's top-level rows open, by
+    /// row id (`store::StoredProfile::folds`).
+    pub(crate) folds: BTreeMap<String, bool>,
     pub(crate) session: Session,
 }
 
@@ -314,6 +323,7 @@ impl Profile {
                     },
                 })
                 .collect(),
+            folds: self.folds.clone(),
         }
     }
 }
@@ -826,6 +836,15 @@ impl Session {
         })
         .detach();
 
+        let explorer_tree = cx.new(|cx| TreeState::new(cx));
+        cx.subscribe(&explorer_tree, {
+            let id = id.clone();
+            move |workspace, tree, event: &TreeEvent, cx| {
+                workspace.remember_fold(&id, &tree, event, cx);
+            }
+        })
+        .detach();
+
         let save_name = cx.new(|cx| InputState::new(window, cx).placeholder("Query name"));
         // Subscribed with the window, because confirming a save can swap the
         // editor's buffer and that cannot be done without one.
@@ -885,7 +904,7 @@ impl Session {
             completion_columns: completion::ColumnCache::default(),
             completions: None,
             explorer_filter,
-            explorer_tree: cx.new(|cx| TreeState::new(cx)),
+            explorer_tree,
             explorer_leaves: Arc::new(HashMap::new()),
             explorer_highlights: Arc::new(HashMap::new()),
             explorer_shortcuts: Arc::new(HashMap::new()),

@@ -544,6 +544,57 @@ fn the_sidebar_takes_the_keyboard_and_escape_hands_it_back(cx: &mut TestAppConte
 }
 
 #[gpui::test]
+fn a_schema_folded_without_a_filter_is_saved_and_one_folded_under_one_is_not(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        let filter_to = |text: &'static str, cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                workspace.update(cx, |workspace, cx| {
+                    let profile = workspace.profile().unwrap();
+                    let (id, filter) =
+                        (profile.id.clone(), profile.session.explorer_filter.clone());
+                    filter.update(cx, |input, cx| input.set_value(text, window, cx));
+                    workspace.refresh_explorer(&id, cx);
+                });
+            });
+        };
+        let fold_schema = |cx: &mut VisualTestContext| {
+            cx.simulate_keystrokes("secondary-k e");
+            settle(cx);
+            cx.simulate_keystrokes("enter");
+            settle(cx);
+        };
+        let schema_open = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                let tree = &workspace.read(cx).profile().unwrap().session.explorer_tree;
+                tree.read(cx).entry(0).unwrap().is_expanded()
+            })
+        };
+        let saved = || {
+            store::peek_profiles(&[]).unwrap().profiles[0]
+                .folds
+                .get("schema-main")
+                .copied()
+        };
+
+        filter_to("birds", cx);
+        fold_schema(cx);
+        assert!(!schema_open(cx));
+        assert_eq!(saved(), None);
+        filter_to("", cx);
+        assert!(schema_open(cx), "the only schema, opened by default");
+
+        fold_schema(cx);
+        assert!(!schema_open(cx));
+        assert_eq!(saved(), Some(false));
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn enter_opens_a_sidebar_row_and_its_structure_takes_the_keyboard(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite_holding(
