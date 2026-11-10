@@ -955,7 +955,7 @@ pub struct ServerConfig {
     /// short-lived token as the password, or none at all.
     pub password: String,
     /// Run for the password in its place at every login, where the target
-    /// takes one.
+    /// [`Target::takes_password_command`].
     pub password_command: Option<PasswordCommand>,
     pub sslmode: SslMode,
     /// libpq's `sslrootcert`. Replaces the platform's trust store rather than
