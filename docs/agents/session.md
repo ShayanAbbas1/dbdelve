@@ -456,8 +456,8 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   of many schemas is not a wall of open trees, and one of a single schema is
   not a lone closed row. Every other schema starts closed, and every row
   that is not a schema (Pinned, folders, Queries) open
-  (`explorer::root_folds`). Opening or closing a top-level row (a schema, a folder, Pinned, Queries) is recorded from the
-  tree's own `TreeEvent` (`Workspace::remember_fold`), keyboard, click and
+  (`explorer::root_folds`). Opening or closing a top-level row (a schema, a
+  folder, Pinned, Queries) is recorded from the tree's own `TreeEvent` (`Workspace::remember_fold`), keyboard, click and
   `reveal_item` alike, in the profile's `folds`, row id to open, saved as
   `[profiles.folds]` and left out when empty. A row it does not name gets the
   default, so a schema created since stays closed and a new folder opens.
