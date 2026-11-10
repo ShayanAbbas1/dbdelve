@@ -225,8 +225,10 @@ impl Candidate {
     /// A built-in's sentence over its signature.
     ///
     /// The sentence leads because a menu too narrow to sit beside its
-    /// documentation shows only the first line of it, and the first line of a
-    /// fence is the fence.
+    /// documentation shows only the first line of it. The signature is inline
+    /// code, not a fence: the renderer draws a fence's language tag over the
+    /// end of a wrapped line, and highlights `with` in `timestamp with time
+    /// zone` as a keyword.
     fn documentation(&self) -> Option<Documentation> {
         let builtin = self.builtin?;
         let signature = match builtin.kind {
@@ -235,7 +237,7 @@ impl Candidate {
         };
         Some(Documentation::MarkupContent(MarkupContent {
             kind: MarkupKind::Markdown,
-            value: format!("{}\n\n```sql\n{signature}\n```", builtin.doc),
+            value: format!("{}\n\n`{signature}`", builtin.doc),
         }))
     }
 }
