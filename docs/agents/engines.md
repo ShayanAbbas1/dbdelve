@@ -218,6 +218,26 @@ Decided, and not to be re-litigated:
   its service or `PGSSLMODE` sets. libpq checks a root certificate on any
   encrypted connection, so `require` with one reads as `verify-ca`, which the
   line under Require says too, and `prefer` with one is refused.
+- **A password command is run at every login, inside `src/db/`**
+  (`ServerConfig::login_password`, `password_command.rs`), never once at
+  connect: an IAM token lasts minutes, and a side session, MySQL's `KILL QUERY`
+  login, SQL Server's re-login after Cancel, a Redis redial and every ClickHouse
+  request log in long after the connect. Its output is cached in memory only,
+  keyed by the substituted command line, for the profile's expiry; 0 never
+  touches the cache, and a failed connect or Test drops the entry
+  (`ConnectionConfig::forget_login_password`) so a retry does not resend a
+  refused token. `%HOSTNAME%`, `%PORT%` and `%USERNAME%` are pgAdmin's
+  spellings, substituted shell-quoted, with the profile's host rather than a
+  tunnel's local end, since a token is signed for the server it names. It runs
+  through `/bin/sh -c` (`cmd /D /S /C` on Windows) with no login shell and no
+  PATH added: guessing at a user's PATH runs whichever binary the guess finds,
+  so a program not found says to give its full path instead. With a command
+  set, the Keychain is not read (a password saved before stays there, unused)
+  and Postgres skips `.pgpass`. MongoDB is excluded
+  (`Target::takes_password_command`): its driver's pool redials with the
+  credentials it parsed at connect, so a token would go stale under it unseen.
+  The command line, its output and its stderr are never logged above debug,
+  and the output at no level.
 - **Postgres's side session** (describe, and the check before a stop at the
   limit) opens with a 2-second `statement_timeout`, and neither ever blocks
   the run on it: a describe waits its turn there on a thread of its own, and a

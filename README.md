@@ -131,6 +131,20 @@ statements you type run under the connection's mode. See
   Unix socket on the SSH host, optionally as another user (Run as); the server
   needs `socat`, and passwordless `sudo` for it when Run as is set. TLS modes
   other than `disable` and `prefer` are refused there.
+- **Sign in with a short-lived token.** On Postgres, MySQL, MariaDB, SQL
+  Server, Redis and ClickHouse, a profile's Password command prints the
+  password at every login, so cloud IAM auth keeps working after the token
+  expires. For Amazon RDS:
+
+  ```sh
+  /opt/homebrew/bin/aws rds generate-db-auth-token --hostname %HOSTNAME% --port %PORT% --username %USERNAME% --region <region>
+  ```
+
+  `%HOSTNAME%`, `%PORT%` and `%USERNAME%` are the profile's own. Give the
+  program's full path (`which aws` prints it): an app opened from the Finder or
+  a desktop launcher does not see the PATH your shell sets. Expires after
+  reuses the output for that many seconds, in memory only; blank runs the
+  command at every login.
 
 Free and open source, nothing behind a paywall, and no telemetry: the only
 request DBDelve makes on its own is an update check, which you can turn off.
