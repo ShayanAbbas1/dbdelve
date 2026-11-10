@@ -165,7 +165,7 @@ fn read_only_volume(path: &Path) -> bool {
 /// Downloads, verifies and swaps in the update, and returns the bundle to
 /// relaunch. Blocking. On failure nothing is left half-installed, and the
 /// reason is in words for the dropdown; the detail goes to the log.
-pub(crate) fn install(installer: Installer, progress: &Progress) -> Result<PathBuf, &'static str> {
+pub(crate) fn install(installer: &Installer, progress: &Progress) -> Result<PathBuf, &'static str> {
     let Installer {
         bundle,
         version,
@@ -173,10 +173,10 @@ pub(crate) fn install(installer: Installer, progress: &Progress) -> Result<PathB
         key,
     } = installer;
     tracing::info!(version, bundle = %bundle.display(), "update started");
-    let _lock = lock(&bundle).map_err(failed(ALREADY_RUNNING))?;
-    let staged = sibling(&bundle, "update-new");
-    let aside = sibling(&bundle, "update-old");
-    clear_leftovers(&bundle, [&staged, &aside]);
+    let _lock = lock(bundle).map_err(failed(ALREADY_RUNNING))?;
+    let staged = sibling(bundle, "update-new");
+    let aside = sibling(bundle, "update-old");
+    clear_leftovers(bundle, [&staged, &aside]);
 
     let scratch = Scratch::new().map_err(failed(NO_SCRATCH))?;
     let file = scratch.0.join(format!("DBDelve-{version}.dmg"));
@@ -185,14 +185,14 @@ pub(crate) fn install(installer: Installer, progress: &Progress) -> Result<PathB
     download(&agent, &dmg.url, dmg.size, &file, progress).map_err(failed(COULD_NOT_DOWNLOAD))?;
     let signature =
         fetch_signature(&agent, &dmg.signature_url).map_err(failed(COULD_NOT_DOWNLOAD))?;
-    verify(&file, &signature, &key).map_err(failed(NOT_SIGNED))?;
+    verify(&file, &signature, key).map_err(failed(NOT_SIGNED))?;
     tracing::info!("the update's signature verified");
 
     progress.installing();
     let installed = stage(&file, &scratch.0.join("mnt"), &staged)
         .map_err(failed(COULD_NOT_UNPACK))
-        .and_then(|()| check(&staged, &bundle, &version).map_err(failed(NOT_THE_APP)))
-        .and_then(|()| replace(&bundle, &staged, &aside).map_err(failed(COULD_NOT_REPLACE)));
+        .and_then(|()| check(&staged, bundle, version).map_err(failed(NOT_THE_APP)))
+        .and_then(|()| replace(bundle, &staged, &aside).map_err(failed(COULD_NOT_REPLACE)));
     let old = match installed {
         Ok(old) => old,
         Err(reason) => {
@@ -202,7 +202,7 @@ pub(crate) fn install(installer: Installer, progress: &Progress) -> Result<PathB
     };
     tracing::info!(version, bundle = %bundle.display(), "update installed");
     remove(&old);
-    Ok(bundle)
+    Ok(bundle.clone())
 }
 
 /// Held for the length of an install, so a second DBDelve process cannot

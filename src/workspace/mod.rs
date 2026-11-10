@@ -1043,15 +1043,15 @@ impl Workspace {
         })
     }
 
-    /// Update and restart: only from [`update::State::Ready`], so a second
-    /// click while one runs does nothing.
+    /// Update and restart: from [`update::State::Ready`], or again after a
+    /// failure, so a second click while one runs does nothing.
     pub(crate) fn install_update(&mut self, cx: &mut Context<Self>) {
         let Some(update) = self.update.as_mut() else {
             return;
         };
         let progress = std::sync::Arc::new(update::Progress::default());
         let state = std::mem::replace(&mut update.state, update::State::Running(progress.clone()));
-        let update::State::Ready(installer) = state else {
+        let (update::State::Ready(installer) | update::State::Failed(_, installer)) = state else {
             update.state = state;
             return;
         };
@@ -1081,8 +1081,9 @@ impl Workspace {
         })
         .detach();
 
-        let install = spawn_blocking(cx.background_executor(), move || {
-            update::install(installer, &progress)
+        let install = spawn_blocking(cx.background_executor(), {
+            let installer = installer.clone();
+            move || update::install(&installer, &progress)
         });
         cx.spawn(async move |workspace, cx| {
             let installed = install.await;
@@ -1096,7 +1097,7 @@ impl Workspace {
                 }
                 Err(reason) => {
                     if let Some(update) = workspace.update.as_mut() {
-                        update.state = update::State::Failed(reason);
+                        update.state = update::State::Failed(reason, installer);
                     }
                     cx.notify();
                 }
@@ -1151,14 +1152,22 @@ impl Workspace {
                     }),
                 )
             }
-            &update::State::Failed(reason) => (
-                format!("DBDelve {version} available"),
-                Rc::new(move |menu| {
-                    menu.label(reason)
-                        .separator()
-                        .link(format!("Download {version}"), url.clone())
-                }),
-            ),
+            &update::State::Failed(reason, _) => {
+                let workspace = cx.weak_entity();
+                (
+                    format!("DBDelve {version} available"),
+                    Rc::new(move |menu| {
+                        let workspace = workspace.clone();
+                        menu.label(reason)
+                            .item(PopupMenuItem::new("Try again").on_click(move |_, _, cx| {
+                                _ = workspace
+                                    .update(cx, |workspace, cx| workspace.install_update(cx));
+                            }))
+                            .separator()
+                            .link(format!("Download {version}"), url.clone())
+                    }),
+                )
+            }
         };
         // On a wrapper: `dropdown_menu` wraps the button, so a margin on the
         // button never reaches the titlebar's row.

@@ -4,7 +4,10 @@
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
 use std::{
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -39,10 +42,11 @@ pub(crate) struct Update {
 pub(crate) enum State {
     /// This install cannot replace itself, so the release page is all there is.
     Link,
-    Ready(Installer),
-    Running(std::sync::Arc<Progress>),
+    Ready(Arc<Installer>),
+    Running(Arc<Progress>),
     /// Why it stopped, in words for the dropdown; the detail is in the log.
-    Failed(&'static str),
+    /// The installer is kept so the same update can be tried again.
+    Failed(&'static str, Arc<Installer>),
 }
 
 /// Written by the install on its own thread, read by the titlebar on a tick.
@@ -130,7 +134,8 @@ pub(crate) fn newer_release() -> Option<Update> {
     tracing::info!(version, current = CURRENT, "a newer release is out");
     let dmg = dmg(&version, &latest.assets);
     Some(Update {
-        state: installer(&version, dmg).map_or(State::Link, State::Ready),
+        state: installer(&version, dmg)
+            .map_or(State::Link, |installer| State::Ready(Arc::new(installer))),
         release: Release {
             version,
             url: latest.html_url,
@@ -180,10 +185,10 @@ fn installer(_: &str, _: Option<Dmg>) -> Option<Installer> {
 
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn install(
-    installer: Installer,
+    installer: &Installer,
     _: &Progress,
 ) -> Result<std::path::PathBuf, &'static str> {
-    match installer {}
+    match *installer {}
 }
 
 /// Numeric, so 0.2.10 beats 0.2.9, and a build ahead of the latest release
