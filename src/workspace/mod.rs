@@ -1059,16 +1059,19 @@ impl Workspace {
 
         // The pill's percentage moves on this tick alone: the download goes to
         // a file, never through anything that would redraw.
+        let ticking = progress.clone();
         cx.spawn(async move |workspace, cx| {
             loop {
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(500))
                     .await;
                 let running = workspace.update(cx, |workspace, cx| {
-                    let running = workspace
-                        .update
-                        .as_ref()
-                        .is_some_and(|update| matches!(update.state, update::State::Running(_)));
+                    // This attempt's progress, not any: a retry started
+                    // within a tick of a failure brings a ticker of its own.
+                    let running = workspace.update.as_ref().is_some_and(|update| {
+                        matches!(&update.state, update::State::Running(progress)
+                            if std::sync::Arc::ptr_eq(progress, &ticking))
+                    });
                     if running {
                         cx.notify();
                     }

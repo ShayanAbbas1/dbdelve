@@ -53,10 +53,23 @@ main() {
 
   scratch="$(mktemp -d)"
   mount="$scratch/mnt"
-  staged="$directory/.DBDelve.install.app"
+  # Beside the destination, so putting the app in place is a rename, and a
+  # folder of this run's own, so two runs cannot remove each other's copy.
+  stage="$(mktemp -d "$directory/.DBDelve.install.XXXXXX")"
+  staged="$stage/DBDelve.app"
+  previous="$stage/previous.app"
   cleanup() {
+    # Interrupted between moving the old app out and the new one in: the old
+    # one goes back rather than leaving nothing installed.
+    if [ ! -e "$app" ] && [ -d "$previous" ]; then
+      mv "$previous" "$app" || echo "install.sh: the app that was installed is at $previous" >&2
+    fi
     hdiutil detach "$mount" -force >/dev/null 2>&1 || true
-    rm -rf "$scratch" "$staged"
+    rm -rf "$scratch"
+    # Unless the old app is in there and could not go back.
+    if [ -e "$app" ] || [ ! -d "$previous" ]; then
+      rm -rf "$stage"
+    fi
   }
   trap cleanup EXIT
   trap 'exit 1' INT TERM
@@ -68,8 +81,11 @@ main() {
 
   # Stock macOS has nothing that checks a minisign signature, so this is for
   # those who have it; everyone else is trusting GitHub over HTTPS, as they
-  # are for this script.
-  if command -v minisign >/dev/null 2>&1 && curl -fsL -o "$dmg.minisig" "$url.minisig" 2>/dev/null; then
+  # are for this script. Where it can be checked it must be: a signature that
+  # will not download is a failure, not a reason to skip the check.
+  if command -v minisign >/dev/null 2>&1; then
+    curl -fsL -o "$dmg.minisig" "$url.minisig" 2>/dev/null ||
+      fail "the signature of DBDelve $version could not be downloaded, so the download cannot be checked"
     minisign -V -q -P "$PUBLIC_KEY" -m "$dmg" -x "$dmg.minisig" ||
       fail "the download's signature did not check out"
     echo "Signature verified."
@@ -78,14 +94,17 @@ main() {
   mkdir "$mount"
   hdiutil attach -nobrowse -readonly -noautoopen -mountpoint "$mount" "$dmg" >/dev/null
   [ -d "$mount/DBDelve.app" ] || fail "the download holds no DBDelve.app"
-  rm -rf "$staged"
   ditto "$mount/DBDelve.app" "$staged"
 
   codesign --verify --deep --strict "$staged" || fail "the downloaded app is damaged"
   found="$(plutil -extract CFBundleIdentifier raw -o - "$staged/Contents/Info.plist")"
   [ "$found" = "$IDENTIFIER" ] || fail "the downloaded app is $found, not DBDelve"
 
-  rm -rf "$app"
+  # The installed app is moved aside, not deleted, until the new one is in
+  # its place; cleanup puts it back if that never happens.
+  if [ -e "$app" ]; then
+    mv "$app" "$previous"
+  fi
   mv "$staged" "$app"
   echo "DBDelve $version is in $app"
   echo "Open it from there, or with: open \"$app\""

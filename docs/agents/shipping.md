@@ -59,10 +59,10 @@ out of the image to a hidden sibling, checks it (`codesign --verify --deep
 release and newer than both the running build and the installed bundle),
 exchanges the two in one `renamex_np(RENAME_SWAP)` and relaunches through
 `App::restart`, which quits the way Quit does. A volume without the atomic
-exchange gets a rename aside, a rename into place, and the first undone if
-the second fails. A lock on the bundle's folder keeps two processes from
-clearing each other's hidden siblings, and an install clears those an
-interrupted one left.
+exchange fails the update and keeps the release link: moving the app aside
+first would leave nothing installed if the process died in between. A lock on
+the bundle's folder keeps two processes from clearing each other's hidden
+sibling, and an install clears the one an interrupted install left.
 
 - **Only the release build in a writable place updates itself.** A dev or
   other `DBDELVE_VARIANT` build, a binary outside a `.app`, a bundle on a

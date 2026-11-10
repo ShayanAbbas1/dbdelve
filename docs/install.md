@@ -35,7 +35,8 @@ curl -fsSL https://raw.githubusercontent.com/ShayanAbbas1/dbdelve/main/install.s
 ```
 
 Nothing it downloads is quarantined, so the app just opens. If `minisign` is
-installed it also checks the release's signature.
+installed it also checks the release's signature, and installs nothing that
+fails the check.
 
 Or take the `.dmg` from [the latest release][releases] and drag DBDelve to
 Applications. A browser quarantines what it downloads and nothing clears that

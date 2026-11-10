@@ -175,8 +175,8 @@ pub(crate) fn install(installer: &Installer, progress: &Progress) -> Result<Path
     tracing::info!(version, bundle = %bundle.display(), "update started");
     let _lock = lock(bundle).map_err(failed(ALREADY_RUNNING))?;
     let staged = sibling(bundle, "update-new");
-    let aside = sibling(bundle, "update-old");
-    clear_leftovers(bundle, [&staged, &aside]);
+    // What an earlier attempt left when it was killed before it could clean up.
+    remove(&staged);
 
     let scratch = Scratch::new().map_err(failed(NO_SCRATCH))?;
     let file = scratch.0.join(format!("DBDelve-{version}.dmg"));
@@ -192,16 +192,16 @@ pub(crate) fn install(installer: &Installer, progress: &Progress) -> Result<Path
     let installed = stage(&file, &scratch.0.join("mnt"), &staged)
         .map_err(failed(COULD_NOT_UNPACK))
         .and_then(|()| check(&staged, bundle, version).map_err(failed(NOT_THE_APP)))
-        .and_then(|()| replace(bundle, &staged, &aside).map_err(failed(COULD_NOT_REPLACE)));
-    let old = match installed {
-        Ok(old) => old,
-        Err(reason) => {
-            remove(&staged);
-            return Err(reason);
-        }
-    };
+        .and_then(|()| {
+            exchange(&staged, bundle)
+                .map_err(|error| format!("exchanging the app and the update: {error}"))
+                .map_err(failed(COULD_NOT_REPLACE))
+        });
+    // After the exchange `staged` holds the old app; before it, the update.
+    // Either way it is what is left over.
+    remove(&staged);
+    installed?;
     tracing::info!(version, bundle = %bundle.display(), "update installed");
-    remove(&old);
     Ok(bundle.clone())
 }
 
@@ -225,27 +225,12 @@ fn failed(reason: &'static str) -> impl FnOnce(String) -> &'static str {
     }
 }
 
-/// Hidden, and beside the bundle so it is on the same volume and the swap is
-/// a rename.
+/// Hidden, and beside the bundle so it is on the same volume as it.
 fn sibling(bundle: &Path, tag: &str) -> PathBuf {
     let stem = bundle
         .file_stem()
         .map_or("DBDelve".into(), |stem| stem.to_string_lossy());
     bundle.with_file_name(format!(".{stem}.{tag}.app"))
-}
-
-/// What an earlier attempt left when it was killed before it could clean up.
-fn clear_leftovers(bundle: &Path, leftovers: [&Path; 2]) {
-    // Without the installed bundle, a leftover may be the only copy of the app.
-    if !bundle.exists() {
-        return;
-    }
-    for leftover in leftovers {
-        if leftover != bundle && leftover.symlink_metadata().is_ok() {
-            tracing::info!(path = %leftover.display(), "removing what an earlier update left");
-            remove(leftover);
-        }
-    }
 }
 
 fn remove(path: &Path) {
@@ -476,19 +461,10 @@ fn accept(
     Ok(())
 }
 
-/// Puts the staged bundle in place and returns where the old one now is.
-/// One atomic exchange where the volume can do it (APFS and HFS+ can), so no
-/// moment exists without an app at its path; [`swap`] where it cannot.
-fn replace(installed: &Path, staged: &Path, aside: &Path) -> Result<PathBuf, String> {
-    match exchange(staged, installed) {
-        Ok(()) => Ok(staged.to_path_buf()),
-        Err(error) => {
-            tracing::info!("no atomic exchange here ({error}), so the app moves aside first");
-            swap(installed, staged, aside).map(|()| aside.to_path_buf())
-        }
-    }
-}
-
+/// Swaps two paths in one atomic step, so no moment exists without an app at
+/// its path, whenever this process dies. APFS and HFS+ can; where the volume
+/// cannot, the update fails and the release page is the way, since moving the
+/// app aside first would leave nothing installed if interrupted.
 fn exchange(first: &Path, second: &Path) -> std::io::Result<()> {
     let path = |path: &Path| CString::new(path.as_os_str().as_bytes());
     let (first, second) = (path(first)?, path(second)?);
@@ -497,22 +473,6 @@ fn exchange(first: &Path, second: &Path) -> std::io::Result<()> {
         0 => Ok(()),
         _ => Err(std::io::Error::last_os_error()),
     }
-}
-
-/// Moves the installed bundle aside and the staged one into its place, and
-/// puts the installed one back if the second move fails.
-fn swap(installed: &Path, staged: &Path, aside: &Path) -> Result<(), String> {
-    fs::rename(installed, aside).map_err(|error| format!("moving the app aside: {error}"))?;
-    let Err(error) = fs::rename(staged, installed) else {
-        return Ok(());
-    };
-    Err(match fs::rename(aside, installed) {
-        Ok(()) => format!("moving the update into place: {error}"),
-        Err(back) => format!(
-            "moving the update into place: {error}, and moving the app back: {back}; it is at {}",
-            aside.display()
-        ),
-    })
 }
 
 /// Stdout on success; on failure, the exit status and what the tool said.
@@ -539,8 +499,8 @@ mod tests {
     use minisign_verify::PublicKey;
 
     use super::{
-        BundleInfo, accept, blocked, bundle_info, bundle_of, check, clear_leftovers, lock,
-        parse_key, read_only_volume, replace, run, sibling, stage, swap, verify,
+        BundleInfo, accept, blocked, bundle_info, bundle_of, check, exchange, lock, parse_key,
+        read_only_volume, run, sibling, stage, verify,
     };
 
     fn scratch(name: &str) -> PathBuf {
@@ -684,44 +644,30 @@ mod tests {
     }
 
     #[test]
-    fn the_swap_puts_the_update_in_place_or_puts_the_app_back() {
-        let directory = scratch("swap");
+    fn the_exchange_puts_the_update_in_place_and_the_app_where_it_was() {
+        let directory = scratch("exchange");
         let installed = directory.join("DBDelve.app");
         let staged = sibling(&installed, "update-new");
-        let aside = sibling(&installed, "update-old");
         assert_eq!(staged, directory.join(".DBDelve.update-new.app"));
 
         fs::create_dir(&installed).unwrap();
         fs::write(installed.join("version"), "old").unwrap();
         fs::create_dir(&staged).unwrap();
         fs::write(staged.join("version"), "new").unwrap();
-        swap(&installed, &staged, &aside).unwrap();
+        exchange(&staged, &installed).unwrap();
         assert_eq!(
             fs::read_to_string(installed.join("version")).unwrap(),
             "new"
         );
-        assert_eq!(fs::read_to_string(aside.join("version")).unwrap(), "old");
-        assert!(!staged.exists());
+        assert_eq!(fs::read_to_string(staged.join("version")).unwrap(), "old");
 
-        // Nothing staged: the second move fails and the first is undone.
-        fs::remove_dir_all(&aside).unwrap();
-        assert!(swap(&installed, &staged, &aside).is_err());
+        // Nothing staged: it fails, and the app is untouched.
+        fs::remove_dir_all(&staged).unwrap();
+        assert!(exchange(&staged, &installed).is_err());
         assert_eq!(
             fs::read_to_string(installed.join("version")).unwrap(),
             "new"
         );
-        assert!(!aside.exists());
-
-        // The exchange: one step, and the old app is where the update was.
-        fs::create_dir(&staged).unwrap();
-        fs::write(staged.join("version"), "newer").unwrap();
-        let old = replace(&installed, &staged, &aside).unwrap();
-        assert_eq!(old, staged);
-        assert_eq!(
-            fs::read_to_string(installed.join("version")).unwrap(),
-            "newer"
-        );
-        assert_eq!(fs::read_to_string(old.join("version")).unwrap(), "new");
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -733,26 +679,6 @@ mod tests {
         assert!(lock(&bundle).is_err());
         drop(held);
         lock(&bundle).unwrap();
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn an_earlier_attempts_leftovers_are_cleared_but_never_the_app() {
-        let directory = scratch("leftovers");
-        let installed = directory.join("DBDelve.app");
-        let staged = sibling(&installed, "update-new");
-        let aside = sibling(&installed, "update-old");
-        fs::create_dir(&staged).unwrap();
-        fs::create_dir(&aside).unwrap();
-
-        // With the app itself missing, the aside copy may be all there is.
-        clear_leftovers(&installed, [&staged, &aside]);
-        assert!(staged.exists() && aside.exists());
-
-        fs::create_dir(&installed).unwrap();
-        clear_leftovers(&installed, [&staged, &aside]);
-        assert!(!staged.exists() && !aside.exists());
-        assert!(installed.exists());
         fs::remove_dir_all(directory).unwrap();
     }
 
