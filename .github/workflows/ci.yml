@@ -118,7 +118,7 @@ jobs:
       # runs: the prebuilt download is quicker than carrying it in the cache.
       - &install-nextest
         name: install nextest
-        uses: taiki-e/install-action@v2.88.0
+        uses: taiki-e/install-action@v2.90.1
         with:
           tool: cargo-nextest@0.9.150
       - &rust-cache
@@ -238,7 +238,7 @@ jobs:
             libfontconfig-dev libxkbcommon-dev libxkbcommon-x11-dev \
             libwayland-dev libdbus-1-dev unixodbc unixodbc-dev
       - name: cache IBM driver
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: dev/db2/.cache
           key: ibm-clidriver-${{ hashFiles('dev/db2/driver.sh') }}
