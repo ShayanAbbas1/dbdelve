@@ -111,6 +111,13 @@ pub struct StoredProfile {
     /// no limit is exactly what it was running with.
     #[serde(default)]
     pub statement_timeout: Option<u32>,
+    /// The command a login runs for its password, as typed, and for how many
+    /// seconds its output is reused (absent or 0: every login runs it). Both
+    /// absent for a profile without one. The output is never written anywhere.
+    #[serde(default)]
+    pub password_command: Option<String>,
+    #[serde(default)]
+    pub password_expires: Option<u32>,
     /// The id the next query buffer will be given. Persisted rather than
     /// derived from the open buffers, because deriving it hands a closed tab's
     /// id back out -- and a new buffer with a dead tab's id reads that tab's
@@ -2869,6 +2876,8 @@ user = "shayan"
                 service: None,
                 editor_font_size: None,
                 statement_timeout: Some(30),
+                password_command: None,
+                password_expires: None,
                 next_query_id: Some(1),
                 color: None,
                 mode: Some("full".into()),
@@ -2925,6 +2934,8 @@ user = "shayan"
             service: None,
             editor_font_size: Some(16.0),
             statement_timeout: Some(30),
+            password_command: None,
+            password_expires: None,
             next_query_id: Some(7),
             color: None,
             mode: None,
@@ -3028,6 +3039,9 @@ open_objects = []
         assert_eq!(profile.color, None);
         // No limit, which is what it was running with.
         assert_eq!(profile.statement_timeout, None);
+        // Signed in with the keychain's password, and still does.
+        assert_eq!(profile.password_command, None);
+        assert_eq!(profile.password_expires, None);
         // A profile predating tunnels connected directly, and still does.
         assert_eq!(profile.ssh, None);
         // And on the server's own search_path.
@@ -3060,6 +3074,8 @@ open_objects = []
             service: None,
             editor_font_size: None,
             statement_timeout: None,
+            password_command: None,
+            password_expires: None,
             next_query_id: Some(0),
             color: None,
             mode: None,
@@ -3351,6 +3367,36 @@ folder = "Hot"
     }
 
     #[test]
+    fn a_password_command_survives_the_round_trip_through_toml_beside_a_tunnel() {
+        // Scalars, so declared after `ssh` they would encode and then fail to
+        // decode.
+        let profile = StoredProfile {
+            password_command: Some("printf %s \"$TOKEN\" # %USERNAME%".into()),
+            password_expires: Some(900),
+            ssh: Some(SshTunnel {
+                host: "bastion".into(),
+                port: None,
+                user: "tunnel".into(),
+                identity_file: None,
+                run_as: None,
+            }),
+            ..a_stored_profile()
+        };
+        let file = ProfileFile {
+            fonts: None,
+            active: None,
+            settings: None,
+            projects: Vec::new(),
+            profiles: vec![profile.clone()],
+        };
+
+        let text = toml::to_string_pretty(&file).expect("profiles must encode");
+        let decoded: ProfileFile = toml::from_str(&text).expect("profiles must decode");
+
+        assert_eq!(decoded.profiles, vec![profile]);
+    }
+
+    #[test]
     fn no_tunnel_is_not_written_as_an_empty_section() {
         let file = ProfileFile {
             fonts: None,
@@ -3393,6 +3439,8 @@ folder = "Hot"
             service: None,
             editor_font_size: None,
             statement_timeout: None,
+            password_command: None,
+            password_expires: None,
             next_query_id: Some(0),
             color: Some(ConnectionColor::Purple.slug().to_string()),
             mode: None,
@@ -3473,6 +3521,8 @@ folder = "Hot"
             service: None,
             editor_font_size: Some(14.0),
             statement_timeout: None,
+            password_command: None,
+            password_expires: None,
             next_query_id: Some(7),
             color: None,
             mode: None,
@@ -3539,6 +3589,8 @@ folder = "Hot"
             service: None,
             editor_font_size: None,
             statement_timeout: Some(60),
+            password_command: None,
+            password_expires: None,
             next_query_id: Some(1),
             color: None,
             mode: None,
@@ -3654,6 +3706,8 @@ open_objects = []
             service: None,
             editor_font_size: None,
             statement_timeout: Some(30),
+            password_command: None,
+            password_expires: None,
             next_query_id: Some(7),
             color: None,
             mode: None,
@@ -3782,6 +3836,8 @@ open_objects = []
                     service: None,
                     editor_font_size: None,
                     statement_timeout: Some(30),
+                    password_command: None,
+                    password_expires: None,
                     next_query_id: Some(2),
                     color: None,
                     mode: None,
@@ -3818,6 +3874,8 @@ open_objects = []
                     service: None,
                     editor_font_size: None,
                     statement_timeout: None,
+                    password_command: None,
+                    password_expires: None,
                     next_query_id: None,
                     color: None,
                     mode: None,
@@ -4452,6 +4510,8 @@ open_objects = []
             service: None,
             editor_font_size: Some(15.0),
             statement_timeout: Some(30),
+            password_command: None,
+            password_expires: None,
             next_query_id: Some(7),
             color: None,
             mode: None,
@@ -4818,6 +4878,8 @@ name = \"accounts\"
             service: None,
             editor_font_size: None,
             statement_timeout: None,
+            password_command: None,
+            password_expires: None,
             next_query_id: Some(0),
             color: None,
             mode: None,
@@ -4934,6 +4996,8 @@ name = \"accounts\"
             service: None,
             editor_font_size: None,
             statement_timeout: None,
+            password_command: None,
+            password_expires: None,
             next_query_id: Some(0),
             color: None,
             mode: None,

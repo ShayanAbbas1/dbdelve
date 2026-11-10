@@ -92,13 +92,6 @@ impl Target {
     /// Every server login DBDelve performs itself, except MongoDB's: its driver
     /// redials with the credentials it parsed at connect, so a token would go
     /// stale under it unseen.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the connection form asks it once it shows the field"
-        )
-    )]
     pub fn takes_password_command(self) -> bool {
         self.driver == Driver::BuiltIn
             && matches!(

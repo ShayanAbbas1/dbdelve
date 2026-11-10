@@ -8,7 +8,7 @@ use gpui_component::menu::PopupMenuItem;
 use gpui_component::tree::{TreeEvent, TreeState};
 
 use crate::connection_form::{ConnectionTest, Reported, duplicate_profile_name, keep_schema};
-use crate::db::{ExternalConfig, Plugin};
+use crate::db::{ExternalConfig, PasswordCommand, Plugin};
 use crate::explorer::Shortcuts;
 use crate::import::{self, Source};
 use crate::session::{STALE_ROWS, restored_shortcuts};
@@ -2569,7 +2569,7 @@ fn stored_config(
                 user: stored.user.clone(),
                 // Never on disk. Read from the Keychain when connecting.
                 password: String::new(),
-                password_command: None,
+                password_command: stored_password_command(stored, engine),
                 sslmode,
                 root_certificate: stored.root_certificate.clone(),
                 statement_timeout: stored.statement_timeout.unwrap_or_default(),
@@ -2610,6 +2610,21 @@ fn stored_config(
             schema: stored.schema.clone(),
         }),
     }
+}
+
+/// A hand-edited file can give a command to an engine whose login never runs
+/// one; dropped there, so the next save does not carry it on.
+fn stored_password_command(
+    stored: &store::StoredProfile,
+    engine: Engine,
+) -> Option<PasswordCommand> {
+    let command = stored.password_command.as_ref()?;
+    (Target::built_in(engine).takes_password_command() && !command.trim().is_empty()).then(|| {
+        PasswordCommand {
+            command: command.clone(),
+            expires: stored.password_expires.unwrap_or_default(),
+        }
+    })
 }
 
 /// Whether picking `name` would leave the profile where it is. A blank
@@ -2956,6 +2971,41 @@ mod tests {
             stored_config(&file("database = ''"), Engine::DuckDb, SslMode::default()),
             ConnectionConfig::duckdb("/data/dev.duckdb".into(), 0)
         );
+    }
+
+    #[test]
+    fn a_password_command_restores_only_where_the_login_runs_one() {
+        let file = |fields: &str| -> store::StoredProfile {
+            toml::from_str(&format!(
+                "id = 'dev'\nname = 'Dev'\nhost = 'db.internal'\nuser = 'ada'\n\
+                 database = 'orders'\n{fields}"
+            ))
+            .expect("a profile")
+        };
+        let restored = |fields: &str, engine| {
+            stored_config(&file(fields), engine, SslMode::default())
+                .server()
+                .and_then(|server| server.password_command.clone())
+        };
+        let command = "password_command = 'printf %s token'";
+        assert_eq!(
+            restored(
+                &format!("{command}\npassword_expires = 900"),
+                Engine::Postgres
+            ),
+            Some(PasswordCommand {
+                command: "printf %s token".into(),
+                expires: 900,
+            })
+        );
+        // No expiry is every login.
+        assert_eq!(
+            restored(command, Engine::Redis).map(|command| command.expires),
+            Some(0)
+        );
+        // MongoDB's driver redials with what it parsed at connect.
+        assert_eq!(restored(command, Engine::MongoDb), None);
+        assert_eq!(restored("password_command = '  '", Engine::Postgres), None);
     }
 
     #[test]
