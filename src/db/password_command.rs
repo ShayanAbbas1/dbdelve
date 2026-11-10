@@ -273,6 +273,19 @@ fn output(line: &str, within: Duration) -> Result<String, DbError> {
             "The password command could not be started: {error}"
         ))
     })?;
+    // cmd's children are not ours to kill, so the job owns them: `stop` ends
+    // cmd, and this handle's drop on return ends the rest and closes the
+    // pipes the drains are reading.
+    #[cfg(windows)]
+    let _job = match super::ssh::kill_on_close_job(&child) {
+        Ok(job) => job,
+        Err(error) => {
+            stop(&mut child);
+            return Err(plain_error(format!(
+                "The password command could not be started: {error}"
+            )));
+        }
+    };
     let deadline = Instant::now() + within;
     let stdout = drain(child.stdout.take());
     let stderr = drain(child.stderr.take());
