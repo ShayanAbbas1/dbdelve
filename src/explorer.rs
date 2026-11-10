@@ -52,6 +52,27 @@ pub fn is_schema_row(id: &str) -> bool {
 
 const SCHEMA_ROW: &str = "schema-";
 
+/// The row id of a schema.
+pub fn schema_row(name: &str) -> String {
+    format!("{SCHEMA_ROW}{name}")
+}
+
+/// Whether each schema row of an unfiltered sidebar opens: only the `active`
+/// one, or with none active the only schema listed, so a database of many
+/// schemas opens on the one being worked in and one of a single schema is not
+/// a lone closed row.
+pub fn root_folds(items: &[TreeItem], active: Option<&str>) -> HashMap<String, bool> {
+    let schemas = items.iter().filter(|item| is_schema_row(&item.id)).count();
+    let lone = active.is_none() && schemas == 1;
+    items
+        .iter()
+        .filter_map(|item| {
+            let schema = item.id.strip_prefix(SCHEMA_ROW)?;
+            Some((item.id.to_string(), lone || active == Some(schema)))
+        })
+        .collect()
+}
+
 /// Whether each folder in `items` is open, by row id, to put back on a
 /// rebuild with [`with_folds`].
 pub fn folds(items: &[TreeItem]) -> HashMap<String, bool> {
@@ -271,7 +292,7 @@ pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
         .by_name()
         .into_iter()
         .filter_map(|(schema_index, schema)| {
-            let id = format!("{SCHEMA_ROW}{}", schema.name);
+            let id = schema_row(&schema.name);
             let schema_matches = builder.name_matches(&id, &schema.name);
             let mut groups = Vec::new();
 
@@ -1734,6 +1755,32 @@ mod tests {
         let group = &explorer.items[0];
         assert!(!is_schema_row(&group.children[0].id));
         assert!(!is_schema_row(&explorer.items[1].children[0].id));
+    }
+
+    #[test]
+    fn only_the_active_schema_opens_or_the_only_one_there_is() {
+        let mut explorer = queries(&["daily".to_string()], "");
+        explorer.extend(tree(&catalog(), ""));
+        let open = |active| {
+            let mut open: Vec<_> = root_folds(&explorer.items, active)
+                .into_iter()
+                .filter_map(|(row, open)| open.then_some(row))
+                .collect();
+            open.sort();
+            open
+        };
+        assert_eq!(open(Some("analytics")), ["schema-analytics"]);
+        assert!(open(Some("gone")).is_empty());
+        assert!(open(None).is_empty(), "two schemas, neither active");
+        assert!(
+            !root_folds(&explorer.items, None).contains_key(QUERIES_GROUP),
+            "every other row keeps how it was built"
+        );
+
+        let mut single = catalog();
+        single.schemas.truncate(1);
+        let lone = tree(&single, "").items;
+        assert_eq!(root_folds(&lone, None).get("schema-analytics"), Some(&true));
     }
 
     #[test]

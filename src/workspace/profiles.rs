@@ -2165,22 +2165,23 @@ impl Workspace {
         }
         let front = profile.front_row();
         let tree = profile.session.explorer_tree.clone();
-        let (items, selected) = match keep {
-            true => {
-                let state = tree.read(cx);
-                let roots: Vec<_> = (0..)
-                    .map_while(|ix| state.entry(ix))
-                    .filter(|entry| entry.depth() == 0)
-                    .map(|entry| entry.item().clone())
-                    .collect();
-                let selected = state.selected_item().map(|item| item.id.clone());
-                (
-                    explorer::with_folds(explorer.items, &explorer::folds(&roots)),
-                    selected,
-                )
-            }
-            false => (explorer.items, None),
+        // A filter opens every row it keeps, so that what matched shows.
+        let mut folds = match filter.trim().is_empty() {
+            true => explorer::root_folds(&explorer.items, profile.active_schema()),
+            false => HashMap::new(),
         };
+        let mut selected = None;
+        if keep {
+            let state = tree.read(cx);
+            let roots: Vec<_> = (0..)
+                .map_while(|ix| state.entry(ix))
+                .filter(|entry| entry.depth() == 0)
+                .map(|entry| entry.item().clone())
+                .collect();
+            selected = state.selected_item().map(|item| item.id.clone());
+            folds.extend(explorer::folds(&roots));
+        }
+        let items = explorer::with_folds(explorer.items, &folds);
 
         let shortcuts = Arc::new(explorer.shortcuts);
         if let Some(profile) = self.profiles.iter_mut().find(|profile| profile.id == id) {
