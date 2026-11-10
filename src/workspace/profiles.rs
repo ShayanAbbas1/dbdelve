@@ -2145,6 +2145,35 @@ impl Workspace {
         }
     }
 
+    /// Every schema of the connection in front closed and kept closed;
+    /// Pinned, the folders and Queries stay as they are.
+    pub(crate) fn collapse_all_schemas(
+        &mut self,
+        _: &CollapseAllSchemas,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(profile) = self.profile_mut() else {
+            return;
+        };
+        let CatalogState::Loaded(catalog, _) = &profile.catalog else {
+            return;
+        };
+        let schemas = catalog.schemas.iter().map(|schema| schema.name.as_str());
+        profile
+            .folds
+            .extend(schemas.map(|name| (explorer::schema_row(name), false)));
+        // A filter opens every row it keeps, so under one nothing would close.
+        let filter = profile.session.explorer_filter.clone();
+        if !filter.read(cx).value().is_empty() {
+            filter.update(cx, |input, cx| input.set_value("", window, cx));
+        }
+        let id = profile.id.clone();
+        self.remember_profiles(cx);
+        self.rebuild_explorer(&id, true, cx);
+        cx.notify();
+    }
+
     pub(crate) fn refresh_explorer(&mut self, id: &str, cx: &mut Context<Self>) {
         self.rebuild_explorer(id, false, cx);
     }

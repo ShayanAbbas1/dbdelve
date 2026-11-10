@@ -2472,6 +2472,10 @@ impl Workspace {
             }
             CatalogState::Loaded(..) => None,
         };
+        let lists_schemas = matches!(
+            &profile.catalog,
+            CatalogState::Loaded(catalog, _) if !catalog.schemas.is_empty()
+        );
         let tree = explorer_drawn(profile).then(|| {
             render_tree(
                 &profile.session.explorer_tree,
@@ -2983,9 +2987,30 @@ impl Workspace {
                                 .min_w_0()
                                 .appearance(false),
                         ),
-                    ),
+                    )
+                    .when(lists_schemas, |row| {
+                        row.child(self.render_collapse_schemas(t))
+                    }),
             )
             .child(div().flex_1().min_h_0().child(content))
+    }
+
+    /// Dispatches what a bound shortcut does, so the two cannot come apart.
+    fn render_collapse_schemas(&self, t: Theme) -> Button {
+        let hint = ui::chord_hint("collapse_all_schemas", &self.settings.custom_keybindings);
+        let tooltip = match hint.is_empty() {
+            true => "Collapse all schemas".to_string(),
+            false => format!("Collapse all schemas  {hint}"),
+        };
+        icon_button(
+            "collapse-schemas",
+            icon::COLLAPSE_ALL,
+            Tone::Quiet,
+            Control::Inline,
+            t,
+        )
+        .tooltip(tooltip)
+        .on_click(|_, window, cx| window.dispatch_action(Box::new(CollapseAllSchemas), cx))
     }
 }
 

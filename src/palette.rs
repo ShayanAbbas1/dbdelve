@@ -413,6 +413,7 @@ pub enum Command {
     SetFont(FontSlot, String),
     ToggleSidebar,
     FocusSidebar,
+    CollapseAllSchemas,
     ToggleResultsFocus,
     ToggleRowPanel,
     ToggleRowEdit,
@@ -4300,6 +4301,17 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         ),
         "focus_sidebar",
     ));
+    if matches!(&profile.catalog, CatalogState::Loaded(catalog, _) if !catalog.schemas.is_empty()) {
+        items.push(bound(
+            command(
+                "Collapse all schemas",
+                icon::COLLAPSE_ALL,
+                Command::CollapseAllSchemas,
+                WINDOW,
+            ),
+            "collapse_all_schemas",
+        ));
+    }
     if session.active_results().is_some() || session.active_object().is_some() {
         items.push(bound(
             command(
@@ -4370,6 +4382,7 @@ fn beside_import(command: &Command) -> bool {
             | Command::PickFont(_)
             | Command::OpenSettings
             | Command::ToggleSidebar
+            | Command::CollapseAllSchemas
             | Command::CycleMode
             | Command::SetMode(_)
             | Command::ResetConfirmations

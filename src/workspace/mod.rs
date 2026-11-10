@@ -2143,6 +2143,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::disconnect))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::focus_sidebar))
+            .on_action(cx.listener(Self::collapse_all_schemas))
             .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::open_logs_folder))
             .on_action(cx.listener(Self::copy_diagnostics))

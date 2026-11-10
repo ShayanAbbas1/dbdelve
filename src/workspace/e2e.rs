@@ -544,9 +544,7 @@ fn the_sidebar_takes_the_keyboard_and_escape_hands_it_back(cx: &mut TestAppConte
 }
 
 #[gpui::test]
-fn a_schema_folded_without_a_filter_is_saved_and_one_folded_under_one_is_not(
-    cx: &mut TestAppContext,
-) {
+fn a_schema_folded_without_a_filter_is_saved_and_collapse_all_closes_it(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
         let filter_to = |text: &'static str, cx: &mut VisualTestContext| {
@@ -587,6 +585,19 @@ fn a_schema_folded_without_a_filter_is_saved_and_one_folded_under_one_is_not(
         assert!(schema_open(cx), "the only schema, opened by default");
 
         fold_schema(cx);
+        assert!(!schema_open(cx));
+        assert_eq!(saved(), Some(false));
+
+        fold_schema(cx);
+        assert_eq!(saved(), Some(true));
+        filter_to("birds", cx);
+        cx.dispatch_action(crate::actions::CollapseAllSchemas);
+        settle(cx);
+        let filter = cx.update(|_, cx| {
+            let session = &workspace.read(cx).profile().unwrap().session;
+            session.explorer_filter.read(cx).value().to_string()
+        });
+        assert_eq!(filter, "", "a filter would have held the schema open");
         assert!(!schema_open(cx));
         assert_eq!(saved(), Some(false));
 

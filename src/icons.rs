@@ -24,13 +24,14 @@ use crate::db::Syntax;
 /// The gpui-component widgets ask for their own paths — those are Lucide names
 /// too, so they resolve here as well. Add a row when something asks for one;
 /// an unlisted path simply draws nothing.
-const ICONS: [(&str, &IconData); 80] = [
+const ICONS: [(&str, &IconData); 81] = [
     ("icons/git-fork.svg", icondata_lu::LuGitFork),
     ("icons/chevron-down.svg", icondata_lu::LuChevronDown),
     ("icons/chevron-right.svg", icondata_lu::LuChevronRight),
     ("icons/chevron-left.svg", icondata_lu::LuChevronLeft),
     ("icons/chevron-up.svg", icondata_lu::LuChevronUp),
     ("icons/chevrons-up-down.svg", icondata_lu::LuChevronsUpDown),
+    ("icons/chevrons-down-up.svg", icondata_lu::LuChevronsDownUp),
     ("icons/sort-ascending.svg", icondata_lu::LuArrowUpNarrowWide),
     (
         "icons/sort-descending.svg",
@@ -149,6 +150,7 @@ pub mod icon {
     pub const FULL_ACCESS: &str = "icons/shield-alert.svg";
     /// Folds the explorer column away, and brings it back.
     pub const SIDEBAR: &str = "icons/panel-left.svg";
+    pub const COLLAPSE_ALL: &str = "icons/chevrons-down-up.svg";
     /// Folds the row panel beside a grid away, and brings it back.
     pub const ROW_PANEL: &str = "icons/panel-right.svg";
     /// Switches the row panel between reading a row and editing it.
