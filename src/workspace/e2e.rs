@@ -2516,6 +2516,103 @@ fn an_odbc_profile_saves_and_restores_as_it_was(cx: &mut TestAppContext) {
     });
 }
 
+/// Through the real restore, the edit form and the real save: a password
+/// command comes back as written, disables the Password field while it is
+/// there, and is dropped from an engine whose login never runs one.
+#[gpui::test]
+fn a_password_command_restores_into_the_edit_form_and_saves_back(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let directory = store::dbdelve_directory().unwrap();
+        std::fs::create_dir_all(&directory).unwrap();
+        // A SQLite profile in front, since launching connects the active one
+        // and a server profile would reach for its login.
+        let database = directory.join("e2e.db");
+        std::fs::write(&database, b"").unwrap();
+        let command = "aws rds generate-db-auth-token --hostname %HOSTNAME% --username %USERNAME%";
+        let server = |id: &str, engine: &str| {
+            format!(
+                "[[profiles]]\nid = \"{id}\"\nname = \"{id}\"\nhost = \"db.internal\"\n\
+                 database = \"d\"\nuser = \"u\"\nengine = \"{engine}\"\n\
+                 password_command = {command:?}\npassword_expires = 900\n"
+            )
+        };
+        std::fs::write(
+            directory.join("profiles.toml"),
+            format!(
+                "active = \"e2e\"\n\
+                 [settings]\ncheck_for_updates = false\n\
+                 [[profiles]]\nid = \"e2e\"\nname = \"E2E\"\nhost = \"\"\ndatabase = \"\"\n\
+                 user = \"\"\nengine = \"sqlite\"\npath = {:?}\n{}{}",
+                database.display().to_string(),
+                server("rds", "postgres"),
+                server("mongo", "mongodb"),
+            ),
+        )
+        .unwrap();
+
+        let (workspace, cx) = launch(cx);
+        let rds = cx.update(|_, cx| {
+            workspace
+                .read(cx)
+                .profiles
+                .iter()
+                .position(|profile| profile.id == "rds")
+                .unwrap()
+        });
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| workspace.edit_profile(rds, window, cx));
+        });
+        settle(cx);
+        cx.update(|_, cx| {
+            let form = workspace.read(cx).form.as_ref().expect("the form is open");
+            assert_eq!(form.password_command.read(cx).value(), command);
+            assert_eq!(form.password_expires.read(cx).value(), "900");
+            let password = form.password.read(cx).presentation();
+            assert!(password.is_disabled());
+            assert_eq!(password.placeholder(), "From the command");
+            let (_, config) = form.config(cx).unwrap();
+            assert_eq!(
+                config.password_command(),
+                Some(&crate::db::PasswordCommand {
+                    command: command.into(),
+                    expires: 900,
+                })
+            );
+            assert_eq!(config.password(), Some(""));
+        });
+
+        // Cleared, the Password field is the profile's own again.
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                let form = workspace.form.as_ref().unwrap();
+                form.password_command
+                    .update(cx, |input, cx| input.set_value("", window, cx));
+                cx.notify();
+            });
+        });
+        settle(cx);
+        cx.update(|_, cx| {
+            let form = workspace.read(cx).form.as_ref().unwrap();
+            let password = form.password.read(cx).presentation();
+            assert!(!password.is_disabled());
+            assert_eq!(password.placeholder(), "Unchanged");
+            assert_eq!(form.config(cx).unwrap().1.password_command(), None);
+        });
+
+        cx.update(|_, cx| workspace.update(cx, |workspace, cx| workspace.remember_profiles(cx)));
+        let saved = std::fs::read_to_string(directory.join("profiles.toml")).unwrap();
+        let list = store::decode_profiles(&saved, &[]).unwrap();
+        let written = |id: &str| {
+            let stored = list.profiles.iter().find(|stored| stored.id == id).unwrap();
+            (stored.password_command.as_deref(), stored.password_expires)
+        };
+        assert_eq!(written("rds"), (Some(command), Some(900)));
+        assert_eq!(written("mongo"), (None, None));
+
+        quit(workspace, cx);
+    });
+}
+
 /// A duplicate has no Keychain entry of its own, so its Password field carries
 /// the original's, for an ODBC profile as for a server.
 #[gpui::test]
