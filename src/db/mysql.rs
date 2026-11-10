@@ -316,16 +316,21 @@ fn base_options(server: &ServerConfig, dial: Option<SocketAddr>) -> OptsBuilder 
         .prefer_socket(dial.is_none())
         .db_name((!server.database.is_empty()).then(|| server.database.clone()))
         .user(Some(server.user.clone()))
-        // Offered only when there is one. An empty password is not the
-        // same as no password, and IAM auth relies on the latter.
-        .pass((!server.password.is_empty()).then(|| server.password.clone()))
         .tcp_connect_timeout(Some(Duration::from_secs(CONNECT_TIMEOUT_SECONDS)))
 }
 
 /// Open a connection built from `options`, falling back to plaintext exactly
 /// where `sslmode=prefer` allows it. Shared by the query connection and the
 /// cancel connection so the fallback behaviour cannot drift between them.
-fn open(server: &ServerConfig, options: impl Fn() -> OptsBuilder) -> Result<Conn, DbError> {
+fn open(
+    server: &ServerConfig,
+    engine: Engine,
+    options: impl Fn() -> OptsBuilder,
+) -> Result<Conn, DbError> {
+    let password = server.login_password(engine)?;
+    // Offered only when there is one. An empty password is not the same as no
+    // password, and IAM auth relies on the latter.
+    let options = || options().pass((!password.is_empty()).then(|| password.to_string()));
     match Conn::new(options().ssl_opts(ssl_options(server))) {
         Ok(connection) => Ok(connection),
         // `prefer` is the one rung where a weaker connection is reachable, and
@@ -345,7 +350,7 @@ fn connect(
     engine: Engine,
     dial: Option<SocketAddr>,
 ) -> Result<Conn, DbError> {
-    open(server, || match server.statement_timeout {
+    open(server, engine, || match server.statement_timeout {
         0 => base_options(server, dial),
         // Run once at connect as a session default, never spliced into the
         // user's own submission — see `ServerConfig::statement_timeout` for
@@ -466,7 +471,7 @@ impl Connection {
     pub fn cancel(&self) -> Result<(), DbError> {
         let server = &self.server;
         let dial = self.dial()?;
-        let mut connection = open(server, || cancel_options(server, dial))?;
+        let mut connection = open(server, self.engine, || cancel_options(server, dial))?;
         connection
             .query_drop(format!("KILL QUERY {}", self.connection_id))
             .map_err(|error| DbError {
@@ -499,7 +504,10 @@ impl Connection {
         for _ in 0..2 {
             if side.is_none() {
                 let dial = self.dial().ok()?;
-                *side = open(&self.server, || cancel_options(&self.server, dial)).ok();
+                *side = open(&self.server, self.engine, || {
+                    cancel_options(&self.server, dial)
+                })
+                .ok();
             }
             match ask(side.as_mut()?) {
                 Ok(answer) => return Some(answer),

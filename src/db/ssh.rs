@@ -881,7 +881,7 @@ fn line_end(raw: &[u8], closed: bool) -> Option<usize> {
 
 /// A line without its terminal escapes or control characters, which a
 /// `ProxyCommand` may colour its output with.
-fn printable(line: &str) -> String {
+pub(super) fn printable(line: &str) -> String {
     let mut printable = String::with_capacity(line.len());
     let mut chars = line.chars();
     while let Some(char) = chars.next() {

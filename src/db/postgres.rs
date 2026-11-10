@@ -632,9 +632,10 @@ fn dbname(server: &ServerConfig) -> &str {
 }
 
 /// The profile's own host and port, not the tunnel's local end: those are
-/// what a `.pgpass` line written for the server names.
+/// what a `.pgpass` line written for the server names. Never consulted for a
+/// password command, whose output is the password even when it is stale.
 fn password_file(server: &ServerConfig) -> Option<pgpass::Lookup> {
-    server.password.is_empty().then(|| {
+    (server.password.is_empty() && server.password_command.is_none()).then(|| {
         pgpass::lookup(
             &server.host,
             server.port.unwrap_or(DEFAULT_PORT),
@@ -939,6 +940,10 @@ impl Connection {
         let signing_in = match &password_file {
             Some(pgpass::Lookup::Found { password, .. }) => &ServerConfig {
                 password: password.clone(),
+                ..server.clone()
+            },
+            _ if server.password_command.is_some() => &ServerConfig {
+                password: server.login_password(Engine::Postgres)?.into_owned(),
                 ..server.clone()
             },
             _ => server,

@@ -29,6 +29,7 @@ use self::edit::{
     TableFacts, UNCOUNTED, Write, count_refusal, explained, halted, hinted, query_shape,
 };
 pub(super) use self::edit::{match_value, review_notes};
+pub(super) use self::http::port;
 use self::http::{Bounds, Scheme, Stop, Watch};
 use self::tsv::{Framed, Next, Reader, Untagged, is_cut};
 use super::ssh::tunnelled;
@@ -934,6 +935,11 @@ impl Connection {
             Kind::Kill { .. } => false,
             _ => self.read_only.load(Ordering::SeqCst),
         };
+        // Every request logs in, so each asks for the password afresh.
+        let password = self
+            .config
+            .login_password(Engine::ClickHouse)
+            .map_err(Failed::Unsent)?;
         let bounds = kind.bounds(self.config.statement_timeout);
         let watch = Watch::new(Arc::default(), bounds.limit());
         let _running =
@@ -941,7 +947,7 @@ impl Connection {
         let _watching = watch.enter();
         let outcome = loop {
             let params = self.params(&query_id, session.as_deref(), read_only);
-            let response = match self.post(sql, &params, bounds) {
+            let response = match self.post(sql, &params, &password, bounds) {
                 Ok(response) => response,
                 Err(error) => break Err(Failed::Unreached(error)),
             };
@@ -1117,7 +1123,13 @@ impl Connection {
         params.finish()
     }
 
-    fn post(&self, sql: &str, params: &str, bounds: Bounds) -> Result<Response<Body>, ureq::Error> {
+    fn post(
+        &self,
+        sql: &str,
+        params: &str,
+        password: &str,
+        bounds: Bounds,
+    ) -> Result<Response<Body>, ureq::Error> {
         let mut request = self
             .agent
             .post(&format!("{}?{params}", self.base))
@@ -1127,7 +1139,7 @@ impl Connection {
             .build()
             // Headers rather than the URL, so an `@` in a user name needs no
             // escaping and the password stays out of any proxy's log.
-            .header("X-ClickHouse-Key", self.config.password.as_str());
+            .header("X-ClickHouse-Key", password);
         if !self.config.user.is_empty() {
             request = request.header("X-ClickHouse-User", self.config.user.as_str());
         }

@@ -770,8 +770,12 @@ impl Connection {
             .map_err(|error| plain_error(format!("Could not start the connection: {error}")))?;
 
         let dial = self.tunnel.as_deref().map(Tunnel::dial).transpose()?;
+        let signing_in = ServerConfig {
+            password: self.server.login_password(Engine::SqlServer)?.into_owned(),
+            ..self.server.clone()
+        };
         let attempt =
-            |encryption| guarded(|| runtime.block_on(login(&self.server, dial, encryption)));
+            |encryption| guarded(|| runtime.block_on(login(&signing_in, dial, encryption)));
         let (client, socket) = match attempt(encryption(self.server.sslmode))? {
             Err(error)
                 if matches!(self.server.sslmode, SslMode::Prefer | SslMode::Disable)

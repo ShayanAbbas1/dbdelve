@@ -32,7 +32,7 @@ use ::redis::{
 
 use super::ssh::{Tunnel, tunnelled};
 use super::{
-    Catalog, Cell, Column, ColumnDefinition, DbError, EditTarget, Fetch, NamedDefinition,
+    Catalog, Cell, Column, ColumnDefinition, DbError, EditTarget, Engine, Fetch, NamedDefinition,
     QueryResult, Relation, RelationKind, Row, RowBuilder, Schema, ServerConfig, SslMode, Stopped,
     Structure, plain_error,
 };
@@ -677,9 +677,10 @@ fn connect(
             server.port.unwrap_or(DEFAULT_PORT),
         ),
     };
+    let password = server.login_password(Engine::Redis)?;
     let attempt = |tls: Option<SslMode>| {
         let open = |protocol| {
-            client(server, &host, port, tls, protocol)?
+            client(server, &password, &host, port, tls, protocol)?
                 .get_connection_with_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECONDS))
         };
         match open(ProtocolVersion::RESP3) {
@@ -741,6 +742,7 @@ fn speaks_plaintext(host: &str, port: u16) -> bool {
 /// certificate, which replaces it.
 fn client(
     server: &ServerConfig,
+    password: &str,
     host: &str,
     port: u16,
     tls: Option<SslMode>,
@@ -768,8 +770,8 @@ fn client(
     }
     // A user with no password is still logged in as that user: sending no
     // credentials at all would leave the session on `default`.
-    if !server.password.is_empty() || !server.user.is_empty() {
-        login = login.set_password(&server.password);
+    if !password.is_empty() || !server.user.is_empty() {
+        login = login.set_password(password);
     }
     let info = address
         .into_connection_info()?
