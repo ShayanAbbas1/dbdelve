@@ -162,6 +162,37 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # Every asset gets a minisign signature beside it, `<asset>.minisig`,
+      # which is what the app checks an update against before installing it.
+      # All of them, not only the DMG, so the other platforms' updaters need
+      # nothing new here. UPDATE_SIGNING_KEY is an unencrypted minisign secret
+      # key; without it nothing is published, since a release without
+      # signatures is one no installed app will update to.
+      - run: sudo apt-get update && sudo apt-get install -y minisign
+      - run: |
+          if [[ -z "$UPDATE_SIGNING_KEY" ]]; then
+            echo "the UPDATE_SIGNING_KEY secret is not set -- releases must be signed" >&2
+            exit 1
+          fi
+          # The key the app is built with, so a secret that does not match it
+          # fails here instead of in every installed app.
+          PUBLIC_KEY="$(sed -n 's/^const RELEASE_PUBLIC_KEY: &str = "\(.*\)";$/\1/p' src/update/macos.rs)"
+          KEY="$RUNNER_TEMP/update.key"
+          trap 'rm -f "$KEY"' EXIT
+          printf '%s\n' "$UPDATE_SIGNING_KEY" > "$KEY"
+          for ASSET in dist/*; do
+            minisign -S -s "$KEY" -m "$ASSET" -x "$ASSET.minisig" < /dev/null
+            # The app verifies prehashed signatures only (algorithm "ED");
+            # a minisign old enough to make the legacy kind must fail here.
+            if [[ "$(sed -n 2p "$ASSET.minisig" | base64 -d | head -c 2)" != ED ]]; then
+              echo "$ASSET.minisig is not a prehashed signature" >&2
+              exit 1
+            fi
+            minisign -V -q -P "$PUBLIC_KEY" -m "$ASSET" -x "$ASSET.minisig"
+          done
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+
       # Every file the release is supposed to carry is named here, so a build
       # that quietly lost one fails before anything goes public rather than
       # publishing a release that is missing it.
@@ -171,11 +202,13 @@ jobs:
             "dbdelve-$VERSION-linux-aarch64.tar.gz" "dbdelve-$VERSION-aarch64.AppImage" \
             "dbdelve-$VERSION-windows-x86_64.zip" \
             "dbdelve-$VERSION-windows-x86_64-setup.exe"; do
-            if [[ ! -f "dist/$ASSET" ]]; then
-              echo "no $ASSET among the built assets" >&2
-              ls dist >&2
-              exit 1
-            fi
+            for FILE in "$ASSET" "$ASSET.minisig"; do
+              if [[ ! -f "dist/$FILE" ]]; then
+                echo "no $FILE among the built assets" >&2
+                ls dist >&2
+                exit 1
+              fi
+            done
           done
           PRERELEASE_FLAG=()
           [[ "$PRERELEASE" == true ]] && PRERELEASE_FLAG=(--prerelease)
@@ -226,6 +259,8 @@ jobs:
             desc "Fast, native, multi-engine database client"
             homepage "https://github.com/ShayanAbbas1/dbdelve"
 
+            # The app updates itself, so Homebrew leaves upgrading it to the app.
+            auto_updates true
             depends_on arch: :arm64
             depends_on macos: :monterey
 
