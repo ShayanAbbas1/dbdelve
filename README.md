@@ -42,9 +42,8 @@ xattr -dr com.apple.quarantine /Applications/DBDelve.app
 Don't skip the second line: the app isn't notarized, so macOS won't open it
 until the quarantine flag is cleared.
 
-**Linux** (x86_64 or aarch64): `sudo snap install dbdelve` from the
-[Snap Store](https://snapcraft.io/dbdelve), `yay -S dbdelve-bin` from the AUR,
-or the tarball or AppImage from [the latest release][releases].
+**Linux** (x86_64 or aarch64): `yay -S dbdelve-bin` from the AUR, or the
+tarball or AppImage from [the latest release][releases].
 
 **Windows** (x86_64): run the installer from [the latest release][releases],
 or unzip the zip and run `dbdelve.exe`. The installer asks for AppData (just
