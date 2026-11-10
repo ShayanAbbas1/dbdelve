@@ -301,7 +301,8 @@ pub(crate) fn mode_pill(t: Theme, mode: Mode) -> Button {
 }
 
 /// A newer release, quiet at the far end of the titlebar: news, not an alarm.
-pub(crate) fn update_pill(t: Theme, version: &str) -> Button {
+/// It reads as the update's progress while one is being installed.
+pub(crate) fn update_pill(t: Theme, label: String) -> Button {
     control("newer-release", Tone::Quiet, Control::Compact)
         .px(px(layout::SPACE_SM))
         .rounded(px(layout::RADIUS_CONTROL))
@@ -312,7 +313,7 @@ pub(crate) fn update_pill(t: Theme, version: &str) -> Button {
                 .gap(px(layout::SPACE_XS))
                 .text_size(px(layout::chrome(layout::TEXT_XS)))
                 .text_color(t.text_muted)
-                .child(format!("DBDelve {version} available"))
+                .child(label)
                 .child(row_icon(t, icon::CHEVRON_DOWN)),
         )
 }
