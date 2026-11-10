@@ -155,7 +155,7 @@ workflow builds everything and publishes nothing.
 than with `dev/identity.sh`'s certificate: that certificate is trusted only on
 the machine that created it, and to Gatekeeper an issuer nobody trusts reads
 worse than no issuer at all. The trade is that the ad-hoc hash moves with every
-release, so an update costs one fresh Keychain prompt. Installing still means
-clearing quarantine by hand:
+release, so an update costs one fresh Keychain prompt. The cask clears quarantine
+itself in a `postflight_steps` block; a `.dmg` installed by hand still needs
 `xattr -dr com.apple.quarantine /Applications/DBDelve.app`.
 

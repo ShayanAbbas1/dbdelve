@@ -9,12 +9,11 @@ Homebrew is the recommended way to install it:
 
 ```sh
 brew install --cask ShayanAbbas1/dbdelve/dbdelve
-xattr -dr com.apple.quarantine /Applications/DBDelve.app
 ```
 
-Don't skip the second line, or macOS will refuse to open the app. DBDelve is
-signed ad-hoc: there's no Developer ID behind it and nothing is notarized, so
-Gatekeeper declines until the quarantine flag is cleared.
+DBDelve is signed ad-hoc: there's no Developer ID behind it and nothing is
+notarized, so Gatekeeper declines to open it while the download's quarantine
+flag is set. The cask clears that flag as it installs.
 
 After that it updates itself: when a release is out, the titlebar says so, and
 **Update and restart** in its menu downloads it, checks its signature, replaces
@@ -29,8 +28,14 @@ pay for a Developer ID if enough people end up using this, which removes all of
 the above.
 
 Failing Homebrew, take the `.dmg` from [the latest release][releases] and drag
-DBDelve to Applications. Same quarantine step, and from then on it updates
-itself the same way.
+DBDelve to Applications. Nothing clears the quarantine flag for you this way,
+so do it once before opening the app:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/DBDelve.app
+```
+
+From then on it updates itself the same way.
 
 To build it yourself instead, `DBDELVE_CHANNEL=release dev/bundle.sh` produces
 `target/DBDelve.app` with the release build, icon and signature. Drag that to

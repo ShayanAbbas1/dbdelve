@@ -266,6 +266,13 @@ jobs:
 
             app "DBDelve.app"
 
+            # Ad-hoc signed and not notarized, so Gatekeeper refuses the app
+            # until its quarantine flag is cleared. Done here so a Homebrew
+            # install opens without the xattr command a manual one needs.
+            postflight_steps do
+              run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{appdir}}/DBDelve.app"]
+            end
+
             # Lowercase: the app writes "dbdelve", and a zap spelled any other way
             # silently removes nothing. Saved passwords live in the Keychain, which zap
             # cannot reach at all.
