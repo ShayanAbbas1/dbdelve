@@ -220,6 +220,12 @@ impl Target {
         abilities.switches_database && !abilities.catalog_lists_databases
     }
 
+    /// Whether the catalog lists every database on the server, each as a
+    /// schema, as MySQL's does.
+    pub fn catalog_lists_databases(self) -> bool {
+        self.abilities().catalog_lists_databases
+    }
+
     /// Whether the row count the catalog carries for a table is exact rather
     /// than the statistics' estimate.
     pub fn exact_row_estimates(self) -> bool {

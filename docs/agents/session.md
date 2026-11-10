@@ -446,10 +446,15 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   unknown carries nothing. The Pinned group exists only while something is
   pinned, so pinning the first thing is the menu's.
 - **The sidebar opens on the active schema and keeps the user's folds.** A
-  schema row starts open only when it is `Profile::active_schema`, or, with
-  none, the only schema listed, so a database of many schemas is not a wall
-  of open trees and one of a single schema is not a lone closed row; every
-  other row starts open (`explorer::root_folds`). Opening or closing a
+  schema row starts open only when it is the schema the connection works in
+  (`Profile::explorer_opens_on`): `Profile::active_schema`, or, where
+  `Target::catalog_lists_databases` (MySQL, MariaDB, ClickHouse, whose
+  schema rows are databases), the row named like `Profile::active_database`.
+  Gated on that ability rather than matched by name everywhere, so a schema
+  sharing the database's name on another engine is not taken for it. When
+  neither names a listed row, the only schema there is opens. So a database
+  of many schemas is not a wall of open trees, and one of a single schema is
+  not a lone closed row; every other row starts open (`explorer::root_folds`). Opening or closing a
   top-level row (a schema, a folder, Pinned, Queries) is recorded from the
   tree's own `TreeEvent` (`Workspace::remember_fold`), keyboard, click and
   `reveal_item` alike, in the profile's `folds`, row id to open, saved as

@@ -112,7 +112,31 @@ fn shortcut_database(
         .map_or(ShortcutDatabase::Unknown, ShortcutDatabase::On)
 }
 
+/// See [`Profile::explorer_opens_on`].
+fn explorer_opens_on(
+    target: Target,
+    active_schema: Option<&str>,
+    database: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    match active_schema {
+        Some(schema) => Some(schema.to_string()),
+        None if target.catalog_lists_databases() => database(),
+        None => None,
+    }
+}
+
 impl Profile {
+    /// The schema the sidebar starts with open (`explorer::root_folds`): the
+    /// active one, or where the catalog lists each database as a schema, the
+    /// database the connection is on. Gated rather than matched by name
+    /// alone, so a schema that happens to share the database's name elsewhere
+    /// is not taken for it.
+    pub(crate) fn explorer_opens_on(&self) -> Option<String> {
+        explorer_opens_on(self.config.target(), self.active_schema(), || {
+            self.active_database()
+        })
+    }
+
     /// Why a queue of reads on this connection runs in turn rather than at
     /// once, said to the user when one does.
     pub(crate) fn in_turn(&self) -> Option<&'static str> {
@@ -3075,6 +3099,26 @@ mod tests {
                 opened_on
             ),
             ShortcutDatabase::Unnamed
+        );
+    }
+
+    #[test]
+    fn the_sidebar_opens_on_the_active_schema_or_where_databases_are_schemas_the_database() {
+        let database = || Some("dbdelve_dev".to_string());
+        assert_eq!(
+            explorer_opens_on(Target::built_in(Engine::Postgres), Some("public"), database),
+            Some("public".into())
+        );
+        for listing_databases in [Engine::MySql, Engine::MariaDb, Engine::ClickHouse] {
+            assert_eq!(
+                explorer_opens_on(Target::built_in(listing_databases), None, database),
+                Some("dbdelve_dev".into())
+            );
+        }
+        // Its schemas are `dbo` and the like, never the database it is on.
+        assert_eq!(
+            explorer_opens_on(Target::built_in(Engine::SqlServer), None, database),
+            None
         );
     }
 

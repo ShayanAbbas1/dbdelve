@@ -58,23 +58,28 @@ pub fn schema_row(name: &str) -> String {
 }
 
 /// Whether each top-level row of an unfiltered sidebar opens: as `saved`
-/// says where it names the row, and otherwise a schema only when it is the
-/// `active` one, or with none active the only schema listed, so a database of
-/// many schemas opens on the one being worked in and one of a single schema is
-/// not a lone closed row. Any other row `saved` does not name is left as built.
+/// says where it names the row, and otherwise a schema only when it is
+/// `within`, the one the connection works in (`Profile::explorer_opens_on`),
+/// or, when `within` names none listed, the only schema there is. So a
+/// database of many schemas opens on the one being worked in, and one of a
+/// single schema is not a lone closed row. Any other row `saved` does not
+/// name is left as built.
 pub fn root_folds(
     items: &[TreeItem],
     saved: &BTreeMap<String, bool>,
-    active: Option<&str>,
+    within: Option<&str>,
 ) -> HashMap<String, bool> {
-    let schemas = items.iter().filter(|item| is_schema_row(&item.id)).count();
-    let lone = active.is_none() && schemas == 1;
+    let schemas: Vec<&str> = items
+        .iter()
+        .filter_map(|item| item.id.strip_prefix(SCHEMA_ROW))
+        .collect();
+    let lone = schemas.len() == 1 && !schemas.iter().any(|schema| Some(*schema) == within);
     items
         .iter()
         .filter_map(|item| {
             let open = saved.get(item.id.as_ref()).copied().or_else(|| {
                 let schema = item.id.strip_prefix(SCHEMA_ROW)?;
-                Some(lone || active == Some(schema))
+                Some(lone || within == Some(schema))
             })?;
             Some((item.id.to_string(), open))
         })
@@ -1818,10 +1823,13 @@ mod tests {
 
         let mut single = catalog();
         single.schemas.truncate(1);
-        assert_eq!(
-            shown(&single, &none, None),
-            [row(QUERIES_GROUP, true), row("schema-analytics", true)]
-        );
+        for within in [None, Some("gone")] {
+            assert_eq!(
+                shown(&single, &none, within),
+                [row(QUERIES_GROUP, true), row("schema-analytics", true)],
+                "the only schema, whatever names one not listed"
+            );
+        }
     }
 
     #[test]

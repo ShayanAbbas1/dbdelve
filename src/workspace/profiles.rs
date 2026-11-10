@@ -2283,7 +2283,7 @@ impl Workspace {
             folds.extend(explorer::root_folds(
                 &explorer.items,
                 &profile.folds,
-                profile.active_schema(),
+                profile.explorer_opens_on().as_deref(),
             ));
         }
         folds.extend(opening.map(|row| (row, true)));
