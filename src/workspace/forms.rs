@@ -328,6 +328,12 @@ impl Workspace {
                         .into_any_element(),
                     );
                 }
+                let from_command = form.typed_password_command(cx).is_some();
+                let password_input = if from_command {
+                    bare(&form.password).disabled(true)
+                } else {
+                    bare(&form.password).mask_toggle()
+                };
                 connection.extend(
                     [
                         field_row(
@@ -338,15 +344,7 @@ impl Workspace {
                             t,
                         ),
                         field_row("user", "User", &form.user, bare(&form.user), t),
-                        field_row(
-                            "password",
-                            "Password",
-                            &form.password,
-                            bare(&form.password)
-                                .mask_toggle()
-                                .disabled(form.typed_password_command(cx).is_some()),
-                            t,
-                        ),
+                        field_row("password", "Password", &form.password, password_input, t),
                     ]
                     .map(IntoElement::into_any_element),
                 );

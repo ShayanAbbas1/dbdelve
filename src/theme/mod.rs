@@ -177,7 +177,7 @@ pub mod layout {
     pub const FORM_TITLE_LINE: f32 = 22.0;
     pub const FORM_SECTION_GAP: f32 = 18.0;
     /// A field's label, so every field in a section starts at the same x.
-    pub const FORM_LABEL_WIDTH: f32 = 120.0;
+    pub const FORM_LABEL_WIDTH: f32 = 140.0;
     pub const FORM_ROW_HEIGHT: f32 = 44.0;
     pub const FORM_PORT_WIDTH: f32 = 84.0;
     pub const FORM_TIMEOUT_WIDTH: f32 = 104.0;

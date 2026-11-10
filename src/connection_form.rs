@@ -274,7 +274,7 @@ impl ConnectionForm {
         let command = server.and_then(|server| server.password_command.as_ref());
         let password_command = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Prints the password; may use %HOSTNAME% %PORT% %USERNAME%")
+                .placeholder("May use %HOSTNAME% %PORT% %USERNAME%")
                 .default_value(value(command.map(|command| command.command.as_str())))
         });
         let password_expires = cx.new(|cx| {
