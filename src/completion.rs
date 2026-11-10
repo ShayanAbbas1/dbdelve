@@ -507,8 +507,11 @@ impl SchemaCompletions {
         candidates.extend(self.all_relations(qualify));
         candidates.extend(self.all_routines());
         // Last, so on a tie the user's own objects win and a dialect's long
-        // list can't push them past the cap.
-        candidates.extend(builtins.iter().map(Candidate::builtin));
+        // list can't push them past the cap. Not after an unreadable
+        // qualifier: `"o".date_trunc(` is never a call.
+        if !before.ends_with('.') {
+            candidates.extend(builtins.iter().map(Candidate::builtin));
+        }
         candidates
     }
 
@@ -1434,11 +1437,22 @@ mod tests {
             1,
             "{offered:?}"
         );
+        let sql = "SELECT * FROM accounts WHERE email = NUL";
+        let (_, null) = catalog()
+            .items(sql, sql.len())
+            .0
+            .into_iter()
+            .find(|(_, candidate)| candidate.label == "NULL")
+            .expect("NULL was offered");
+        assert_eq!(null.kind, CompletionItemKind::CONSTANT);
     }
 
     #[test]
     fn no_built_in_is_offered_where_a_relation_belongs_or_inside_a_literal() {
         assert!(!labels("SELECT * FROM date_tr|").contains(&"date_trunc".to_string()));
+        assert!(
+            !labels(r#"SELECT "o".date_tr| FROM orders o"#).contains(&"date_trunc".to_string())
+        );
         assert!(labels("SELECT 'now|'").is_empty());
     }
 
