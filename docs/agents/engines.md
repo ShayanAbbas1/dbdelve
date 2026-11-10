@@ -228,7 +228,11 @@ Decided, and not to be re-litigated:
   (`ConnectionConfig::forget_login_password`) so a retry does not resend a
   refused token. `%HOSTNAME%`, `%PORT%` and `%USERNAME%` are pgAdmin's
   spellings, substituted shell-quoted, with the profile's host rather than a
-  tunnel's local end, since a token is signed for the server it names. It runs
+  tunnel's local end, since a token is signed for the server it names. A
+  placeholder the shell would not read bare (inside quotes, after an escape,
+  or past syntax the scan in `bare_for_sh`/`bare_for_cmd` does not follow)
+  refuses the command: quoting a value already in quotes undoes it, and a
+  username pasted from a URL would run as shell code. It runs
   through `/bin/sh -c` (`cmd /D /S /C` on Windows) with no login shell and no
   PATH added: guessing at a user's PATH runs whichever binary the guess finds,
   so a program not found says to give its full path instead. With a command

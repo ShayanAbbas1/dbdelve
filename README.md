@@ -140,9 +140,11 @@ statements you type run under the connection's mode. See
   /opt/homebrew/bin/aws rds generate-db-auth-token --hostname %HOSTNAME% --port %PORT% --username %USERNAME% --region <region>
   ```
 
-  `%HOSTNAME%`, `%PORT%` and `%USERNAME%` are the profile's own. Give the
-  program's full path (`which aws` prints it): an app opened from the Finder or
-  a desktop launcher does not see the PATH your shell sets. Expires after
+  `%HOSTNAME%`, `%PORT%` and `%USERNAME%` are the profile's own. DBDelve
+  quotes them itself, so write them unquoted: one inside quotes stops the
+  command from running. Give the program's full path (`which aws` prints it):
+  an app opened from the Finder or a desktop launcher does not see the PATH
+  your shell sets. Expires after
   reuses the output for that many seconds, in memory only; blank runs the
   command at every login.
 

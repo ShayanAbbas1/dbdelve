@@ -123,6 +123,9 @@ fn command_line(template: &str, server: &ServerConfig, engine: Engine) -> Result
             .find(|(placeholder, _)| rest.starts_with(*placeholder))
         {
             Some((placeholder, (name, value))) => {
+                if !bare(&template[..template.len() - rest.len()]) {
+                    return Err(not_bare(placeholder));
+                }
                 line.push_str(&quoted(value).ok_or_else(|| unquotable(name))?);
                 rest = &rest[placeholder.len()..];
             }
@@ -142,6 +145,74 @@ fn login_port(server: &ServerConfig, engine: Engine) -> Option<u16> {
         Engine::ClickHouse => Some(super::clickhouse::port(server)),
         _ => server.port.or(engine.default_port()),
     }
+}
+
+/// Whether the shell reads what follows `before` outside any quotes and not
+/// escaped, the one place a value quoted by `quoted` stays one word.
+fn bare(before: &str) -> bool {
+    if cfg!(windows) {
+        bare_for_cmd(before)
+    } else {
+        bare_for_sh(before)
+    }
+}
+
+/// Quotes and backslashes as sh reads them. Past a backtick, a comment, a
+/// heredoc, `$'…'`, or `$(`/`${` inside double quotes, where quoting nests,
+/// the scan loses track and admits nothing more.
+fn bare_for_sh(before: &str) -> bool {
+    #[derive(Clone, Copy)]
+    enum Quote {
+        None,
+        Single,
+        Double,
+    }
+    let mut quote = Quote::None;
+    let mut escaped = false;
+    let mut chars = before.chars().peekable();
+    while let Some(char) = chars.next() {
+        let next = chars.peek().copied();
+        match (quote, char) {
+            (Quote::Single, '\'') => quote = Quote::None,
+            (Quote::Single, _) => {}
+            _ if escaped => escaped = false,
+            (_, '\\') => escaped = true,
+            (Quote::None, '\'') => quote = Quote::Single,
+            (Quote::None, '"') => quote = Quote::Double,
+            (Quote::Double, '"') => quote = Quote::None,
+            (Quote::None, '`' | '#') | (Quote::Double, '`') => return false,
+            (Quote::None, '<') if next == Some('<') => return false,
+            (Quote::None, '$') if next == Some('\'') => return false,
+            (Quote::Double, '$') if matches!(next, Some('(' | '{')) => return false,
+            _ => {}
+        }
+    }
+    matches!(quote, Quote::None) && !escaped && !before.ends_with('$')
+}
+
+/// cmd's own rules: a double quote opens or closes, and outside quotes a
+/// caret escapes the next character.
+fn bare_for_cmd(before: &str) -> bool {
+    let mut quoted = false;
+    let mut escaped = false;
+    for char in before.chars() {
+        match char {
+            _ if escaped => escaped = false,
+            '"' => quoted = !quoted,
+            '^' if !quoted => escaped = true,
+            _ => {}
+        }
+    }
+    !quoted && !escaped
+}
+
+fn not_bare(placeholder: &str) -> DbError {
+    plain_error(format!(
+        "The password command was not run: {placeholder} is inside quotes, or after an \
+         escape or other shell syntax that would undo the quoting DBDelve gives its value. \
+         Write each placeholder unquoted, as in --username %USERNAME%: DBDelve quotes \
+         its value itself."
+    ))
 }
 
 fn quoted(value: &str) -> Option<String> {
@@ -399,6 +470,59 @@ mod tests {
         let server = server("%PORT%", "", 0);
         let line = command_line("token --user %USERNAME%", &server, Engine::Postgres).unwrap();
         assert_eq!(line, "token --user '%PORT%'");
+    }
+
+    #[test]
+    fn a_placeholder_inside_quotes_refuses_the_command() {
+        let server = server("$(printf INJECTED >&2)", "", 0);
+        let error =
+            command_line(r#"printf %s "%USERNAME%""#, &server, Engine::Postgres).unwrap_err();
+        assert!(
+            error
+                .message
+                .starts_with("The password command was not run: %USERNAME% is inside quotes"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn sh_admits_a_placeholder_only_outside_quotes_and_escapes() {
+        for admitted in [
+            "token --user ",
+            r#"printf "%s" \" "#,
+            r"printf 'it'\''s' ",
+            r#"printf "a\"b" "#,
+            "token --user=",
+            "token $(id) ",
+        ] {
+            assert!(bare_for_sh(admitted), "{admitted}");
+        }
+        for refused in [
+            r#"printf %s ""#,
+            "printf %s '",
+            r#"printf %s "it's "#,
+            r"printf %s \",
+            "printf %s 'unclosed ",
+            "printf %s `echo ",
+            r#"printf "$(echo " "#,
+            "printf %s $",
+            "printf %s $'a\\' ' ",
+            "cat <<EOF\n'",
+            "# it's\nprintf %s '",
+        ] {
+            assert!(!bare_for_sh(refused), "{refused}");
+        }
+    }
+
+    #[test]
+    fn cmd_admits_a_placeholder_only_outside_quotes_and_carets() {
+        for admitted in ["token --user ", r#"token "a b" "#, r#"token ^" "#] {
+            assert!(bare_for_cmd(admitted), "{admitted}");
+        }
+        for refused in [r#"token ""#, r#"token "a b"#, "token ^"] {
+            assert!(!bare_for_cmd(refused), "{refused}");
+        }
     }
 
     #[test]
