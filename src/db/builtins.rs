@@ -91,3 +91,22 @@ const fn val(name: &'static str, returns: &'static str, doc: &'static str) -> Bu
         doc,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::Engine;
+
+    #[test]
+    fn no_dialect_offers_a_name_twice() {
+        for engine in Engine::ALL {
+            let mut names: Vec<String> = engine
+                .builtins()
+                .iter()
+                .map(|builtin| builtin.name.to_ascii_lowercase())
+                .collect();
+            names.sort();
+            let duplicates: Vec<_> = names.windows(2).filter(|pair| pair[0] == pair[1]).collect();
+            assert!(duplicates.is_empty(), "{engine:?} repeats {duplicates:?}");
+        }
+    }
+}
