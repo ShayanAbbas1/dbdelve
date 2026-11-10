@@ -414,6 +414,7 @@ pub enum Command {
     ToggleSidebar,
     FocusSidebar,
     CollapseAllSchemas,
+    ExpandAllSchemas,
     ToggleResultsFocus,
     ToggleRowPanel,
     ToggleRowEdit,
@@ -4304,6 +4305,15 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
     if matches!(&profile.catalog, CatalogState::Loaded(catalog, _) if !catalog.schemas.is_empty()) {
         items.push(bound(
             command(
+                "Expand all schemas",
+                icon::EXPAND_ALL,
+                Command::ExpandAllSchemas,
+                WINDOW,
+            ),
+            "expand_all_schemas",
+        ));
+        items.push(bound(
+            command(
                 "Collapse all schemas",
                 icon::COLLAPSE_ALL,
                 Command::CollapseAllSchemas,
@@ -4383,6 +4393,7 @@ fn beside_import(command: &Command) -> bool {
             | Command::OpenSettings
             | Command::ToggleSidebar
             | Command::CollapseAllSchemas
+            | Command::ExpandAllSchemas
             | Command::CycleMode
             | Command::SetMode(_)
             | Command::ResetConfirmations

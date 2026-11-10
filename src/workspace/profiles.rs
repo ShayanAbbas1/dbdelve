@@ -2146,14 +2146,27 @@ impl Workspace {
         }
     }
 
-    /// Every schema of the connection in front closed and kept closed;
-    /// Pinned, the folders and Queries stay as they are.
     pub(crate) fn collapse_all_schemas(
         &mut self,
         _: &CollapseAllSchemas,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.fold_all_schemas(false, window, cx);
+    }
+
+    pub(crate) fn expand_all_schemas(
+        &mut self,
+        _: &ExpandAllSchemas,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.fold_all_schemas(true, window, cx);
+    }
+
+    /// Every schema of the connection in front opened or closed and kept so;
+    /// Pinned, the folders and Queries stay as they are.
+    fn fold_all_schemas(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(profile) = self.profile_mut() else {
             return;
         };
@@ -2163,10 +2176,11 @@ impl Workspace {
         let schemas = catalog.schemas.iter().map(|schema| schema.name.as_str());
         profile
             .folds
-            .extend(schemas.map(|name| (explorer::schema_row(name), false)));
+            .extend(schemas.map(|name| (explorer::schema_row(name), open)));
         // A filter opens every row it keeps, so under one nothing would close.
+        // Opening needs no such clearing, and the user's filter stays.
         let filter = profile.session.explorer_filter.clone();
-        if !filter.read(cx).value().is_empty() {
+        if !open && !filter.read(cx).value().is_empty() {
             filter.update(cx, |input, cx| input.set_value("", window, cx));
         }
         let id = profile.id.clone();

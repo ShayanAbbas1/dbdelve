@@ -231,6 +231,7 @@ actions!(
         ToggleResultsFocus,
         FocusSidebar,
         CollapseAllSchemas,
+        ExpandAllSchemas,
         OpenSidebarItem,
         AcceptCompletion,
         OpenSettings,

@@ -461,14 +461,15 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   `[profiles.folds]` and left out when empty. A row it does not name gets the
   default, so a schema created since stays closed and a new folder opens.
   Every rebuild without a filter puts `folds` over what was kept, which is
-  how Collapse All Schemas (the filter row's button and the palette, no
-  default chord) and Set as Active Schema show at once: Set as Active Schema
+  how Collapse All and Expand All Schemas (the filter row's buttons and the
+  palette, no default chords) and Set as Active Schema show at once: Set as Active Schema
   records the schema it picks as open and the one it leaves as it was, since
   that one was open only for being active, and its rebuild opens the picked
   row over what was kept, so it opens under a filter too. Nothing is recorded while the
   filter has text: a filter opens every row it keeps so that matches show,
   and those are not the user's folds. Clearing it rebuilds from `folds` and
-  the defaults; Collapse All Schemas clears it first, or nothing would close.
+  the defaults; Collapse All Schemas clears it first, or nothing would close;
+  Expand All leaves it.
   Category folds are kept across a refresh but not saved. Stale ids are left
   in `folds`: harmless, and a dropped schema may come back. A duplicate takes
   the folds with the folders.

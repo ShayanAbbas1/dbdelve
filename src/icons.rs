@@ -151,6 +151,7 @@ pub mod icon {
     /// Folds the explorer column away, and brings it back.
     pub const SIDEBAR: &str = "icons/panel-left.svg";
     pub const COLLAPSE_ALL: &str = "icons/chevrons-down-up.svg";
+    pub const EXPAND_ALL: &str = "icons/chevrons-up-down.svg";
     /// Folds the row panel beside a grid away, and brings it back.
     pub const ROW_PANEL: &str = "icons/panel-right.svg";
     /// Switches the row panel between reading a row and editing it.

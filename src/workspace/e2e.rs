@@ -608,6 +608,11 @@ fn a_schema_folded_without_a_filter_is_saved_and_collapse_all_closes_it(cx: &mut
         assert!(!schema_open(cx));
         assert_eq!(saved(), Some(false));
 
+        cx.dispatch_action(crate::actions::ExpandAllSchemas);
+        settle(cx);
+        assert!(schema_open(cx));
+        assert_eq!(saved(), Some(true));
+
         quit(workspace, cx);
     });
 }
