@@ -331,17 +331,27 @@ fn open(
     // Offered only when there is one. An empty password is not the same as no
     // password, and IAM auth relies on the latter.
     let options = || options().pass((!password.is_empty()).then(|| password.to_string()));
-    match Conn::new(options().ssl_opts(ssl_options(server))) {
+    match Conn::new(over(options(), server, ssl_options(server))) {
         Ok(connection) => Ok(connection),
         // `prefer` is the one rung where a weaker connection is reachable, and
         // reaching it is what the word means. The driver cannot say "encrypt if
         // you can" in one attempt, so this is two — which is what libpq's own
         // `prefer` amounts to. No other mode falls back.
         Err(_) if server.sslmode == SslMode::Prefer => {
-            Conn::new(options().ssl_opts(None)).map_err(|error| connect_error(&error, server))
+            Conn::new(over(options(), server, None)).map_err(|error| connect_error(&error, server))
         }
         Err(error) => Err(connect_error(&error, server)),
     }
+}
+
+/// `options` over `tls`, answering a server that asks for
+/// `mysql_clear_password` only when the password is a command's and goes
+/// encrypted: RDS IAM asks for it, the driver refuses it by default, and a
+/// plaintext socket must never carry a token in the clear. With TLS asked for,
+/// the driver fails rather than carry on unencrypted.
+fn over(options: OptsBuilder, server: &ServerConfig, tls: Option<SslOpts>) -> OptsBuilder {
+    let cleartext = tls.is_some() && server.password_command.is_some();
+    options.ssl_opts(tls).enable_cleartext_plugin(cleartext)
 }
 
 /// The connection a profile keeps.
@@ -1329,6 +1339,31 @@ mod tests {
         let verify_full = ssl_options(&server(SslMode::VerifyFull)).expect("a connector is built");
         assert!(!verify_full.accept_invalid_certs());
         assert!(!verify_full.skip_domain_validation());
+    }
+
+    #[test]
+    fn only_a_password_command_over_tls_may_answer_in_cleartext() {
+        let cleartext = |command: bool, sslmode| {
+            let server = ServerConfig {
+                sslmode,
+                password_command: command.then(|| crate::db::PasswordCommand {
+                    command: "token".into(),
+                    expires: 0,
+                }),
+                ..ServerConfig::default()
+            };
+            let tls = ssl_options(&server);
+            let opened = |tls| {
+                ::mysql::Opts::from(over(OptsBuilder::new(), &server, tls))
+                    .get_enable_cleartext_plugin()
+            };
+            // The second is `prefer`'s plaintext fallback.
+            (opened(tls), opened(None))
+        };
+        assert_eq!(cleartext(true, SslMode::Prefer), (true, false));
+        assert_eq!(cleartext(true, SslMode::VerifyFull), (true, false));
+        assert_eq!(cleartext(true, SslMode::Disable), (false, false));
+        assert_eq!(cleartext(false, SslMode::Require), (false, false));
     }
 
     #[test]
