@@ -331,7 +331,7 @@ fn open(
     // Offered only when there is one. An empty password is not the same as no
     // password, and IAM auth relies on the latter.
     let options = || options().pass((!password.is_empty()).then(|| password.to_string()));
-    match Conn::new(over(options(), server, ssl_options(server))) {
+    let opened = match Conn::new(over(options(), server, ssl_options(server))) {
         Ok(connection) => Ok(connection),
         // `prefer` is the one rung where a weaker connection is reachable, and
         // reaching it is what the word means. The driver cannot say "encrypt if
@@ -341,7 +341,8 @@ fn open(
             Conn::new(over(options(), server, None)).map_err(|error| connect_error(&error, server))
         }
         Err(error) => Err(connect_error(&error, server)),
-    }
+    };
+    server.forgetting_on_failure(engine, opened)
 }
 
 /// `options` over `tls`, answering a server that asks for

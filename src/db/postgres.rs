@@ -929,6 +929,10 @@ impl Connection {
     }
 
     fn connect(server: &ServerConfig, route: Route) -> Result<Self, DbError> {
+        server.forgetting_on_failure(Engine::Postgres, Self::sign_in(server, route))
+    }
+
+    fn sign_in(server: &ServerConfig, route: Route) -> Result<Self, DbError> {
         let connector = tls::connector(server.sslmode, server.root_certificate.as_deref())
             .map_err(|message| DbError {
                 message,

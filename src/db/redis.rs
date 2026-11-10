@@ -693,7 +693,7 @@ fn connect(
         SslMode::Prefer if speaks_plaintext(&host, port) => attempt(None),
         mode => attempt(Some(mode)),
     };
-    connected.map_err(|error| {
+    let connected = connected.map_err(|error| {
         let tls = server.sslmode != SslMode::Disable;
         match error.is_timeout() && tls && speaks_plaintext(&host, port) {
             true => plain_error(format!(
@@ -703,7 +703,8 @@ fn connect(
             )),
             false => connect_error(&error, server),
         }
-    })
+    });
+    server.forgetting_on_failure(Engine::Redis, connected)
 }
 
 /// Whether the server turned `HELLO 3` down, as one from before Redis 6 does

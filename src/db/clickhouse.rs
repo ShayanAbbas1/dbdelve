@@ -56,6 +56,7 @@ const SESSION_TIMEOUT: &str = "3600";
 
 const SESSION_NOT_FOUND: i64 = 372;
 const INVALID_SESSION_TIMEOUT: i64 = 374;
+const AUTHENTICATION_FAILED: i64 = 516;
 
 /// How a killed query's error ends, before the body or in the tagged frame.
 const WAS_CANCELLED: &str = "(QUERY_WAS_CANCELLED)";
@@ -960,6 +961,9 @@ impl Connection {
                     .read(response, sql, &query_id, fetch, started)
                     .map_err(Failed::Broken);
             }
+            if refused_login(status, response.headers()) {
+                self.config.forget_login_password(Engine::ClickHouse);
+            }
             if let Some(session) = session.as_deref_mut() {
                 match http::exception_code(response.headers()) {
                     // Refused before the statement ran, so it is sent again.
@@ -1556,6 +1560,17 @@ fn failure(mut response: Response<Body>, sql: &str) -> DbError {
     http::exception(status, response.headers(), &body, sql)
 }
 
+/// Whether the server turned the login down, not the statement: so a cached
+/// token it refused is not sent again, while a typo does not rerun the
+/// password command. By the code when there is one, since other codes share
+/// its 403; by the status where a proxy sent none.
+fn refused_login(status: u16, headers: &HeaderMap) -> bool {
+    match http::exception_code(headers) {
+        Some(code) => code == AUTHENTICATION_FAILED,
+        None => matches!(status, 401 | 403),
+    }
+}
+
 fn header(headers: &HeaderMap, name: &str) -> Option<String> {
     Some(headers.get(name)?.to_str().ok()?.trim().to_string())
 }
@@ -2103,6 +2118,41 @@ mod tests {
             requests[2].param("session_id"),
             requests[0].param("session_id")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_a_refused_login_runs_the_password_command_again() {
+        let mock = Mock::start();
+        let runs = std::env::temp_dir().join(format!(
+            "dbdelve-clickhouse-password-command-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&runs);
+        let server = ServerConfig {
+            password_command: Some(crate::db::PasswordCommand {
+                command: format!("printf x >> {}; printf token", runs.display()),
+                expires: 60,
+            }),
+            ..profile(&mock)
+        };
+        let connection = open_with(&mock, writer(), &server).unwrap();
+        mock.on_statement(
+            "SELECT n",
+            [
+                Response::error(404, 60, "UNKNOWN_TABLE", "Unknown table"),
+                Response::error(403, 516, "AUTHENTICATION_FAILED", "Authentication failed"),
+                Response::rows(&[("n", "UInt8")], &[&["1"]]),
+            ],
+        );
+        let ran = || std::fs::read_to_string(&runs).unwrap().len();
+        run(&connection, "SELECT n FROM t").unwrap_err();
+        assert_eq!(ran(), 1);
+        run(&connection, "SELECT n FROM t").unwrap_err();
+        run(&connection, "SELECT n FROM t").unwrap();
+        let after_refusal = ran();
+        let _ = std::fs::remove_file(&runs);
+        assert_eq!(after_refusal, 2);
     }
 
     #[test]

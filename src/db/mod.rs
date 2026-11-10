@@ -1384,27 +1384,19 @@ pub enum Connection {
 impl Connection {
     pub fn open(config: ConnectionConfig) -> Result<Self, DbError> {
         match config {
-            ConnectionConfig::Postgres(postgres) => {
-                let server = postgres.resolved()?;
-                server
-                    .forgetting_on_failure(Engine::Postgres, postgres::Connection::open(&server))
-                    .map(Self::Postgres)
+            ConnectionConfig::Postgres(postgres) => postgres
+                .resolved()
+                .and_then(|server| postgres::Connection::open(&server))
+                .map(Self::Postgres),
+            ConnectionConfig::MySql(server) => {
+                mysql::Connection::open(&server, Engine::MySql).map(Self::MySql)
             }
-            ConnectionConfig::MySql(server) => server
-                .forgetting_on_failure(
-                    Engine::MySql,
-                    mysql::Connection::open(&server, Engine::MySql),
-                )
-                .map(Self::MySql),
-            ConnectionConfig::MariaDb(server) => server
-                .forgetting_on_failure(
-                    Engine::MariaDb,
-                    mysql::Connection::open(&server, Engine::MariaDb),
-                )
-                .map(Self::MySql),
-            ConnectionConfig::SqlServer(server) => server
-                .forgetting_on_failure(Engine::SqlServer, mssql::Connection::open(&server))
-                .map(Self::SqlServer),
+            ConnectionConfig::MariaDb(server) => {
+                mysql::Connection::open(&server, Engine::MariaDb).map(Self::MySql)
+            }
+            ConnectionConfig::SqlServer(server) => {
+                mssql::Connection::open(&server).map(Self::SqlServer)
+            }
             ConnectionConfig::Sqlite {
                 path,
                 statement_timeout,
@@ -1426,13 +1418,11 @@ impl Connection {
             ConnectionConfig::Snowflake(account) => {
                 snowflake::Connection::open(&account).map(Self::Snowflake)
             }
-            ConnectionConfig::ClickHouse(server) => server
-                .forgetting_on_failure(Engine::ClickHouse, clickhouse::Connection::open(&server))
-                .map(Self::ClickHouse),
+            ConnectionConfig::ClickHouse(server) => {
+                clickhouse::Connection::open(&server).map(Self::ClickHouse)
+            }
             ConnectionConfig::MongoDb(mongo) => mongo::Connection::open(&mongo).map(Self::MongoDb),
-            ConnectionConfig::Redis(server) => server
-                .forgetting_on_failure(Engine::Redis, redis::Connection::open(&server))
-                .map(Self::Redis),
+            ConnectionConfig::Redis(server) => redis::Connection::open(&server).map(Self::Redis),
             ConnectionConfig::External(external) => {
                 external::Connection::open(&external).map(Self::External)
             }

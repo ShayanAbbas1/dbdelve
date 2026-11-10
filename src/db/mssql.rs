@@ -760,10 +760,15 @@ impl Connection {
         })
     }
 
+    fn connect(&self) -> Result<Session, DbError> {
+        self.server
+            .forgetting_on_failure(Engine::SqlServer, self.sign_in())
+    }
+
     /// `prefer` and `disable` are the rungs that may reach less than their
     /// first attempt, and reaching it is what the words mean: a second attempt
     /// that negotiates nothing, for a server that cannot encrypt at all.
-    fn connect(&self) -> Result<Session, DbError> {
+    fn sign_in(&self) -> Result<Session, DbError> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

@@ -81,22 +81,24 @@ impl ServerConfig {
         Ok(Cow::Owned(password))
     }
 
-    /// What an open gave, the cached output dropped if it failed, so Reconnect
-    /// or Test runs the command again rather than resend a token the server
-    /// may have refused. On the server the login used: a Postgres service
-    /// fills in what the profile leaves blank, placeholders included.
+    /// What a login gave, the cached output dropped if it failed, so the next
+    /// login (a side session, a cancel's, a redial, Reconnect or Test) runs
+    /// the command again rather than resend a token the server may have
+    /// refused. Called at each login site with the server it signed in to: a
+    /// Postgres service fills in what the profile leaves blank, placeholders
+    /// included.
     pub(super) fn forgetting_on_failure<T>(
         &self,
         engine: Engine,
-        opened: Result<T, DbError>,
+        signed_in: Result<T, DbError>,
     ) -> Result<T, DbError> {
-        if opened.is_err() {
+        if signed_in.is_err() {
             self.forget_login_password(engine);
         }
-        opened
+        signed_in
     }
 
-    fn forget_login_password(&self, engine: Engine) {
+    pub(super) fn forget_login_password(&self, engine: Engine) {
         let Some(command) = &self.password_command else {
             return;
         };
