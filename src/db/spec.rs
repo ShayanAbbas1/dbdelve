@@ -7,8 +7,8 @@
 //! existing strategies is one more value here and its driver.
 
 use super::{
-    ColumnDefinition, Fields, RelationKind, Syntax, clickhouse, duckdb, mongo, mssql, mysql,
-    postgres, redis,
+    Builtin, ColumnDefinition, Fields, RelationKind, Syntax, builtins, clickhouse, duckdb, mongo,
+    mssql, mysql, postgres, redis,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -319,6 +319,9 @@ pub struct SqlSpec {
     /// Whether the write gate reads the terms a row named by every value
     /// carries: `toString(c) = '…'` and `c IS NULL`.
     pub row_terms: bool,
+    /// What completion offers beside the catalog: the functions and value
+    /// expressions the dialect has built in.
+    pub builtins: &'static [Builtin],
 }
 
 impl SqlSpec {
@@ -359,6 +362,7 @@ impl SqlSpec {
         stateless_requests: false,
         transactions: true,
         row_terms: false,
+        builtins: &[],
     };
 
     /// The word that opens a transaction around a generated multi-statement
@@ -740,6 +744,7 @@ pub(crate) const POSTGRES: EngineSpec = EngineSpec {
         parser_dialect: ParserDialect::PostgreSql,
         regex: RegexMatch::Tilde,
         read_only_session: ReadOnlySession::DefaultTransaction,
+        builtins: builtins::postgres::BUILTINS,
         ..SqlSpec::ANSI
     },
     abilities: Abilities {
@@ -798,6 +803,7 @@ pub(crate) const MYSQL: EngineSpec = EngineSpec {
         parser_dialect: ParserDialect::MySql,
         regex: RegexMatch::RegexpLike,
         read_only_session: ReadOnlySession::SessionTransaction,
+        builtins: builtins::mysql::BUILTINS,
         ..SqlSpec::ANSI
     },
     abilities: Abilities {
@@ -859,6 +865,7 @@ pub(crate) const MARIADB: EngineSpec = EngineSpec {
         parser_dialect: ParserDialect::MySql,
         regex: RegexMatch::RegexpInstr,
         read_only_session: ReadOnlySession::SessionTransaction,
+        builtins: builtins::mysql::BUILTINS,
         ..SqlSpec::ANSI
     },
     abilities: Abilities {
@@ -915,6 +922,7 @@ pub(crate) const SQLITE: EngineSpec = EngineSpec {
         substring: SubstringMatch::Instr,
         // No `generated_defaults`: `table_info` leaves generated columns out
         // altogether.
+        builtins: builtins::sqlite::BUILTINS,
         ..SqlSpec::ANSI
     },
     abilities: Abilities {
@@ -959,6 +967,7 @@ pub(crate) const TURSO: EngineSpec = EngineSpec {
         },
         parser_dialect: ParserDialect::Sqlite,
         substring: SubstringMatch::Instr,
+        builtins: builtins::sqlite::BUILTINS,
         ..SqlSpec::ANSI
     },
     abilities: Abilities {
@@ -1008,6 +1017,7 @@ pub(crate) const DUCKDB: EngineSpec = EngineSpec {
         // `explain.rs` does not read yet. No `read_only_session`: an open
         // database has no session switch; read-only is a way to open the
         // file, which a profile does not ask for yet.
+        builtins: builtins::duckdb::BUILTINS,
         ..SqlSpec::ANSI
     },
     abilities: Abilities {
@@ -1074,6 +1084,7 @@ pub(crate) const SNOWFLAKE: EngineSpec = EngineSpec {
         // shape `explain.rs` does not read yet. No `read_only_session`: there
         // is no session to set anything on. No `generated_defaults`: an
         // identity takes a supplied value.
+        builtins: builtins::snowflake::BUILTINS,
         ..SqlSpec::ANSI
     },
     abilities: Abilities {
@@ -1150,6 +1161,7 @@ pub(crate) const SQL_SERVER: EngineSpec = EngineSpec {
         // `read_only_session`: no session-level switch exists.
         // `ApplicationIntent=ReadOnly` routes a login to a readable replica
         // and is ignored by a primary.
+        builtins: builtins::sqlserver::BUILTINS,
         ..SqlSpec::ANSI
     },
     abilities: Abilities {
@@ -1358,6 +1370,7 @@ pub(crate) const CLICKHOUSE: EngineSpec = EngineSpec {
         // there is no analyzing form, and no `skip_duplicates`: there is no
         // clause that skips a row on a key, because there is no unique key.
         explain_plan: Some(ExplainPrefix::Explain),
+        builtins: builtins::clickhouse::BUILTINS,
         ..SqlSpec::ANSI
     },
     abilities: Abilities {
@@ -1408,6 +1421,7 @@ pub(crate) const GENERIC: EngineSpec = EngineSpec {
         // plugin target admits yet; false is the answer that cannot send an
         // offset to a server whose timestamp literal takes none (Db2).
         literal_offsets: false,
+        builtins: builtins::ansi::BUILTINS,
         ..SqlSpec::ANSI
     },
     abilities: Abilities::NONE,

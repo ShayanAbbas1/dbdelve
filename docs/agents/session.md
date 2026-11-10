@@ -494,10 +494,15 @@ The shape a change to the main pane has to fit (`session.rs`, with the
 ## Completion
 
 `src/completion.rs` offers the schemas, relations and routines the loaded
-catalog holds, the columns of the relations a statement actually names, and the
-keywords that carry a statement's shape. It is a `CompletionProvider`
-implementation and nothing else: the popup, its scroll and its keys all belong
-to gpui-component.
+catalog holds, the columns of the relations a statement actually names, the
+keywords that carry a statement's shape, and the dialect's built-in functions
+and values. It is a `CompletionProvider` implementation and nothing else: the
+popup, its scroll and its keys all belong to gpui-component.
+
+The built-ins are data, one table per dialect under `src/db/builtins/` read
+through `Engine::builtins`, offered wherever keywords are and never where a
+relation belongs; a keyword spelled like one is offered once, as the built-in,
+which writes a function up to its open parenthesis and a value bare.
 
 **Columns are not in the catalog, and must not be put there.** Fetching every
 column of every relation at connect is unbounded: on a large schema it is a

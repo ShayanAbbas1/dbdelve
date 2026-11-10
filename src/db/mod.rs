@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 
 pub use crate::tls::SslMode;
 
+mod builtins;
 mod clickhouse;
 #[cfg(test)]
 mod conformance;
@@ -40,6 +41,7 @@ mod target;
 mod turso;
 mod xlsx;
 
+pub use builtins::{Builtin, BuiltinKind};
 pub use duckdb::IN_MEMORY as DUCKDB_IN_MEMORY;
 pub use external::ExternalConfig;
 #[cfg(test)]
@@ -711,6 +713,12 @@ impl Engine {
     /// Whether a date literal may carry a UTC offset.
     pub fn reads_literal_offsets(self) -> bool {
         self.spec().sql.literal_offsets
+    }
+
+    /// The functions and value expressions this dialect has built in, as it
+    /// spells them.
+    pub fn builtins(self) -> &'static [Builtin] {
+        self.spec().sql.builtins
     }
 
     /// Whether a backslash in a single-quoted literal escapes the character
