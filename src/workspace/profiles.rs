@@ -2188,6 +2188,10 @@ impl Workspace {
     /// A top-level row of the sidebar the user opened or closed, kept for the
     /// next launch. Not under a filter, which opens every row it keeps
     /// whatever the user left them as.
+    // ponytail: only top-level rows are kept, so a category or partitioned
+    // table folded inside a schema opens again on the next launch. Their ids
+    // are name-based too; keeping them means dropping the root check here and
+    // applying nested ids where `root_folds` applies these.
     pub(crate) fn remember_fold(
         &mut self,
         id: &str,

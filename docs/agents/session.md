@@ -445,6 +445,27 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   lands where no row takes it, and an object dragged while its database is
   unknown carries nothing. The Pinned group exists only while something is
   pinned, so pinning the first thing is the menu's.
+- **The sidebar opens on the active schema and keeps the user's folds.** A
+  schema row starts open only when it is `Profile::active_schema`, or, with
+  none, the only schema listed, so a database of many schemas is not a wall
+  of open trees and one of a single schema is not a lone closed row; every
+  other row starts open (`explorer::root_folds`). Opening or closing a
+  top-level row (a schema, a folder, Pinned, Queries) is recorded from the
+  tree's own `TreeEvent` (`Workspace::remember_fold`), keyboard, click and
+  `reveal_item` alike, in the profile's `folds`, row id to open, saved as
+  `[profiles.folds]` and left out when empty. A row it does not name gets the
+  default, so a schema created since stays closed and a new folder opens.
+  Every rebuild without a filter puts `folds` over what was kept, which is
+  how Collapse All Schemas (the filter row's button and the palette, no
+  default chord) and Set as Active Schema show at once: Set as Active Schema
+  records the schema it picks as open and the one it leaves as it was, since
+  that one was open only for being active. Nothing is recorded while the
+  filter has text: a filter opens every row it keeps so that matches show,
+  and those are not the user's folds. Clearing it rebuilds from `folds` and
+  the defaults; Collapse All Schemas clears it first, or nothing would close.
+  Category folds are kept across a refresh but not saved. Stale ids are left
+  in `folds`: harmless, and a dropped schema may come back. A duplicate takes
+  the folds with the folders.
 - **A named buffer persists to its query file, an unnamed one to its own
   `.scratch-{id}.sql`.** Edits stay in memory until Save, a connection switch,
   opening another query, or normal quit/window close persists the buffers.
