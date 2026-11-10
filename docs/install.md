@@ -5,7 +5,7 @@
 Apple Silicon, macOS 12 or later — that's what it's built and tested on. Intel
 and older macOS aren't blocked by anything in the code, they're just untested.
 
-Homebrew is the recommended way. It handles installing and upgrading:
+Homebrew is the recommended way to install it:
 
 ```sh
 brew install --cask ShayanAbbas1/dbdelve/dbdelve
@@ -16,6 +16,12 @@ Don't skip the second line, or macOS will refuse to open the app. DBDelve is
 signed ad-hoc: there's no Developer ID behind it and nothing is notarized, so
 Gatekeeper declines until the quarantine flag is cleared.
 
+After that it updates itself: when a release is out, the titlebar says so, and
+**Update and restart** in its menu downloads it, checks its signature, replaces
+the app and opens the new one. That needs the app to live somewhere you can
+write to, such as `/Applications` on an administrator account; one run from the
+`.dmg`, or from a folder you can't write to, links to the release instead.
+
 Your connections and query history are kept outside the app and survive updates.
 macOS will ask once more for the saved passwords in your Keychain after each
 update, because each release carries a different ad-hoc signature. I'll
@@ -23,7 +29,8 @@ pay for a Developer ID if enough people end up using this, which removes all of
 the above.
 
 Failing Homebrew, take the `.dmg` from [the latest release][releases] and drag
-DBDelve to Applications. Same quarantine step and you have to update manually.
+DBDelve to Applications. Same quarantine step, and from then on it updates
+itself the same way.
 
 To build it yourself instead, `DBDELVE_CHANNEL=release dev/bundle.sh` produces
 `target/DBDelve.app` with the release build, icon and signature. Drag that to
@@ -148,15 +155,21 @@ DBDelve doesn't bundle any.
 
 ## Updating
 
-`brew upgrade --cask dbdelve`, if you installed it that way. If you used the
-Windows installer, run the next one over it; it upgrades in place. The zip has
-no upgrade: each version unzips to its own folder, so delete the old one.
-Connections and any plugins you added live in `%APPDATA%\dbdelve`, not there.
-Otherwise the
-status bar links to [the latest release][releases] once there is a newer one.
+On macOS, **Update and restart** in the titlebar's update menu (or
+"Update to dbdelve … and restart" in the command palette) does it in one click,
+as described [above](#macos). Homebrew leaves a self-updating app to update
+itself, so `brew upgrade` skips DBDelve unless you add `--greedy`.
 
-There is no telemetry. The only request DBDelve makes on its own is one to
-GitHub at startup to check for updates, which you can turn off in Settings.
+Elsewhere it doesn't update itself yet. If you used the Windows installer, run
+the next one over it; it upgrades in place. The zip has no upgrade: each
+version unzips to its own folder, so delete the old one. Connections and any
+plugins you added live in `%APPDATA%\dbdelve`, not there. Otherwise the
+titlebar links to [the latest release][releases] once there is a newer one.
+
+There is no telemetry. The only requests DBDelve makes on its own are to
+GitHub, to check for a newer release at startup and every six hours after,
+which you can turn off in Settings, and on macOS to download the release you
+asked to update to.
 
 [releases]: https://github.com/ShayanAbbas1/dbdelve/releases/latest
 [Inno Setup]: https://jrsoftware.org/isinfo.php
