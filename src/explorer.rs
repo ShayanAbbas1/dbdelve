@@ -1767,24 +1767,38 @@ mod tests {
 
     #[test]
     fn only_the_active_schema_opens_or_the_only_one_there_is() {
-        let mut explorer = queries(&["daily".to_string()], "");
-        explorer.extend(tree(&catalog(), ""));
-        let open = |saved: &BTreeMap<String, bool>, active| {
-            let mut open: Vec<_> = root_folds(&explorer.items, saved, active)
-                .into_iter()
-                .filter_map(|(row, open)| open.then_some(row))
-                .collect();
-            open.sort();
-            open
+        // Each root of a sidebar built afresh, as `root_folds` leaves it. Built
+        // expanded, so a schema it failed to close would show here as open.
+        let shown = |catalog: &Catalog, saved: &BTreeMap<String, bool>, active| {
+            let mut explorer = queries(&["daily".to_string()], "");
+            explorer.extend(tree(catalog, ""));
+            let folds = root_folds(&explorer.items, saved, active);
+            with_folds(explorer.items, &folds)
+                .iter()
+                .map(|item| (item.id.to_string(), item.is_expanded()))
+                .collect::<Vec<_>>()
         };
+        let row = |id: &str, open| (id.to_string(), open);
         let none = BTreeMap::new();
-        assert_eq!(open(&none, Some("analytics")), ["schema-analytics"]);
-        assert!(open(&none, Some("gone")).is_empty());
-        assert!(open(&none, None).is_empty(), "two schemas, neither active");
-        assert!(
-            !root_folds(&explorer.items, &none, None).contains_key(QUERIES_GROUP),
-            "every other row keeps how it was built"
+        assert_eq!(
+            shown(&catalog(), &none, Some("analytics")),
+            [
+                row(QUERIES_GROUP, true),
+                row("schema-analytics", true),
+                row("schema-public", false)
+            ]
         );
+        for active in [Some("gone"), None] {
+            assert_eq!(
+                shown(&catalog(), &none, active),
+                [
+                    row(QUERIES_GROUP, true),
+                    row("schema-analytics", false),
+                    row("schema-public", false)
+                ],
+                "two schemas, neither active"
+            );
+        }
 
         let saved = BTreeMap::from([
             ("schema-analytics".to_string(), false),
@@ -1793,21 +1807,20 @@ mod tests {
             ("schema-dropped".to_string(), true),
         ]);
         assert_eq!(
-            open(&saved, Some("analytics")),
-            ["schema-public"],
+            shown(&catalog(), &saved, Some("analytics")),
+            [
+                row(QUERIES_GROUP, false),
+                row("schema-analytics", false),
+                row("schema-public", true)
+            ],
             "what the user left open or closed outranks the active schema"
-        );
-        assert_eq!(
-            root_folds(&explorer.items, &saved, None).get(QUERIES_GROUP),
-            Some(&false)
         );
 
         let mut single = catalog();
         single.schemas.truncate(1);
-        let lone = tree(&single, "").items;
         assert_eq!(
-            root_folds(&lone, &none, None).get("schema-analytics"),
-            Some(&true)
+            shown(&single, &none, None),
+            [row(QUERIES_GROUP, true), row("schema-analytics", true)]
         );
     }
 
