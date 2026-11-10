@@ -16,8 +16,9 @@ use gpui_component::input::{InputEvent, InputState};
 use crate::{
     Workspace,
     db::{
-        ConnectionConfig, Driver, Engine, ExternalConfig, Fields, MongoConfig, Plugin,
-        PostgresConfig, ServerConfig, SnowflakeConfig, SshTunnel, SslMode, Target, odbc_string,
+        ConnectionConfig, Driver, Engine, ExternalConfig, Fields, MongoConfig, PasswordCommand,
+        Plugin, PostgresConfig, ServerConfig, SnowflakeConfig, SshTunnel, SslMode, Target,
+        odbc_string,
     },
     explorer::Shortcuts,
     session::Profile,
@@ -51,6 +52,13 @@ pub(crate) struct ConnectionForm {
     pub(crate) database: Entity<InputState>,
     pub(crate) user: Entity<InputState>,
     pub(crate) password: Entity<InputState>,
+    /// Run for the password at every login, where
+    /// `Target::takes_password_command`. While it holds anything the Password
+    /// field is disabled and not read, but keeps what was typed in it.
+    pub(crate) password_command: Entity<InputState>,
+    /// Seconds the command's output is reused for. Blank is 0: every login
+    /// runs it.
+    pub(crate) password_expires: Entity<InputState>,
     pub(crate) sslmode: SslMode,
     /// Only reachable while the mode consults one, so the field cannot sit
     /// there filled in and doing nothing.
@@ -112,8 +120,9 @@ pub(crate) struct ConnectionForm {
     /// the same ones, are there from the start rather than fading in again.
     pub(crate) backdrop_shown: bool,
     /// The target the target-dependent placeholders were last written for,
-    /// whether a service was typed then, and the root certificate's.
-    pub(crate) placeholders_for: Option<(Target, bool, &'static str)>,
+    /// whether a service was typed then, the root certificate's, and the
+    /// password's.
+    pub(crate) placeholders_for: Option<(Target, bool, &'static str, &'static str)>,
     /// The URL field as of its last change, to tell a URL pasted whole from
     /// one being typed.
     pub(crate) last_url: SharedString,
@@ -262,6 +271,22 @@ impl ConnectionForm {
                 .masked(true)
         });
 
+        let command = server.and_then(|server| server.password_command.as_ref());
+        let password_command = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Prints the password; may use %HOSTNAME% %PORT% %USERNAME%")
+                .default_value(value(command.map(|command| command.command.as_str())))
+        });
+        let password_expires = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("0").default_value(
+                command
+                    .map(|command| command.expires)
+                    .filter(|seconds| *seconds > 0)
+                    .map(|seconds| seconds.to_string())
+                    .unwrap_or_default(),
+            )
+        });
+
         let root_certificate = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("System trust store")
@@ -328,7 +353,9 @@ impl ConnectionForm {
                 )
         });
 
-        statement_timeout.update(cx, |input, cx| input.set_text_align(TextAlign::Right, cx));
+        for seconds in [&statement_timeout, &password_expires] {
+            seconds.update(cx, |input, cx| input.set_text_align(TextAlign::Right, cx));
+        }
 
         let mut subscriptions = vec![cx.subscribe_in(
             &url,
@@ -352,6 +379,8 @@ impl ConnectionForm {
             &service,
             &ssh_host,
             &account_name,
+            // And the Password field, disabled while a command is typed.
+            &password_command,
         ] {
             subscriptions.push(cx.subscribe(input, |_, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
@@ -375,6 +404,8 @@ impl ConnectionForm {
             database,
             user,
             password,
+            password_command,
+            password_expires,
             sslmode: server.map(|server| server.sslmode).unwrap_or_default(),
             root_certificate,
             ssh: ssh.is_some(),
@@ -437,7 +468,6 @@ impl ConnectionForm {
         });
         form.password.update(cx, |password, cx| {
             password.set_value("", window, cx);
-            password.set_placeholder("Unchanged", window, cx);
         });
         form
     }
@@ -586,7 +616,11 @@ impl ConnectionForm {
     pub(crate) fn sync_placeholders(&mut self, window: &mut Window, cx: &mut App) {
         let beside_a_service = self.typed_service(cx).is_some();
         let root_certificate = root_certificate_placeholder(self.sslmode, beside_a_service);
-        let written = (self.target(), beside_a_service, root_certificate);
+        let password = password_placeholder(
+            self.typed_password_command(cx).is_some(),
+            self.editing.is_some(),
+        );
+        let written = (self.target(), beside_a_service, root_certificate, password);
         if self.placeholders_for == Some(written) {
             return;
         }
@@ -598,6 +632,7 @@ impl ConnectionForm {
         };
         for (input, placeholder) in [
             (&self.root_certificate, SharedString::from(root_certificate)),
+            (&self.password, password.into()),
             (&self.name, SharedString::from(blank.name)),
             (&self.host, blank.host.into()),
             (&self.port, blank.port.into()),
@@ -615,6 +650,11 @@ impl ConnectionForm {
     pub(crate) fn typed_service(&self, cx: &App) -> Option<String> {
         Some(self.service.read(cx).value().trim().to_string())
             .filter(|service| self.target().takes_service() && !service.is_empty())
+    }
+
+    /// The command typed, where the target runs one.
+    pub(crate) fn typed_password_command(&self, cx: &App) -> Option<String> {
+        typed_command(self.target(), &self.password_command.read(cx).value())
     }
 
     /// Whether the root certificate field means anything for what is typed.
@@ -735,13 +775,18 @@ impl ConnectionForm {
             .then(|| read(&self.root_certificate))
             .filter(|path| !path.is_empty());
 
+        let (password, password_command) = login(
+            self.password.read(cx).unmask_value().to_string(),
+            self.typed_password_command(cx),
+            self.password_expires.read(cx).value().trim(),
+        )?;
         let server = ServerConfig {
             host,
             port,
             database,
             user,
-            password: self.password.read(cx).unmask_value().to_string(),
-            password_command: None,
+            password,
+            password_command,
             sslmode: self.sslmode,
             root_certificate,
             statement_timeout: self.statement_timeout(cx)?,
@@ -1052,6 +1097,43 @@ fn ssh_tunnel(
         identity_file,
         run_as: Some(run_as).filter(|user| takes_run_as && !user.is_empty()),
     }))
+}
+
+/// A command left typed under an engine whose login runs none is not read,
+/// the way another engine's fields are not.
+fn typed_command(target: Target, typed: &str) -> Option<String> {
+    let command = typed.trim();
+    (target.takes_password_command() && !command.is_empty()).then(|| command.to_string())
+}
+
+/// The password a login sends and the command it runs instead, if any. Beside
+/// a command the typed password is dropped, so it is neither sent nor saved to
+/// the Keychain. Blank expiry is 0: every login runs the command.
+fn login(
+    password: String,
+    command: Option<String>,
+    expires: &str,
+) -> Result<(String, Option<PasswordCommand>), String> {
+    let Some(command) = command else {
+        return Ok((password, None));
+    };
+    let expires = match expires {
+        "" => 0,
+        seconds => seconds
+            .parse()
+            .map_err(|_| "Expires after must be a whole number of seconds.".to_string())?,
+    };
+    Ok((String::new(), Some(PasswordCommand { command, expires })))
+}
+
+/// What a blank Password field means: an edited profile's blank keeps the
+/// password saved for it.
+fn password_placeholder(from_command: bool, editing: bool) -> &'static str {
+    match (from_command, editing) {
+        (true, _) => "From the command",
+        (false, true) => "Unchanged",
+        (false, false) => "Optional",
+    }
 }
 
 /// Blank is the default port.
@@ -1488,6 +1570,69 @@ mod tests {
             duplicate_profile_name("Prod", &["Staging".to_string()]),
             "Prod copy"
         );
+    }
+
+    #[test]
+    fn a_password_command_is_read_only_where_the_login_runs_one_and_blank_is_none() {
+        let typed = |engine| typed_command(Target::built_in(engine), " printf %s token ");
+        assert_eq!(typed(Engine::Postgres).as_deref(), Some("printf %s token"));
+        assert_eq!(typed(Engine::Redis).as_deref(), Some("printf %s token"));
+        assert_eq!(typed(Engine::MongoDb), None);
+        assert_eq!(typed(Engine::Sqlite), None);
+        let plugin = Target {
+            engine: Engine::Postgres,
+            driver: Driver::Plugin(odbc()),
+        };
+        assert_eq!(typed_command(plugin, "printf %s token"), None);
+        assert_eq!(
+            typed_command(Target::built_in(Engine::Postgres), "  "),
+            None
+        );
+    }
+
+    #[test]
+    fn a_password_command_takes_the_place_of_the_password_and_its_keychain_entry() {
+        let command = || Some("printf %s token".to_string());
+        let (password, with) = login("hunter2".into(), command(), "").unwrap();
+        // Blank expiry runs it at every login.
+        assert_eq!(
+            with,
+            Some(PasswordCommand {
+                command: "printf %s token".into(),
+                expires: 0,
+            })
+        );
+        let config = ConnectionConfig::postgres(ServerConfig {
+            password,
+            password_command: with,
+            ..ServerConfig::default()
+        });
+        assert_eq!(password_to_persist(&config, Origin::Form), None);
+
+        assert_eq!(
+            login(String::new(), command(), "900")
+                .unwrap()
+                .1
+                .unwrap()
+                .expires,
+            900
+        );
+        assert_eq!(
+            login(String::new(), command(), "15m"),
+            Err("Expires after must be a whole number of seconds.".into())
+        );
+        // Without a command the expiry is not read, and the password is kept.
+        assert_eq!(
+            login("hunter2".into(), None, "15m"),
+            Ok(("hunter2".into(), None))
+        );
+    }
+
+    #[test]
+    fn a_blank_password_says_what_blank_means() {
+        assert_eq!(password_placeholder(false, false), "Optional");
+        assert_eq!(password_placeholder(false, true), "Unchanged");
+        assert_eq!(password_placeholder(true, true), "From the command");
     }
 
     #[test]

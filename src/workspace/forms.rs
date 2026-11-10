@@ -342,12 +342,41 @@ impl Workspace {
                             "password",
                             "Password",
                             &form.password,
-                            bare(&form.password).mask_toggle(),
+                            bare(&form.password)
+                                .mask_toggle()
+                                .disabled(form.typed_password_command(cx).is_some()),
                             t,
                         ),
                     ]
                     .map(IntoElement::into_any_element),
                 );
+                // Shown for every engine that takes one rather than only once
+                // typed, so no row leaves the screen with the focus in it.
+                if form.target().takes_password_command() {
+                    connection.push(
+                        field_row(
+                            "password-command",
+                            "Password command",
+                            &form.password_command,
+                            mono_field(&form.password_command),
+                            t,
+                        )
+                        .into_any_element(),
+                    );
+                    connection.push(
+                        ui::option_row(
+                            "Expires after",
+                            Some(
+                                "How long the command's password is reused for. 0 runs it \
+                                 at every login."
+                                    .into(),
+                            ),
+                            seconds_field(&form.password_expires, t),
+                            t,
+                        )
+                        .into_any_element(),
+                    );
+                }
                 if form.engine.takes_service() {
                     connection.push(
                         field_row("service", "Service", &form.service, bare(&form.service), t)
@@ -584,30 +613,7 @@ impl Workspace {
             ui::option_row(
                 "Statement timeout",
                 None,
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(layout::SPACE_XS))
-                    .w(px(layout::chrome(layout::FORM_TIMEOUT_WIDTH)))
-                    .h(px(Control::Compact.height()))
-                    .px(px(layout::SPACE_SM))
-                    .rounded(px(layout::RADIUS_CONTROL))
-                    .border_1()
-                    .border_color(t.border)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(gpui_component::Sizable::small(bare(
-                                &form.statement_timeout,
-                            ))),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(layout::chrome(layout::TEXT_SM)))
-                            .text_color(t.text_faint)
-                            .child("s"),
-                    ),
+                seconds_field(&form.statement_timeout, t),
                 t,
             )
             .into_any_element(),
@@ -3454,6 +3460,32 @@ fn nested_field_row(
                 .flex()
                 .items_center()
                 .child(control),
+        )
+}
+
+/// A small boxed field for a number of seconds, its unit after it.
+fn seconds_field(input: &Entity<InputState>, t: Theme) -> gpui::Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(layout::SPACE_XS))
+        .w(px(layout::chrome(layout::FORM_TIMEOUT_WIDTH)))
+        .h(px(Control::Compact.height()))
+        .px(px(layout::SPACE_SM))
+        .rounded(px(layout::RADIUS_CONTROL))
+        .border_1()
+        .border_color(t.border)
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(gpui_component::Sizable::small(bare(input))),
+        )
+        .child(
+            div()
+                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                .text_color(t.text_faint)
+                .child("s"),
         )
 }
 
