@@ -1139,11 +1139,15 @@ impl ConnectionConfig {
 
     /// Drops what a password command printed for this profile, after a
     /// connect that may have failed on it, so Reconnect runs it again.
-    #[expect(dead_code, reason = "the workspace calls it once it connects with one")]
     pub fn forget_login_password(&self) {
         if let Some(server) = self.server() {
             server.forget_login_password(self.engine());
         }
+    }
+
+    /// The command a login runs in place of the Keychain's password.
+    pub fn password_command(&self) -> Option<&PasswordCommand> {
+        self.server()?.password_command.as_ref()
     }
 
     /// The password the Keychain holds for this profile, where it has one.

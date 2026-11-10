@@ -770,13 +770,17 @@ impl Workspace {
                 // A blank password on an existing profile means "keep the saved
                 // one", which is what the connect would use.
                 if let Some(id) = editing
+                    && config.password_command().is_none()
                     && let Some(slot) = config.password_mut()
                     && slot.is_empty()
                     && let Some(password) = store::password(&id)?
                 {
                     *slot = password;
                 }
-                let connection = Connection::open(config).map_err(|error| error.message)?;
+                let connection = Connection::open(config.clone()).map_err(|error| {
+                    config.forget_login_password();
+                    error.message
+                })?;
                 if mode == Mode::ReadOnly {
                     connection
                         .set_read_only(true)
@@ -1759,8 +1763,11 @@ impl Workspace {
                     message
                 };
                 // A file engine has nothing to authenticate to, so it never
-                // reaches the Keychain — and never triggers its prompt.
-                if let Some(slot) = config.password_mut()
+                // reaches the Keychain — and never triggers its prompt. Nor does
+                // a password command: a password saved before it is ignored,
+                // not deleted.
+                if config.password_command().is_none()
+                    && let Some(slot) = config.password_mut()
                     && slot.is_empty()
                 {
                     match store::password(&id) {
@@ -1771,8 +1778,12 @@ impl Workspace {
                         Err(message) => return Err(failed("keychain", message)),
                     }
                 }
-                let connection =
-                    Connection::open(config).map_err(|error| failed("open", error.message))?;
+                let connection = Connection::open(config.clone()).map_err(|error| {
+                    // So Reconnect after a rejected token runs the command
+                    // again rather than resend what the server refused.
+                    config.forget_login_password();
+                    failed("open", error.message)
+                })?;
                 // Only Read-only asks the server for anything here: the
                 // servers already default to read-write, and a redundant
                 // switch to it risks a pooler or proxy that rejects the
