@@ -177,6 +177,10 @@ jobs:
           # The key the app is built with, so a secret that does not match it
           # fails here instead of in every installed app.
           PUBLIC_KEY="$(sed -n 's/^const RELEASE_PUBLIC_KEY: &str = "\(.*\)";$/\1/p' src/update/macos.rs)"
+          if ! grep -qxF "PUBLIC_KEY=\"$PUBLIC_KEY\"" install.sh; then
+            echo "install.sh does not check downloads against the app's release key" >&2
+            exit 1
+          fi
           KEY="$RUNNER_TEMP/update.key"
           trap 'rm -f "$KEY"' EXIT
           printf '%s\n' "$UPDATE_SIGNING_KEY" > "$KEY"

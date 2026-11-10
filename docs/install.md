@@ -27,9 +27,19 @@ update, because each release carries a different ad-hoc signature. I'll
 pay for a Developer ID if enough people end up using this, which removes all of
 the above.
 
-Failing Homebrew, take the `.dmg` from [the latest release][releases] and drag
-DBDelve to Applications. Nothing clears the quarantine flag for you this way,
-so do it once before opening the app:
+Without Homebrew, one line installs the latest release into `/Applications`
+(or `~/Applications` when that isn't yours to write to):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ShayanAbbas1/dbdelve/main/install.sh | sh
+```
+
+Nothing it downloads is quarantined, so the app just opens. If `minisign` is
+installed it also checks the release's signature.
+
+Or take the `.dmg` from [the latest release][releases] and drag DBDelve to
+Applications. A browser quarantines what it downloads and nothing clears that
+for you this way, so do it once before opening the app:
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/DBDelve.app
