@@ -2223,6 +2223,29 @@ mod tests {
         assert!(last.messages[0].starts_with("Note (1051)"));
     }
 
+    /// The cancel's `KILL QUERY` is a login of its own, so it runs the
+    /// command too.
+    fn live_a_password_command_signs_in_the_session_and_its_cancel(engine: Engine) {
+        let config = live_config(engine);
+        let command = format!("printf %s '{}'", config.password.replace('\'', r"'\''"));
+        let connection = Connection::open(
+            &ServerConfig {
+                sslmode: SslMode::Disable,
+                password: String::new(),
+                password_command: Some(crate::db::PasswordCommand {
+                    command,
+                    expires: 0,
+                }),
+                ..config
+            },
+            engine,
+        )
+        .expect("the command's password should sign in");
+        connection
+            .cancel()
+            .expect("the cancel's login should sign in too");
+    }
+
     /// Each `live_` body above, run once against each server the driver
     /// speaks to.
     macro_rules! on_both_servers {
@@ -2344,6 +2367,7 @@ mod tests {
     );
 
     on_both_servers!(
+        live_a_password_command_signs_in_the_session_and_its_cancel,
         live_reads_run_at_once_take_the_time_of_one,
         live_a_cancel_stops_every_read_run_at_once,
         live_a_row_limit_keeps_the_first_rows_and_counts_the_rest,

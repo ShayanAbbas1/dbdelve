@@ -2302,6 +2302,27 @@ mod tests {
         assert!(skipped.contains("is readable by other users"), "{skipped}");
     }
 
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_a_password_command_signs_in_in_place_of_the_typed_password() {
+        let config = live_config();
+        let printing = |password: &str| ServerConfig {
+            password: String::new(),
+            password_command: Some(crate::db::PasswordCommand {
+                command: format!("printf %s '{}'", password.replace('\'', r"'\''")),
+                expires: 0,
+            }),
+            ..config.clone()
+        };
+        let connection = Connection::open(&printing(&config.password))
+            .expect("the command's password should sign in");
+        connection
+            .alongside()
+            .expect("a second session should sign in with it too");
+        assert!(Connection::open(&printing("not-the-password")).is_err());
+    }
+
     #[test]
     #[ignore = "requires a local Postgres server configured through PG*"]
     fn live_an_active_schema_leads_every_session_and_moves_the_open_ones() {
