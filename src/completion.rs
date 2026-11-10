@@ -7,8 +7,9 @@
 //! module is the part that is dbdelve's: which identifiers are worth offering
 //! for the text in front of the cursor.
 //!
-//! Everything offered comes from the catalog the explorer already loaded, so
-//! the popup can never name a relation the tree does not show. Nothing here
+//! Every object offered comes from the catalog the explorer already loaded, so
+//! the popup can never name a relation the tree does not show; the rest is the
+//! dialect's keywords and built-in functions and values. Nothing here
 //! runs SQL and nothing here edits the buffer: an accepted row is a
 //! [`TextEdit`] over the word being typed, and the input applies it.
 //!
@@ -27,12 +28,12 @@ use gpui::{App, Result, Task, WeakEntity, Window};
 use gpui_component::input::{CompletionProvider, Rope, RopeExt};
 use lsp_types::{
     CompletionContext, CompletionItem, CompletionItemKind, CompletionResponse, CompletionTextEdit,
-    TextEdit,
+    Documentation, MarkupContent, MarkupKind, TextEdit,
 };
 
 use crate::{
     Workspace,
-    db::{Catalog, Engine, RelationKind, Syntax},
+    db::{Builtin, BuiltinKind, Catalog, Engine, RelationKind, Syntax},
     fuzzy::{Fuzzy, Query},
     mql::{self, Completing},
     redis_cmd, sql,
@@ -170,6 +171,9 @@ struct Candidate {
     /// A flag rather than the name, which is spelled only for the few that
     /// survive ranking; ranking reads the label alone either way.
     qualified: bool,
+    /// The built-in it offers, whose call and documentation are spelled, like
+    /// a qualified name, only for the few that survive ranking.
+    builtin: Option<&'static Builtin>,
 }
 
 impl Candidate {
@@ -179,11 +183,35 @@ impl Candidate {
             detail,
             kind,
             qualified: false,
+            builtin: None,
+        }
+    }
+
+    fn builtin(builtin: &'static Builtin) -> Self {
+        let (detail, kind) = match builtin.kind {
+            BuiltinKind::Function => ("function", CompletionItemKind::FUNCTION),
+            BuiltinKind::Aggregate => ("aggregate", CompletionItemKind::FUNCTION),
+            BuiltinKind::Window => ("window", CompletionItemKind::FUNCTION),
+            BuiltinKind::Value => ("value", CompletionItemKind::CONSTANT),
+        };
+        Self {
+            builtin: Some(builtin),
+            ..Self::new(builtin.name, Some(detail.to_string()), kind)
         }
     }
 
     /// What accepting it writes into the buffer.
+    ///
+    /// A function is written up to its open parenthesis, ready for the first
+    /// argument, and closed as well when it takes none.
     fn written(&self, engine: Engine) -> String {
+        if let Some(builtin) = self.builtin {
+            return match (builtin.kind, builtin.args) {
+                (BuiltinKind::Value, _) => builtin.name.to_string(),
+                (_, "") => format!("{}()", builtin.name),
+                _ => format!("{}(", builtin.name),
+            };
+        }
         match (self.qualified, &self.detail) {
             (true, Some(schema)) => format!(
                 "{}.{}",
@@ -192,6 +220,25 @@ impl Candidate {
             ),
             _ => self.label.clone(),
         }
+    }
+
+    /// A built-in's sentence over its signature.
+    ///
+    /// The sentence leads because a menu too narrow to sit beside its
+    /// documentation shows only the first line of it. The fence names no
+    /// language: a language's tag is drawn over the end of a wrapped line, and
+    /// its highlighter colours `with` in `timestamp with time zone` as a
+    /// keyword.
+    fn documentation(&self) -> Option<Documentation> {
+        let builtin = self.builtin?;
+        let signature = match builtin.kind {
+            BuiltinKind::Value => format!("{} → {}", builtin.name, builtin.returns),
+            _ => format!("{}({}) → {}", builtin.name, builtin.args, builtin.returns),
+        };
+        Some(Documentation::MarkupContent(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value: format!("{}\n\n```\n{signature}\n```", builtin.doc),
+        }))
     }
 }
 
@@ -446,13 +493,27 @@ impl SchemaCompletions {
                 .flat_map(|relation| self.columns_of_except(relation, scope, wanted)),
         );
 
+        // A keyword the dialect also has as a built-in (`NULL`, `COALESCE`) is
+        // offered once, as the built-in, which knows how it is written.
+        let builtins = self.engine.builtins();
         candidates.extend(
             KEYWORDS
                 .iter()
+                .filter(|keyword| {
+                    !builtins
+                        .iter()
+                        .any(|builtin| builtin.name.eq_ignore_ascii_case(keyword))
+                })
                 .map(|keyword| Candidate::new(*keyword, None, CompletionItemKind::KEYWORD)),
         );
         candidates.extend(self.all_relations(qualify));
         candidates.extend(self.all_routines());
+        // Last, so on a tie the user's own objects win and a dialect's long
+        // list can't push them past the cap. Not after an unreadable
+        // qualifier: `"o".date_trunc(` is never a call.
+        if !before.ends_with('.') {
+            candidates.extend(builtins.iter().map(Candidate::builtin));
+        }
         candidates
     }
 
@@ -676,6 +737,7 @@ impl SchemaCompletions {
                     },
                     new_text: candidate.written(self.engine),
                 })),
+                documentation: candidate.documentation(),
                 label: candidate.label,
                 detail: candidate.detail,
                 kind: Some(candidate.kind),
@@ -1083,14 +1145,22 @@ mod tests {
 
     /// The labels offered for a caret at `|`.
     fn labels(sql: &str) -> Vec<String> {
+        labels_on(Engine::Postgres, sql)
+    }
+
+    /// [`labels`] on another engine's dialect.
+    fn labels_on(engine: Engine, sql: &str) -> Vec<String> {
         let offset = sql.find('|').expect("the test must mark the caret");
         let sql = sql.replace('|', "");
-        catalog()
-            .items(&sql, offset)
-            .0
-            .into_iter()
-            .map(|(_, candidate)| candidate.label)
-            .collect()
+        SchemaCompletions {
+            engine,
+            ..catalog()
+        }
+        .items(&sql, offset)
+        .0
+        .into_iter()
+        .map(|(_, candidate)| candidate.label)
+        .collect()
     }
 
     #[test]
@@ -1323,6 +1393,78 @@ mod tests {
     #[test]
     fn a_routine_is_offered() {
         assert!(labels("SELECT recalc|").contains(&"recalculate_totals".to_string()));
+    }
+
+    #[test]
+    fn a_dialects_own_built_ins_are_offered_on_its_engine_only() {
+        assert!(labels("SELECT date_tr|").contains(&"date_trunc".to_string()));
+        assert!(
+            !labels_on(Engine::SqlServer, "SELECT date_tr|").contains(&"date_trunc".to_string())
+        );
+        assert!(labels_on(Engine::SqlServer, "SELECT getd|").contains(&"GETDATE".to_string()));
+        assert!(!labels("SELECT getd|").contains(&"GETDATE".to_string()));
+    }
+
+    #[test]
+    fn a_built_in_is_written_as_a_call_or_a_bare_value() {
+        let written = |sql: &str, label: &str| {
+            let completions = catalog();
+            let (_, candidate) = completions
+                .items(sql, sql.len())
+                .0
+                .into_iter()
+                .find(|(_, candidate)| candidate.label == label)
+                .expect("the built-in was offered");
+            assert!(candidate.documentation().is_some(), "{label}");
+            candidate.written(completions.engine)
+        };
+        assert_eq!(written("SELECT date_trunc", "date_trunc"), "date_trunc(");
+        assert_eq!(written("SELECT now", "now"), "now()");
+        assert_eq!(written("SELECT current_d", "CURRENT_DATE"), "CURRENT_DATE");
+    }
+
+    #[test]
+    fn current_offers_the_current_values() {
+        let offered = labels("SELECT CURRENT_|");
+        for value in ["CURRENT_DATE", "CURRENT_TIMESTAMP", "CURRENT_USER"] {
+            assert!(offered.contains(&value.to_string()), "{offered:?}");
+        }
+    }
+
+    #[test]
+    fn a_keyword_that_is_also_a_built_in_is_offered_once() {
+        let offered = labels("SELECT * FROM accounts WHERE email = NUL|");
+        assert_eq!(
+            offered.iter().filter(|label| *label == "NULL").count(),
+            1,
+            "{offered:?}"
+        );
+        let sql = "SELECT * FROM accounts WHERE email = NUL";
+        let (_, null) = catalog()
+            .items(sql, sql.len())
+            .0
+            .into_iter()
+            .find(|(_, candidate)| candidate.label == "NULL")
+            .expect("NULL was offered");
+        assert_eq!(null.kind, CompletionItemKind::CONSTANT);
+    }
+
+    #[test]
+    fn no_built_in_is_offered_where_a_relation_belongs_or_inside_a_literal() {
+        assert!(!labels("SELECT * FROM date_tr|").contains(&"date_trunc".to_string()));
+        assert!(
+            !labels(r#"SELECT "o".date_tr| FROM orders o"#).contains(&"date_trunc".to_string())
+        );
+        assert!(labels("SELECT 'now|'").is_empty());
+    }
+
+    #[test]
+    fn a_raw_filter_offers_built_ins() {
+        let offered = filter_items(Engine::Postgres, "accounts", "created_at < no|");
+        assert!(
+            offered.contains(&("no".to_string(), "now".to_string())),
+            "{offered:?}"
+        );
     }
 
     #[test]
