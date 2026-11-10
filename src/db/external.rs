@@ -1045,7 +1045,7 @@ mod tests {
     }
 
     /// Echo takes a moment over `close` and exits on EOF, so it writes its
-    /// marker only if stdin stayed open until it had answered.
+    /// marker only if stdin stayed open until it was about to answer.
     #[test]
     fn a_close_is_answered_before_the_plugin_reads_the_end_of_its_stdin() {
         let marker =
