@@ -122,6 +122,7 @@ pub fn config_from_url(url: &str) -> Result<ServerConfig, String> {
             .map(super::percent_decoded)
             .transpose()?
             .unwrap_or_default(),
+        password_command: None,
         sslmode,
         root_certificate,
         // A URL has nowhere to say either; the form is where they are set.

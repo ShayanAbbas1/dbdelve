@@ -2569,6 +2569,7 @@ fn stored_config(
                 user: stored.user.clone(),
                 // Never on disk. Read from the Keychain when connecting.
                 password: String::new(),
+                password_command: None,
                 sslmode,
                 root_certificate: stored.root_certificate.clone(),
                 statement_timeout: stored.statement_timeout.unwrap_or_default(),

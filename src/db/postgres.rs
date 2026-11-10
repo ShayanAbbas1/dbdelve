@@ -525,6 +525,7 @@ pub fn config_from_url(url: &str) -> Result<PostgresConfig, String> {
             database,
             user,
             password,
+            password_command: None,
             sslmode,
             root_certificate,
             // A URL has nowhere to say it; the form is where it is set.
@@ -2010,6 +2011,7 @@ mod tests {
             database: "dbdelve_test".into(),
             user: "someone".into(),
             password: String::new(),
+            password_command: None,
             sslmode: SslMode::default(),
             root_certificate: None,
             statement_timeout: 0,
@@ -2030,6 +2032,7 @@ mod tests {
             password: std::env::var("PGPASSWORD").unwrap_or_default(),
             // The compose database speaks no TLS, and these tests are the one
             // place a plaintext connection is the point.
+            password_command: None,
             sslmode: SslMode::Disable,
             root_certificate: None,
             statement_timeout: 0,
@@ -2595,6 +2598,7 @@ mod tests {
                     database: "dbdelve_test".into(),
                     user: "person@example.com".into(),
                     password: String::new(),
+                    password_command: None,
                     sslmode: SslMode::default(),
                     root_certificate: None,
                     statement_timeout: 0,

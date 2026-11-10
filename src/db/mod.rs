@@ -30,6 +30,7 @@ mod mongo;
 mod mssql;
 mod mysql;
 pub(crate) mod odbc_string;
+mod password_command;
 pub(crate) mod plugin;
 mod postgres;
 mod redis;
@@ -46,6 +47,7 @@ pub use duckdb::IN_MEMORY as DUCKDB_IN_MEMORY;
 pub use external::ExternalConfig;
 #[cfg(test)]
 pub(crate) use external::echo;
+pub use password_command::PasswordCommand;
 pub use plugin::Plugin;
 
 pub use mongo::MongoConfig;
@@ -898,6 +900,7 @@ pub(super) fn server_from_url(url: &str, engine: &str) -> Result<ServerConfig, S
             .map(percent_decoded)
             .transpose()?
             .unwrap_or_default(),
+        password_command: None,
         sslmode,
         root_certificate,
         // A URL has nowhere to say it; the form is where it is set.
@@ -951,6 +954,9 @@ pub struct ServerConfig {
     /// Blank is valid and must never be warned about — cloud IAM auth issues a
     /// short-lived token as the password, or none at all.
     pub password: String,
+    /// Run for the password in its place at every login, where the target
+    /// takes one.
+    pub password_command: Option<PasswordCommand>,
     pub sslmode: SslMode,
     /// libpq's `sslrootcert`. Replaces the platform's trust store rather than
     /// adding to it, and only consulted by the two verifying modes.

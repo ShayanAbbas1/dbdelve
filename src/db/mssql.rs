@@ -2306,6 +2306,7 @@ mod tests {
                 database: "dbdelve_test".into(),
                 user: "person@example.com".into(),
                 password: "pa ss".into(),
+                password_command: None,
                 sslmode: SslMode::default(),
                 root_certificate: None,
                 statement_timeout: 0,
