@@ -109,6 +109,13 @@ impl ServerConfig {
 /// An error's text as a log may carry it. A password command's can quote its
 /// stderr, which can echo the secret it printed (`set -x` does), so none of
 /// it is logged at any level, unlike a server's connect error.
+///
+/// ponytail: matched by text, since `DbError` is built as a literal in over a
+/// hundred places and the connect logs only hold its message. Its ceiling is
+/// an unrelated error that quotes "The password command", whose debug line is
+/// then left out too; the user still sees it. A flag the resolver sets on
+/// `DbError`, carried to these log sites, is the upgrade if that ever costs a
+/// diagnosis.
 pub fn loggable_error(message: &str) -> &str {
     if message.contains(SAID_BY_US) {
         "(a password command's error, not logged)"
