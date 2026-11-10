@@ -29,6 +29,7 @@ use self::edit::{
     TableFacts, UNCOUNTED, Write, count_refusal, explained, halted, hinted, query_shape,
 };
 pub(super) use self::edit::{match_value, review_notes};
+pub(super) use self::http::port;
 use self::http::{Bounds, Scheme, Stop, Watch};
 use self::tsv::{Framed, Next, Reader, Untagged, is_cut};
 use super::ssh::tunnelled;
@@ -55,6 +56,7 @@ const SESSION_TIMEOUT: &str = "3600";
 
 const SESSION_NOT_FOUND: i64 = 372;
 const INVALID_SESSION_TIMEOUT: i64 = 374;
+const AUTHENTICATION_FAILED: i64 = 516;
 
 /// How a killed query's error ends, before the body or in the tagged frame.
 const WAS_CANCELLED: &str = "(QUERY_WAS_CANCELLED)";
@@ -934,6 +936,11 @@ impl Connection {
             Kind::Kill { .. } => false,
             _ => self.read_only.load(Ordering::SeqCst),
         };
+        // Every request logs in, so each asks for the password afresh.
+        let password = self
+            .config
+            .login_password(Engine::ClickHouse)
+            .map_err(Failed::Unsent)?;
         let bounds = kind.bounds(self.config.statement_timeout);
         let watch = Watch::new(Arc::default(), bounds.limit());
         let _running =
@@ -941,7 +948,7 @@ impl Connection {
         let _watching = watch.enter();
         let outcome = loop {
             let params = self.params(&query_id, session.as_deref(), read_only);
-            let response = match self.post(sql, &params, bounds) {
+            let response = match self.post(sql, &params, &password, bounds) {
                 Ok(response) => response,
                 Err(error) => break Err(Failed::Unreached(error)),
             };
@@ -953,6 +960,9 @@ impl Connection {
                 break self
                     .read(response, sql, &query_id, fetch, started)
                     .map_err(Failed::Broken);
+            }
+            if refused_login(status, response.headers()) {
+                self.config.forget_login_password(Engine::ClickHouse);
             }
             if let Some(session) = session.as_deref_mut() {
                 match http::exception_code(response.headers()) {
@@ -1117,7 +1127,13 @@ impl Connection {
         params.finish()
     }
 
-    fn post(&self, sql: &str, params: &str, bounds: Bounds) -> Result<Response<Body>, ureq::Error> {
+    fn post(
+        &self,
+        sql: &str,
+        params: &str,
+        password: &str,
+        bounds: Bounds,
+    ) -> Result<Response<Body>, ureq::Error> {
         let mut request = self
             .agent
             .post(&format!("{}?{params}", self.base))
@@ -1127,7 +1143,7 @@ impl Connection {
             .build()
             // Headers rather than the URL, so an `@` in a user name needs no
             // escaping and the password stays out of any proxy's log.
-            .header("X-ClickHouse-Key", self.config.password.as_str());
+            .header("X-ClickHouse-Key", password);
         if !self.config.user.is_empty() {
             request = request.header("X-ClickHouse-User", self.config.user.as_str());
         }
@@ -1542,6 +1558,17 @@ fn failure(mut response: Response<Body>, sql: &str) -> DbError {
         .read_to_vec()
         .unwrap_or_default();
     http::exception(status, response.headers(), &body, sql)
+}
+
+/// Whether the server turned the login down, not the statement: so a cached
+/// token it refused is not sent again, while a typo does not rerun the
+/// password command. By the code when there is one, since other codes share
+/// its 403; by the status where a proxy sent none.
+fn refused_login(status: u16, headers: &HeaderMap) -> bool {
+    match http::exception_code(headers) {
+        Some(code) => code == AUTHENTICATION_FAILED,
+        None => matches!(status, 401 | 403),
+    }
 }
 
 fn header(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -2091,6 +2118,41 @@ mod tests {
             requests[2].param("session_id"),
             requests[0].param("session_id")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_a_refused_login_runs_the_password_command_again() {
+        let mock = Mock::start();
+        let runs = std::env::temp_dir().join(format!(
+            "dbdelve-clickhouse-password-command-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&runs);
+        let server = ServerConfig {
+            password_command: Some(crate::db::PasswordCommand {
+                command: format!("printf x >> {}; printf token", runs.display()),
+                expires: 60,
+            }),
+            ..profile(&mock)
+        };
+        let connection = open_with(&mock, writer(), &server).unwrap();
+        mock.on_statement(
+            "SELECT n",
+            [
+                Response::error(404, 60, "UNKNOWN_TABLE", "Unknown table"),
+                Response::error(403, 516, "AUTHENTICATION_FAILED", "Authentication failed"),
+                Response::rows(&[("n", "UInt8")], &[&["1"]]),
+            ],
+        );
+        let ran = || std::fs::read_to_string(&runs).unwrap().len();
+        run(&connection, "SELECT n FROM t").unwrap_err();
+        assert_eq!(ran(), 1);
+        run(&connection, "SELECT n FROM t").unwrap_err();
+        run(&connection, "SELECT n FROM t").unwrap();
+        let after_refusal = ran();
+        let _ = std::fs::remove_file(&runs);
+        assert_eq!(after_refusal, 2);
     }
 
     #[test]

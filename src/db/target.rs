@@ -88,6 +88,23 @@ impl Target {
         self.driver == Driver::BuiltIn && self.engine.takes_service()
     }
 
+    /// Whether a profile can have a command print its password at each login.
+    /// Every server login DBDelve performs itself, except MongoDB's: its driver
+    /// redials with the credentials it parsed at connect, so a token would go
+    /// stale under it unseen.
+    pub fn takes_password_command(self) -> bool {
+        self.driver == Driver::BuiltIn
+            && matches!(
+                self.engine,
+                Engine::Postgres
+                    | Engine::MySql
+                    | Engine::MariaDb
+                    | Engine::SqlServer
+                    | Engine::Redis
+                    | Engine::ClickHouse
+            )
+    }
+
     /// Whether a profile's SSH tunnel may end at a Unix socket on the SSH host,
     /// opened as another OS user: a Host starting with `/` is its directory.
     pub fn reaches_socket_over_ssh(self) -> bool {
@@ -469,5 +486,29 @@ mod tests {
                 assert_ne!(engine.fields(), Fields::ConnectionString, "{engine:?}");
             }
         }
+    }
+
+    #[test]
+    fn only_a_built_in_server_login_takes_a_password_command() {
+        let taking: Vec<_> = Engine::ALL
+            .into_iter()
+            .filter(|&engine| Target::built_in(engine).takes_password_command())
+            .collect();
+        assert_eq!(
+            taking,
+            [
+                Engine::Postgres,
+                Engine::MySql,
+                Engine::MariaDb,
+                Engine::ClickHouse,
+                Engine::SqlServer,
+                Engine::Redis,
+            ]
+        );
+        let plugin = Target {
+            engine: Engine::Postgres,
+            driver: Driver::Plugin(odbc()),
+        };
+        assert!(!plugin.takes_password_command());
     }
 }

@@ -190,6 +190,7 @@ fn connection_config_from(
         database,
         user,
         password: variable("PGPASSWORD").unwrap_or_default(),
+        password_command: None,
         sslmode,
         root_certificate,
         // No `PG*` variable means it, and dbdelve is not inventing one.

@@ -213,6 +213,7 @@ pub fn config_from_url(url: &str) -> Result<MongoConfig, String> {
             database: parsed.default_database.unwrap_or_default(),
             user: credential.username.unwrap_or_default(),
             password: credential.password.unwrap_or_default(),
+            password_command: None,
             sslmode,
             root_certificate: root_certificate.filter(|_| sslmode.checks_certificate()),
             // A URL has nowhere to say either; the form is where they are set.

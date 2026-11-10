@@ -681,7 +681,10 @@ impl Workspace {
                         }
                         Err(error) => {
                             tracing::warn!("import failed: its own connection did not open");
-                            tracing::debug!("import failed: {}", error.message);
+                            tracing::debug!(
+                                "import failed: {}",
+                                crate::db::loggable_error(&error.message)
+                            );
                             dialog.phase = ImportPhase::Editing;
                             dialog.error = Some(error.message);
                             cx.notify();

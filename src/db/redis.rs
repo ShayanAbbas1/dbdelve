@@ -32,7 +32,7 @@ use ::redis::{
 
 use super::ssh::{Tunnel, tunnelled};
 use super::{
-    Catalog, Cell, Column, ColumnDefinition, DbError, EditTarget, Fetch, NamedDefinition,
+    Catalog, Cell, Column, ColumnDefinition, DbError, EditTarget, Engine, Fetch, NamedDefinition,
     QueryResult, Relation, RelationKind, Row, RowBuilder, Schema, ServerConfig, SslMode, Stopped,
     Structure, plain_error,
 };
@@ -122,6 +122,7 @@ pub fn config_from_url(url: &str) -> Result<ServerConfig, String> {
             .map(super::percent_decoded)
             .transpose()?
             .unwrap_or_default(),
+        password_command: None,
         sslmode,
         root_certificate,
         // A URL has nowhere to say either; the form is where they are set.
@@ -676,9 +677,10 @@ fn connect(
             server.port.unwrap_or(DEFAULT_PORT),
         ),
     };
+    let password = server.login_password(Engine::Redis)?;
     let attempt = |tls: Option<SslMode>| {
         let open = |protocol| {
-            client(server, &host, port, tls, protocol)?
+            client(server, &password, &host, port, tls, protocol)?
                 .get_connection_with_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECONDS))
         };
         match open(ProtocolVersion::RESP3) {
@@ -691,7 +693,7 @@ fn connect(
         SslMode::Prefer if speaks_plaintext(&host, port) => attempt(None),
         mode => attempt(Some(mode)),
     };
-    connected.map_err(|error| {
+    let connected = connected.map_err(|error| {
         let tls = server.sslmode != SslMode::Disable;
         match error.is_timeout() && tls && speaks_plaintext(&host, port) {
             true => plain_error(format!(
@@ -701,7 +703,8 @@ fn connect(
             )),
             false => connect_error(&error, server),
         }
-    })
+    });
+    server.forgetting_on_failure(Engine::Redis, connected)
 }
 
 /// Whether the server turned `HELLO 3` down, as one from before Redis 6 does
@@ -740,6 +743,7 @@ fn speaks_plaintext(host: &str, port: u16) -> bool {
 /// certificate, which replaces it.
 fn client(
     server: &ServerConfig,
+    password: &str,
     host: &str,
     port: u16,
     tls: Option<SslMode>,
@@ -767,8 +771,8 @@ fn client(
     }
     // A user with no password is still logged in as that user: sending no
     // credentials at all would leave the session on `default`.
-    if !server.password.is_empty() || !server.user.is_empty() {
-        login = login.set_password(&server.password);
+    if !password.is_empty() || !server.user.is_empty() {
+        login = login.set_password(password);
     }
     let info = address
         .into_connection_info()?

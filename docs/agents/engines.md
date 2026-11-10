@@ -218,6 +218,45 @@ Decided, and not to be re-litigated:
   its service or `PGSSLMODE` sets. libpq checks a root certificate on any
   encrypted connection, so `require` with one reads as `verify-ca`, which the
   line under Require says too, and `prefer` with one is refused.
+- **A password command is run at every login, inside `src/db/`**
+  (`ServerConfig::login_password`, `password_command.rs`), never once at
+  connect: an IAM token lasts minutes, and a side session, MySQL's `KILL QUERY`
+  login, SQL Server's re-login after Cancel, a Redis redial and every ClickHouse
+  request log in long after the connect. Its output is cached in memory only,
+  keyed by the substituted command line, for the profile's expiry; 0 never
+  touches the cache, and every login site drops the entry when its login fails
+  (`ServerConfig::forgetting_on_failure`), so no later login (a side session,
+  a cancel, a redial, Reconnect or Test) resends a refused token. ClickHouse,
+  where each request logs in, drops it only when the server refuses the login
+  (`clickhouse::refused_login`), since a typo would otherwise rerun the
+  command. It forgets on the server the login used, which for a
+  Postgres service is the one the service filled in, placeholders included. `%HOSTNAME%`, `%PORT%` and `%USERNAME%` are pgAdmin's
+  spellings, substituted shell-quoted, with the profile's host rather than a
+  tunnel's local end, since a token is signed for the server it names. A
+  placeholder the shell would not read bare (inside quotes, after an escape,
+  or past syntax the scan in `bare_for_sh`/`bare_for_cmd` does not follow)
+  refuses the command: quoting a value already in quotes undoes it, and a
+  username pasted from a URL would run as shell code. It runs
+  through `/bin/sh -c` (`cmd /D /S /C` on Windows) with no login shell and no
+  PATH added: guessing at a user's PATH runs whichever binary the guess finds,
+  so a program not found says to give its full path instead. With a command
+  set, the Keychain is not read (a password saved before stays there, unused)
+  and Postgres skips `.pgpass`. MongoDB is excluded
+  (`Target::takes_password_command`): its driver's pool redials with the
+  credentials it parsed at connect, so a token would go stale under it unseen.
+  On MySQL and MariaDB a login with a command answers `mysql_clear_password`,
+  which RDS IAM asks for and the driver refuses by default, only over TLS
+  (`mysql::over`): never on `prefer`'s plaintext fallback, and never for a
+  typed password, which no server needs to see in the clear.
+  Each stream is read to its end, so a command never blocks on a full pipe,
+  but only its last 64 KiB is kept: a runaway command cannot fill memory, and
+  more than that on stdout is an error, never a truncated password.
+  The command line, its output and its stderr are never logged, at any level.
+  Stderr's last lines stay in the error the user sees, since that is how they
+  learn the helper found no credentials, but stderr can echo the secret
+  (`set -x` does), so every log line that carries an error's text (connect,
+  Test, cancel, import) passes it through `db::loggable_error`, which leaves
+  out any error a password command's run produced.
 - **Postgres's side session** (describe, and the check before a stop at the
   limit) opens with a 2-second `statement_timeout`, and neither ever blocks
   the run on it: a describe waits its turn there on a thread of its own, and a

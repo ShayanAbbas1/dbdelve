@@ -760,18 +760,27 @@ impl Connection {
         })
     }
 
+    fn connect(&self) -> Result<Session, DbError> {
+        self.server
+            .forgetting_on_failure(Engine::SqlServer, self.sign_in())
+    }
+
     /// `prefer` and `disable` are the rungs that may reach less than their
     /// first attempt, and reaching it is what the words mean: a second attempt
     /// that negotiates nothing, for a server that cannot encrypt at all.
-    fn connect(&self) -> Result<Session, DbError> {
+    fn sign_in(&self) -> Result<Session, DbError> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|error| plain_error(format!("Could not start the connection: {error}")))?;
 
         let dial = self.tunnel.as_deref().map(Tunnel::dial).transpose()?;
+        let signing_in = ServerConfig {
+            password: self.server.login_password(Engine::SqlServer)?.into_owned(),
+            ..self.server.clone()
+        };
         let attempt =
-            |encryption| guarded(|| runtime.block_on(login(&self.server, dial, encryption)));
+            |encryption| guarded(|| runtime.block_on(login(&signing_in, dial, encryption)));
         let (client, socket) = match attempt(encryption(self.server.sslmode))? {
             Err(error)
                 if matches!(self.server.sslmode, SslMode::Prefer | SslMode::Disable)
@@ -2306,6 +2315,7 @@ mod tests {
                 database: "dbdelve_test".into(),
                 user: "person@example.com".into(),
                 password: "pa ss".into(),
+                password_command: None,
                 sslmode: SslMode::default(),
                 root_certificate: None,
                 statement_timeout: 0,

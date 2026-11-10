@@ -248,6 +248,7 @@ impl Profile {
         // path, rather than either writing a blank the loader would have to
         // decide the meaning of.
         let server = self.config.server();
+        let password_command = server.and_then(|server| server.password_command.as_ref());
         let snowflake = match &self.config {
             ConnectionConfig::Snowflake(account) => Some(account),
             _ => None,
@@ -304,6 +305,8 @@ impl Profile {
             // the migration to read on the next upgrade.
             editor_font_size: None,
             statement_timeout: Some(self.config.statement_timeout()),
+            password_command: password_command.map(|command| command.command.clone()),
+            password_expires: password_command.map(|command| command.expires),
             next_query_id: Some(self.session.next_query_id),
             color: self.color.map(|color| color.slug().to_string()),
             mode: Some(self.mode.slug().to_string()),

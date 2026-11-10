@@ -56,8 +56,8 @@
 //! `references` while reading stdin on, as a driver stuck in a catalog call;
 //! `DBDELVE_ECHO_LINGER=<ms>` only sleeps that long, which is what `orphan`
 //! starts; `DBDELVE_ECHO_CLOSED=<path>` takes [`CLOSING`] over `close`, as a
-//! driver's disconnect does, and writes the path once `closed` is sent, so a
-//! host that ends stdin first finds no file.
+//! driver's disconnect does, and writes the path just before `closed` is
+//! sent, so a host that ends stdin first finds no file.
 //!
 //! It exits on stdin EOF, as every plugin must.
 
@@ -502,15 +502,15 @@ impl Echo {
                 },
             ),
             Request::Close => {
-                let marker = env::var_os("DBDELVE_ECHO_CLOSED");
-                if marker.is_some() {
+                // Written before `closed` goes out: once it has, the host may
+                // end stdin at once, and the reader's exit on EOF would race
+                // the write.
+                if let Some(marker) = env::var_os("DBDELVE_ECHO_CLOSED") {
                     thread::sleep(CLOSING);
+                    let _ = std::fs::write(marker, b"closed");
                 }
                 self.reply(id, Response::Closed);
                 let _ = self.out.flush();
-                if let Some(marker) = marker {
-                    let _ = std::fs::write(marker, b"closed");
-                }
                 process::exit(0);
             }
             other => self.error(

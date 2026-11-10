@@ -316,27 +316,43 @@ fn base_options(server: &ServerConfig, dial: Option<SocketAddr>) -> OptsBuilder 
         .prefer_socket(dial.is_none())
         .db_name((!server.database.is_empty()).then(|| server.database.clone()))
         .user(Some(server.user.clone()))
-        // Offered only when there is one. An empty password is not the
-        // same as no password, and IAM auth relies on the latter.
-        .pass((!server.password.is_empty()).then(|| server.password.clone()))
         .tcp_connect_timeout(Some(Duration::from_secs(CONNECT_TIMEOUT_SECONDS)))
 }
 
 /// Open a connection built from `options`, falling back to plaintext exactly
 /// where `sslmode=prefer` allows it. Shared by the query connection and the
 /// cancel connection so the fallback behaviour cannot drift between them.
-fn open(server: &ServerConfig, options: impl Fn() -> OptsBuilder) -> Result<Conn, DbError> {
-    match Conn::new(options().ssl_opts(ssl_options(server))) {
+fn open(
+    server: &ServerConfig,
+    engine: Engine,
+    options: impl Fn() -> OptsBuilder,
+) -> Result<Conn, DbError> {
+    let password = server.login_password(engine)?;
+    // Offered only when there is one. An empty password is not the same as no
+    // password, and IAM auth relies on the latter.
+    let options = || options().pass((!password.is_empty()).then(|| password.to_string()));
+    let opened = match Conn::new(over(options(), server, ssl_options(server))) {
         Ok(connection) => Ok(connection),
         // `prefer` is the one rung where a weaker connection is reachable, and
         // reaching it is what the word means. The driver cannot say "encrypt if
         // you can" in one attempt, so this is two — which is what libpq's own
         // `prefer` amounts to. No other mode falls back.
         Err(_) if server.sslmode == SslMode::Prefer => {
-            Conn::new(options().ssl_opts(None)).map_err(|error| connect_error(&error, server))
+            Conn::new(over(options(), server, None)).map_err(|error| connect_error(&error, server))
         }
         Err(error) => Err(connect_error(&error, server)),
-    }
+    };
+    server.forgetting_on_failure(engine, opened)
+}
+
+/// `options` over `tls`, answering a server that asks for
+/// `mysql_clear_password` only when the password is a command's and goes
+/// encrypted: RDS IAM asks for it, the driver refuses it by default, and a
+/// plaintext socket must never carry a token in the clear. With TLS asked for,
+/// the driver fails rather than carry on unencrypted.
+fn over(options: OptsBuilder, server: &ServerConfig, tls: Option<SslOpts>) -> OptsBuilder {
+    let cleartext = tls.is_some() && server.password_command.is_some();
+    options.ssl_opts(tls).enable_cleartext_plugin(cleartext)
 }
 
 /// The connection a profile keeps.
@@ -345,7 +361,7 @@ fn connect(
     engine: Engine,
     dial: Option<SocketAddr>,
 ) -> Result<Conn, DbError> {
-    open(server, || match server.statement_timeout {
+    open(server, engine, || match server.statement_timeout {
         0 => base_options(server, dial),
         // Run once at connect as a session default, never spliced into the
         // user's own submission — see `ServerConfig::statement_timeout` for
@@ -466,7 +482,7 @@ impl Connection {
     pub fn cancel(&self) -> Result<(), DbError> {
         let server = &self.server;
         let dial = self.dial()?;
-        let mut connection = open(server, || cancel_options(server, dial))?;
+        let mut connection = open(server, self.engine, || cancel_options(server, dial))?;
         connection
             .query_drop(format!("KILL QUERY {}", self.connection_id))
             .map_err(|error| DbError {
@@ -499,7 +515,10 @@ impl Connection {
         for _ in 0..2 {
             if side.is_none() {
                 let dial = self.dial().ok()?;
-                *side = open(&self.server, || cancel_options(&self.server, dial)).ok();
+                *side = open(&self.server, self.engine, || {
+                    cancel_options(&self.server, dial)
+                })
+                .ok();
             }
             match ask(side.as_mut()?) {
                 Ok(answer) => return Some(answer),
@@ -1243,6 +1262,7 @@ mod tests {
                 // contain anything a URL can encode.
                 user: "person@example.com".into(),
                 password: "pa ss".into(),
+                password_command: None,
                 sslmode: SslMode::default(),
                 root_certificate: None,
                 statement_timeout: 0,
@@ -1320,6 +1340,31 @@ mod tests {
         let verify_full = ssl_options(&server(SslMode::VerifyFull)).expect("a connector is built");
         assert!(!verify_full.accept_invalid_certs());
         assert!(!verify_full.skip_domain_validation());
+    }
+
+    #[test]
+    fn only_a_password_command_over_tls_may_answer_in_cleartext() {
+        let cleartext = |command: bool, sslmode| {
+            let server = ServerConfig {
+                sslmode,
+                password_command: command.then(|| crate::db::PasswordCommand {
+                    command: "token".into(),
+                    expires: 0,
+                }),
+                ..ServerConfig::default()
+            };
+            let tls = ssl_options(&server);
+            let opened = |tls| {
+                ::mysql::Opts::from(over(OptsBuilder::new(), &server, tls))
+                    .get_enable_cleartext_plugin()
+            };
+            // The second is `prefer`'s plaintext fallback.
+            (opened(tls), opened(None))
+        };
+        assert_eq!(cleartext(true, SslMode::Prefer), (true, false));
+        assert_eq!(cleartext(true, SslMode::VerifyFull), (true, false));
+        assert_eq!(cleartext(true, SslMode::Disable), (false, false));
+        assert_eq!(cleartext(false, SslMode::Require), (false, false));
     }
 
     #[test]
@@ -2214,6 +2259,29 @@ mod tests {
         assert!(last.messages[0].starts_with("Note (1051)"));
     }
 
+    /// The cancel's `KILL QUERY` is a login of its own, so it runs the
+    /// command too.
+    fn live_a_password_command_signs_in_the_session_and_its_cancel(engine: Engine) {
+        let config = live_config(engine);
+        let command = format!("printf %s '{}'", config.password.replace('\'', r"'\''"));
+        let connection = Connection::open(
+            &ServerConfig {
+                sslmode: SslMode::Disable,
+                password: String::new(),
+                password_command: Some(crate::db::PasswordCommand {
+                    command,
+                    expires: 0,
+                }),
+                ..config
+            },
+            engine,
+        )
+        .expect("the command's password should sign in");
+        connection
+            .cancel()
+            .expect("the cancel's login should sign in too");
+    }
+
     /// Each `live_` body above, run once against each server the driver
     /// speaks to.
     macro_rules! on_both_servers {
@@ -2335,6 +2403,7 @@ mod tests {
     );
 
     on_both_servers!(
+        live_a_password_command_signs_in_the_session_and_its_cancel,
         live_reads_run_at_once_take_the_time_of_one,
         live_a_cancel_stops_every_read_run_at_once,
         live_a_row_limit_keeps_the_first_rows_and_counts_the_rest,

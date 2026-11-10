@@ -638,6 +638,13 @@ the form first, finds no handler there and lets it through
 (`keybindings::INERT_IN` is what tells the conflict check so). **Test** opens
 the connection the way **Connect** would (keychain password, Read-only hold)
 and throws it away, so a profile can be checked before it is saved.
+Where `Target::takes_password_command`, Password command and Expires after
+sit under Password, always drawn for those engines so neither leaves the screen
+holding focus. While the command holds anything, Password is disabled with
+"From the command" as its placeholder; what was typed in it stays but is not
+read, so the config's password is blank and nothing reaches the Keychain. The
+command is stored as typed (`password_command`, `password_expires` in
+`profiles.toml`), and restore drops one from an engine that does not take it.
 
 **The ODBC tile** is one tile per discovered plugin (`Target::tiles`, after the
 built-ins, wearing one generic plug icon), shown only when the bridge is
