@@ -224,9 +224,10 @@ Decided, and not to be re-litigated:
   login, SQL Server's re-login after Cancel, a Redis redial and every ClickHouse
   request log in long after the connect. Its output is cached in memory only,
   keyed by the substituted command line, for the profile's expiry; 0 never
-  touches the cache, and a failed connect or Test drops the entry
-  (`ConnectionConfig::forget_login_password`) so a retry does not resend a
-  refused token. `%HOSTNAME%`, `%PORT%` and `%USERNAME%` are pgAdmin's
+  touches the cache, and a failed `Connection::open` drops the entry
+  (`ServerConfig::forgetting_on_failure`) so Reconnect or Test does not resend
+  a refused token. It forgets on the server the login used, which for a
+  Postgres service is the one the service filled in, placeholders included. `%HOSTNAME%`, `%PORT%` and `%USERNAME%` are pgAdmin's
   spellings, substituted shell-quoted, with the profile's host rather than a
   tunnel's local end, since a token is signed for the server it names. A
   placeholder the shell would not read bare (inside quotes, after an escape,

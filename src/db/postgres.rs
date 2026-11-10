@@ -2166,6 +2166,60 @@ mod tests {
         );
     }
 
+    /// Run again in a child process, `PGSERVICEFILE` set before it starts, as
+    /// the live service test below is. No server: the port is closed.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_open_forgets_the_output_cached_under_its_services_username() {
+        const CHILD: &str = "DBDELVE_PGSERVICE_FORGET_CHILD";
+        let name = "db::postgres::tests::a_failed_open_forgets_the_output_cached_under_its_services_username";
+        let Some(directory) = std::env::var_os(CHILD) else {
+            let directory = std::env::temp_dir()
+                .join(format!("dbdelve-pgservice-forget-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::create_dir_all(&directory).unwrap();
+            let closed = std::net::TcpListener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port();
+            let file = directory.join("pg_service.conf");
+            std::fs::write(
+                &file,
+                format!("[svc]\nhost=127.0.0.1\nport={closed}\nuser=svcuser\nsslmode=disable\n"),
+            )
+            .unwrap();
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args([name, "--exact", "--nocapture"])
+                .env(CHILD, &directory)
+                .env("PGSERVICEFILE", file);
+            for variable in ["PGHOST", "PGPORT", "PGUSER", "PGDATABASE", "PGPASSWORD"] {
+                child.env_remove(variable);
+            }
+            let status = child.status().unwrap();
+            let _ = std::fs::remove_dir_all(&directory);
+            assert!(status.success());
+            return;
+        };
+
+        let runs = std::path::Path::new(&directory).join("runs");
+        let config = crate::db::ConnectionConfig::Postgres(PostgresConfig {
+            service: Some("svc".into()),
+            server: ServerConfig {
+                password_command: Some(crate::db::PasswordCommand {
+                    command: format!("printf %s %USERNAME% >> {}; printf token", runs.display()),
+                    expires: 60,
+                }),
+                ..ServerConfig::default()
+            },
+        });
+        for _ in 0..2 {
+            assert!(crate::db::Connection::open(config.clone()).is_err());
+        }
+        assert_eq!(std::fs::read_to_string(&runs).unwrap(), "svcusersvcuser");
+    }
+
     /// Run again in a child process, for the same reason as the password file
     /// test below: `PGSERVICEFILE` has to be set before it starts, and the file
     /// holds the live password.

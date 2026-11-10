@@ -777,10 +777,7 @@ impl Workspace {
                 {
                     *slot = password;
                 }
-                let connection = Connection::open(config.clone()).map_err(|error| {
-                    config.forget_login_password();
-                    error.message
-                })?;
+                let connection = Connection::open(config).map_err(|error| error.message)?;
                 if mode == Mode::ReadOnly {
                     connection
                         .set_read_only(true)
@@ -1785,12 +1782,8 @@ impl Workspace {
                         Err(message) => return Err(failed("keychain", message)),
                     }
                 }
-                let connection = Connection::open(config.clone()).map_err(|error| {
-                    // So Reconnect after a rejected token runs the command
-                    // again rather than resend what the server refused.
-                    config.forget_login_password();
-                    failed("open", error.message)
-                })?;
+                let connection =
+                    Connection::open(config).map_err(|error| failed("open", error.message))?;
                 // Only Read-only asks the server for anything here: the
                 // servers already default to read-write, and a redundant
                 // switch to it risks a pooler or proxy that rejects the

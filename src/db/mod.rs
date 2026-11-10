@@ -1137,14 +1137,6 @@ impl ConnectionConfig {
         }
     }
 
-    /// Drops what a password command printed for this profile, after a
-    /// connect that may have failed on it, so Reconnect runs it again.
-    pub fn forget_login_password(&self) {
-        if let Some(server) = self.server() {
-            server.forget_login_password(self.engine());
-        }
-    }
-
     /// The command a login runs in place of the Keychain's password.
     pub fn password_command(&self) -> Option<&PasswordCommand> {
         self.server()?.password_command.as_ref()
@@ -1392,19 +1384,27 @@ pub enum Connection {
 impl Connection {
     pub fn open(config: ConnectionConfig) -> Result<Self, DbError> {
         match config {
-            ConnectionConfig::Postgres(postgres) => postgres
-                .resolved()
-                .and_then(|server| postgres::Connection::open(&server))
-                .map(Self::Postgres),
-            ConnectionConfig::MySql(server) => {
-                mysql::Connection::open(&server, Engine::MySql).map(Self::MySql)
+            ConnectionConfig::Postgres(postgres) => {
+                let server = postgres.resolved()?;
+                server
+                    .forgetting_on_failure(Engine::Postgres, postgres::Connection::open(&server))
+                    .map(Self::Postgres)
             }
-            ConnectionConfig::MariaDb(server) => {
-                mysql::Connection::open(&server, Engine::MariaDb).map(Self::MySql)
-            }
-            ConnectionConfig::SqlServer(server) => {
-                mssql::Connection::open(&server).map(Self::SqlServer)
-            }
+            ConnectionConfig::MySql(server) => server
+                .forgetting_on_failure(
+                    Engine::MySql,
+                    mysql::Connection::open(&server, Engine::MySql),
+                )
+                .map(Self::MySql),
+            ConnectionConfig::MariaDb(server) => server
+                .forgetting_on_failure(
+                    Engine::MariaDb,
+                    mysql::Connection::open(&server, Engine::MariaDb),
+                )
+                .map(Self::MySql),
+            ConnectionConfig::SqlServer(server) => server
+                .forgetting_on_failure(Engine::SqlServer, mssql::Connection::open(&server))
+                .map(Self::SqlServer),
             ConnectionConfig::Sqlite {
                 path,
                 statement_timeout,
@@ -1426,11 +1426,13 @@ impl Connection {
             ConnectionConfig::Snowflake(account) => {
                 snowflake::Connection::open(&account).map(Self::Snowflake)
             }
-            ConnectionConfig::ClickHouse(server) => {
-                clickhouse::Connection::open(&server).map(Self::ClickHouse)
-            }
+            ConnectionConfig::ClickHouse(server) => server
+                .forgetting_on_failure(Engine::ClickHouse, clickhouse::Connection::open(&server))
+                .map(Self::ClickHouse),
             ConnectionConfig::MongoDb(mongo) => mongo::Connection::open(&mongo).map(Self::MongoDb),
-            ConnectionConfig::Redis(server) => redis::Connection::open(&server).map(Self::Redis),
+            ConnectionConfig::Redis(server) => server
+                .forgetting_on_failure(Engine::Redis, redis::Connection::open(&server))
+                .map(Self::Redis),
             ConnectionConfig::External(external) => {
                 external::Connection::open(&external).map(Self::External)
             }
