@@ -16,7 +16,7 @@ use super::{CURRENT, Dmg, Progress, is_newer};
 /// untrusted comment). The release workflow signs every asset with its secret
 /// half, `UPDATE_SIGNING_KEY`, and an update that does not verify against this
 /// is never installed. While this is not a key, no install updates itself.
-const RELEASE_PUBLIC_KEY: &str = "REPLACE_WITH_RELEASE_PUBLIC_KEY";
+const RELEASE_PUBLIC_KEY: &str = "RWS7Oo2qbLFxuFuw9Ygz9Ew/UX5XomznTQHGTHGNRfmLqWPa3RqbChNw";
 
 /// The release bundle's id, which `dev/bundle.sh` sets and the Keychain scopes
 /// saved passwords to.
@@ -587,6 +587,7 @@ mod tests {
         assert!(parse_key("").is_none());
         // The public key minisign-verify's own tests use.
         assert!(parse_key("RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3").is_some());
+        assert!(parse_key(super::RELEASE_PUBLIC_KEY).is_some());
     }
 
     #[test]
