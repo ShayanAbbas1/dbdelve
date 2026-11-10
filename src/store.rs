@@ -114,9 +114,9 @@ pub struct StoredProfile {
     /// The command a login runs for its password, as typed, and for how many
     /// seconds its output is reused (absent or 0: every login runs it). Both
     /// absent for a profile without one. The output is never written anywhere.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "readable_or_none")]
     pub password_command: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "readable_or_none")]
     pub password_expires: Option<u32>,
     /// The id the next query buffer will be given. Persisted rather than
     /// derived from the open buffers, because deriving it hands a closed tab's
@@ -216,6 +216,25 @@ where
             Entry::Unread(_) => None,
         })
         .collect())
+}
+
+/// The value, or none when this build cannot read it: a bad value costs its
+/// one field, not every connection in the file.
+fn readable_or_none<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Value<T> {
+        Read(T),
+        Unread(IgnoredAny),
+    }
+    Ok(match Value::<T>::deserialize(deserializer)? {
+        Value::Read(value) => Some(value),
+        Value::Unread(_) => None,
+    })
 }
 
 /// One entry in a folder or the pins: a saved query by `query`, a folder by
@@ -2056,6 +2075,49 @@ pub(crate) mod tests {
                 1,
                 "{text}"
             );
+        }
+    }
+
+    #[test]
+    fn an_unreadable_password_command_or_expiry_costs_only_that_field() {
+        for (extra, command, expires) in [
+            (
+                "password_command = 'aws'\npassword_expires = -1",
+                Some("aws"),
+                None,
+            ),
+            (
+                "password_command = 'aws'\npassword_expires = 4294967296",
+                Some("aws"),
+                None,
+            ),
+            (
+                "password_command = 'aws'\npassword_expires = '900'",
+                Some("aws"),
+                None,
+            ),
+            (
+                "password_command = 123\npassword_expires = 900",
+                None,
+                Some(900),
+            ),
+        ] {
+            let text = format!(
+                "{}{}",
+                supported_stub(Some("postgres"), extra),
+                supported_stub(Some("mysql"), "").replace("'a'", "'b'")
+            );
+            let list = decode_profiles(&text, &[]).expect(extra);
+            let ids: Vec<&str> = list
+                .profiles
+                .iter()
+                .map(|profile| profile.id.as_str())
+                .collect();
+            assert_eq!(ids, ["a", "b"], "{extra}");
+            let profile = &list.profiles[0];
+            assert_eq!(profile.password_command.as_deref(), command, "{extra}");
+            assert_eq!(profile.password_expires, expires, "{extra}");
+            assert_eq!(profile.host, "h", "{extra}");
         }
     }
 
