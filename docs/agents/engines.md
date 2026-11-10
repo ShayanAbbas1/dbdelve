@@ -240,6 +240,9 @@ Decided, and not to be re-litigated:
   and Postgres skips `.pgpass`. MongoDB is excluded
   (`Target::takes_password_command`): its driver's pool redials with the
   credentials it parsed at connect, so a token would go stale under it unseen.
+  Each stream is read to its end, so a command never blocks on a full pipe,
+  but only its last 64 KiB is kept: a runaway command cannot fill memory, and
+  more than that on stdout is an error, never a truncated password.
   The command line, its output and its stderr are never logged above debug,
   and the output at no level.
 - **Postgres's side session** (describe, and the check before a stop at the

@@ -32,6 +32,10 @@ const FINISH_WITHIN: Duration = Duration::from_secs(30);
 /// How much of a failed command's stderr its error shows.
 const SAID_LINES: usize = 3;
 
+/// What is kept of each stream: far more than any password, and than the last
+/// lines of stderr need, while a runaway command cannot fill memory.
+const KEPT_BYTES: usize = 64 * 1024;
+
 /// pgAdmin's spellings, so a command copied from it works unchanged.
 const PLACEHOLDERS: [&str; 3] = ["%HOSTNAME%", "%PORT%", "%USERNAME%"];
 
@@ -296,7 +300,7 @@ fn output(line: &str, within: Duration) -> Result<String, DbError> {
     };
     // Something the command left running in the background can still hold
     // its output open.
-    let read = |pipe: mpsc::Receiver<Vec<u8>>| {
+    let read = |pipe: mpsc::Receiver<Drained>| {
         pipe.recv_timeout(deadline.saturating_duration_since(Instant::now()))
     };
     let (Ok(stdout), Ok(stderr)) = (read(stdout), read(stderr)) else {
@@ -304,9 +308,15 @@ fn output(line: &str, within: Duration) -> Result<String, DbError> {
         return Err(unfinished());
     };
     if !status.success() {
-        return Err(failure(status, &said(&stderr)));
+        return Err(failure(status, &said(&stderr.last)));
     }
-    let password = String::from_utf8(stdout).map_err(|_| {
+    if stdout.overflowed {
+        return Err(plain_error(format!(
+            "The password command printed more than {} KiB, more than any password.",
+            KEPT_BYTES / 1024
+        )));
+    }
+    let password = String::from_utf8(stdout.last).map_err(|_| {
         plain_error("The password command printed something that is not text.".into())
     })?;
     match without_trailing_newlines(password) {
@@ -317,13 +327,40 @@ fn output(line: &str, within: Duration) -> Result<String, DbError> {
     }
 }
 
-fn drain(pipe: Option<impl Read + Send + 'static>) -> mpsc::Receiver<Vec<u8>> {
+struct Drained {
+    /// The last `KEPT_BYTES` read.
+    last: Vec<u8>,
+    overflowed: bool,
+}
+
+/// Reads to the end, so a command never blocks on a full pipe, keeping only
+/// the last `KEPT_BYTES`.
+fn drain(pipe: Option<impl Read + Send + 'static>) -> mpsc::Receiver<Drained> {
     let (sender, receiver) = mpsc::channel();
     if let Some(mut pipe) = pipe {
         thread::spawn(move || {
-            let mut read = Vec::new();
-            let _ = pipe.read_to_end(&mut read);
-            let _ = sender.send(read);
+            let mut last = Vec::new();
+            let mut overflowed = false;
+            let mut chunk = [0; 8192];
+            loop {
+                match pipe.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(read) => last.extend_from_slice(&chunk[..read]),
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
+                // Trimmed only once twice the limit is held, so the bytes
+                // moved stay proportional to the bytes read.
+                if last.len() > 2 * KEPT_BYTES {
+                    last.drain(..last.len() - KEPT_BYTES);
+                    overflowed = true;
+                }
+            }
+            if last.len() > KEPT_BYTES {
+                last.drain(..last.len() - KEPT_BYTES);
+                overflowed = true;
+            }
+            let _ = sender.send(Drained { last, overflowed });
         });
     }
     receiver
@@ -588,6 +625,22 @@ mod tests {
             error.message,
             "The password command failed: two\nthree\nfour"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_past_the_limit_is_an_error_and_stderr_keeps_its_last_lines() {
+        let error = run("yes | head -c 100000", FINISH_WITHIN).unwrap_err();
+        assert_eq!(
+            error.message,
+            "The password command printed more than 64 KiB, more than any password."
+        );
+        let error = run(
+            "yes | head -c 200000 >&2; echo last >&2; exit 1",
+            FINISH_WITHIN,
+        )
+        .unwrap_err();
+        assert_eq!(error.message, "The password command failed: y\ny\nlast");
     }
 
     #[cfg(unix)]
