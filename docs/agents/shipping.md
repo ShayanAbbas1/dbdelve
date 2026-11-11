@@ -48,13 +48,14 @@ Four things in the script are load-bearing:
 - **The font licences ship inside the bundle**, because the fonts are compiled
   into the binary and the OFL asks the licence to travel with them.
 
-## Self-update (macOS and Linux)
+## Self-update (macOS, Linux and Windows)
 
 `src/update.rs` checks GitHub's `releases/latest` at launch and every six
 hours. An install that can replace itself gets **Update and restart**; every
-other one gets the link to the release page. What both platforms share --
-the release key, the download, the minisign check, the folder lock and the
-scratch directory -- is in `src/update/download.rs`. Both fetch the
+other one gets the link to the release page. What the platforms share --
+the release key, the download, the minisign check, the install lock and the
+scratch directory -- is in `src/update/download.rs`; the file identity Linux
+and Windows compare is in `src/update/identity.rs`. All fetch the
 `.minisig` before the asset, so a release without one fails before the large
 download, and verify once the download is complete. The pill and its menu sit
 at the right end of the titlebar on the home screen as well as in a
@@ -111,23 +112,94 @@ On Linux (`src/update/linux.rs`) two kinds of install update themselves:
 Everything else on Linux -- a tarball run where it was unpacked, a distro or
 Snap package, a binary anywhere else -- keeps the link.
 
-Both platforms take a lock on the folder of what they replace, which keeps two
-processes from clearing each other's hidden sibling, and clear the one an
-interrupted install left. Under that lock both refuse an install that another
-process has updated since this one started, so a stale offer never puts an
-older release over a newer one: macOS by the installed bundle's version, Linux
-by the file itself (the AppImage as recorded at startup, before any update
-check, or `/proc/self/exe` for `~/.local/bin/dbdelve`, by device and inode). On
-Linux a replaced install also stops offering the update, and when the refusal
-comes at install time the menu offers **Restart DBDelve**, which relaunches
-the install on disk, rather than a retry that could never succeed.
+On Windows (`src/update/windows.rs`) a running executable can be renamed but
+not overwritten or deleted, so every update moves what it replaces into a
+folder ending `.dbdelve-old` inside the install, and that folder is cleared
+later. Two kinds of install update themselves:
+
+- **The installer's install**, recognised when the running `dbdelve.exe`'s
+  folder is the one Inno Setup recorded under
+  `Software\Microsoft\Windows\CurrentVersion\Uninstall\{300CEAF2-D7A2-4D97-B94B-20ED16631AF4}_is1`
+  (`Inno Setup: App Path`, else `InstallLocation`), looked up in HKCU, then
+  HKLM's 64-bit view. The hive that matched is the mode. The update
+  downloads `dbdelve-<version>-windows-<arch>-setup.exe` and runs it,
+  waiting for its exit code, as
+  `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOCLOSEAPPLICATIONS /CURRENTUSER|/ALLUSERS /UPDATE "/DIR=<folder>" "/LOG=<scratch>\setup.log"`.
+  `/ALLUSERS` brings the UAC prompt; Setup's unelevated half waits for its
+  elevated self and passes its exit code on, and a declined prompt exits 2,
+  which the app reports as cancelled and lets the user retry. Any other
+  non-zero code is a failure with the log's tail in the app's log. After
+  exit 0 the app checks a different file now stands at its path, then
+  restarts into it through `App::restart`; the app itself is never elevated,
+  so neither is the relaunch, and the script has no `[Run]` relaunch.
+- **The portable zip**, recognised when it is not the installer's, the
+  executable is `dbdelve.exe`, `LICENSE` and `NOTICES.md` sit beside it (a
+  build tree has neither) and the folder is writable (probed by creating a
+  file: Windows has no `access(2)`). It downloads
+  `dbdelve-<version>-windows-<arch>.zip`, unpacks it into
+  `update.dbdelve-new` inside the install (same volume) with the `zip` crate,
+  and requires every entry to sit under the one folder
+  `dbdelve-<version>-windows-<arch>` through plain names (no root, drive,
+  `..`, `:` or link) and a `dbdelve.exe` in it. Then it swaps file by file:
+  each installed file the release ships is renamed into the set-aside
+  folder, `plugins\odbc` is emptied the same way and removed (a folder
+  holding a running bridge cannot itself be renamed), and the release's
+  files and its `plugins\odbc` folder are renamed in. Any failed step undoes
+  every rename before it, in reverse. Files the release does not ship stay,
+  so the user's own files and an older release's dropped ones remain; the
+  folder keeps its old versioned name.
+
+`/UPDATE` is the installer contract, in `assets/windows/dbdelve.iss`'s
+`[Code]`. With it, `PrepareToInstall` (which runs before Setup looks for
+files in use and before `[InstallDelete]`) renames `dbdelve.exe`,
+`plugins\odbc\bin\dbdelve-odbc.exe` and then the whole `plugins` folder into
+`{app}\<timestamp>.dbdelve-old`; the elevated installer does it, since the
+app cannot write Program Files. `[InstallDelete]` then finds no `plugins` to
+wipe (if `plugins` would not move, it wipes it as before). If Setup ends
+without reaching `ssPostInstall`, `DeinitializeSetup` clears whatever the
+rolled-back install left at each path and renames everything back, in
+reverse. Without `/UPDATE` nothing is moved, so an interactive run is as it
+was. Every run clears earlier `*.dbdelve-old` entries in `PrepareToInstall`
+and after installing, and `[UninstallDelete]` removes them on uninstall. The
+app clears them, and a leftover `update.dbdelve-new`, at startup where it can
+write (not Program Files), under the install lock and best effort: the
+executable an update has just replaced is still running until the relaunch.
+The script ships in the release it installs, so it is the new release's
+`[Code]` that runs.
+
+Every platform takes a lock for the folder of what it replaces, which keeps
+two processes from clearing each other's hidden sibling or set-aside files,
+and clears the one an interrupted install left. On macOS and Linux it is
+`flock` on that folder; on Windows it is a file opened with no sharing, in the
+user's temporary folder, named after a hash of the install folder (an
+all-users install's folder is not writable without elevation). Under that lock
+all refuse an install that another process has updated since this one
+started, so a stale offer never puts an older release over a newer one: macOS
+by the installed bundle's version, Linux and Windows by the file itself (the
+AppImage as recorded at startup, before any update check, or
+`/proc/self/exe` for `~/.local/bin/dbdelve`, by device and inode; on Windows
+`dbdelve.exe` as recorded at startup, by volume serial number and file index).
+On Linux and Windows a replaced install also stops offering the update, and
+when the refusal comes at install time the menu offers **Restart DBDelve**,
+which relaunches the install on disk, rather than a retry that could never
+succeed.
 
 - **Only the release build in a writable place updates itself.** A dev or
   other `DBDELVE_VARIANT` build, a binary outside a `.app`, a bundle on a
   read-only volume (run from the DMG), App-Translocated, or in a folder the
   user cannot write, keeps the link to the release page; so does an AppImage
-  in a folder the user cannot write. So does a release missing the asset or
-  its `.minisig`, and a build whose key is still the placeholder.
+  or a portable Windows folder the user cannot write. So does a release
+  missing the asset or its `.minisig`, and a build whose key is still the
+  placeholder.
+- **What is tested where.** The Windows module's logic (kind detection with
+  the registry injected, the installer's command line, zip validation, the
+  swap with an open file and its rollback at each stage, set-aside clearing,
+  the replaced-file check) runs on macOS too, as `linux.rs`'s does; the
+  identity, lock and writability calls run only on the Windows CI job. No
+  test runs the real installer or a real UAC prompt, and nothing yet updates
+  a Windows install end to end in CI: a silent `/CURRENTUSER` install, an
+  update over it while the old `dbdelve.exe` runs, and a declined
+  `/ALLUSERS` prompt are checked by hand on Windows.
 - **A signature binds the asset's name.** minisign's default trusted comment
   is `timestamp:<n>\tfile:<name>\thashed`, and the signature covers it. The
   app refuses a signature whose `file:` is not the exact asset it asked for,

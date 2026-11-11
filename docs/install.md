@@ -191,10 +191,10 @@ DBDelve doesn't bundle any.
 
 ## Updating
 
-On macOS and Linux, **Update and restart** in the titlebar's update menu (or
-"Update to dbdelve … and restart" in the command palette) does it in one click.
-It downloads the release from GitHub, checks its signature against the key built
-into the app, replaces the app and opens the new one. On macOS that is
+On macOS, Linux and Windows, **Update and restart** in the titlebar's update
+menu (or "Update to dbdelve … and restart" in the command palette) does it in
+one click. It downloads the release from GitHub, checks its signature against
+the key built into the app, replaces the app and opens the new one. On macOS that is
 described [above](#macos). Homebrew leaves a self-updating app to update
 itself, so `brew upgrade` skips DBDelve unless you add `--greedy`.
 
@@ -206,16 +206,22 @@ any dev or variant build don't update themselves; the titlebar links to
 [the latest release][releases] instead, and your package manager is the way to
 update.
 
-Windows doesn't update itself yet. If you used the Windows installer, run
-the next one over it; it upgrades in place. The zip has no upgrade: each
-version unzips to its own folder, so delete the old one. Connections and any
-plugins you added live in `%APPDATA%\dbdelve`, not there. The titlebar links
-to [the latest release][releases] once there is a newer one.
+On Windows it works for an install the installer made, and for the unzipped
+portable build in a folder you can write to. An install for all users (in
+Program Files) asks for administrator rights through the usual Windows prompt;
+saying no leaves the update to try again. The portable build is updated in
+its folder, which keeps the name of the version you first unzipped. Anything
+you put in that folder yourself is left alone, except inside
+`plugins\odbc`, which the release replaces whole. Connections and any plugins
+you added in `%APPDATA%\dbdelve` are untouched either way. A dev or variant
+build, or a `dbdelve.exe` anywhere else, links to [the latest
+release][releases] instead: run the next installer over the old install, or
+unzip the next zip.
 
 There is no telemetry. The only requests DBDelve makes on its own are to
 GitHub, to check for a newer release at startup and every six hours after,
 which you can turn off in Settings, and to download the release you asked to
-update to, on macOS and Linux.
+update to.
 
 [releases]: https://github.com/ShayanAbbas1/dbdelve/releases/latest
 [Inno Setup]: https://jrsoftware.org/isinfo.php
