@@ -174,9 +174,14 @@ pub(super) struct Scratch(pub(super) PathBuf);
 impl Scratch {
     pub(super) fn new() -> Result<Self, String> {
         let path = scratch_root()?.join(format!("dbdelve-update-{}", unique()));
-        let mut builder = fs::DirBuilder::new();
         #[cfg(unix)]
-        builder.mode(0o700);
+        let builder = {
+            let mut builder = fs::DirBuilder::new();
+            builder.mode(0o700);
+            builder
+        };
+        #[cfg(not(unix))]
+        let builder = fs::DirBuilder::new();
         builder
             .create(&path)
             .map_err(|error| format!("{}: {error}", path.display()))?;

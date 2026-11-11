@@ -259,8 +259,10 @@ begin
     Result := 'Could not move the running ODBC bridge aside.';
     Exit;
   end;
-  { Whole, so a failed update can put it back: left in place,
-    [InstallDelete] would delete it beyond any putting back. }
+  { Whole, so a failed update can put it back: left in place, the
+    InstallDelete section would delete it beyond any putting back.
+    A comment line must not start with a bracket: Inno reads it as a
+    section tag. }
   if not SetAside('plugins', Aside) then begin
     PutBack;
     Result := 'Could not move the plugins folder aside.';
