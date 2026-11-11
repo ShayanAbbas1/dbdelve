@@ -85,15 +85,22 @@ On Linux (`src/update/linux.rs`) two kinds of install update themselves:
   (no entry may land outside the scratch directory), requires the one
   directory `dbdelve-<version>-linux-<arch>` holding `dbdelve` and
   `install.sh`, and runs that `install.sh`: the new release knows its own
-  layout. `install.sh` writes the binary beside the old one and `mv`s it
-  over, so it is safe over a running copy.
+  layout. `install.sh` copies the binary and the ODBC bridge beside where
+  they go and renames both into place only once both copies are whole, so a
+  failed copy leaves the old pair installed and a running copy keeps its
+  file.
 
 Everything else on Linux -- a tarball run where it was unpacked, a distro or
 Snap package, a binary anywhere else -- keeps the link.
 
 Both platforms take a lock on the folder of what they replace, which keeps two
 processes from clearing each other's hidden sibling, and clear the one an
-interrupted install left.
+interrupted install left. Under that lock both refuse an install that another
+process has updated since this one started, so a stale offer never puts an
+older release over a newer one: macOS by the installed bundle's version, Linux
+by the file itself (the AppImage as first seen, or `/proc/self/exe` for
+`~/.local/bin/dbdelve`, by device and inode). On Linux a replaced install also
+stops offering the update.
 
 - **Only the release build in a writable place updates itself.** A dev or
   other `DBDELVE_VARIANT` build, a binary outside a `.app`, a bundle on a

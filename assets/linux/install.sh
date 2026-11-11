@@ -12,6 +12,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="$HOME/.local/bin"
 ICONS="$HOME/.local/share/icons/hicolor"
 APPS="$HOME/.local/share/applications"
+# The binary lands alone in ~/.local/bin, so its bridge goes to the per-user
+# plugin directory db::plugin::discover() also reads, not beside the binary.
+PLUGINS="${XDG_DATA_HOME:-$HOME/.local/share}/dbdelve/plugins"
 SIZES=(16 32 64 128 256 512)
 
 refresh() {
@@ -26,8 +29,8 @@ refresh() {
 }
 
 if [[ "${1:-}" == --uninstall ]]; then
-  rm -f "$BIN/dbdelve" "$APPS/dbdelve.desktop"
-  rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/dbdelve/plugins/odbc"
+  rm -f "$BIN/dbdelve" "$BIN/.dbdelve.new" "$APPS/dbdelve.desktop"
+  rm -rf "$PLUGINS/odbc" "$PLUGINS/.odbc.new" "$PLUGINS/.odbc.old"
   for size in "${SIZES[@]}"; do
     rm -f "$ICONS/${size}x${size}/apps/dbdelve.png"
   done
@@ -38,18 +41,21 @@ if [[ "${1:-}" == --uninstall ]]; then
   exit 0
 fi
 
-mkdir -p "$BIN" "$APPS"
-# Beside it and then renamed over it, so the path never holds a half-written
-# binary, and a running DBDelve -- the one updating itself, say -- keeps the
-# file it started from rather than having it rewritten under it.
+mkdir -p "$BIN" "$APPS" "$PLUGINS"
+# The binary and its bridge are copied beside where they go, and only renamed
+# into place once both copies are whole: a failed copy leaves the installed
+# pair as it was, never a new binary beside a missing bridge. A running
+# DBDelve -- the one updating itself, say -- keeps the files it started from.
+trap 'rm -rf "$BIN/.dbdelve.new" "$PLUGINS/.odbc.new"' EXIT
+rm -rf "$BIN/.dbdelve.new" "$PLUGINS/.odbc.new" "$PLUGINS/.odbc.old"
 install -m 755 "$HERE/dbdelve" "$BIN/.dbdelve.new"
+cp -R "$HERE/plugins/odbc" "$PLUGINS/.odbc.new"
+if [[ -e "$PLUGINS/odbc" || -L "$PLUGINS/odbc" ]]; then
+  mv "$PLUGINS/odbc" "$PLUGINS/.odbc.old"
+fi
+mv "$PLUGINS/.odbc.new" "$PLUGINS/odbc"
 mv -f "$BIN/.dbdelve.new" "$BIN/dbdelve"
-# The binary lands alone in ~/.local/bin, so its bridge goes to the per-user
-# plugin directory db::plugin::discover() also reads, not beside the binary.
-PLUGINS="${XDG_DATA_HOME:-$HOME/.local/share}/dbdelve/plugins"
-rm -rf "$PLUGINS/odbc"
-mkdir -p "$PLUGINS"
-cp -R "$HERE/plugins/odbc" "$PLUGINS/odbc"
+rm -rf "$PLUGINS/.odbc.old"
 # Exec gets the absolute path rather than the bare name the entry ships with:
 # a desktop launches its entries with the session's PATH, and ~/.local/bin only
 # joins that at login -- and only when it already existed. Bare `dbdelve` would

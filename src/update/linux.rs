@@ -2,9 +2,10 @@ use std::{
     ffi::{OsStr, OsString},
     fs::{self, File, OpenOptions},
     io::{self, Read as _},
-    os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _},
+    os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _},
     path::{Path, PathBuf},
     process::Command,
+    sync::OnceLock,
 };
 
 use flate2::read::GzDecoder;
@@ -19,10 +20,16 @@ use super::{
     },
 };
 
+const ALREADY_UPDATED: &str =
+    "DBDelve was updated since it started. Restart it to run that version.";
+
 /// Everything an install needs, found when the release was: having one is what
 /// makes this install eligible to update itself.
 pub(crate) struct Installer {
     kind: Kind,
+    /// The file this process runs from, which the installed path must still
+    /// be when the update starts.
+    running: Identity,
     version: String,
     asset: Asset,
     key: PublicKey,
@@ -52,6 +59,59 @@ impl Kind {
             Kind::AppImage(appimage) => appimage.clone(),
             Kind::Tarball { home } => home.join(".local/bin/dbdelve"),
         }
+    }
+}
+
+/// A file, whatever path it is reached by or renamed to.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Identity {
+    device: u64,
+    inode: u64,
+}
+
+impl Identity {
+    fn of(path: &Path) -> io::Result<Self> {
+        let metadata = path.symlink_metadata()?;
+        Ok(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+}
+
+/// The AppImage file as it was when this process first looked: the running
+/// executable is inside its mount, so it has no identity of its own to check.
+static APPIMAGE_AT_START: OnceLock<Identity> = OnceLock::new();
+
+/// The file this process was started from, as it was then.
+fn running(kind: &Kind, appimage_at_start: &OnceLock<Identity>) -> io::Result<Identity> {
+    match kind {
+        Kind::AppImage(appimage) => {
+            if let Some(identity) = appimage_at_start.get() {
+                return Ok(*identity);
+            }
+            let identity = Identity::of(appimage)?;
+            Ok(*appimage_at_start.get_or_init(|| identity))
+        }
+        // Still the file that was started even once it is replaced or
+        // deleted, which the path `current_exe` reads is not.
+        Kind::Tarball { .. } => fs::metadata("/proc/self/exe").map(|metadata| Identity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        }),
+    }
+}
+
+/// Another process may have updated this install since it started, perhaps
+/// past the release this one offers: putting that over it would go backwards.
+fn unchanged(installed: &Path, running: Identity) -> Result<(), String> {
+    match Identity::of(installed) {
+        Ok(identity) if identity == running => Ok(()),
+        Ok(_) => Err(format!(
+            "{} is no longer the file this DBDelve started from",
+            installed.display()
+        )),
+        Err(error) => Err(format!("{}: {error}", installed.display())),
     }
 }
 
@@ -91,6 +151,18 @@ pub(super) fn installer(version: &str, asset: impl Fn(&str) -> Option<Asset>) ->
             return None;
         }
     };
+    let installed = kind.installed();
+    let running = match running(&kind, &APPIMAGE_AT_START) {
+        Ok(running) => running,
+        Err(error) => {
+            tracing::info!("the running executable could not be found: {error}");
+            return None;
+        }
+    };
+    if let Err(reason) = unchanged(&installed, running) {
+        tracing::info!("no self-update: {reason}");
+        return None;
+    }
     let name = kind.asset_name(version, std::env::consts::ARCH);
     let Some(asset) = asset(&name) else {
         tracing::info!(
@@ -102,6 +174,7 @@ pub(super) fn installer(version: &str, asset: impl Fn(&str) -> Option<Asset>) ->
     };
     Some(Installer {
         kind,
+        running,
         version: version.to_string(),
         asset,
         key,
@@ -178,6 +251,7 @@ fn appimage_at(appimage: &Path) -> Result<PathBuf, &'static str> {
 pub(crate) fn install(installer: &Installer, progress: &Progress) -> Result<PathBuf, &'static str> {
     let Installer {
         kind,
+        running,
         version,
         asset,
         key,
@@ -185,6 +259,7 @@ pub(crate) fn install(installer: &Installer, progress: &Progress) -> Result<Path
     let installed = kind.installed();
     tracing::info!(version, path = %installed.display(), "update started");
     let _lock = lock(&installed).map_err(failed(ALREADY_RUNNING))?;
+    unchanged(&installed, *running).map_err(failed(ALREADY_UPDATED))?;
 
     let scratch = Scratch::new().map_err(failed(NO_SCRATCH))?;
     let file = scratch.0.join(&asset.name);
@@ -330,12 +405,14 @@ mod tests {
         io::Read as _,
         os::unix::fs::PermissionsExt as _,
         path::{Path, PathBuf},
+        sync::OnceLock,
     };
 
     use flate2::{Compression, write::GzEncoder};
 
     use super::{
-        Kind, bundled_installer, kind_of, release_directory, run, sibling, swap_in, unpack,
+        Identity, Kind, bundled_installer, kind_of, release_directory, run, running, sibling,
+        swap_in, unchanged, unpack,
     };
     use crate::update::download::{COULD_NOT_REPLACE, NOT_THE_APP, tests::scratch};
 
@@ -457,6 +534,56 @@ mod tests {
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(locked, Err("~/.local/bin is not writable"));
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn an_install_replaced_since_start_is_refused() {
+        let directory = scratch("identity");
+        let installed = directory.join("dbdelve");
+        fs::write(&installed, "A").unwrap();
+        let started = Identity::of(&installed).unwrap();
+        unchanged(&installed, started).unwrap();
+
+        // Another DBDelve's update, renamed over it.
+        let newer = directory.join(".dbdelve.new");
+        fs::write(&newer, "C").unwrap();
+        fs::rename(&newer, &installed).unwrap();
+        assert!(unchanged(&installed, started).is_err());
+        fs::remove_file(&installed).unwrap();
+        assert!(unchanged(&installed, started).is_err());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn an_appimage_is_remembered_as_it_was_first_seen() {
+        let directory = scratch("appimage-identity");
+        let appimage = directory.join("DBDelve.AppImage");
+        fs::write(&appimage, "A").unwrap();
+        let kind = Kind::AppImage(appimage.clone());
+        let at_start = OnceLock::new();
+        let first = running(&kind, &at_start).unwrap();
+        unchanged(&appimage, first).unwrap();
+
+        let newer = directory.join(".DBDelve.AppImage.update-new");
+        fs::write(&newer, "C").unwrap();
+        fs::rename(&newer, &appimage).unwrap();
+        let later = running(&kind, &at_start).unwrap();
+        assert_eq!(later, first);
+        assert!(unchanged(&appimage, later).is_err());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_tarball_install_is_the_running_executable() {
+        let kind = Kind::Tarball {
+            home: PathBuf::from("/nonexistent"),
+        };
+        let exe = std::env::current_exe().unwrap();
+        assert_eq!(
+            running(&kind, &OnceLock::new()).unwrap(),
+            Identity::of(&exe).unwrap()
+        );
     }
 
     #[test]
@@ -657,6 +784,36 @@ mod tests {
         assert!(
             home.join(".local/share/icons/hicolor/512x512/apps/dbdelve.png")
                 .is_file()
+        );
+
+        // A release missing its bridge fails before anything is replaced.
+        let broken = directory.join("broken.tar.gz");
+        tarball(
+            &broken,
+            &entries
+                .iter()
+                .filter(|(path, ..)| !path.contains("/plugins/"))
+                .map(|(path, data, mode)| {
+                    let data = if path.ends_with("/dbdelve") {
+                        &b"newer binary"[..]
+                    } else {
+                        data.as_slice()
+                    };
+                    (path.as_str(), data, *mode)
+                })
+                .collect::<Vec<_>>(),
+        );
+        let release = unpack(&broken, &directory.join("broken"), &top).unwrap();
+        assert!(run(bundled_installer(&release, &home).env_remove("XDG_DATA_HOME")).is_err());
+        assert_eq!(fs::read_to_string(&installed).unwrap(), "new binary");
+        assert_eq!(fs::read_to_string(&bridge).unwrap(), "bridge");
+        assert_eq!(fs::read_dir(&bin).unwrap().count(), 1);
+        assert_eq!(
+            fs::read_dir(home.join(".local/share/dbdelve/plugins"))
+                .unwrap()
+                .count(),
+            1,
+            "nothing but the bridge is left beside it"
         );
         fs::remove_dir_all(directory).unwrap();
     }

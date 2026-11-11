@@ -2,7 +2,10 @@ use std::{
     ffi::CString,
     fs::{self, File},
     io::{Read as _, Write as _},
-    os::{fd::AsRawFd as _, unix::ffi::OsStrExt as _},
+    os::{
+        fd::AsRawFd as _,
+        unix::{ffi::OsStrExt as _, fs::DirBuilderExt as _},
+    },
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -92,6 +95,8 @@ pub(super) fn remove(path: &Path) {
 }
 
 /// A fresh directory of its own, gone with everything in it when dropped.
+/// Only this user can enter it: what is verified in it is what gets installed,
+/// so nobody else may swap a file in between.
 pub(super) struct Scratch(pub(super) PathBuf);
 
 impl Scratch {
@@ -101,7 +106,10 @@ impl Scratch {
             .map_or(0, |since| since.as_nanos());
         let path =
             std::env::temp_dir().join(format!("dbdelve-update-{}-{nanos}", std::process::id()));
-        fs::create_dir(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&path)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
         Ok(Self(path))
     }
 }
@@ -238,11 +246,11 @@ pub(super) fn run(command: &mut Command) -> Result<String, String> {
 
 #[cfg(test)]
 pub(super) mod tests {
-    use std::{fs, path::PathBuf};
+    use std::{fs, os::unix::fs::PermissionsExt as _, path::PathBuf};
 
     use minisign_verify::PublicKey;
 
-    use super::{lock, parse_key, remove, verify};
+    use super::{Scratch, lock, parse_key, remove, verify};
 
     pub(in crate::update) fn scratch(name: &str) -> PathBuf {
         let directory =
@@ -334,6 +342,19 @@ pub(super) mod tests {
         drop(held);
         lock(&bundle).unwrap();
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn the_scratch_directory_is_private_and_goes_when_dropped() {
+        let scratch = Scratch::new().unwrap();
+        let path = scratch.0.clone();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        fs::write(path.join("download"), "x").unwrap();
+        drop(scratch);
+        assert!(!path.exists());
     }
 
     #[test]
