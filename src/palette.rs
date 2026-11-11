@@ -477,6 +477,9 @@ pub enum Command {
     DownloadUpdate(String),
     /// Update and restart, as the update pill's dropdown does.
     InstallUpdate,
+    /// Relaunch into an install another DBDelve has already updated, as the
+    /// pill's Restart DBDelve does.
+    RestartIntoUpdate(std::path::PathBuf),
 }
 
 struct Item {
@@ -3318,30 +3321,48 @@ fn welcome_items(workspace: &Workspace) -> Vec<Item> {
     let overrides = &workspace.settings.custom_keybindings;
     let mut items = starting_items(overrides);
     items.extend(appearance_items(overrides));
-    items.extend(update_item(workspace));
+    items.extend(workspace.update.iter().flat_map(update_items));
     if !workspace.profiles.is_empty() || !workspace.unavailable.is_empty() {
         items.extend(connection_items(workspace));
     }
     items
 }
 
-fn update_item(workspace: &Workspace) -> Option<Item> {
-    let update = workspace.update.as_ref()?;
+/// The update's rows, as its pill offers them.
+fn update_items(update: &update::Update) -> Vec<Item> {
     let version = &update.release.version;
-    Some(match update.state {
-        update::State::Ready(_) => command(
-            &format!("Update to dbdelve {version} and restart"),
-            icon::REFRESH,
-            Command::InstallUpdate,
-            WINDOW,
-        ),
-        _ => command(
+    let download = || {
+        command(
             &format!("Download dbdelve {version}"),
             icon::LINK,
             Command::DownloadUpdate(update.release.url.clone()),
             WINDOW,
-        ),
-    })
+        )
+    };
+    match &update.state {
+        update::State::Ready(_) => vec![command(
+            &format!("Update to dbdelve {version} and restart"),
+            icon::REFRESH,
+            Command::InstallUpdate,
+            WINDOW,
+        )],
+        update::State::Failed(..) => vec![
+            command(
+                &format!("Try updating to dbdelve {version} again"),
+                icon::REFRESH,
+                Command::InstallUpdate,
+                WINDOW,
+            ),
+            download(),
+        ],
+        update::State::Superseded(installed) => vec![command(
+            &format!("Restart dbdelve to finish updating to {version}"),
+            icon::REFRESH,
+            Command::RestartIntoUpdate(installed.clone()),
+            WINDOW,
+        )],
+        update::State::Link | update::State::Running(_) => vec![download()],
+    }
 }
 
 fn command(label: &str, icon: &'static str, command: Command, group: &'static str) -> Item {
@@ -4297,7 +4318,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         ));
     }
     items.extend(appearance_items(overrides));
-    items.extend(update_item(workspace));
+    items.extend(workspace.update.iter().flat_map(update_items));
     // One row rather than a Show/Hide pair: the palette is built from the
     // session, which does not know whether the column is folded.
     items.push(bound(
@@ -4417,6 +4438,7 @@ fn beside_import(command: &Command) -> bool {
             | Command::CopyDiagnostics
             | Command::DownloadUpdate(_)
             | Command::InstallUpdate
+            | Command::RestartIntoUpdate(_)
     )
 }
 
@@ -4454,6 +4476,43 @@ mod tests {
                 Row::Item(index) => items[*index].label.clone(),
             })
             .collect()
+    }
+
+    fn update_in(state: update::State) -> update::Update {
+        update::Update {
+            release: update::Release {
+                version: "9.9.9".into(),
+                url: "https://example.test/v9.9.9".into(),
+            },
+            state,
+        }
+    }
+
+    // `Failed` holds the platform's installer, which a test cannot build
+    // here; `Ready` is the same row as a retry without the download.
+    #[test]
+    fn an_update_installed_elsewhere_offers_a_restart_into_it() {
+        let installed = std::path::PathBuf::from("/home/me/.local/bin/dbdelve");
+        let items = update_items(&update_in(update::State::Superseded(installed.clone())));
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].label,
+            "Restart dbdelve to finish updating to 9.9.9"
+        );
+        assert!(
+            matches!(&items[0].command, Command::RestartIntoUpdate(path) if *path == installed)
+        );
+        assert!(beside_import(&items[0].command));
+    }
+
+    #[test]
+    fn an_update_this_install_cannot_take_offers_the_download() {
+        let items = update_items(&update_in(update::State::Link));
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "Download dbdelve 9.9.9");
+        assert!(
+            matches!(&items[0].command, Command::DownloadUpdate(url) if url == "https://example.test/v9.9.9")
+        );
     }
 
     #[test]
