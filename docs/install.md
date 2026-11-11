@@ -122,6 +122,9 @@ entry out by hand. The tarball does it for you, which is still the reason to
 prefer it. An AppImage in a folder you can write to updates itself in place,
 see [Updating](#updating).
 
+One unpacked with `--appimage-extract` does not: to update it, download the
+next release and unpack that.
+
 To build it yourself instead, on Debian or Ubuntu the build needs:
 
 ```sh
