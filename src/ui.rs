@@ -13,7 +13,7 @@ use gpui::{
     prelude::FluentBuilder, px,
 };
 use gpui_component::{
-    InteractiveElementExt, POPOVER_BLUR,
+    InteractiveElementExt, POPOVER_BLUR, Selectable,
     button::{Button, ButtonCustomVariant, ButtonVariants},
     highlighter::{HighlightTheme, SyntaxHighlighter},
     input::{Input, InputState, Rope},
@@ -1056,6 +1056,35 @@ pub(crate) fn accent_button(
                 .text_size(px(size.text_size()))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(t.on_accent)
+                .child(label.into()),
+        )
+}
+
+/// The status bar's choice chip as a button, for a form the keyboard has to
+/// reach: a tab stop that Enter and Space press. The chosen one is filled, the
+/// rest are muted ink that the hover washes, as on the chip.
+pub(crate) fn choice_button(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<SharedString>,
+    selected: bool,
+    t: Theme,
+    cx: &App,
+) -> Button {
+    Button::new(id)
+        .custom(
+            ButtonCustomVariant::new(cx)
+                .hover(t.element_hover.into())
+                .active(t.element_active.into()),
+        )
+        // Paints the variant's `active` and skips its hover while chosen.
+        .selected(selected)
+        .h(px(layout::chrome(24.)))
+        .px(px(layout::SPACE_SM))
+        .child(
+            div()
+                .whitespace_nowrap()
+                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                .text_color(if selected { t.text } else { t.text_muted })
                 .child(label.into()),
         )
 }

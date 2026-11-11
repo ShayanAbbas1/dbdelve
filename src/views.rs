@@ -61,9 +61,9 @@ use crate::{
     tab_drag::{DragTab, TabStrip},
     theme::{Theme, fonts, layout, theme},
     ui::{
-        Code, Control, Tone, button, button_label, chord_hint, code_highlights, compact_count,
-        control, group_thousands, icon_button, key_hint, keycap_text, kind_color, object_icon,
-        reconnect_button, row_icon, section_label,
+        Code, Control, Tone, button, button_label, choice_button, chord_hint, code_highlights,
+        compact_count, control, group_thousands, icon_button, key_hint, keycap_text, kind_color,
+        object_icon, reconnect_button, row_icon, section_label,
     },
     workspace::error_in_buffer,
 };
@@ -1150,24 +1150,28 @@ fn render_new_row_panel(
                                 .text_color(t.text_faint)
                                 .child(field.data_type.clone()),
                         )
-                        .child(choice_chip(
-                            ("insert-default", index),
-                            "DEFAULT",
-                            !field.nulled && !field.touched,
-                            cx,
-                            move |workspace, window, cx| {
-                                workspace.default_insert_field(index, window, cx)
-                            },
-                        ))
-                        .child(choice_chip(
-                            ("insert-null", index),
-                            "NULL",
-                            field.nulled,
-                            cx,
-                            move |workspace, window, cx| {
-                                workspace.toggle_insert_null(index, window, cx)
-                            },
-                        )),
+                        .child(
+                            choice_button(
+                                ("insert-default", index),
+                                "DEFAULT",
+                                !field.nulled && !field.touched,
+                                t,
+                                cx,
+                            )
+                            .on_click(cx.listener(
+                                move |workspace, _: &ClickEvent, window, cx| {
+                                    workspace.default_insert_field(index, window, cx)
+                                },
+                            )),
+                        )
+                        .child(
+                            choice_button(("insert-null", index), "NULL", field.nulled, t, cx)
+                                .on_click(cx.listener(
+                                    move |workspace, _: &ClickEvent, window, cx| {
+                                        workspace.toggle_insert_null(index, window, cx)
+                                    },
+                                )),
+                        ),
                 )
                 .child(Input::new(&field.input).small())
                 .into_any_element()
