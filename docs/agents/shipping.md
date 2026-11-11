@@ -115,7 +115,11 @@ Snap package, a binary anywhere else -- keeps the link.
 On Windows (`src/update/windows.rs`) a running executable can be renamed but
 not overwritten or deleted, so every update moves what it replaces into a
 folder ending `.dbdelve-old` inside the install, and that folder is cleared
-later. Two kinds of install update themselves:
+later. The download goes to `%LOCALAPPDATA%\dbdelve\updates`, not the
+temporary folder, which can be pointed somewhere shared, and stays open from
+before its signature is checked until Setup has exited or the zip is
+unpacked, shared for reading only, so nothing can swap the verified file for
+another. Two kinds of install update themselves:
 
 - **The installer's install**, recognised when the running `dbdelve.exe`'s
   folder is the one Inno Setup recorded under

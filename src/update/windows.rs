@@ -14,7 +14,7 @@ use super::Progress;
 #[cfg(windows)]
 use super::download::{
     ALREADY_RUNNING, COULD_NOT_DOWNLOAD, NO_SCRATCH, NOT_SIGNED, Scratch, agent, download,
-    fetch_signature, lock, release_key, verify, writable,
+    fetch_signature, hold, lock, release_key, verify_contents, writable,
 };
 use super::{
     Asset,
@@ -333,7 +333,8 @@ pub(crate) fn install(installer: &Installer, progress: &Progress) -> Result<Path
     tracing::info!(url = asset.url, size = asset.size, "downloading the update");
     download(&agent, &asset.url, asset.size, &file, progress)
         .map_err(failed(COULD_NOT_DOWNLOAD))?;
-    verify(&file, &signature, key, &asset.name).map_err(failed(NOT_SIGNED))?;
+    let held = hold(&file).map_err(failed(COULD_NOT_DOWNLOAD))?;
+    verify_contents(&held, &signature, key, &asset.name).map_err(failed(NOT_SIGNED))?;
     tracing::info!("the update's signature verified");
 
     progress.installing();
@@ -348,6 +349,7 @@ pub(crate) fn install(installer: &Installer, progress: &Progress) -> Result<Path
             &mut |from, to| fs::rename(from, to),
         )?,
     }
+    drop(held);
     replaced(&installed, *running).map_err(failed(COULD_NOT_REPLACE))?;
     tracing::info!(version, path = %installed.display(), "update installed");
     Ok(installed)

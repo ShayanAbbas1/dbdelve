@@ -9,7 +9,7 @@ use std::{
 };
 use std::{
     fs::{self, File},
-    io::{Read as _, Write as _},
+    io::{Read, Write as _},
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -159,13 +159,14 @@ pub(super) fn remove(path: &Path) {
 
 /// A fresh directory of its own, gone with everything in it when dropped.
 /// Only this user can enter it: what is verified in it is what gets installed,
-/// so nobody else may swap a file in between. On Windows the temporary folder
-/// is already the user's own, and what is made in it inherits that.
+/// so nobody else may swap a file in between. On Windows it is under
+/// LocalAppData, which is the user's own and what is made in it inherits that;
+/// the temporary folder can be pointed somewhere shared.
 pub(super) struct Scratch(pub(super) PathBuf);
 
 impl Scratch {
     pub(super) fn new() -> Result<Self, String> {
-        let path = std::env::temp_dir().join(format!("dbdelve-update-{}", unique()));
+        let path = scratch_root()?.join(format!("dbdelve-update-{}", unique()));
         let mut builder = fs::DirBuilder::new();
         #[cfg(unix)]
         builder.mode(0o700);
@@ -174,6 +175,38 @@ impl Scratch {
             .map_err(|error| format!("{}: {error}", path.display()))?;
         Ok(Self(path))
     }
+}
+
+#[cfg(unix)]
+fn scratch_root() -> Result<PathBuf, String> {
+    Ok(std::env::temp_dir())
+}
+
+#[cfg(windows)]
+fn scratch_root() -> Result<PathBuf, String> {
+    let root = std::env::var_os("LOCALAPPDATA")
+        .filter(|root| !root.is_empty())
+        .ok_or("LOCALAPPDATA is not set")?;
+    let root = PathBuf::from(root).join("dbdelve").join("updates");
+    fs::create_dir_all(&root).map_err(|error| format!("{}: {error}", root.display()))?;
+    Ok(root)
+}
+
+/// The downloaded update, opened so that nothing else can write, rename or
+/// delete it until the handle closes. Taken before verifying and verified
+/// through, so what ran or was unpacked is what verified. Running it or
+/// reading it again still works: both only read.
+#[cfg(windows)]
+pub(super) fn hold(path: &Path) -> Result<File, String> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+
+    fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(path)
+        .map_err(|error| format!("{}: {error}", path.display()))
 }
 
 impl Drop for Scratch {
@@ -259,8 +292,20 @@ pub(super) fn fetch_signature(agent: &ureq::Agent, url: &str) -> Result<String, 
 /// the signature, and the name carries the version: without this, an older
 /// release's asset and its genuine signature, served under the new name,
 /// would verify.
+#[cfg(any(unix, test))]
 pub(super) fn verify(
     file: &Path,
+    signature: &str,
+    key: &PublicKey,
+    asset: &str,
+) -> Result<(), String> {
+    let file = File::open(file).map_err(|error| error.to_string())?;
+    verify_contents(file, signature, key, asset)
+}
+
+/// [`verify`], reading what to check from `file`.
+pub(super) fn verify_contents(
+    mut file: impl Read,
     signature: &str,
     key: &PublicKey,
     asset: &str,
@@ -269,7 +314,6 @@ pub(super) fn verify(
     let mut verifier = key
         .verify_stream(&signature)
         .map_err(|error| error.to_string())?;
-    let mut file = File::open(file).map_err(|error| error.to_string())?;
     let mut buffer = vec![0; 256 * 1024];
     loop {
         let read = file.read(&mut buffer).map_err(|error| error.to_string())?;
