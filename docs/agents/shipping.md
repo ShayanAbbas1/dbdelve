@@ -161,8 +161,9 @@ another. Two kinds of install update themselves:
 files in use and before `[InstallDelete]`) renames `dbdelve.exe`,
 `plugins\odbc\bin\dbdelve-odbc.exe` and then the whole `plugins` folder into
 `{app}\<timestamp>.dbdelve-old`; the elevated installer does it, since the
-app cannot write Program Files. `[InstallDelete]` then finds no `plugins` to
-wipe (if `plugins` would not move, it wipes it as before). If Setup ends
+app cannot write Program Files. If any of the three will not move, what did
+is put back and Setup stops with an error before installing anything, so
+`[InstallDelete]` only ever runs once `plugins` is safe aside. If Setup ends
 without reaching `ssPostInstall`, `DeinitializeSetup` clears whatever the
 rolled-back install left at each path and renames everything back, in
 reverse; what will not go back stays listed for the next try and is written

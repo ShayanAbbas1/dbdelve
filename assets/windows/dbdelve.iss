@@ -259,9 +259,12 @@ begin
     Result := 'Could not move the running ODBC bridge aside.';
     Exit;
   end;
-  { Whole, so a failed update can put it back. If it will not move,
-    [InstallDelete] removes it as it always has. }
-  SetAside('plugins', Aside);
+  { Whole, so a failed update can put it back: left in place,
+    [InstallDelete] would delete it beyond any putting back. }
+  if not SetAside('plugins', Aside) then begin
+    PutBack;
+    Result := 'Could not move the plugins folder aside.';
+  end;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
