@@ -1126,8 +1126,6 @@ fn render_new_row_panel(
         .iter()
         .enumerate()
         .map(|(index, field)| {
-            let null_workspace = cx.entity().downgrade();
-            let default_workspace = cx.entity().downgrade();
             div()
                 .flex()
                 .flex_col()
@@ -1152,47 +1150,22 @@ fn render_new_row_panel(
                                 .text_color(t.text_faint)
                                 .child(field.data_type.clone()),
                         )
-                        .child(
-                            button(
-                                ("insert-default", index),
-                                "DEFAULT",
-                                // Lit while the field will be left out, which
-                                // is the state clicking it returns to.
-                                if !field.nulled && !field.touched {
-                                    Tone::Primary
-                                } else {
-                                    Tone::Quiet
-                                },
-                                Control::Inline,
-                                t,
-                            )
-                            .on_click(move |_, window, cx| {
-                                _ = default_workspace.update(cx, |workspace, cx| {
-                                    workspace.default_insert_field(index, window, cx);
-                                });
-                            }),
-                        )
-                        .child(
-                            button(
-                                ("insert-null", index),
-                                "NULL",
-                                // Filled while it is on, because whether this
-                                // field is a NULL is the only thing the chip
-                                // has to say.
-                                if field.nulled {
-                                    Tone::Primary
-                                } else {
-                                    Tone::Quiet
-                                },
-                                Control::Inline,
-                                t,
-                            )
-                            .on_click(move |_, _, cx| {
-                                _ = null_workspace.update(cx, |workspace, cx| {
-                                    workspace.toggle_insert_null(index, cx);
-                                });
-                            }),
-                        ),
+                        .child(choice_chip(
+                            ("insert-default", index),
+                            "DEFAULT",
+                            !field.nulled && !field.touched,
+                            cx,
+                            move |workspace, window, cx| {
+                                workspace.default_insert_field(index, window, cx)
+                            },
+                        ))
+                        .child(choice_chip(
+                            ("insert-null", index),
+                            "NULL",
+                            field.nulled,
+                            cx,
+                            move |workspace, _, cx| workspace.toggle_insert_null(index, cx),
+                        )),
                 )
                 .child(Input::new(&field.input).small())
                 .into_any_element()
