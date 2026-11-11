@@ -1121,44 +1121,68 @@ pub fn profile_id(name: &str, existing: &[String]) -> String {
 /// blank password is valid, so none of them can be inferred from the connect
 /// attempt that would follow.
 pub fn password(profile_id: &str) -> Result<Option<String>, String> {
-    secret(profile_id, "password")
+    secret(Secret::Password, profile_id)
 }
 
 pub fn set_password(profile_id: &str, password: &str) -> Result<(), String> {
-    set_secret(profile_id, "password", password)
+    set_secret(Secret::Password, profile_id, password)
 }
 
 /// The passphrase of the key a profile's SSH tunnel logs in with, read as
 /// [`password`] is.
 pub fn ssh_passphrase(profile_id: &str) -> Result<Option<String>, String> {
-    secret(&passphrase_account(profile_id), "SSH key passphrase")
+    secret(Secret::SshPassphrase, profile_id)
 }
 
 pub fn set_ssh_passphrase(profile_id: &str, passphrase: &str) -> Result<(), String> {
-    set_secret(
-        &passphrase_account(profile_id),
-        "SSH key passphrase",
-        passphrase,
-    )
+    set_secret(Secret::SshPassphrase, profile_id, passphrase)
 }
 
 /// Both of a profile's keychain items, the password and the key passphrase.
 pub fn delete_secrets(profile_id: &str) {
-    for account in [profile_id.to_owned(), passphrase_account(profile_id)] {
-        if let Ok(entry) = keychain_entry(&account) {
+    for kind in [Secret::Password, Secret::SshPassphrase] {
+        if let Ok(entry) = keychain_entry(kind, profile_id) {
             let _ = entry.delete_credential();
         }
     }
 }
 
-/// A `#` no slug [`profile_id`] makes can hold, so it never names another
-/// profile's password.
-fn passphrase_account(profile_id: &str) -> String {
-    format!("{profile_id}#ssh-passphrase")
+/// What a profile keeps in the keychain, each under the profile id as its
+/// account and a service of its own.
+#[derive(Clone, Copy)]
+enum Secret {
+    Password,
+    SshPassphrase,
 }
 
-fn secret(account: &str, what: &str) -> Result<Option<String>, String> {
-    match keychain_entry(account)?.get_password() {
+impl Secret {
+    fn what(self) -> &'static str {
+        match self {
+            Self::Password => "password",
+            Self::SshPassphrase => "SSH key passphrase",
+        }
+    }
+
+    fn service(self) -> Result<String, String> {
+        let variant = variant_name()?;
+        Ok(match self {
+            Self::Password => variant,
+            Self::SshPassphrase => passphrase_service(&variant),
+        })
+    }
+}
+
+/// A service apart from the passwords', so no profile id, however
+/// hand-edited, names another profile's passphrase as its password. A `/`,
+/// which `unsafe_component` refuses in a variant, so no variant's own
+/// service can spell this one either.
+fn passphrase_service(variant: &str) -> String {
+    format!("{variant}/ssh-passphrase")
+}
+
+fn secret(kind: Secret, profile_id: &str) -> Result<Option<String>, String> {
+    let what = kind.what();
+    match keychain_entry(kind, profile_id)?.get_password() {
         Ok(secret) => Ok(Some(secret)),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(keyring::Error::BadEncoding(_)) => {
@@ -1170,18 +1194,23 @@ fn secret(account: &str, what: &str) -> Result<Option<String>, String> {
     }
 }
 
-fn set_secret(account: &str, what: &str, secret: &str) -> Result<(), String> {
-    keychain_entry(account)?
+fn set_secret(kind: Secret, profile_id: &str, secret: &str) -> Result<(), String> {
+    keychain_entry(kind, profile_id)?
         .set_password(secret)
-        .map_err(|error| format!("Could not save the {what} to the keychain: {error}"))
+        .map_err(|error| {
+            format!(
+                "Could not save the {} to the keychain: {error}",
+                kind.what()
+            )
+        })
 }
 
 /// Keychain Services on macOS, Secret Service on Linux, Credential Manager on
-/// Windows. The service is the variant name and the account the profile id
-/// (or, for the key passphrase, [`passphrase_account`]), which is what keeps a
-/// dev build's passwords apart from a release build's.
-fn keychain_entry(account: &str) -> Result<keyring::Entry, String> {
-    keyring::Entry::new(&variant_name()?, account)
+/// Windows. The account is the profile id and the service comes from the
+/// variant name, which is what keeps a dev build's passwords apart from a
+/// release build's.
+fn keychain_entry(kind: Secret, profile_id: &str) -> Result<keyring::Entry, String> {
+    keyring::Entry::new(&kind.service()?, profile_id)
         .map_err(|error| format!("Could not reach the keychain: {error}"))
 }
 
@@ -4089,6 +4118,16 @@ open_objects = []
     /// Inside `with_home` for its lock rather than for its directory:
     /// `DBDELVE_VARIANT` is process-wide too, and every other test here reads
     /// it through `dbdelve_directory`.
+    #[test]
+    fn no_variant_is_named_like_another_variants_passphrase_service() {
+        for variant in ["dbdelve", "dbdelve-dev", "dbdelve-x.ssh-passphrase"] {
+            let service = passphrase_service(variant);
+            assert_ne!(service, variant);
+            let suffix = service.strip_prefix("dbdelve-").unwrap_or(&service);
+            assert!(unsafe_component(suffix).is_some(), "{service}");
+        }
+    }
+
     #[test]
     fn the_variant_moves_the_directory_and_the_keychain_together() {
         with_home(|| {

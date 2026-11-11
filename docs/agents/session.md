@@ -614,7 +614,7 @@ one waiting on a column ignores whatever is typed into it.
   `generic` engine with no plugin gets the Generic refusal.
 - **Passwords** go through `keyring`, never into `profiles.toml`: Keychain on
   macOS, Secret Service on Linux, Credential Manager on Windows. So does an
-  SSH key's passphrase, as a second item per profile.
+  SSH key's passphrase, as an item per profile in a service of its own.
 - **Keybindings** are spelled `secondary-`, which GPUI reads as Cmd on macOS and
   Ctrl elsewhere. Never `cmd-`: on Linux that is Super, which the window manager
   takes first. Every binding is rebindable from Settings (`keybindings.rs`), and

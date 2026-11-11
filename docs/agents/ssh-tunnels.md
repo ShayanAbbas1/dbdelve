@@ -78,10 +78,13 @@ already set up on the machine.
 
 - **A key passphrase is answered through ssh's askpass, never a prompt or a
   terminal** (`ssh/askpass.rs`). It is a secret, so it lives where the
-  password does: a second Keychain item per profile (`<id>#ssh-passphrase`,
-  which no slug `store::profile_id` makes can spell), on `SshTunnel` with
-  `#[serde(skip)]`, filled in at connect and Test, carried by Duplicate and
-  removed with the profile (`store::delete_secrets`). Blank is none, and then
+  password does: a second Keychain item per profile, under the profile id
+  like the password but in a service of its own (`<variant>/ssh-passphrase`,
+  `store::Secret`), so no hand-edited profile id can name another profile's
+  passphrase as its password, and no variant's name, which may not hold a
+  `/`, can spell the service. It sits on `SshTunnel` with
+  `#[serde(skip)]`, is filled in at connect and Test, carried by Duplicate
+  and removed with the profile (`store::delete_secrets`). Blank is none, and then
   ssh runs exactly as without the field, `BatchMode=yes` and all.
   - **A passphrase drops `BatchMode`, because `BatchMode` blocks askpass**
     even under `SSH_ASKPASS_REQUIRE=force`. In its place go `BatchMode=no`
