@@ -48,6 +48,40 @@ Four things in the script are load-bearing:
 - **The font licences ship inside the bundle**, because the fonts are compiled
   into the binary and the OFL asks the licence to travel with them.
 
+## Self-update (macOS)
+
+`src/update.rs` checks GitHub's `releases/latest` at launch and every six
+hours. On macOS (`src/update/macos.rs`) an install that can replace itself
+gets **Update and restart**: it downloads `DBDelve-<version>.dmg`, verifies
+`DBDelve-<version>.dmg.minisig` against `RELEASE_PUBLIC_KEY`, copies the app
+out of the image to a hidden sibling, checks it (`codesign --verify --deep
+--strict`, same `CFBundleIdentifier`, `CFBundleShortVersionString` equal to the
+release and newer than both the running build and the installed bundle),
+exchanges the two in one `renamex_np(RENAME_SWAP)` and relaunches through
+`App::restart`, which quits the way Quit does. A volume without the atomic
+exchange fails the update and keeps the release link: moving the app aside
+first would leave nothing installed if the process died in between. A lock on
+the bundle's folder keeps two processes from clearing each other's hidden
+sibling, and an install clears the one an interrupted install left.
+
+- **Only the release build in a writable place updates itself.** A dev or
+  other `DBDELVE_VARIANT` build, a binary outside a `.app`, a bundle on a
+  read-only volume (run from the DMG), App-Translocated, or in a folder the
+  user cannot write, keeps the link to the release page. So does a release
+  missing either asset, and a build whose key is still the placeholder.
+- **The release workflow signs every asset** with the `UPDATE_SIGNING_KEY`
+  secret (an unencrypted minisign secret key) and checks each signature is
+  prehashed and verifies against the key in `src/update/macos.rs`; it refuses
+  to publish otherwise. Changing the key strands every installed app on the
+  old one, which then never verifies another release.
+- **The cask says `auto_updates true`**, so `brew upgrade` does not fight the
+  app over which copy is current.
+- **`update-test-hooks` is the only way to point an app elsewhere.** Off by
+  default; with it the app reads `DBDELVE_UPDATE_FEED` and
+  `DBDELVE_UPDATE_PUBLIC_KEY` and a variant build may update itself.
+  `DBDELVE_FEATURES=update-test-hooks DBDELVE_NO_LAUNCH=1 dev/bundle.sh`
+  builds such a dev bundle without opening it.
+
 ## The ODBC bridge in each artifact
 
 Every artifact carries `plugins/odbc` (never echo, which is test code), laid
@@ -115,13 +149,14 @@ Only once every asset exists does it tag the commit `v$VERSION` and publish,
 then it rewrites `Casks/dbdelve.rb` in the `ShayanAbbas1/homebrew-dbdelve` tap
 through the `TAP_TOKEN` secret. A version with a hyphen (`0.2.0-rc.1`) is a
 pre-release, may run from any branch and leaves the cask alone. Unticked, the
-workflow builds everything and publishes nothing.
+workflow builds everything, signs it and publishes nothing, which is how to
+check `UPDATE_SIGNING_KEY` against the app's key without releasing.
 
 **There is no notarization and no Developer ID.** A release signs ad-hoc rather
 than with `dev/identity.sh`'s certificate: that certificate is trusted only on
 the machine that created it, and to Gatekeeper an issuer nobody trusts reads
 worse than no issuer at all. The trade is that the ad-hoc hash moves with every
-release, so an update costs one fresh Keychain prompt. Installing still means
-clearing quarantine by hand:
+release, so an update costs one fresh Keychain prompt. The cask clears quarantine
+itself in a `postflight_steps` block; a `.dmg` installed by hand still needs
 `xattr -dr com.apple.quarantine /Applications/DBDelve.app`.
 

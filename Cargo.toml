@@ -413,6 +413,22 @@ windows-sys = { version = "=0.61.2", features = [
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.189"
 
+# Checking a downloaded update against the key releases are signed with. Zero
+# dependencies. macOS alone for now, as the one platform that updates itself.
+[target.'cfg(target_os = "macos")'.dependencies]
+minisign-verify = "=0.3.0"
+
+# Signing the updater's test files the way the release pipeline's minisign
+# does, so no tool has to be installed to run them.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+minisign = "=0.10.0"
+
+[features]
+# Lets an end-to-end test point the updater at its own feed and key, and lets a
+# DBDELVE_VARIANT build update itself. Never on in a shipped build, so no
+# released app can be redirected to another feed or key.
+update-test-hooks = []
+
 # Explorer shows the icon compiled into the .exe. The resource compiler is
 # the Windows SDK's; macOS and Linux never run this build script's embed.
 [target.'cfg(target_os = "windows")'.build-dependencies]

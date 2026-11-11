@@ -893,6 +893,7 @@ impl Workspace {
             Command::CopyPlan => self.copy_plan(cx),
             Command::ShowStructureSection(section) => self.show_structure_section(section, cx),
             Command::DownloadUpdate(url) => cx.open_url(&url),
+            Command::InstallUpdate => self.install_update(cx),
         }
     }
 }

@@ -1,7 +1,8 @@
 name: release
 
-# Run from the Actions tab. Unticked, it builds every asset and publishes
-# nothing -- the point is finding out whether they build. Ticked, it tags the
+# Run from the Actions tab. Unticked, it builds every asset, signs them and
+# publishes nothing -- the point is finding out whether they build and whether
+# the signing key is the one the app trusts. Ticked, it tags the
 # commit as v<Cargo.toml version>, publishes the release once every asset
 # exists, and repoints the Homebrew cask. A version with a hyphen
 # (0.2.0-rc.1) is published as a pre-release, may come from any branch, and
@@ -151,8 +152,60 @@ jobs:
             target/windows/dbdelve-*-setup.exe
           if-no-files-found: error
 
+  # Its own job, and not gated on publishing, so an unticked run proves the
+  # secret signs what the app will accept before a release depends on it.
+  sign:
+    needs: [linux, macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Every asset gets a minisign signature beside it, `<asset>.minisig`,
+      # which is what the app checks an update against before installing it.
+      # All of them, not only the DMG, so the other platforms' updaters need
+      # nothing new here. UPDATE_SIGNING_KEY is an unencrypted minisign secret
+      # key; without it nothing is published, since a release without
+      # signatures is one no installed app will update to.
+      - run: sudo apt-get update && sudo apt-get install -y minisign
+      - run: |
+          if [[ -z "$UPDATE_SIGNING_KEY" ]]; then
+            echo "the UPDATE_SIGNING_KEY secret is not set -- releases must be signed" >&2
+            exit 1
+          fi
+          # The key the app is built with, so a secret that does not match it
+          # fails here instead of in every installed app.
+          PUBLIC_KEY="$(sed -n 's/^const RELEASE_PUBLIC_KEY: &str = "\(.*\)";$/\1/p' src/update/macos.rs)"
+          if ! grep -qxF "PUBLIC_KEY=\"$PUBLIC_KEY\"" install.sh; then
+            echo "install.sh does not check downloads against the app's release key" >&2
+            exit 1
+          fi
+          KEY="$RUNNER_TEMP/update.key"
+          trap 'rm -f "$KEY"' EXIT
+          printf '%s\n' "$UPDATE_SIGNING_KEY" > "$KEY"
+          for ASSET in dist/*; do
+            minisign -S -s "$KEY" -m "$ASSET" -x "$ASSET.minisig" < /dev/null
+            # The app verifies prehashed signatures only (algorithm "ED");
+            # a minisign old enough to make the legacy kind must fail here.
+            if [[ "$(sed -n 2p "$ASSET.minisig" | base64 -d | head -c 2)" != ED ]]; then
+              echo "$ASSET.minisig is not a prehashed signature" >&2
+              exit 1
+            fi
+            minisign -V -q -P "$PUBLIC_KEY" -m "$ASSET" -x "$ASSET.minisig"
+          done
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: signatures
+          path: dist/*.minisig
+          if-no-files-found: error
+
   release:
-    needs: [version, linux, macos, windows]
+    needs: [version, sign]
     if: inputs.publish
     runs-on: ubuntu-latest
     steps:
@@ -171,11 +224,13 @@ jobs:
             "dbdelve-$VERSION-linux-aarch64.tar.gz" "dbdelve-$VERSION-aarch64.AppImage" \
             "dbdelve-$VERSION-windows-x86_64.zip" \
             "dbdelve-$VERSION-windows-x86_64-setup.exe"; do
-            if [[ ! -f "dist/$ASSET" ]]; then
-              echo "no $ASSET among the built assets" >&2
-              ls dist >&2
-              exit 1
-            fi
+            for FILE in "$ASSET" "$ASSET.minisig"; do
+              if [[ ! -f "dist/$FILE" ]]; then
+                echo "no $FILE among the built assets" >&2
+                ls dist >&2
+                exit 1
+              fi
+            done
           done
           PRERELEASE_FLAG=()
           [[ "$PRERELEASE" == true ]] && PRERELEASE_FLAG=(--prerelease)
@@ -226,10 +281,19 @@ jobs:
             desc "Fast, native, multi-engine database client"
             homepage "https://github.com/ShayanAbbas1/dbdelve"
 
+            # The app updates itself, so Homebrew leaves upgrading it to the app.
+            auto_updates true
             depends_on arch: :arm64
             depends_on macos: :monterey
 
             app "DBDelve.app"
+
+            # Ad-hoc signed and not notarized, so Gatekeeper refuses the app
+            # until its quarantine flag is cleared. Done here so a Homebrew
+            # install opens without the xattr command a manual one needs.
+            postflight_steps do
+              run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{appdir}}/DBDelve.app"]
+            end
 
             # Lowercase: the app writes "dbdelve", and a zap spelled any other way
             # silently removes nothing. Saved passwords live in the Keychain, which zap

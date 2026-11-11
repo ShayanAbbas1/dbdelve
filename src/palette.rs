@@ -66,6 +66,7 @@ use crate::{
         keycap_parts, keycaps, kind_color, object_icon, one_line, raised_card, row_icon_tinted,
         search_field, status_dot,
     },
+    update,
     workspace::{ReferenceSource, opacity_for},
 };
 
@@ -474,6 +475,8 @@ pub enum Command {
     ShowStructureSection(Section),
     /// Open the release page, as the update pill's link does.
     DownloadUpdate(String),
+    /// Update and restart, as the update pill's dropdown does.
+    InstallUpdate,
 }
 
 struct Item {
@@ -4274,13 +4277,22 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         ));
     }
     items.extend(appearance_items(overrides));
-    if let Some(release) = &workspace.newer_release {
-        items.push(command(
-            &format!("Download dbdelve {}", release.version),
-            icon::LINK,
-            Command::DownloadUpdate(release.url.clone()),
-            WINDOW,
-        ));
+    if let Some(update) = &workspace.update {
+        let version = &update.release.version;
+        items.push(match update.state {
+            update::State::Ready(_) => command(
+                &format!("Update to dbdelve {version} and restart"),
+                icon::REFRESH,
+                Command::InstallUpdate,
+                WINDOW,
+            ),
+            _ => command(
+                &format!("Download dbdelve {version}"),
+                icon::LINK,
+                Command::DownloadUpdate(update.release.url.clone()),
+                WINDOW,
+            ),
+        });
     }
     // One row rather than a Show/Hide pair: the palette is built from the
     // session, which does not know whether the column is folded.
@@ -4400,6 +4412,7 @@ fn beside_import(command: &Command) -> bool {
             | Command::OpenLogsFolder
             | Command::CopyDiagnostics
             | Command::DownloadUpdate(_)
+            | Command::InstallUpdate
     )
 }
 

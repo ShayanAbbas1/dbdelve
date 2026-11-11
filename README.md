@@ -36,11 +36,14 @@ I wanted something which is performant, modern and consumes little ram. The exis
 
 ```sh
 brew install --cask ShayanAbbas1/dbdelve/dbdelve
-xattr -dr com.apple.quarantine /Applications/DBDelve.app
 ```
 
-Don't skip the second line: the app isn't notarized, so macOS won't open it
-until the quarantine flag is cleared.
+The app isn't notarized, so the cask clears the quarantine flag macOS would
+otherwise refuse it over. Without Homebrew:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ShayanAbbas1/dbdelve/main/install.sh | sh
+```
 
 **Linux** (x86_64 or aarch64): `yay -S dbdelve-bin` from the AUR, or the
 tarball or AppImage from [the latest release][releases].

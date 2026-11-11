@@ -27,7 +27,7 @@ mod welcome;
 use std::collections::{HashMap, HashSet};
 
 use crate::export::ClipboardFormat;
-use gpui_component::menu::DropdownMenu;
+use gpui_component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
 
 pub(crate) use import_dialog::PreviewGrid;
 pub(crate) use profiles::unavailable_reason;
@@ -370,7 +370,9 @@ pub(crate) struct Workspace {
     pub(crate) focus_before_dialog: std::cell::RefCell<Option<FocusHandle>>,
     /// See [`Workspace::welcome_project_focus`].
     pub(crate) welcome_project_focus: std::cell::RefCell<Vec<FocusHandle>>,
-    pub(crate) newer_release: Option<update::Release>,
+    pub(crate) update: Option<update::Update>,
+    /// The launch check and the ones after it; dropped, they stop.
+    update_checks: Option<gpui::Task<()>>,
 }
 
 impl Workspace {
@@ -519,7 +521,8 @@ impl Workspace {
             dialog_choice: std::cell::Cell::default(),
             focus_before_dialog: std::cell::RefCell::default(),
             welcome_project_focus: std::cell::RefCell::default(),
-            newer_release: None,
+            update: None,
+            update_checks: None,
         };
 
         let mut load_failure = None;
@@ -679,17 +682,7 @@ impl Workspace {
         }
 
         if workspace.settings.check_for_updates {
-            let check = spawn_blocking(cx.background_executor(), update::newer_release);
-            cx.spawn(async move |workspace, cx| {
-                let Some(release) = check.await else {
-                    return;
-                };
-                _ = workspace.update(cx, |workspace, cx| {
-                    workspace.newer_release = Some(release);
-                    cx.notify();
-                });
-            })
-            .detach();
+            workspace.update_checks = Some(Self::check_for_updates(cx));
         }
 
         // A rebind capture takes the next keystroke whatever it is, and an
@@ -1020,8 +1013,173 @@ impl Workspace {
             return;
         }
         self.settings.check_for_updates = check;
+        self.update_checks = check.then(|| Self::check_for_updates(cx));
         self.remember_profiles(cx);
         cx.notify();
+    }
+
+    /// At launch and every [`update::RECHECK`] after it.
+    fn check_for_updates(cx: &mut Context<Self>) -> gpui::Task<()> {
+        cx.spawn(async move |workspace, cx| {
+            loop {
+                let found = spawn_blocking(cx.background_executor(), update::newer_release).await;
+                let open = workspace.update(cx, |workspace, cx| {
+                    // A check that comes back while an update is being
+                    // installed must not take its progress away.
+                    let running = workspace
+                        .update
+                        .as_ref()
+                        .is_some_and(|update| matches!(update.state, update::State::Running(_)));
+                    if let Some(found) = found.filter(|_| !running) {
+                        workspace.update = Some(found);
+                        cx.notify();
+                    }
+                });
+                if open.is_err() {
+                    return;
+                }
+                cx.background_executor().timer(update::RECHECK).await;
+            }
+        })
+    }
+
+    /// Update and restart: from [`update::State::Ready`], or again after a
+    /// failure, so a second click while one runs does nothing.
+    pub(crate) fn install_update(&mut self, cx: &mut Context<Self>) {
+        let Some(update) = self.update.as_mut() else {
+            return;
+        };
+        let progress = std::sync::Arc::new(update::Progress::default());
+        let state = std::mem::replace(&mut update.state, update::State::Running(progress.clone()));
+        let (update::State::Ready(installer) | update::State::Failed(_, installer)) = state else {
+            update.state = state;
+            return;
+        };
+        cx.notify();
+
+        // The pill's percentage moves on this tick alone: the download goes to
+        // a file, never through anything that would redraw.
+        let ticking = progress.clone();
+        cx.spawn(async move |workspace, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(500))
+                    .await;
+                let running = workspace.update(cx, |workspace, cx| {
+                    // This attempt's progress, not any: a retry started
+                    // within a tick of a failure brings a ticker of its own.
+                    let running = workspace.update.as_ref().is_some_and(|update| {
+                        matches!(&update.state, update::State::Running(progress)
+                            if std::sync::Arc::ptr_eq(progress, &ticking))
+                    });
+                    if running {
+                        cx.notify();
+                    }
+                    running
+                });
+                if !matches!(running, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
+
+        let install = spawn_blocking(cx.background_executor(), {
+            let installer = installer.clone();
+            move || update::install(&installer, &progress)
+        });
+        cx.spawn(async move |workspace, cx| {
+            let installed = install.await;
+            _ = workspace.update(cx, |workspace, cx| match installed {
+                // Through the platform's quit, as Quit goes, so buffers and
+                // profiles are written on the way out exactly as they are then.
+                Ok(bundle) => {
+                    tracing::info!("restarting into the update");
+                    cx.set_restart_path(bundle);
+                    cx.restart();
+                }
+                Err(reason) => {
+                    if let Some(update) = workspace.update.as_mut() {
+                        update.state = update::State::Failed(reason, installer);
+                    }
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The newer release at the far end of the titlebar, and its dropdown:
+    /// one click to update where this install can replace itself, the
+    /// release page where it cannot or where that failed.
+    fn render_update_pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = *theme(cx);
+        let update = self.update.as_ref()?;
+        let version = update.release.version.clone();
+        let url = update.release.url.clone();
+        let (label, menu): (String, Rc<dyn Fn(PopupMenu) -> PopupMenu>) = match &update.state {
+            update::State::Link => (
+                format!("DBDelve {version} available"),
+                Rc::new(move |menu| {
+                    menu.label("Update it with your package manager,")
+                        .label("or download it from GitHub.")
+                        .separator()
+                        .link(format!("Download {version}"), url.clone())
+                }),
+            ),
+            update::State::Ready(_) => {
+                let workspace = cx.weak_entity();
+                (
+                    format!("DBDelve {version} available"),
+                    Rc::new(move |menu| {
+                        let workspace = workspace.clone();
+                        menu.item(PopupMenuItem::new("Update and restart").on_click(
+                            move |_, _, cx| {
+                                _ = workspace
+                                    .update(cx, |workspace, cx| workspace.install_update(cx));
+                            },
+                        ))
+                        .separator()
+                        .link("Release notes", url.clone())
+                    }),
+                )
+            }
+            update::State::Running(progress) => {
+                let status = format!("DBDelve {version} opens once it is installed.");
+                (
+                    progress.label(),
+                    Rc::new(move |menu| {
+                        menu.label(status.clone())
+                            .separator()
+                            .link("Release notes", url.clone())
+                    }),
+                )
+            }
+            &update::State::Failed(reason, _) => {
+                let workspace = cx.weak_entity();
+                (
+                    format!("DBDelve {version} available"),
+                    Rc::new(move |menu| {
+                        let workspace = workspace.clone();
+                        menu.label(reason)
+                            .item(PopupMenuItem::new("Try again").on_click(move |_, _, cx| {
+                                _ = workspace
+                                    .update(cx, |workspace, cx| workspace.install_update(cx));
+                            }))
+                            .separator()
+                            .link(format!("Download {version}"), url.clone())
+                    }),
+                )
+            }
+        };
+        // On a wrapper: `dropdown_menu` wraps the button, so a margin on the
+        // button never reaches the titlebar's row.
+        Some(
+            div()
+                .ml_auto()
+                .child(ui::update_pill(t, label).dropdown_menu(move |popup, _, _| menu(popup)))
+                .into_any_element(),
+        )
     }
 
     pub(crate) fn set_verbose_logging(&mut self, verbose: bool, cx: &mut Context<Self>) {
@@ -1728,7 +1886,7 @@ impl Render for Workspace {
             (Some(status_group), None)
         };
         let notice = profile.session.shown_notice().map(str::to_string);
-        let newer_release = self.newer_release.clone();
+        let update_pill = self.render_update_pill(cx);
         let pending_count = self.pending_edit_count(cx);
         let has_pending = pending_count > 0;
         let has_results = self.has_results(cx);
@@ -2238,24 +2396,7 @@ impl Render for Workspace {
                         })
                         .into_any_element()
                 })
-                .chain(newer_release.map(|release| {
-                    // On a wrapper: `dropdown_menu` wraps the button, so a
-                    // margin on the button never reaches the titlebar's row.
-                    div()
-                        .ml_auto()
-                        .child(ui::update_pill(t, &release.version).dropdown_menu(
-                            move |menu, _, _| {
-                                menu.label("Update it with your package manager,")
-                                    .label("or download it from GitHub.")
-                                    .separator()
-                                    .link(
-                                        format!("Download {}", release.version),
-                                        release.url.clone(),
-                                    )
-                            },
-                        ))
-                        .into_any_element()
-                }))
+                .chain(update_pill)
                 .collect(),
                 [
                     icon_button(

@@ -14,7 +14,8 @@
 //! - **At info:** the version, OS and arch at startup; plugin and theme loads,
 //!   by file name; connection lifecycle by engine and [`connection_number`],
 //!   with the outcome, the stage a failure happened at, and durations; tunnels;
-//!   cancels; exports and imports by format with row counts.
+//!   cancels; exports and imports by format with row counts; update checks and
+//!   each step of a self-update, with its versions, URLs and paths.
 //! - **At debug**, which only Verbose logging or `DBDELVE_LOG` turns on:
 //!   hostnames, database names and connect error text, each in a `debug!` line
 //!   beside the info line it explains.

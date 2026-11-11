@@ -1687,6 +1687,13 @@ fn variant_name() -> Result<String, String> {
     Ok(format!("{NAME}-{variant}"))
 }
 
+/// Whether this is the release's own data and keychain, rather than a dev or
+/// other variant's.
+#[cfg(target_os = "macos")]
+pub(crate) fn is_release_variant() -> bool {
+    variant_name().is_ok_and(|name| name == NAME)
+}
+
 /// macOS keeps Application Support, where every install before this already
 /// has its data. Linux follows the XDG base directory spec. Windows uses the
 /// roaming profile, which follows the user the way Application Support does.

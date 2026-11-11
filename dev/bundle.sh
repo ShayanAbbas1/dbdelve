@@ -7,6 +7,10 @@
 # neither replace the released app nor touch what it has saved.
 # DBDELVE_CHANNEL=release builds the app the release workflow ships.
 #
+# DBDELVE_FEATURES passes cargo features to the app's build (update-test-hooks
+# for an end-to-end test of the updater), and DBDELVE_NO_LAUNCH=1 builds the
+# dev app without opening it.
+#
 # Usage: dev/bundle.sh
 set -euo pipefail
 
@@ -45,7 +49,11 @@ else
   fi
 fi
 
-cargo build --release
+FEATURES=()
+if [[ -n "${DBDELVE_FEATURES:-}" ]]; then
+  FEATURES=(--features "$DBDELVE_FEATURES")
+fi
+cargo build --release ${FEATURES[@]+"${FEATURES[@]}"}
 # Builds the ODBC bridge, which links unixODBC statically on macOS, and stages
 # it under target/release/plugins/odbc.
 dev/plugins.sh --release
@@ -141,7 +149,7 @@ codesign --verify --deep --strict "$APP"
 # Neither variant installs. The release reaches /Applications by the DMG's
 # drag-to-install, and the dev app runs where it was built so it can never be
 # mistaken for -- or dropped over -- the real one.
-if [[ "$CHANNEL" == release ]]; then
+if [[ "$CHANNEL" == release || "${DBDELVE_NO_LAUNCH:-}" == 1 ]]; then
   echo "built $APP (v$VERSION)"
   exit 0
 fi
