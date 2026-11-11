@@ -367,7 +367,11 @@ impl Theme {
         let mode = if cx.should_auto_hide_scrollbars() {
             ScrollbarMode::Scrolling
         } else {
-            ScrollbarMode::Hover
+            // dbdelve patch: `Hover` still hides the bar at rest, so a user
+            // whose OS is set to always show scrollbars sees none until the
+            // pointer is over it. `Always` honours that setting and, having no
+            // fade, costs no per-frame redraws. Re-apply on a gpui-component bump.
+            ScrollbarMode::Always
         };
         Self::set_scrollbar_mode(mode, cx);
     }
@@ -1030,6 +1034,16 @@ mod base_theme_projection_tests {
                 gpui_base::ScrollbarMode::Always
             );
             assert_styled_projection(cx);
+        });
+    }
+
+    #[gpui::test]
+    fn init_maps_not_auto_hide_to_always(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            init(cx);
+            // The test platform reports `should_auto_hide_scrollbars` as false,
+            // so `init` takes the not-auto-hide branch and pins `Always`.
+            assert_eq!(Theme::global(cx).scrollbar_mode, ScrollbarMode::Always);
         });
     }
 
