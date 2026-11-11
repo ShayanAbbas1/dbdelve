@@ -638,11 +638,12 @@ pub(crate) struct InsertField {
     pub(crate) column: String,
     pub(crate) data_type: String,
     pub(crate) input: Entity<InputState>,
-    /// The `NULL` chip. Wins over typed text, because the chip is the later
-    /// word.
+    /// The `NULL` chip is on. Exclusive with `touched`: whichever happened
+    /// last wins, and NULL clears the box.
     pub(crate) nulled: bool,
-    /// Whether this field has been typed into. The reason `insert_value`
-    /// answers three ways rather than two.
+    /// Typed into since the last DEFAULT or NULL, so the text is sent even
+    /// when empty. The reason `insert_value` answers three ways rather than
+    /// two.
     pub(crate) touched: bool,
 }
 
@@ -723,6 +724,15 @@ pub(crate) enum ImportPhase {
         started: std::time::Instant,
         cancelling: bool,
     },
+}
+
+/// What an empty box says will be sent.
+pub(crate) fn insert_placeholder(nulled: bool, touched: bool) -> &'static str {
+    match (nulled, touched) {
+        (true, _) => "NULL",
+        (false, true) => "empty string",
+        (false, false) => "DEFAULT",
+    }
 }
 
 /// What one field contributes to the `INSERT`. The outer `None` is a column
@@ -3943,8 +3953,8 @@ mod tests {
             insert_value(false, true, "42"),
             Some(Some("42".to_string()))
         );
-        // The chip is the later word: a field nulled after being typed into is
-        // a NULL.
+        // The form keeps the two exclusive; if both were ever set, NULL is the
+        // answer that cannot send stray text.
         assert_eq!(insert_value(true, true, "42"), Some(None));
     }
 

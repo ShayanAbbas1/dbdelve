@@ -1164,7 +1164,9 @@ fn render_new_row_panel(
                             "NULL",
                             field.nulled,
                             cx,
-                            move |workspace, _, cx| workspace.toggle_insert_null(index, cx),
+                            move |workspace, window, cx| {
+                                workspace.toggle_insert_null(index, window, cx)
+                            },
                         )),
                 )
                 .child(Input::new(&field.input).small())

@@ -4,7 +4,7 @@
 //! impl live in as many modules as it has concerns; they moved out whole.
 
 use super::*;
-use crate::session::{ReviewSlot, StaleEdit, StaleResume, refreshing};
+use crate::session::{ReviewSlot, StaleEdit, StaleResume, insert_placeholder, refreshing};
 
 impl Workspace {
     /// Open the "Insert" form over the preview in front, one field per column
@@ -89,14 +89,20 @@ impl Workspace {
         };
         let mut fields = Vec::with_capacity(columns.len());
         for (index, (column, data_type)) in columns.into_iter().enumerate() {
-            let input = cx.new(|cx| InputState::new(window, cx));
+            let input = cx.new(|cx| {
+                InputState::new(window, cx).placeholder(insert_placeholder(false, false))
+            });
             // The first keystroke is what makes this field a value rather than
             // an omission, so the change event is where `touched` is set.
-            cx.subscribe(&input, move |workspace, _, event: &InputEvent, _| {
-                if matches!(event, InputEvent::Change) {
-                    workspace.touch_insert_field(index);
-                }
-            })
+            cx.subscribe_in(
+                &input,
+                window,
+                move |workspace, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        workspace.touch_insert_field(index, window, cx);
+                    }
+                },
+            )
             .detach();
             fields.push(InsertField {
                 column,
@@ -118,22 +124,34 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(crate) fn touch_insert_field(&mut self, index: usize) {
-        if let Some(profile) = self.profile_mut()
-            && let Some(form) = &mut profile.session.insert_form
-            && let Some(field) = form.fields.get_mut(index)
-        {
-            field.touched = true;
-        }
+    /// Typing is the latest word, so it turns a NULL off.
+    pub(crate) fn touch_insert_field(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_insert_state(index, false, true, window, cx);
     }
 
-    pub(crate) fn toggle_insert_null(&mut self, index: usize, cx: &mut Context<Self>) {
-        if let Some(profile) = self.profile_mut()
-            && let Some(form) = &mut profile.session.insert_form
-            && let Some(field) = form.fields.get_mut(index)
-        {
-            field.nulled = !field.nulled;
-            cx.notify();
+    /// Clears the box when turning NULL on, so the input shows what is sent;
+    /// turning it off returns the field to left out.
+    pub(crate) fn toggle_insert_null(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let nulled = self
+            .profile()
+            .and_then(|profile| profile.session.insert_form.as_ref())
+            .and_then(|form| form.fields.get(index))
+            .is_some_and(|field| field.nulled);
+        if nulled {
+            self.default_insert_field(index, window, cx);
+        } else {
+            self.set_insert_state(index, true, false, window, cx);
+            self.clear_insert_input(index, window, cx);
         }
     }
 
@@ -145,15 +163,41 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.set_insert_state(index, false, false, window, cx);
+        self.clear_insert_input(index, window, cx);
+    }
+
+    fn set_insert_state(
+        &mut self,
+        index: usize,
+        nulled: bool,
+        touched: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(profile) = self.profile_mut()
             && let Some(form) = &mut profile.session.insert_form
             && let Some(field) = form.fields.get_mut(index)
         {
-            field.nulled = false;
-            field.touched = false;
+            field.nulled = nulled;
+            field.touched = touched;
             let input = field.input.clone();
-            input.update(cx, |input, cx| input.set_value("", window, cx));
+            input.update(cx, |input, cx| {
+                input.set_placeholder(insert_placeholder(nulled, touched), window, cx)
+            });
             cx.notify();
+        }
+    }
+
+    fn clear_insert_input(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(form) = self
+            .profile()
+            .and_then(|profile| profile.session.insert_form.as_ref())
+            && let Some(field) = form.fields.get(index)
+        {
+            field
+                .input
+                .update(cx, |input, cx| input.set_value("", window, cx));
         }
     }
 

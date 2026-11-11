@@ -3823,7 +3823,9 @@ fn the_default_chip_puts_a_typed_then_emptied_insert_field_back_out_of_the_state
         };
         // `set_value` emits no change, so touching is what a keystroke does.
         let touch = |index: usize, cx: &mut VisualTestContext| {
-            workspace.update(cx, |workspace, _| workspace.touch_insert_field(index));
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.touch_insert_field(index, window, cx)
+            });
         };
         let touched = |index: usize, cx: &mut VisualTestContext| {
             workspace.read_with(cx, |workspace, _| {
@@ -3848,6 +3850,57 @@ fn the_default_chip_puts_a_typed_then_emptied_insert_field_back_out_of_the_state
         });
         settle(cx);
         assert!(!touched(0, cx), "DEFAULT puts the field back to left out");
+
+        let state = |index: usize, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, cx| {
+                let field = &workspace
+                    .profile()
+                    .unwrap()
+                    .session
+                    .insert_form
+                    .as_ref()
+                    .unwrap()
+                    .fields[index];
+                let input = field.input.read(cx);
+                (
+                    field.nulled,
+                    field.touched,
+                    input.value().to_string(),
+                    input.presentation().placeholder().to_string(),
+                )
+            })
+        };
+        let toggle_null = |index: usize, cx: &mut VisualTestContext| {
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.toggle_insert_null(index, window, cx);
+            });
+            settle(cx);
+        };
+        assert_eq!(
+            state(0, cx),
+            (false, false, String::new(), "DEFAULT".into())
+        );
+        type_into(0, "7", cx);
+        touch(0, cx);
+        toggle_null(0, cx);
+        assert_eq!(state(0, cx), (true, false, String::new(), "NULL".into()));
+        type_into(0, "9", cx);
+        touch(0, cx);
+        assert_eq!(
+            state(0, cx),
+            (false, true, "9".into(), "empty string".into())
+        );
+        toggle_null(0, cx);
+        toggle_null(0, cx);
+        assert_eq!(
+            state(0, cx),
+            (false, false, String::new(), "DEFAULT".into())
+        );
+
+        type_into(1, "x", cx);
+        touch(1, cx);
+        toggle_null(1, cx);
+        assert_eq!(state(1, cx), (true, false, String::new(), "NULL".into()));
 
         type_into(1, "robin", cx);
         touch(1, cx);
@@ -3875,6 +3928,34 @@ fn the_default_chip_puts_a_typed_then_emptied_insert_field_back_out_of_the_state
         );
         assert!(
             statement.contains("\"wing\"") && statement.contains("''"),
+            "{statement}"
+        );
+
+        workspace.update(cx, |workspace, cx| workspace.close_apply_review(cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.new_row(&crate::actions::NewRow, window, cx);
+        });
+        settle(cx);
+        type_into(1, "robin", cx);
+        touch(1, cx);
+        toggle_null(1, cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.confirm_new_row(window, cx);
+        });
+        settle(cx);
+        let statement = workspace.read_with(cx, |workspace, _| {
+            workspace
+                .profile()
+                .unwrap()
+                .session
+                .apply_review
+                .as_ref()
+                .unwrap()
+                .sql
+                .clone()
+        });
+        assert!(
+            statement.contains("NULL") && !statement.contains("robin"),
             "{statement}"
         );
 
