@@ -1163,6 +1163,7 @@ fn render_new_row_panel(
                                 t,
                                 cx,
                             )
+                            .accessibility_label(format!("{} DEFAULT", field.column))
                             .on_click(cx.listener(
                                 move |workspace, _: &ClickEvent, window, cx| {
                                     workspace.default_insert_field(index, window, cx)
@@ -1171,6 +1172,7 @@ fn render_new_row_panel(
                         )
                         .child(
                             choice_button(("insert-null", index), "NULL", field.nulled, t, cx)
+                                .accessibility_label(format!("{} NULL", field.column))
                                 .on_click(cx.listener(
                                     move |workspace, _: &ClickEvent, window, cx| {
                                         workspace.toggle_insert_null(index, window, cx)

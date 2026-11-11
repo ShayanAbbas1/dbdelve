@@ -1078,6 +1078,7 @@ pub(crate) fn choice_button(
         )
         // Paints the variant's `active` and skips its hover while chosen.
         .selected(selected)
+        .toggled(selected)
         .h(px(layout::chrome(24.)))
         .px(px(layout::SPACE_SM))
         .child(
