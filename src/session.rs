@@ -645,6 +645,9 @@ pub(crate) struct InsertField {
     /// when empty. The reason `insert_value` answers three ways rather than
     /// two.
     pub(crate) touched: bool,
+    /// `Engine::new_row_sends_empty`: whether an emptied field is `''` or left
+    /// out.
+    pub(crate) sends_empty: bool,
 }
 
 /// Rows on their way into a table.
@@ -726,13 +729,20 @@ pub(crate) enum ImportPhase {
     },
 }
 
-/// What an empty box says will be sent.
-pub(crate) fn insert_placeholder(nulled: bool, touched: bool) -> &'static str {
-    match (nulled, touched) {
+/// What an empty box says will be sent. An emptied field is an empty string
+/// only where the engine writes one; elsewhere it is left out after all.
+pub(crate) fn insert_placeholder(nulled: bool, touched: bool, sends_empty: bool) -> &'static str {
+    match (nulled, touched && sends_empty) {
         (true, _) => "NULL",
         (false, true) => "empty string",
         (false, false) => "DEFAULT",
     }
+}
+
+/// Whether the statement leaves the column out, so it keeps its default:
+/// what the DEFAULT chip shows.
+pub(crate) fn insert_left_out(nulled: bool, touched: bool, sends_empty: bool, typed: &str) -> bool {
+    !nulled && (!touched || (!sends_empty && typed.is_empty()))
 }
 
 /// What one field contributes to the `INSERT`. The outer `None` is a column
@@ -3956,6 +3966,17 @@ mod tests {
         // The form keeps the two exclusive; if both were ever set, NULL is the
         // answer that cannot send stray text.
         assert_eq!(insert_value(true, true, "42"), Some(None));
+    }
+
+    #[test]
+    fn an_emptied_field_reads_as_left_out_where_the_engine_drops_it() {
+        assert_eq!(insert_placeholder(false, true, true), "empty string");
+        assert!(!insert_left_out(false, true, true, ""));
+        assert_eq!(insert_placeholder(false, true, false), "DEFAULT");
+        assert!(insert_left_out(false, true, false, ""));
+        assert!(!insert_left_out(false, true, false, "42"));
+        assert_eq!(insert_placeholder(true, false, false), "NULL");
+        assert!(!insert_left_out(true, false, false, ""));
     }
 
     #[test]

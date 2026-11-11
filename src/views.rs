@@ -54,7 +54,7 @@ use crate::{
     scroller::{SmoothScrollable, scroll_to, smooth, smooth_for, smooth_scoped},
     session::{
         Explained, ObjectBody, ObjectTab, Profile, ProfileState, QueryState, QueryTab, Said,
-        Session, StructureState, Tab, query_label, result_pane_is_expanded,
+        Session, StructureState, Tab, insert_left_out, query_label, result_pane_is_expanded,
     },
     sql::Mode,
     structure_grid::{Section, StructureGrid},
@@ -1154,7 +1154,12 @@ fn render_new_row_panel(
                             choice_button(
                                 ("insert-default", index),
                                 "DEFAULT",
-                                !field.nulled && !field.touched,
+                                insert_left_out(
+                                    field.nulled,
+                                    field.touched,
+                                    field.sends_empty,
+                                    &field.input.read(cx).value(),
+                                ),
                                 t,
                                 cx,
                             )
@@ -1180,6 +1185,13 @@ fn render_new_row_panel(
 
     let cancel_workspace = cx.entity().downgrade();
     let review_workspace = cancel_workspace.clone();
+    // Only where it holds for every field: MongoDB leaves an emptied field
+    // out, and Redis one that is not text.
+    let hint = if form.fields.iter().all(|field| field.sends_empty) {
+        "DEFAULT leaves a column out, so it keeps its default. Anything typed is sent, even when emptied again."
+    } else {
+        "DEFAULT leaves a column out, so it keeps its default."
+    };
 
     div()
         .size_full()
@@ -1194,7 +1206,7 @@ fn render_new_row_panel(
             div()
                 .text_size(px(layout::chrome(layout::TEXT_SM)))
                 .text_color(t.text_faint)
-                .child("DEFAULT leaves a column out, so it keeps its default. Anything typed is sent, even when emptied again."),
+                .child(hint),
         )
         .child(
             div()

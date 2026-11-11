@@ -89,8 +89,13 @@ impl Workspace {
         };
         let mut fields = Vec::with_capacity(columns.len());
         for (index, (column, data_type)) in columns.into_iter().enumerate() {
+            let sends_empty = engine.new_row_sends_empty(&column);
             let input = cx.new(|cx| {
-                InputState::new(window, cx).placeholder(insert_placeholder(false, false))
+                InputState::new(window, cx).placeholder(insert_placeholder(
+                    false,
+                    false,
+                    sends_empty,
+                ))
             });
             // The first keystroke is what makes this field a value rather than
             // an omission, so the change event is where `touched` is set.
@@ -110,6 +115,7 @@ impl Workspace {
                 input,
                 nulled: false,
                 touched: false,
+                sends_empty,
             });
         }
 
@@ -181,9 +187,10 @@ impl Workspace {
         {
             field.nulled = nulled;
             field.touched = touched;
+            let placeholder = insert_placeholder(nulled, touched, field.sends_empty);
             let input = field.input.clone();
             input.update(cx, |input, cx| {
-                input.set_placeholder(insert_placeholder(nulled, touched), window, cx)
+                input.set_placeholder(placeholder, window, cx)
             });
             cx.notify();
         }
