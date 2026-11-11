@@ -137,6 +137,26 @@ impl Workspace {
         }
     }
 
+    /// Back to left out of the `INSERT`: the one way to undo a first
+    /// keystroke, which otherwise makes even an emptied field a `''`.
+    pub(crate) fn default_insert_field(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(profile) = self.profile_mut()
+            && let Some(form) = &mut profile.session.insert_form
+            && let Some(field) = form.fields.get_mut(index)
+        {
+            field.nulled = false;
+            field.touched = false;
+            let input = field.input.clone();
+            input.update(cx, |input, cx| input.set_value("", window, cx));
+            cx.notify();
+        }
+    }
+
     /// Generate the `INSERT` and show it. **Nothing runs here** — Run in the
     /// review panel is the ask (`AGENTS.md` rule 1).
     pub(crate) fn confirm_new_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {

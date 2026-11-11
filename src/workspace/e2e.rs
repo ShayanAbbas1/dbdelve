@@ -3784,3 +3784,100 @@ fn files_opened_while_connecting_are_not_run_by_a_later_connect(cx: &mut TestApp
         quit(workspace, cx);
     });
 }
+
+#[gpui::test]
+fn the_default_chip_puts_a_typed_then_emptied_insert_field_back_out_of_the_statement(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            "create table birds (id integer primary key, name text, wing text);",
+        );
+        workspace.update_in(cx, |workspace, window, cx| {
+            let leaf = workspace.profile().unwrap().session.explorer_leaves
+                [&explorer::relation_row("main", "birds")];
+            workspace.open_explorer_target(leaf.target, window, cx);
+        });
+        settle(cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.new_row(&crate::actions::NewRow, window, cx);
+        });
+        settle(cx);
+
+        let type_into = |index: usize, text: &str, cx: &mut VisualTestContext| {
+            workspace.update_in(cx, |workspace, window, cx| {
+                let input = workspace
+                    .profile()
+                    .unwrap()
+                    .session
+                    .insert_form
+                    .as_ref()
+                    .unwrap()
+                    .fields[index]
+                    .input
+                    .clone();
+                input.update(cx, |input, cx| input.set_value(text, window, cx));
+            });
+            settle(cx);
+        };
+        // `set_value` emits no change, so touching is what a keystroke does.
+        let touch = |index: usize, cx: &mut VisualTestContext| {
+            workspace.update(cx, |workspace, _| workspace.touch_insert_field(index));
+        };
+        let touched = |index: usize, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                workspace
+                    .profile()
+                    .unwrap()
+                    .session
+                    .insert_form
+                    .as_ref()
+                    .unwrap()
+                    .fields[index]
+                    .touched
+            })
+        };
+
+        type_into(0, "7", cx);
+        touch(0, cx);
+        type_into(0, "", cx);
+        assert!(touched(0, cx), "emptying alone keeps the field a value");
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.default_insert_field(0, window, cx);
+        });
+        settle(cx);
+        assert!(!touched(0, cx), "DEFAULT puts the field back to left out");
+
+        type_into(1, "robin", cx);
+        touch(1, cx);
+        type_into(2, "", cx);
+        touch(2, cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.confirm_new_row(window, cx);
+        });
+        settle(cx);
+        let statement = workspace.read_with(cx, |workspace, _| {
+            workspace
+                .profile()
+                .unwrap()
+                .session
+                .apply_review
+                .as_ref()
+                .unwrap()
+                .sql
+                .clone()
+        });
+        assert!(!statement.contains("\"id\""), "{statement}");
+        assert!(
+            statement.contains("\"name\"") && statement.contains("'robin'"),
+            "{statement}"
+        );
+        assert!(
+            statement.contains("\"wing\"") && statement.contains("''"),
+            "{statement}"
+        );
+
+        quit(workspace, cx);
+    });
+}

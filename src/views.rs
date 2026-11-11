@@ -1127,6 +1127,7 @@ fn render_new_row_panel(
         .enumerate()
         .map(|(index, field)| {
             let null_workspace = cx.entity().downgrade();
+            let default_workspace = cx.entity().downgrade();
             div()
                 .flex()
                 .flex_col()
@@ -1150,6 +1151,26 @@ fn render_new_row_panel(
                                 .text_size(px(layout::chrome(layout::TEXT_XS)))
                                 .text_color(t.text_faint)
                                 .child(field.data_type.clone()),
+                        )
+                        .child(
+                            button(
+                                ("insert-default", index),
+                                "DEFAULT",
+                                // Lit while the field will be left out, which
+                                // is the state clicking it returns to.
+                                if !field.nulled && !field.touched {
+                                    Tone::Primary
+                                } else {
+                                    Tone::Quiet
+                                },
+                                Control::Inline,
+                                t,
+                            )
+                            .on_click(move |_, window, cx| {
+                                _ = default_workspace.update(cx, |workspace, cx| {
+                                    workspace.default_insert_field(index, window, cx);
+                                });
+                            }),
                         )
                         .child(
                             button(
@@ -1194,7 +1215,7 @@ fn render_new_row_panel(
             div()
                 .text_size(px(layout::chrome(layout::TEXT_SM)))
                 .text_color(t.text_faint)
-                .child("A field left blank is left out, so the column keeps its default."),
+                .child("DEFAULT leaves a column out, so it keeps its default. Anything typed is sent, even when emptied again."),
         )
         .child(
             div()
