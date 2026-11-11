@@ -54,16 +54,16 @@ use crate::{
     scroller::{SmoothScrollable, scroll_to, smooth, smooth_for, smooth_scoped},
     session::{
         Explained, ObjectBody, ObjectTab, Profile, ProfileState, QueryState, QueryTab, Said,
-        Session, StructureState, Tab, query_label, result_pane_is_expanded,
+        Session, StructureState, Tab, insert_left_out, query_label, result_pane_is_expanded,
     },
     sql::Mode,
     structure_grid::{Section, StructureGrid},
     tab_drag::{DragTab, TabStrip},
     theme::{Theme, fonts, layout, theme},
     ui::{
-        Code, Control, Tone, button, button_label, chord_hint, code_highlights, compact_count,
-        control, group_thousands, icon_button, key_hint, keycap_text, kind_color, object_icon,
-        reconnect_button, row_icon, section_label,
+        Code, Control, Tone, button, button_label, choice_button, chord_hint, code_highlights,
+        compact_count, control, group_thousands, icon_button, key_hint, keycap_text, kind_color,
+        object_icon, reconnect_button, row_icon, section_label,
     },
     workspace::error_in_buffer,
 };
@@ -1126,7 +1126,6 @@ fn render_new_row_panel(
         .iter()
         .enumerate()
         .map(|(index, field)| {
-            let null_workspace = cx.entity().downgrade();
             div()
                 .flex()
                 .flex_col()
@@ -1152,25 +1151,33 @@ fn render_new_row_panel(
                                 .child(field.data_type.clone()),
                         )
                         .child(
-                            button(
-                                ("insert-null", index),
-                                "NULL",
-                                // Filled while it is on, because whether this
-                                // field is a NULL is the only thing the chip
-                                // has to say.
-                                if field.nulled {
-                                    Tone::Primary
-                                } else {
-                                    Tone::Quiet
-                                },
-                                Control::Inline,
+                            choice_button(
+                                ("insert-default", index),
+                                "DEFAULT",
+                                insert_left_out(
+                                    field.nulled,
+                                    field.touched,
+                                    field.sends_empty,
+                                    &field.input.read(cx).value(),
+                                ),
                                 t,
+                                cx,
                             )
-                            .on_click(move |_, _, cx| {
-                                _ = null_workspace.update(cx, |workspace, cx| {
-                                    workspace.toggle_insert_null(index, cx);
-                                });
-                            }),
+                            .accessibility_label(format!("{} DEFAULT", field.column))
+                            .on_click(cx.listener(
+                                move |workspace, _: &ClickEvent, window, cx| {
+                                    workspace.default_insert_field(index, window, cx)
+                                },
+                            )),
+                        )
+                        .child(
+                            choice_button(("insert-null", index), "NULL", field.nulled, t, cx)
+                                .accessibility_label(format!("{} NULL", field.column))
+                                .on_click(cx.listener(
+                                    move |workspace, _: &ClickEvent, window, cx| {
+                                        workspace.toggle_insert_null(index, window, cx)
+                                    },
+                                )),
                         ),
                 )
                 .child(Input::new(&field.input).small())
@@ -1180,6 +1187,13 @@ fn render_new_row_panel(
 
     let cancel_workspace = cx.entity().downgrade();
     let review_workspace = cancel_workspace.clone();
+    // Only where it holds for every field: MongoDB leaves an emptied field
+    // out, and Redis one that is not text.
+    let hint = if form.fields.iter().all(|field| field.sends_empty) {
+        "DEFAULT leaves a column out, so it keeps its default. Anything typed is sent, even when emptied again."
+    } else {
+        "DEFAULT leaves a column out, so it keeps its default."
+    };
 
     div()
         .size_full()
@@ -1194,7 +1208,7 @@ fn render_new_row_panel(
             div()
                 .text_size(px(layout::chrome(layout::TEXT_SM)))
                 .text_color(t.text_faint)
-                .child("A field left blank is left out, so the column keeps its default."),
+                .child(hint),
         )
         .child(
             div()

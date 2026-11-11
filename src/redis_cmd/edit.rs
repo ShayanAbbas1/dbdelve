@@ -434,6 +434,12 @@ fn changes(key: &str, held: &Collection, edited: &Collection) -> Result<Vec<Stri
     Ok(lines)
 }
 
+/// Whether a new row's field left empty is left out rather than written as an
+/// empty string: where the column is not text, empty means nothing.
+pub(crate) fn empty_is_none(column: &str) -> bool {
+    matches!(column, "type" | "ttl" | "index" | "score")
+}
+
 /// The command a new row is: a key that does not exist yet, or a field,
 /// item or member of the opened key, never written over one already there.
 /// A field left empty is left out, and so is a list item's index, which is
@@ -446,16 +452,14 @@ pub(crate) fn insert_row(
     if schema == STRING {
         return Err("A string holds one value: edit it rather than adding a row.".into());
     }
-    // What a field left empty means where it is not text: nothing.
-    let optional = |column: &str| matches!(column, "type" | "ttl" | "index" | "score");
     let filled = |column: &str| -> Option<Option<&str>> {
         columns
             .iter()
-            .find(|(name, value)| *name == column && !(optional(name) && *value == Some("")))
+            .find(|(name, value)| *name == column && !(empty_is_none(name) && *value == Some("")))
             .map(|(_, value)| *value)
     };
     for &(column, value) in columns {
-        if optional(column) && value == Some("") {
+        if empty_is_none(column) && value == Some("") {
             continue;
         }
         if !self::columns(schema).contains(&column) {

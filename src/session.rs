@@ -638,12 +638,16 @@ pub(crate) struct InsertField {
     pub(crate) column: String,
     pub(crate) data_type: String,
     pub(crate) input: Entity<InputState>,
-    /// The `NULL` chip. Wins over typed text, because the chip is the later
-    /// word.
+    /// The `NULL` chip is on. Exclusive with `touched`: whichever happened
+    /// last wins, and NULL clears the box.
     pub(crate) nulled: bool,
-    /// Whether this field has been typed into. The reason `insert_value`
-    /// answers three ways rather than two.
+    /// Typed into since the last DEFAULT or NULL, so the text is sent even
+    /// when empty. The reason `insert_value` answers three ways rather than
+    /// two.
     pub(crate) touched: bool,
+    /// `Engine::new_row_sends_empty`: whether an emptied field is `''` or left
+    /// out.
+    pub(crate) sends_empty: bool,
 }
 
 /// Rows on their way into a table.
@@ -723,6 +727,22 @@ pub(crate) enum ImportPhase {
         started: std::time::Instant,
         cancelling: bool,
     },
+}
+
+/// What an empty box says will be sent. An emptied field is an empty string
+/// only where the engine writes one; elsewhere it is left out after all.
+pub(crate) fn insert_placeholder(nulled: bool, touched: bool, sends_empty: bool) -> &'static str {
+    match (nulled, touched && sends_empty) {
+        (true, _) => "NULL",
+        (false, true) => "empty string",
+        (false, false) => "DEFAULT",
+    }
+}
+
+/// Whether the statement leaves the column out, so it keeps its default:
+/// what the DEFAULT chip shows.
+pub(crate) fn insert_left_out(nulled: bool, touched: bool, sends_empty: bool, typed: &str) -> bool {
+    !nulled && (!touched || (!sends_empty && typed.is_empty()))
 }
 
 /// What one field contributes to the `INSERT`. The outer `None` is a column
@@ -3943,9 +3963,20 @@ mod tests {
             insert_value(false, true, "42"),
             Some(Some("42".to_string()))
         );
-        // The chip is the later word: a field nulled after being typed into is
-        // a NULL.
+        // The form keeps the two exclusive; if both were ever set, NULL is the
+        // answer that cannot send stray text.
         assert_eq!(insert_value(true, true, "42"), Some(None));
+    }
+
+    #[test]
+    fn an_emptied_field_reads_as_left_out_where_the_engine_drops_it() {
+        assert_eq!(insert_placeholder(false, true, true), "empty string");
+        assert!(!insert_left_out(false, true, true, ""));
+        assert_eq!(insert_placeholder(false, true, false), "DEFAULT");
+        assert!(insert_left_out(false, true, false, ""));
+        assert!(!insert_left_out(false, true, false, "42"));
+        assert_eq!(insert_placeholder(true, false, false), "NULL");
+        assert!(!insert_left_out(true, false, false, ""));
     }
 
     #[test]

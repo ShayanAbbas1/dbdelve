@@ -482,6 +482,17 @@ impl Engine {
         }
     }
 
+    /// Whether New row sends a field typed into and emptied again as an empty
+    /// string. MongoDB leaves an empty field out of the document, and Redis
+    /// leaves out an empty one that is not text.
+    pub fn new_row_sends_empty(self, column: &str) -> bool {
+        match self.syntax() {
+            Syntax::Sql => true,
+            Syntax::Mongo => false,
+            Syntax::Redis => !crate::redis_cmd::edit::empty_is_none(column),
+        }
+    }
+
     /// What the review of a generated batch says beyond its statements: how
     /// the engine matches rows, what it cannot undo, what it cannot write.
     /// Empty for every engine that has nothing to add.
@@ -3747,6 +3758,19 @@ mod tests {
                 engine != Engine::Redis,
                 "{engine:?}"
             );
+        }
+    }
+
+    #[test]
+    fn an_emptied_new_row_field_is_sent_only_where_the_engine_writes_one() {
+        for engine in Target::tiles(&[]).map(|target| target.engine) {
+            let sends = engine.new_row_sends_empty("name");
+            assert_eq!(sends, engine != Engine::MongoDb, "{engine:?}");
+        }
+        assert!(Engine::Redis.new_row_sends_empty("value"));
+        assert!(Engine::Redis.new_row_sends_empty("member"));
+        for column in ["ttl", "index", "score"] {
+            assert!(!Engine::Redis.new_row_sends_empty(column), "{column}");
         }
     }
 

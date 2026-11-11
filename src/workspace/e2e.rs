@@ -3784,3 +3784,130 @@ fn files_opened_while_connecting_are_not_run_by_a_later_connect(cx: &mut TestApp
         quit(workspace, cx);
     });
 }
+
+#[gpui::test]
+fn the_default_chip_puts_a_typed_then_emptied_insert_field_back_out_of_the_statement(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            "create table birds (id integer primary key, name text, wing text);",
+        );
+        workspace.update_in(cx, |workspace, window, cx| {
+            let leaf = workspace.profile().unwrap().session.explorer_leaves
+                [&explorer::relation_row("main", "birds")];
+            workspace.open_explorer_target(leaf.target, window, cx);
+        });
+        settle(cx);
+        let open_form = |cx: &mut VisualTestContext| {
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.new_row(&crate::actions::NewRow, window, cx);
+            });
+            settle(cx);
+        };
+        let input = |index: usize, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                let form = workspace.profile().unwrap().session.insert_form.as_ref();
+                form.unwrap().fields[index].input.clone()
+            })
+        };
+        let focus = |index: usize, cx: &mut VisualTestContext| {
+            let input = input(index, cx);
+            cx.update(|window, cx| input.focus_handle(cx).focus(window, cx));
+            settle(cx);
+        };
+        let typing_in = |index: usize, cx: &mut VisualTestContext| {
+            let input = input(index, cx);
+            cx.update(|window, cx| input.focus_handle(cx).is_focused(window))
+        };
+        let state = |index: usize, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, cx| {
+                let form = workspace.profile().unwrap().session.insert_form.as_ref();
+                let field = &form.unwrap().fields[index];
+                let input = field.input.read(cx);
+                (
+                    field.nulled,
+                    field.touched,
+                    input.value().to_string(),
+                    input.presentation().placeholder().to_string(),
+                )
+            })
+        };
+        let statement = |cx: &mut VisualTestContext| {
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.confirm_new_row(window, cx);
+            });
+            settle(cx);
+            workspace.read_with(cx, |workspace, _| {
+                let review = workspace.profile().unwrap().session.apply_review.as_ref();
+                review.unwrap().sql.clone()
+            })
+        };
+        let left_out = || (false, false, String::new(), "DEFAULT".to_string());
+        let nulled = || (true, false, String::new(), "NULL".to_string());
+        let typed = |text: &str| (false, true, text.to_string(), "empty string".to_string());
+
+        open_form(cx);
+        focus(0, cx);
+        cx.simulate_input("7");
+        settle(cx);
+        assert_eq!(state(0, cx), typed("7"));
+        cx.simulate_keystrokes("backspace");
+        settle(cx);
+        assert_eq!(state(0, cx), typed(""), "emptying keeps the field a value");
+
+        // Each field is its DEFAULT, its NULL, then its box.
+        cx.simulate_keystrokes("shift-tab shift-tab");
+        settle(cx);
+        assert!(!typing_in(0, cx));
+        press(cx, "enter");
+        assert_eq!(state(0, cx), left_out(), "DEFAULT puts the field back out");
+        cx.simulate_keystrokes("tab");
+        settle(cx);
+        press(cx, "space");
+        assert_eq!(state(0, cx), nulled());
+        cx.simulate_keystrokes("tab");
+        settle(cx);
+        assert!(typing_in(0, cx));
+        cx.simulate_input("9");
+        settle(cx);
+        assert_eq!(state(0, cx), typed("9"), "typing turns the NULL off");
+        cx.simulate_keystrokes("shift-tab");
+        settle(cx);
+        press(cx, "space");
+        assert_eq!(state(0, cx), nulled(), "NULL clears the box");
+        press(cx, "space");
+        assert_eq!(state(0, cx), left_out());
+
+        cx.simulate_keystrokes("tab tab tab tab");
+        settle(cx);
+        assert!(typing_in(1, cx));
+        cx.simulate_input("robin");
+        cx.simulate_keystrokes("tab tab tab");
+        settle(cx);
+        assert!(typing_in(2, cx));
+        cx.simulate_input("x");
+        cx.simulate_keystrokes("backspace");
+        settle(cx);
+        assert_eq!(state(1, cx), typed("robin"));
+        assert_eq!(state(2, cx), typed(""));
+        let sql = statement(cx);
+        assert!(!sql.contains("\"id\""), "{sql}");
+        assert!(sql.contains("\"name\"") && sql.contains("'robin'"), "{sql}");
+        assert!(sql.contains("\"wing\"") && sql.contains("''"), "{sql}");
+
+        workspace.update(cx, |workspace, cx| workspace.close_apply_review(cx));
+        open_form(cx);
+        focus(1, cx);
+        cx.simulate_input("robin");
+        cx.simulate_keystrokes("shift-tab");
+        settle(cx);
+        press(cx, "space");
+        assert_eq!(state(1, cx), nulled());
+        let sql = statement(cx);
+        assert!(sql.contains("NULL") && !sql.contains("robin"), "{sql}");
+
+        quit(workspace, cx);
+    });
+}
