@@ -28,6 +28,7 @@ Then, on the profile, turn on **Connect through an SSH tunnel** and fill in:
 | SSH port | Optional; blank defers to the config, or 22. |
 | SSH username | Optional; blank defers to the config, or the local user. |
 | Identity file | Optional; blank defers to the config, or ssh-agent. Absolute, or under `~/`, which `ssh` itself expands — a relative path is refused. |
+| Key passphrase | Optional; for a key file protected by a passphrase. Kept in the system keychain, never in the profile file. Blank means none. |
 
 **Host and Port on the rest of the form are as the SSH host sees them.** A
 `localhost` there means the SSH host itself, not your machine — the usual
@@ -58,9 +59,11 @@ SSH configuration.
 
 ## What's supported
 
-- Any auth `ssh` can do without prompting: a key already in ssh-agent
-  (a hardware key or one held by 1Password's or Secretive's agent included),
-  or an unencrypted key file.
+- Key auth: a key already in ssh-agent (a hardware key or one held by
+  1Password's or Secretive's agent included), an unencrypted key file, or a
+  key file with a passphrase given as **Key passphrase**. DBDelve hands the
+  passphrase to `ssh` only when it asks for that key's passphrase, never as a
+  password to a server.
 - Everything `~/.ssh/config` can say about the host: aliases, `ProxyJump`,
   `User`, `IdentityFile`, `Port`, `IdentitiesOnly`, and the rest.
 - TLS still verifies the database's real hostname, not the tunnel's local
@@ -77,11 +80,10 @@ ssh-agent` before `ssh-add`ing a key, or use an unencrypted key file instead.
 
 ## Limits
 
-- **No password auth and no passphrase prompts.** The tunnel runs
-  non-interactively: a key that needs a passphrase, or a host that only
-  offers password auth, fails rather than prompting. Decrypt the key first
-  (see `docs/snowflake.md` for the same `openssl pkcs8` step) or load it into
-  ssh-agent unlocked.
+- **No password auth.** The tunnel never prompts: a host that only offers
+  password or keyboard-interactive auth fails. A key's passphrase works only
+  through the Key passphrase field, which needs OpenSSH 8.4 or later; with an
+  older `ssh`, load the key into ssh-agent instead.
 - **MySQL's `verify-full` is refused through a tunnel.** The driver checks
   the certificate against the address it actually dials, and through a
   tunnel that's the local forward, not the server — so `verify-full` there
@@ -97,8 +99,10 @@ ssh-agent` before `ssh-add`ing a key, or use an unencrypted key file instead.
 These are `ssh`'s own messages, shown as they are:
 
 - **`Permission denied (publickey)`** — the SSH host didn't accept any key
-  offered. Check the identity file path, and that the right key is loaded
-  (`ssh-add -l`); there's no password fallback to try instead.
+  offered, or `ssh` couldn't use the one it did. Check the identity file path,
+  and that the right key is loaded (`ssh-add -l`); there's no password
+  fallback to try instead. If the key has a passphrase, enter it as Key
+  passphrase.
 - **`Host key verification failed`** — for example, a new host with
   `StrictHostKeyChecking=yes`, or a changed host key. Verify the server's
   fingerprint before adding or updating its entry in `known_hosts`.
