@@ -149,7 +149,10 @@ another. Two kinds of install update themselves:
   folder, `plugins\odbc` is emptied the same way and removed (a folder
   holding a running bridge cannot itself be renamed), and the release's
   files and its `plugins\odbc` folder are renamed in. Any failed step undoes
-  every rename before it, in reverse. Files the release does not ship stay,
+  every rename before it, in reverse; if some file will not go back, the
+  set-aside folder is kept with `dbdelve-unrestored.txt` in it listing where
+  each belongs, and no clearing touches a folder holding one (uninstalling
+  aside). Files the release does not ship stay,
   so the user's own files and an older release's dropped ones remain; the
   folder keeps its old versioned name.
 
@@ -162,7 +165,9 @@ app cannot write Program Files. `[InstallDelete]` then finds no `plugins` to
 wipe (if `plugins` would not move, it wipes it as before). If Setup ends
 without reaching `ssPostInstall`, `DeinitializeSetup` clears whatever the
 rolled-back install left at each path and renames everything back, in
-reverse. Without `/UPDATE` nothing is moved, so an interactive run is as it
+reverse; what will not go back stays listed for the next try and is written
+to the same `dbdelve-unrestored.txt` marker, which the `[Code]`'s clearing
+honours too. Without `/UPDATE` nothing is moved, so an interactive run is as it
 was. Every run clears earlier `*.dbdelve-old` entries in `PrepareToInstall`
 and after installing, and `[UninstallDelete]` removes them on uninstall. The
 app clears them, and a leftover `update.dbdelve-new`, at startup where it can

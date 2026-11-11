@@ -32,6 +32,12 @@ const EXE: &str = "dbdelve.exe";
 /// what has it.
 const SET_ASIDE: &str = ".dbdelve-old";
 
+/// Written into a set-aside folder that still holds files a failed update
+/// could not put back, listing where each belongs. No clearing takes a folder
+/// with it, since it may hold the only copy of the old release. The
+/// installer's `[Code]` writes and honours the same one.
+const UNRESTORED: &str = "dbdelve-unrestored.txt";
+
 /// Where a portable update unpacks: inside the install, so its files move into
 /// place by rename.
 const STAGING: &str = "update.dbdelve-new";
@@ -151,6 +157,10 @@ fn clear_set_aside(folder: &Path) {
             continue;
         }
         let path = entry.path();
+        if path.join(UNRESTORED).is_file() {
+            tracing::warn!(path = %path.display(), "kept: it holds what a failed update could not put back");
+            continue;
+        }
         let cleared = if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
             fs::remove_dir_all(&path)
         } else {
@@ -563,21 +573,28 @@ fn swap(
         }
         return Ok(());
     };
-    let mut restored = true;
+    let mut unrestored = String::new();
     for (from, to) in done.iter().rev() {
         let back = from
             .parent()
             .map_or(Ok(()), fs::create_dir_all)
             .and_then(|()| rename(to, from));
         if let Err(undo) = back {
-            restored = false;
             tracing::error!(path = %from.display(), "could not be put back from {}: {undo}", to.display());
+            unrestored.push_str(&format!("{} <- {}\r\n", from.display(), to.display()));
         }
     }
-    // Kept if anything is still in it, so the next start's clearing does not
-    // take what could not be put back.
-    if restored {
+    if unrestored.is_empty() {
         _ = fs::remove_dir_all(aside);
+    } else {
+        match fs::write(aside.join(UNRESTORED), unrestored) {
+            Ok(()) => {
+                tracing::error!(path = %aside.display(), "kept, with {UNRESTORED} listing what to put back")
+            }
+            Err(mark) => {
+                tracing::error!(path = %aside.display(), "could not be marked as holding what was not put back, so the next start may clear it: {mark}")
+            }
+        }
     }
     Err(error.to_string())
 }
@@ -653,7 +670,7 @@ mod tests {
     use zip::{ZipWriter, write::SimpleFileOptions};
 
     use super::{
-        EXE, Kind, STAGING, Scope, clear_set_aside, files_under, kind_of, put_in_place,
+        EXE, Kind, STAGING, Scope, UNRESTORED, clear_set_aside, files_under, kind_of, put_in_place,
         release_directory, replaced, same_folder, setup_arguments, swap, unpack,
     };
     use crate::update::{
@@ -830,6 +847,7 @@ mod tests {
     fn the_installer_script_honours_the_update_switch() {
         let script = include_str!("../../assets/windows/dbdelve.iss");
         let suffix = format!("SetAsideSuffix = '{}';", super::SET_ASIDE);
+        let marker = format!("UnrestoredMarker = '{UNRESTORED}';");
         for needed in [
             "'/UPDATE'",
             "function PrepareToInstall(var NeedsRestart: Boolean): String;",
@@ -838,6 +856,7 @@ mod tests {
             r"SetAside('plugins\odbc\bin\dbdelve-odbc.exe', Aside)",
             r#"Name: "{app}\*.dbdelve-old""#,
             suffix.as_str(),
+            marker.as_str(),
         ] {
             assert!(script.contains(needed), "{needed}");
         }
@@ -1111,6 +1130,43 @@ mod tests {
             assert!(!folder.join(STAGING).exists(), "{case}");
             drop(running);
         }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn what_a_failed_swap_could_not_put_back_is_never_cleared() {
+        let directory = scratch("windows-unrestored");
+        let top = release_directory("9.9.9", "x86_64");
+        let zip = directory.join(format!("{top}.zip"));
+        zip_release(&zip, &release(&top, "new"));
+        let folder = directory.join("install");
+        installed_folder(&folder);
+        let licence = folder.join("LICENSE");
+        let mut refusing = |from: &Path, to: &Path| {
+            let arriving = to == folder.join("licenses").join("new.txt");
+            let returning = to == licence && !from.starts_with(folder.join(STAGING));
+            if arriving || returning {
+                return Err(io::Error::other("in use"));
+            }
+            fs::rename(from, to)
+        };
+        assert_eq!(
+            put_in_place(&zip, &folder, &top, &mut refusing),
+            Err(COULD_NOT_REPLACE)
+        );
+        assert!(!licence.exists());
+        let aside = set_aside_folders(&folder);
+        assert_eq!(aside.len(), 1);
+        let marker = fs::read_to_string(aside[0].join(UNRESTORED)).unwrap();
+        assert!(marker.contains(&licence.display().to_string()), "{marker}");
+
+        fs::create_dir_all(folder.join("1-2.dbdelve-old")).unwrap();
+        clear_set_aside(&folder);
+        assert_eq!(set_aside_folders(&folder), aside);
+        assert_eq!(
+            fs::read_to_string(aside[0].join("LICENSE")).unwrap(),
+            "old licence"
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 

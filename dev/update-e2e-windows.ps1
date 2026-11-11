@@ -271,7 +271,7 @@ function Assert-Release([string]$Folder, [string]$Stage) {
 
 function Get-Leftovers([string]$Folder) {
     @(Get-ChildItem -LiteralPath $Folder -Force | Where-Object {
-            $_.Name -like "*.dbdelve-old" -or $_.Name -like "*.dbdelve-unrestored" -or $_.Name -eq "update.dbdelve-new"
+            $_.Name -like "*.dbdelve-old" -or $_.Name -eq "update.dbdelve-new"
         })
 }
 

@@ -22,7 +22,9 @@
 ; the ODBC bridge's executable and the plugins folder into a folder ending
 ; .dbdelve-old inside {app} before anything is installed, and moves them back
 ; if the install fails. That folder goes on the next run of this installer, on
-; uninstall, and at the app's next start where it may write there. Without
+; uninstall, and at the app's next start where it may write there, unless
+; something in it could not be put back: then dbdelve-unrestored.txt in it
+; lists where each file belongs, and only uninstalling clears it. Without
 ; /UPDATE nothing is moved: an ordinary run behaves as it always has.
 ;
 ; Defines required on the iscc command line:
@@ -123,8 +125,11 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChang
 [Code]
 const
   SetAsideSuffix = '.dbdelve-old';
+  { The same as UNRESTORED in src/update/windows.rs. }
+  UnrestoredMarker = 'dbdelve-unrestored.txt';
 
 var
+  SetAsideDir: String;
   SetAsideFrom: TArrayOfString;
   SetAsideTo: TArrayOfString;
   InstallDone: Boolean;
@@ -149,10 +154,12 @@ begin
     try
       repeat
         Path := ExpandConstant('{app}\') + FindRec.Name;
-        if FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY <> 0 then
-          DelTree(Path, True, True, True)
+        if FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY = 0 then
+          DeleteFile(Path)
+        else if FileExists(AddBackslash(Path) + UnrestoredMarker) then
+          Log('Kept ' + Path + ': it holds what a failed update could not put back')
         else
-          DeleteFile(Path);
+          DelTree(Path, True, True, True);
       until not FindNext(FindRec);
     finally
       FindClose(FindRec);
@@ -182,11 +189,17 @@ begin
 end;
 
 { In reverse, so the plugins folder is back before the bridge returns into
-  it. Whatever a failed install left in the way goes first. }
+  it. Whatever a failed install left in the way goes first. What will not go
+  back stays listed, for DeinitializeSetup to try again, and the marker keeps
+  every later clearing away from it. }
 procedure PutBack;
 var
-  I: Integer;
+  I, Count: Integer;
+  KeptFrom, KeptTo: TArrayOfString;
+  Listed: String;
 begin
+  Count := 0;
+  Listed := '';
   for I := GetArrayLength(SetAsideFrom) - 1 downto 0 do begin
     if DirExists(SetAsideFrom[I]) then
       DelTree(SetAsideFrom[I], True, True, True)
@@ -195,11 +208,30 @@ begin
     ForceDirectories(ExtractFileDir(SetAsideFrom[I]));
     if RenameFile(SetAsideTo[I], SetAsideFrom[I]) then
       Log('Put back ' + SetAsideFrom[I])
-    else
+    else begin
       Log('Could not put back ' + SetAsideFrom[I] + ' from ' + SetAsideTo[I]);
+      SetArrayLength(KeptFrom, Count + 1);
+      SetArrayLength(KeptTo, Count + 1);
+      KeptFrom[Count] := SetAsideFrom[I];
+      KeptTo[Count] := SetAsideTo[I];
+      Count := Count + 1;
+      Listed := Listed + SetAsideFrom[I] + ' <- ' + SetAsideTo[I] + #13#10;
+    end;
   end;
-  SetArrayLength(SetAsideFrom, 0);
-  SetArrayLength(SetAsideTo, 0);
+  { Back in the order they were set aside, so a retry still runs in reverse. }
+  SetArrayLength(SetAsideFrom, Count);
+  SetArrayLength(SetAsideTo, Count);
+  for I := 0 to Count - 1 do begin
+    SetAsideFrom[I] := KeptFrom[Count - 1 - I];
+    SetAsideTo[I] := KeptTo[Count - 1 - I];
+  end;
+  if SetAsideDir = '' then
+    Exit;
+  if Count > 0 then begin
+    if not SaveStringToFile(AddBackslash(SetAsideDir) + UnrestoredMarker, Listed, False) then
+      Log('Could not mark ' + SetAsideDir + ' as holding what was not put back');
+  end else
+    DeleteFile(AddBackslash(SetAsideDir) + UnrestoredMarker);
 end;
 
 { Runs before Setup looks for files in use and before [InstallDelete]. }
@@ -216,6 +248,7 @@ begin
     Result := 'Could not create ' + Aside + '.';
     Exit;
   end;
+  SetAsideDir := Aside;
   if not SetAside('dbdelve.exe', Aside) then begin
     PutBack;
     Result := 'Could not move the running DBDelve aside.';
