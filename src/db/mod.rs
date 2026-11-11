@@ -915,7 +915,7 @@ pub(super) fn server_from_url(url: &str, engine: &str) -> Result<ServerConfig, S
 /// A local port forward opened over the system `ssh` binary before the engine
 /// dials in. The one secret is the key's passphrase, which the Keychain holds,
 /// never `profiles.toml`; the private key stays on disk or with ssh-agent.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SshTunnel {
     /// A hostname, or an alias `~/.ssh/config` resolves.
     pub host: String,
@@ -937,6 +937,19 @@ pub struct SshTunnel {
     /// password is. Blank is none, and ssh runs exactly as it does without one.
     #[serde(skip)]
     pub passphrase: String,
+}
+
+/// By hand, so the passphrase reaches no log line or panic message.
+impl std::fmt::Debug for SshTunnel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SshTunnel")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("user", &self.user)
+            .field("identity_file", &self.identity_file)
+            .field("run_as", &self.run_as)
+            .finish_non_exhaustive()
+    }
 }
 
 impl SshTunnel {
@@ -3932,6 +3945,23 @@ mod tests {
             path: "/tmp/dbdelve.db".into(),
             statement_timeout: 0
         }));
+    }
+
+    #[test]
+    fn a_key_passphrase_is_left_out_of_debug_output() {
+        let tunnel = SshTunnel {
+            host: "bastion".into(),
+            passphrase: "correct horse".into(),
+            ..SshTunnel::default()
+        };
+        let config = ConnectionConfig::MySql(ServerConfig {
+            ssh: Some(tunnel),
+            ..ServerConfig::default()
+        });
+        for printed in [format!("{config:?}"), format!("{config:#?}")] {
+            assert!(printed.contains("bastion"), "{printed}");
+            assert!(!printed.contains("correct horse"), "{printed}");
+        }
     }
 
     #[test]
