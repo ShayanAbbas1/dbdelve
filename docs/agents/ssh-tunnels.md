@@ -118,7 +118,9 @@ already set up on the machine.
     with one given that ssh was handed, that it may be wrong.
   - In the tests `current_exe()` is the test binary, whose arguments libtest
     would read as a filter, so a `cfg(test)` loader hook (`.init_array`,
-    `__mod_init_func`) answers as askpass before libtest's main. The live
+    `__mod_init_func`) answers as askpass before libtest's main. It needs the
+    loader to pass it argv, which glibc and macOS do and musl does not, so
+    the hook and the tests that lean on it are glibc and macOS only. The live
     tests use the `dbdelve-bastion-keyless` entry `dev/ssh/setup.sh` writes,
     with no identity or agent of its own, and an encrypted copy of the key.
 

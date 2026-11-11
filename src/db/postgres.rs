@@ -3381,7 +3381,7 @@ mod tests {
     }
 
     // Where the test binary can stand in as ssh's askpass.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
     #[test]
     #[ignore = "requires the dev bastions and Postgres configured through dbdelve_SSH_CONFIG and PG*"]
     fn live_ssh_every_login_over_the_socket_is_given_the_key_passphrase() {

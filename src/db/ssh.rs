@@ -2014,7 +2014,7 @@ mod tests {
     }
 
     // Where the test binary can stand in as ssh's askpass.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
     #[test]
     #[ignore = "requires the dev bastions configured through dbdelve_SSH_CONFIG"]
     fn live_ssh_a_key_with_a_passphrase_opens_a_tunnel_once_given_it() {
@@ -2024,7 +2024,7 @@ mod tests {
     }
 
     // Where the test binary can stand in as ssh's askpass.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
     #[test]
     #[ignore = "requires the dev bastions configured through dbdelve_SSH_CONFIG"]
     fn live_ssh_a_key_with_a_passphrase_fails_saying_so_without_the_right_one() {

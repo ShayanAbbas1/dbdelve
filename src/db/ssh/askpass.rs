@@ -199,8 +199,12 @@ fn ask(address: &str, token: &str, prompt: &str) -> Option<String> {
 /// ssh runs the test binary as its askpass in the live tests, and libtest
 /// would read the prompt as a test filter: this answers first, before
 /// libtest's own main, as `main` does in the app. The prompt comes from the
-/// loader's own arguments, since std may not have read them yet.
-#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+/// loader's own arguments, since std may not have read them yet; glibc and
+/// dyld pass them to a constructor, musl does not.
+#[cfg(all(
+    test,
+    any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")
+))]
 #[used]
 #[cfg_attr(target_os = "linux", unsafe(link_section = ".init_array"))]
 #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,__mod_init_func"))]
