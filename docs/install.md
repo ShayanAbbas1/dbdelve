@@ -201,9 +201,10 @@ itself, so `brew upgrade` skips DBDelve unless you add `--greedy`.
 On Linux it works for an install at `~/.local/bin/dbdelve`, which is what the
 tarball's `install.sh` and the one-liner make, and for a running AppImage whose
 folder you can write to. Installs from the AUR or another package manager, a
-tarball run from where it was unpacked, and builds from source don't update
-themselves; the titlebar links to [the latest release][releases] instead, and
-your package manager is the way to update.
+tarball run from where it was unpacked, a build run from the source tree, and
+any dev or variant build don't update themselves; the titlebar links to
+[the latest release][releases] instead, and your package manager is the way to
+update.
 
 Windows doesn't update itself yet. If you used the Windows installer, run
 the next one over it; it upgrades in place. The zip has no upgrade: each

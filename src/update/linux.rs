@@ -78,11 +78,17 @@ struct Identity {
 
 impl Identity {
     fn of(path: &Path) -> io::Result<Self> {
-        let metadata = path.symlink_metadata()?;
-        Ok(Self {
+        path.symlink_metadata()
+            .map(|metadata| Self::from(&metadata))
+    }
+}
+
+impl From<&fs::Metadata> for Identity {
+    fn from(metadata: &fs::Metadata) -> Self {
+        Self {
             device: metadata.dev(),
             inode: metadata.ino(),
-        })
+        }
     }
 }
 
@@ -129,12 +135,16 @@ fn remember(appimage: &Path, at_start: &OnceLock<Identity>) {
 /// children only: this process, on its way out, keeps using them.
 #[cfg(target_os = "linux")]
 pub(super) fn close_inherited_files() {
+    let first: libc::c_uint = 3;
+    // Through syscall: the libc crate wraps close_range for glibc only, and a
+    // musl build has to compile too.
     // SAFETY: sets a flag on descriptors; none is closed.
     let flagged = unsafe {
-        libc::close_range(
-            3,
+        libc::syscall(
+            libc::SYS_close_range,
+            first,
             libc::c_uint::MAX,
-            libc::CLOSE_RANGE_CLOEXEC as libc::c_int,
+            libc::CLOSE_RANGE_CLOEXEC,
         )
     };
     if flagged == 0 {
@@ -181,15 +191,32 @@ fn running(kind: &Kind, appimage_at_start: &OnceLock<Identity>) -> io::Result<Id
 
 /// Another process may have updated this install since it started, perhaps
 /// past the release this one offers: putting that over it would go backwards.
-fn unchanged(installed: &Path, running: Identity) -> Result<(), String> {
-    match Identity::of(installed) {
-        Ok(identity) if identity == running => Ok(()),
-        Ok(_) => Err(format!(
-            "{} is no longer the file this DBDelve started from",
-            installed.display()
-        )),
-        Err(error) => Err(format!("{}: {error}", installed.display())),
+/// [`ALREADY_UPDATED`], which offers a restart, only when another regular file
+/// has taken its place; anything else there could not be launched, and is a
+/// plain failure. The reason comes with the detail for the log.
+fn unchanged(installed: &Path, running: Identity) -> Result<(), (&'static str, String)> {
+    let metadata = installed.symlink_metadata().map_err(|error| {
+        (
+            COULD_NOT_REPLACE,
+            format!("{}: {error}", installed.display()),
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err((
+            COULD_NOT_REPLACE,
+            format!("{} is no longer a file", installed.display()),
+        ));
     }
+    if Identity::from(&metadata) != running {
+        return Err((
+            ALREADY_UPDATED,
+            format!(
+                "{} is no longer the file this DBDelve started from",
+                installed.display()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// The one directory a release tarball holds.
@@ -246,7 +273,7 @@ pub(super) fn installer(version: &str, asset: impl Fn(&str) -> Option<Asset>) ->
             return None;
         }
     };
-    if let Err(reason) = unchanged(&installed, running) {
+    if let Err((_, reason)) = unchanged(&installed, running) {
         tracing::info!("no self-update: {reason}");
         return None;
     }
@@ -384,7 +411,7 @@ pub(crate) fn install(installer: &Installer, progress: &Progress) -> Result<Path
     let installed = kind.installed();
     tracing::info!(version, path = %installed.display(), "update started");
     let _lock = lock(&installed).map_err(failed(ALREADY_RUNNING))?;
-    unchanged(&installed, *running).map_err(failed(ALREADY_UPDATED))?;
+    unchanged(&installed, *running).map_err(|(reason, detail)| failed(reason)(detail))?;
 
     let scratch = Scratch::new().map_err(failed(NO_SCRATCH))?;
     let file = scratch.0.join(&asset.name);
@@ -538,8 +565,9 @@ mod tests {
     use flate2::{Compression, write::GzEncoder};
 
     use super::{
-        Identity, Kind, appimage_of, bundled_installer, kind_of, mount_point, relaunchable,
-        release_directory, remember, run, running, sibling, swap_in, unchanged, unpack,
+        ALREADY_UPDATED, Identity, Kind, appimage_of, bundled_installer, kind_of, mount_point,
+        relaunchable, release_directory, remember, run, running, sibling, swap_in, unchanged,
+        unpack,
     };
     use crate::update::download::{COULD_NOT_REPLACE, NOT_THE_APP, tests::scratch};
 
@@ -672,15 +700,25 @@ mod tests {
         let installed = directory.join("dbdelve");
         fs::write(&installed, "A").unwrap();
         let started = Identity::of(&installed).unwrap();
-        unchanged(&installed, started).unwrap();
+        let reason = |started| unchanged(&installed, started).map_err(|(reason, _)| reason);
+        assert_eq!(reason(started), Ok(()));
 
-        // Another DBDelve's update, renamed over it.
+        // Another DBDelve's update, renamed over it: a restart runs that.
         let newer = directory.join(".dbdelve.new");
         fs::write(&newer, "C").unwrap();
         fs::rename(&newer, &installed).unwrap();
-        assert!(unchanged(&installed, started).is_err());
+        assert_eq!(reason(started), Err(ALREADY_UPDATED));
+
+        // Nothing a restart could run.
         fs::remove_file(&installed).unwrap();
-        assert!(unchanged(&installed, started).is_err());
+        assert_eq!(reason(started), Err(COULD_NOT_REPLACE));
+        fs::create_dir(&installed).unwrap();
+        assert_eq!(reason(started), Err(COULD_NOT_REPLACE));
+        fs::remove_dir(&installed).unwrap();
+        let elsewhere = directory.join("elsewhere");
+        fs::write(&elsewhere, "C").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &installed).unwrap();
+        assert_eq!(reason(started), Err(COULD_NOT_REPLACE));
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1007,10 +1045,12 @@ mod tests {
             );
             assert_eq!(fs::read_to_string(&bridge).unwrap(), "bridge", "{case}");
             assert_eq!(fs::read_dir(&bin).unwrap().count(), 1, "{case}");
+            // The lock file stays, and only where `flock` is installed.
             let names = |dir: &Path| {
                 fs::read_dir(dir)
                     .unwrap()
                     .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                    .filter(|name| name != ".install.lock")
                     .collect::<Vec<_>>()
             };
             assert_eq!(names(&data), ["plugins"], "{case}");

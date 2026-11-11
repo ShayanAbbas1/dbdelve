@@ -98,11 +98,15 @@ On Linux (`src/update/linux.rs`) two kinds of install update themselves:
   `install.sh`, and runs that `install.sh`: the new release knows its own
   layout. `install.sh` copies the binary beside where it goes and the ODBC
   bridge beside `plugins/` (never in it, where discovery would load it), and
-  renames both into place only once both copies are whole. A failure during
-  the renames puts the old bridge back, and a run killed during them is
-  rolled back by the next run, so the installed pair is the old one or the
-  new one, and a running copy keeps its file. Plugin discovery skips hidden
-  folders for the same reason.
+  renames both into place only once both copies are whole, so a failed copy
+  changes nothing and a running copy keeps its file. The commit is renames
+  only, with HUP, INT and TERM ignored while it runs; a failed rename puts
+  the old bridge back, and a run killed hard part way through leaves a backup
+  the next run restores before doing anything else. A lock file of its own,
+  `.install.lock` in the data directory (taken when `flock` exists; never the
+  `~/.local/bin` lock the updater holds), keeps two runs from sharing the
+  staged and backup names. Plugin discovery skips hidden folders, so neither
+  copy is ever loaded.
 
 Everything else on Linux -- a tarball run where it was unpacked, a distro or
 Snap package, a binary anywhere else -- keeps the link.

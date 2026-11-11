@@ -23,6 +23,18 @@ STAGED="$DATA/.odbc.new"
 BACKUP="$DATA/.odbc.old"
 SIZES=(16 32 64 128 256 512)
 
+# One install or uninstall at a time: two would share the staged and backup
+# names above and undo each other's work. A lock file of this script's own --
+# the app's updater, which runs this, already holds one on ~/.local/bin.
+mkdir -p "$DATA"
+if command -v flock >/dev/null; then
+  exec 9>"$DATA/.install.lock"
+  flock -n 9 || {
+    echo "another dbdelve install is running" >&2
+    exit 1
+  }
+fi
+
 refresh() {
   # Both are optional: a desktop without them still reads the directories on
   # its own schedule, and a headless box has neither installed.
@@ -63,9 +75,8 @@ fi
 
 # The binary and its bridge are copied beside where they go, then renamed into
 # place only once both copies are whole, and a failure part way through the
-# renames puts the old bridge back: the installed pair is either the old one
-# or the new one. A running DBDelve -- the one updating itself, say -- keeps
-# the files it started from.
+# renames puts the old bridge back. A running DBDelve -- the one updating
+# itself, say -- keeps the files it started from.
 moved_aside=
 swapped=
 committed=
@@ -74,7 +85,7 @@ roll_back() {
     if [[ -n "$swapped" ]]; then
       rm -rf "$PLUGINS/odbc"
     fi
-    if [[ -n "$moved_aside" ]]; then
+    if [[ -n "$moved_aside" && ! -e "$PLUGINS/odbc" ]]; then
       mv "$BACKUP" "$PLUGINS/odbc"
     fi
   fi
@@ -85,6 +96,9 @@ trap 'exit 1' HUP INT TERM
 rm -rf "$BIN/.dbdelve.new" "$STAGED"
 install -m 755 "$HERE/dbdelve" "$BIN/.dbdelve.new"
 cp -R "$HERE/plugins/odbc" "$STAGED"
+# Ignored while only renames run, so a signal cannot land between a rename and
+# the flag that records it and leave roll_back undoing the wrong step.
+trap '' HUP INT TERM
 if [[ -e "$PLUGINS/odbc" || -L "$PLUGINS/odbc" ]]; then
   mv "$PLUGINS/odbc" "$BACKUP"
   moved_aside=1
@@ -94,6 +108,7 @@ swapped=1
 mv -f "$BIN/.dbdelve.new" "$BIN/dbdelve"
 committed=1
 rm -rf "$BACKUP"
+trap 'exit 1' HUP INT TERM
 # Exec gets the absolute path rather than the bare name the entry ships with:
 # a desktop launches its entries with the session's PATH, and ~/.local/bin only
 # joins that at login -- and only when it already existed. Bare `dbdelve` would
