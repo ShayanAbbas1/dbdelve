@@ -151,6 +151,13 @@ pub(crate) fn newer_release() -> Option<Update> {
     })
 }
 
+/// Notes what this process was installed as, before any update check can find
+/// that another process has replaced it since. Once, at startup.
+pub(crate) fn remember_install() {
+    #[cfg(target_os = "linux")]
+    linux::remember_install();
+}
+
 /// Only a test build reads its feed from the environment, so a shipped one
 /// cannot be pointed anywhere but the real releases.
 fn feed() -> String {

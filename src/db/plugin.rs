@@ -70,6 +70,9 @@ pub fn discover_in(dirs: &[(PathBuf, Layout)]) -> Vec<&'static Plugin> {
         };
         let mut folders: Vec<PathBuf> = entries
             .filter_map(Result::ok)
+            // Hidden folders are an install's staging and backup copies, and
+            // sort ahead of the real ones.
+            .filter(|entry| !entry.file_name().as_encoded_bytes().starts_with(b"."))
             .map(|entry| entry.path())
             .filter(|path| path.is_dir())
             .collect();
@@ -233,6 +236,20 @@ mod tests {
         );
         write(&root, "i-last", &manifest("last", ""));
         assert_eq!(ids(&root), ["good", "last"]);
+    }
+
+    #[test]
+    fn a_hidden_folder_is_never_a_plugin() {
+        let root = scratch("hidden");
+        write(
+            &root,
+            ".odbc.new",
+            &manifest("odbc", "").replace("1.0.0", "2.0.0"),
+        );
+        write(&root, "odbc", &manifest("odbc", ""));
+        let found = discover_in(&[(root.clone(), Layout::Plain)]);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].version, "1.0.0");
     }
 
     #[test]

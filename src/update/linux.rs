@@ -79,20 +79,46 @@ impl Identity {
     }
 }
 
-/// The AppImage file as it was when this process first looked: the running
+/// The AppImage file as it was when this process started: the running
 /// executable is inside its mount, so it has no identity of its own to check.
 static APPIMAGE_AT_START: OnceLock<Identity> = OnceLock::new();
+
+/// Records the AppImage this process runs from, if it runs from one. Called
+/// once at startup, before any update check: recorded any later, it could be
+/// a newer release another process has put there since.
+pub(super) fn remember_install() {
+    let exe = match std::env::current_exe().and_then(fs::canonicalize) {
+        Ok(exe) => exe,
+        Err(error) => {
+            tracing::info!("the running executable could not be found: {error}");
+            return;
+        }
+    };
+    if let Some(appimage) = appimage_of(
+        &exe,
+        std::env::var_os("APPIMAGE").as_deref(),
+        std::env::var_os("APPDIR").as_deref(),
+    ) {
+        remember(appimage, &APPIMAGE_AT_START);
+    }
+}
+
+fn remember(appimage: &Path, at_start: &OnceLock<Identity>) {
+    match Identity::of(appimage) {
+        Ok(identity) => {
+            _ = at_start.set(identity);
+        }
+        Err(error) => tracing::info!("the AppImage could not be read: {error}"),
+    }
+}
 
 /// The file this process was started from, as it was then.
 fn running(kind: &Kind, appimage_at_start: &OnceLock<Identity>) -> io::Result<Identity> {
     match kind {
-        Kind::AppImage(appimage) => {
-            if let Some(identity) = appimage_at_start.get() {
-                return Ok(*identity);
-            }
-            let identity = Identity::of(appimage)?;
-            Ok(*appimage_at_start.get_or_init(|| identity))
-        }
+        Kind::AppImage(_) => appimage_at_start
+            .get()
+            .copied()
+            .ok_or_else(|| io::Error::other("the AppImage was not recorded at startup")),
         // Still the file that was started even once it is replaced or
         // deleted, which the path `current_exe` reads is not.
         Kind::Tarball { .. } => fs::metadata("/proc/self/exe").map(|metadata| Identity {
@@ -196,15 +222,7 @@ fn kind_of(
     appdir: Option<&OsStr>,
     home: Option<&Path>,
 ) -> Result<Kind, &'static str> {
-    fn set(value: Option<&OsStr>) -> Option<&Path> {
-        value.filter(|value| !value.is_empty()).map(Path::new)
-    }
-    // An AppImage's runtime exports both to everything it starts, so a
-    // terminal opened from one hands them to a DBDelve that is no AppImage at
-    // all. Only an executable inside the mount APPDIR names is the AppImage.
-    if let (Some(appimage), Some(appdir)) = (set(appimage), set(appdir))
-        && fs::canonicalize(appdir).is_ok_and(|appdir| exe.starts_with(appdir))
-    {
+    if let Some(appimage) = appimage_of(exe, appimage, appdir) {
         return appimage_at(appimage).map(Kind::AppImage);
     }
     let Some(home) = home.filter(|home| home.is_absolute()) else {
@@ -225,6 +243,22 @@ fn kind_of(
     Ok(Kind::Tarball {
         home: home.to_path_buf(),
     })
+}
+
+/// The AppImage `exe` (canonical) runs from, if it runs from one.
+fn appimage_of<'a>(
+    exe: &Path,
+    appimage: Option<&'a OsStr>,
+    appdir: Option<&OsStr>,
+) -> Option<&'a Path> {
+    let appimage = appimage.filter(|value| !value.is_empty()).map(Path::new)?;
+    let appdir = appdir.filter(|value| !value.is_empty())?;
+    // An AppImage's runtime exports both to everything it starts, so a
+    // terminal opened from one hands them to a DBDelve that is no AppImage at
+    // all. Only an executable inside the mount APPDIR names is the AppImage.
+    fs::canonicalize(appdir)
+        .is_ok_and(|appdir| exe.starts_with(appdir))
+        .then_some(appimage)
 }
 
 fn appimage_at(appimage: &Path) -> Result<PathBuf, &'static str> {
@@ -411,8 +445,8 @@ mod tests {
     use flate2::{Compression, write::GzEncoder};
 
     use super::{
-        Identity, Kind, bundled_installer, kind_of, release_directory, run, running, sibling,
-        swap_in, unchanged, unpack,
+        Identity, Kind, appimage_of, bundled_installer, kind_of, release_directory, remember, run,
+        running, sibling, swap_in, unchanged, unpack,
     };
     use crate::update::download::{COULD_NOT_REPLACE, NOT_THE_APP, tests::scratch};
 
@@ -469,7 +503,10 @@ mod tests {
         let elsewhere = directory.join("dbdelve");
         fs::write(&elsewhere, "").unwrap();
         assert!(kind_of(&elsewhere, image, dir, None).is_err());
+        assert_eq!(appimage_of(&exe, image, dir), Some(appimage.as_path()));
+        assert_eq!(appimage_of(&elsewhere, image, dir), None);
         // APPIMAGE alone proves nothing.
+        assert_eq!(appimage_of(&exe, image, None), None);
         assert!(kind_of(&exe, image, None, None).is_err());
         assert!(kind_of(&exe, image, Some(OsStr::new("")), None).is_err());
 
@@ -555,18 +592,24 @@ mod tests {
     }
 
     #[test]
-    fn an_appimage_is_remembered_as_it_was_first_seen() {
+    fn an_appimage_is_remembered_as_it_was_at_startup() {
         let directory = scratch("appimage-identity");
         let appimage = directory.join("DBDelve.AppImage");
         fs::write(&appimage, "A").unwrap();
         let kind = Kind::AppImage(appimage.clone());
         let at_start = OnceLock::new();
+        // Not recorded at startup: nothing found later stands in for it.
+        assert!(running(&kind, &at_start).is_err());
+
+        remember(&appimage, &at_start);
         let first = running(&kind, &at_start).unwrap();
         unchanged(&appimage, first).unwrap();
 
+        // Another process's update, then this one's first check.
         let newer = directory.join(".DBDelve.AppImage.update-new");
         fs::write(&newer, "C").unwrap();
         fs::rename(&newer, &appimage).unwrap();
+        remember(&appimage, &at_start);
         let later = running(&kind, &at_start).unwrap();
         assert_eq!(later, first);
         assert!(unchanged(&appimage, later).is_err());
@@ -786,35 +829,83 @@ mod tests {
                 .is_file()
         );
 
+        let data = home.join(".local/share/dbdelve");
+        let release_with = |name: &str, bridge: Option<&[u8]>| {
+            let at = directory.join(format!("{name}.tar.gz"));
+            tarball(
+                &at,
+                &entries
+                    .iter()
+                    .filter(|(path, ..)| bridge.is_some() || !path.contains("/plugins/"))
+                    .map(|(path, data, mode)| {
+                        let data = if path.ends_with("/dbdelve") {
+                            &b"newer binary"[..]
+                        } else if path.ends_with("/dbdelve-odbc") {
+                            bridge.unwrap()
+                        } else {
+                            data.as_slice()
+                        };
+                        (path.as_str(), data, *mode)
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            unpack(&at, &directory.join(name), &top).unwrap()
+        };
+        let untouched = |case: &str| {
+            assert_eq!(
+                fs::read_to_string(&installed).unwrap(),
+                "new binary",
+                "{case}"
+            );
+            assert_eq!(fs::read_to_string(&bridge).unwrap(), "bridge", "{case}");
+            assert_eq!(fs::read_dir(&bin).unwrap().count(), 1, "{case}");
+            let names = |dir: &Path| {
+                fs::read_dir(dir)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(names(&data), ["plugins"], "{case}");
+            assert_eq!(names(&data.join("plugins")), ["odbc"], "{case}");
+        };
+
         // A release missing its bridge fails before anything is replaced.
-        let broken = directory.join("broken.tar.gz");
-        tarball(
-            &broken,
-            &entries
-                .iter()
-                .filter(|(path, ..)| !path.contains("/plugins/"))
-                .map(|(path, data, mode)| {
-                    let data = if path.ends_with("/dbdelve") {
-                        &b"newer binary"[..]
-                    } else {
-                        data.as_slice()
-                    };
-                    (path.as_str(), data, *mode)
-                })
-                .collect::<Vec<_>>(),
+        let broken = release_with("broken", None);
+        assert!(run(bundled_installer(&broken, &home).env_remove("XDG_DATA_HOME")).is_err());
+        untouched("a failed copy");
+
+        // The binary's rename fails after the bridge's: the old bridge goes
+        // back beside the old binary.
+        let fake = directory.join("fake-bin");
+        fs::create_dir(&fake).unwrap();
+        fs::write(
+            fake.join("mv"),
+            "#!/bin/sh\nfor arg; do case $arg in */.dbdelve.new) exit 1;; esac; done\nexec /bin/mv \"$@\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(fake.join("mv"), fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!("{}:{}", fake.display(), std::env::var("PATH").unwrap());
+        let newer = release_with("newer", Some(b"newer bridge"));
+        assert!(
+            run(bundled_installer(&newer, &home)
+                .env_remove("XDG_DATA_HOME")
+                .env("PATH", path))
+            .is_err()
         );
-        let release = unpack(&broken, &directory.join("broken"), &top).unwrap();
-        assert!(run(bundled_installer(&release, &home).env_remove("XDG_DATA_HOME")).is_err());
-        assert_eq!(fs::read_to_string(&installed).unwrap(), "new binary");
-        assert_eq!(fs::read_to_string(&bridge).unwrap(), "bridge");
-        assert_eq!(fs::read_dir(&bin).unwrap().count(), 1);
-        assert_eq!(
-            fs::read_dir(home.join(".local/share/dbdelve/plugins"))
-                .unwrap()
-                .count(),
-            1,
-            "nothing but the bridge is left beside it"
-        );
+        untouched("a failed commit");
+
+        // Killed between moving the old bridge aside and the binary's rename:
+        // the next run puts the old bridge back before anything else.
+        fs::rename(data.join("plugins/odbc"), data.join(".odbc.old")).unwrap();
+        fs::write(bin.join(".dbdelve.new"), "newer binary").unwrap();
+        assert!(run(bundled_installer(&broken, &home).env_remove("XDG_DATA_HOME")).is_err());
+        untouched("an interrupted commit");
+
+        // Then the newer release goes in whole.
+        run(bundled_installer(&newer, &home).env_remove("XDG_DATA_HOME")).unwrap();
+        assert_eq!(fs::read_to_string(&installed).unwrap(), "newer binary");
+        assert_eq!(fs::read_to_string(&bridge).unwrap(), "newer bridge");
+        assert!(!data.join(".odbc.old").exists() && !data.join(".odbc.new").exists());
         fs::remove_dir_all(directory).unwrap();
     }
 }
