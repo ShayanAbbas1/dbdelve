@@ -508,6 +508,7 @@ impl Workspace {
                     "SSH tunnel",
                     Some(hint.into()),
                     ui::switch("ssh-tunnel", form.ssh, t)
+                        .debug_selector(|| "ssh-tunnel".into())
                         .on_click(cx.listener(Self::toggle_ssh_tunnel)),
                     t,
                 )
@@ -537,6 +538,12 @@ impl Workspace {
                         t,
                         cx,
                     )),
+                    nested(
+                        "ssh-passphrase",
+                        "Key passphrase",
+                        &form.ssh_passphrase,
+                        bare(&form.ssh_passphrase).mask_toggle(),
+                    ),
                 ];
                 if socket {
                     rows.push(nested(
@@ -812,6 +819,7 @@ impl Workspace {
             &form.ssh_port,
             &form.ssh_user,
             &form.ssh_identity_file,
+            &form.ssh_passphrase,
             &form.ssh_run_as,
         ]
         .iter()

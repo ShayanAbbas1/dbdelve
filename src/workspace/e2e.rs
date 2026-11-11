@@ -2467,6 +2467,7 @@ fn an_odbc_profile_saves_and_restores_as_it_was(cx: &mut TestAppContext) {
                         user: "me".into(),
                         identity_file: None,
                         run_as: None,
+                        passphrase: String::new(),
                     })
                 ),
             ]
@@ -2647,7 +2648,7 @@ fn duplicating_an_odbc_profile_keeps_its_password(cx: &mut TestAppContext) {
                 let form = ConnectionForm::duplicating(
                     profile,
                     "DSN copy".into(),
-                    Some("hunter2".into()),
+                    [Some("hunter2".into()), None],
                     window,
                     cx,
                 );
@@ -2699,8 +2700,13 @@ fn the_forms_save_and_test_refuse_run_as_without_a_socket_directory(cx: &mut Tes
                         .iter()
                         .find(|profile| profile.id == id)
                         .unwrap();
-                    let form =
-                        ConnectionForm::duplicating(profile, "Copy".into(), None, window, cx);
+                    let form = ConnectionForm::duplicating(
+                        profile,
+                        "Copy".into(),
+                        [None, None],
+                        window,
+                        cx,
+                    );
                     form.config(cx).map(|_| ())
                 })
             })
@@ -2709,6 +2715,58 @@ fn the_forms_save_and_test_refuse_run_as_without_a_socket_directory(cx: &mut Tes
         assert!(refused.starts_with("Run as needs Host"), "{refused}");
         assert_eq!(read_as(cx, "socket"), Ok(()));
         assert_eq!(read_as(cx, "service"), Ok(()));
+        quit(workspace, cx);
+    });
+}
+
+/// Turning the tunnel off with the keyboard in Key passphrase takes that row
+/// away, so the keyboard goes to Password rather than nowhere, and typing
+/// lands there.
+#[gpui::test]
+fn turning_the_tunnel_off_from_key_passphrase_hands_the_keyboard_to_password(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch(cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.new_connection_in(None, window, cx);
+            });
+        });
+        settle(cx);
+        let toggle_tunnel = |cx: &mut VisualTestContext| {
+            let switch = cx
+                .debug_bounds("ssh-tunnel")
+                .expect("the switch is drawn")
+                .center();
+            cx.simulate_click(switch, gpui::Modifiers::default());
+            settle(cx);
+        };
+        let field = |cx: &mut VisualTestContext,
+                     field: fn(&ConnectionForm) -> &Entity<InputState>| {
+            cx.update(|_, cx| field(workspace.read(cx).form.as_ref().unwrap()).clone())
+        };
+
+        toggle_tunnel(cx);
+        let passphrase = field(cx, |form| &form.ssh_passphrase);
+        cx.update(|window, cx| passphrase.focus_handle(cx).focus(window, cx));
+        settle(cx);
+        cx.simulate_input("correct horse");
+        assert_eq!(
+            cx.update(|_, cx| passphrase.read(cx).unmask_value().to_string()),
+            "correct horse"
+        );
+
+        toggle_tunnel(cx);
+        let password = field(cx, |form| &form.password);
+        assert!(!workspace.read_with(cx, |workspace, _| workspace.form.as_ref().unwrap().ssh));
+        assert!(cx.update(|window, cx| password.focus_handle(cx).is_focused(window)));
+        cx.simulate_input("hunter2");
+        assert_eq!(
+            cx.update(|_, cx| password.read(cx).unmask_value().to_string()),
+            "hunter2"
+        );
+
         quit(workspace, cx);
     });
 }

@@ -76,6 +76,64 @@ already set up on the machine.
   dead tunnel fails the dial with what ssh last said on its stderr, rather
   than reaching whatever is now listening on that port.
 
+- **A key passphrase is answered through ssh's askpass, never a prompt or a
+  terminal** (`ssh/askpass.rs`). It is a secret, so it lives where the
+  password does: a second Keychain item per profile, under the profile id
+  like the password but in a service of its own (`<variant>/ssh-passphrase`,
+  `store::Secret`), so no hand-edited profile id can name another profile's
+  passphrase as its password, and no variant's name, which may not hold a
+  `/`, can spell the service. It sits on `SshTunnel` with
+  `#[serde(skip)]`, is filled in at connect and Test, carried by Duplicate
+  and removed with the profile (`store::delete_secrets`). Blank is none, and then
+  ssh runs exactly as without the field, `BatchMode=yes` and all.
+  - **A passphrase drops `BatchMode`, because `BatchMode` blocks askpass**
+    even under `SSH_ASKPASS_REQUIRE=force`. In its place go `BatchMode=no`
+    (a config's `BatchMode yes` would block it too, and the command line
+    wins), `PasswordAuthentication=no` and `KbdInteractiveAuthentication=no`,
+    so the only prompt left is the key's own. ssh runs with `SSH_ASKPASS` set to
+    DBDelve's own executable and `SSH_ASKPASS_REQUIRE=force`; `main` answers
+    as askpass before anything else starts when `DBDELVE_ASKPASS` is set.
+  - **The passphrase never enters ssh's environment or arguments**, which
+    last as long as ssh runs. While a session opens, DBDelve serves it on a
+    loopback port to whoever shows a 128-bit one-time token
+    (`DBDELVE_ASKPASS`, `DBDELVE_ASKPASS_TOKEN`), compared in constant time;
+    a wrong token is closed on without an answer. TCP rather than a Unix
+    socket, so one path serves Windows. The listener lives until the session
+    is ready or ssh exits, since ssh asks again after a wrong passphrase, and
+    the token is useless after that. Each exchange gets one deadline for the
+    whole of it, so a client trickling bytes cannot hold up the next, and
+    dropping the listener never waits on one. A `SocketBridge` holds the
+    passphrase and serves it again for every login.
+  - **The token is in ssh's environment, and that is accepted.** A process of
+    the same user that reads it while the session opens can fetch the
+    passphrase: the same-user boundary ssh-agent's socket has, not one this
+    defends.
+  - **Only a prompt starting with `Enter passphrase for key` and a space is
+    answered.** A host key question, a server's password or
+    keyboard-interactive prompt and a hardware key's PIN exit non-zero
+    without connecting, so the passphrase is never sent as a password. A `ProxyJump` hop is its own ssh without our `-o` options, so it
+    is this filter, not the options, that keeps the passphrase from it, and
+    it holds because OpenSSH 8.5 begins a server's keyboard-interactive
+    prompt with `(user@host)`, so no server can spell the prefix.
+  - **A passphrase is refused on an ssh older than OpenSSH 8.5**, naming it,
+    from `ssh -V` (read once per process, and only when a passphrase is set;
+    `OpenSSH_for_Windows_` counts). Before 8.4 ssh ignores
+    `SSH_ASKPASS_REQUIRE`; 8.4 honours it but still leaves a server's
+    keyboard-interactive prompt unprefixed (the `(user@host)` prefix is
+    8.5's), so a hop's server could ask for the passphrase as if it were ssh.
+    An unreadable version is refused too: never a quiet fallback.
+  - **A refused login says what a passphrase has to do with it.** With none
+    given, after a key the SSH host accepted (`-v`'s `Server accepts key:`)
+    or with Identity file set, the error suggests entering it or ssh-agent;
+    with one given that ssh was handed, that it may be wrong.
+  - In the tests `current_exe()` is the test binary, whose arguments libtest
+    would read as a filter, so a `cfg(test)` loader hook (`.init_array`,
+    `__mod_init_func`) answers as askpass before libtest's main. It needs the
+    loader to pass it argv, which glibc and macOS do and musl does not, so
+    the hook and the tests that lean on it are glibc and macOS only. The live
+    tests use the `dbdelve-bastion-keyless` entry `dev/ssh/setup.sh` writes,
+    with no identity or agent of its own, and an encrypted copy of the key.
+
 - **An ODBC profile tunnels by rewriting its connection string at open, and
   refuses whenever it cannot be sure the driver dials only what it rewrote.**
   Its address is inside the string, in driver-specific keys, so
@@ -130,8 +188,9 @@ It is not a forward.
   it waits, so ssh never reads the startup message (`pump`).
 - **A `/` Host is the socket directory, as in libpq, and Port picks the
   file** (`<dir>/.s.PGSQL.<port>`). `Run as` is the user `sudo -n -u` opens it
-  as; blank is the SSH user. `-n` because under `BatchMode` a sudo that wants a
-  password must fail saying so rather than wait for one nobody can type. A set
+  as; blank is the SSH user. `-n` because with no terminal on the SSH
+  host a sudo that wants a password must fail saying so rather than wait for
+  one nobody can type. A set
   Run as with a non-socket Host, or on a forward, is refused at connect for
   every engine rather than quietly connecting as the SSH user
   (`ssh_socket_error`, `ssh_args`), which is what catches a hand-edited

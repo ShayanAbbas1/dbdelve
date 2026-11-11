@@ -70,6 +70,9 @@ pub(crate) struct ConnectionForm {
     pub(crate) ssh_port: Entity<InputState>,
     pub(crate) ssh_user: Entity<InputState>,
     pub(crate) ssh_identity_file: Entity<InputState>,
+    /// A secret, kept in the Keychain like the password and, like it, never
+    /// read back onto the screen of an edited profile.
+    pub(crate) ssh_passphrase: Entity<InputState>,
     pub(crate) ssh_run_as: Entity<InputState>,
     /// What an account has that a server does not. `host`, `database` and
     /// `user` are shared with the server fields: they mean the same thing, and
@@ -308,6 +311,12 @@ impl ConnectionForm {
         let ssh_user = input("Optional", ssh_user);
         let ssh_identity_file = input("SSH agent", ssh_identity_file);
         let ssh_run_as = input("SSH user", ssh_run_as);
+        let ssh_passphrase = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Optional")
+                .default_value(value(ssh.map(|ssh| ssh.passphrase.as_str())))
+                .masked(true)
+        });
         let account_name = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Account identifier")
@@ -413,6 +422,7 @@ impl ConnectionForm {
             ssh_port,
             ssh_user,
             ssh_identity_file,
+            ssh_passphrase,
             ssh_run_as,
             account: account_name,
             private_key,
@@ -466,19 +476,22 @@ impl ConnectionForm {
         form.name.update(cx, |name, cx| {
             name.set_value(profile.name.clone(), window, cx);
         });
-        form.password.update(cx, |password, cx| {
-            password.set_value("", window, cx);
-        });
+        for secret in [&form.password, &form.ssh_passphrase] {
+            secret.update(cx, |secret, cx| {
+                secret.set_value("", window, cx);
+            });
+        }
         form
     }
 
     /// Seeded from `profile` but never bound to it: no `editing` id, so saving
-    /// creates a new profile. Unlike `editing`, the password is prefilled,
-    /// because a duplicate has no Keychain entry of its own to fall back to.
+    /// creates a new profile. Unlike `editing`, the password and the key
+    /// passphrase are prefilled, because a duplicate has no Keychain entry of
+    /// its own to fall back to.
     pub(crate) fn duplicating(
         profile: &Profile,
         name: String,
-        password: Option<String>,
+        [password, passphrase]: [Option<String>; 2],
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> Self {
@@ -487,6 +500,11 @@ impl ConnectionForm {
             && let Some(slot) = config.password_mut()
         {
             *slot = password;
+        }
+        if let Some(passphrase) = passphrase
+            && let Some(ssh) = config.ssh_mut()
+        {
+            ssh.passphrase = passphrase;
         }
         let mut form = Self::new(Some(&config), window, cx);
         form.color = profile.color;
@@ -588,7 +606,7 @@ impl ConnectionForm {
 
     fn ssh_tunnel(&self, cx: &App) -> Result<Option<SshTunnel>, String> {
         let read = |input: &Entity<InputState>| input.read(cx).value().trim().to_string();
-        ssh_tunnel(
+        let tunnel = ssh_tunnel(
             self.ssh,
             self.target().reaches_socket_over_ssh(),
             [
@@ -598,7 +616,12 @@ impl ConnectionForm {
                 read(&self.ssh_identity_file),
                 read(&self.ssh_run_as),
             ],
-        )
+        )?;
+        // Untrimmed, as the password is: a space can be part of either.
+        Ok(tunnel.map(|ssh| SshTunnel {
+            passphrase: self.ssh_passphrase.read(cx).unmask_value().to_string(),
+            ..ssh
+        }))
     }
 
     /// What the tunnel will do to the connection string, while it is on and
@@ -630,9 +653,11 @@ impl ConnectionForm {
         } else {
             placeholders(self.target())
         };
+        let passphrase = password_placeholder(false, self.editing.is_some());
         for (input, placeholder) in [
             (&self.root_certificate, SharedString::from(root_certificate)),
             (&self.password, password.into()),
+            (&self.ssh_passphrase, passphrase.into()),
             (&self.name, SharedString::from(blank.name)),
             (&self.host, blank.host.into()),
             (&self.port, blank.port.into()),
@@ -1096,6 +1121,7 @@ fn ssh_tunnel(
         user,
         identity_file,
         run_as: Some(run_as).filter(|user| takes_run_as && !user.is_empty()),
+        passphrase: String::new(),
     }))
 }
 
@@ -1232,6 +1258,15 @@ pub(crate) enum Origin {
     Form,
 }
 
+/// The key passphrase that earns a Keychain entry, if any: one typed, since
+/// blank is none.
+pub(crate) fn passphrase_to_persist(config: &ConnectionConfig) -> Option<&str> {
+    config
+        .ssh()
+        .map(|ssh| ssh.passphrase.as_str())
+        .filter(|passphrase| !passphrase.is_empty())
+}
+
 /// The password that earns a Keychain entry, if any.
 ///
 /// A file engine has none. A blank one is valid and never warned about, but an
@@ -1331,6 +1366,7 @@ mod tests {
                 user: String::new(),
                 identity_file: None,
                 run_as: None,
+                passphrase: String::new(),
             }))
         );
         assert_eq!(
@@ -1371,6 +1407,7 @@ mod tests {
             user: "deploy".into(),
             identity_file: Some("~/.ssh/id_ed25519".into()),
             run_as: Some("postgres".into()),
+            passphrase: String::new(),
         };
         assert_eq!(
             ssh_tunnel(true, true, ssh_fields(Some(&saved))),
@@ -1679,6 +1716,29 @@ mod tests {
         });
         assert_eq!(password_to_persist(&account, Origin::Form), None);
         assert_eq!(default_profile_name(&account), "ANALYTICS");
+    }
+
+    #[test]
+    fn a_typed_key_passphrase_goes_to_the_keychain_and_blank_is_none() {
+        let tunnelled = |passphrase: &str| {
+            ConnectionConfig::MySql(ServerConfig {
+                ssh: Some(SshTunnel {
+                    host: "bastion".into(),
+                    passphrase: passphrase.into(),
+                    ..SshTunnel::default()
+                }),
+                ..ServerConfig::default()
+            })
+        };
+        assert_eq!(
+            passphrase_to_persist(&tunnelled("correct horse")),
+            Some("correct horse")
+        );
+        assert_eq!(passphrase_to_persist(&tunnelled("")), None);
+        assert_eq!(
+            passphrase_to_persist(&ConnectionConfig::MySql(ServerConfig::default())),
+            None
+        );
     }
 
     #[test]

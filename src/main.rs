@@ -201,6 +201,11 @@ fn connection_config_from(
 }
 
 fn main() {
+    // ssh runs this executable as its askpass to fetch a key's passphrase,
+    // which must answer and exit before anything else starts.
+    if let Some(status) = db::askpass(std::env::args_os().nth(1).as_deref()) {
+        std::process::exit(status);
+    }
     logging::install_panic_log();
     logging::install();
     update::remember_install();

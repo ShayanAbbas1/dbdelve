@@ -154,7 +154,7 @@ pub struct StoredProfile {
     /// The SSH tunnel this profile dials through, or absent for a direct
     /// connection -- which is every profile written before tunnels existed. A
     /// table, so it has to come after every scalar above. Nothing secret is in
-    /// it: no password field, keys and ssh-agent only.
+    /// it: the key's passphrase is skipped here and kept in the Keychain.
     #[serde(default)]
     pub ssh: Option<SshTunnel>,
     /// The query buffers this profile had open, in strip order.
@@ -1121,35 +1121,96 @@ pub fn profile_id(name: &str, existing: &[String]) -> String {
 /// blank password is valid, so none of them can be inferred from the connect
 /// attempt that would follow.
 pub fn password(profile_id: &str) -> Result<Option<String>, String> {
-    match keychain_entry(profile_id)?.get_password() {
-        Ok(password) => Ok(Some(password)),
+    secret(Secret::Password, profile_id)
+}
+
+pub fn set_password(profile_id: &str, password: &str) -> Result<(), String> {
+    set_secret(Secret::Password, profile_id, password)
+}
+
+/// The passphrase of the key a profile's SSH tunnel logs in with, read as
+/// [`password`] is.
+pub fn ssh_passphrase(profile_id: &str) -> Result<Option<String>, String> {
+    secret(Secret::SshPassphrase, profile_id)
+}
+
+pub fn set_ssh_passphrase(profile_id: &str, passphrase: &str) -> Result<(), String> {
+    set_secret(Secret::SshPassphrase, profile_id, passphrase)
+}
+
+/// Both of a profile's keychain items, the password and the key passphrase.
+pub fn delete_secrets(profile_id: &str) {
+    for kind in [Secret::Password, Secret::SshPassphrase] {
+        if let Ok(entry) = keychain_entry(kind, profile_id) {
+            let _ = entry.delete_credential();
+        }
+    }
+}
+
+/// What a profile keeps in the keychain, each under the profile id as its
+/// account and a service of its own.
+#[derive(Clone, Copy)]
+enum Secret {
+    Password,
+    SshPassphrase,
+}
+
+impl Secret {
+    fn what(self) -> &'static str {
+        match self {
+            Self::Password => "password",
+            Self::SshPassphrase => "SSH key passphrase",
+        }
+    }
+
+    fn service(self) -> Result<String, String> {
+        let variant = variant_name()?;
+        Ok(match self {
+            Self::Password => variant,
+            Self::SshPassphrase => passphrase_service(&variant),
+        })
+    }
+}
+
+/// A service apart from the passwords', so no profile id, however
+/// hand-edited, names another profile's passphrase as its password. A `/`,
+/// which `unsafe_component` refuses in a variant, so no variant's own
+/// service can spell this one either.
+fn passphrase_service(variant: &str) -> String {
+    format!("{variant}/ssh-passphrase")
+}
+
+fn secret(kind: Secret, profile_id: &str) -> Result<Option<String>, String> {
+    let what = kind.what();
+    match keychain_entry(kind, profile_id)?.get_password() {
+        Ok(secret) => Ok(Some(secret)),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(keyring::Error::BadEncoding(_)) => {
-            Err("The keychain password is not valid text.".to_string())
+            Err(format!("The keychain {what} is not valid text."))
         }
         Err(error) => Err(format!(
-            "Could not read the password from the keychain: {error}"
+            "Could not read the {what} from the keychain: {error}"
         )),
     }
 }
 
-pub fn set_password(profile_id: &str, password: &str) -> Result<(), String> {
-    keychain_entry(profile_id)?
-        .set_password(password)
-        .map_err(|error| format!("Could not save the password to the keychain: {error}"))
-}
-
-pub fn delete_password(profile_id: &str) {
-    if let Ok(entry) = keychain_entry(profile_id) {
-        let _ = entry.delete_credential();
-    }
+fn set_secret(kind: Secret, profile_id: &str, secret: &str) -> Result<(), String> {
+    keychain_entry(kind, profile_id)?
+        .set_password(secret)
+        .map_err(|error| {
+            format!(
+                "Could not save the {} to the keychain: {error}",
+                kind.what()
+            )
+        })
 }
 
 /// Keychain Services on macOS, Secret Service on Linux, Credential Manager on
-/// Windows. The service is the variant name and the account the profile id,
-/// which is what keeps a dev build's passwords apart from a release build's.
-fn keychain_entry(profile_id: &str) -> Result<keyring::Entry, String> {
-    keyring::Entry::new(&variant_name()?, profile_id)
+/// Windows. The account is the profile id and the service comes from the
+/// variant name, which is what keeps a dev build's passwords apart from a
+/// release build's.
+fn keychain_entry(kind: Secret, profile_id: &str) -> Result<keyring::Entry, String> {
+    keyring::Entry::new(&kind.service()?, profile_id)
         .map_err(|error| format!("Could not reach the keychain: {error}"))
 }
 
@@ -3344,6 +3405,7 @@ folder = "Hot"
                 user: "tunnel".into(),
                 identity_file: Some("/home/dbdelve/.ssh/id_ed25519".into()),
                 run_as: Some("postgres".into()),
+                passphrase: String::new(),
             }),
             ..a_stored_profile()
         };
@@ -3370,6 +3432,7 @@ folder = "Hot"
                 user: String::new(),
                 identity_file: None,
                 run_as: None,
+                passphrase: String::new(),
             }),
             ..a_stored_profile()
         };
@@ -3387,6 +3450,39 @@ folder = "Hot"
         assert_eq!(decoded.profiles, vec![profile]);
         // So a tunnel without Run as saves as it did before the field existed.
         assert!(!text.contains("run_as"), "{text}");
+    }
+
+    #[test]
+    fn a_key_passphrase_is_never_written() {
+        let tunnel = SshTunnel {
+            host: "dbdelve-bastion".into(),
+            identity_file: Some("/home/dbdelve/.ssh/id_ed25519".into()),
+            passphrase: "correct horse".into(),
+            ..SshTunnel::default()
+        };
+        let file = ProfileFile {
+            fonts: None,
+            active: None,
+            settings: None,
+            projects: Vec::new(),
+            profiles: vec![StoredProfile {
+                ssh: Some(tunnel.clone()),
+                ..a_stored_profile()
+            }],
+        };
+
+        let text = toml::to_string_pretty(&file).expect("profiles must encode");
+        assert!(!text.contains("correct horse"), "{text}");
+        assert!(!text.contains("passphrase"), "{text}");
+
+        let decoded: ProfileFile = toml::from_str(&text).expect("profiles must decode");
+        assert_eq!(
+            decoded.profiles[0].ssh,
+            Some(SshTunnel {
+                passphrase: String::new(),
+                ..tunnel
+            })
+        );
     }
 
     #[test]
@@ -3448,6 +3544,7 @@ folder = "Hot"
                 user: "tunnel".into(),
                 identity_file: None,
                 run_as: None,
+                passphrase: String::new(),
             }),
             ..a_stored_profile()
         };
@@ -4021,6 +4118,16 @@ open_objects = []
     /// Inside `with_home` for its lock rather than for its directory:
     /// `DBDELVE_VARIANT` is process-wide too, and every other test here reads
     /// it through `dbdelve_directory`.
+    #[test]
+    fn no_variant_is_named_like_another_variants_passphrase_service() {
+        for variant in ["dbdelve", "dbdelve-dev", "dbdelve-x.ssh-passphrase"] {
+            let service = passphrase_service(variant);
+            assert_ne!(service, variant);
+            let suffix = service.strip_prefix("dbdelve-").unwrap_or(&service);
+            assert!(unsafe_component(suffix).is_some(), "{service}");
+        }
+    }
+
     #[test]
     fn the_variant_moves_the_directory_and_the_keychain_together() {
         with_home(|| {

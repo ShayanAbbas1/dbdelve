@@ -10,11 +10,16 @@ use std::collections::VecDeque;
 use std::io::{self, Read};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::process::{Child, ChildStderr, Command, ExitStatus, Stdio};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use super::{DbError, ServerConfig, SshTunnel, plain_error};
+
+mod askpass;
+
+use askpass::Askpass;
+pub use askpass::askpass;
 
 /// Long enough for a hardware key waiting on a touch.
 const READY_WITHIN: Duration = Duration::from_secs(30);
@@ -35,6 +40,10 @@ const LINE_LIMIT: usize = 1024;
 /// having exited ssh before this for any that could not be. "Local forwarding
 /// listening" alone is not enough: ssh prints it before it binds.
 const SESSION_STARTED: &str = "debug1: Entering interactive session.";
+
+/// What `-v` prints when the SSH host will take a key ssh offered, before ssh
+/// has to sign with it.
+const KEY_ACCEPTED: &str = "debug1: Server accepts key: ";
 
 /// What ssh prints, per connection, when the SSH host could not reach the
 /// forward's target.
@@ -79,6 +88,9 @@ struct Said {
     listening: bool,
     /// ... and gone on to the session, so it is bound.
     ready: bool,
+    /// The SSH host accepted a key, so a refusal after it came from a key ssh
+    /// could not use, one with a passphrase most likely.
+    key_accepted: bool,
     /// A line read so far whose newline has not arrived.
     unfinished: String,
 }
@@ -111,6 +123,7 @@ impl Tunnel {
         target_host: &str,
         target_port: u16,
     ) -> Result<Self, (&'static str, DbError)> {
+        let askpass = askpass_for(ssh).map_err(|error| ("askpass", error))?;
         let mut attempt = 1;
         loop {
             let port = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -130,14 +143,15 @@ impl Tunnel {
             );
 
             let local = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-            let mut tunnel =
-                spawn(local, &ssh.host, &args).map_err(|error| match error.kind() {
+            let mut tunnel = spawn(local, &ssh.host, &args, askpass.as_ref()).map_err(|error| {
+                match error.kind() {
                     io::ErrorKind::NotFound => ("no ssh", no_ssh()),
                     _ => (
                         "spawn",
                         plain_error(format!("Could not start ssh: {error}")),
                     ),
-                })?;
+                }
+            })?;
             let process = tunnel
                 .process
                 .get_mut()
@@ -163,7 +177,15 @@ impl Tunnel {
                         attempt += 1;
                         continue;
                     }
-                    return Err(("ssh exited", failure(&ssh.host, status, &said)));
+                    let hint = passphrase_hint(
+                        ssh,
+                        &tunnel.said(),
+                        askpass.as_ref().map(Askpass::answered),
+                    );
+                    return Err((
+                        "ssh exited",
+                        hinted(failure(&ssh.host, status, &said), hint),
+                    ));
                 }
                 Ready::TimedOut => {
                     return Err((
@@ -293,7 +315,7 @@ impl Drop for Tunnel {
 /// master (`-M -S <private path> -o ControlPersist=no`, watched like a
 /// tunnel) the bridges multiplex over; Windows' OpenSSH cannot multiplex.
 pub struct SocketBridge {
-    host: String,
+    ssh: SshTunnel,
     args: Vec<String>,
 }
 
@@ -322,7 +344,7 @@ impl SocketBridge {
     /// [`Self::connect`].
     pub fn new(ssh: &SshTunnel, socket: &str) -> Result<Self, DbError> {
         Ok(Self {
-            host: ssh.host.clone(),
+            ssh: ssh.clone(),
             args: configured(bridge_args(ssh, socket)?),
         })
     }
@@ -331,7 +353,7 @@ impl SocketBridge {
     /// driver's end of it.
     pub fn connect(&self) -> Result<(TcpStream, Bridged), DbError> {
         let started = Instant::now();
-        tracing::debug!(ssh_host = self.host, "opening ssh bridge");
+        tracing::debug!(ssh_host = self.ssh.host, "opening ssh bridge");
         let opened = self.connected();
         let elapsed = started.elapsed();
         match opened {
@@ -350,13 +372,16 @@ impl SocketBridge {
     /// A failure comes with its kind, for the log, which may not say what ssh
     /// said, where it was going or who it ran as.
     fn connected(&self) -> Result<(TcpStream, Bridged), (&'static str, DbError)> {
-        let mut process = spawn_bridge(&self.args).map_err(|error| match error.kind() {
-            io::ErrorKind::NotFound => ("no ssh", no_ssh()),
-            _ => (
-                "spawn",
-                plain_error(format!("Could not start ssh: {error}")),
-            ),
-        })?;
+        let host = &self.ssh.host;
+        let askpass = askpass_for(&self.ssh).map_err(|error| ("askpass", error))?;
+        let mut process =
+            spawn_bridge(&self.args, askpass.as_ref()).map_err(|error| match error.kind() {
+                io::ErrorKind::NotFound => ("no ssh", no_ssh()),
+                _ => (
+                    "spawn",
+                    plain_error(format!("Could not start ssh: {error}")),
+                ),
+            })?;
         let said = Arc::<Mutex<Said>>::default();
         let draining = drain(
             process.child.stderr.take().expect("stderr is piped"),
@@ -368,10 +393,7 @@ impl SocketBridge {
             Ready::HostKeyNotSaved(message) => {
                 return Err((
                     "host key",
-                    plain_error(format!(
-                        "SSH bridge through {} failed: {message}",
-                        self.host
-                    )),
+                    plain_error(format!("SSH bridge through {host} failed: {message}")),
                 ));
             }
             Ready::Exited(status) => {
@@ -382,24 +404,20 @@ impl SocketBridge {
                 if cfg!(unix) && status.code() == Some(127) && !said.ready {
                     return Err(("no ssh", no_ssh()));
                 }
-                return Err((
-                    "ssh exited",
-                    plain_error(if said.lines.is_empty() {
-                        format!(
-                            "SSH bridge through {} failed: ssh exited ({status}).",
-                            self.host
-                        )
-                    } else {
-                        format!("SSH bridge through {} failed: {}", self.host, said.shown())
-                    }),
-                ));
+                let failed = plain_error(if said.lines.is_empty() {
+                    format!("SSH bridge through {host} failed: ssh exited ({status}).")
+                } else {
+                    format!("SSH bridge through {host} failed: {}", said.shown())
+                });
+                let hint =
+                    passphrase_hint(&self.ssh, &said, askpass.as_ref().map(Askpass::answered));
+                return Err(("ssh exited", hinted(failed, hint)));
             }
             Ready::TimedOut => {
                 return Err((
                     "timed out",
                     plain_error(format!(
-                        "SSH bridge through {} did not come up within {} seconds.",
-                        self.host,
+                        "SSH bridge through {host} did not come up within {} seconds.",
                         READY_WITHIN.as_secs()
                     )),
                 ));
@@ -418,7 +436,7 @@ impl SocketBridge {
         Ok((
             driver,
             Bridged {
-                host: self.host.clone(),
+                host: host.clone(),
                 said,
                 draining,
                 process: Some(process),
@@ -530,8 +548,8 @@ fn bridge_args(ssh: &SshTunnel, socket: &str) -> Result<Vec<String>, DbError> {
     let mut args = session_args(ssh, ["-e".to_owned(), "none".to_owned()])?;
     let open = format!("socat STDIO UNIX-CONNECT:{socket}");
     args.push(match run_as(ssh) {
-        // -n: under BatchMode, a sudo that wants a password fails saying so
-        // rather than waiting for one nobody can type.
+        // -n: with no terminal on the SSH host, a sudo that wants a password
+        // fails saying so rather than waiting for one nobody can type.
         Some(user) => format!("sudo -n -u {user} {open}"),
         None => open,
     });
@@ -595,19 +613,22 @@ fn paired_through(listener: TcpListener) -> io::Result<(TcpStream, TcpStream)> {
 }
 
 #[cfg(unix)]
-fn spawn_bridge(args: &[String]) -> io::Result<Process> {
-    watched_bridge("ssh", args)
+fn spawn_bridge(args: &[String], askpass: Option<&Askpass>) -> io::Result<Process> {
+    watched_bridge("ssh", args, askpass)
 }
 
 #[cfg(windows)]
-fn spawn_bridge(args: &[String]) -> io::Result<Process> {
-    let mut child = crate::db::spawn(
-        ssh_command()
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped()),
-    )?;
+fn spawn_bridge(args: &[String], askpass: Option<&Askpass>) -> io::Result<Process> {
+    let mut command = ssh_command();
+    command
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(askpass) = askpass {
+        askpass.put_on(&mut command);
+    }
+    let mut child = crate::db::spawn(&mut command)?;
     match kill_on_close_job(&child) {
         Ok(job) => Ok(Process { child, _job: job }),
         Err(error) => {
@@ -664,27 +685,46 @@ fn session_args(
         return Err(plain_error(error));
     }
 
+    // BatchMode blocks the askpass a passphrase is answered through, so with
+    // one only the prompts that could take a server's password are turned off.
+    // Said outright, since a config's `BatchMode yes` would block it too and
+    // the command line's value wins.
+    let interaction = if ssh.passphrase.is_empty() {
+        ["BatchMode=yes"].as_slice()
+    } else {
+        &[
+            "BatchMode=no",
+            "PasswordAuthentication=no",
+            "KbdInteractiveAuthentication=no",
+        ]
+    };
     let mut args: Vec<String> = [
         "-T",
         // What readiness is read from, and it outranks a config `LogLevel`
         // quiet enough to hide "open failed" too.
         "-v",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ServerAliveInterval=15",
-        "-o",
-        "ServerAliveCountMax=3",
-        // A config's ControlPersist would fork ssh into the background past
-        // Drop and the watchdog, and an existing master would take the
-        // session over from a process we do not hold.
-        "-o",
-        "ControlMaster=no",
-        "-o",
-        "ControlPath=none",
     ]
     .map(String::from)
     .into();
+    for option in interaction {
+        args.extend(["-o".to_owned(), (*option).to_owned()]);
+    }
+    args.extend(
+        [
+            "-o",
+            "ServerAliveInterval=15",
+            "-o",
+            "ServerAliveCountMax=3",
+            // A config's ControlPersist would fork ssh into the background past
+            // Drop and the watchdog, and an existing master would take the
+            // session over from a process we do not hold.
+            "-o",
+            "ControlMaster=no",
+            "-o",
+            "ControlPath=none",
+        ]
+        .map(String::from),
+    );
     args.extend(session);
     if let Some(port) = ssh.port {
         args.extend(["-p".to_owned(), port.to_string()]);
@@ -818,6 +858,104 @@ fn drained(draining: JoinHandle<()>, said: &Mutex<Said>) {
     }
 }
 
+/// The first OpenSSH to begin a server's keyboard-interactive prompt with
+/// `(user@host)`, without which a `ProxyJump` hop's server could ask for the
+/// passphrase in ssh's own words. `SSH_ASKPASS_REQUIRE` came a release
+/// earlier, in 8.4.
+const ASKPASS_FROM: (u32, u32) = (8, 5);
+
+/// What answers ssh's passphrase prompt while a session opens, when there is
+/// a passphrase to give, and only from an ssh that keeps it from a server.
+fn askpass_for(ssh: &SshTunnel) -> Result<Option<Askpass>, DbError> {
+    if ssh.passphrase.is_empty() {
+        return Ok(None);
+    }
+    let version = ssh_version()?;
+    if openssh_version(version).is_none_or(|parsed| parsed < ASKPASS_FROM) {
+        let (major, minor) = ASKPASS_FROM;
+        return Err(plain_error(if version.is_empty() {
+            format!(
+                "A key passphrase needs OpenSSH {major}.{minor} or later; this ssh did not say its version."
+            )
+        } else {
+            format!(
+                "A key passphrase needs OpenSSH {major}.{minor} or later; this ssh is {version}."
+            )
+        }));
+    }
+    Askpass::serve(&ssh.passphrase).map(Some).map_err(|error| {
+        plain_error(format!(
+            "Could not answer ssh's prompt for the key passphrase: {error}"
+        ))
+    })
+}
+
+/// What to try after a refused login that a passphrase could explain: none
+/// given for a key that needs one, or the wrong one given. `answered` is
+/// whether ssh was handed the passphrase, where there was one to hand.
+fn passphrase_hint(ssh: &SshTunnel, said: &Said, answered: Option<bool>) -> Option<&'static str> {
+    if !said
+        .lines
+        .iter()
+        .any(|line| line.contains("Permission denied"))
+    {
+        return None;
+    }
+    if let Some(answered) = answered {
+        return answered.then_some("The Key passphrase may be wrong.");
+    }
+    let identity = ssh
+        .identity_file
+        .as_ref()
+        .is_some_and(|path| !path.is_empty());
+    (identity || said.key_accepted).then_some(
+        "If the key has a passphrase, enter it as Key passphrase, or add the key to ssh-agent.",
+    )
+}
+
+/// The first line `ssh -V` prints, asked once per process; a failure is not
+/// kept, so an ssh installed since is found.
+fn ssh_version() -> Result<&'static str, DbError> {
+    static VERSION: OnceLock<String> = OnceLock::new();
+    if let Some(version) = VERSION.get() {
+        return Ok(version);
+    }
+    let output = crate::db::spawn(
+        ssh_command()
+            .arg("-V")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped()),
+    )
+    .and_then(Child::wait_with_output)
+    .map_err(|error| match error.kind() {
+        io::ErrorKind::NotFound => no_ssh(),
+        _ => plain_error(format!("Could not ask ssh its version: {error}")),
+    })?;
+    let said = String::from_utf8_lossy(&output.stderr);
+    let first = printable(said.lines().next().unwrap_or_default());
+    Ok(VERSION.get_or_init(|| first))
+}
+
+/// OpenSSH's major and minor version from what `ssh -V` said, Windows'
+/// own build's `OpenSSH_for_Windows_` included.
+fn openssh_version(said: &str) -> Option<(u32, u32)> {
+    let version = said.strip_prefix("OpenSSH_")?;
+    let version = version.strip_prefix("for_Windows_").unwrap_or(version);
+    let (major, rest) = version.split_once('.')?;
+    let minor = &rest[..rest
+        .find(|char: char| !char.is_ascii_digit())
+        .unwrap_or(rest.len())];
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
+fn hinted(mut error: DbError, hint: Option<&str>) -> DbError {
+    if let Some(hint) = hint {
+        error.message = format!("{}\n{hint}", error.message);
+    }
+    error
+}
+
 fn no_ssh() -> DbError {
     plain_error("No ssh executable was found.".to_owned())
 }
@@ -846,6 +984,9 @@ fn drain(mut stderr: ChildStderr, said: Arc<Mutex<Said>>, port: Option<u16>) -> 
                     said.host_key_error.get_or_insert_with(|| line.clone());
                 }
                 if line.starts_with("debug") {
+                    if line.starts_with(KEY_ACCEPTED) {
+                        said.key_accepted = true;
+                    }
                     if listening.as_ref() == Some(&line) {
                         said.listening = true;
                     } else if said.listening && line == SESSION_STARTED
@@ -943,17 +1084,22 @@ fn ssh_command() -> Command {
 }
 
 #[cfg(unix)]
-fn spawn(local: SocketAddr, host: &str, args: &[String]) -> io::Result<Tunnel> {
+fn spawn(
+    local: SocketAddr,
+    host: &str,
+    args: &[String],
+    askpass: Option<&Askpass>,
+) -> io::Result<Tunnel> {
     Ok(Tunnel {
         local,
         host: host.to_owned(),
         said: Arc::default(),
-        process: Mutex::new(watched("ssh", args)?),
+        process: Mutex::new(watched("ssh", args, askpass)?),
     })
 }
 
 #[cfg(unix)]
-fn watched(program: &str, args: &[String]) -> io::Result<Child> {
+fn watched(program: &str, args: &[String], askpass: Option<&Askpass>) -> io::Result<Child> {
     let mut command = Command::new("/bin/sh");
     command
         .args(["-c", WATCHDOG, "sh", program])
@@ -961,12 +1107,19 @@ fn watched(program: &str, args: &[String]) -> io::Result<Child> {
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
+    if let Some(askpass) = askpass {
+        askpass.put_on(&mut command);
+    }
     unmask_signals(&mut command);
     crate::db::spawn(&mut command)
 }
 
 #[cfg(unix)]
-fn watched_bridge(program: &str, args: &[String]) -> io::Result<Process> {
+fn watched_bridge(
+    program: &str,
+    args: &[String],
+    askpass: Option<&Askpass>,
+) -> io::Result<Process> {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::process::CommandExt;
 
@@ -986,6 +1139,9 @@ fn watched_bridge(program: &str, args: &[String]) -> io::Result<Process> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(askpass) = askpass {
+        askpass.put_on(&mut command);
+    }
     unmask_signals(&mut command);
     // SAFETY: dup2 is async-signal-safe, which is all a hook between fork
     // and exec may call. The copy on fd 3 is the one end not close-on-exec.
@@ -1050,14 +1206,22 @@ fn ssh_command() -> Command {
 }
 
 #[cfg(windows)]
-fn spawn(local: SocketAddr, host: &str, args: &[String]) -> io::Result<Tunnel> {
-    let mut process = crate::db::spawn(
-        ssh_command()
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped()),
-    )?;
+fn spawn(
+    local: SocketAddr,
+    host: &str,
+    args: &[String],
+    askpass: Option<&Askpass>,
+) -> io::Result<Tunnel> {
+    let mut command = ssh_command();
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    if let Some(askpass) = askpass {
+        askpass.put_on(&mut command);
+    }
+    let mut process = crate::db::spawn(&mut command)?;
     match kill_on_close_job(&process) {
         Ok(job) => Ok(Tunnel {
             local,
@@ -1121,6 +1285,56 @@ pub(super) fn live_bastion(alias: &str) -> Option<SshTunnel> {
     })
 }
 
+/// The dev bastion's key with a passphrase, in a directory of the test's
+/// own, through the bastion's entry that offers no other identity: the
+/// usual one names the unencrypted key, which would let ssh in without
+/// the passphrase. The directory goes with the [`KeyCopy`].
+#[cfg(all(
+    test,
+    any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")
+))]
+pub(super) fn live_bastion_with_a_passphrase(test: &str, passphrase: &str) -> (SshTunnel, KeyCopy) {
+    let config = std::env::var("dbdelve_SSH_CONFIG").expect("dbdelve_SSH_CONFIG is required");
+    let key = std::path::Path::new(&config).with_file_name("id_ed25519");
+    let directory = std::env::temp_dir().join(format!("dbdelve-ssh-{}-{test}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let copy = KeyCopy(directory.clone());
+    let encrypted = directory.join("id_ed25519");
+    std::fs::copy(&key, &encrypted).unwrap();
+    assert!(
+        Command::new("ssh-keygen")
+            .args(["-q", "-p", "-P", "", "-N", "correct horse", "-f"])
+            .arg(&encrypted)
+            .stdout(Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    );
+    let ssh = SshTunnel {
+        identity_file: Some(encrypted.display().to_string()),
+        passphrase: passphrase.to_owned(),
+        host: "dbdelve-bastion-keyless".to_owned(),
+        ..SshTunnel::default()
+    };
+    (ssh, copy)
+}
+
+#[cfg(all(
+    test,
+    any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")
+))]
+pub(super) struct KeyCopy(std::path::PathBuf);
+
+#[cfg(all(
+    test,
+    any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")
+))]
+impl Drop for KeyCopy {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1176,6 +1390,7 @@ mod tests {
             user: "deploy@corp".to_owned(),
             identity_file: Some("~/.ssh/100%.key".to_owned()),
             run_as: None,
+            passphrase: String::new(),
         };
         let mut expected = OPTIONS.to_vec();
         expected.extend(FORWARD);
@@ -1223,6 +1438,7 @@ mod tests {
             user: "deploy@corp".to_owned(),
             identity_file: Some("~/.ssh/id_ed25519".to_owned()),
             run_as: Some("postgres".to_owned()),
+            passphrase: String::new(),
         };
         let mut expected = OPTIONS.to_vec();
         expected.extend([
@@ -1293,6 +1509,100 @@ mod tests {
             ssh_args(&ssh, 40000, "db", 5432).unwrap_err().message,
             RUN_AS_NEEDS_A_SOCKET
         );
+    }
+
+    #[test]
+    fn a_passphrase_lifts_batch_mode_for_the_askpass_and_nothing_else_can_prompt() {
+        let ssh = SshTunnel {
+            passphrase: "correct horse".to_owned(),
+            ..tunnel("bastion")
+        };
+        let mut expected = vec![
+            "-T",
+            "-v",
+            "-o",
+            "BatchMode=no",
+            "-o",
+            "PasswordAuthentication=no",
+            "-o",
+            "KbdInteractiveAuthentication=no",
+        ];
+        expected.extend(&OPTIONS[4..]);
+        expected.extend(FORWARD);
+        expected.extend(["127.0.0.1:40000:db:5432", "--", "bastion"]);
+        assert_eq!(ssh_args(&ssh, 40000, "db", 5432).unwrap(), expected);
+
+        let bridge = bridge_args(&ssh, "/tmp/.s.PGSQL.5432").unwrap();
+        assert_eq!(bridge[..OPTIONS.len()], expected[..OPTIONS.len()]);
+        assert!(!bridge.iter().any(|arg| arg.contains("correct horse")));
+    }
+
+    #[test]
+    fn the_openssh_version_is_read_from_what_ssh_v_says() {
+        for (said, version) in [
+            ("OpenSSH_10.3p1, LibreSSL 3.3.6", Some((10, 3))),
+            (
+                "OpenSSH_8.4p1 Debian-5+deb11u3, OpenSSL 1.1.1w  11 Sep 2023",
+                Some((8, 4)),
+            ),
+            (
+                "OpenSSH_8.2p1 Ubuntu-4ubuntu0.11, OpenSSL 1.1.1f  31 Mar 2020",
+                Some((8, 2)),
+            ),
+            ("OpenSSH_for_Windows_9.5p1, LibreSSL 3.8.2", Some((9, 5))),
+            ("OpenSSH_for_Windows_8.1p1, LibreSSL 3.0.2", Some((8, 1))),
+            ("OpenSSH_9.9", Some((9, 9))),
+            ("Sun_SSH_1.1", None),
+            ("OpenSSH_x.y", None),
+            ("", None),
+        ] {
+            assert_eq!(openssh_version(said), version, "{said}");
+        }
+        // 8.4 has SSH_ASKPASS_REQUIRE but not the prefix. Compared as
+        // numbers, so 8.10 is past 8.5.
+        assert!((8, 4) < ASKPASS_FROM && (8, 5) == ASKPASS_FROM && (8, 10) > ASKPASS_FROM);
+    }
+
+    #[test]
+    fn a_refused_login_says_what_a_passphrase_has_to_do_with_it() {
+        const NONE_GIVEN: &str =
+            "If the key has a passphrase, enter it as Key passphrase, or add the key to ssh-agent.";
+        let refused = |key_accepted| Said {
+            lines: ["dev@127.0.0.1: Permission denied (publickey).".to_owned()].into(),
+            key_accepted,
+            ..Said::default()
+        };
+        let with_key = SshTunnel {
+            identity_file: Some("/home/dev/.ssh/id_ed25519".to_owned()),
+            ..tunnel("bastion")
+        };
+        let bare = tunnel("bastion");
+
+        assert_eq!(
+            passphrase_hint(&with_key, &refused(false), None),
+            Some(NONE_GIVEN)
+        );
+        // A key from ~/.ssh/config the SSH host took, but ssh could not sign with.
+        assert_eq!(
+            passphrase_hint(&bare, &refused(true), None),
+            Some(NONE_GIVEN)
+        );
+        assert_eq!(passphrase_hint(&bare, &refused(false), None), None);
+        assert_eq!(
+            passphrase_hint(&with_key, &refused(true), Some(true)),
+            Some("The Key passphrase may be wrong.")
+        );
+        // Refused before ssh ever asked: the passphrase was not why.
+        assert_eq!(
+            passphrase_hint(&with_key, &refused(true), Some(false)),
+            None
+        );
+
+        let unreachable = Said {
+            lines: ["ssh: connect to host bastion port 22: Connection refused".to_owned()].into(),
+            ..Said::default()
+        };
+        assert_eq!(passphrase_hint(&with_key, &unreachable, None), None);
     }
 
     #[test]
@@ -1381,6 +1691,7 @@ mod tests {
                         "sh".to_owned(),
                         output,
                     ],
+                    None,
                 )
                 .unwrap(),
             ),
@@ -1433,7 +1744,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn closing_the_watchdogs_stdin_ends_what_it_runs() {
-        let mut child = watched("sleep", &["30".to_owned()]).unwrap();
+        let mut child = watched("sleep", &["30".to_owned()], None).unwrap();
         let started = Instant::now();
         drop(child.stdin.take());
         let status = child.wait().unwrap();
@@ -1528,8 +1839,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_watchdog_started_with_every_signal_blocked_still_ends_what_it_runs() {
-        let mut child =
-            on_a_thread_blocking_every_signal(|| watched("sleep", &["30".to_owned()]).unwrap());
+        let mut child = on_a_thread_blocking_every_signal(|| {
+            watched("sleep", &["30".to_owned()], None).unwrap()
+        });
         drop(child.stdin.take());
         let deadline = Instant::now() + Duration::from_secs(5);
         while child.try_wait().unwrap().is_none() {
@@ -1548,7 +1860,7 @@ mod tests {
         use std::io::BufRead;
 
         let script = "echo $$; exec sleep 30".to_owned();
-        let mut process = watched_bridge("sh", &["-c".to_owned(), script]).unwrap();
+        let mut process = watched_bridge("sh", &["-c".to_owned(), script], None).unwrap();
         let mut pid = String::new();
         io::BufReader::new(process.child.stdout.take().unwrap())
             .read_line(&mut pid)
@@ -1587,7 +1899,7 @@ mod tests {
     fn a_bridge_watchdog_hands_what_it_runs_its_stdin_and_stdout() {
         use std::io::Write;
 
-        let mut process = watched_bridge("cat", &[]).unwrap();
+        let mut process = watched_bridge("cat", &[], None).unwrap();
         let mut stdin = process.child.stdin.take().unwrap();
         stdin.write_all(b"ping").unwrap();
         drop(stdin);
@@ -1607,7 +1919,7 @@ mod tests {
     fn a_bridged_child_answers_the_driver_while_its_stream_stays_open() {
         use std::io::Write;
 
-        let mut process = watched_bridge("cat", &[]).unwrap();
+        let mut process = watched_bridge("cat", &[], None).unwrap();
         let mut driver = piped_to(&mut process.child).unwrap();
         driver.write_all(b"ping").unwrap();
         driver
@@ -1650,7 +1962,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_missing_ssh_is_named_as_missing() {
-        let mut child = watched("dbdelve-no-such-ssh", &[]).unwrap();
+        let mut child = watched("dbdelve-no-such-ssh", &[], None).unwrap();
         // Held, because `wait` would close it and the watchdog would race the
         // shell's own exit with a kill.
         let _stdin = child.stdin.take();
@@ -1801,6 +2113,41 @@ mod tests {
             "{}",
             error.message
         );
+    }
+
+    // Where the test binary can stand in as ssh's askpass.
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+    #[test]
+    #[ignore = "requires the dev bastions configured through dbdelve_SSH_CONFIG"]
+    fn live_ssh_a_key_with_a_passphrase_opens_a_tunnel_once_given_it() {
+        let (ssh, _key) = live_bastion_with_a_passphrase("given", "correct horse");
+        let tunnel = live_tunnel(&ssh).unwrap();
+        postgres_answers(tunnel.dial().unwrap());
+    }
+
+    // Where the test binary can stand in as ssh's askpass.
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+    #[test]
+    #[ignore = "requires the dev bastions configured through dbdelve_SSH_CONFIG"]
+    fn live_ssh_a_key_with_a_passphrase_fails_saying_so_without_the_right_one() {
+        for (passphrase, said) in [
+            (
+                "",
+                "If the key has a passphrase, enter it as Key passphrase",
+            ),
+            ("wrong horse", "The Key passphrase may be wrong."),
+        ] {
+            let (ssh, _key) = live_bastion_with_a_passphrase("refused", passphrase);
+            let Err(error) = live_tunnel(&ssh) else {
+                panic!("a tunnel opened with {passphrase:?}");
+            };
+            assert!(
+                error.message.contains("Permission denied"),
+                "{}",
+                error.message
+            );
+            assert!(error.message.contains(said), "{}", error.message);
+        }
     }
 
     #[test]
