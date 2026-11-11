@@ -1091,16 +1091,13 @@ impl Workspace {
         cx.spawn(async move |workspace, cx| {
             let installed = install.await;
             _ = workspace.update(cx, |workspace, cx| match installed {
-                // Through the platform's quit, as Quit goes, so buffers and
-                // profiles are written on the way out exactly as they are then.
                 Ok(installed) => {
                     tracing::info!("restarting into the update");
-                    cx.set_restart_path(installed);
-                    cx.restart();
+                    restart_into(installed, cx);
                 }
                 Err(reason) => {
                     if let Some(update) = workspace.update.as_mut() {
-                        update.state = update::State::Failed(reason, installer);
+                        update.state = update::State::stopped(reason, installer);
                     }
                     cx.notify();
                 }
@@ -1168,6 +1165,22 @@ impl Workspace {
                             }))
                             .separator()
                             .link(format!("Download {version}"), url.clone())
+                    }),
+                )
+            }
+            update::State::Superseded(installed) => {
+                let installed = installed.clone();
+                (
+                    "Restart to update".into(),
+                    Rc::new(move |menu| {
+                        let installed = installed.clone();
+                        menu.label("DBDelve was updated since it started.")
+                            .item(
+                                PopupMenuItem::new("Restart DBDelve")
+                                    .on_click(move |_, _, cx| restart_into(installed.clone(), cx)),
+                            )
+                            .separator()
+                            .link("Release notes", url.clone())
                     }),
                 )
             }
@@ -1601,7 +1614,13 @@ impl Render for Workspace {
                 .on_action(cx.listener(Self::zoom_editor_in))
                 .on_action(cx.listener(Self::zoom_editor_out))
                 .on_action(cx.listener(Self::reset_editor_zoom))
-                .child(titlebar(t, None, Vec::new(), Vec::new(), Vec::new()))
+                .child(titlebar(
+                    t,
+                    None,
+                    self.render_update_pill(cx).into_iter().collect(),
+                    Vec::new(),
+                    Vec::new(),
+                ))
                 .child(self.beside_settings(self.render_welcome(window, cx).into_any_element(), cx))
                 .children(self.dialog_layer(
                     [("import-choice", self.render_import_choice(cx))],
@@ -2692,6 +2711,14 @@ pub(crate) fn opacity_from_percent_input(typed: &str, current: f32) -> f32 {
         return current;
     }
     (percent / 100.0).clamp(theme::OPACITY_MIN, theme::OPACITY_MAX)
+}
+
+/// Through the platform's quit, as Quit goes, so buffers and profiles are
+/// written on the way out exactly as they are then.
+fn restart_into(installed: std::path::PathBuf, cx: &mut App) {
+    update::before_restart();
+    cx.set_restart_path(installed);
+    cx.restart();
 }
 
 #[cfg(test)]

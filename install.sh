@@ -32,14 +32,29 @@ fail() {
 # script. Where it can be checked it must be: a signature that will not
 # download is a failure, not a reason to skip the check.
 download() {
+  verifying=
+  if command -v minisign >/dev/null 2>&1; then
+    verifying=1
+    # First, so a missing signature fails before the download rather than
+    # after it.
+    curl -fsL -o "$2.minisig" "$1.minisig" 2>/dev/null ||
+      fail "the signature of DBDelve $version could not be downloaded, so the download cannot be checked"
+  fi
+
   echo "Downloading DBDelve $version..."
   curl -fL --progress-bar -o "$2" "$1"
 
-  if command -v minisign >/dev/null 2>&1; then
-    curl -fsL -o "$2.minisig" "$1.minisig" 2>/dev/null ||
-      fail "the signature of DBDelve $version could not be downloaded, so the download cannot be checked"
-    minisign -V -q -P "$PUBLIC_KEY" -m "$2" -x "$2.minisig" ||
+  if [ -n "$verifying" ]; then
+    comment="$(minisign -V -Q -P "$PUBLIC_KEY" -m "$2" -x "$2.minisig")" ||
       fail "the download's signature did not check out"
+    # The signed comment names the file that was signed, version and all, so
+    # an older release's file and its genuine signature served under this
+    # name are refused.
+    tab="$(printf '\t')"
+    case "$tab$comment$tab" in
+      *"${tab}file:${1##*/}${tab}"*) ;;
+      *) fail "the download's signature is for another file than ${1##*/}" ;;
+    esac
     echo "Signature verified."
   fi
 }

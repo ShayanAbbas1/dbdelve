@@ -144,10 +144,12 @@ pub(crate) fn install(installer: &Installer, progress: &Progress) -> Result<Path
     let scratch = Scratch::new().map_err(failed(NO_SCRATCH))?;
     let file = scratch.0.join(&dmg.name);
     let agent = agent();
-    tracing::info!(url = dmg.url, size = dmg.size, "downloading the update");
-    download(&agent, &dmg.url, dmg.size, &file, progress).map_err(failed(COULD_NOT_DOWNLOAD))?;
+    // First, so a release whose signature is missing fails before the
+    // download rather than after it.
     let signature =
         fetch_signature(&agent, &dmg.signature_url).map_err(failed(COULD_NOT_DOWNLOAD))?;
+    tracing::info!(url = dmg.url, size = dmg.size, "downloading the update");
+    download(&agent, &dmg.url, dmg.size, &file, progress).map_err(failed(COULD_NOT_DOWNLOAD))?;
     verify(&file, &signature, key, &dmg.name).map_err(failed(NOT_SIGNED))?;
     tracing::info!("the update's signature verified");
 

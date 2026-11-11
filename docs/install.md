@@ -123,7 +123,10 @@ prefer it. An AppImage in a folder you can write to updates itself in place,
 see [Updating](#updating).
 
 One unpacked with `--appimage-extract` does not: to update it, download the
-next release and unpack that.
+next release and unpack that. Nor does one started with
+`--appimage-extract-and-run`, since its restart would need the FUSE it ran
+without; `APPIMAGE_EXTRACT_AND_RUN=1` in the environment does the same job
+and does update, because the restart keeps it.
 
 To build it yourself instead, on Debian or Ubuntu the build needs:
 

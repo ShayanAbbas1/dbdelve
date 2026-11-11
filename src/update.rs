@@ -4,6 +4,7 @@
 #![cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
 
 use std::{
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -55,6 +56,22 @@ pub(crate) enum State {
     /// Why it stopped, in words for the dropdown; the detail is in the log.
     /// The installer is kept so the same update can be tried again.
     Failed(&'static str, Arc<Installer>),
+    /// Another DBDelve has replaced this install since it started, so trying
+    /// again cannot succeed; restarting into the install at this path runs
+    /// what it put there.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    Superseded(PathBuf),
+}
+
+impl State {
+    /// What an install that stopped for `reason` leaves.
+    pub(crate) fn stopped(reason: &'static str, installer: Arc<Installer>) -> Self {
+        #[cfg(target_os = "linux")]
+        if reason == linux::ALREADY_UPDATED {
+            return State::Superseded(installer.installed());
+        }
+        State::Failed(reason, installer)
+    }
 }
 
 /// Written by the install on its own thread, read by the titlebar on a tick.
@@ -151,6 +168,12 @@ pub(crate) fn newer_release() -> Option<Update> {
     })
 }
 
+/// Just ahead of `App::restart` into an install.
+pub(crate) fn before_restart() {
+    #[cfg(target_os = "linux")]
+    linux::close_inherited_files();
+}
+
 /// Notes what this process was installed as, before any update check can find
 /// that another process has replaced it since. Once, at startup.
 pub(crate) fn remember_install() {
@@ -204,10 +227,7 @@ fn installer(_: &str, _: &[LatestAsset]) -> Option<Installer> {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub(crate) fn install(
-    installer: &Installer,
-    _: &Progress,
-) -> Result<std::path::PathBuf, &'static str> {
+pub(crate) fn install(installer: &Installer, _: &Progress) -> Result<PathBuf, &'static str> {
     match *installer {}
 }
 

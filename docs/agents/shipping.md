@@ -54,7 +54,11 @@ Four things in the script are load-bearing:
 hours. An install that can replace itself gets **Update and restart**; every
 other one gets the link to the release page. What both platforms share --
 the release key, the download, the minisign check, the folder lock and the
-scratch directory -- is in `src/update/download.rs`.
+scratch directory -- is in `src/update/download.rs`. Both fetch the
+`.minisig` before the asset, so a release without one fails before the large
+download, and verify once the download is complete. The pill and its menu sit
+at the right end of the titlebar on the home screen as well as in a
+connection, and the palette lists the update on both.
 
 On macOS (`src/update/macos.rs`) the update downloads
 `DBDelve-<version>.dmg`, verifies `DBDelve-<version>.dmg.minisig` against
@@ -79,6 +83,13 @@ On Linux (`src/update/linux.rs`) two kinds of install update themselves:
   the old mount's `LD_LIBRARY_PATH`; AppRun restores the original from the
   `DBDELVE_ORIGINAL_LD_LIBRARY_PATH` pair the earlier AppRun saved before
   saving it again, so the new process sees the same as a fresh start.
+  Before the relaunch every descriptor past stdio is made close-on-exec: the
+  runtime keeps its FUSE mount alive while any process holds a pipe it hands
+  the app, and the relaunch would otherwise keep the old mount, and the
+  replaced file under it, alive until the new app exits. An AppImage run with
+  `--appimage-extract-and-run` (its `APPDIR` is not a mount point) keeps the
+  link, since the plain relaunch would need the FUSE it ran without; with
+  `APPIMAGE_EXTRACT_AND_RUN` set it updates, as the relaunch inherits that.
 - **The tarball's `install.sh` install**, recognised only when the executable
   is exactly `~/.local/bin/dbdelve` (a regular file, not a link), downloads
   `dbdelve-<version>-linux-<arch>.tar.gz`, unpacks it with the `tar` crate
@@ -102,8 +113,10 @@ interrupted install left. Under that lock both refuse an install that another
 process has updated since this one started, so a stale offer never puts an
 older release over a newer one: macOS by the installed bundle's version, Linux
 by the file itself (the AppImage as recorded at startup, before any update
-check, or `/proc/self/exe` for `~/.local/bin/dbdelve`, by device and inode). On Linux a replaced install also
-stops offering the update.
+check, or `/proc/self/exe` for `~/.local/bin/dbdelve`, by device and inode). On
+Linux a replaced install also stops offering the update, and when the refusal
+comes at install time the menu offers **Restart DBDelve**, which relaunches
+the install on disk, rather than a retry that could never succeed.
 
 - **Only the release build in a writable place updates itself.** A dev or
   other `DBDELVE_VARIANT` build, a binary outside a `.app`, a bundle on a

@@ -3318,10 +3318,30 @@ fn welcome_items(workspace: &Workspace) -> Vec<Item> {
     let overrides = &workspace.settings.custom_keybindings;
     let mut items = starting_items(overrides);
     items.extend(appearance_items(overrides));
+    items.extend(update_item(workspace));
     if !workspace.profiles.is_empty() || !workspace.unavailable.is_empty() {
         items.extend(connection_items(workspace));
     }
     items
+}
+
+fn update_item(workspace: &Workspace) -> Option<Item> {
+    let update = workspace.update.as_ref()?;
+    let version = &update.release.version;
+    Some(match update.state {
+        update::State::Ready(_) => command(
+            &format!("Update to dbdelve {version} and restart"),
+            icon::REFRESH,
+            Command::InstallUpdate,
+            WINDOW,
+        ),
+        _ => command(
+            &format!("Download dbdelve {version}"),
+            icon::LINK,
+            Command::DownloadUpdate(update.release.url.clone()),
+            WINDOW,
+        ),
+    })
 }
 
 fn command(label: &str, icon: &'static str, command: Command, group: &'static str) -> Item {
@@ -4277,23 +4297,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         ));
     }
     items.extend(appearance_items(overrides));
-    if let Some(update) = &workspace.update {
-        let version = &update.release.version;
-        items.push(match update.state {
-            update::State::Ready(_) => command(
-                &format!("Update to dbdelve {version} and restart"),
-                icon::REFRESH,
-                Command::InstallUpdate,
-                WINDOW,
-            ),
-            _ => command(
-                &format!("Download dbdelve {version}"),
-                icon::LINK,
-                Command::DownloadUpdate(update.release.url.clone()),
-                WINDOW,
-            ),
-        });
-    }
+    items.extend(update_item(workspace));
     // One row rather than a Show/Hide pair: the palette is built from the
     // session, which does not know whether the column is folded.
     items.push(bound(

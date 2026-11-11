@@ -20,7 +20,7 @@ use super::{
     },
 };
 
-const ALREADY_UPDATED: &str =
+pub(super) const ALREADY_UPDATED: &str =
     "DBDelve was updated since it started. Restart it to run that version.";
 
 /// Everything an install needs, found when the release was: having one is what
@@ -43,6 +43,13 @@ enum Kind {
     /// The tarball's `install.sh` put the binary in `~/.local/bin` under this
     /// home; the new release's own `install.sh` replaces it.
     Tarball { home: PathBuf },
+}
+
+impl Installer {
+    /// What the update replaces, and so what to relaunch.
+    pub(super) fn installed(&self) -> PathBuf {
+        self.kind.installed()
+    }
 }
 
 impl Kind {
@@ -112,6 +119,50 @@ fn remember(appimage: &Path, at_start: &OnceLock<Identity>) {
     }
 }
 
+/// Marks every descriptor past stdio close-on-exec, ahead of the relaunch.
+///
+/// The AppImage runtime keeps its FUSE mount alive for as long as any process
+/// holds a pipe it hands the app, and every child inherits it unless told
+/// otherwise. `App::restart` spawns its relaunch script without closing
+/// anything, so each update would keep the old mount, and the replaced file
+/// under it, alive until the new app exits. Close-on-exec reaches exec'd
+/// children only: this process, on its way out, keeps using them.
+#[cfg(target_os = "linux")]
+pub(super) fn close_inherited_files() {
+    // SAFETY: sets a flag on descriptors; none is closed.
+    let flagged = unsafe {
+        libc::close_range(
+            3,
+            libc::c_uint::MAX,
+            libc::CLOSE_RANGE_CLOEXEC as libc::c_int,
+        )
+    };
+    if flagged == 0 {
+        return;
+    }
+    // close_range takes CLOSE_RANGE_CLOEXEC from Linux 5.11.
+    let descriptors: Vec<libc::c_int> = match fs::read_dir("/proc/self/fd") {
+        Ok(entries) => entries
+            .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok())
+            .filter(|&descriptor| descriptor >= 3)
+            .collect(),
+        Err(error) => {
+            tracing::warn!("open files could not be listed before the relaunch: {error}");
+            return;
+        }
+    };
+    for descriptor in descriptors {
+        // SAFETY: reads and sets one descriptor's flags; one already closed
+        // (the listing's own) fails with EBADF and is skipped.
+        unsafe {
+            let flags = libc::fcntl(descriptor, libc::F_GETFD);
+            if flags >= 0 {
+                libc::fcntl(descriptor, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+            }
+        }
+    }
+}
+
 /// The file this process was started from, as it was then.
 fn running(kind: &Kind, appimage_at_start: &OnceLock<Identity>) -> io::Result<Identity> {
     match kind {
@@ -177,6 +228,16 @@ pub(super) fn installer(version: &str, asset: impl Fn(&str) -> Option<Asset>) ->
             return None;
         }
     };
+    if let (Kind::AppImage(_), Some(appdir)) = (&kind, std::env::var_os("APPDIR"))
+        && let Err(reason) = relaunchable(
+            Path::new(&appdir),
+            std::env::var_os("APPIMAGE_EXTRACT_AND_RUN").as_deref(),
+            mount_point,
+        )
+    {
+        tracing::info!(path = %exe.display(), "no self-update: {reason}");
+        return None;
+    }
     let installed = kind.installed();
     let running = match running(&kind, &APPIMAGE_AT_START) {
         Ok(running) => running,
@@ -261,6 +322,36 @@ fn appimage_of<'a>(
         .then_some(appimage)
 }
 
+/// Whether the AppImage, once replaced, starts again when relaunched the way
+/// `App::restart` does: as a plain path, with this process's environment.
+fn relaunchable(
+    appdir: &Path,
+    extract_and_run: Option<&OsStr>,
+    mounted: impl Fn(&Path) -> bool,
+) -> Result<(), &'static str> {
+    // `--appimage-extract-and-run` unpacks the image to a folder instead of
+    // mounting it, which is how it runs where there is no FUSE. A relaunch
+    // without the flag would need FUSE there, and no window would come back.
+    // APPIMAGE_EXTRACT_AND_RUN is the same switch, and the relaunch inherits it.
+    if mounted(appdir) || extract_and_run.is_some_and(|value| !value.is_empty()) {
+        return Ok(());
+    }
+    Err("it runs unpacked by --appimage-extract-and-run, which its relaunch would not be")
+}
+
+fn mount_point(path: &Path) -> bool {
+    let Ok(path) = fs::canonicalize(path) else {
+        return false;
+    };
+    let Some(parent) = path.parent() else {
+        return true;
+    };
+    match (fs::metadata(&path), fs::metadata(parent)) {
+        (Ok(path), Ok(parent)) => path.dev() != parent.dev(),
+        _ => false,
+    }
+}
+
 fn appimage_at(appimage: &Path) -> Result<PathBuf, &'static str> {
     // Renaming over a symlink would replace the link, not the AppImage.
     if !appimage.is_absolute()
@@ -298,11 +389,13 @@ pub(crate) fn install(installer: &Installer, progress: &Progress) -> Result<Path
     let scratch = Scratch::new().map_err(failed(NO_SCRATCH))?;
     let file = scratch.0.join(&asset.name);
     let agent = agent();
+    // First, so a release whose signature is missing fails before the
+    // download rather than after it.
+    let signature =
+        fetch_signature(&agent, &asset.signature_url).map_err(failed(COULD_NOT_DOWNLOAD))?;
     tracing::info!(url = asset.url, size = asset.size, "downloading the update");
     download(&agent, &asset.url, asset.size, &file, progress)
         .map_err(failed(COULD_NOT_DOWNLOAD))?;
-    let signature =
-        fetch_signature(&agent, &asset.signature_url).map_err(failed(COULD_NOT_DOWNLOAD))?;
     verify(&file, &signature, key, &asset.name).map_err(failed(NOT_SIGNED))?;
     tracing::info!("the update's signature verified");
 
@@ -445,8 +538,8 @@ mod tests {
     use flate2::{Compression, write::GzEncoder};
 
     use super::{
-        Identity, Kind, appimage_of, bundled_installer, kind_of, release_directory, remember, run,
-        running, sibling, swap_in, unchanged, unpack,
+        Identity, Kind, appimage_of, bundled_installer, kind_of, mount_point, relaunchable,
+        release_directory, remember, run, running, sibling, swap_in, unchanged, unpack,
     };
     use crate::update::download::{COULD_NOT_REPLACE, NOT_THE_APP, tests::scratch};
 
@@ -627,6 +720,61 @@ mod tests {
             running(&kind, &OnceLock::new()).unwrap(),
             Identity::of(&exe).unwrap()
         );
+    }
+
+    #[test]
+    fn an_unpacked_appimage_updates_only_if_its_relaunch_unpacks_too() {
+        let appdir = Path::new("/tmp/appimage_extracted_0123");
+        assert!(relaunchable(appdir, None, |_| true).is_ok());
+        assert!(relaunchable(appdir, None, |_| false).is_err());
+        assert!(relaunchable(appdir, Some(OsStr::new("1")), |_| false).is_ok());
+        assert!(relaunchable(appdir, Some(OsStr::new("")), |_| false).is_err());
+
+        assert!(mount_point(Path::new("/")));
+        assert!(mount_point(Path::new("/dev")));
+        let directory = scratch("mount-point");
+        assert!(!mount_point(&directory));
+        assert!(!mount_point(&directory.join("missing")));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn only_an_install_replaced_since_start_offers_a_restart() {
+        use std::sync::Arc;
+
+        use crate::update::{Asset, State};
+
+        let installer = || {
+            Arc::new(super::Installer {
+                kind: Kind::Tarball {
+                    home: PathBuf::from("/home/me"),
+                },
+                running: Identity {
+                    device: 0,
+                    inode: 0,
+                },
+                version: "9.9.9".into(),
+                asset: Asset {
+                    name: String::new(),
+                    url: String::new(),
+                    size: 0,
+                    signature_url: String::new(),
+                },
+                key: minisign_verify::PublicKey::from_base64(
+                    "RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3",
+                )
+                .unwrap(),
+            })
+        };
+        assert!(matches!(
+            State::stopped(super::ALREADY_UPDATED, installer()),
+            State::Superseded(path) if path == Path::new("/home/me/.local/bin/dbdelve")
+        ));
+        assert!(matches!(
+            State::stopped(COULD_NOT_REPLACE, installer()),
+            State::Failed(COULD_NOT_REPLACE, _)
+        ));
     }
 
     #[test]
