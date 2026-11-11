@@ -48,32 +48,71 @@ Four things in the script are load-bearing:
 - **The font licences ship inside the bundle**, because the fonts are compiled
   into the binary and the OFL asks the licence to travel with them.
 
-## Self-update (macOS)
+## Self-update (macOS and Linux)
 
 `src/update.rs` checks GitHub's `releases/latest` at launch and every six
-hours. On macOS (`src/update/macos.rs`) an install that can replace itself
-gets **Update and restart**: it downloads `DBDelve-<version>.dmg`, verifies
-`DBDelve-<version>.dmg.minisig` against `RELEASE_PUBLIC_KEY`, copies the app
-out of the image to a hidden sibling, checks it (`codesign --verify --deep
---strict`, same `CFBundleIdentifier`, `CFBundleShortVersionString` equal to the
-release and newer than both the running build and the installed bundle),
-exchanges the two in one `renamex_np(RENAME_SWAP)` and relaunches through
-`App::restart`, which quits the way Quit does. A volume without the atomic
-exchange fails the update and keeps the release link: moving the app aside
-first would leave nothing installed if the process died in between. A lock on
-the bundle's folder keeps two processes from clearing each other's hidden
-sibling, and an install clears the one an interrupted install left.
+hours. An install that can replace itself gets **Update and restart**; every
+other one gets the link to the release page. What both platforms share --
+the release key, the download, the minisign check, the folder lock and the
+scratch directory -- is in `src/update/download.rs`.
+
+On macOS (`src/update/macos.rs`) the update downloads
+`DBDelve-<version>.dmg`, verifies `DBDelve-<version>.dmg.minisig` against
+`RELEASE_PUBLIC_KEY`, copies the app out of the image to a hidden sibling,
+checks it (`codesign --verify --deep --strict`, same `CFBundleIdentifier`,
+`CFBundleShortVersionString` equal to the release and newer than both the
+running build and the installed bundle), exchanges the two in one
+`renamex_np(RENAME_SWAP)` and relaunches through `App::restart`, which quits
+the way Quit does. A volume without the atomic exchange fails the update and
+keeps the release link: moving the app aside first would leave nothing
+installed if the process died in between.
+
+On Linux (`src/update/linux.rs`) two kinds of install update themselves:
+
+- **An AppImage** downloads `dbdelve-<version>-<arch>.AppImage`, copies it to
+  a hidden sibling of the AppImage (same filesystem), checks it is an ELF and
+  `rename(2)`s it over the old one under the old one's name. The running
+  image keeps its inode until it exits. It counts as an AppImage only when
+  `APPIMAGE` names a regular file *and* the executable lies inside `APPDIR`:
+  the runtime exports both to everything an AppImage starts, so a terminal
+  opened from one hands them to an unrelated DBDelve. The relaunch inherits
+  the old mount's `LD_LIBRARY_PATH`; AppRun restores the original from the
+  `DBDELVE_ORIGINAL_LD_LIBRARY_PATH` pair the earlier AppRun saved before
+  saving it again, so the new process sees the same as a fresh start.
+- **The tarball's `install.sh` install**, recognised only when the executable
+  is exactly `~/.local/bin/dbdelve` (a regular file, not a link), downloads
+  `dbdelve-<version>-linux-<arch>.tar.gz`, unpacks it with the `tar` crate
+  (no entry may land outside the scratch directory), requires the one
+  directory `dbdelve-<version>-linux-<arch>` holding `dbdelve` and
+  `install.sh`, and runs that `install.sh`: the new release knows its own
+  layout. `install.sh` writes the binary beside the old one and `mv`s it
+  over, so it is safe over a running copy.
+
+Everything else on Linux -- a tarball run where it was unpacked, a distro or
+Snap package, a binary anywhere else -- keeps the link.
+
+Both platforms take a lock on the folder of what they replace, which keeps two
+processes from clearing each other's hidden sibling, and clear the one an
+interrupted install left.
 
 - **Only the release build in a writable place updates itself.** A dev or
   other `DBDELVE_VARIANT` build, a binary outside a `.app`, a bundle on a
   read-only volume (run from the DMG), App-Translocated, or in a folder the
-  user cannot write, keeps the link to the release page. So does a release
-  missing either asset, and a build whose key is still the placeholder.
+  user cannot write, keeps the link to the release page; so does an AppImage
+  in a folder the user cannot write. So does a release missing the asset or
+  its `.minisig`, and a build whose key is still the placeholder.
+- **A signature binds the asset's name.** minisign's default trusted comment
+  is `timestamp:<n>\tfile:<name>\thashed`, and the signature covers it. The
+  app refuses a signature whose `file:` is not the exact asset it asked for,
+  which carries the version, so an older release's genuine file and signature
+  served under the new name do not verify. The release must keep signing
+  with the default comment (no `-t`); the workflow checks it does.
 - **The release workflow signs every asset** with the `UPDATE_SIGNING_KEY`
   secret (an unencrypted minisign secret key) and checks each signature is
-  prehashed and verifies against the key in `src/update/macos.rs`; it refuses
-  to publish otherwise. Changing the key strands every installed app on the
-  old one, which then never verifies another release.
+  prehashed, names its asset and verifies against the key in
+  `src/update/download.rs`; it refuses to publish otherwise. Changing the key
+  strands every installed app on the old one, which then never verifies
+  another release.
 - **The cask says `auto_updates true`**, so `brew upgrade` does not fight the
   app over which copy is current.
 - **`update-test-hooks` is the only way to point an app elsewhere.** Off by

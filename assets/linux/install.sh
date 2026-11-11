@@ -39,7 +39,11 @@ if [[ "${1:-}" == --uninstall ]]; then
 fi
 
 mkdir -p "$BIN" "$APPS"
-install -m 755 "$HERE/dbdelve" "$BIN/dbdelve"
+# Beside it and then renamed over it, so the path never holds a half-written
+# binary, and a running DBDelve -- the one updating itself, say -- keeps the
+# file it started from rather than having it rewritten under it.
+install -m 755 "$HERE/dbdelve" "$BIN/.dbdelve.new"
+mv -f "$BIN/.dbdelve.new" "$BIN/dbdelve"
 # The binary lands alone in ~/.local/bin, so its bridge goes to the per-user
 # plugin directory db::plugin::discover() also reads, not beside the binary.
 PLUGINS="${XDG_DATA_HOME:-$HOME/.local/share}/dbdelve/plugins"

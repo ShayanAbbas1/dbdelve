@@ -54,7 +54,19 @@ Applications; the quarantine step doesn't apply here.
 
 ## Linux
 
-Install from the AUR:
+One line installs the latest release for your architecture under `~/.local`,
+with no root:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ShayanAbbas1/dbdelve/main/install.sh | sh
+```
+
+It downloads the tarball described below and runs the `install.sh` inside it.
+If `minisign` is installed it also checks the release's signature, and installs
+nothing that fails the check. It needs `curl`, `tar` and `bash`. An install made
+this way updates itself, see [Updating](#updating).
+
+Or install from the AUR:
 
 ```sh
 yay -S dbdelve-bin
@@ -82,9 +94,10 @@ cd dbdelve-*-linux-*/
 Everything goes under `~/.local`, so no root: the binary to `~/.local/bin`, the
 icons and the desktop entry where your desktop looks for them, which is what
 puts DBDelve in the app menu. Make sure `~/.local/bin` is on your PATH —
-`install.sh` says so if it isn't. Updating means unpacking the next release and
-running it again; `./install.sh --uninstall` reverses it and leaves your
-connections and query history alone.
+`install.sh` says so if it isn't. The installed app updates itself, and
+running the next release's `install.sh` over it works too;
+`./install.sh --uninstall` reverses it and leaves your connections and query
+history alone.
 
 Or take `dbdelve-<version>-<arch>.AppImage` from the same release, which is one
 file that runs where it lands:
@@ -106,7 +119,8 @@ What it does not do is put DBDelve in the app menu: an AppImage on its own is
 just a file you run, so there is no desktop entry and no icon until you
 integrate it — Gear Lever and AppImageLauncher both do that, or you copy the
 entry out by hand. The tarball does it for you, which is still the reason to
-prefer it. Updating either way is downloading the next one.
+prefer it. An AppImage in a folder you can write to updates itself in place,
+see [Updating](#updating).
 
 To build it yourself instead, on Debian or Ubuntu the build needs:
 
@@ -171,21 +185,30 @@ DBDelve doesn't bundle any.
 
 ## Updating
 
-On macOS, **Update and restart** in the titlebar's update menu (or
-"Update to dbdelve … and restart" in the command palette) does it in one click,
-as described [above](#macos). Homebrew leaves a self-updating app to update
+On macOS and Linux, **Update and restart** in the titlebar's update menu (or
+"Update to dbdelve … and restart" in the command palette) does it in one click.
+It downloads the release from GitHub, checks its signature against the key built
+into the app, replaces the app and opens the new one. On macOS that is
+described [above](#macos). Homebrew leaves a self-updating app to update
 itself, so `brew upgrade` skips DBDelve unless you add `--greedy`.
 
-Elsewhere it doesn't update itself yet. If you used the Windows installer, run
+On Linux it works for an install at `~/.local/bin/dbdelve`, which is what the
+tarball's `install.sh` and the one-liner make, and for a running AppImage whose
+folder you can write to. Installs from the AUR or another package manager, a
+tarball run from where it was unpacked, and builds from source don't update
+themselves; the titlebar links to [the latest release][releases] instead, and
+your package manager is the way to update.
+
+Windows doesn't update itself yet. If you used the Windows installer, run
 the next one over it; it upgrades in place. The zip has no upgrade: each
 version unzips to its own folder, so delete the old one. Connections and any
-plugins you added live in `%APPDATA%\dbdelve`, not there. Otherwise the
-titlebar links to [the latest release][releases] once there is a newer one.
+plugins you added live in `%APPDATA%\dbdelve`, not there. The titlebar links
+to [the latest release][releases] once there is a newer one.
 
 There is no telemetry. The only requests DBDelve makes on its own are to
 GitHub, to check for a newer release at startup and every six hours after,
-which you can turn off in Settings, and on macOS to download the release you
-asked to update to.
+which you can turn off in Settings, and to download the release you asked to
+update to, on macOS and Linux.
 
 [releases]: https://github.com/ShayanAbbas1/dbdelve/releases/latest
 [Inno Setup]: https://jrsoftware.org/isinfo.php

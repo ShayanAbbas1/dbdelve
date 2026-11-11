@@ -1093,9 +1093,9 @@ impl Workspace {
             _ = workspace.update(cx, |workspace, cx| match installed {
                 // Through the platform's quit, as Quit goes, so buffers and
                 // profiles are written on the way out exactly as they are then.
-                Ok(bundle) => {
+                Ok(installed) => {
                     tracing::info!("restarting into the update");
-                    cx.set_restart_path(bundle);
+                    cx.set_restart_path(installed);
                     cx.restart();
                 }
                 Err(reason) => {

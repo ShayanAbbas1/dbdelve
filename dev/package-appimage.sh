@@ -138,6 +138,15 @@ cat > "$APPDIR/AppRun" <<'APPRUN'
 # for the names we ship and the host supplies every other name, which is the
 # split package-appimage.sh made.
 HERE="$(dirname "$(readlink -f "$0")")"
+# A DBDelve started by another -- relaunching into its update, say -- inherits
+# that one's LD_LIBRARY_PATH, which points into the old mount, so what the
+# earlier AppRun saved is the original.
+if [ -n "${DBDELVE_ORIGINAL_LD_LIBRARY_PATH+x}" ]; then
+  export LD_LIBRARY_PATH="$DBDELVE_ORIGINAL_LD_LIBRARY_PATH"
+elif [ -n "${DBDELVE_ORIGINAL_LD_LIBRARY_PATH_UNSET+x}" ]; then
+  unset LD_LIBRARY_PATH
+fi
+unset DBDELVE_ORIGINAL_LD_LIBRARY_PATH DBDELVE_ORIGINAL_LD_LIBRARY_PATH_UNSET
 # Saved for the ODBC bridge, whose vendor drivers must not see the bundled libraries.
 if [ -n "${LD_LIBRARY_PATH+x}" ]; then
   export DBDELVE_ORIGINAL_LD_LIBRARY_PATH="$LD_LIBRARY_PATH"

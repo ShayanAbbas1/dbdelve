@@ -45,8 +45,9 @@ otherwise refuse it over. Without Homebrew:
 curl -fsSL https://raw.githubusercontent.com/ShayanAbbas1/dbdelve/main/install.sh | sh
 ```
 
-**Linux** (x86_64 or aarch64): `yay -S dbdelve-bin` from the AUR, or the
-tarball or AppImage from [the latest release][releases].
+**Linux** (x86_64 or aarch64): the same one-liner installs it under `~/.local`
+with no root, or `yay -S dbdelve-bin` from the AUR, or the tarball or AppImage
+from [the latest release][releases].
 
 **Windows** (x86_64): run the installer from [the latest release][releases],
 or unzip the zip and run `dbdelve.exe`. The installer asks for AppData (just

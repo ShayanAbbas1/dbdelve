@@ -414,14 +414,27 @@ windows-sys = { version = "=0.61.2", features = [
 libc = "=0.2.189"
 
 # Checking a downloaded update against the key releases are signed with. Zero
-# dependencies. macOS alone for now, as the one platform that updates itself.
-[target.'cfg(target_os = "macos")'.dependencies]
+# dependencies. macOS and Linux, the platforms that update themselves.
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
 minisign-verify = "=0.3.0"
+
+# Unpacking a Linux update tarball. Both already in the graph (tar through
+# libduckdb-sys's build, flate2 through mysql and zip) and pinned to the
+# versions locked there, so naming them adds no crate. No default features:
+# tar's only one restores extended attributes, which a release never carries.
+[target.'cfg(target_os = "linux")'.dependencies]
+tar = { version = "=0.4.46", default-features = false }
+flate2 = "=1.1.9"
 
 # Signing the updater's test files the way the release pipeline's minisign
 # does, so no tool has to be installed to run them.
-[target.'cfg(target_os = "macos")'.dev-dependencies]
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dev-dependencies]
 minisign = "=0.10.0"
+
+# The Linux updater's tests also run on macOS, the platform it is written on.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+tar = { version = "=0.4.46", default-features = false }
+flate2 = "=1.1.9"
 
 [features]
 # Lets an end-to-end test point the updater at its own feed and key, and lets a
