@@ -49,4 +49,14 @@ Host dbdelve-inner
     UserKnownHostsFile $abs_dir/known_hosts
     StrictHostKeyChecking accept-new
     ProxyJump dbdelve-bastion
+
+# No identity of its own and no agent, for a test that brings its own key.
+Host dbdelve-bastion-keyless
+    HostName 127.0.0.1
+    Port $port
+    User dev
+    IdentitiesOnly yes
+    IdentityAgent none
+    UserKnownHostsFile $abs_dir/known_hosts
+    StrictHostKeyChecking accept-new
 EOF

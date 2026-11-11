@@ -381,6 +381,7 @@ fn ssh(handler: &Value, login: Option<&Value>, notes: &mut Vec<String>) -> Optio
             .unwrap_or_default(),
         identity_file,
         run_as: None,
+        passphrase: String::new(),
     })
 }
 
@@ -868,6 +869,7 @@ mod tests {
                     user: "deploy".into(),
                     identity_file: Some("~/.ssh/id_ed25519".into()),
                     run_as: None,
+                    passphrase: String::new(),
                 }),
                 vec![]
             )
@@ -881,6 +883,7 @@ mod tests {
                     user: "deploy".into(),
                     identity_file: None,
                     run_as: None,
+                    passphrase: String::new(),
                 }),
                 vec![]
             )

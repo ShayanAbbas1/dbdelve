@@ -3380,6 +3380,32 @@ mod tests {
         assert!(connection.query("SELECT 1", Fetch::default()).is_ok());
     }
 
+    // Where the test binary can stand in as ssh's askpass.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    #[ignore = "requires the dev bastions and Postgres configured through dbdelve_SSH_CONFIG and PG*"]
+    fn live_ssh_every_login_over_the_socket_is_given_the_key_passphrase() {
+        let server = ServerConfig {
+            ssh: Some(crate::db::ssh::live_bastion_with_a_passphrase(
+                "socket",
+                "correct horse",
+            )),
+            ..live_socket("dbdelve-bastion", Some("postgres"))
+        };
+        let connection = Connection::open(&server).expect("connection should open");
+        let canceller = connection.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            canceller.cancel().expect("the cancel request should send");
+        });
+
+        // The cancel is a login of its own.
+        let error = connection
+            .query("SELECT pg_sleep(30)", Fetch::default())
+            .expect_err("the statement should be cancelled");
+        assert!(error.message.contains("cancel"), "{}", error.message);
+    }
+
     #[test]
     #[ignore = "requires the dev bastions and Postgres configured through dbdelve_SSH_CONFIG and PG*"]
     fn live_ssh_a_run_as_user_sudo_refuses_fails_with_sudo_s_reason() {

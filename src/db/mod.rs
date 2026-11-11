@@ -49,6 +49,7 @@ pub use external::ExternalConfig;
 pub(crate) use external::echo;
 pub use password_command::{PasswordCommand, loggable_error};
 pub use plugin::Plugin;
+pub use ssh::askpass;
 
 pub use mongo::MongoConfig;
 pub use postgres::PostgresConfig;
@@ -912,8 +913,8 @@ pub(super) fn server_from_url(url: &str, engine: &str) -> Result<ServerConfig, S
 }
 
 /// A local port forward opened over the system `ssh` binary before the engine
-/// dials in. Nothing here is a secret: the private key stays on disk and the
-/// password, if any, stays with ssh-agent.
+/// dials in. The one secret is the key's passphrase, which the Keychain holds,
+/// never `profiles.toml`; the private key stays on disk or with ssh-agent.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SshTunnel {
     /// A hostname, or an alias `~/.ssh/config` resolves.
@@ -924,14 +925,18 @@ pub struct SshTunnel {
     /// Blank defers to `~/.ssh/config`, or the local user.
     #[serde(default)]
     pub user: String,
-    /// None defers to `~/.ssh/config`, or ssh-agent. No password field: v1 is
-    /// keys and agent only.
+    /// None defers to `~/.ssh/config`, or ssh-agent. No password field: a
+    /// host is reached by key, never by password.
     #[serde(default)]
     pub identity_file: Option<String>,
     /// The OS user `sudo` opens a Unix socket as on the SSH host, for peer
     /// authentication. None, or blank, opens it as the SSH user.
     #[serde(default)]
     pub run_as: Option<String>,
+    /// What decrypts the key, filled in from the Keychain at connect as the
+    /// password is. Blank is none, and ssh runs exactly as it does without one.
+    #[serde(skip)]
+    pub passphrase: String,
 }
 
 impl SshTunnel {
@@ -1137,6 +1142,15 @@ impl ConnectionConfig {
         }
     }
 
+    /// The same, for the callers that fill its passphrase in from the Keychain
+    /// or take it out to save there.
+    pub fn ssh_mut(&mut self) -> Option<&mut SshTunnel> {
+        match self {
+            Self::External(external) => external.ssh.as_mut(),
+            _ => self.server_mut()?.ssh.as_mut(),
+        }
+    }
+
     /// The command a login runs in place of the Keychain's password.
     pub fn password_command(&self) -> Option<&PasswordCommand> {
         self.server()?.password_command.as_ref()
@@ -1315,13 +1329,18 @@ impl ConnectionConfig {
     /// what the Keychain holds, so blank there means "leave it alone" -- taken
     /// literally it would drop and reopen the connection every time a colour
     /// was saved. A password that was typed does count, since applying it is
-    /// the only reason to type one.
+    /// the only reason to type one. The same goes for the key passphrase.
     pub fn needs_reconnect(&self, edited: &Self) -> bool {
         let mut current = self.clone();
         if let Some(password) = current.password_mut()
             && edited.password().is_some_and(str::is_empty)
         {
             password.clear();
+        }
+        if let Some(ssh) = current.ssh_mut()
+            && edited.ssh().is_some_and(|ssh| ssh.passphrase.is_empty())
+        {
+            ssh.passphrase.clear();
         }
         current != *edited
     }
@@ -3913,6 +3932,25 @@ mod tests {
             path: "/tmp/dbdelve.db".into(),
             statement_timeout: 0
         }));
+    }
+
+    #[test]
+    fn an_edit_reconnects_for_a_typed_key_passphrase_but_not_a_blank_one() {
+        let tunnelled = |passphrase: &str| {
+            ConnectionConfig::MySql(ServerConfig {
+                host: "db.internal".into(),
+                ssh: Some(SshTunnel {
+                    host: "bastion".into(),
+                    passphrase: passphrase.into(),
+                    ..SshTunnel::default()
+                }),
+                ..ServerConfig::default()
+            })
+        };
+        let stored = tunnelled("secret");
+
+        assert!(!stored.needs_reconnect(&tunnelled("")));
+        assert!(stored.needs_reconnect(&tunnelled("typed")));
     }
 
     #[test]

@@ -154,7 +154,7 @@ pub struct StoredProfile {
     /// The SSH tunnel this profile dials through, or absent for a direct
     /// connection -- which is every profile written before tunnels existed. A
     /// table, so it has to come after every scalar above. Nothing secret is in
-    /// it: no password field, keys and ssh-agent only.
+    /// it: the key's passphrase is skipped here and kept in the Keychain.
     #[serde(default)]
     pub ssh: Option<SshTunnel>,
     /// The query buffers this profile had open, in strip order.
@@ -3344,6 +3344,7 @@ folder = "Hot"
                 user: "tunnel".into(),
                 identity_file: Some("/home/dbdelve/.ssh/id_ed25519".into()),
                 run_as: Some("postgres".into()),
+                passphrase: String::new(),
             }),
             ..a_stored_profile()
         };
@@ -3370,6 +3371,7 @@ folder = "Hot"
                 user: String::new(),
                 identity_file: None,
                 run_as: None,
+                passphrase: String::new(),
             }),
             ..a_stored_profile()
         };
@@ -3387,6 +3389,39 @@ folder = "Hot"
         assert_eq!(decoded.profiles, vec![profile]);
         // So a tunnel without Run as saves as it did before the field existed.
         assert!(!text.contains("run_as"), "{text}");
+    }
+
+    #[test]
+    fn a_key_passphrase_is_never_written() {
+        let tunnel = SshTunnel {
+            host: "dbdelve-bastion".into(),
+            identity_file: Some("/home/dbdelve/.ssh/id_ed25519".into()),
+            passphrase: "correct horse".into(),
+            ..SshTunnel::default()
+        };
+        let file = ProfileFile {
+            fonts: None,
+            active: None,
+            settings: None,
+            projects: Vec::new(),
+            profiles: vec![StoredProfile {
+                ssh: Some(tunnel.clone()),
+                ..a_stored_profile()
+            }],
+        };
+
+        let text = toml::to_string_pretty(&file).expect("profiles must encode");
+        assert!(!text.contains("correct horse"), "{text}");
+        assert!(!text.contains("passphrase"), "{text}");
+
+        let decoded: ProfileFile = toml::from_str(&text).expect("profiles must decode");
+        assert_eq!(
+            decoded.profiles[0].ssh,
+            Some(SshTunnel {
+                passphrase: String::new(),
+                ..tunnel
+            })
+        );
     }
 
     #[test]
@@ -3448,6 +3483,7 @@ folder = "Hot"
                 user: "tunnel".into(),
                 identity_file: None,
                 run_as: None,
+                passphrase: String::new(),
             }),
             ..a_stored_profile()
         };

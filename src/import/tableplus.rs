@@ -482,6 +482,7 @@ fn ssh(row: &Row, notes: &mut Vec<String>) -> Option<SshTunnel> {
         user: row.ssh_user.clone(),
         identity_file,
         run_as: None,
+        passphrase: String::new(),
     })
 }
 
@@ -1008,6 +1009,7 @@ mod tests {
                 user: "deploy".into(),
                 identity_file: identity_file.map(str::to_string),
                 run_as: None,
+                passphrase: String::new(),
             })
         };
         let unlocated = vec![

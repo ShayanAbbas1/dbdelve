@@ -1096,6 +1096,7 @@ fn ssh_tunnel(
         user,
         identity_file,
         run_as: Some(run_as).filter(|user| takes_run_as && !user.is_empty()),
+        passphrase: String::new(),
     }))
 }
 
@@ -1331,6 +1332,7 @@ mod tests {
                 user: String::new(),
                 identity_file: None,
                 run_as: None,
+                passphrase: String::new(),
             }))
         );
         assert_eq!(
@@ -1371,6 +1373,7 @@ mod tests {
             user: "deploy".into(),
             identity_file: Some("~/.ssh/id_ed25519".into()),
             run_as: Some("postgres".into()),
+            passphrase: String::new(),
         };
         assert_eq!(
             ssh_tunnel(true, true, ssh_fields(Some(&saved))),

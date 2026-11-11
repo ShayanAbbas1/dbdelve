@@ -2467,6 +2467,7 @@ fn an_odbc_profile_saves_and_restores_as_it_was(cx: &mut TestAppContext) {
                         user: "me".into(),
                         identity_file: None,
                         run_as: None,
+                        passphrase: String::new(),
                     })
                 ),
             ]
