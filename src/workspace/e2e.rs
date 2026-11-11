@@ -3800,67 +3800,31 @@ fn the_default_chip_puts_a_typed_then_emptied_insert_field_back_out_of_the_state
             workspace.open_explorer_target(leaf.target, window, cx);
         });
         settle(cx);
-        workspace.update_in(cx, |workspace, window, cx| {
-            workspace.new_row(&crate::actions::NewRow, window, cx);
-        });
-        settle(cx);
-
-        let type_into = |index: usize, text: &str, cx: &mut VisualTestContext| {
+        let open_form = |cx: &mut VisualTestContext| {
             workspace.update_in(cx, |workspace, window, cx| {
-                let input = workspace
-                    .profile()
-                    .unwrap()
-                    .session
-                    .insert_form
-                    .as_ref()
-                    .unwrap()
-                    .fields[index]
-                    .input
-                    .clone();
-                input.update(cx, |input, cx| input.set_value(text, window, cx));
+                workspace.new_row(&crate::actions::NewRow, window, cx);
             });
             settle(cx);
         };
-        // `set_value` emits no change, so touching is what a keystroke does.
-        let touch = |index: usize, cx: &mut VisualTestContext| {
-            workspace.update_in(cx, |workspace, window, cx| {
-                workspace.touch_insert_field(index, window, cx)
-            });
-        };
-        let touched = |index: usize, cx: &mut VisualTestContext| {
+        let input = |index: usize, cx: &mut VisualTestContext| {
             workspace.read_with(cx, |workspace, _| {
-                workspace
-                    .profile()
-                    .unwrap()
-                    .session
-                    .insert_form
-                    .as_ref()
-                    .unwrap()
-                    .fields[index]
-                    .touched
+                let form = workspace.profile().unwrap().session.insert_form.as_ref();
+                form.unwrap().fields[index].input.clone()
             })
         };
-
-        type_into(0, "7", cx);
-        touch(0, cx);
-        type_into(0, "", cx);
-        assert!(touched(0, cx), "emptying alone keeps the field a value");
-        workspace.update_in(cx, |workspace, window, cx| {
-            workspace.default_insert_field(0, window, cx);
-        });
-        settle(cx);
-        assert!(!touched(0, cx), "DEFAULT puts the field back to left out");
-
+        let focus = |index: usize, cx: &mut VisualTestContext| {
+            let input = input(index, cx);
+            cx.update(|window, cx| input.focus_handle(cx).focus(window, cx));
+            settle(cx);
+        };
+        let typing_in = |index: usize, cx: &mut VisualTestContext| {
+            let input = input(index, cx);
+            cx.update(|window, cx| input.focus_handle(cx).is_focused(window))
+        };
         let state = |index: usize, cx: &mut VisualTestContext| {
             workspace.read_with(cx, |workspace, cx| {
-                let field = &workspace
-                    .profile()
-                    .unwrap()
-                    .session
-                    .insert_form
-                    .as_ref()
-                    .unwrap()
-                    .fields[index];
+                let form = workspace.profile().unwrap().session.insert_form.as_ref();
+                let field = &form.unwrap().fields[index];
                 let input = field.input.read(cx);
                 (
                     field.nulled,
@@ -3870,94 +3834,79 @@ fn the_default_chip_puts_a_typed_then_emptied_insert_field_back_out_of_the_state
                 )
             })
         };
-        let toggle_null = |index: usize, cx: &mut VisualTestContext| {
+        let statement = |cx: &mut VisualTestContext| {
             workspace.update_in(cx, |workspace, window, cx| {
-                workspace.toggle_insert_null(index, window, cx);
+                workspace.confirm_new_row(window, cx);
             });
             settle(cx);
+            workspace.read_with(cx, |workspace, _| {
+                let review = workspace.profile().unwrap().session.apply_review.as_ref();
+                review.unwrap().sql.clone()
+            })
         };
-        assert_eq!(
-            state(0, cx),
-            (false, false, String::new(), "DEFAULT".into())
-        );
-        type_into(0, "7", cx);
-        touch(0, cx);
-        toggle_null(0, cx);
-        assert_eq!(state(0, cx), (true, false, String::new(), "NULL".into()));
-        type_into(0, "9", cx);
-        touch(0, cx);
-        assert_eq!(
-            state(0, cx),
-            (false, true, "9".into(), "empty string".into())
-        );
-        toggle_null(0, cx);
-        toggle_null(0, cx);
-        assert_eq!(
-            state(0, cx),
-            (false, false, String::new(), "DEFAULT".into())
-        );
+        let left_out = || (false, false, String::new(), "DEFAULT".to_string());
+        let nulled = || (true, false, String::new(), "NULL".to_string());
+        let typed = |text: &str| (false, true, text.to_string(), "empty string".to_string());
 
-        type_into(1, "x", cx);
-        touch(1, cx);
-        toggle_null(1, cx);
-        assert_eq!(state(1, cx), (true, false, String::new(), "NULL".into()));
-
-        type_into(1, "robin", cx);
-        touch(1, cx);
-        type_into(2, "", cx);
-        touch(2, cx);
-        workspace.update_in(cx, |workspace, window, cx| {
-            workspace.confirm_new_row(window, cx);
-        });
+        open_form(cx);
+        focus(0, cx);
+        cx.simulate_input("7");
         settle(cx);
-        let statement = workspace.read_with(cx, |workspace, _| {
-            workspace
-                .profile()
-                .unwrap()
-                .session
-                .apply_review
-                .as_ref()
-                .unwrap()
-                .sql
-                .clone()
-        });
-        assert!(!statement.contains("\"id\""), "{statement}");
-        assert!(
-            statement.contains("\"name\"") && statement.contains("'robin'"),
-            "{statement}"
-        );
-        assert!(
-            statement.contains("\"wing\"") && statement.contains("''"),
-            "{statement}"
-        );
+        assert_eq!(state(0, cx), typed("7"));
+        cx.simulate_keystrokes("backspace");
+        settle(cx);
+        assert_eq!(state(0, cx), typed(""), "emptying keeps the field a value");
+
+        // Each field is its DEFAULT, its NULL, then its box.
+        cx.simulate_keystrokes("shift-tab shift-tab");
+        settle(cx);
+        assert!(!typing_in(0, cx));
+        press(cx, "enter");
+        assert_eq!(state(0, cx), left_out(), "DEFAULT puts the field back out");
+        cx.simulate_keystrokes("tab");
+        settle(cx);
+        press(cx, "space");
+        assert_eq!(state(0, cx), nulled());
+        cx.simulate_keystrokes("tab");
+        settle(cx);
+        assert!(typing_in(0, cx));
+        cx.simulate_input("9");
+        settle(cx);
+        assert_eq!(state(0, cx), typed("9"), "typing turns the NULL off");
+        cx.simulate_keystrokes("shift-tab");
+        settle(cx);
+        press(cx, "space");
+        assert_eq!(state(0, cx), nulled(), "NULL clears the box");
+        press(cx, "space");
+        assert_eq!(state(0, cx), left_out());
+
+        cx.simulate_keystrokes("tab tab tab tab");
+        settle(cx);
+        assert!(typing_in(1, cx));
+        cx.simulate_input("robin");
+        cx.simulate_keystrokes("tab tab tab");
+        settle(cx);
+        assert!(typing_in(2, cx));
+        cx.simulate_input("x");
+        cx.simulate_keystrokes("backspace");
+        settle(cx);
+        assert_eq!(state(1, cx), typed("robin"));
+        assert_eq!(state(2, cx), typed(""));
+        let sql = statement(cx);
+        assert!(!sql.contains("\"id\""), "{sql}");
+        assert!(sql.contains("\"name\"") && sql.contains("'robin'"), "{sql}");
+        assert!(sql.contains("\"wing\"") && sql.contains("''"), "{sql}");
 
         workspace.update(cx, |workspace, cx| workspace.close_apply_review(cx));
-        workspace.update_in(cx, |workspace, window, cx| {
-            workspace.new_row(&crate::actions::NewRow, window, cx);
-        });
+        open_form(cx);
+        focus(1, cx);
+        cx.simulate_input("robin");
+        cx.simulate_keystrokes("shift-tab");
         settle(cx);
-        type_into(1, "robin", cx);
-        touch(1, cx);
-        toggle_null(1, cx);
-        workspace.update_in(cx, |workspace, window, cx| {
-            workspace.confirm_new_row(window, cx);
-        });
-        settle(cx);
-        let statement = workspace.read_with(cx, |workspace, _| {
-            workspace
-                .profile()
-                .unwrap()
-                .session
-                .apply_review
-                .as_ref()
-                .unwrap()
-                .sql
-                .clone()
-        });
-        assert!(
-            statement.contains("NULL") && !statement.contains("robin"),
-            "{statement}"
-        );
+        press(cx, "space");
+        assert_eq!(state(1, cx), nulled());
+        let sql = statement(cx);
+        assert!(sql.contains("NULL") && !sql.contains("robin"), "{sql}");
 
         quit(workspace, cx);
     });
