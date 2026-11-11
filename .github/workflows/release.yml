@@ -1,7 +1,8 @@
 name: release
 
-# Run from the Actions tab. Unticked, it builds every asset and publishes
-# nothing -- the point is finding out whether they build. Ticked, it tags the
+# Run from the Actions tab. Unticked, it builds every asset, signs them and
+# publishes nothing -- the point is finding out whether they build and whether
+# the signing key is the one the app trusts. Ticked, it tags the
 # commit as v<Cargo.toml version>, publishes the release once every asset
 # exists, and repoints the Homebrew cask. A version with a hyphen
 # (0.2.0-rc.1) is published as a pre-release, may come from any branch, and
@@ -151,9 +152,10 @@ jobs:
             target/windows/dbdelve-*-setup.exe
           if-no-files-found: error
 
-  release:
-    needs: [version, linux, macos, windows]
-    if: inputs.publish
+  # Its own job, and not gated on publishing, so an unticked run proves the
+  # secret signs what the app will accept before a release depends on it.
+  sign:
+    needs: [linux, macos, windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -196,6 +198,22 @@ jobs:
           done
         env:
           UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: signatures
+          path: dist/*.minisig
+          if-no-files-found: error
+
+  release:
+    needs: [version, sign]
+    if: inputs.publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
 
       # Every file the release is supposed to carry is named here, so a build
       # that quietly lost one fails before anything goes public rather than

@@ -149,7 +149,8 @@ Only once every asset exists does it tag the commit `v$VERSION` and publish,
 then it rewrites `Casks/dbdelve.rb` in the `ShayanAbbas1/homebrew-dbdelve` tap
 through the `TAP_TOKEN` secret. A version with a hyphen (`0.2.0-rc.1`) is a
 pre-release, may run from any branch and leaves the cask alone. Unticked, the
-workflow builds everything and publishes nothing.
+workflow builds everything, signs it and publishes nothing, which is how to
+check `UPDATE_SIGNING_KEY` against the app's key without releasing.
 
 **There is no notarization and no Developer ID.** A release signs ad-hoc rather
 than with `dev/identity.sh`'s certificate: that certificate is trusted only on
