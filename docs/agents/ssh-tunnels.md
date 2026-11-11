@@ -110,14 +110,15 @@ already set up on the machine.
     exit non-zero without connecting, so the passphrase is never sent as a
     password. A `ProxyJump` hop is its own ssh without our `-o` options, so it
     is this filter, not the options, that keeps the passphrase from it, and
-    it holds because OpenSSH 8.4 begins a server's keyboard-interactive
+    it holds because OpenSSH 8.5 begins a server's keyboard-interactive
     prompt with `(user@host)`, so no server can spell the prefix.
-  - **A passphrase is refused on an ssh older than OpenSSH 8.4**, naming it,
+  - **A passphrase is refused on an ssh older than OpenSSH 8.5**, naming it,
     from `ssh -V` (read once per process, and only when a passphrase is set;
     `OpenSSH_for_Windows_` counts). Before 8.4 ssh ignores
-    `SSH_ASKPASS_REQUIRE` and leaves a server's prompt unprefixed, so a hop's
-    server could ask for the passphrase as if it were ssh. An unreadable
-    version is refused too: never a quiet fallback.
+    `SSH_ASKPASS_REQUIRE`; 8.4 honours it but still leaves a server's
+    keyboard-interactive prompt unprefixed (the `(user@host)` prefix is
+    8.5's), so a hop's server could ask for the passphrase as if it were ssh.
+    An unreadable version is refused too: never a quiet fallback.
   - **A refused login says what a passphrase has to do with it.** With none
     given, after a key the SSH host accepted (`-v`'s `Server accepts key:`)
     or with Identity file set, the error suggests entering it or ssh-agent;

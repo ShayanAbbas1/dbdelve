@@ -82,7 +82,7 @@ ssh-agent` before `ssh-add`ing a key, or use an unencrypted key file instead.
 
 - **No password auth.** The tunnel never prompts: a host that only offers
   password or keyboard-interactive auth fails. A key's passphrase works only
-  through the Key passphrase field, which needs OpenSSH 8.4 or later: an
+  through the Key passphrase field, which needs OpenSSH 8.5 or later: an
   older `ssh` is refused, saying which it is. Load the key into ssh-agent
   instead there.
 - **MySQL's `verify-full` is refused through a tunnel.** The driver checks

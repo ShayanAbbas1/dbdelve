@@ -858,10 +858,11 @@ fn drained(draining: JoinHandle<()>, said: &Mutex<Said>) {
     }
 }
 
-/// The first OpenSSH to honour `SSH_ASKPASS_REQUIRE`, and to begin a server's
-/// keyboard-interactive prompt with `(user@host)`: an older one could hand a
-/// `ProxyJump` hop's server the passphrase for a prompt spelled like ssh's.
-const ASKPASS_FROM: (u32, u32) = (8, 4);
+/// The first OpenSSH to begin a server's keyboard-interactive prompt with
+/// `(user@host)`, without which a `ProxyJump` hop's server could ask for the
+/// passphrase in ssh's own words. `SSH_ASKPASS_REQUIRE` came a release
+/// earlier, in 8.4.
+const ASKPASS_FROM: (u32, u32) = (8, 5);
 
 /// What answers ssh's passphrase prompt while a session opens, when there is
 /// a passphrase to give, and only from an ssh that keeps it from a server.
@@ -1557,8 +1558,9 @@ mod tests {
         ] {
             assert_eq!(openssh_version(said), version, "{said}");
         }
-        // Compared as numbers, so 8.10 is past 8.4.
-        assert!((8, 3) < ASKPASS_FROM && (8, 10) > ASKPASS_FROM);
+        // 8.4 has SSH_ASKPASS_REQUIRE but not the prefix. Compared as
+        // numbers, so 8.10 is past 8.5.
+        assert!((8, 4) < ASKPASS_FROM && (8, 5) == ASKPASS_FROM && (8, 10) > ASKPASS_FROM);
     }
 
     #[test]

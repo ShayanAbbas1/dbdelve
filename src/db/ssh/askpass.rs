@@ -23,7 +23,7 @@ const TOKEN: &str = "DBDELVE_ASKPASS_TOKEN";
 
 /// What ssh asks its askpass for a key file's passphrase, and the one prompt
 /// answered: a server's password or keyboard-interactive prompt, a host key
-/// question and a hardware key's PIN never get the passphrase. OpenSSH 8.4,
+/// question and a hardware key's PIN never get the passphrase. OpenSSH 8.5,
 /// the oldest a passphrase is given to, begins every keyboard-interactive
 /// prompt with `(user@host)`, so a server cannot spell this one.
 const KEY_PROMPT: &str = "Enter passphrase for key ";
