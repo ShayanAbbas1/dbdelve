@@ -206,6 +206,17 @@ fn feed() -> String {
     LATEST.to_string()
 }
 
+/// Whether a found update installs without anyone clicking: only a test build
+/// told to by `DBDELVE_UPDATE_AUTO=1`, for an end-to-end test of the updater
+/// that has nobody at the screen.
+pub(crate) fn installs_unattended() -> bool {
+    #[cfg(feature = "update-test-hooks")]
+    if std::env::var("DBDELVE_UPDATE_AUTO").is_ok_and(|value| value == "1") {
+        return true;
+    }
+    false
+}
+
 /// Exactly the asset called `name` and its `.minisig`, or nothing: an update
 /// without its signature is not one this app will install.
 fn asset(name: &str, assets: &[LatestAsset]) -> Option<Asset> {
