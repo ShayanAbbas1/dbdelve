@@ -397,16 +397,24 @@ gpui = { package = "gpui-pre", version = "=0.3.9", features = ["test-support"] }
 # default features, so the colored-diff console stack stays out.
 insta = { version = "=1.49.0", default-features = false }
 
-# The Job Object that ends an SSH tunnel's ssh.exe when DBDelve exits, and
-# MoveFileExW for atomic no-overwrite query renames. Pinned to the version
-# already locked, so naming it adds no copy.
+# The Job Object that ends an SSH tunnel's ssh.exe when DBDelve exits,
+# MoveFileExW for atomic no-overwrite query renames, and the file identity the
+# updater compares. Pinned to the version already locked, so naming it adds no
+# copy.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "=0.61.2", features = [
+    "Win32_Foundation",
     "Win32_Security",
     "Win32_System_JobObjects",
     "Win32_System_Threading",
     "Win32_Storage_FileSystem",
 ] }
+# Where the installer recorded an install, read by the updater. Already locked
+# (winresource's build uses it), on the windows-sys 0.59 the graph already has.
+winreg = "=0.55.0"
+# Unpacking the portable zip update. Already in the graph through calamine,
+# which turns on the same deflate support.
+zip = { version = "=9.1.3", default-features = false, features = ["deflate"] }
 
 # pthread_sigmask for SSH shutdown and native no-overwrite query renames.
 # Pinned to the version already locked.
@@ -414,8 +422,8 @@ windows-sys = { version = "=0.61.2", features = [
 libc = "=0.2.189"
 
 # Checking a downloaded update against the key releases are signed with. Zero
-# dependencies. macOS and Linux, the platforms that update themselves.
-[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+# dependencies. The platforms that update themselves.
+[target.'cfg(any(target_os = "macos", target_os = "linux", windows))'.dependencies]
 minisign-verify = "=0.3.0"
 
 # Unpacking a Linux update tarball. Both already in the graph (tar through
@@ -428,13 +436,15 @@ flate2 = "=1.1.9"
 
 # Signing the updater's test files the way the release pipeline's minisign
 # does, so no tool has to be installed to run them.
-[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dev-dependencies]
+[target.'cfg(any(target_os = "macos", target_os = "linux", windows))'.dev-dependencies]
 minisign = "=0.10.0"
 
-# The Linux updater's tests also run on macOS, the platform it is written on.
+# The Linux and Windows updaters' tests also run on macOS, the platform they
+# are written on.
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 tar = { version = "=0.4.46", default-features = false }
 flate2 = "=1.1.9"
+zip = { version = "=9.1.3", default-features = false, features = ["deflate"] }
 
 [features]
 # Lets an end-to-end test point the updater at its own feed and key, and lets a

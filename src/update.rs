@@ -1,7 +1,10 @@
-// macOS and Linux replace themselves. Elsewhere the install half still
-// compiles, so the workspace drives one state machine on every platform, and
-// goes unused.
-#![cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
+// macOS, Linux and Windows replace themselves. Elsewhere the install half
+// still compiles, so the workspace drives one state machine on every platform,
+// and goes unused.
+#![cfg_attr(
+    not(any(target_os = "macos", target_os = "linux", windows)),
+    allow(dead_code)
+)]
 
 use std::{
     path::PathBuf,
@@ -14,19 +17,26 @@ use std::{
 
 use serde::Deserialize;
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
 mod download;
+#[cfg(any(target_os = "linux", windows, all(test, target_os = "macos")))]
+mod identity;
 // Also built into the macOS tests, which are the ones a Mac can run.
 #[cfg(any(target_os = "linux", all(test, target_os = "macos")))]
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(any(windows, all(test, target_os = "macos")))]
+#[cfg_attr(not(windows), allow(dead_code))]
+mod windows;
 
 #[cfg(target_os = "linux")]
 pub(crate) use linux::{Installer, install};
 #[cfg(target_os = "macos")]
 pub(crate) use macos::{Installer, install};
+#[cfg(windows)]
+pub(crate) use windows::{Installer, install};
 
 const LATEST: &str = "https://api.github.com/repos/ShayanAbbas1/dbdelve/releases/latest";
 
@@ -59,15 +69,15 @@ pub(crate) enum State {
     /// Another DBDelve has replaced this install since it started, so trying
     /// again cannot succeed; restarting into the install at this path runs
     /// what it put there.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
     Superseded(PathBuf),
 }
 
 impl State {
     /// What an install that stopped for `reason` leaves.
     pub(crate) fn stopped(reason: &'static str, installer: Arc<Installer>) -> Self {
-        #[cfg(target_os = "linux")]
-        if reason == linux::ALREADY_UPDATED {
+        #[cfg(any(target_os = "linux", windows))]
+        if reason == identity::ALREADY_UPDATED {
             return State::Superseded(installer.installed());
         }
         State::Failed(reason, installer)
@@ -179,6 +189,8 @@ pub(crate) fn before_restart() {
 pub(crate) fn remember_install() {
     #[cfg(target_os = "linux")]
     linux::remember_install();
+    #[cfg(windows)]
+    windows::remember_install();
 }
 
 /// Only a test build reads its feed from the environment, so a shipped one
@@ -218,15 +230,20 @@ fn installer(version: &str, assets: &[LatestAsset]) -> Option<Installer> {
     linux::installer(version, |name| asset(name, assets))
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(windows)]
+fn installer(version: &str, assets: &[LatestAsset]) -> Option<Installer> {
+    windows::installer(version, |name| asset(name, assets))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 pub(crate) enum Installer {}
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn installer(_: &str, _: &[LatestAsset]) -> Option<Installer> {
     None
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 pub(crate) fn install(installer: &Installer, _: &Progress) -> Result<PathBuf, &'static str> {
     match *installer {}
 }

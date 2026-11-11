@@ -1689,7 +1689,7 @@ fn variant_name() -> Result<String, String> {
 
 /// Whether this is the release's own data and keychain, rather than a dev or
 /// other variant's.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
 pub(crate) fn is_release_variant() -> bool {
     variant_name().is_ok_and(|name| name == NAME)
 }
