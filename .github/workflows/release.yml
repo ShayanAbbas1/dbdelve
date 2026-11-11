@@ -178,7 +178,7 @@ jobs:
           fi
           # The key the app is built with, so a secret that does not match it
           # fails here instead of in every installed app.
-          PUBLIC_KEY="$(sed -n 's/^const RELEASE_PUBLIC_KEY: &str = "\(.*\)";$/\1/p' src/update/macos.rs)"
+          PUBLIC_KEY="$(sed -n 's/^const RELEASE_PUBLIC_KEY: &str = "\(.*\)";$/\1/p' src/update/download.rs)"
           if ! grep -qxF "PUBLIC_KEY=\"$PUBLIC_KEY\"" install.sh; then
             echo "install.sh does not check downloads against the app's release key" >&2
             exit 1
@@ -192,6 +192,13 @@ jobs:
             # a minisign old enough to make the legacy kind must fail here.
             if [[ "$(sed -n 2p "$ASSET.minisig" | base64 -d | head -c 2)" != ED ]]; then
               echo "$ASSET.minisig is not a prehashed signature" >&2
+              exit 1
+            fi
+            # The app requires the trusted comment, which the signature covers,
+            # to name the asset it downloaded: minisign's default
+            # `file:<basename>` is what binds a signature to one release.
+            if [[ "$(sed -n 3p "$ASSET.minisig")"$'\t' != *$'\t'"file:${ASSET##*/}"$'\t'* ]]; then
+              echo "$ASSET.minisig does not name ${ASSET##*/} in its trusted comment" >&2
               exit 1
             fi
             minisign -V -q -P "$PUBLIC_KEY" -m "$ASSET" -x "$ASSET.minisig"

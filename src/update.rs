@@ -1,9 +1,10 @@
-// Only macOS replaces itself so far. Elsewhere the install half still
+// macOS and Linux replace themselves. Elsewhere the install half still
 // compiles, so the workspace drives one state machine on every platform, and
 // goes unused.
-#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#![cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
 
 use std::{
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -13,9 +14,17 @@ use std::{
 
 use serde::Deserialize;
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod download;
+// Also built into the macOS tests, which are the ones a Mac can run.
+#[cfg(any(target_os = "linux", all(test, target_os = "macos")))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 
+#[cfg(target_os = "linux")]
+pub(crate) use linux::{Installer, install};
 #[cfg(target_os = "macos")]
 pub(crate) use macos::{Installer, install};
 
@@ -47,6 +56,22 @@ pub(crate) enum State {
     /// Why it stopped, in words for the dropdown; the detail is in the log.
     /// The installer is kept so the same update can be tried again.
     Failed(&'static str, Arc<Installer>),
+    /// Another DBDelve has replaced this install since it started, so trying
+    /// again cannot succeed; restarting into the install at this path runs
+    /// what it put there.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    Superseded(PathBuf),
+}
+
+impl State {
+    /// What an install that stopped for `reason` leaves.
+    pub(crate) fn stopped(reason: &'static str, installer: Arc<Installer>) -> Self {
+        #[cfg(target_os = "linux")]
+        if reason == linux::ALREADY_UPDATED {
+            return State::Superseded(installer.installed());
+        }
+        State::Failed(reason, installer)
+    }
 }
 
 /// Written by the install on its own thread, read by the titlebar on a tick.
@@ -96,9 +121,10 @@ struct LatestAsset {
     size: u64,
 }
 
-/// The macOS update and its minisign signature, as the release lists them.
+/// An update file and its minisign signature, as the release lists them.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Dmg {
+pub(crate) struct Asset {
+    pub(crate) name: String,
     pub(crate) url: String,
     pub(crate) size: u64,
     pub(crate) signature_url: String,
@@ -132,15 +158,27 @@ pub(crate) fn newer_release() -> Option<Update> {
         return None;
     }
     tracing::info!(version, current = CURRENT, "a newer release is out");
-    let dmg = dmg(&version, &latest.assets);
     Some(Update {
-        state: installer(&version, dmg)
+        state: installer(&version, &latest.assets)
             .map_or(State::Link, |installer| State::Ready(Arc::new(installer))),
         release: Release {
             version,
             url: latest.html_url,
         },
     })
+}
+
+/// Just ahead of `App::restart` into an install.
+pub(crate) fn before_restart() {
+    #[cfg(target_os = "linux")]
+    linux::close_inherited_files();
+}
+
+/// Notes what this process was installed as, before any update check can find
+/// that another process has replaced it since. Once, at startup.
+pub(crate) fn remember_install() {
+    #[cfg(target_os = "linux")]
+    linux::remember_install();
 }
 
 /// Only a test build reads its feed from the environment, so a shipped one
@@ -156,38 +194,40 @@ fn feed() -> String {
     LATEST.to_string()
 }
 
-/// Exactly `DBDelve-<version>.dmg` and its `.minisig`, or nothing: an update
+/// Exactly the asset called `name` and its `.minisig`, or nothing: an update
 /// without its signature is not one this app will install.
-fn dmg(version: &str, assets: &[LatestAsset]) -> Option<Dmg> {
-    let name = format!("DBDelve-{version}.dmg");
+fn asset(name: &str, assets: &[LatestAsset]) -> Option<Asset> {
     let signature = format!("{name}.minisig");
     let find = |wanted: &str| assets.iter().find(|asset| asset.name == wanted);
-    let (dmg, signature) = (find(&name)?, find(&signature)?);
-    Some(Dmg {
-        url: dmg.browser_download_url.clone(),
-        size: dmg.size,
+    let (asset, signature) = (find(name)?, find(&signature)?);
+    Some(Asset {
+        name: asset.name.clone(),
+        url: asset.browser_download_url.clone(),
+        size: asset.size,
         signature_url: signature.browser_download_url.clone(),
     })
 }
 
 #[cfg(target_os = "macos")]
-fn installer(version: &str, dmg: Option<Dmg>) -> Option<Installer> {
-    macos::installer(version, dmg)
+fn installer(version: &str, assets: &[LatestAsset]) -> Option<Installer> {
+    macos::installer(version, asset(&format!("DBDelve-{version}.dmg"), assets))
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+fn installer(version: &str, assets: &[LatestAsset]) -> Option<Installer> {
+    linux::installer(version, |name| asset(name, assets))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub(crate) enum Installer {}
 
-#[cfg(not(target_os = "macos"))]
-fn installer(_: &str, _: Option<Dmg>) -> Option<Installer> {
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn installer(_: &str, _: &[LatestAsset]) -> Option<Installer> {
     None
 }
 
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn install(
-    installer: &Installer,
-    _: &Progress,
-) -> Result<std::path::PathBuf, &'static str> {
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub(crate) fn install(installer: &Installer, _: &Progress) -> Result<PathBuf, &'static str> {
     match *installer {}
 }
 
@@ -205,7 +245,7 @@ fn is_newer(candidate: &str, current: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Dmg, Latest, Progress, dmg, is_newer};
+    use super::{Asset, Latest, Progress, asset, is_newer};
 
     #[test]
     fn compares_versions_numerically() {
@@ -228,38 +268,69 @@ mod tests {
              "browser_download_url": "https://example.test/DBDelve-0.7.9.dmg"},
             {"name": "dbdelve-0.8.0-linux-x86_64.tar.gz", "size": 2,
              "browser_download_url": "https://example.test/dbdelve-0.8.0-linux-x86_64.tar.gz"},
+            {"name": "dbdelve-0.8.0-linux-x86_64.tar.gz.minisig", "size": 310,
+             "browser_download_url": "https://example.test/dbdelve-0.8.0-linux-x86_64.tar.gz.minisig"},
+            {"name": "dbdelve-0.8.0-x86_64.AppImage", "size": 3,
+             "browser_download_url": "https://example.test/dbdelve-0.8.0-x86_64.AppImage"},
+            {"name": "dbdelve-0.8.0-x86_64.AppImage.minisig", "size": 310,
+             "browser_download_url": "https://example.test/dbdelve-0.8.0-x86_64.AppImage.minisig"},
+            {"name": "dbdelve-0.8.0-aarch64.AppImage", "size": 4,
+             "browser_download_url": "https://example.test/dbdelve-0.8.0-aarch64.AppImage"},
             {"name": "DBDelve-0.8.0.dmg", "size": 41943040,
              "browser_download_url": "https://example.test/DBDelve-0.8.0.dmg"}
         ]
     }"#;
 
     #[test]
-    fn picks_the_releases_own_dmg_and_its_signature() {
+    fn picks_the_named_asset_and_its_signature() {
         let latest: Latest = serde_json::from_str(LATEST).unwrap();
-        assert_eq!(
-            dmg("0.8.0", &latest.assets),
-            Some(Dmg {
-                url: "https://example.test/DBDelve-0.8.0.dmg".into(),
-                size: 41943040,
-                signature_url: "https://example.test/DBDelve-0.8.0.dmg.minisig".into(),
-            })
-        );
+        let listed = |name: &str, size: u64| Asset {
+            name: name.into(),
+            url: format!("https://example.test/{name}"),
+            size,
+            signature_url: format!("https://example.test/{name}.minisig"),
+        };
+        for (name, size) in [
+            ("DBDelve-0.8.0.dmg", 41943040),
+            ("dbdelve-0.8.0-linux-x86_64.tar.gz", 2),
+            ("dbdelve-0.8.0-x86_64.AppImage", 3),
+        ] {
+            assert_eq!(asset(name, &latest.assets), Some(listed(name, size)));
+        }
         // Another version's dmg is not this release's update.
-        assert_eq!(dmg("0.7.9", &latest.assets), None);
+        assert_eq!(asset("DBDelve-0.7.9.dmg", &latest.assets), None);
+        // Nor is an asset the release does not have.
+        assert_eq!(
+            asset("dbdelve-0.8.0-linux-aarch64.tar.gz", &latest.assets),
+            None
+        );
     }
 
     #[test]
-    fn a_dmg_without_its_signature_is_not_an_update() {
-        let mut latest: Latest = serde_json::from_str(LATEST).unwrap();
-        latest
+    fn an_asset_without_its_signature_is_not_an_update() {
+        let latest: Latest = serde_json::from_str(LATEST).unwrap();
+        // Listed, but its .minisig is not.
+        assert_eq!(
+            asset("dbdelve-0.8.0-aarch64.AppImage", &latest.assets),
+            None
+        );
+
+        let mut unsigned: Latest = serde_json::from_str(LATEST).unwrap();
+        unsigned
             .assets
             .retain(|asset| !asset.name.ends_with(".minisig"));
-        assert_eq!(dmg("0.8.0", &latest.assets), None);
+        for name in [
+            "DBDelve-0.8.0.dmg",
+            "dbdelve-0.8.0-linux-x86_64.tar.gz",
+            "dbdelve-0.8.0-x86_64.AppImage",
+        ] {
+            assert_eq!(asset(name, &unsigned.assets), None, "{name}");
+        }
 
         let without_assets: Latest =
             serde_json::from_str(r#"{"tag_name": "v0.8.0", "html_url": "https://example.test"}"#)
                 .unwrap();
-        assert_eq!(dmg("0.8.0", &without_assets.assets), None);
+        assert_eq!(asset("DBDelve-0.8.0.dmg", &without_assets.assets), None);
     }
 
     #[test]

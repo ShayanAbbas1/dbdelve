@@ -203,6 +203,7 @@ fn connection_config_from(
 fn main() {
     logging::install_panic_log();
     logging::install();
+    update::remember_install();
     // Manifests only, ahead of the profiles that name them: no plugin process
     // starts until one of its connections opens.
     let plugins = db::plugin::discover();
