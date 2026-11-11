@@ -104,14 +104,15 @@ already set up on the machine.
     server's password or keyboard-interactive prompt and a hardware key's PIN
     exit non-zero without connecting, so the passphrase is never sent as a
     password. A `ProxyJump` hop is its own ssh without our `-o` options, so it
-    is this filter, not the options, that keeps the passphrase from it;
-    OpenSSH 8.4, the first to honour `SSH_ASKPASS_REQUIRE`, also prefixes a
-    server's keyboard-interactive prompt with `(user@host)`, so no server can
-    spell the prefix. `ponytail:` an older ssh ignores `force` and asks
-    askpass only with `DISPLAY` set and no terminal, which on Linux it
-    usually is; there a hop's server could spell the prompt. An older
-    Windows OpenSSH ignores `force` the same way, and a key with a passphrase
-    fails there as it did before the field existed.
+    is this filter, not the options, that keeps the passphrase from it, and
+    it holds because OpenSSH 8.4 begins a server's keyboard-interactive
+    prompt with `(user@host)`, so no server can spell the prefix.
+  - **A passphrase is refused on an ssh older than OpenSSH 8.4**, naming it,
+    from `ssh -V` (read once per process, and only when a passphrase is set;
+    `OpenSSH_for_Windows_` counts). Before 8.4 ssh ignores
+    `SSH_ASKPASS_REQUIRE` and leaves a server's prompt unprefixed, so a hop's
+    server could ask for the passphrase as if it were ssh. An unreadable
+    version is refused too: never a quiet fallback.
   - **A refused login says what a passphrase has to do with it.** With none
     given, after a key the SSH host accepted (`-v`'s `Server accepts key:`)
     or with Identity file set, the error suggests entering it or ssh-agent;

@@ -22,9 +22,8 @@ const TOKEN: &str = "DBDELVE_ASKPASS_TOKEN";
 /// What ssh asks its askpass for a key file's passphrase, and the one prompt
 /// answered: a server's password or keyboard-interactive prompt, a host key
 /// question and a hardware key's PIN never get the passphrase. OpenSSH 8.4,
-/// the first to honour `SSH_ASKPASS_REQUIRE`, also began every
-/// keyboard-interactive prompt with `(user@host)`, so a server cannot spell
-/// this one.
+/// the oldest a passphrase is given to, begins every keyboard-interactive
+/// prompt with `(user@host)`, so a server cannot spell this one.
 const KEY_PROMPT: &str = "Enter passphrase for key ";
 
 /// How long one exchange may take, whole, so a stalled or trickling askpass
@@ -79,12 +78,6 @@ impl Askpass {
 
     /// Has ssh run this executable as its askpass, every prompt included, and
     /// told it where to ask.
-    ///
-    /// ponytail: an ssh before OpenSSH 8.4 ignores `SSH_ASKPASS_REQUIRE`, and
-    /// Windows' own OpenSSH may too; such an ssh asks its askpass only with
-    /// `DISPLAY` set and no terminal, and otherwise fails the login as it did
-    /// before a passphrase could be given. Telling the user which ssh is too
-    /// old, from `ssh -V`, is the upgrade if that is ever reported.
     pub(super) fn put_on(&self, command: &mut Command) {
         command
             .env("SSH_ASKPASS", &self.program)

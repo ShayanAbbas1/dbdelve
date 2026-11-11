@@ -10,7 +10,7 @@ use std::collections::VecDeque;
 use std::io::{self, Read};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::process::{Child, ChildStderr, Command, ExitStatus, Stdio};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -858,11 +858,29 @@ fn drained(draining: JoinHandle<()>, said: &Mutex<Said>) {
     }
 }
 
+/// The first OpenSSH to honour `SSH_ASKPASS_REQUIRE`, and to begin a server's
+/// keyboard-interactive prompt with `(user@host)`: an older one could hand a
+/// `ProxyJump` hop's server the passphrase for a prompt spelled like ssh's.
+const ASKPASS_FROM: (u32, u32) = (8, 4);
+
 /// What answers ssh's passphrase prompt while a session opens, when there is
-/// a passphrase to give.
+/// a passphrase to give, and only from an ssh that keeps it from a server.
 fn askpass_for(ssh: &SshTunnel) -> Result<Option<Askpass>, DbError> {
     if ssh.passphrase.is_empty() {
         return Ok(None);
+    }
+    let version = ssh_version()?;
+    if openssh_version(version).is_none_or(|parsed| parsed < ASKPASS_FROM) {
+        let (major, minor) = ASKPASS_FROM;
+        return Err(plain_error(if version.is_empty() {
+            format!(
+                "A key passphrase needs OpenSSH {major}.{minor} or later; this ssh did not say its version."
+            )
+        } else {
+            format!(
+                "A key passphrase needs OpenSSH {major}.{minor} or later; this ssh is {version}."
+            )
+        }));
     }
     Askpass::serve(&ssh.passphrase).map(Some).map_err(|error| {
         plain_error(format!(
@@ -892,6 +910,42 @@ fn passphrase_hint(ssh: &SshTunnel, said: &Said, answered: Option<bool>) -> Opti
     (identity || said.key_accepted).then_some(
         "If the key has a passphrase, enter it as Key passphrase, or add the key to ssh-agent.",
     )
+}
+
+/// The first line `ssh -V` prints, asked once per process; a failure is not
+/// kept, so an ssh installed since is found.
+fn ssh_version() -> Result<&'static str, DbError> {
+    static VERSION: OnceLock<String> = OnceLock::new();
+    if let Some(version) = VERSION.get() {
+        return Ok(version);
+    }
+    let output = crate::db::spawn(
+        ssh_command()
+            .arg("-V")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped()),
+    )
+    .and_then(Child::wait_with_output)
+    .map_err(|error| match error.kind() {
+        io::ErrorKind::NotFound => no_ssh(),
+        _ => plain_error(format!("Could not ask ssh its version: {error}")),
+    })?;
+    let said = String::from_utf8_lossy(&output.stderr);
+    let first = printable(said.lines().next().unwrap_or_default());
+    Ok(VERSION.get_or_init(|| first))
+}
+
+/// OpenSSH's major and minor version from what `ssh -V` said, Windows'
+/// own build's `OpenSSH_for_Windows_` included.
+fn openssh_version(said: &str) -> Option<(u32, u32)> {
+    let version = said.strip_prefix("OpenSSH_")?;
+    let version = version.strip_prefix("for_Windows_").unwrap_or(version);
+    let (major, rest) = version.split_once('.')?;
+    let minor = &rest[..rest
+        .find(|char: char| !char.is_ascii_digit())
+        .unwrap_or(rest.len())];
+    Some((major.parse().ok()?, minor.parse().ok()?))
 }
 
 fn hinted(mut error: DbError, hint: Option<&str>) -> DbError {
@@ -1459,6 +1513,31 @@ mod tests {
         let bridge = bridge_args(&ssh, "/tmp/.s.PGSQL.5432").unwrap();
         assert_eq!(bridge[..OPTIONS.len()], expected[..OPTIONS.len()]);
         assert!(!bridge.iter().any(|arg| arg.contains("correct horse")));
+    }
+
+    #[test]
+    fn the_openssh_version_is_read_from_what_ssh_v_says() {
+        for (said, version) in [
+            ("OpenSSH_10.3p1, LibreSSL 3.3.6", Some((10, 3))),
+            (
+                "OpenSSH_8.4p1 Debian-5+deb11u3, OpenSSL 1.1.1w  11 Sep 2023",
+                Some((8, 4)),
+            ),
+            (
+                "OpenSSH_8.2p1 Ubuntu-4ubuntu0.11, OpenSSL 1.1.1f  31 Mar 2020",
+                Some((8, 2)),
+            ),
+            ("OpenSSH_for_Windows_9.5p1, LibreSSL 3.8.2", Some((9, 5))),
+            ("OpenSSH_for_Windows_8.1p1, LibreSSL 3.0.2", Some((8, 1))),
+            ("OpenSSH_9.9", Some((9, 9))),
+            ("Sun_SSH_1.1", None),
+            ("OpenSSH_x.y", None),
+            ("", None),
+        ] {
+            assert_eq!(openssh_version(said), version, "{said}");
+        }
+        // Compared as numbers, so 8.10 is past 8.4.
+        assert!((8, 3) < ASKPASS_FROM && (8, 10) > ASKPASS_FROM);
     }
 
     #[test]
