@@ -96,7 +96,9 @@ already set up on the machine.
     (`DBDELVE_ASKPASS`, `DBDELVE_ASKPASS_TOKEN`), compared in constant time;
     a wrong token is closed on without an answer. TCP rather than a Unix
     socket, so one path serves Windows. The listener lives until the session
-    is ready or ssh exits, since ssh asks again after a wrong passphrase. A
+    is ready or ssh exits, since ssh asks again after a wrong passphrase;
+    each exchange gets a deadline for the whole of it, so a client trickling
+    bytes cannot hold the next one up, and dropping it never waits on one. A
     `SocketBridge` holds the passphrase and serves it again for every login.
   - **Only `Enter passphrase for key ` is answered.** A host key question, a
     server's password or keyboard-interactive prompt and a hardware key's PIN

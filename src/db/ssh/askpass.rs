@@ -12,8 +12,8 @@ use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 /// Where the askpass process asks, and the token it shows.
 const ADDRESS: &str = "DBDELVE_ASKPASS";
@@ -27,8 +27,8 @@ const TOKEN: &str = "DBDELVE_ASKPASS_TOKEN";
 /// this one.
 const KEY_PROMPT: &str = "Enter passphrase for key ";
 
-/// How long either side waits on the other, so a stalled askpass cannot hold
-/// up the next.
+/// How long one exchange may take, whole, so a stalled or trickling askpass
+/// cannot hold up the next.
 const ANSWERED_WITHIN: Duration = Duration::from_secs(5);
 
 /// The passphrase, handed to whoever shows the token on a loopback port, for
@@ -39,7 +39,6 @@ pub(super) struct Askpass {
     program: OsString,
     answered: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
-    serving: Option<JoinHandle<()>>,
 }
 
 impl Askpass {
@@ -51,7 +50,7 @@ impl Askpass {
         let token = token()?;
         let answered = Arc::<AtomicBool>::default();
         let stop = Arc::<AtomicBool>::default();
-        let serving = thread::spawn({
+        thread::spawn({
             let token = token.clone();
             let passphrase = passphrase.to_owned();
             let answered = answered.clone();
@@ -75,7 +74,6 @@ impl Askpass {
             program,
             answered,
             stop,
-            serving: Some(serving),
         })
     }
 
@@ -101,29 +99,39 @@ impl Askpass {
     }
 }
 
+/// Not joined: the thread drops the listener within a poll of seeing `stop`,
+/// or once an exchange in flight has run out its time, and nothing waits.
 impl Drop for Askpass {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        if let Some(serving) = self.serving.take() {
-            let _ = serving.join();
-        }
     }
 }
 
 /// Whether `stream` showed the token and was given the passphrase. A wrong
 /// token is closed on without a word.
 fn answer(mut stream: &TcpStream, token: &str, passphrase: &str) -> io::Result<bool> {
+    let deadline = Instant::now() + ANSWERED_WITHIN;
+    let left = || {
+        Some(deadline.saturating_duration_since(Instant::now()))
+            .filter(|left| !left.is_zero())
+            .ok_or(io::Error::from(io::ErrorKind::TimedOut))
+    };
     stream.set_nonblocking(false)?;
-    stream.set_read_timeout(Some(ANSWERED_WITHIN))?;
-    stream.set_write_timeout(Some(ANSWERED_WITHIN))?;
     let mut shown = Vec::new();
+    let mut chunk = [0; 64];
     // One byte past a token, so a longer one cannot pass for it.
-    stream
-        .take(token.len() as u64 + 1)
-        .read_to_end(&mut shown)?;
+    while shown.len() <= token.len() {
+        stream.set_read_timeout(Some(left()?))?;
+        let wanted = (token.len() + 1 - shown.len()).min(chunk.len());
+        match stream.read(&mut chunk[..wanted])? {
+            0 => break,
+            read => shown.extend_from_slice(&chunk[..read]),
+        }
+    }
     if !same(&shown, token.as_bytes()) {
         return Ok(false);
     }
+    stream.set_write_timeout(Some(left()?))?;
     stream.write_all(passphrase.as_bytes())?;
     Ok(true)
 }
@@ -247,8 +255,34 @@ mod tests {
             Some("correct horse")
         );
 
+        let token = askpass.token.clone();
         drop(askpass);
-        assert_eq!(ask(&address, "", PROMPT), None);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while ask(&address, &token, PROMPT).is_some() {
+            assert!(Instant::now() < deadline, "still answering once dropped");
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn a_trickling_askpass_is_cut_off_whole_not_per_byte() {
+        let askpass = Askpass::serve("correct horse").unwrap();
+        let mut trickle = TcpStream::connect(askpass.address).unwrap();
+        let started = Instant::now();
+        let answered = thread::spawn(move || {
+            let mut answer = Vec::new();
+            for byte in askpass.token.bytes() {
+                if trickle.write_all(&[byte]).is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(500));
+            }
+            let _ = trickle.read_to_end(&mut answer);
+            answer
+        });
+        let answer = answered.join().unwrap();
+        assert!(answer.is_empty(), "a trickled token was answered");
+        assert!(started.elapsed() < Duration::from_secs(10));
     }
 
     #[test]
