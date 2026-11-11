@@ -508,6 +508,7 @@ impl Workspace {
                     "SSH tunnel",
                     Some(hint.into()),
                     ui::switch("ssh-tunnel", form.ssh, t)
+                        .debug_selector(|| "ssh-tunnel".into())
                         .on_click(cx.listener(Self::toggle_ssh_tunnel)),
                     t,
                 )
