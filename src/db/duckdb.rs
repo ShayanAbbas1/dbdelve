@@ -2228,6 +2228,19 @@ mod tests {
     }
 
     #[test]
+    fn the_engine_reports_a_release_version_so_extensions_install() {
+        let connection = memory("");
+        let result = connection
+            .query(
+                "SELECT library_version FROM pragma_version()",
+                Fetch::default(),
+            )
+            .unwrap();
+        let version = cells(&result)[0][0].unwrap().to_string();
+        assert!(!version.contains("-dev"), "{version}");
+    }
+
+    #[test]
     fn the_attached_databases_are_listed_without_duckdbs_own() {
         let connection = memory("ATTACH ':memory:' AS other");
         let databases = connection.databases().unwrap();
