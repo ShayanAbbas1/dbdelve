@@ -336,6 +336,9 @@ pub(crate) fn install(installer: &Installer, progress: &Progress) -> Result<Path
     let held = hold(&file).map_err(failed(COULD_NOT_DOWNLOAD))?;
     verify_contents(&held, &signature, key, &asset.name).map_err(failed(NOT_SIGNED))?;
     tracing::info!("the update's signature verified");
+    // Again, just before anything changes: another user, or an installer run
+    // by hand, may have replaced this install while the download ran.
+    unchanged(&installed, *running).map_err(|(reason, detail)| failed(reason)(detail))?;
 
     progress.installing();
     match kind {

@@ -176,10 +176,13 @@ two processes from clearing each other's hidden sibling or set-aside files,
 and clears the one an interrupted install left. On macOS and Linux it is
 `flock` on that folder; on Windows it is a file opened with no sharing, in the
 user's temporary folder, named after a hash of the install folder (an
-all-users install's folder is not writable without elevation). Under that lock
+all-users install's folder is not writable without elevation). Being per
+user, it does not keep two users from updating one all-users install at
+once; the elevated installer is all that serialises them. Under that lock
 all refuse an install that another process has updated since this one
-started, so a stale offer never puts an older release over a newer one: macOS
-by the installed bundle's version, Linux and Windows by the file itself (the
+started (Windows checks again once the update has downloaded and verified,
+just before it changes anything), so a stale offer never puts an older
+release over a newer one: macOS by the installed bundle's version, Linux and Windows by the file itself (the
 AppImage as recorded at startup, before any update check, or
 `/proc/self/exe` for `~/.local/bin/dbdelve`, by device and inode; on Windows
 `dbdelve.exe` as recorded at startup, by volume serial number and file index).

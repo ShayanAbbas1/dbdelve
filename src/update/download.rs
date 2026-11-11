@@ -120,6 +120,13 @@ pub(super) fn lock(installed: &Path) -> Result<File, String> {
 #[cfg(any(windows, test))]
 fn lock_name(folder: &Path) -> String {
     let folder = folder.to_string_lossy().replace('/', "\\").to_lowercase();
+    let folder = if let Some(share) = folder.strip_prefix(r"\\?\unc\") {
+        format!(r"\\{share}")
+    } else if let Some(local) = folder.strip_prefix(r"\\?\") {
+        local.to_string()
+    } else {
+        folder
+    };
     let folder = folder.trim_end_matches('\\');
     let hash = folder
         .bytes()
@@ -467,6 +474,16 @@ pub(super) mod tests {
             lock_name(std::path::Path::new(
                 "C:/Users/Me/AppData/Local/Programs/DBDelve"
             ))
+        );
+        assert_eq!(
+            name,
+            lock_name(std::path::Path::new(
+                r"\\?\C:\Users\Me\AppData\Local\Programs\DBDelve"
+            ))
+        );
+        assert_eq!(
+            lock_name(std::path::Path::new(r"\\?\UNC\server\share\DBDelve")),
+            lock_name(std::path::Path::new(r"\\server\share\DBDelve"))
         );
         assert_ne!(
             name,
