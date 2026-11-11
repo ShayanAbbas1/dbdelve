@@ -451,7 +451,10 @@ gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
 # `popover_style`, which frosts the card when the theme hands it a translucent
 # `popover` colour -- a glass theme does, an opaque one never -- with a
 # hairline in place of the drop shadow that would darken the frost, and thin
-# washes for the hover and selection inside it. Every change is marked
+# washes for the hover and selection inside it. Its `theme/mod.rs` also maps
+# the OS "always show scrollbars" setting to `ScrollbarMode::Always` instead of
+# `Hover`, so a user who asked the system to always show scrollbars gets a bar
+# at rest rather than only under the pointer. Every change is marked
 # `dbdelve patch`; re-apply them on a gpui-component bump.
 gpui-component = { path = "vendor/gpui-component" }
 
