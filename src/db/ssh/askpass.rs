@@ -1,8 +1,10 @@
 //! ssh's askpass, for a key with a passphrase. ssh runs DBDelve's own
 //! executable with its prompt, and that process fetches the passphrase from
 //! the DBDelve that started ssh, over loopback and by a one-time token, so the
-//! passphrase is never in ssh's environment or arguments, where any process
-//! of the same user could read it.
+//! passphrase is never in ssh's environment or arguments for as long as ssh
+//! runs. The token is, and works only while the session is opening: a process
+//! of the same user that reads ssh's environment in that window can fetch the
+//! passphrase with it. That is the boundary ssh-agent's socket has too.
 //!
 //! TCP rather than a Unix socket, so the same path serves Windows.
 

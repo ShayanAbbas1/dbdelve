@@ -91,15 +91,20 @@ already set up on the machine.
     DBDelve's own executable and `SSH_ASKPASS_REQUIRE=force`; `main` answers
     as askpass before anything else starts when `DBDELVE_ASKPASS` is set.
   - **The passphrase never enters ssh's environment or arguments**, which
-    any process of the same user can read. While a session opens, DBDelve
-    serves it on a loopback port to whoever shows a 128-bit one-time token
+    last as long as ssh runs. While a session opens, DBDelve serves it on a
+    loopback port to whoever shows a 128-bit one-time token
     (`DBDELVE_ASKPASS`, `DBDELVE_ASKPASS_TOKEN`), compared in constant time;
     a wrong token is closed on without an answer. TCP rather than a Unix
     socket, so one path serves Windows. The listener lives until the session
-    is ready or ssh exits, since ssh asks again after a wrong passphrase;
-    each exchange gets a deadline for the whole of it, so a client trickling
-    bytes cannot hold the next one up, and dropping it never waits on one. A
-    `SocketBridge` holds the passphrase and serves it again for every login.
+    is ready or ssh exits, since ssh asks again after a wrong passphrase, and
+    the token is useless after that. Each exchange gets one deadline for the
+    whole of it, so a client trickling bytes cannot hold up the next, and
+    dropping the listener never waits on one. A `SocketBridge` holds the
+    passphrase and serves it again for every login.
+  - **The token is in ssh's environment, and that is accepted.** A process of
+    the same user that reads it while the session opens can fetch the
+    passphrase: the same-user boundary ssh-agent's socket has, not one this
+    defends.
   - **Only `Enter passphrase for key ` is answered.** A host key question, a
     server's password or keyboard-interactive prompt and a hardware key's PIN
     exit non-zero without connecting, so the passphrase is never sent as a
