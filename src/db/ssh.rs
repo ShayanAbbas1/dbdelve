@@ -1287,13 +1287,14 @@ pub(super) fn live_bastion(alias: &str) -> Option<SshTunnel> {
 /// The dev bastion's key with a passphrase, in a directory of the test's
 /// own, through the bastion's entry that offers no other identity: the
 /// usual one names the unencrypted key, which would let ssh in without
-/// the passphrase.
+/// the passphrase. The directory goes with the [`KeyCopy`].
 #[cfg(test)]
-pub(super) fn live_bastion_with_a_passphrase(test: &str, passphrase: &str) -> SshTunnel {
+pub(super) fn live_bastion_with_a_passphrase(test: &str, passphrase: &str) -> (SshTunnel, KeyCopy) {
     let config = std::env::var("dbdelve_SSH_CONFIG").expect("dbdelve_SSH_CONFIG is required");
     let key = std::path::Path::new(&config).with_file_name("id_ed25519");
     let directory = std::env::temp_dir().join(format!("dbdelve-ssh-{}-{test}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();
+    let copy = KeyCopy(directory.clone());
     let encrypted = directory.join("id_ed25519");
     std::fs::copy(&key, &encrypted).unwrap();
     assert!(
@@ -1305,11 +1306,22 @@ pub(super) fn live_bastion_with_a_passphrase(test: &str, passphrase: &str) -> Ss
             .unwrap()
             .success()
     );
-    SshTunnel {
+    let ssh = SshTunnel {
         identity_file: Some(encrypted.display().to_string()),
         passphrase: passphrase.to_owned(),
         host: "dbdelve-bastion-keyless".to_owned(),
         ..SshTunnel::default()
+    };
+    (ssh, copy)
+}
+
+#[cfg(test)]
+pub(super) struct KeyCopy(std::path::PathBuf);
+
+#[cfg(test)]
+impl Drop for KeyCopy {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
@@ -2097,7 +2109,7 @@ mod tests {
     #[test]
     #[ignore = "requires the dev bastions configured through dbdelve_SSH_CONFIG"]
     fn live_ssh_a_key_with_a_passphrase_opens_a_tunnel_once_given_it() {
-        let ssh = live_bastion_with_a_passphrase("given", "correct horse");
+        let (ssh, _key) = live_bastion_with_a_passphrase("given", "correct horse");
         let tunnel = live_tunnel(&ssh).unwrap();
         postgres_answers(tunnel.dial().unwrap());
     }
@@ -2114,7 +2126,7 @@ mod tests {
             ),
             ("wrong horse", "The Key passphrase may be wrong."),
         ] {
-            let ssh = live_bastion_with_a_passphrase("refused", passphrase);
+            let (ssh, _key) = live_bastion_with_a_passphrase("refused", passphrase);
             let Err(error) = live_tunnel(&ssh) else {
                 panic!("a tunnel opened with {passphrase:?}");
             };

@@ -3385,11 +3385,9 @@ mod tests {
     #[test]
     #[ignore = "requires the dev bastions and Postgres configured through dbdelve_SSH_CONFIG and PG*"]
     fn live_ssh_every_login_over_the_socket_is_given_the_key_passphrase() {
+        let (ssh, _key) = crate::db::ssh::live_bastion_with_a_passphrase("socket", "correct horse");
         let server = ServerConfig {
-            ssh: Some(crate::db::ssh::live_bastion_with_a_passphrase(
-                "socket",
-                "correct horse",
-            )),
+            ssh: Some(ssh),
             ..live_socket("dbdelve-bastion", Some("postgres"))
         };
         let connection = Connection::open(&server).expect("connection should open");
