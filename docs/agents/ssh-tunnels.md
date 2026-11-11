@@ -108,10 +108,10 @@ already set up on the machine.
     the same user that reads it while the session opens can fetch the
     passphrase: the same-user boundary ssh-agent's socket has, not one this
     defends.
-  - **Only `Enter passphrase for key ` is answered.** A host key question, a
-    server's password or keyboard-interactive prompt and a hardware key's PIN
-    exit non-zero without connecting, so the passphrase is never sent as a
-    password. A `ProxyJump` hop is its own ssh without our `-o` options, so it
+  - **Only a prompt starting with `Enter passphrase for key` and a space is
+    answered.** A host key question, a server's password or
+    keyboard-interactive prompt and a hardware key's PIN exit non-zero
+    without connecting, so the passphrase is never sent as a password. A `ProxyJump` hop is its own ssh without our `-o` options, so it
     is this filter, not the options, that keeps the passphrase from it, and
     it holds because OpenSSH 8.5 begins a server's keyboard-interactive
     prompt with `(user@host)`, so no server can spell the prefix.
