@@ -84,9 +84,10 @@ already set up on the machine.
   removed with the profile (`store::delete_secrets`). Blank is none, and then
   ssh runs exactly as without the field, `BatchMode=yes` and all.
   - **A passphrase drops `BatchMode`, because `BatchMode` blocks askpass**
-    even under `SSH_ASKPASS_REQUIRE=force`. In its place go
-    `PasswordAuthentication=no` and `KbdInteractiveAuthentication=no`, so the
-    only prompt left is the key's own. ssh runs with `SSH_ASKPASS` set to
+    even under `SSH_ASKPASS_REQUIRE=force`. In its place go `BatchMode=no`
+    (a config's `BatchMode yes` would block it too, and the command line
+    wins), `PasswordAuthentication=no` and `KbdInteractiveAuthentication=no`,
+    so the only prompt left is the key's own. ssh runs with `SSH_ASKPASS` set to
     DBDelve's own executable and `SSH_ASKPASS_REQUIRE=force`; `main` answers
     as askpass before anything else starts when `DBDELVE_ASKPASS` is set.
   - **The passphrase never enters ssh's environment or arguments**, which

@@ -687,10 +687,13 @@ fn session_args(
 
     // BatchMode blocks the askpass a passphrase is answered through, so with
     // one only the prompts that could take a server's password are turned off.
+    // Said outright, since a config's `BatchMode yes` would block it too and
+    // the command line's value wins.
     let interaction = if ssh.passphrase.is_empty() {
         ["BatchMode=yes"].as_slice()
     } else {
         &[
+            "BatchMode=no",
             "PasswordAuthentication=no",
             "KbdInteractiveAuthentication=no",
         ]
@@ -1441,6 +1444,8 @@ mod tests {
         let mut expected = vec![
             "-T",
             "-v",
+            "-o",
+            "BatchMode=no",
             "-o",
             "PasswordAuthentication=no",
             "-o",
