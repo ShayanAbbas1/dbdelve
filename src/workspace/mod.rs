@@ -34,7 +34,7 @@ pub(crate) use profiles::unavailable_reason;
 pub(crate) use projects::project_name_refusal;
 pub(crate) use queries::error_in_buffer;
 
-use crate::connection_form::{Origin, password_to_persist};
+use crate::connection_form::{Origin, passphrase_to_persist, password_to_persist};
 use crate::session::{catalog_relation, write_buffer, write_grids};
 use crate::settings_panel::{SettingMatch, SettingsTab, filter_settings, render_settings_panel};
 use crate::sql::{Mode, appended_statement, remember_statement, update_batch};

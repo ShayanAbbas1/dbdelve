@@ -1121,35 +1121,67 @@ pub fn profile_id(name: &str, existing: &[String]) -> String {
 /// blank password is valid, so none of them can be inferred from the connect
 /// attempt that would follow.
 pub fn password(profile_id: &str) -> Result<Option<String>, String> {
-    match keychain_entry(profile_id)?.get_password() {
-        Ok(password) => Ok(Some(password)),
+    secret(profile_id, "password")
+}
+
+pub fn set_password(profile_id: &str, password: &str) -> Result<(), String> {
+    set_secret(profile_id, "password", password)
+}
+
+/// The passphrase of the key a profile's SSH tunnel logs in with, read as
+/// [`password`] is.
+pub fn ssh_passphrase(profile_id: &str) -> Result<Option<String>, String> {
+    secret(&passphrase_account(profile_id), "SSH key passphrase")
+}
+
+pub fn set_ssh_passphrase(profile_id: &str, passphrase: &str) -> Result<(), String> {
+    set_secret(
+        &passphrase_account(profile_id),
+        "SSH key passphrase",
+        passphrase,
+    )
+}
+
+/// Both of a profile's keychain items, the password and the key passphrase.
+pub fn delete_secrets(profile_id: &str) {
+    for account in [profile_id.to_owned(), passphrase_account(profile_id)] {
+        if let Ok(entry) = keychain_entry(&account) {
+            let _ = entry.delete_credential();
+        }
+    }
+}
+
+/// A `#` no slug [`profile_id`] makes can hold, so it never names another
+/// profile's password.
+fn passphrase_account(profile_id: &str) -> String {
+    format!("{profile_id}#ssh-passphrase")
+}
+
+fn secret(account: &str, what: &str) -> Result<Option<String>, String> {
+    match keychain_entry(account)?.get_password() {
+        Ok(secret) => Ok(Some(secret)),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(keyring::Error::BadEncoding(_)) => {
-            Err("The keychain password is not valid text.".to_string())
+            Err(format!("The keychain {what} is not valid text."))
         }
         Err(error) => Err(format!(
-            "Could not read the password from the keychain: {error}"
+            "Could not read the {what} from the keychain: {error}"
         )),
     }
 }
 
-pub fn set_password(profile_id: &str, password: &str) -> Result<(), String> {
-    keychain_entry(profile_id)?
-        .set_password(password)
-        .map_err(|error| format!("Could not save the password to the keychain: {error}"))
-}
-
-pub fn delete_password(profile_id: &str) {
-    if let Ok(entry) = keychain_entry(profile_id) {
-        let _ = entry.delete_credential();
-    }
+fn set_secret(account: &str, what: &str, secret: &str) -> Result<(), String> {
+    keychain_entry(account)?
+        .set_password(secret)
+        .map_err(|error| format!("Could not save the {what} to the keychain: {error}"))
 }
 
 /// Keychain Services on macOS, Secret Service on Linux, Credential Manager on
-/// Windows. The service is the variant name and the account the profile id,
-/// which is what keeps a dev build's passwords apart from a release build's.
-fn keychain_entry(profile_id: &str) -> Result<keyring::Entry, String> {
-    keyring::Entry::new(&variant_name()?, profile_id)
+/// Windows. The service is the variant name and the account the profile id
+/// (or, for the key passphrase, [`passphrase_account`]), which is what keeps a
+/// dev build's passwords apart from a release build's.
+fn keychain_entry(account: &str) -> Result<keyring::Entry, String> {
+    keyring::Entry::new(&variant_name()?, account)
         .map_err(|error| format!("Could not reach the keychain: {error}"))
 }
 

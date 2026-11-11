@@ -248,6 +248,7 @@ impl Workspace {
             cx,
         );
         let password = password_to_persist(&config, origin).map(str::to_string);
+        let passphrase = passphrase_to_persist(&config).map(str::to_string);
         self.profiles.push(Profile {
             id: id.clone(),
             name,
@@ -270,6 +271,11 @@ impl Workspace {
         });
         if let Some(password) = password
             && let Err(message) = store::set_password(&id, &password)
+        {
+            self.note(message, cx);
+        }
+        if let Some(passphrase) = passphrase
+            && let Err(message) = store::set_ssh_passphrase(&id, &passphrase)
         {
             self.note(message, cx);
         }
@@ -298,14 +304,20 @@ impl Workspace {
                 .collect::<Vec<_>>(),
         );
 
-        let password_task = {
+        let tunnelled = profile.config.ssh().is_some();
+        let secrets_task = {
             let id = id.clone();
             spawn_blocking(cx.background_executor(), move || {
-                store::password(&id).ok().flatten()
+                [
+                    store::password(&id).ok().flatten(),
+                    tunnelled
+                        .then(|| store::ssh_passphrase(&id).ok().flatten())
+                        .flatten(),
+                ]
             })
         };
         cx.spawn_in(window, async move |workspace, cx| {
-            let password = password_task.await;
+            let secrets = secrets_task.await;
             _ = workspace.update_in(cx, |workspace, window, cx| {
                 // Removed while the Keychain answered --
                 // nothing left to seed a form from.
@@ -313,7 +325,7 @@ impl Workspace {
                 else {
                     return;
                 };
-                let mut form = ConnectionForm::duplicating(profile, name, password, window, cx);
+                let mut form = ConnectionForm::duplicating(profile, name, secrets, window, cx);
                 form.project = workspace.group_of(&id).map(str::to_string);
                 workspace.form = Some(form);
                 cx.notify();
@@ -769,13 +781,20 @@ impl Workspace {
             let tested = (|| {
                 // A blank password on an existing profile means "keep the saved
                 // one", which is what the connect would use.
-                if let Some(id) = editing
+                if let Some(id) = &editing
                     && config.password_command().is_none()
                     && let Some(slot) = config.password_mut()
                     && slot.is_empty()
-                    && let Some(password) = store::password(&id)?
+                    && let Some(password) = store::password(id)?
                 {
                     *slot = password;
+                }
+                if let Some(id) = &editing
+                    && let Some(ssh) = config.ssh_mut()
+                    && ssh.passphrase.is_empty()
+                    && let Some(passphrase) = store::ssh_passphrase(id)?
+                {
+                    ssh.passphrase = passphrase;
                 }
                 let connection = Connection::open(config).map_err(|error| error.message)?;
                 if mode == Mode::ReadOnly {
@@ -836,6 +855,7 @@ impl Workspace {
         };
 
         let password = password_to_persist(&config, Origin::Form).map(str::to_string);
+        let passphrase = passphrase_to_persist(&config).map(str::to_string);
         let profile = &mut self.profiles[index];
         // A profile left idle, disconnected or never opened, opens on the
         // edited config whenever it is next picked.
@@ -853,6 +873,11 @@ impl Workspace {
         // stored password.
         if let Some(password) = password
             && let Err(message) = store::set_password(id, &password)
+        {
+            self.note(message, cx);
+        }
+        if let Some(passphrase) = passphrase
+            && let Err(message) = store::set_ssh_passphrase(id, &passphrase)
         {
             self.note(message, cx);
         }
@@ -1782,6 +1807,16 @@ impl Workspace {
                         Err(message) => return Err(failed("keychain", message)),
                     }
                 }
+                // Only a profile with a tunnel reaches for it, and blank is
+                // none, as it is for the password.
+                if let Some(ssh) = config.ssh_mut()
+                    && ssh.passphrase.is_empty()
+                {
+                    match store::ssh_passphrase(&id) {
+                        Ok(passphrase) => ssh.passphrase = passphrase.unwrap_or_default(),
+                        Err(message) => return Err(failed("keychain", message)),
+                    }
+                }
                 let connection =
                     Connection::open(config).map_err(|error| failed("open", error.message))?;
                 // Only Read-only asks the server for anything here: the
@@ -2431,7 +2466,7 @@ impl Workspace {
         let removed_queries = if shared {
             Ok(())
         } else {
-            store::delete_password(&id);
+            store::delete_secrets(&id);
             let removed_queries = store::delete_queries(&id);
             let _ = store::delete_grids(&id);
             for project in &mut self.projects {
@@ -2470,7 +2505,7 @@ impl Workspace {
             removal_note(&removed.name, 0, None)
         } else {
             let queries = store::saved_queries(&removed.id).len();
-            store::delete_password(&removed.id);
+            store::delete_secrets(&removed.id);
             let removed_queries = store::delete_queries(&removed.id);
             let _ = store::delete_grids(&removed.id);
             for project in &mut self.projects {

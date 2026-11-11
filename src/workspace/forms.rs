@@ -537,6 +537,12 @@ impl Workspace {
                         t,
                         cx,
                     )),
+                    nested(
+                        "ssh-passphrase",
+                        "Key passphrase",
+                        &form.ssh_passphrase,
+                        bare(&form.ssh_passphrase).mask_toggle(),
+                    ),
                 ];
                 if socket {
                     rows.push(nested(
@@ -812,6 +818,7 @@ impl Workspace {
             &form.ssh_port,
             &form.ssh_user,
             &form.ssh_identity_file,
+            &form.ssh_passphrase,
             &form.ssh_run_as,
         ]
         .iter()

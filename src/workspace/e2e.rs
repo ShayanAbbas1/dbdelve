@@ -2648,7 +2648,7 @@ fn duplicating_an_odbc_profile_keeps_its_password(cx: &mut TestAppContext) {
                 let form = ConnectionForm::duplicating(
                     profile,
                     "DSN copy".into(),
-                    Some("hunter2".into()),
+                    [Some("hunter2".into()), None],
                     window,
                     cx,
                 );
@@ -2700,8 +2700,13 @@ fn the_forms_save_and_test_refuse_run_as_without_a_socket_directory(cx: &mut Tes
                         .iter()
                         .find(|profile| profile.id == id)
                         .unwrap();
-                    let form =
-                        ConnectionForm::duplicating(profile, "Copy".into(), None, window, cx);
+                    let form = ConnectionForm::duplicating(
+                        profile,
+                        "Copy".into(),
+                        [None, None],
+                        window,
+                        cx,
+                    );
                     form.config(cx).map(|_| ())
                 })
             })
