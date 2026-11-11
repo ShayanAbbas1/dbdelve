@@ -1288,7 +1288,10 @@ pub(super) fn live_bastion(alias: &str) -> Option<SshTunnel> {
 /// own, through the bastion's entry that offers no other identity: the
 /// usual one names the unencrypted key, which would let ssh in without
 /// the passphrase. The directory goes with the [`KeyCopy`].
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")
+))]
 pub(super) fn live_bastion_with_a_passphrase(test: &str, passphrase: &str) -> (SshTunnel, KeyCopy) {
     let config = std::env::var("dbdelve_SSH_CONFIG").expect("dbdelve_SSH_CONFIG is required");
     let key = std::path::Path::new(&config).with_file_name("id_ed25519");
@@ -1315,10 +1318,16 @@ pub(super) fn live_bastion_with_a_passphrase(test: &str, passphrase: &str) -> (S
     (ssh, copy)
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")
+))]
 pub(super) struct KeyCopy(std::path::PathBuf);
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")
+))]
 impl Drop for KeyCopy {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
