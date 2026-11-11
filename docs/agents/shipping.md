@@ -195,11 +195,24 @@ succeed.
   the registry injected, the installer's command line, zip validation, the
   swap with an open file and its rollback at each stage, set-aside clearing,
   the replaced-file check) runs on macOS too, as `linux.rs`'s does; the
-  identity, lock and writability calls run only on the Windows CI job. No
-  test runs the real installer or a real UAC prompt, and nothing yet updates
-  a Windows install end to end in CI: a silent `/CURRENTUSER` install, an
-  update over it while the old `dbdelve.exe` runs, and a declined
-  `/ALLUSERS` prompt are checked by hand on Windows.
+  identity, lock and writability calls run only on the Windows CI job.
+- **The Windows update end to end.** `update-e2e-windows.yml` runs
+  `dev/update-e2e-windows.ps1` on pushes that touch the updater, the
+  installer script or the packaging, and from the Actions tab. It builds this
+  version and 99.0.0 with `update-test-hooks`, signs the newer with a key made
+  for the run, serves a `releases/latest`-shaped feed on 127.0.0.1, and lets
+  the older app update itself (`DBDELVE_UPDATE_AUTO=1`, which only a test
+  build reads) from a per-user install with the ODBC bridge running, an
+  all-users install, and a portable folder holding files of the user's own;
+  each must end with the new files in place, the new app running from the
+  same path, user files kept and nothing set aside left behind. A badly
+  signed update must leave the install untouched, and an installer forced to
+  fail after `/UPDATE` set the running files aside must put them back and
+  leave the old app runnable. The runner is already elevated, so the UAC
+  prompt, declining it, and DBDelve reopening unelevated afterwards are still
+  checked by hand. By hand, on a Windows machine without DBDelve installed:
+  `pwsh -File dev/update-e2e-windows.ps1` (elevated for the all-users case;
+  `-SkipBuild` reuses the last builds, `-Only portable` runs one scenario).
 - **A signature binds the asset's name.** minisign's default trusted comment
   is `timestamp:<n>\tfile:<name>\thashed`, and the signature covers it. The
   app refuses a signature whose `file:` is not the exact asset it asked for,
@@ -215,8 +228,9 @@ succeed.
 - **The cask says `auto_updates true`**, so `brew upgrade` does not fight the
   app over which copy is current.
 - **`update-test-hooks` is the only way to point an app elsewhere.** Off by
-  default; with it the app reads `DBDELVE_UPDATE_FEED` and
-  `DBDELVE_UPDATE_PUBLIC_KEY` and a variant build may update itself.
+  default; with it the app reads `DBDELVE_UPDATE_FEED`,
+  `DBDELVE_UPDATE_PUBLIC_KEY` and `DBDELVE_UPDATE_AUTO` (install a found
+  update without the click), and a variant build may update itself.
   `DBDELVE_FEATURES=update-test-hooks DBDELVE_NO_LAUNCH=1 dev/bundle.sh`
   builds such a dev bundle without opening it.
 
