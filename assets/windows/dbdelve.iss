@@ -13,6 +13,18 @@
 ; changing it orphans the uninstaller and stacks a second copy. The GUID is
 ; this installer's, not a Windows identity the app itself reads.
 ;
+;
+; /UPDATE is DBDelve's own switch, passed only by the app updating itself
+; (src/update/windows.rs), always with /VERYSILENT /SUPPRESSMSGBOXES
+; /NOCLOSEAPPLICATIONS and the install's mode and folder. Windows will not
+; overwrite or delete a running executable, only rename it, and the app stays
+; open while this runs, so with /UPDATE the [Code] below moves dbdelve.exe,
+; the ODBC bridge's executable and the plugins folder into a folder ending
+; .dbdelve-old inside {app} before anything is installed, and moves them back
+; if the install fails. That folder goes on the next run of this installer, on
+; uninstall, and at the app's next start where it may write there. Without
+; /UPDATE nothing is moved: an ordinary run behaves as it always has.
+;
 ; Defines required on the iscc command line:
 ;   MyAppVersion  from Cargo.toml
 ;   StageDir      the staged zip directory (absolute)
@@ -90,6 +102,9 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 ; renames would otherwise linger here, and discover() prefers this directory.
 Type: filesandordirs; Name: "{app}\plugins"
 
+[UninstallDelete]
+Type: filesandordirs; Name: "{app}\*.dbdelve-old"
+
 [Files]
 Source: "{#StageDir}\dbdelve.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; Beside the executable, where db::plugin::discover() looks.
@@ -104,3 +119,128 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+
+[Code]
+const
+  SetAsideSuffix = '.dbdelve-old';
+
+var
+  SetAsideFrom: TArrayOfString;
+  SetAsideTo: TArrayOfString;
+  InstallDone: Boolean;
+
+function IsUpdate: Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  for I := 1 to ParamCount do
+    if CompareText(ParamStr(I), '/UPDATE') = 0 then
+      Result := True;
+end;
+
+{ Best effort: what still runs from an earlier update stays until next time. }
+procedure ClearSetAside;
+var
+  FindRec: TFindRec;
+  Path: String;
+begin
+  if FindFirst(ExpandConstant('{app}\*') + SetAsideSuffix, FindRec) then
+    try
+      repeat
+        Path := ExpandConstant('{app}\') + FindRec.Name;
+        if FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY <> 0 then
+          DelTree(Path, True, True, True)
+        else
+          DeleteFile(Path);
+      until not FindNext(FindRec);
+    finally
+      FindClose(FindRec);
+    end;
+end;
+
+function SetAside(const Name, Aside: String): Boolean;
+var
+  From, Dest: String;
+  Count: Integer;
+begin
+  Result := True;
+  From := ExpandConstant('{app}\') + Name;
+  if not FileExists(From) and not DirExists(From) then
+    Exit;
+  Dest := AddBackslash(Aside) + ExtractFileName(Name);
+  if not RenameFile(From, Dest) then begin
+    Log('Could not move ' + From + ' aside to ' + Dest);
+    Result := False;
+    Exit;
+  end;
+  Count := GetArrayLength(SetAsideFrom);
+  SetArrayLength(SetAsideFrom, Count + 1);
+  SetArrayLength(SetAsideTo, Count + 1);
+  SetAsideFrom[Count] := From;
+  SetAsideTo[Count] := Dest;
+end;
+
+{ In reverse, so the plugins folder is back before the bridge returns into
+  it. Whatever a failed install left in the way goes first. }
+procedure PutBack;
+var
+  I: Integer;
+begin
+  for I := GetArrayLength(SetAsideFrom) - 1 downto 0 do begin
+    if DirExists(SetAsideFrom[I]) then
+      DelTree(SetAsideFrom[I], True, True, True)
+    else if FileExists(SetAsideFrom[I]) then
+      DeleteFile(SetAsideFrom[I]);
+    ForceDirectories(ExtractFileDir(SetAsideFrom[I]));
+    if RenameFile(SetAsideTo[I], SetAsideFrom[I]) then
+      Log('Put back ' + SetAsideFrom[I])
+    else
+      Log('Could not put back ' + SetAsideFrom[I] + ' from ' + SetAsideTo[I]);
+  end;
+  SetArrayLength(SetAsideFrom, 0);
+  SetArrayLength(SetAsideTo, 0);
+end;
+
+{ Runs before Setup looks for files in use and before [InstallDelete]. }
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  Aside: String;
+begin
+  Result := '';
+  ClearSetAside;
+  if not IsUpdate then
+    Exit;
+  Aside := ExpandConstant('{app}\') + GetDateTimeString('yyyymmddhhnnsszzz', #0, #0) + SetAsideSuffix;
+  if not CreateDir(Aside) then begin
+    Result := 'Could not create ' + Aside + '.';
+    Exit;
+  end;
+  if not SetAside('dbdelve.exe', Aside) then begin
+    PutBack;
+    Result := 'Could not move the running DBDelve aside.';
+    Exit;
+  end;
+  if not SetAside('plugins\odbc\bin\dbdelve-odbc.exe', Aside) then begin
+    PutBack;
+    Result := 'Could not move the running ODBC bridge aside.';
+    Exit;
+  end;
+  { Whole, so a failed update can put it back. If it will not move,
+    [InstallDelete] removes it as it always has. }
+  SetAside('plugins', Aside);
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then begin
+    InstallDone := True;
+    ClearSetAside;
+  end;
+end;
+
+procedure DeinitializeSetup;
+begin
+  if not InstallDone then
+    PutBack;
+end;
