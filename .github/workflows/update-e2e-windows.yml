@@ -13,6 +13,7 @@ on:
       - "assets/windows/**"
       - "dev/package-windows.ps1"
       - "dev/update-e2e-windows.ps1"
+      - "dev/update-test-kit/**"
       - ".github/workflows/update-e2e-windows.yml"
 
 permissions:
@@ -46,8 +47,19 @@ jobs:
       - name: inno setup
         run: choco install innosetup --no-progress --yes
       - name: update end to end
-        run: pwsh -NoProfile -File dev/update-e2e-windows.ps1 -Work "$env:RUNNER_TEMP\update-e2e"
+        run: pwsh -NoProfile -File dev/update-e2e-windows.ps1 -Work "$env:RUNNER_TEMP\update-e2e" -Kit "$env:RUNNER_TEMP\update-test-kit"
         shell: pwsh
+      # For testing by hand what CI cannot: the click, the UAC prompt, the
+      # unelevated reopen (dev/update-test-kit/README.txt). Present only when
+      # it was built and its server checked out, failing scenarios or not.
+      - name: test kit
+        if: success() || failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: update-test-kit-windows
+          path: ${{ runner.temp }}/update-test-kit
+          if-no-files-found: ignore
+          retention-days: 3
       - name: diagnostics
         if: failure()
         uses: actions/upload-artifact@v7

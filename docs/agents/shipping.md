@@ -239,6 +239,15 @@ succeed.
   checked by hand. By hand, on a Windows machine without DBDelve installed:
   `pwsh -File dev/update-e2e-windows.ps1` (elevated for the all-users case;
   `-SkipBuild` reuses the last builds, `-Only portable` runs one scenario).
+- **The Windows test kit** is what the e2e run leaves for testing by hand
+  what it cannot: the click on **Update and restart**, the UAC prompt
+  approved and declined, and the unelevated reopen. The run uploads it as
+  `update-test-kit-windows` (kept 3 days): the old build's installer and
+  zip, the signed 99.0.0 feed and its key, and `Start-Test.cmd`, which
+  serves the feed from Windows PowerShell 5.1 alone and starts DBDelve
+  pointed at it without `DBDELVE_UPDATE_AUTO`. `dev/update-test-kit/README.txt`
+  is the tester's script; the run checks that 5.1 parses the kit and that its
+  server hands back the feed byte for byte before it uploads anything.
 - **A signature binds the asset's name.** minisign's default trusted comment
   is `timestamp:<n>\tfile:<name>\thashed`, and the signature covers it. The
   app refuses a signature whose `file:` is not the exact asset it asked for,

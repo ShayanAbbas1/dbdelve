@@ -14,13 +14,17 @@
 #
 # Needs Rust, Inno Setup and Python (for the feed server) on PATH.
 #
-# Usage: pwsh -File dev/update-e2e-windows.ps1 [-Work <dir>] [-SkipBuild] [-Only <scenario>,...]
+# Usage: pwsh -File dev/update-e2e-windows.ps1 [-Work <dir>] [-SkipBuild] [-Only <scenario>,...] [-Kit <dir>]
 #   -SkipBuild reuses the builds an earlier run left under <dir>\builds.
+#   -Kit also assembles, after the scenarios, the kit in dev/update-test-kit
+#   for testing by hand on a bare Windows PC, from the same builds and key;
+#   its server is checked under Windows PowerShell 5.1 before it counts.
 
 param(
     [string]$Work = (Join-Path ([IO.Path]::GetTempPath()) "dbdelve-update-e2e"),
     [switch]$SkipBuild,
-    [string[]]$Only = @()
+    [string[]]$Only = @(),
+    [string]$Kit = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -485,6 +489,78 @@ $Scenarios = [ordered]@{
     }
 }
 
+# Windows PowerShell 5.1, which is all the PC running the kit has, rather than
+# the pwsh this script runs under.
+function Assert-ParsesIn51([string]$Path) {
+    $Quoted = $Path.Replace("'", "''")
+    $Command = "`$tokens = `$null; `$errors = `$null; " +
+        "[void][System.Management.Automation.Language.Parser]::ParseFile('$Quoted', [ref]`$tokens, [ref]`$errors); " +
+        "if (`$errors) { `$errors | ForEach-Object { `$_.ToString() }; exit 1 }"
+    $Encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Command))
+    $Output = & powershell.exe -NoProfile -NonInteractive -EncodedCommand $Encoded
+    if ($LASTEXITCODE -ne 0) { throw "Windows PowerShell 5.1 cannot parse ${Path}:`n$($Output -join "`n")" }
+}
+
+# Starts the kit's server under Windows PowerShell 5.1 without the app, and
+# checks it serves the feed it wrote and the files byte for byte.
+function Assert-KitServes([string]$Into) {
+    $Out = Join-Path $Diagnostics "kit-server.out.log"
+    $Err = Join-Path $Diagnostics "kit-server.err.log"
+    $Server51 = Start-Process powershell.exe -PassThru -WindowStyle Hidden `
+        -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$(Join-Path $Into 'Start-Test.ps1')`"", "-NoLaunch" `
+        -RedirectStandardOutput $Out -RedirectStandardError $Err
+    try {
+        $Url = Wait-Until {
+            if ($Server51.HasExited) { throw "the kit's server exited: $(Get-Content -Raw $Out) $(Get-Content -Raw $Err)" }
+            $Text = Get-Content -Raw -LiteralPath $Out -ErrorAction SilentlyContinue
+            if ($Text -match "Serving the feed at (http://127\.0\.0\.1:\d+/latest\.json)") { $Matches[1] }
+        } 60 "the kit's server to start"
+        $Fetched = Join-Path $Diagnostics "kit-fetched"
+        if (Test-Path $Fetched) { Remove-Item -Recurse -Force $Fetched }
+        New-Item -ItemType Directory -Path $Fetched | Out-Null
+        $Written = Join-Path $Into "feed\latest.json"
+        Invoke-WebRequest -UseBasicParsing $Url -OutFile (Join-Path $Fetched "latest.json")
+        Assert-SameFile (Join-Path $Fetched "latest.json") $Written
+        $Latest = Get-Content -Raw $Written | ConvertFrom-Json
+        if ($Latest.tag_name -ne "v$NewVersion" -or @($Latest.assets).Count -ne 4) {
+            throw "the kit's feed is not the 4 files of v${NewVersion}: $(Get-Content -Raw $Written)"
+        }
+        foreach ($Asset in @($Latest.assets)) {
+            $Local = Join-Path $Into "feed\$($Asset.name)"
+            if ($Asset.size -ne (Get-Item -LiteralPath $Local).Length) { throw "the kit's feed lists $($Asset.name) at the wrong size" }
+            Invoke-WebRequest -UseBasicParsing $Asset.browser_download_url -OutFile (Join-Path $Fetched $Asset.name)
+            Assert-SameFile (Join-Path $Fetched $Asset.name) $Local
+        }
+    }
+    finally {
+        Stop-Process -Id $Server51.Id -Force -ErrorAction SilentlyContinue
+        Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $Into "feed\latest.json")
+    }
+}
+
+# Text files go in with Windows line endings, for Notepad and cmd.
+function Copy-KitText([string]$From, [string]$To) {
+    $Text = [IO.File]::ReadAllText($From).Replace("`r`n", "`n").Replace("`n", "`r`n")
+    $Text = $Text.Replace("{OLD}", $OldVersion).Replace("{NEW}", $NewVersion).Replace("{ARCH}", $Arch)
+    [IO.File]::WriteAllText($To, $Text, [Text.UTF8Encoding]::new($false))
+}
+
+function Build-Kit([string]$Into) {
+    if (Test-Path $Into) { Remove-Item -Recurse -Force $Into }
+    New-Item -ItemType Directory -Path (Join-Path $Into "old"), (Join-Path $Into "feed") | Out-Null
+    Copy-Item $OldSetup, $OldZip (Join-Path $Into "old")
+    Get-ChildItem -LiteralPath (Join-Path $Feed "good") -File | Where-Object Name -ne "latest.json" |
+        Copy-Item -Destination (Join-Path $Into "feed")
+    Set-Content -Encoding ascii (Join-Path $Into "feed\version.txt") $NewVersion
+    Copy-Item (Join-Path $Tools "trusted.pub") (Join-Path $Into "update-key.pub")
+    $Source = Join-Path $Root "dev\update-test-kit"
+    foreach ($Name in @("README.txt", "Start-Test.cmd", "Start-Test.ps1")) {
+        Copy-KitText (Join-Path $Source $Name) (Join-Path $Into $Name)
+    }
+    Assert-ParsesIn51 (Join-Path $Into "Start-Test.ps1")
+    Assert-KitServes $Into
+}
+
 $Elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)
 if (Compare-Object @($Scenarios.Keys) $ScenarioNames) { throw "`$ScenarioNames does not list the scenarios" }
@@ -546,6 +622,18 @@ try {
 }
 finally {
     Stop-Process -Id $Server.Id -Force -ErrorAction SilentlyContinue
+}
+
+# A kit that fails its checks is removed, so nothing uploads a broken one.
+if ($Kit) {
+    try {
+        Build-Kit $Kit
+        $Results["test kit"] = [pscustomobject]@{ Passed = $true; Text = "built in $Kit" }
+    }
+    catch {
+        $Results["test kit"] = [pscustomobject]@{ Passed = $false; Text = "FAILED: $_" }
+        if (Test-Path $Kit) { Remove-Item -Recurse -Force $Kit }
+    }
 }
 
 Write-Output ""
