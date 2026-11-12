@@ -234,6 +234,10 @@ pub(super) fn agent() -> ureq::Agent {
         .timeout_connect(Some(Duration::from_secs(30)))
         .timeout_recv_response(Some(Duration::from_secs(30)))
         .timeout_recv_body(Some(Duration::from_secs(30 * 60)))
+        // The download follows the signature on the same host. A server that
+        // closed the first connection fails the second outright on Windows
+        // ("Peer disconnected") when the pool hands the dead one back.
+        .max_idle_connections(0)
         .user_agent(concat!("dbdelve/", env!("CARGO_PKG_VERSION")))
         .build()
         .into()
