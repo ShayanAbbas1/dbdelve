@@ -646,7 +646,13 @@ fn release_aside(aside: &Path) {
 
 /// The real [`UNRESTORED`] marker, which the tests replace to make it fail.
 fn protect(marker: &Path) -> io::Result<()> {
-    fs::write(marker, PROTECTION)
+    use std::io::Write as _;
+
+    let mut file = fs::File::create(marker)?;
+    file.write_all(PROTECTION.as_bytes())?;
+    // On disk before the first rename, so a power cut cannot keep the renames
+    // and lose the marker.
+    file.sync_all()
 }
 
 struct Plan<'a> {
