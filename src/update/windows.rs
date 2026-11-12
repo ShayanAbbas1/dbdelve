@@ -387,6 +387,8 @@ fn run_setup(setup: &Path, scope: Scope, folder: &Path, log: &Path) -> Result<()
         .status()
         .map_err(|error| format!("{}: {error}", setup.display()))
         .map_err(failed(COULD_NOT_REPLACE))?;
+    #[cfg(feature = "update-test-hooks")]
+    keep_setup_log(log);
     if status.success() {
         return Ok(());
     }
@@ -401,6 +403,20 @@ fn run_setup(setup: &Path, scope: Scope, folder: &Path, log: &Path) -> Result<()
         "the installer exited with {status}; its log ends: {}",
         log_tail(log)
     )))
+}
+
+/// Only a test build, told to by `DBDELVE_UPDATE_SETUP_LOG`, copies the
+/// installer's log there: the scratch folder holding it goes with the update,
+/// and the end-to-end test reads it to see what the installer did.
+#[cfg(all(windows, feature = "update-test-hooks"))]
+fn keep_setup_log(log: &Path) {
+    let Some(keep) = std::env::var_os("DBDELVE_UPDATE_SETUP_LOG").filter(|keep| !keep.is_empty())
+    else {
+        return;
+    };
+    if let Err(error) = fs::copy(log, &keep) {
+        tracing::info!(path = %Path::new(&keep).display(), "the installer's log could not be kept: {error}");
+    }
 }
 
 /// The installer's command line. `/UPDATE` is this app's own switch: the
