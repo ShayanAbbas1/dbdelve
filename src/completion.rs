@@ -463,7 +463,7 @@ impl SchemaCompletions {
     /// from a relation to itself is the exception, being the only way to ask
     /// for a self-join.
     fn joins(&self, head: &str, wanted: &mut Wanted) -> Vec<Join> {
-        let sources = sources(head);
+        let sources = sources(&reach(head));
         let held = |(schema, relation): &(String, String)| {
             sources.iter().any(|source| {
                 source.relation.eq_ignore_ascii_case(relation)
@@ -1275,10 +1275,23 @@ impl Around<'_> {
     }
 
     /// Whether a join condition can be written here as well: after `JOIN`,
-    /// in front of no `ON` of the statement's own.
+    /// in front of no `ON` of the statement's own. Not after `CROSS JOIN` or
+    /// `NATURAL JOIN`, which take none.
     fn takes_condition(&self) -> bool {
+        let unconditional = tokens(self.before)
+            .iter()
+            .rev()
+            .skip_while(|token| token.ends_with('.'))
+            .skip(1)
+            .take_while(|token| is_join_modifier(token))
+            .any(|token| {
+                ["cross", "natural"]
+                    .iter()
+                    .any(|k| token.eq_ignore_ascii_case(k))
+            });
         self.source()
             .is_some_and(|keyword| keyword.eq_ignore_ascii_case("join"))
+            && !unconditional
             && self.next().is_none_or(|next| next != Next::Condition)
     }
 
@@ -1289,7 +1302,9 @@ impl Around<'_> {
         // The caret is inside a word, or in front of a quoted name or a
         // call's arguments: whatever is written here is not the whole name.
         let inside = rest.len() == self.tail.len() && is_ident_byte(first);
-        if inside || matches!(first, b'"' | b'`' | b'[' | b'(' | b'.') {
+        // Nor is it known past a comment, which may sit in front of an alias.
+        let comment = rest.starts_with("--") || rest.starts_with("/*");
+        if inside || comment || matches!(first, b'"' | b'`' | b'[' | b'(' | b'.') {
             return Some(Next::Name);
         }
         if !is_ident_byte(first) {
@@ -1307,6 +1322,37 @@ impl Around<'_> {
             token if is_keyword(token) && !token.eq_ignore_ascii_case("as") => Next::Other,
             _ => Next::Name,
         })
+    }
+}
+
+/// A word that may stand between a join's kind and its `JOIN`.
+fn is_join_modifier(token: &str) -> bool {
+    [
+        "cross", "natural", "inner", "left", "right", "full", "outer",
+    ]
+    .iter()
+    .any(|modifier| token.eq_ignore_ascii_case(modifier))
+}
+
+/// The part of `head` whose relations a condition at its end can name: less
+/// every parenthesis already closed, and from the one the caret is inside.
+/// A subquery's relations, or a CTE's, are out of reach of the query around
+/// it, and the reverse.
+fn reach(head: &str) -> String {
+    let mut reach = String::new();
+    let mut opened = Vec::new();
+    for character in head.chars() {
+        match character {
+            '(' => opened.push(reach.len()),
+            ')' => reach.truncate(opened.pop().unwrap_or(0)),
+            _ => {}
+        }
+        // A space where a group closed, so the words around it stay two.
+        reach.push(if character == ')' { ' ' } else { character });
+    }
+    match opened.last() {
+        Some(&open) => reach.split_off(open),
+        None => reach,
     }
 }
 
@@ -1336,11 +1382,11 @@ struct Join {
 ///
 /// ponytail: a [`ForeignKey`] is one column of a key and does not say which
 /// key, so two keys onto one relation and one key of two columns arrive
-/// looking alike. A column named twice settles it, since no key repeats one:
-/// `created_by` and `updated_by` both onto `users.id` are two joins. Two
-/// single-column keys onto different columns of one relation are read as one
-/// key of two -- carry the constraint's name on `ForeignKey` if that is ever
-/// met.
+/// looking alike. No key names a column twice, so a column met again opens
+/// the next key: `created_by` and `updated_by` both onto `users.id` are two
+/// joins. That leans on a key's columns arriving together, and reads two
+/// single-column keys onto different columns of one relation as one key of
+/// two -- carry the constraint's name on `ForeignKey` if either is ever met.
 fn foreign_keys(keys: &[ForeignKey]) -> Vec<(JoinTarget, Vec<(String, String)>)> {
     let mut grouped: Vec<(JoinTarget, Vec<(String, String)>)> = Vec::new();
     for key in keys {
@@ -1354,18 +1400,19 @@ fn foreign_keys(keys: &[ForeignKey]) -> Vec<(JoinTarget, Vec<(String, String)>)>
     grouped
         .into_iter()
         .flat_map(|(target, columns)| {
-            let repeats = columns.iter().enumerate().any(|(index, (theirs, ours))| {
-                columns[..index]
-                    .iter()
-                    .any(|(held_theirs, held_ours)| held_theirs == theirs || held_ours == ours)
-            });
-            match repeats {
-                true => columns
-                    .into_iter()
-                    .map(|columns| (target.clone(), vec![columns]))
-                    .collect(),
-                false => vec![(target, columns)],
+            let mut keys: Vec<Vec<(String, String)>> = Vec::new();
+            for (theirs, ours) in columns {
+                let repeats = keys.last().is_none_or(|key| {
+                    key.iter().any(|(held_theirs, held_ours)| {
+                        held_theirs == &theirs || held_ours == &ours
+                    })
+                });
+                match keys.last_mut().filter(|_| !repeats) {
+                    Some(key) => key.push((theirs, ours)),
+                    None => keys.push(vec![(theirs, ours)]),
+                }
             }
+            keys.into_iter().map(move |key| (target.clone(), key))
         })
         .collect()
 }
@@ -2526,6 +2573,37 @@ mod tests {
             "customers c"
         );
         assert_eq!(first("SELECT * FROM orders o, cust|"), "customers");
+    }
+
+    #[test]
+    fn no_condition_follows_a_join_that_takes_none_or_names_a_relation_out_of_reach() {
+        for sql in [
+            "SELECT * FROM orders o CROSS JOIN cust|",
+            "SELECT * FROM orders o NATURAL LEFT JOIN cust|",
+            "SELECT * FROM orders o JOIN cust| /* keep */ ON true",
+            "WITH x AS (SELECT * FROM orders o) SELECT * FROM users u JOIN cust|",
+        ] {
+            assert!(!first(sql).contains(" ON "), "{sql}");
+        }
+        assert_eq!(
+            first("SELECT * FROM users u JOIN (SELECT * FROM orders o JOIN cust|"),
+            "customers c ON c.id = o.customer_id"
+        );
+    }
+
+    #[test]
+    fn two_keys_of_two_columns_onto_one_relation_stay_whole() {
+        let keys = [
+            key("billing_tenant", "addresses", "tenant_id"),
+            key("billing_id", "addresses", "id"),
+            key("shipping_tenant", "addresses", "tenant_id"),
+            key("shipping_id", "addresses", "id"),
+        ];
+        let columns = foreign_keys(&keys)
+            .into_iter()
+            .map(|(_, columns)| columns.len())
+            .collect::<Vec<_>>();
+        assert_eq!(columns, [2, 2]);
     }
 
     #[test]
