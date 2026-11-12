@@ -221,7 +221,9 @@ succeed.
   same path, user files kept and nothing set aside left behind. A badly
   signed update must leave the install untouched, and an installer forced to
   fail after `/UPDATE` set the running files aside must put them back and
-  leave the old app runnable. The runner is already elevated, so the UAC
+  leave the old app runnable, with the installer's own log showing `/UPDATE`,
+  each set-aside, the locked file's abort, the rollback and each put-back,
+  in that order (the `[Code]` logs its steps as `DBDelve update: ...`). The runner is already elevated, so the UAC
   prompt, declining it, and DBDelve reopening unelevated afterwards are still
   checked by hand. By hand, on a Windows machine without DBDelve installed:
   `pwsh -File dev/update-e2e-windows.ps1` (elevated for the all-users case;
@@ -242,8 +244,9 @@ succeed.
   app over which copy is current.
 - **`update-test-hooks` is the only way to point an app elsewhere.** Off by
   default; with it the app reads `DBDELVE_UPDATE_FEED`,
-  `DBDELVE_UPDATE_PUBLIC_KEY` and `DBDELVE_UPDATE_AUTO` (install a found
-  update without the click), and a variant build may update itself.
+  `DBDELVE_UPDATE_PUBLIC_KEY`, `DBDELVE_UPDATE_AUTO` (install a found
+  update without the click) and, on Windows, `DBDELVE_UPDATE_SETUP_LOG`
+  (copy the installer's log there), and a variant build may update itself.
   `DBDELVE_FEATURES=update-test-hooks DBDELVE_NO_LAUNCH=1 dev/bundle.sh`
   builds such a dev bundle without opening it.
 

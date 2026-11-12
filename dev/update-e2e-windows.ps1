@@ -43,9 +43,22 @@ $Arch = switch ($env:PROCESSOR_ARCHITECTURE) {
     default { throw "Unsupported architecture: $env:PROCESSOR_ARCHITECTURE" }
 }
 
+$ScenarioNames = @("bad-signature", "failed-installer", "user-installer", "all-users", "portable")
+$Unknown = @($Only | Where-Object { $_ -notin $ScenarioNames })
+if ($Unknown) {
+    throw "No scenario called $($Unknown -join ', '). The scenarios are $($ScenarioNames -join ', ')."
+}
+
 foreach ($Key in $UninstallKeys) {
     if (Test-Path $Key) {
         throw "DBDelve is installed here ($Key). Run this on a machine without it: it installs and uninstalls DBDelve."
+    }
+}
+# The installer's default folders, which the scenarios install into and then
+# uninstall: a portable copy or anything else already there would go with them.
+foreach ($Folder in @((Join-Path $env:LOCALAPPDATA "Programs\DBDelve"), (Join-Path $env:ProgramFiles "DBDelve"))) {
+    if (Test-Path -LiteralPath $Folder) {
+        throw "$Folder already exists. Run this on a machine without it: the scenarios install DBDelve there and uninstall it."
     }
 }
 
@@ -208,6 +221,7 @@ function Start-App([string]$Exe, [string]$FeedUrl) {
         DBDELVE_UPDATE_FEED       = $FeedUrl
         DBDELVE_UPDATE_PUBLIC_KEY = $Trusted.Public
         DBDELVE_UPDATE_AUTO       = "1"
+        DBDELVE_UPDATE_SETUP_LOG  = Join-Path $Diagnostics "$CurrentScenario\setup.log"
     }
     $Saved = @{}
     foreach ($Name in $Environment.Keys) {
@@ -277,6 +291,16 @@ function Get-Leftovers([string]$Folder) {
 
 function Assert-NoLeftovers([string]$Folder) {
     Wait-Until { -not (Get-Leftovers $Folder) } 30 "what the update set aside in $Folder to be cleared" | Out-Null
+}
+
+# Each pattern must match, in order, after the previous one's match.
+function Assert-InOrder([string]$Text, [string]$Source, [string[]]$Patterns) {
+    $At = 0
+    foreach ($Pattern in $Patterns) {
+        $Match = [regex]::new($Pattern, "Multiline").Match($Text, $At)
+        if (-not $Match.Success) { throw "$Source has no /$Pattern/ after offset $At" }
+        $At = $Match.Index + $Match.Length
+    }
 }
 
 function Assert-File([string]$Path, [string]$Content) {
@@ -364,8 +388,10 @@ $Scenarios = [ordered]@{
 
     # The installer fails after /UPDATE set the running files aside: a locked
     # LICENSE makes [Files] abort (a suppressed Abort/Retry/Ignore answers
-    # Abort), Inno rolls back the files it created, and the [Code] puts the old
-    # ones back. The old app keeps running, and the restored one starts.
+    # Abort, and Setup exits 5), Inno rolls back the files it created, and the
+    # [Code] puts the old ones back. Inno's log, which the app copies out of
+    # its scratch folder for this, shows each of those steps in that order.
+    # The old app keeps running, and the restored one starts.
     "failed-installer" = {
         $Exe = Install-Old "CURRENTUSER" "failed-installer"
         $Folder = Split-Path $Exe
@@ -373,12 +399,25 @@ $Scenarios = [ordered]@{
         try {
             $Old = Start-App $Exe $GoodFeed
             Wait-Started $OldVersion
-            Wait-Log "update failed: The installed app could not be replaced" 300 "the installer to fail"
+            Wait-Log "update failed: The installed app could not be replaced\. the installer exited with exit code: 5\b" 300 "the installer to fail with exit code 5"
             Assert-StaysUp $Old
         }
         finally {
             $Lock.Dispose()
         }
+        $SetupLog = Join-Path $Diagnostics "failed-installer\setup.log"
+        if (-not (Test-Path $SetupLog)) { throw "the app kept no installer log at $SetupLog" }
+        Assert-InOrder (Get-Content -Raw $SetupLog) "the installer's log" @(
+            'Setup command line: .*/UPDATE\b',
+            'DBDelve update: set aside .*\\dbdelve\.exe to .*\.dbdelve-old\\dbdelve\.exe\r?$',
+            'DBDelve update: set aside .*\\plugins\\odbc\\bin\\dbdelve-odbc\.exe to .*\.dbdelve-old\\dbdelve-odbc\.exe\r?$',
+            'DBDelve update: set aside .*\\plugins to .*\.dbdelve-old\\plugins\r?$',
+            'Defaulting to Abort for suppressed message box.*\r?\n.*\\LICENSE\r?$',
+            'Rolling back changes\.',
+            'DBDelve update: put back .*\\plugins\r?$',
+            'DBDelve update: put back .*\\plugins\\odbc\\bin\\dbdelve-odbc\.exe\r?$',
+            'DBDelve update: put back .*\\dbdelve\.exe\r?$'
+        )
         Assert-Release $Folder $OldStage
         Assert-Registered "HKCU:" $OldVersion
         $Again = Restart-App $Exe $OldVersion
@@ -448,24 +487,32 @@ $Scenarios = [ordered]@{
 
 $Elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)
+if (Compare-Object @($Scenarios.Keys) $ScenarioNames) { throw "`$ScenarioNames does not list the scenarios" }
 $Results = [ordered]@{}
+$Ran = 0
+$CurrentScenario = ""
 try {
     foreach ($Name in $Scenarios.Keys) {
         if ($Only -and $Name -notin $Only) { continue }
         if ($Name -eq "all-users" -and -not $Elevated) {
-            $Results[$Name] = "skipped (needs an elevated shell)"
+            $Results[$Name] = [pscustomobject]@{ Passed = $true; Text = "skipped (needs an elevated shell)" }
             continue
         }
         Write-Output "== $Name"
+        $Ran += 1
+        $CurrentScenario = $Name
         $Scenario = Join-Path $Diagnostics $Name
+        if (Test-Path $Scenario) { Remove-Item -Recurse -Force $Scenario }
         New-Item -ItemType Directory -Force -Path $Scenario | Out-Null
         if (Test-Path $LogDir) { Remove-Item -Recurse -Force $LogDir }
+        $Result = [pscustomobject]@{ Passed = $true; Text = "passed" }
+        $Results[$Name] = $Result
         try {
             & $Scenarios[$Name]
-            $Results[$Name] = "passed"
         }
         catch {
-            $Results[$Name] = "FAILED: $_"
+            $Result.Passed = $false
+            $Result.Text = "FAILED: $_"
             Write-Output "  $_"
             Write-Output $_.ScriptStackTrace
             $Registration = Get-Registration
@@ -484,11 +531,17 @@ try {
                 Set-Content (Join-Path $Scenario "processes.txt")
         }
         finally {
-            Stop-Ours
-            try { Remove-Installed } catch { $Results[$Name] = "$($Results[$Name]); cleanup: $_" }
-            if (Test-Path $PortableRoot) { Remove-Item -Recurse -Force $PortableRoot }
+            try {
+                Stop-Ours
+                Remove-Installed
+                if (Test-Path $PortableRoot) { Remove-Item -Recurse -Force $PortableRoot }
+            }
+            catch {
+                $Result.Passed = $false
+                $Result.Text = "$($Result.Text); cleanup FAILED: $_"
+            }
         }
-        Write-Output "  $($Results[$Name])"
+        Write-Output "  $($Result.Text)"
     }
 }
 finally {
@@ -496,5 +549,9 @@ finally {
 }
 
 Write-Output ""
-foreach ($Name in $Results.Keys) { Write-Output ("{0,-18} {1}" -f $Name, $Results[$Name]) }
-if ($Results.Values | Where-Object { $_ -notmatch '^(passed|skipped)' }) { exit 1 }
+foreach ($Name in $Results.Keys) { Write-Output ("{0,-18} {1}" -f $Name, $Results[$Name].Text) }
+if ($Ran -eq 0) {
+    Write-Output "no scenario ran"
+    exit 1
+}
+if ($Results.Values | Where-Object { -not $_.Passed }) { exit 1 }
