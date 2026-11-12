@@ -157,7 +157,7 @@ begin
         if FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY = 0 then
           DeleteFile(Path)
         else if FileExists(AddBackslash(Path) + UnrestoredMarker) then
-          Log('Kept ' + Path + ': it holds what a failed update could not put back')
+          Log('DBDelve update: kept ' + Path + ', which holds what a failed update could not put back')
         else
           DelTree(Path, True, True, True);
       until not FindNext(FindRec);
@@ -177,7 +177,7 @@ begin
     Exit;
   Dest := AddBackslash(Aside) + ExtractFileName(Name);
   if not RenameFile(From, Dest) then begin
-    Log('Could not move ' + From + ' aside to ' + Dest);
+    Log('DBDelve update: could not set aside ' + From + ' to ' + Dest);
     Result := False;
     Exit;
   end;
@@ -186,6 +186,7 @@ begin
   SetArrayLength(SetAsideTo, Count + 1);
   SetAsideFrom[Count] := From;
   SetAsideTo[Count] := Dest;
+  Log('DBDelve update: set aside ' + From + ' to ' + Dest);
 end;
 
 { In reverse, so the plugins folder is back before the bridge returns into
@@ -207,9 +208,9 @@ begin
       DeleteFile(SetAsideFrom[I]);
     ForceDirectories(ExtractFileDir(SetAsideFrom[I]));
     if RenameFile(SetAsideTo[I], SetAsideFrom[I]) then
-      Log('Put back ' + SetAsideFrom[I])
+      Log('DBDelve update: put back ' + SetAsideFrom[I])
     else begin
-      Log('Could not put back ' + SetAsideFrom[I] + ' from ' + SetAsideTo[I]);
+      Log('DBDelve update: could not put back ' + SetAsideFrom[I] + ' from ' + SetAsideTo[I]);
       SetArrayLength(KeptFrom, Count + 1);
       SetArrayLength(KeptTo, Count + 1);
       KeptFrom[Count] := SetAsideFrom[I];
@@ -229,7 +230,7 @@ begin
     Exit;
   if Count > 0 then begin
     if not SaveStringToFile(AddBackslash(SetAsideDir) + UnrestoredMarker, Listed, False) then
-      Log('Could not mark ' + SetAsideDir + ' as holding what was not put back');
+      Log('DBDelve update: could not mark ' + SetAsideDir + ' as holding what was not put back');
   end else
     DeleteFile(AddBackslash(SetAsideDir) + UnrestoredMarker);
 end;
