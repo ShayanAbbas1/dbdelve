@@ -339,10 +339,10 @@ function Remove-Installed {
     if (-not $Registration) { return }
     Start-Process $Registration.Uninstaller -Wait -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" | Out-Null
     Wait-Until { -not (Get-Registration) } 120 "the uninstaller to finish" | Out-Null
-    if (Test-Path -LiteralPath $Registration.Folder) {
-        $Leftovers = Get-Leftovers $Registration.Folder
-        if ($Leftovers) { throw "uninstalling left $($Leftovers.Name -join ', ') in $($Registration.Folder)" }
-    }
+    # The key goes early in the uninstall and [UninstallDelete] runs last.
+    Wait-Until {
+        -not (Test-Path -LiteralPath $Registration.Folder) -or -not (Get-Leftovers $Registration.Folder)
+    } 60 "the uninstaller to clear what updates set aside in $($Registration.Folder)" | Out-Null
 }
 
 # A held stdin keeps the bridge waiting for its host, the way it sits beside a

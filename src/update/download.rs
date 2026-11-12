@@ -104,7 +104,9 @@ pub(super) fn lock(installed: &Path) -> Result<File, String> {
     let parent = installed
         .parent()
         .ok_or("the app has no parent directory")?;
-    let path = std::env::temp_dir().join(lock_name(parent));
+    // One lock for every spelling of the folder, short names included.
+    let parent = fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+    let path = std::env::temp_dir().join(lock_name(&parent));
     fs::OpenOptions::new()
         .read(true)
         .write(true)
