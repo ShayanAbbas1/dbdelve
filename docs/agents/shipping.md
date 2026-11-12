@@ -149,12 +149,24 @@ another. Two kinds of install update themselves:
   folder, `plugins\odbc` is emptied the same way and removed (a folder
   holding a running bridge cannot itself be renamed), and the release's
   files and its `plugins\odbc` folder are renamed in. Any failed step undoes
-  every rename before it, in reverse; if some file will not go back, the
-  set-aside folder is kept with `dbdelve-unrestored.txt` in it listing where
-  each belongs, and no clearing touches a folder holding one (uninstalling
-  aside). Files the release does not ship stay,
+  every rename before it, in reverse. Files the release does not ship stay,
   so the user's own files and an older release's dropped ones remain; the
   folder keeps its old versioned name.
+
+**The set-aside folder is protected while it may hold the only copy** of the
+installed files. Both the portable swap and the installer's `[Code]` create
+it, write `dbdelve-unrestored.txt` into it, and move nothing into it until
+that write has succeeded; a marker that cannot be written stops the update
+with nothing moved (portable: a failure the user can retry; installer:
+`PrepareToInstall` returns an error). The marker goes only when the files
+in it are disposable: after the swap or install has finished, or after a
+failed one has put every file back. Neither clearing (the app's at startup,
+the `[Code]`'s) touches a folder holding one, so a failed undo, a crash or a
+power cut part way through leaves the old files where only uninstalling
+(`[UninstallDelete]`, unchanged) removes them; a failed undo also lists in
+the marker what it could not put back and where each belongs, best effort.
+A marker that will not go after success leaves its folder protected and
+never cleared automatically, which is logged and does not fail the update.
 
 `/UPDATE` is the installer contract, in `assets/windows/dbdelve.iss`'s
 `[Code]`. With it, `PrepareToInstall` (which runs before Setup looks for
@@ -166,9 +178,8 @@ is put back and Setup stops with an error before installing anything, so
 `[InstallDelete]` only ever runs once `plugins` is safe aside. If Setup ends
 without reaching `ssPostInstall`, `DeinitializeSetup` clears whatever the
 rolled-back install left at each path and renames everything back, in
-reverse; what will not go back stays listed for the next try and is written
-to the same `dbdelve-unrestored.txt` marker, which the `[Code]`'s clearing
-honours too. Without `/UPDATE` nothing is moved, so an interactive run is as it
+reverse; what will not go back stays listed for the next try and keeps the
+marker in place. Without `/UPDATE` nothing is moved, so an interactive run is as it
 was. Every run clears earlier `*.dbdelve-old` entries in `PrepareToInstall`
 and after installing, and `[UninstallDelete]` removes them on uninstall. The
 app clears them, and a leftover `update.dbdelve-new`, at startup where it can

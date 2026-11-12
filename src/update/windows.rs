@@ -32,11 +32,19 @@ const EXE: &str = "dbdelve.exe";
 /// what has it.
 const SET_ASIDE: &str = ".dbdelve-old";
 
-/// Written into a set-aside folder that still holds files a failed update
-/// could not put back, listing where each belongs. No clearing takes a folder
-/// with it, since it may hold the only copy of the old release. The
-/// installer's `[Code]` writes and honours the same one.
+/// In a set-aside folder for as long as what it holds may be the only copy of
+/// the installed release: written before anything moves into it, removed only
+/// once the update has finished or every file is back. No clearing takes a
+/// folder with it, so an update that stops part way -- a failed undo, a crash,
+/// a power cut -- never loses the old files. Anything that could not be put
+/// back is listed in it. The installer's `[Code]` writes and honours the same
+/// one.
 const UNRESTORED: &str = "dbdelve-unrestored.txt";
+
+const PROTECTION: &str = "DBDelve moved its installed files here while updating. Until \
+    the update finishes, or puts them back, this may be the only copy of them, so \
+    nothing clears this folder while this file is in it. Anything a failed update \
+    could not put back is listed below, with where it belongs.\r\n";
 
 /// Where a portable update unpacks: inside the install, so its files move into
 /// place by rename.
@@ -158,7 +166,7 @@ fn clear_set_aside(folder: &Path) {
         }
         let path = entry.path();
         if path.join(UNRESTORED).is_file() {
-            tracing::warn!(path = %path.display(), "kept: it holds what a failed update could not put back");
+            tracing::warn!(path = %path.display(), "kept: an update did not finish or put back what it holds");
             continue;
         }
         let cleared = if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
@@ -360,6 +368,7 @@ pub(crate) fn install(installer: &Installer, progress: &Progress) -> Result<Path
             folder,
             &release_directory(version, std::env::consts::ARCH),
             &mut |from, to| fs::rename(from, to),
+            &mut protect,
         )?,
     }
     drop(held);
@@ -471,6 +480,7 @@ fn put_in_place(
     folder: &Path,
     top: &str,
     rename: &mut dyn FnMut(&Path, &Path) -> io::Result<()>,
+    protect: &mut dyn FnMut(&Path) -> io::Result<()>,
 ) -> Result<(), &'static str> {
     let staging = folder.join(STAGING);
     // What an earlier attempt left when it was killed before it could clean up.
@@ -479,7 +489,7 @@ fn put_in_place(
     let swapped = unpack(zip, &staging, top)
         .map_err(|(reason, detail)| failed(reason)(detail))
         .and_then(|release| {
-            swap(&release, folder, &aside, rename).map_err(failed(COULD_NOT_REPLACE))
+            swap(&release, folder, &aside, rename, protect).map_err(failed(COULD_NOT_REPLACE))
         });
     remove(&staging);
     swapped
@@ -539,12 +549,14 @@ fn within(path: &Path, top: &str) -> bool {
 /// each installed file the release replaces moves into `aside` first, since a
 /// running one can be renamed but not overwritten, then the release's file
 /// moves to its place. The bridge's folder is replaced whole. Files the
-/// release does not ship stay. Any failure moves everything back.
+/// release does not ship stay. Any failure moves everything back. `protect`
+/// writes the [`UNRESTORED`] marker; nothing moves until it has.
 fn swap(
     release: &Path,
     folder: &Path,
     aside: &Path,
     rename: &mut dyn FnMut(&Path, &Path) -> io::Result<()>,
+    protect: &mut dyn FnMut(&Path) -> io::Result<()>,
 ) -> Result<(), String> {
     let tree = PLUGIN_TREE.iter().collect::<PathBuf>();
     let shipped = files_under(release).map_err(|error| format!("listing the update: {error}"))?;
@@ -581,12 +593,11 @@ fn swap(
             emptied: replaces_tree.then_some(old_tree.as_path()),
         },
         rename,
+        protect,
         &mut done,
     );
     let Err(error) = applied else {
-        if let Err(error) = fs::remove_dir_all(aside) {
-            tracing::info!(path = %aside.display(), "left for the next start: {error}");
-        }
+        release_aside(aside);
         return Ok(());
     };
     let mut unrestored = String::new();
@@ -601,18 +612,41 @@ fn swap(
         }
     }
     if unrestored.is_empty() {
-        _ = fs::remove_dir_all(aside);
+        release_aside(aside);
     } else {
-        match fs::write(aside.join(UNRESTORED), unrestored) {
-            Ok(()) => {
-                tracing::error!(path = %aside.display(), "kept, with {UNRESTORED} listing what to put back")
-            }
-            Err(mark) => {
-                tracing::error!(path = %aside.display(), "could not be marked as holding what was not put back, so the next start may clear it: {mark}")
-            }
+        tracing::error!(path = %aside.display(), "kept, protected by its {UNRESTORED}");
+        let listed = fs::OpenOptions::new()
+            .append(true)
+            .open(aside.join(UNRESTORED))
+            .and_then(|mut marker| io::Write::write_all(&mut marker, unrestored.as_bytes()));
+        if let Err(list) = listed {
+            tracing::warn!(path = %aside.display(), "what was not put back could not be listed in it: {list}");
         }
     }
     Err(error.to_string())
+}
+
+/// The set-aside folder once nothing in it is needed: unprotected, then
+/// removed. What still runs from it keeps it until the next start clears it.
+/// A marker that will not go leaves it protected, and never cleared, rather
+/// than failing an update that has finished.
+fn release_aside(aside: &Path) {
+    match fs::remove_file(aside.join(UNRESTORED)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            tracing::warn!(path = %aside.display(), "stays protected, so nothing will clear it: {error}");
+            return;
+        }
+    }
+    if let Err(error) = fs::remove_dir_all(aside) {
+        tracing::info!(path = %aside.display(), "left for the next start: {error}");
+    }
+}
+
+/// The real [`UNRESTORED`] marker, which the tests replace to make it fail.
+fn protect(marker: &Path) -> io::Result<()> {
+    fs::write(marker, PROTECTION)
 }
 
 struct Plan<'a> {
@@ -632,6 +666,7 @@ struct Plan<'a> {
 fn apply(
     plan: &Plan,
     rename: &mut dyn FnMut(&Path, &Path) -> io::Result<()>,
+    protect: &mut dyn FnMut(&Path) -> io::Result<()>,
     done: &mut Vec<(PathBuf, PathBuf)>,
 ) -> io::Result<()> {
     let mut step = |from: PathBuf, to: PathBuf| {
@@ -643,6 +678,7 @@ fn apply(
         Ok::<_, io::Error>(())
     };
     fs::create_dir(plan.aside)?;
+    protect(&plan.aside.join(UNRESTORED))?;
     for file in plan.displaced {
         step(plan.folder.join(file), plan.aside.join(file))?;
     }
@@ -686,8 +722,9 @@ mod tests {
     use zip::{ZipWriter, write::SimpleFileOptions};
 
     use super::{
-        EXE, Kind, STAGING, Scope, UNRESTORED, clear_set_aside, files_under, kind_of, put_in_place,
-        release_directory, replaced, same_folder, setup_arguments, swap, unpack,
+        EXE, Kind, SET_ASIDE, STAGING, Scope, UNRESTORED, clear_set_aside, files_under, kind_of,
+        protect, put_in_place, release_directory, replaced, same_folder, setup_arguments, swap,
+        unpack,
     };
     use crate::update::{
         download::{COULD_NOT_REPLACE, COULD_NOT_UNPACK, NOT_THE_APP, tests::scratch},
@@ -877,6 +914,16 @@ mod tests {
         ] {
             assert!(script.contains(needed), "{needed}");
         }
+        let protect = script
+            .find("SaveStringToFile(AddBackslash(Aside) + UnrestoredMarker")
+            .unwrap();
+        let first_move = script
+            .find("if not SetAside('dbdelve.exe', Aside)")
+            .unwrap();
+        assert!(
+            protect < first_move,
+            "the folder is protected before anything moves into it"
+        );
     }
 
     /// A zip of `entries`: a name ending in `/` is a folder, `->` a link.
@@ -1065,7 +1112,14 @@ mod tests {
         // What a killed attempt left.
         fs::create_dir_all(folder.join(STAGING).join("half")).unwrap();
 
-        put_in_place(&zip, &folder, &top, &mut |from, to| fs::rename(from, to)).unwrap();
+        put_in_place(
+            &zip,
+            &folder,
+            &top,
+            &mut |from, to| fs::rename(from, to),
+            &mut protect,
+        )
+        .unwrap();
 
         let after = contents(&folder);
         let expected = [
@@ -1137,7 +1191,7 @@ mod tests {
                 fs::rename(from, to)
             };
             assert_eq!(
-                put_in_place(&zip, &folder, &top, &mut refusing),
+                put_in_place(&zip, &folder, &top, &mut refusing, &mut protect),
                 Err(COULD_NOT_REPLACE),
                 "{case}"
             );
@@ -1168,13 +1222,14 @@ mod tests {
             fs::rename(from, to)
         };
         assert_eq!(
-            put_in_place(&zip, &folder, &top, &mut refusing),
+            put_in_place(&zip, &folder, &top, &mut refusing, &mut protect),
             Err(COULD_NOT_REPLACE)
         );
         assert!(!licence.exists());
         let aside = set_aside_folders(&folder);
         assert_eq!(aside.len(), 1);
         let marker = fs::read_to_string(aside[0].join(UNRESTORED)).unwrap();
+        assert!(marker.starts_with("DBDelve moved"), "{marker}");
         assert!(marker.contains(&licence.display().to_string()), "{marker}");
 
         fs::create_dir_all(folder.join("1-2.dbdelve-old")).unwrap();
@@ -1188,6 +1243,99 @@ mod tests {
     }
 
     #[test]
+    fn nothing_moves_until_the_set_aside_folder_is_protected() {
+        let directory = scratch("windows-unprotected");
+        let top = release_directory("9.9.9", "x86_64");
+        let zip = directory.join(format!("{top}.zip"));
+        zip_release(&zip, &release(&top, "new"));
+        let folder = directory.join("install");
+        installed_folder(&folder);
+        let before = contents(&folder);
+        let mut moves = 0;
+        assert_eq!(
+            put_in_place(
+                &zip,
+                &folder,
+                &top,
+                &mut |from, to| {
+                    moves += 1;
+                    fs::rename(from, to)
+                },
+                &mut |_| Err(io::Error::other("disk full")),
+            ),
+            Err(COULD_NOT_REPLACE)
+        );
+        assert_eq!(moves, 0);
+        assert_eq!(contents(&folder), before);
+        assert!(set_aside_folders(&folder).is_empty());
+        assert!(!folder.join(STAGING).exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// Keeps `file` from being deleted until what it returns drops, as a
+    /// running executable does on Windows.
+    #[cfg(unix)]
+    fn pin(file: &Path) -> impl Sized + use<> {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        struct Unpin(PathBuf);
+        impl Drop for Unpin {
+            fn drop(&mut self) {
+                fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        let parent = file.parent().unwrap().to_path_buf();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o555)).unwrap();
+        Unpin(parent)
+    }
+
+    #[cfg(windows)]
+    fn pin(file: &Path) -> impl Sized + use<> {
+        use std::os::windows::fs::OpenOptionsExt as _;
+
+        const FILE_SHARE_READ: u32 = 1;
+        fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(file)
+            .unwrap()
+    }
+
+    #[test]
+    fn a_finished_swap_leaves_its_set_aside_folder_to_clearing() {
+        let directory = scratch("windows-finished");
+        let top = release_directory("9.9.9", "x86_64");
+        let zip = directory.join(format!("{top}.zip"));
+        zip_release(&zip, &release(&top, "new"));
+        let folder = directory.join("install");
+        installed_folder(&folder);
+        let mut pinned = None;
+        put_in_place(
+            &zip,
+            &folder,
+            &top,
+            &mut |from, to| {
+                fs::rename(from, to)?;
+                let aside = to.ancestors().nth(2).unwrap();
+                if to.ends_with("licenses/OFL.txt") && aside.to_string_lossy().ends_with(SET_ASIDE)
+                {
+                    pinned = Some(pin(to));
+                }
+                Ok(())
+            },
+            &mut protect,
+        )
+        .unwrap();
+        let aside = set_aside_folders(&folder);
+        assert_eq!(aside.len(), 1, "the pinned file keeps it");
+        assert!(!aside[0].join(UNRESTORED).exists());
+        drop(pinned);
+        clear_set_aside(&folder);
+        assert!(set_aside_folders(&folder).is_empty());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn a_bad_zip_changes_nothing() {
         let directory = scratch("windows-bad-zip");
         let folder = directory.join("install");
@@ -1197,7 +1345,13 @@ mod tests {
         let zip = directory.join("other.zip");
         zip_release(&zip, &release(&release_directory("9.9.8", "x86_64"), "new"));
         assert_eq!(
-            put_in_place(&zip, &folder, &top, &mut |from, to| fs::rename(from, to)),
+            put_in_place(
+                &zip,
+                &folder,
+                &top,
+                &mut |from, to| fs::rename(from, to),
+                &mut protect
+            ),
             Err(NOT_THE_APP)
         );
         assert_eq!(contents(&folder), before);
@@ -1219,6 +1373,7 @@ mod tests {
             &folder,
             &folder.join("x.dbdelve-old"),
             &mut |from, to| fs::rename(from, to),
+            &mut protect,
         )
         .unwrap();
         let after = contents(&folder);

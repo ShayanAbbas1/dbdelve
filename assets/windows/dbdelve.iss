@@ -21,11 +21,14 @@
 ; open while this runs, so with /UPDATE the [Code] below moves dbdelve.exe,
 ; the ODBC bridge's executable and the plugins folder into a folder ending
 ; .dbdelve-old inside {app} before anything is installed, and moves them back
-; if the install fails. That folder goes on the next run of this installer, on
-; uninstall, and at the app's next start where it may write there, unless
-; something in it could not be put back: then dbdelve-unrestored.txt in it
-; lists where each file belongs, and only uninstalling clears it. Without
-; /UPDATE nothing is moved: an ordinary run behaves as it always has.
+; if the install fails. Before anything moves into it, the folder gets
+; dbdelve-unrestored.txt, which keeps every clearing away from it; that goes
+; only once the install has finished or everything is back, so a failed undo
+; or a run cut short leaves the old files where nothing but uninstalling
+; removes them (the marker lists what could not be put back). An unmarked
+; folder goes on the next run of this installer, on uninstall, and at the
+; app's next start where it may write there. Without /UPDATE nothing is
+; moved: an ordinary run behaves as it always has.
 ;
 ; Defines required on the iscc command line:
 ;   MyAppVersion  from Cargo.toml
@@ -157,13 +160,38 @@ begin
         if FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY = 0 then
           DeleteFile(Path)
         else if FileExists(AddBackslash(Path) + UnrestoredMarker) then
-          Log('DBDelve update: kept ' + Path + ', which holds what a failed update could not put back')
+          Log('DBDelve update: kept ' + Path + ', which an update did not finish or put back')
         else
           DelTree(Path, True, True, True);
       until not FindNext(FindRec);
     finally
       FindClose(FindRec);
     end;
+end;
+
+function ProtectionText: String;
+begin
+  Result := 'DBDelve moved its installed files here while updating. Until the ' +
+    'update finishes, or puts them back, this may be the only copy of them, so ' +
+    'nothing clears this folder while this file is in it. Anything a failed ' +
+    'update could not put back is listed below, with where it belongs.' + #13#10;
+end;
+
+{ Once nothing in the folder is needed. A marker that will not go leaves the
+  folder protected, and never cleared, rather than failing a finished install. }
+procedure ReleaseSetAside;
+var
+  Marker: String;
+begin
+  if SetAsideDir = '' then
+    Exit;
+  Marker := AddBackslash(SetAsideDir) + UnrestoredMarker;
+  if not FileExists(Marker) then
+    Exit;
+  if DeleteFile(Marker) then
+    Log('DBDelve update: released ' + SetAsideDir)
+  else
+    Log('DBDelve update: could not release ' + SetAsideDir + ', so nothing will clear it');
 end;
 
 function SetAside(const Name, Aside: String): Boolean;
@@ -191,8 +219,8 @@ end;
 
 { In reverse, so the plugins folder is back before the bridge returns into
   it. Whatever a failed install left in the way goes first. What will not go
-  back stays listed, for DeinitializeSetup to try again, and the marker keeps
-  every later clearing away from it. }
+  back stays listed, for DeinitializeSetup to try again, and keeps the
+  marker in place; the list written into it is for whoever finds it. }
 procedure PutBack;
 var
   I, Count: Integer;
@@ -226,13 +254,10 @@ begin
     SetAsideFrom[I] := KeptFrom[Count - 1 - I];
     SetAsideTo[I] := KeptTo[Count - 1 - I];
   end;
-  if SetAsideDir = '' then
-    Exit;
-  if Count > 0 then begin
-    if not SaveStringToFile(AddBackslash(SetAsideDir) + UnrestoredMarker, Listed, False) then
-      Log('DBDelve update: could not mark ' + SetAsideDir + ' as holding what was not put back');
-  end else
-    DeleteFile(AddBackslash(SetAsideDir) + UnrestoredMarker);
+  if Count = 0 then
+    ReleaseSetAside
+  else if not SaveStringToFile(AddBackslash(SetAsideDir) + UnrestoredMarker, ProtectionText + Listed, False) then
+    Log('DBDelve update: could not list in ' + SetAsideDir + ' what was not put back');
 end;
 
 { Runs before Setup looks for files in use and before [InstallDelete]. }
@@ -249,7 +274,14 @@ begin
     Result := 'Could not create ' + Aside + '.';
     Exit;
   end;
+  if not SaveStringToFile(AddBackslash(Aside) + UnrestoredMarker, ProtectionText, False) then begin
+    Log('DBDelve update: could not protect ' + Aside);
+    DelTree(Aside, True, True, True);
+    Result := 'Could not protect ' + Aside + ' before moving anything into it.';
+    Exit;
+  end;
   SetAsideDir := Aside;
+  Log('DBDelve update: protected ' + Aside);
   if not SetAside('dbdelve.exe', Aside) then begin
     PutBack;
     Result := 'Could not move the running DBDelve aside.';
@@ -274,6 +306,7 @@ procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then begin
     InstallDone := True;
+    ReleaseSetAside;
     ClearSetAside;
   end;
 end;
