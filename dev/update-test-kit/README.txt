@@ -4,8 +4,10 @@ DBDelve update test kit
 This kit tests DBDelve updating itself on Windows: the "Update and restart"
 button, the administrator prompt for an all-users install, and DBDelve
 reopening afterwards as an ordinary (not administrator) program. It needs
-nothing installed. Everything in it is a test build: it updates only from
-this kit, never from the internet.
+nothing installed. Everything in it is a test build: started by
+Start-Test.cmd, it looks for updates only in this kit. Started any other
+way (the installer's "Launch DBDelve", the Start menu), it asks GitHub
+like a normal build.
 
 What is in it:
   old\dbdelve-{OLD}-windows-{ARCH}-setup.exe   the installer of the old build
@@ -89,6 +91,8 @@ Write down what you clicked and what you saw (a screenshot of the pill's
 menu helps), and send:
 - the newest dbdelve.<date>.log from %LOCALAPPDATA%\dbdelve, and panic.log
   if there is one there;
+  The log names folders on this PC, your Windows user name among them;
+  blank out anything you would rather not share.
 - the text in the Start-Test window;
 - for passes A and B, a listing of the install folder. In a Command Prompt:
     dir /s /a "%LOCALAPPDATA%\Programs\DBDelve" > "%USERPROFILE%\Desktop\listing.txt"
@@ -101,5 +105,7 @@ Cleaning up
 1. Uninstall DBDelve: Settings > Apps > Installed apps (Apps & features on
    Windows 10) > DBDelve > Uninstall.
 2. Delete the portable folder from pass C, and the kit folder.
-3. Delete %APPDATA%\dbdelve and %LOCALAPPDATA%\dbdelve (paste each into
-   File Explorer's address bar to find them).
+3. Only if this PC had no DBDelve before the test: delete %APPDATA%\dbdelve
+   and %LOCALAPPDATA%\dbdelve (paste each into File Explorer's address bar
+   to find them). If you use DBDelve here, leave them: %APPDATA%\dbdelve
+   holds your saved connections and queries.
