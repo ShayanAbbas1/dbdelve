@@ -68,6 +68,7 @@ impl Workspace {
             color_titlebar: Some(self.settings.color_titlebar),
             client_sort: Some(self.settings.client_sort),
             qualify_completions: Some(self.settings.qualify_completions),
+            alias_completions: Some(self.settings.alias_completions),
             verbose_logging: Some(self.settings.verbose_logging),
             welcomed: Some(self.settings.welcomed),
             custom_keybindings: Some(self.settings.custom_keybindings.clone()),
@@ -2110,7 +2111,19 @@ impl Workspace {
 
         let task = spawn_blocking(cx.background_executor(), {
             let (schema, relation) = (schema.clone(), relation.clone());
-            move || connection.structure(&schema, &relation)
+            // Who points back is a second query, asked only while the joins
+            // it feeds are being suggested. A failure costs those suggestions
+            // and not the columns.
+            let references = self.settings.alias_completions;
+            move || {
+                let mut structure = connection.structure(&schema, &relation)?;
+                if references {
+                    structure.referenced_by = connection
+                        .references(&schema, &relation)
+                        .unwrap_or_default();
+                }
+                Ok::<_, DbError>(structure)
+            }
         });
         cx.spawn(async move |workspace, cx| {
             let result = task.await;
@@ -2124,13 +2137,7 @@ impl Workspace {
                     }
                     let key = (schema, relation);
                     let state = match result {
-                        Ok(structure) => completion::ColumnState::Loaded(
-                            structure
-                                .columns
-                                .into_iter()
-                                .map(|column| column.name)
-                                .collect(),
-                        ),
+                        Ok(structure) => completion::ColumnState::Loaded((&structure).into()),
                         // The attempt count rides on the `Loading` the request
                         // wrote, so a relation that keeps failing runs out.
                         Err(_) => {
@@ -2161,6 +2168,7 @@ impl Workspace {
                 Arc::new(catalog.clone()),
                 profile.session.completion_columns.clone(),
                 self.settings.qualify_completions,
+                self.settings.alias_completions,
                 cx.weak_entity(),
             ))),
             _ => None,
