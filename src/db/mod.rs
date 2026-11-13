@@ -2480,9 +2480,9 @@ pub struct Structure {
     pub constraints: Vec<NamedDefinition>,
     pub foreign_keys: Vec<ForeignKey>,
     /// The single-column foreign keys of other relations that point at this one.
-    /// Filled by `load_structure` from [`Connection::references`], not by
-    /// [`Connection::structure`]: completion calls that one per relation it
-    /// sees, and has no use for who points back.
+    /// Filled from [`Connection::references`] by the callers that want it, not
+    /// by [`Connection::structure`]: completion calls that one per relation it
+    /// sees, and only wants who points back while it is suggesting joins.
     pub referenced_by: Vec<Reference>,
 }
 

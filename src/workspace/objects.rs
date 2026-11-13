@@ -632,16 +632,11 @@ impl Workspace {
                     // The same call completion makes, so completion should not
                     // make it again for this relation.
                     if let Ok(structure) = &result {
-                        profile.session.completion_columns.borrow_mut().insert(
-                            key,
-                            completion::ColumnState::Loaded(
-                                structure
-                                    .columns
-                                    .iter()
-                                    .map(|column| column.name.clone())
-                                    .collect(),
-                            ),
-                        );
+                        profile
+                            .session
+                            .completion_columns
+                            .borrow_mut()
+                            .insert(key, completion::ColumnState::Loaded(structure.into()));
                     }
                     // Addressed by tab, so a second object opened while this was
                     // in flight cannot end up wearing this one's columns.

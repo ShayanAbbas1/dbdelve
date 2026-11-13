@@ -19,6 +19,7 @@ check_for_updates = false
 color_titlebar = true
 client_sort = false
 qualify_completions = true
+alias_completions = true
 welcomed = true
 
 [settings.custom_keybindings]
