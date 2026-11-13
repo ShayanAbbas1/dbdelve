@@ -188,15 +188,7 @@ Third-party font and theme licenses are in [NOTICES.md](NOTICES.md).
 
 ## Sponsors
 
-Support DBDelve's development on [Patreon](https://www.patreon.com/membership/30003257).
-
-| Tier | Price | You get |
-|---|---|---|
-| Supporter | $5/month | Name in the README |
-| Bronze | $20/month | Name in the README and on the site |
-| Silver | $50/month | Name in the README and on the site, linked to your site |
-| Gold | $100/month | Logo in the README and on the site, linked to your site |
-| Platinum | $200/month | Larger logo in the README and on the site, linked to your site |
+Support DBDelve on [Patreon](https://www.patreon.com/membership/30003257). Sponsors are listed here and on the site.
 
 <a href="https://dbdelve.github.io/#sponsors"><img src="https://dbdelve.github.io/sponsors/sponsors.svg" alt="DBDelve's sponsors"></a>
 
