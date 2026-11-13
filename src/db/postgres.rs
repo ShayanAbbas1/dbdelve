@@ -3354,33 +3354,7 @@ mod tests {
     #[test]
     #[ignore = "requires a local Postgres server configured through PG*"]
     fn live_a_schema_graph_reads_the_seeds_keys_back() {
-        use crate::db::SchemaGraph;
-        use crate::db::graph::{GraphColumn, KeyTarget};
-
-        fn table_index(graph: &SchemaGraph, name: &str) -> u32 {
-            graph
-                .tables
-                .iter()
-                .position(|table| table.name.as_ref() == name)
-                .unwrap_or_else(|| panic!("{name} should be drawn")) as u32
-        }
-        fn column<'a>(graph: &'a SchemaGraph, table: &str, name: &str) -> &'a GraphColumn {
-            graph.tables[table_index(graph, table) as usize]
-                .columns
-                .iter()
-                .find(|column| column.name.as_ref() == name)
-                .unwrap_or_else(|| panic!("{table}.{name} should be read"))
-        }
-        fn names(graph: &SchemaGraph, table: u32, columns: &[u32]) -> Vec<String> {
-            columns
-                .iter()
-                .map(|&column| {
-                    graph.tables[table as usize].columns[column as usize]
-                        .name
-                        .to_string()
-                })
-                .collect()
-        }
+        use crate::db::graph::seed;
 
         let graph = live_profile()
             .schema_graph("public")
@@ -3393,44 +3367,16 @@ mod tests {
                 .all(|table| table.name.as_ref() != "account_overview"),
             "a view is not drawn"
         );
-        let items = graph
-            .keys
-            .iter()
-            .find(|key| key.table == table_index(&graph, "order_items"))
-            .expect("order_items' key should be read");
+        seed::assert_keys_read_back(&graph);
         assert_eq!(
-            names(&graph, items.table, &items.columns),
-            ["order_account_id", "order_number"]
-        );
-        let KeyTarget::Table {
-            table: orders,
-            columns,
-        } = &items.referenced
-        else {
-            panic!("orders is in the same schema: {:?}", items.referenced);
-        };
-        assert_eq!(*orders, table_index(&graph, "orders"));
-        assert_eq!(names(&graph, *orders, columns), ["account_id", "number"]);
-
-        let account_id = column(&graph, "orders", "account_id");
-        assert!(account_id.primary && account_id.foreign && !account_id.unique);
-        assert!(!account_id.nullable);
-        assert!(column(&graph, "accounts", "external_id").unique);
-        assert_eq!(
-            graph.types[column(&graph, "orders", "total").type_label as usize].as_ref(),
+            graph.types[seed::column(&graph, "orders", "total").type_label as usize].as_ref(),
             "numeric(14,2)"
         );
 
         let archive = live_profile()
             .schema_graph("archive")
             .expect("the graph should read");
-        assert_eq!(
-            archive.keys[0].referenced,
-            KeyTarget::Elsewhere {
-                schema: "public".into(),
-                table: "accounts".into()
-            }
-        );
+        seed::assert_archive_points_at_accounts(&archive, "public");
     }
 
     #[test]

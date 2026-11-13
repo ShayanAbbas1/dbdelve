@@ -1917,9 +1917,9 @@ impl Connection {
     pub fn schema_graph(&self, schema: &str) -> Result<SchemaGraph, DbError> {
         match self {
             Self::Postgres(connection) => connection.schema_graph(schema),
+            Self::MySql(connection) => connection.schema_graph(schema),
             // ponytail: read in the next slice of the diagram's first phase.
-            Self::MySql(_)
-            | Self::SqlServer(_)
+            Self::SqlServer(_)
             | Self::Sqlite(_)
             | Self::Turso(_)
             | Self::DuckDb(_)

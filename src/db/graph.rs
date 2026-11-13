@@ -492,3 +492,76 @@ mod tests {
         assert!(graph.tables[3].columns.is_empty());
     }
 }
+
+/// What every engine's `live_` graph test asks of the dev seed, which gives
+/// each one the same `accounts`, `orders` and `order_items` tables.
+#[cfg(test)]
+pub(super) mod seed {
+    use super::*;
+
+    pub fn table_index(graph: &SchemaGraph, name: &str) -> u32 {
+        graph
+            .tables
+            .iter()
+            .position(|table| table.name.as_ref() == name)
+            .unwrap_or_else(|| panic!("{name} should be drawn")) as u32
+    }
+
+    pub fn column<'a>(graph: &'a SchemaGraph, table: &str, name: &str) -> &'a GraphColumn {
+        graph.tables[table_index(graph, table) as usize]
+            .columns
+            .iter()
+            .find(|column| column.name.as_ref() == name)
+            .unwrap_or_else(|| panic!("{table}.{name} should be read"))
+    }
+
+    fn names(graph: &SchemaGraph, table: u32, columns: &[u32]) -> Vec<String> {
+        columns
+            .iter()
+            .map(|&column| {
+                graph.tables[table as usize].columns[column as usize]
+                    .name
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// The composite key, the flags on its columns, and that a unique column
+    /// is flagged. Case and quoting of names are the engine's own, so the
+    /// seed's lower-case ones are asked for as they are.
+    pub fn assert_keys_read_back(graph: &SchemaGraph) {
+        let items = graph
+            .keys
+            .iter()
+            .find(|key| key.table == table_index(graph, "order_items"))
+            .expect("order_items' key should be read");
+        assert_eq!(
+            names(graph, items.table, &items.columns),
+            ["order_account_id", "order_number"]
+        );
+        let KeyTarget::Table {
+            table: orders,
+            columns,
+        } = &items.referenced
+        else {
+            panic!("orders is in the same schema: {:?}", items.referenced);
+        };
+        assert_eq!(*orders, table_index(graph, "orders"));
+        assert_eq!(names(graph, *orders, columns), ["account_id", "number"]);
+
+        let account_id = column(graph, "orders", "account_id");
+        assert!(account_id.primary && account_id.foreign && !account_id.unique);
+        assert!(!account_id.nullable);
+        assert!(column(graph, "accounts", "external_id").unique);
+    }
+
+    pub fn assert_archive_points_at_accounts(graph: &SchemaGraph, schema: &str) {
+        assert_eq!(
+            graph.keys[0].referenced,
+            KeyTarget::Elsewhere {
+                schema: schema.to_string().into(),
+                table: "accounts".into()
+            }
+        );
+    }
+}

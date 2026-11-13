@@ -30,9 +30,10 @@ use ::mysql::{Conn, OptsBuilder, SslOpts, Value};
 use super::ssh::{Tunnel, tunnelled};
 use super::{
     Catalog, Column, DbError, EditTarget, Engine, Fetch, Index, IndexKind, QueryResult, Reference,
-    RowBuilder, Schema, ServerConfig, Sizes, SslMode, Stopped, Structure, assemble_catalog,
-    assemble_databases, assemble_foreign_keys, assemble_references, assemble_sizes,
-    assemble_structure, non_utf8_error, optional_cell, plain_error, required_cell,
+    RowBuilder, Schema, SchemaGraph, ServerConfig, Sizes, SslMode, Stopped, Structure,
+    assemble_catalog, assemble_databases, assemble_foreign_keys, assemble_references,
+    assemble_schema_graph, assemble_sizes, assemble_structure, non_utf8_error, optional_cell,
+    plain_error, required_cell,
 };
 
 /// Without this the driver waits out the OS SYN retry budget, so a host that
@@ -267,6 +268,56 @@ const CONSTRAINT_COLUMNS_SQL: &str = "COALESCE((
       AND key_column.CONSTRAINT_NAME = table_constraint.CONSTRAINT_NAME
       AND key_column.TABLE_NAME = table_constraint.TABLE_NAME
 ), '')";
+
+// The ER diagram's three reads, each over a whole database. A table with no
+// columns still comes back, as one row of NULLs, so it is drawn.
+const GRAPH_COLUMNS_SQL: &str = "
+SELECT base_table.TABLE_NAME AS table_name,
+       column_entry.COLUMN_NAME AS column_name,
+       column_entry.COLUMN_TYPE AS data_type,
+       CASE column_entry.IS_NULLABLE WHEN 'YES' THEN 'yes' ELSE 'no' END AS nullable
+FROM information_schema.TABLES AS base_table
+LEFT JOIN information_schema.COLUMNS AS column_entry
+    ON column_entry.TABLE_SCHEMA = base_table.TABLE_SCHEMA
+    AND column_entry.TABLE_NAME = base_table.TABLE_NAME
+WHERE base_table.TABLE_SCHEMA = {schema}
+  AND base_table.TABLE_TYPE IN {stored}
+ORDER BY base_table.TABLE_NAME, column_entry.ORDINAL_POSITION
+";
+
+// An index with a prefix part (`SUB_PART`) or a functional one (no
+// `COLUMN_NAME`) is not unique in its columns, whatever it enforces.
+const GRAPH_UNIQUE_KEYS_SQL: &str = "
+SELECT statistic.TABLE_NAME AS table_name,
+       statistic.INDEX_NAME AS constraint_name,
+       statistic.COLUMN_NAME AS column_name,
+       CASE WHEN statistic.INDEX_NAME = 'PRIMARY' THEN 'primary' ELSE 'unique' END AS key_kind
+FROM information_schema.STATISTICS AS statistic
+WHERE statistic.TABLE_SCHEMA = {schema}
+  AND statistic.NON_UNIQUE = 0
+  AND NOT EXISTS (
+      SELECT 1
+      FROM information_schema.STATISTICS AS part
+      WHERE part.TABLE_SCHEMA = statistic.TABLE_SCHEMA
+        AND part.TABLE_NAME = statistic.TABLE_NAME
+        AND part.INDEX_NAME = statistic.INDEX_NAME
+        AND (part.SUB_PART IS NOT NULL OR part.COLUMN_NAME IS NULL)
+  )
+ORDER BY statistic.TABLE_NAME, statistic.INDEX_NAME, statistic.SEQ_IN_INDEX
+";
+
+const GRAPH_FOREIGN_KEYS_SQL: &str = "
+SELECT TABLE_NAME AS table_name,
+       CONSTRAINT_NAME AS constraint_name,
+       COLUMN_NAME AS column_name,
+       REFERENCED_TABLE_SCHEMA AS referenced_schema,
+       REFERENCED_TABLE_NAME AS referenced_table,
+       REFERENCED_COLUMN_NAME AS referenced_column
+FROM information_schema.KEY_COLUMN_USAGE
+WHERE TABLE_SCHEMA = {schema}
+  AND REFERENCED_TABLE_NAME IS NOT NULL
+ORDER BY TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION
+";
 
 const PRIMARY_KEY_SQL: &str = "
 SELECT COLUMN_NAME AS column_name
@@ -950,6 +1001,13 @@ impl Connection {
         Ok(structure)
     }
 
+    pub fn schema_graph(&self, schema: &str) -> Result<SchemaGraph, DbError> {
+        let columns = self.internal_query(&graph_sql(GRAPH_COLUMNS_SQL, schema))?;
+        let unique_keys = self.internal_query(&graph_sql(GRAPH_UNIQUE_KEYS_SQL, schema))?;
+        let foreign_keys = self.internal_query(&graph_sql(GRAPH_FOREIGN_KEYS_SQL, schema))?;
+        assemble_schema_graph(schema, &columns, &unique_keys, &foreign_keys)
+    }
+
     /// `SHOW CREATE TABLE` answers for a view too, with its `CREATE VIEW` in
     /// the same second column.
     pub fn ddl(&self, schema: &str, relation: &str) -> Result<String, DbError> {
@@ -1179,6 +1237,12 @@ fn resolve_edit_target(
         keys,
         ..Default::default()
     })
+}
+
+fn graph_sql(template: &str, schema: &str) -> String {
+    template
+        .replace("{schema}", &Engine::MySql.quote_literal(schema))
+        .replace("{stored}", STORED_TABLES)
 }
 
 fn structure_sql(template: &str, schema: &str, relation: &str) -> String {
@@ -1851,6 +1915,55 @@ mod tests {
         );
         // `KILL QUERY` ends the statement, not the session.
         assert!(connection.query("SELECT 1", Fetch::default()).is_ok());
+    }
+
+    fn live_a_schema_graph_reads_the_seeds_keys_back(engine: Engine) {
+        use crate::db::graph::seed;
+
+        let graph = live_profile(engine)
+            .schema_graph("dbdelve_dev")
+            .expect("the graph should read");
+
+        assert!(
+            graph
+                .tables
+                .iter()
+                .all(|table| table.name.as_ref() != "account_overview"),
+            "a view is not drawn"
+        );
+        seed::assert_keys_read_back(&graph);
+        assert_eq!(
+            graph.types[seed::column(&graph, "orders", "total").type_label as usize].as_ref(),
+            "decimal(14,2)"
+        );
+
+        let archive = live_profile(engine)
+            .schema_graph("dbdelve_archive")
+            .expect("the graph should read");
+        seed::assert_archive_points_at_accounts(&archive, "dbdelve_dev");
+    }
+
+    fn live_a_cancel_on_its_own_connection_stops_a_catalog_statement(engine: Engine) {
+        // The catalog reads of a diagram take no lock a second session could
+        // hold, so a sleeping statement stands in for a slow one. `schema_graph`
+        // is nothing but three of these on the side connection.
+        let side = live(engine)
+            .alongside()
+            .expect("a side connection should open");
+        let canceller = super::super::Connection::MySql(side.clone());
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            canceller
+                .cancel(&crate::db::CancelToken::default())
+                .expect("the KILL QUERY should send");
+        });
+
+        let started = Instant::now();
+        let error = side
+            .internal_query(LIVE_SLOW_SELECT)
+            .expect_err("the statement should be cancelled");
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(error.message.contains("interrupt"), "{}", error.message);
     }
 
     fn live_a_statement_timeout_bounds_a_select_and_a_write_only_on_mariadb(engine: Engine) {
@@ -2772,5 +2885,7 @@ mod tests {
         live_a_table_referencing_nothing_reports_no_foreign_keys,
         live_the_rendered_foreign_key_ddl_survives_beside_the_structured_form,
         live_the_ddl_of_a_table_and_a_view_is_the_servers_own,
+        live_a_schema_graph_reads_the_seeds_keys_back,
+        live_a_cancel_on_its_own_connection_stops_a_catalog_statement,
     );
 }
