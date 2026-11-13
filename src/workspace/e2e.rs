@@ -1351,6 +1351,7 @@ fn the_ring_reaches_dont_ask_again_and_enter_or_space_ticks_it(cx: &mut TestAppC
 fn ticking_run_once_s_box_runs_the_next_unreadable_statement_unasked(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite_holding(cx, "create table t (a integer);");
+        cx.executor().allow_parking();
         cx.simulate_input("selec 1");
         raise_run_once_prompt(&workspace, cx);
 
