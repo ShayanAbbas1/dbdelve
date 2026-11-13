@@ -38,8 +38,9 @@ use crate::sql::Projected;
 
 use super::{
     Catalog, Column, Databases, DbError, EditTarget, Engine, Fetch, QueryResult, Reference,
-    RowBuilder, Stopped, Structure, Unpicked, assemble_catalog, assemble_foreign_keys,
-    assemble_references, assemble_structure, plain_error, required_cell, terminated,
+    RowBuilder, SchemaGraph, Stopped, Structure, Unpicked, assemble_catalog, assemble_foreign_keys,
+    assemble_references, assemble_schema_graph, assemble_structure, plain_error, required_cell,
+    terminated,
 };
 
 // Workaround for duckdb-rs#920, fixed upstream by #923 but unreleased past
@@ -465,6 +466,82 @@ impl Connection {
                    AND constraint_type = 'FOREIGN KEY'"
         ))?)?;
         Ok(structure)
+    }
+
+    /// The tables of one schema of the picked database. A DuckDB foreign key
+    /// cannot leave its schema, so no key here is ever a stub.
+    pub fn schema_graph(&self, schema: &str) -> Result<SchemaGraph, DbError> {
+        let schema_literal = Engine::DuckDb.quote_literal(schema);
+        let columns = self.internal_query(&format!(
+            "SELECT tables.table_name, columns.column_name,
+                    lower(columns.data_type) AS data_type,
+                    CASE WHEN columns.is_nullable THEN 'yes' ELSE 'no' END AS nullable
+             FROM duckdb_tables() AS tables
+             LEFT JOIN duckdb_columns() AS columns
+                    ON columns.database_name = tables.database_name
+                   AND columns.schema_name = tables.schema_name
+                   AND columns.table_name = tables.table_name
+             WHERE NOT tables.internal
+               AND tables.database_name = current_database()
+               AND tables.schema_name = {schema_literal}
+             ORDER BY tables.table_name, columns.column_index"
+        ))?;
+        // A constraint row carries its columns as a list, so each is unnested
+        // by position rather than by two `unnest`s that only happen to stay
+        // paired. The explicit indexes are read as their expressions, which
+        // is all `duckdb_indexes` has: an element that is not a bare
+        // identifier is an expression, and an index with one makes nothing
+        // unique. (A column spelled with quotes is missed that way, and just
+        // is not flagged.)
+        let unique_keys = self.internal_query(&format!(
+            "SELECT table_name, constraint_name, column_name, key_kind
+             FROM (
+                 SELECT table_name, constraint_name,
+                        constraint_column_names[position] AS column_name,
+                        CASE WHEN constraint_type = 'PRIMARY KEY'
+                             THEN 'primary' ELSE 'unique' END AS key_kind,
+                        position
+                 FROM (
+                     SELECT *, unnest(range(1, len(constraint_column_names) + 1)) AS position
+                     FROM duckdb_constraints()
+                     WHERE database_name = current_database()
+                       AND schema_name = {schema_literal}
+                       AND constraint_type IN ('PRIMARY KEY', 'UNIQUE')
+                 )
+                 UNION ALL
+                 SELECT table_name, index_name, expressions[position], 'unique', position
+                 FROM (
+                     SELECT table_name, index_name,
+                            expressions::VARCHAR[] AS expressions,
+                            unnest(range(1, len(expressions::VARCHAR[]) + 1)) AS position
+                     FROM duckdb_indexes()
+                     WHERE database_name = current_database()
+                       AND schema_name = {schema_literal}
+                       AND is_unique
+                 )
+                 WHERE len(list_filter(
+                     expressions,
+                     lambda element: NOT regexp_matches(element, '^[A-Za-z_][A-Za-z0-9_]*$')
+                 )) = 0
+             )
+             ORDER BY table_name, constraint_name, position"
+        ))?;
+        let foreign_keys = self.internal_query(&format!(
+            "SELECT table_name, constraint_name,
+                    constraint_column_names[position] AS column_name,
+                    schema_name AS referenced_schema,
+                    referenced_table,
+                    referenced_column_names[position] AS referenced_column
+             FROM (
+                 SELECT *, unnest(range(1, len(constraint_column_names) + 1)) AS position
+                 FROM duckdb_constraints()
+                 WHERE database_name = current_database()
+                   AND schema_name = {schema_literal}
+                   AND constraint_type = 'FOREIGN KEY'
+             )
+             ORDER BY table_name, constraint_name, position"
+        ))?;
+        assemble_schema_graph(schema, &columns, &unique_keys, &foreign_keys)
     }
 
     /// Who points at this relation. A DuckDB foreign key names its parent by
@@ -1748,6 +1825,69 @@ mod tests {
         assert_eq!(error.message, INTERRUPTED);
         let after = connection.query("SELECT 7", Fetch::default()).unwrap();
         assert_eq!(cells(&after), [[Some("7")]]);
+    }
+
+    #[test]
+    fn a_schema_graph_reads_the_seeds_keys_back() {
+        use crate::db::graph::seed;
+
+        let graph = seeded()
+            .schema_graph("main")
+            .expect("the graph should read");
+
+        assert!(
+            graph
+                .tables
+                .iter()
+                .all(|table| table.name.as_ref() != "account_overview"),
+            "a view is not drawn"
+        );
+        seed::assert_keys_read_back(&graph);
+        assert_eq!(
+            graph.types[seed::column(&graph, "orders", "total").type_label as usize].as_ref(),
+            "decimal(18,2)"
+        );
+        assert!(seed::column(&graph, "contacts", "email").unique);
+        assert!(
+            seeded()
+                .schema_graph("analytics")
+                .expect("the graph should read")
+                .keys
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn an_index_over_an_expression_or_two_columns_makes_no_column_unique() {
+        use crate::db::graph::seed;
+
+        let graph = memory(
+            "CREATE TABLE t (a INT, b INT, c TEXT);
+             CREATE UNIQUE INDEX t_a ON t (a);
+             CREATE UNIQUE INDEX t_ab ON t (a, b);
+             CREATE UNIQUE INDEX t_lowered ON t (lower(c));",
+        )
+        .schema_graph("main")
+        .expect("the graph should read");
+        assert!(seed::column(&graph, "t", "a").unique);
+        assert!(!seed::column(&graph, "t", "b").unique);
+        assert!(!seed::column(&graph, "t", "c").unique);
+    }
+
+    #[test]
+    fn a_cancel_on_its_own_connection_stops_a_catalog_statement() {
+        // A catalog read of a handful of tables is too quick to catch, and
+        // `schema_graph` is nothing but three `internal_query` calls.
+        let side = memory("")
+            .alongside()
+            .expect("a side connection should open");
+        let canceller = side.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            canceller.cancel().unwrap();
+        });
+        let error = side.internal_query(RUNAWAY).unwrap_err();
+        assert_eq!(error.message, INTERRUPTED);
     }
 
     #[test]

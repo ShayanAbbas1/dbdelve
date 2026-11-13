@@ -1921,8 +1921,9 @@ impl Connection {
             Self::SqlServer(connection) => connection.schema_graph(schema),
             Self::Sqlite(connection) => connection.schema_graph(schema),
             Self::Turso(connection) => connection.schema_graph(schema),
+            Self::DuckDb(connection) => connection.schema_graph(schema),
             // ponytail: read in the next slice of the diagram's first phase.
-            Self::DuckDb(_) | Self::Snowflake(_) => Err(plain_error(
+            Self::Snowflake(_) => Err(plain_error(
                 "The diagram is not read on this engine yet.".into(),
             )),
             Self::ClickHouse(_) | Self::MongoDb(_) | Self::Redis(_) => Err(plain_error(
