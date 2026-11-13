@@ -6,8 +6,9 @@
 //! comment beside the column, since a value the grid spells the same either
 //! way would pass here and still be gone. Snowflake and Turso are not covered.
 
+use super::schema::{SchemaRequest, export_schema};
 use super::*;
-use crate::db::{ConnectionConfig, Fetch};
+use crate::db::{ConnectionConfig, Fetch, ForeignKeyReplay};
 
 const AWKWARD_TEXTS: [&str; 14] = [
     "it's a \"quote\"",
@@ -153,10 +154,14 @@ impl Throwaway {
             .filter_map(|range| {
                 let statement = &file[range];
                 // The gate's parser has no `OVERRIDING`, so a query tab asks
-                // once before running such a file.
+                // once before running such a file. Nor `OWNED BY`, which a
+                // schema file ties each sequence to its column with: the file
+                // is for whoever runs it back, and DBDelve never runs it.
                 let verdict = sql::classify(self.engine, statement);
                 assert!(
                     statement.contains(" OVERRIDING SYSTEM VALUE ")
+                        || (statement.starts_with("ALTER SEQUENCE ")
+                            && statement.contains(" OWNED BY "))
                         || !verdict.destructive.contains(&Destructive::Unreadable),
                     "{:?} cannot read `{statement}`",
                     self.engine
@@ -684,6 +689,407 @@ fn live_a_nul_in_text_exported_as_sql_runs_back_on_sql_server() {
     let table = Throwaway::new(open("dbdelve_MSSQL_URL"), Engine::SqlServer, "dbo", "nul");
     table.run("CREATE TABLE {table} (id INT PRIMARY KEY, body NVARCHAR(MAX))");
     assert_nul_in_text_runs_back(&table);
+}
+
+/// A schema's tables as the round trips build them: a parent, a child whose
+/// key points at it, an empty table, a table whose rows point at each other and,
+/// where the engine can declare one, two tables that point at each other.
+struct Fixture {
+    // Dropped in the order declared, each table before the ones it points at.
+    /// The table `b` and then `a`, whose key to `b` is added once both exist.
+    /// None on DuckDB, which adds no foreign key by `ALTER TABLE`, so no two of
+    /// its tables can point at each other.
+    cycle: Option<(Throwaway, Throwaway)>,
+    employees: Throwaway,
+    empty: Throwaway,
+    child: Throwaway,
+    parent: Throwaway,
+}
+
+impl Fixture {
+    /// `tag` keeps the tables of two tests running at once apart.
+    fn new(connection: Connection, engine: Engine, schema: &'static str, tag: &str) -> Self {
+        let table = |name: &str| {
+            Throwaway::new(connection.clone(), engine, schema, &format!("{tag}_{name}"))
+        };
+        // Declared parent first, so it is dropped last: the child's key holds it.
+        let parent = table("parent");
+        let child = table("child");
+        let empty = table("empty");
+        let employees = table("employees");
+        let body = match engine {
+            Engine::SqlServer => "NVARCHAR(MAX)",
+            _ => "TEXT",
+        };
+        // A table-level key: MySQL parses a column's `REFERENCES` and enforces none.
+        parent.run(&format!(
+            "CREATE TABLE {{table}} (id INTEGER PRIMARY KEY, body {body})"
+        ));
+        child.run(&format!(
+            "CREATE TABLE {{table}} (id INTEGER PRIMARY KEY, parent_id INTEGER, \
+             FOREIGN KEY (parent_id) REFERENCES {} (id))",
+            engine.qualified(schema, &parent.name)
+        ));
+        empty.run("CREATE TABLE {table} (id INTEGER PRIMARY KEY)");
+        employees.run(
+            "CREATE TABLE {table} (id INTEGER PRIMARY KEY, manager_id INTEGER, \
+             FOREIGN KEY (manager_id) REFERENCES {table} (id))",
+        );
+        parent.seed_awkward_texts("body");
+        child.run(&format!(
+            "INSERT INTO {{table}} VALUES (1, {FIRST_TEXT_ID}), (2, NULL)"
+        ));
+        // Manager 1 comes before its report, manager 4 after its report 3.
+        for row in ["(1, NULL)", "(2, 1)", "(4, 1)", "(3, 4)"] {
+            employees.run(&format!("INSERT INTO {{table}} VALUES {row}"));
+        }
+        let cycle = (engine != Engine::DuckDb).then(|| {
+            let first = table("cycle_a");
+            let mut second = table("cycle_b");
+            first.run("CREATE TABLE {table} (id INTEGER PRIMARY KEY, b_id INTEGER)");
+            second.run(&format!(
+                "CREATE TABLE {{table}} (id INTEGER PRIMARY KEY, a_id INTEGER, \
+                 FOREIGN KEY (a_id) REFERENCES {} (id))",
+                engine.qualified(schema, &first.name)
+            ));
+            first.run(&format!(
+                "ALTER TABLE {{table}} ADD CONSTRAINT {{name}}_to_b \
+                 FOREIGN KEY (b_id) REFERENCES {} (id)",
+                engine.qualified(schema, &second.name)
+            ));
+            // Whichever goes first is held by the other's key, so `b` takes
+            // `a`'s with it.
+            let unkeyed = first.named(match engine {
+                Engine::MySql | Engine::MariaDb => {
+                    "ALTER TABLE {table} DROP FOREIGN KEY {name}_to_b"
+                }
+                _ => "ALTER TABLE {table} DROP CONSTRAINT {name}_to_b",
+            });
+            second.drops.insert(0, unkeyed);
+            first.run("INSERT INTO {table} VALUES (1, NULL)");
+            second.run("INSERT INTO {table} VALUES (1, 1)");
+            first.run("UPDATE {table} SET b_id = 1");
+            (second, first)
+        });
+        Self {
+            cycle,
+            employees,
+            empty,
+            child,
+            parent,
+        }
+    }
+
+    /// `tables` dropped, keys and all, so the file has to bring them back.
+    fn drop_tables(&self, tables: &[&Throwaway]) {
+        if let Some((second, _)) = &self.cycle {
+            second.run(&second.drops[0]);
+        }
+        for table in tables {
+            table.run("DROP TABLE {table}");
+        }
+    }
+
+    /// The tables of the cycles, named in the order `dependency_order` meets them.
+    fn cyclic(&self) -> Vec<&Throwaway> {
+        let mut cyclic = vec![&self.employees];
+        if let Some((second, first)) = &self.cycle {
+            cyclic.extend([second, first]);
+        }
+        cyclic
+    }
+
+    /// Every table, each before none it points at.
+    fn everything(&self) -> Vec<&Throwaway> {
+        let mut tables = vec![&self.child, &self.empty];
+        tables.extend(self.cyclic());
+        tables.push(&self.parent);
+        tables
+    }
+
+    fn export(&self, tables: &[&Throwaway], structure: bool, rows: bool) -> Result<String, Ended> {
+        let path = self.parent.directory.join("schema.sql");
+        _ = std::fs::remove_file(&path);
+        let request = SchemaRequest {
+            tables: tables.iter().map(|table| table.name.clone()).collect(),
+            structure,
+            rows,
+            partitioned: Vec::new(),
+        };
+        let written = export_schema(
+            &self.parent.connection,
+            self.parent.schema,
+            &request,
+            false,
+            self.parent.engine,
+            &path,
+            &ExportProgress::default(),
+        )?;
+        let rows_in = tables.iter().map(|table| table.rows().rows.len()).sum();
+        assert_eq!(written, if rows { rows_in } else { 0 });
+        Ok(std::fs::read_to_string(&path).unwrap())
+    }
+}
+
+/// The fixture exported as one schema with every table named before the ones
+/// it points at, dropped, and run back. An engine that refuses a cycle must
+/// name just its tables, and still run back the rest.
+fn assert_a_schema_runs_back(connection: Connection, engine: Engine, schema: &'static str) {
+    let fixture = Fixture::new(connection, engine, schema, "schema");
+    let replay = Target::built_in(engine)
+        .exports_schema()
+        .expect("the engine exports a schema");
+    let mut tables = fixture.everything();
+    if replay.foreign_keys == ForeignKeyReplay::RefusesCycles {
+        match fixture.export(&tables, true, true) {
+            Err(Ended::Failed(message)) => {
+                for table in &tables {
+                    let cyclic = fixture.cyclic().iter().any(|each| each.name == table.name);
+                    assert_eq!(message.contains(&table.name), cyclic, "{message}");
+                }
+            }
+            other => panic!("{engine:?}: {other:?}"),
+        }
+        let cyclic = fixture.cyclic();
+        tables.retain(|table| !cyclic.iter().any(|each| each.name == table.name));
+    }
+    let befores: Vec<QueryResult> = tables.iter().map(|table| table.rows()).collect();
+    let sql = fixture
+        .export(&tables, true, true)
+        .expect("the export finishes");
+    let count = match tables.len() {
+        1 => "1 table".to_string(),
+        count => format!("{count} tables"),
+    };
+    assert!(
+        sql.starts_with(&format!(
+            "-- Schema \"{schema}\" exported by DBDelve: {count}, structure and rows."
+        )),
+        "{sql}"
+    );
+    // The rows land where the `CREATE` before them put the table, whichever
+    // schema the file is run in.
+    let qualified = format!("INSERT INTO {}.", engine.quote_identifier(schema));
+    assert_eq!(
+        sql.contains(&qualified),
+        replay.names == crate::db::DdlNames::Qualified,
+        "{engine:?}: {sql}"
+    );
+
+    fixture.drop_tables(&tables);
+    let problems = fixture.parent.replay(&sql);
+    assert!(
+        problems.is_empty(),
+        "{engine:?}: {sql}\n{}",
+        problems.join("\n")
+    );
+    for (table, before) in tables.iter().zip(&befores) {
+        let problems = differences(before, &table.rows(), None);
+        assert!(problems.is_empty(), "{engine:?}: {}", problems.join("\n"));
+    }
+    // Every key is back: a row naming no row is refused.
+    let mut keyed = vec![("parent_id", &fixture.child)];
+    if tables
+        .iter()
+        .any(|table| table.name == fixture.employees.name)
+    {
+        keyed.push(("manager_id", &fixture.employees));
+    }
+    if let Some((second, first)) = &fixture.cycle {
+        keyed.extend([("b_id", first), ("a_id", second)]);
+    }
+    for (column, table) in keyed {
+        let sql = table.named(&format!(
+            "INSERT INTO {{table}} (id, {column}) VALUES (999, 1000)"
+        ));
+        let inserted = table
+            .connection
+            .query(&sql, &CancelToken::default(), Fetch::default());
+        assert!(inserted.is_err(), "{engine:?}: `{sql}` ran with no key");
+    }
+}
+
+#[test]
+fn a_schema_exported_as_sql_runs_back_on_duckdb() {
+    let file = DuckDbFile::new("schema");
+    assert_a_schema_runs_back(file.open(), Engine::DuckDb, "main");
+}
+
+#[test]
+#[ignore = "needs the dev Postgres"]
+fn live_a_schema_exported_as_sql_runs_back_on_postgres() {
+    assert_a_schema_runs_back(postgres(), Engine::Postgres, "public");
+}
+
+#[test]
+#[ignore = "needs the dev MySQL"]
+fn live_a_schema_exported_as_sql_runs_back_on_mysql() {
+    let connection = open("dbdelve_MYSQL_URL");
+    assert_a_schema_runs_back(connection.clone(), Engine::MySql, "dbdelve_dev");
+    let checks = connection
+        .query(
+            "SELECT @@FOREIGN_KEY_CHECKS",
+            &CancelToken::default(),
+            Fetch::default(),
+        )
+        .unwrap();
+    assert_eq!(checks.rows[0].get(0), Some("1"));
+}
+
+#[test]
+#[ignore = "needs the dev SQL Server"]
+fn live_a_schema_exported_as_sql_runs_back_on_sql_server() {
+    assert_a_schema_runs_back(open("dbdelve_MSSQL_URL"), Engine::SqlServer, "dbo");
+}
+
+#[test]
+#[ignore = "needs the dev MySQL"]
+fn live_a_rows_only_file_turns_checks_off_where_the_engine_does() {
+    let fixture = Fixture::new(
+        open("dbdelve_MYSQL_URL"),
+        Engine::MySql,
+        "dbdelve_dev",
+        "rows",
+    );
+    let Some(ForeignKeyReplay::ChecksOff { off, on }) = Target::built_in(Engine::MySql)
+        .exports_schema()
+        .map(|export| export.foreign_keys)
+    else {
+        panic!("MySQL turns its checks off");
+    };
+    let sql = fixture
+        .export(&fixture.everything(), false, true)
+        .expect("the export finishes");
+    let (header, body) = sql.split_once("\n\n").expect("a header");
+    assert!(header.contains("rows only"), "{sql}");
+    // With the checks off, the order the rows come in cannot fail them.
+    assert!(!header.contains("reference each other"), "{sql}");
+    assert!(body.starts_with(off), "{sql}");
+    assert!(body.trim_end().ends_with(on), "{sql}");
+    assert!(!sql.contains("CREATE TABLE"), "{sql}");
+}
+
+#[test]
+#[ignore = "needs the dev Postgres"]
+fn live_a_schema_with_sequences_runs_back_on_postgres() {
+    let mut serial = Throwaway::new(postgres(), Engine::Postgres, "public", "serial");
+    // Left behind if the file stops before its `OWNED BY` ties it to the table.
+    serial.drop_after("DROP SEQUENCE IF EXISTS \"{schema}\".\"{name}_id_seq\"");
+    let identity = Throwaway::new(postgres(), Engine::Postgres, "public", "identity");
+    serial.run("CREATE TABLE {table} (id serial PRIMARY KEY, body text)");
+    identity.run(
+        "CREATE TABLE {table} (id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY, body text)",
+    );
+    for table in [&serial, &identity] {
+        table.run("INSERT INTO {table} (body) VALUES ('one'), ('two'), ('three')");
+        // A gap, so the next id comes from the sequence and not the row count.
+        table.run("DELETE FROM {table} WHERE id = 2");
+    }
+    let path = serial.directory.join("schema.sql");
+    let request = SchemaRequest {
+        tables: vec![serial.name.clone(), identity.name.clone()],
+        structure: true,
+        rows: true,
+        partitioned: Vec::new(),
+    };
+    export_schema(
+        &serial.connection,
+        "public",
+        &request,
+        false,
+        Engine::Postgres,
+        &path,
+        &ExportProgress::default(),
+    )
+    .expect("the export finishes");
+    let sql = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        sql.contains("Only tables and the sequences their columns own are written"),
+        "{sql}"
+    );
+
+    for table in [&serial, &identity] {
+        table.run("DROP TABLE {table}");
+    }
+    let problems = serial.replay(&sql);
+    assert!(problems.is_empty(), "{sql}\n{}", problems.join("\n"));
+    for table in [&serial, &identity] {
+        let next = table.run("INSERT INTO {table} (body) VALUES ('next') RETURNING id");
+        assert_eq!(next.rows[0].get(0), Some("4"), "{sql}");
+    }
+}
+
+#[test]
+fn a_rows_only_schema_names_its_missing_and_cyclic_tables_on_duckdb() {
+    let file = DuckDbFile::new("schema-rows");
+    let fixture = Fixture::new(file.open(), Engine::DuckDb, "main", "rows");
+    let sql = fixture
+        .export(&[&fixture.child, &fixture.employees], false, true)
+        .expect("the export finishes");
+    assert!(
+        sql.contains(&format!(
+            "-- Referenced but not exported: {}.\n",
+            fixture.parent.name
+        )),
+        "{sql}"
+    );
+    assert!(
+        sql.contains(&format!(
+            "-- These tables reference each other, so their rows may not run back in this order: {}.\n",
+            fixture.employees.name
+        )),
+        "{sql}"
+    );
+}
+
+#[test]
+fn a_schema_export_that_ends_early_leaves_the_file_that_was_there() {
+    let file = DuckDbFile::new("schema-ends");
+    let table = Throwaway::new(file.open(), Engine::DuckDb, "main", "kept");
+    table.run("CREATE TABLE {table} (id INTEGER PRIMARY KEY)");
+    let path = table.directory.join("schema.sql");
+    std::fs::write(&path, "kept").unwrap();
+    let export = |tables: &[String], progress: &ExportProgress| {
+        let request = SchemaRequest {
+            tables: tables.to_vec(),
+            structure: true,
+            rows: true,
+            partitioned: Vec::new(),
+        };
+        export_schema(
+            &table.connection,
+            "main",
+            &request,
+            false,
+            Engine::DuckDb,
+            &path,
+            progress,
+        )
+    };
+
+    let missing = [table.name.clone(), "dbdelve_no_such_table".to_string()];
+    match export(&missing, &ExportProgress::default()) {
+        Err(Ended::Failed(message)) => {
+            assert!(message.contains("dbdelve_no_such_table"), "{message}")
+        }
+        other => panic!("{other:?}"),
+    }
+    let cancelled = ExportProgress::default();
+    cancelled.cancelled.store(true, Ordering::Relaxed);
+    assert_eq!(
+        export(std::slice::from_ref(&table.name), &cancelled),
+        Err(Ended::Cancelled)
+    );
+
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "kept");
+    let partials = std::fs::read_dir(&table.directory)
+        .unwrap()
+        .filter(|entry| {
+            let name = entry.as_ref().unwrap().file_name();
+            name.to_string_lossy().ends_with(".partial")
+        })
+        .count();
+    assert_eq!(partials, 0);
 }
 
 #[test]

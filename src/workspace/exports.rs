@@ -426,7 +426,40 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let Some(connection) = connection else {
+        let format = FileAs::for_path(&path, engine);
+        self.run_export(
+            id,
+            generation,
+            path,
+            format,
+            move |connection, read_only, path, progress| {
+                export_every_row(
+                    connection, &refetch, &target, read_only, engine, path, progress,
+                )
+            },
+            cx,
+        );
+    }
+
+    /// Run `work` on a thread of its own against the profile's connection,
+    /// counting in the status bar while it writes to `path` and saying what it
+    /// ended in, `format` being what the notice names. Whatever could refuse
+    /// it has been asked already.
+    fn run_export(
+        &mut self,
+        id: &str,
+        generation: u64,
+        path: PathBuf,
+        format: FileAs,
+        work: impl FnOnce(&Connection, bool, &Path, &ExportProgress) -> Result<usize, Ended>
+        + Send
+        + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(profile) = self.issued_to(id, generation) else {
+            return;
+        };
+        let Some(connection) = profile.connection() else {
             return;
         };
         let read_only = profile.mode == Mode::ReadOnly;
@@ -470,17 +503,8 @@ impl Workspace {
         let task = spawn_blocking(cx.background_executor(), {
             let (path, progress) = (path.clone(), progress.clone());
             move || {
-                let format = FileAs::for_path(&path, engine);
-                tracing::info!(format = format.extension(), "export of every row started");
-                let ended = export_every_row(
-                    &connection,
-                    &refetch,
-                    &target,
-                    read_only,
-                    engine,
-                    &path,
-                    &progress,
-                );
+                tracing::info!(format = format.extension(), "export started");
+                let ended = work(&connection, read_only, &path, &progress);
                 log_export(format, ended.as_ref().copied());
                 ended
             }
@@ -512,7 +536,7 @@ impl Workspace {
                 };
                 match ended {
                     Ok(rows) => {
-                        let message = exported(rows, FileAs::for_path(&path, engine), &path);
+                        let message = exported(rows, format, &path);
                         profile.session.notice = Some(message.clone());
                         workspace.clear_notice_later(id, generation, message, cx);
                     }
@@ -1167,6 +1191,13 @@ fn rendered(engine: Engine, columns: &[Column], rows: Vec<Row>) -> Vec<Row> {
     }
     chunk.rows
 }
+
+mod schema;
+mod schema_dialog;
+
+#[cfg(test)]
+pub(crate) use schema_dialog::Loading;
+pub(crate) use schema_dialog::SchemaExportDialog;
 
 #[cfg(test)]
 mod round_trip;

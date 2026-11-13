@@ -55,13 +55,13 @@ pub use mongo::MongoConfig;
 pub use postgres::PostgresConfig;
 pub use snowflake::{SnowflakeConfig, account_identifier, normalize_host};
 #[cfg(test)]
-pub use spec::{Abilities, Hints, Hooks, IdentifierQuote};
+pub use spec::{Abilities, Hints, Hooks, IdentifierQuote, SchemaExport};
+pub use spec::{DdlNames, ForeignKeyReplay, IdentityInsert, ReadOnlySession, UnreadableFloor};
 pub use spec::{
     EngineSpec, ExplainPrefix, ForeignTable, FormatDialect, MaterializedViewDrop, Paging, Params,
     ParserDialect, RegexMatch, SelectTop, SkipDuplicates, SqlSpec, StatementSplit, SubstringMatch,
     Truncate, TypedExplain,
 };
-pub use spec::{IdentityInsert, ReadOnlySession, UnreadableFloor};
 pub use target::{Driver, Target, cancel_cost, is_cancel};
 
 /// One run's claim on Cancel: [`Connection::query`] runs under it, and
@@ -1850,6 +1850,7 @@ impl Connection {
         match self {
             Self::Postgres(connection) => connection.current_schema(),
             Self::DuckDb(connection) => Some(connection.current_schema()),
+            Self::SqlServer(connection) => connection.current_schema(),
             _ => None,
         }
     }
@@ -1920,6 +1921,38 @@ impl Connection {
             Self::External(_) => Err(plain_error(
                 "Copy DDL is not offered through a plugin driver.".into(),
             )),
+        }
+    }
+
+    /// A table's DDL for a schema export. An engine that adds its foreign keys
+    /// after the rows gets them as statements of their own; every other
+    /// engine's is [`Connection::ddl`] whole, its keys declared with the table.
+    pub fn export_ddl(&self, schema: &str, relation: &str) -> Result<ExportDdl, DbError> {
+        let apart = |engine: Engine| {
+            Target::built_in(engine)
+                .exports_schema()
+                .is_some_and(|export| export.foreign_keys == spec::ForeignKeyReplay::AddedAfterRows)
+        };
+        match self {
+            Self::Postgres(connection) if apart(Engine::Postgres) => {
+                connection.export_ddl(schema, relation)
+            }
+            Self::SqlServer(connection) if apart(Engine::SqlServer) => {
+                connection.export_ddl(schema, relation)
+            }
+            _ => Ok(ExportDdl {
+                create: self.ddl(schema, relation, RelationKind::Table)?,
+                foreign_keys: Vec::new(),
+            }),
+        }
+    }
+
+    /// The sequences the columns of `tables` own, for a schema export. Only
+    /// Postgres has them to bring back.
+    pub fn sequences(&self, schema: &str, tables: &[String]) -> Result<Sequences, DbError> {
+        match self {
+            Self::Postgres(connection) => connection.sequences(schema, tables),
+            _ => Ok(Sequences::default()),
         }
     }
 
@@ -3106,6 +3139,56 @@ pub(super) fn assemble_structure(
     Ok(structure)
 }
 
+/// The sequences a schema export has to bring back with its tables.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Sequences {
+    /// `CREATE SEQUENCE`, written before the tables whose defaults name them.
+    pub before_tables: Vec<String>,
+    /// `ALTER SEQUENCE … OWNED BY` and `setval`, written after the rows.
+    pub after_rows: Vec<String>,
+    /// Sequences the role may not read where they stand, by qualified name,
+    /// which no `setval` can be written for: the catalog shows them unused.
+    pub unreadable: Vec<String>,
+}
+
+/// A table's DDL for a schema export: `create` without the foreign keys an
+/// engine adds after the rows, and those keys as statements of their own.
+pub struct ExportDdl {
+    pub create: String,
+    pub foreign_keys: Vec<String>,
+}
+
+/// The structure without its foreign keys, and each as an `ALTER TABLE` that
+/// adds it back once every table it might point at exists.
+pub(super) fn split_foreign_keys(
+    engine: Engine,
+    schema: &str,
+    relation: &str,
+    structure: &Structure,
+) -> (Structure, Vec<String>) {
+    let (keys, rest): (Vec<_>, Vec<_>) = structure
+        .constraints
+        .iter()
+        .cloned()
+        .partition(|constraint| constraint.definition.starts_with("FOREIGN KEY"));
+    let statements = keys
+        .iter()
+        .map(|key| {
+            format!(
+                "ALTER TABLE {} ADD CONSTRAINT {} {};",
+                engine.qualified(schema, relation),
+                engine.quote_identifier(&key.name),
+                key.definition
+            )
+        })
+        .collect();
+    let structure = Structure {
+        constraints: rest,
+        ..structure.clone()
+    };
+    (structure, statements)
+}
+
 /// `{head} (columns, constraints){tail};` written back out of a loaded
 /// structure, then each index as a statement of its own, spelled by `index`.
 /// An index sharing a key or exclusion constraint's name is that constraint's,
@@ -3533,6 +3616,35 @@ pub(crate) fn spawn(command: &mut std::process::Command) -> std::io::Result<std:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn create_table_leaves_foreign_keys_for_after_the_rows() {
+        let named = |name: &str, definition: &str| NamedDefinition {
+            name: name.into(),
+            definition: definition.into(),
+        };
+        let structure = Structure {
+            constraints: vec![
+                named("t_pkey", "PRIMARY KEY (id)"),
+                named(
+                    "t_parent_fk",
+                    "FOREIGN KEY (parent_id) REFERENCES \"s\".\"p\"(id)",
+                ),
+            ],
+            ..Structure::default()
+        };
+
+        let (rest, keys) = split_foreign_keys(Engine::Postgres, "s", "t", &structure);
+
+        assert_eq!(rest.constraints, vec![named("t_pkey", "PRIMARY KEY (id)")]);
+        assert_eq!(
+            keys,
+            vec![
+                "ALTER TABLE \"s\".\"t\" ADD CONSTRAINT \"t_parent_fk\" \
+                 FOREIGN KEY (parent_id) REFERENCES \"s\".\"p\"(id);"
+            ]
+        );
+    }
 
     #[test]
     fn a_bounded_feed_holds_a_push_past_its_bound_until_rows_are_taken() {

@@ -997,8 +997,9 @@ impl Workspace {
 
     /// How many controls the dialog in front has to move the ring across:
     /// its buttons, then its "Don't ask again" box or its project, which sit
-    /// left of and above them. None for the import, a form with fields and
-    /// lists of its own, which Tab moves the keyboard itself through.
+    /// left of and above them. None for the import and the schema export,
+    /// forms with controls of their own, which Tab moves the keyboard itself
+    /// through.
     fn dialog_buttons(&self) -> usize {
         let checkbox = usize::from(self.dialog_checkbox());
         match self.dialog_in_front.get() {
@@ -1017,7 +1018,7 @@ impl Workspace {
                     .is_some_and(|pending| pending.every_row.is_ok());
                 if all { 3 } else { 2 }
             }
-            Some("import-rows") | None => 0,
+            Some("import-rows" | "schema-export") | None => 0,
             Some(_) => 2 + checkbox,
         }
     }
@@ -2475,6 +2476,7 @@ impl Workspace {
         let menu_schema = active_schema.clone();
         let picks_schema = profile.config.target().picks_schema();
         let drop_line = self.explorer_drop.clone();
+        let exports_schema = profile.config.target().exports_schema().is_some();
         let open_queries: HashSet<String> = profile
             .session
             .queries
@@ -2833,21 +2835,36 @@ impl Workspace {
                     );
                 }
                 let Some(leaf) = menu_leaves.get(id.as_ref()).copied() else {
-                    if !picks_schema || !is_schema_row(entry.item().id.as_str()) {
+                    if !is_schema_row(entry.item().id.as_str()) {
                         return menu;
                     }
-                    let workspace = menu_workspace.clone();
                     let schema = entry.item().label.to_string();
-                    return menu.item(
-                        PopupMenuItem::new("Set as Active Schema")
-                            .checked(menu_schema.as_ref() == Some(&entry.item().label))
-                            .on_click(move |_, _, cx| {
+                    let mut menu = menu;
+                    if picks_schema {
+                        let (workspace, schema) = (menu_workspace.clone(), schema.clone());
+                        menu = menu.item(
+                            PopupMenuItem::new("Set as Active Schema")
+                                .checked(menu_schema.as_ref() == Some(&entry.item().label))
+                                .on_click(move |_, _, cx| {
+                                    let schema = schema.clone();
+                                    _ = workspace.update(cx, |workspace, cx| {
+                                        workspace.set_schema(schema, cx);
+                                    });
+                                }),
+                        );
+                    }
+                    if exports_schema {
+                        let workspace = menu_workspace.clone();
+                        menu = menu.item(PopupMenuItem::new("Export Schema as SQL…").on_click(
+                            move |_, _, cx| {
                                 let schema = schema.clone();
                                 _ = workspace.update(cx, |workspace, cx| {
-                                    workspace.set_schema(schema, cx);
+                                    workspace.open_schema_export(schema, cx);
                                 });
-                            }),
-                    );
+                            },
+                        ));
+                    }
+                    return menu;
                 };
                 let Some(workspace) = menu_workspace.upgrade() else {
                     return menu;
