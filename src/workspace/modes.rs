@@ -158,6 +158,7 @@ impl Workspace {
     }
 
     pub(crate) fn approve_pending_run(&mut self, cx: &mut Context<Self>) {
+        let run_unreadable = self.settings.run_unreadable;
         let Some(profile) = self.profile_mut() else {
             return;
         };
@@ -170,7 +171,9 @@ impl Workspace {
         else {
             return;
         };
-        let Some(stop) = sql::gate(&verdict, profile.mode, &profile.confirmed) else {
+        let Some(stop) =
+            sql::gate_own_run(&verdict, profile.mode, &profile.confirmed, run_unreadable)
+        else {
             return;
         };
 
@@ -224,7 +227,12 @@ impl Workspace {
                 }
                 self.run_resume(resume, cx);
             }
-            Stop::RunOnce => self.run_resume(resume, cx),
+            Stop::RunOnce => {
+                if dont_ask {
+                    self.set_run_unreadable(true, cx);
+                }
+                self.run_resume(resume, cx);
+            }
         }
     }
 

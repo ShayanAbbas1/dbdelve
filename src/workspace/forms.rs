@@ -1023,7 +1023,8 @@ impl Workspace {
     }
 
     /// Whether the dialog in front offers to stop asking: the run prompt over
-    /// a kind that can be silenced, and the stale-edit prompt over an edit.
+    /// a kind that can be silenced or a statement dbdelve cannot parse, and the
+    /// stale-edit prompt over an edit.
     pub(crate) fn dialog_checkbox(&self) -> bool {
         let Some(profile) = self.profile() else {
             return false;
@@ -1033,8 +1034,19 @@ impl Workspace {
                 .session
                 .pending_run
                 .as_ref()
-                .and_then(|pending| sql::gate(&pending.verdict, profile.mode, &profile.confirmed))
-                .is_some_and(|stop| matches!(stop, Stop::Confirm(kind) if kind.suppressible())),
+                .and_then(|pending| {
+                    sql::gate_own_run(
+                        &pending.verdict,
+                        profile.mode,
+                        &profile.confirmed,
+                        self.settings.run_unreadable,
+                    )
+                })
+                .is_some_and(|stop| match stop {
+                    Stop::Confirm(kind) => kind.suppressible(),
+                    Stop::RunOnce => true,
+                    Stop::Upgrade(_) => false,
+                }),
             Some("stale-edit") => profile
                 .session
                 .stale_edit
@@ -1608,7 +1620,12 @@ impl Workspace {
         // Re-derived rather than trusted from when the prompt was raised: the
         // mode or the silenced list may have changed underneath it (the
         // upgrade arm changes the mode itself, mid-prompt).
-        let stop = sql::gate(&pending.verdict, profile.mode, &profile.confirmed)?;
+        let stop = sql::gate_own_run(
+            &pending.verdict,
+            profile.mode,
+            &profile.confirmed,
+            self.settings.run_unreadable,
+        )?;
         let name = profile.name.clone();
         let current_mode = profile.mode.label();
         let syntax = profile.config.engine().syntax();
@@ -1705,21 +1722,28 @@ impl Workspace {
                                 .text_color(t.text)
                                 .children(sql.into_iter().map(|line| div().child(line)))
                         }))
-                        // Never for `Unreadable`: silencing it would cover
-                        // every future typo along with it, on the strength of
-                        // one decision about one of them.
-                        .children(match stop {
-                            Stop::Confirm(kind) if kind.suppressible() => Some(
+                        // An unreadable statement's box turns on the app-wide
+                        // setting, never this connection's silenced list: it
+                        // silences every future typo, not one kind, so it is a
+                        // setting the panel shows and can take back.
+                        .children(
+                            match stop {
+                                Stop::Confirm(kind) if kind.suppressible() => {
+                                    Some(format!("Don't ask again for {} on {name}", kind.label()))
+                                }
+                                Stop::RunOnce => Some(
+                                    "Run statements dbdelve can't parse without asking".to_string(),
+                                ),
+                                _ => None,
+                            }
+                            .map(|label| {
                                 self.choice(
                                     "pending-run",
                                     2,
                                     Checkbox::new("dont-ask-again")
                                         .text_size(px(layout::chrome(layout::TEXT_SM)))
                                         .font_weight(FontWeight::BOLD)
-                                        .label(format!(
-                                            "Don't ask again for {} on {name}",
-                                            kind.label()
-                                        ))
+                                        .label(label)
                                         .checked(dont_ask)
                                         .on_click(move |_, _, cx| {
                                             _ = tick.update(cx, |workspace, cx| {
@@ -1727,10 +1751,9 @@ impl Workspace {
                                             });
                                         }),
                                     t,
-                                ),
-                            ),
-                            _ => None,
-                        })
+                                )
+                            }),
+                        )
                         .child(
                             div()
                                 .flex()

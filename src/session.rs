@@ -777,7 +777,8 @@ pub(crate) struct PendingRun {
     /// there is nothing to resume, and the dialog offers only the mode change.
     pub(crate) resume: Option<Resume>,
     pub(crate) verdict: Verdict,
-    /// The "don't ask again" tick, which only the Confirm shape shows.
+    /// The "don't ask again" tick, shown by the Confirm shape and, as the
+    /// app-wide opt-in to run what dbdelve cannot parse, by RunOnce.
     pub(crate) dont_ask: bool,
     /// The mode refused a grid cell's commit, whose input waits open behind
     /// the prompt: raising the mode carries the commit through.

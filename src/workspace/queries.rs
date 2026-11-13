@@ -1989,9 +1989,14 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let verdict = sql::classify(self.engine(), &sql);
-        let stopped = self
-            .profile()
-            .and_then(|profile| sql::gate(&verdict, profile.mode, &profile.confirmed));
+        let stopped = self.profile().and_then(|profile| {
+            sql::gate_own_run(
+                &verdict,
+                profile.mode,
+                &profile.confirmed,
+                self.settings.run_unreadable,
+            )
+        });
 
         if stopped.is_some() {
             if let Some(profile) = self.profile_mut() {

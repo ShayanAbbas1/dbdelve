@@ -2476,9 +2476,11 @@ impl Destructive {
             .find(|kind| kind.slug() == slug)
     }
 
-    /// Whether a "don't ask again" tick may silence this kind. Never for
-    /// `Unreadable`: that would silence an open-ended set -- every future typo,
-    /// every `DO` block -- on one decision about one of them.
+    /// Whether a "don't ask again" tick may silence this kind on a connection.
+    /// Never for `Unreadable`: that would silence an open-ended set -- every
+    /// future typo, every `DO` block -- on one decision about one of them.
+    /// Running those unasked is a separate, app-wide opt-in (`gate_own_run`),
+    /// whose box says that is what it covers.
     pub(crate) fn suppressible(self) -> bool {
         !matches!(self, Destructive::Unreadable)
     }
@@ -4720,7 +4722,8 @@ pub(crate) enum Stop {
     /// Allowed, but it destroys something and this connection has not silenced
     /// that kind.
     Confirm(Destructive),
-    /// dbdelve could not read it. Runs once on confirmation and changes nothing.
+    /// dbdelve could not read it. Runs once on confirmation and changes nothing,
+    /// unless the user has opted to run these unasked (`gate_own_run`).
     RunOnce,
 }
 
@@ -4754,6 +4757,19 @@ pub(crate) fn gate(verdict: &Verdict, mode: Mode, confirmed: &[Destructive]) -> 
         .find(|kind| !confirmed.contains(kind))
         .copied()
         .map(Stop::Confirm)
+}
+
+/// `gate` for a statement the user ran, with `run_unreadable`, their app-wide
+/// opt-in, letting what dbdelve cannot parse through unasked. Only `RunOnce`
+/// gives way: an unreadable `Upgrade` is the mode check where nothing on the
+/// server holds Read-only, and Read-only has to keep meaning it.
+pub(crate) fn gate_own_run(
+    verdict: &Verdict,
+    mode: Mode,
+    confirmed: &[Destructive],
+    run_unreadable: bool,
+) -> Option<Stop> {
+    gate(verdict, mode, confirmed).filter(|stop| !(run_unreadable && *stop == Stop::RunOnce))
 }
 
 /// `sql` laid out over several lines: the same tokens, indented. Refused when
@@ -9291,6 +9307,33 @@ mod tests {
         assert_eq!(
             gate(&unreadable, Mode::Full, &[Destructive::Unreadable]),
             Some(Stop::RunOnce)
+        );
+    }
+
+    #[test]
+    fn the_opt_in_runs_the_unreadable_but_never_past_the_mode() {
+        let held = classify(Engine::Postgres, "SELCT 1");
+        let unheld = classify(Engine::Sqlite, "PRAGMA table_info(t)");
+        for mode in Mode::ALL {
+            assert_eq!(gate_own_run(&held, mode, &[], true), None, "{mode:?}");
+            assert_eq!(
+                gate_own_run(&held, mode, &[], false),
+                gate(&held, mode, &[])
+            );
+        }
+        assert_eq!(
+            gate_own_run(&unheld, Mode::ReadOnly, &[], true),
+            Some(Stop::Upgrade(Mode::ReadWrite))
+        );
+        assert_eq!(gate_own_run(&unheld, Mode::ReadWrite, &[], true), None);
+        assert_eq!(
+            gate_own_run(
+                &classify(Engine::Postgres, "DROP TABLE t"),
+                Mode::Full,
+                &[],
+                true
+            ),
+            Some(Stop::Confirm(Destructive::Drop))
         );
     }
 

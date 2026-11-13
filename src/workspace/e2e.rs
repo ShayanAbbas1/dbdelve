@@ -234,7 +234,7 @@ fn a_prompt_takes_the_keyboard_and_hands_it_back_once_answered(cx: &mut TestAppC
             "the buffer behind took a key"
         );
 
-        for (keystroke, ringed) in [("left", 1), ("right", 0), ("tab", 1), ("shift-tab", 0)] {
+        for (keystroke, ringed) in [("left", 1), ("right", 0), ("tab", 2), ("shift-tab", 0)] {
             cx.simulate_keystrokes(keystroke);
             settle(cx);
             assert_eq!(ringed_button(&workspace, cx), ringed, "after {keystroke}");
@@ -268,7 +268,7 @@ fn a_prompt_dismissed_from_the_keyboard_hands_it_back_to_the_editor(cx: &mut Tes
         let (workspace, cx) = launch_on_sqlite(cx);
         cx.simulate_input("selec 1");
 
-        for (dismiss, typed) in [("tab enter", "x"), ("escape", "y")] {
+        for (dismiss, typed) in [("tab tab enter", "x"), ("escape", "y")] {
             raise_run_once_prompt(&workspace, cx);
             let before = buffer(&workspace, cx);
             cx.simulate_keystrokes(dismiss);
@@ -1341,6 +1341,54 @@ fn the_ring_reaches_dont_ask_again_and_enter_or_space_ticks_it(cx: &mut TestAppC
                     .contains(&crate::sql::Destructive::UnfilteredDelete),
                 "Run ran with the box ticked"
             );
+        });
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn ticking_run_once_s_box_runs_the_next_unreadable_statement_unasked(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table t (a integer);");
+        cx.simulate_input("selec 1");
+        raise_run_once_prompt(&workspace, cx);
+
+        cx.simulate_keystrokes("left left");
+        settle(cx);
+        assert_eq!(ringed_button(&workspace, cx), 2, "the ring reaches the box");
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let session = &workspace.profile().unwrap().session;
+            assert!(session.pending_run.as_ref().unwrap().dont_ask);
+            assert!(!workspace.settings.run_unreadable, "ticking alone set it");
+        });
+
+        cx.simulate_keystrokes("right right enter");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), None);
+        query_tab(&workspace, cx, |tab, _, _| {
+            assert!(matches!(tab.query, QueryState::Failed(_)), "Run once ran");
+        });
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.settings.run_unreadable)
+        });
+        let saved =
+            std::fs::read_to_string(store::dbdelve_directory().unwrap().join("profiles.toml"))
+                .unwrap();
+        assert!(saved.contains("run_unreadable = true"), "{saved}");
+
+        // Unreadable to sqlparser, and a read SQLite answers with rows.
+        cx.simulate_keystrokes("secondary-a");
+        cx.simulate_input("PRAGMA table_info(t)");
+        cx.simulate_keystrokes("secondary-enter");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), None, "it asked again");
+        query_tab(&workspace, cx, |tab, _, _| match &tab.query {
+            QueryState::Complete { rows, .. } => assert_eq!(*rows, 1),
+            QueryState::Failed(error) => panic!("the pragma failed: {error}"),
+            _ => panic!("the pragma never ran"),
         });
 
         quit(workspace, cx);

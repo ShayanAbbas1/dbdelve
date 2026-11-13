@@ -109,6 +109,7 @@ enum SettingId {
     RowLimit,
     DefaultSorting,
     QualifyCompletions,
+    RunUnreadable,
     CheckForUpdates,
     VerboseLogging,
     MatchSystemAppearance,
@@ -185,6 +186,25 @@ fn setting_rows() -> Vec<SettingRow> {
                 "schema",
                 "prefix",
                 "qualified",
+            ],
+        ),
+        row(
+            SettingId::RunUnreadable,
+            SettingsTab::General,
+            "Queries",
+            "Run statements DBDelve can't parse",
+            "Runs a statement DBDelve can't parse without asking first, as \
+             far as the connection's mode allows. Where nothing on the server \
+             holds a connection to Read-only, it still asks to switch to \
+             Read-write.",
+            &[
+                "parse",
+                "unparseable",
+                "unreadable",
+                "confirm",
+                "ask",
+                "prompt",
+                "run",
             ],
         ),
         row(
@@ -811,6 +831,12 @@ fn render_control(
                 }))
                 .into_any_element()
         }
+        SettingId::RunUnreadable => switch("run-unreadable", settings.run_unreadable, t)
+            .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
+                let run = !workspace.settings.run_unreadable;
+                workspace.set_run_unreadable(run, cx);
+            }))
+            .into_any_element(),
         SettingId::ColorTitlebar => switch("color-titlebar", settings.color_titlebar, t)
             .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
                 let color = !workspace.settings.color_titlebar;
@@ -1083,6 +1109,7 @@ mod tests {
         assert!(found("sort").contains(&SettingId::DefaultSorting));
         assert!(found("titlebar").contains(&SettingId::ColorTitlebar));
         assert!(found("autocomplete").contains(&SettingId::QualifyCompletions));
+        assert!(found("unparseable").contains(&SettingId::RunUnreadable));
         assert!(found("transparency").contains(&SettingId::Opacity));
         assert!(found("updates").contains(&SettingId::CheckForUpdates));
         assert!(found("auto").contains(&SettingId::MatchSystemAppearance));
@@ -1133,7 +1160,7 @@ mod tests {
                 SettingId::Keybinding("sort_active_column"),
             ]
         );
-        assert_eq!(found("!keyboard").len(), 14);
+        assert_eq!(found("!keyboard").len(), 15);
     }
 
     #[test]

@@ -68,6 +68,7 @@ impl Workspace {
             color_titlebar: Some(self.settings.color_titlebar),
             client_sort: Some(self.settings.client_sort),
             qualify_completions: Some(self.settings.qualify_completions),
+            run_unreadable: Some(self.settings.run_unreadable),
             verbose_logging: Some(self.settings.verbose_logging),
             welcomed: Some(self.settings.welcomed),
             custom_keybindings: Some(self.settings.custom_keybindings.clone()),
