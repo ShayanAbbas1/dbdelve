@@ -245,9 +245,7 @@ jobs:
           # with github.token starts no other workflow run.
           gh release create "v$VERSION" dist/* --target "$GITHUB_SHA" \
             --title "DBDelve $VERSION" --generate-notes "${PRERELEASE_FLAG[@]}" \
-            --notes "Missing something? [Request it or upvote others' ideas](https://github.com/ShayanAbbas1/dbdelve/discussions/42).
-
-          The ODBC plugin ships on Windows untested. On Linux it needs the \`unixodbc\` package (\`apt install unixodbc\`); macOS carries its own."
+            --notes "Missing something? [Request it or upvote others' ideas](https://github.com/ShayanAbbas1/dbdelve/discussions/42)."
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.version.outputs.version }}
