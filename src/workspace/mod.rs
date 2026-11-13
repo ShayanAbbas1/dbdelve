@@ -78,6 +78,9 @@ pub(crate) struct Settings {
     /// Whether completing a table after FROM or JOIN adds a short alias, and
     /// after JOIN offers the condition its foreign keys imply.
     pub(crate) alias_completions: bool,
+    /// Whether a statement the user runs that dbdelve cannot parse runs without
+    /// the run-once prompt, for people who live in a dialect sqlparser misreads.
+    pub(crate) run_unreadable: bool,
     /// Whether the diagnostic log takes DBDelve's debug lines and other
     /// crates' info, applied as it changes (`logging::set_verbose`).
     pub(crate) verbose_logging: bool,
@@ -119,6 +122,7 @@ impl Default for Settings {
             client_sort: false,
             qualify_completions: false,
             alias_completions: true,
+            run_unreadable: false,
             verbose_logging: false,
             welcomed: false,
             custom_keybindings: HashMap::new(),
@@ -605,6 +609,7 @@ impl Workspace {
                     stored_settings.qualify_completions.unwrap_or(false);
                 workspace.settings.alias_completions =
                     stored_settings.alias_completions.unwrap_or(true);
+                workspace.settings.run_unreadable = stored_settings.run_unreadable.unwrap_or(false);
                 workspace.settings.verbose_logging =
                     stored_settings.verbose_logging.unwrap_or(false);
                 crate::logging::set_verbose(workspace.settings.verbose_logging);
@@ -1230,6 +1235,15 @@ impl Workspace {
             return;
         }
         self.settings.client_sort = client;
+        self.remember_profiles(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn set_run_unreadable(&mut self, run: bool, cx: &mut Context<Self>) {
+        if self.settings.run_unreadable == run {
+            return;
+        }
+        self.settings.run_unreadable = run;
         self.remember_profiles(cx);
         cx.notify();
     }

@@ -142,7 +142,18 @@ server, and how `IF` conditions and `CycleMode` are read, are in
   for Full to get a syntax error back would teach people to live in Full.
   The exception is Read-only on an engine where `Engine::holds_read_only` is
   false: nothing on the server would stop it writing, so the verdict carries
-  Read-write and the gate asks for that instead.
+  Read-write and the gate asks for that instead. The run-once prompt's box
+  turns on an app-wide setting (`Settings::run_unreadable`, read through
+  `sql::gate_own_run`) that runs the user's own unreadable statements unasked.
+  It skips that prompt and never an upgrade, so Read-only keeps meaning it; it
+  never joins a profile's silenced list; and only a run the user just asked
+  for (`Workspace::execute_own`: Run, its queue, Explain) consults it.
+  Previews, edits and refreshes go through `execute_and_then` and keep
+  asking, so a missed refresh stays the worst it can do. In Read-only the
+  server's hold is then all that stops such a statement writing, so the opt-in
+  applies there only once that hold is known to have landed
+  (`session::skips_run_once`, `Profile::held`); until then, or after it
+  failed, the prompt shows.
 - Unknown statements and `ALTER` operations other than `ADD COLUMN` need Full.
   Keep it that strict.
 - **`IF`/`ELSEIF` conditions are classified, not treated as unreadable.** Every

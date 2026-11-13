@@ -126,6 +126,15 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # rust-cache saves a directory of target/ that is not a profile with its
+      # files deleted and its directories kept, so libduckdb-sys's unpacked
+      # sources come back without their completion marker, and its build
+      # script, whenever it reruns, fails renaming a fresh unpack over them.
+      # Nothing reads them once the build script has run.
+      - &duckdb-sources
+        name: drop cached duckdb sources
+        shell: bash
+        run: rm -rf target/duckdb-sources
       - &dependencies-unoptimized
         name: dependencies unoptimized
         run: mkdir -p ../.cargo && printf '[profile.dev.package."*"]\nopt-level = 0\n' >> ../.cargo/config.toml
@@ -246,6 +255,7 @@ jobs:
         run: dev/db2/driver.sh
       - *install-nextest
       - *rust-cache
+      - *duckdb-sources
       - *dependencies-unoptimized
       - name: wait for db2
         run: |
@@ -278,6 +288,7 @@ jobs:
     steps:
       - *checkout
       - *rust-cache
+      - *duckdb-sources
       - *dependencies-unoptimized
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
@@ -290,6 +301,7 @@ jobs:
     steps:
       - *checkout
       - *rust-cache
+      - *duckdb-sources
       - *dependencies-unoptimized
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings

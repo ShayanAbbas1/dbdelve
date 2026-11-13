@@ -194,8 +194,10 @@ The core of the mode check is in `AGENTS.md`, "Connection modes". The detail:
   `Engine::holds_read_only` is false on SQLite, DuckDB, Snowflake and SQL
   Server, so a statement `sqlparser` cannot parse carries Read-write there, not
   Read-only, and the gate asks for that. A statement it parses keeps its own
-  verdict. ClickHouse holds Read-only (`readonly=2`) but not for every
-  statement, so what it cannot parse is read by its first keyword
+  verdict. The opt-in to run unreadable statements unasked
+  (`sql::gate_own_run`) lets only `Stop::RunOnce` through, so this upgrade
+  still asks: the setting is about being asked, not about the mode.
+  ClickHouse holds Read-only (`readonly=2`) but not for every statement, so what it cannot parse is read by its first keyword
   (`UnreadableFloor::FirstKeyword`): reads stay Read-only and run once on
   confirmation, writes need Read-write, DDL, server control and `BACKUP` and
   `RESTORE` need Full, and anything it does not know fails closed to
@@ -274,3 +276,9 @@ The core of the mode check is in `AGENTS.md`, "Connection modes". The detail:
   held one way with the other mode on screen is opened again under the mode now
   picked (`begin_connect`), on every engine, since the gate runs a statement
   it cannot read in Read-only on the strength of that hold.
+- **A mode change's hold is ordered and awaited.** `set_mode` sends each hold
+  through the profile's `HoldLine`, which takes them in turn and skips one a
+  newer hold overtook, since the connection mutex is not first come, first
+  served. `Profile::held` is cleared as it goes and set only when the latest
+  lands, or when a connect lands, which fails rather than open unheld; until
+  then an unreadable statement in Read-only asks even with the opt-in on.

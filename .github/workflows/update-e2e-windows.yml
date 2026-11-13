@@ -44,6 +44,10 @@ jobs:
         with:
           key: update-e2e
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Why: ci.yml's `drop cached duckdb sources`.
+      - name: drop cached duckdb sources
+        shell: bash
+        run: rm -rf target/duckdb-sources
       - name: inno setup
         run: choco install innosetup --no-progress --yes
       - name: update end to end

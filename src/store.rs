@@ -519,6 +519,7 @@ pub struct StoredSettings {
     pub qualify_completions: Option<bool>,
     #[serde(default)]
     pub alias_completions: Option<bool>,
+    pub run_unreadable: Option<bool>,
     #[serde(default)]
     pub verbose_logging: Option<bool>,
     /// Whether the first-run greeting has played. Absent in a file written
@@ -3962,6 +3963,7 @@ open_objects = []
                 client_sort: Some(true),
                 qualify_completions: Some(true),
                 alias_completions: Some(true),
+                run_unreadable: Some(true),
                 verbose_logging: Some(true),
                 welcomed: Some(true),
                 custom_keybindings: Some(HashMap::from([(

@@ -1023,18 +1023,20 @@ impl Workspace {
     }
 
     /// Whether the dialog in front offers to stop asking: the run prompt over
-    /// a kind that can be silenced, and the stale-edit prompt over an edit.
+    /// a kind that can be silenced or a statement dbdelve cannot parse, and the
+    /// stale-edit prompt over an edit.
     pub(crate) fn dialog_checkbox(&self) -> bool {
         let Some(profile) = self.profile() else {
             return false;
         };
         match self.dialog_in_front.get() {
-            Some("pending-run") => profile
-                .session
-                .pending_run
-                .as_ref()
-                .and_then(|pending| sql::gate(&pending.verdict, profile.mode, &profile.confirmed))
-                .is_some_and(|stop| matches!(stop, Stop::Confirm(kind) if kind.suppressible())),
+            Some("pending-run") => profile.session.pending_run.as_ref().is_some_and(|pending| {
+                match sql::gate(&pending.verdict, profile.mode, &profile.confirmed) {
+                    Some(Stop::Confirm(kind)) => kind.suppressible(),
+                    Some(Stop::RunOnce) => pending.own_run,
+                    _ => false,
+                }
+            }),
             Some("stale-edit") => profile
                 .session
                 .stale_edit
@@ -1607,7 +1609,10 @@ impl Workspace {
         let pending = profile.session.pending_run.as_ref()?;
         // Re-derived rather than trusted from when the prompt was raised: the
         // mode or the silenced list may have changed underneath it (the
-        // upgrade arm changes the mode itself, mid-prompt).
+        // upgrade arm changes the mode itself, mid-prompt). With the plain
+        // gate, not `gate_run`: the opt-in decides whether a prompt goes up,
+        // and one already up that it later waved through would vanish with
+        // its statement neither run nor cancelled.
         let stop = sql::gate(&pending.verdict, profile.mode, &profile.confirmed)?;
         let name = profile.name.clone();
         let current_mode = profile.mode.label();
@@ -1618,6 +1623,7 @@ impl Workspace {
             .map(|resume| code_lines(&resume.sql, syntax, &cx.theme().highlight_theme));
         let code = fonts(cx).editor.clone();
         let dont_ask = pending.dont_ask;
+        let own_run = pending.own_run;
 
         let (title, message, confirm, tone) = match stop {
             Stop::Upgrade(needed) => (
@@ -1705,21 +1711,28 @@ impl Workspace {
                                 .text_color(t.text)
                                 .children(sql.into_iter().map(|line| div().child(line)))
                         }))
-                        // Never for `Unreadable`: silencing it would cover
-                        // every future typo along with it, on the strength of
-                        // one decision about one of them.
-                        .children(match stop {
-                            Stop::Confirm(kind) if kind.suppressible() => Some(
+                        // An unreadable statement's box turns on the app-wide
+                        // setting, never this connection's silenced list: it
+                        // silences every future typo, not one kind, so it is a
+                        // setting the panel shows and can take back.
+                        .children(
+                            match stop {
+                                Stop::Confirm(kind) if kind.suppressible() => {
+                                    Some(format!("Don't ask again for {} on {name}", kind.label()))
+                                }
+                                Stop::RunOnce if own_run => Some(
+                                    "Run statements dbdelve can't parse without asking".to_string(),
+                                ),
+                                _ => None,
+                            }
+                            .map(|label| {
                                 self.choice(
                                     "pending-run",
                                     2,
                                     Checkbox::new("dont-ask-again")
                                         .text_size(px(layout::chrome(layout::TEXT_SM)))
                                         .font_weight(FontWeight::BOLD)
-                                        .label(format!(
-                                            "Don't ask again for {} on {name}",
-                                            kind.label()
-                                        ))
+                                        .label(label)
                                         .checked(dont_ask)
                                         .on_click(move |_, _, cx| {
                                             _ = tick.update(cx, |workspace, cx| {
@@ -1727,10 +1740,9 @@ impl Workspace {
                                             });
                                         }),
                                     t,
-                                ),
-                            ),
-                            _ => None,
-                        })
+                                )
+                            }),
+                        )
                         .child(
                             div()
                                 .flex()
