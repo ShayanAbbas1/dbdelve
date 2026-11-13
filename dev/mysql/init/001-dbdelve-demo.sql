@@ -227,6 +227,12 @@ INSERT INTO dbdelve_archive.closed_accounts VALUES
     (1, 3, '2024-07-01 00:00:00'),
     (2, 5, '2024-07-04 12:00:00');
 
+-- A database with nothing in it, as one just created is: the sidebar lists it
+-- all the same, and with no table the catalog has nothing else to find it by.
+CREATE DATABASE dbdelve_empty;
+
+GRANT ALL PRIVILEGES ON dbdelve_empty.* TO 'dbdelve'@'%';
+
 CREATE VIEW account_overview AS
 SELECT
     plan,

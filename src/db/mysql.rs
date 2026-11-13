@@ -61,6 +61,18 @@ const BINARY_COLLATION: u16 = 63;
 /// leaves these out keeps the database the connection selected.
 const SYSTEM_SCHEMAS: &str = "('information_schema', 'mysql', 'performance_schema', 'sys')";
 
+/// What `TABLE_TYPE` calls a table that holds rows: MariaDB names one it keeps
+/// the history of apart.
+const STORED_TABLES: &str = "('BASE TABLE', 'SYSTEM VERSIONED')";
+
+/// Every table, with MariaDB's sequence among them: there is no kind of its
+/// own for one, and it reads as the one-row table it is to a `SELECT`.
+const TABLES: &str = "('BASE TABLE', 'SYSTEM VERSIONED', 'SEQUENCE')";
+
+/// `SYSTEM VIEW` is `information_schema`'s own, and listed only where it is
+/// the database selected.
+const VIEWS: &str = "('VIEW', 'SYSTEM VIEW')";
+
 const DATABASES_SQL: &str = "
 SELECT SCHEMA_NAME AS name, SCHEMA_NAME = DATABASE() AS is_current
 FROM information_schema.SCHEMATA
@@ -77,13 +89,13 @@ WHERE SCHEMA_NAME NOT IN {system} OR SCHEMA_NAME = DATABASE()
 const RELATIONS_SQL: &str = "
 SELECT TABLE_SCHEMA AS schema_name,
        TABLE_NAME AS relation_name,
-       CASE TABLE_TYPE
-           WHEN 'BASE TABLE' THEN 'table'
-           WHEN 'VIEW' THEN 'view'
+       CASE
+           WHEN TABLE_TYPE IN {tables} THEN 'table'
+           WHEN TABLE_TYPE IN {views} THEN 'view'
        END AS relation_kind
 FROM information_schema.TABLES
 WHERE (TABLE_SCHEMA NOT IN {system} OR TABLE_SCHEMA = DATABASE())
-  AND TABLE_TYPE IN ('BASE TABLE', 'VIEW')
+  AND (TABLE_TYPE IN {tables} OR TABLE_TYPE IN {views})
 ORDER BY TABLE_SCHEMA, TABLE_NAME
 ";
 
@@ -98,7 +110,7 @@ SELECT TABLE_SCHEMA AS schema_name,
        TABLE_ROWS AS row_estimate
 FROM information_schema.TABLES
 WHERE (TABLE_SCHEMA NOT IN {system} OR TABLE_SCHEMA = DATABASE())
-  AND TABLE_TYPE = 'BASE TABLE'
+  AND TABLE_TYPE IN {stored}
 ";
 
 // Every column is coalesced because the assembler refuses a null, and several of
@@ -863,7 +875,12 @@ impl Connection {
     }
 
     pub fn catalog(&self) -> Result<Catalog, DbError> {
-        let relations = self.internal_query(&RELATIONS_SQL.replace("{system}", SYSTEM_SCHEMAS))?;
+        let relations = self.internal_query(
+            &RELATIONS_SQL
+                .replace("{system}", SYSTEM_SCHEMAS)
+                .replace("{tables}", TABLES)
+                .replace("{views}", VIEWS),
+        )?;
         let mut catalog = assemble_catalog(relations, QueryResult::default())?;
         let schemas = self.internal_query(&SCHEMAS_SQL.replace("{system}", SYSTEM_SCHEMAS))?;
         for name in column_of(&schemas, "schema_name")? {
@@ -897,7 +914,13 @@ impl Connection {
             address: self.address,
             side: Arc::default(),
         };
-        assemble_sizes(side.internal_query(&SIZES_SQL.replace("{system}", SYSTEM_SCHEMAS))?)
+        assemble_sizes(
+            side.internal_query(
+                &SIZES_SQL
+                    .replace("{system}", SYSTEM_SCHEMAS)
+                    .replace("{stored}", STORED_TABLES),
+            )?,
+        )
     }
 
     pub fn references(&self, schema: &str, relation: &str) -> Result<Vec<Reference>, DbError> {
@@ -2066,8 +2089,7 @@ mod tests {
 
     /// The user's own database alone is no proof: the system schemas have to
     /// stay out while the one selected comes in. `information_schema` is the
-    /// one an ordinary user may select, and it holds no table or view, so it
-    /// also stands for a database just created.
+    /// one an ordinary user may select.
     fn live_the_selected_database_is_listed_even_when_the_server_owns_it(engine: Engine) {
         let connection = Connection::open(
             &ServerConfig {
@@ -2085,10 +2107,85 @@ mod tests {
             .map(|schema| schema.name.as_str())
             .collect::<Vec<_>>();
 
-        assert!(names.contains(&"information_schema"), "{names:?}");
         assert!(names.contains(&"dbdelve_dev"), "{names:?}");
         assert!(!names.contains(&"mysql"), "{names:?}");
         assert!(!names.contains(&"performance_schema"), "{names:?}");
+        let selected = catalog
+            .schemas
+            .iter()
+            .find(|schema| schema.name == "information_schema")
+            .expect("the selected database should be listed");
+        assert!(
+            selected
+                .relations
+                .iter()
+                .any(|relation| relation.name == "TABLES" && relation.kind == RelationKind::View)
+        );
+    }
+
+    fn live_an_empty_database_is_listed(engine: Engine) {
+        let catalog = live(engine).catalog().expect("catalog should load");
+        let empty = catalog
+            .schemas
+            .iter()
+            .find(|schema| schema.name == "dbdelve_empty")
+            .expect("the seeded empty database should be listed");
+        assert!(empty.relations.is_empty());
+    }
+
+    /// MariaDB's own two kinds of table, which MySQL has neither of.
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MARIADB_URL"]
+    fn live_mariadb_lists_a_versioned_table_and_a_sequence() {
+        let connection = live(Engine::MariaDb);
+        connection
+            .query(
+                "DROP TABLE IF EXISTS dbdelve_test_versioned; \
+                 DROP SEQUENCE IF EXISTS dbdelve_test_sequence; \
+                 CREATE TABLE dbdelve_test_versioned (id INT PRIMARY KEY, label TEXT) \
+                     WITH SYSTEM VERSIONING; \
+                 CREATE SEQUENCE dbdelve_test_sequence",
+                Fetch::default(),
+            )
+            .expect("the fixtures should create");
+        let catalog = connection.catalog();
+        let sizes = connection.sizes();
+        let versioned = connection.query("SELECT * FROM dbdelve_test_versioned", Fetch::default());
+        let sequence = connection.query("SELECT * FROM dbdelve_test_sequence", Fetch::default());
+        connection
+            .query(
+                "DROP TABLE dbdelve_test_versioned; DROP SEQUENCE dbdelve_test_sequence",
+                Fetch::default(),
+            )
+            .expect("the fixtures should drop");
+
+        let catalog = catalog.expect("catalog should load");
+        let relations = &catalog
+            .schemas
+            .iter()
+            .find(|schema| schema.name == "dbdelve_dev")
+            .expect("dbdelve_dev should exist")
+            .relations;
+        for name in ["dbdelve_test_versioned", "dbdelve_test_sequence"] {
+            assert!(
+                relations
+                    .iter()
+                    .any(|relation| relation.name == name && relation.kind == RelationKind::Table),
+                "{name}"
+            );
+        }
+        assert!(
+            sizes.expect("sizes should load")["dbdelve_dev"].contains_key("dbdelve_test_versioned")
+        );
+        let edit = versioned
+            .expect("the versioned table should read")
+            .edit
+            .expect("a versioned table is edited by its primary key");
+        assert_eq!(edit.table, "dbdelve_test_versioned");
+        assert!(
+            sequence.expect("the sequence should read").edit.is_none(),
+            "a sequence has no primary key to name a row by"
+        );
     }
 
     fn live_structure_round_trip(engine: Engine) {
@@ -2664,6 +2761,7 @@ mod tests {
         live_a_column_is_tagged_with_the_type_the_server_would_name,
         live_catalog_round_trip,
         live_the_selected_database_is_listed_even_when_the_server_owns_it,
+        live_an_empty_database_is_listed,
         live_structure_round_trip,
         live_a_single_table_select_is_editable_by_its_primary_key,
         live_an_aliased_or_computed_column_reports_what_the_table_calls_it,
