@@ -29,9 +29,9 @@ use sqlparser::parser::Parser;
 
 use super::{
     Catalog, Column, ColumnDefinition, DbError, EditTarget, Engine, Fetch, ForeignKey, Index,
-    IndexKind, NamedDefinition, QueryResult, Reference, RowBuilder, Stopped, Structure,
-    assemble_catalog, assemble_references, assemble_structure, non_utf8_error, optional_cell,
-    percent_decoded, plain_error, required_cell,
+    IndexKind, NamedDefinition, QueryResult, Reference, RowBuilder, SchemaGraph, Stopped,
+    Structure, assemble_catalog, assemble_references, assemble_schema_graph, assemble_structure,
+    non_utf8_error, optional_cell, percent_decoded, plain_error, required_cell,
 };
 
 /// The path out of a `sqlite:` or `file:` URL.
@@ -381,6 +381,10 @@ impl Connection {
     pub fn ddl(&self, schema: &str, relation: &str) -> Result<String, DbError> {
         self.schema().ddl(schema, relation)
     }
+
+    pub fn schema_graph(&self, schema: &str) -> Result<SchemaGraph, DbError> {
+        self.schema().schema_graph(schema)
+    }
 }
 
 pub(super) struct Schema<F> {
@@ -507,6 +511,118 @@ impl<F: Fn(&str) -> Result<QueryResult, DbError>> Schema<F> {
             result.rows.retain(|row| row.get(3).is_some());
         }
         assemble_references(&result)
+    }
+
+    /// Three statements over `sqlite_master` joined to the pragma functions,
+    /// each one call however many tables there are. Both engines take the
+    /// join; Turso refuses the schema argument, which `argument` leaves off.
+    ///
+    /// A key's columns are matched to the tables' own spelling of them, since
+    /// SQLite folds case in names and the graph does not.
+    pub(super) fn schema_graph(&self, schema: &str) -> Result<SchemaGraph, DbError> {
+        let master = self.engine.quote_identifier(schema);
+        let filter = format!(
+            "tables.type = 'table'
+               AND tables.name NOT LIKE 'sqlite\\_%' ESCAPE '\\'{}",
+            hidden_prefixes(self.hidden(), "tables.name")
+        );
+        let argument = self.argument(schema);
+
+        let columns = (self.run)(&format!(
+            "SELECT tables.name AS table_name,
+                    columns.name AS column_name,
+                    columns.type AS data_type,
+                    CASE
+                        WHEN columns.\"notnull\" THEN 'no'
+                        -- The rowid alias cannot hold a null, which the pragma
+                        -- does not say; see `structure`.
+                        WHEN columns.pk = 1
+                             AND upper(columns.type) = 'INTEGER'
+                             AND (
+                                 SELECT count(*)
+                                 FROM pragma_table_info(tables.name{argument})
+                                 WHERE pk > 0
+                             ) = 1
+                            THEN 'no'
+                        ELSE 'yes'
+                    END AS nullable
+             FROM {master}.sqlite_master AS tables
+             LEFT JOIN pragma_table_xinfo(tables.name{argument}) AS columns
+                    ON columns.hidden <> 1
+             WHERE {filter}
+             ORDER BY tables.name, columns.cid"
+        ))?;
+
+        // The primary key from the table's own columns, because a rowid alias
+        // has no index to list; every other unique key from the indexes, so a
+        // `WITHOUT ROWID` primary key is not read twice. A partial index or
+        // one over an expression does not make its columns unique.
+        let unique_keys = (self.run)(&format!(
+            "SELECT table_name, constraint_name, column_name, key_kind
+             FROM (
+                 SELECT tables.name AS table_name,
+                        'PRIMARY KEY' AS constraint_name,
+                        columns.name AS column_name,
+                        'primary' AS key_kind,
+                        columns.pk AS key_position
+                 FROM {master}.sqlite_master AS tables,
+                      pragma_table_info(tables.name{argument}) AS columns
+                 WHERE {filter} AND columns.pk > 0
+                 UNION ALL
+                 SELECT tables.name,
+                        index_list.name,
+                        key_column.name,
+                        'unique',
+                        key_column.seqno
+                 FROM {master}.sqlite_master AS tables,
+                      pragma_index_list(tables.name{argument}) AS index_list,
+                      pragma_index_xinfo(index_list.name{argument}) AS key_column
+                 WHERE {filter}
+                   AND index_list.\"unique\" = 1
+                   AND index_list.origin <> 'pk'
+                   AND index_list.partial = 0
+                   AND key_column.key = 1
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM pragma_index_xinfo(index_list.name{argument})
+                       WHERE key = 1 AND name IS NULL
+                   )
+             )
+             ORDER BY table_name, constraint_name, key_position"
+        ))?;
+
+        // A key naming no parent column references the parent's primary key,
+        // which `pk` numbers in key order, as `seq` does the key. Turso says
+        // so with an empty `to` where SQLite says NULL.
+        let foreign_keys = (self.run)(&format!(
+            "SELECT tables.name AS table_name,
+                    CAST(keys.id AS text) AS constraint_name,
+                    COALESCE((
+                        SELECT name
+                        FROM pragma_table_info(tables.name{argument})
+                        WHERE name = keys.\"from\" COLLATE NOCASE
+                    ), keys.\"from\") AS column_name,
+                    {schema_literal} AS referenced_schema,
+                    COALESCE((
+                        SELECT name
+                        FROM {master}.sqlite_master
+                        WHERE type = 'table' AND name = keys.\"table\" COLLATE NOCASE
+                    ), keys.\"table\") AS referenced_table,
+                    COALESCE((
+                        SELECT name
+                        FROM pragma_table_info(keys.\"table\"{argument})
+                        WHERE CASE
+                                  WHEN COALESCE(keys.\"to\", '') = '' THEN pk = keys.seq + 1
+                                  ELSE name = keys.\"to\" COLLATE NOCASE
+                              END
+                    ), keys.\"to\", '') AS referenced_column
+             FROM {master}.sqlite_master AS tables,
+                  pragma_foreign_key_list(tables.name{argument}) AS keys
+             WHERE {filter}
+             ORDER BY tables.name, keys.id, keys.seq",
+            schema_literal = self.engine.quote_literal(schema),
+        ))?;
+        assemble_schema_graph(schema, &columns, &unique_keys, &foreign_keys)
     }
 
     pub(super) fn structure(&self, schema: &str, relation: &str) -> Result<Structure, DbError> {
@@ -966,16 +1082,20 @@ fn resolve_edit_target(
 
 /// One `sqlite_master` scan per schema, aliased to the column names
 /// [`assemble_catalog`] reads rather than to SQLite's own.
-fn relations_sql(engine: Engine, schemas: &[String], hidden: &[&str]) -> String {
-    let hidden: String = hidden
+fn hidden_prefixes(hidden: &[&str], column: &str) -> String {
+    hidden
         .iter()
         .map(|prefix| {
             format!(
-                "\n                   AND name NOT LIKE '{}%' ESCAPE '\\'",
+                "\n                   AND {column} NOT LIKE '{}%' ESCAPE '\\'",
                 prefix.replace('_', "\\_")
             )
         })
-        .collect();
+        .collect()
+}
+
+fn relations_sql(engine: Engine, schemas: &[String], hidden: &[&str]) -> String {
+    let hidden = hidden_prefixes(hidden, "name");
     let scans: Vec<String> = schemas
         .iter()
         .map(|schema| {
@@ -1228,6 +1348,92 @@ fn describe(error: &rusqlite::Error) -> String {
 }
 
 #[cfg(test)]
+pub(super) mod graph_fixture {
+    use super::*;
+
+    /// Tables written to trip the graph read: names that differ in case from
+    /// what refers to them, a key that names no parent column, a key into the
+    /// table itself, and unique indexes that make nothing unique.
+    pub const GRAPH_FIXTURE: &str = "
+        CREATE TABLE parent (
+            id INTEGER PRIMARY KEY, code TEXT NOT NULL UNIQUE, a INT, b INT, UNIQUE (a, b)
+        );
+        CREATE TABLE node (id INTEGER PRIMARY KEY, parent_id INT REFERENCES node, label TEXT);
+        CREATE TABLE child (
+            x INT, y INT, parent_code TEXT, note TEXT,
+            FOREIGN KEY (x, y) REFERENCES PARENT (A, B),
+            FOREIGN KEY (parent_code) REFERENCES parent (code)
+        );
+        CREATE UNIQUE INDEX child_noted ON child (note) WHERE note IS NOT NULL;
+        CREATE UNIQUE INDEX child_lowered ON child (lower(parent_code));
+        CREATE TABLE lines (
+            order_id INT NOT NULL, n INT NOT NULL, PRIMARY KEY (order_id, n)
+        );
+        CREATE VIEW seen AS SELECT 1 AS one;
+    ";
+
+    pub fn assert_graph_fixture(graph: &SchemaGraph) {
+        use crate::db::graph::{KeyTarget, seed};
+
+        let mut tables: Vec<&str> = graph.tables.iter().map(|t| t.name.as_ref()).collect();
+        tables.sort();
+        assert_eq!(tables, ["child", "lines", "node", "parent"]);
+
+        let key_of = |table: &str| {
+            graph
+                .keys
+                .iter()
+                .filter(|key| key.table == seed::table_index(graph, table))
+                .collect::<Vec<_>>()
+        };
+        let child = key_of("child");
+        assert_eq!(child.len(), 2);
+        let [composite, single] = if child[0].columns.len() == 2 {
+            [child[0], child[1]]
+        } else {
+            [child[1], child[0]]
+        };
+        let parent = seed::table_index(graph, "parent");
+        assert_eq!(
+            seed::names(graph, composite.table, &composite.columns),
+            ["x", "y"]
+        );
+        let KeyTarget::Table { table, columns } = &composite.referenced else {
+            panic!("{:?}", composite.referenced);
+        };
+        assert_eq!(*table, parent);
+        assert_eq!(seed::names(graph, parent, columns), ["a", "b"]);
+        assert_eq!(
+            seed::names(graph, single.table, &single.columns),
+            ["parent_code"]
+        );
+        let KeyTarget::Table { columns, .. } = &single.referenced else {
+            panic!("{:?}", single.referenced);
+        };
+        assert_eq!(seed::names(graph, parent, columns), ["code"]);
+
+        let [own] = key_of("node")[..] else {
+            panic!("node references itself once");
+        };
+        let KeyTarget::Table { table, columns } = &own.referenced else {
+            panic!("{:?}", own.referenced);
+        };
+        assert_eq!(*table, own.table);
+        assert_eq!(seed::names(graph, *table, columns), ["id"]);
+
+        let id = seed::column(graph, "parent", "id");
+        assert!(id.primary && id.unique && !id.nullable);
+        assert!(seed::column(graph, "parent", "code").unique);
+        assert!(!seed::column(graph, "parent", "a").unique);
+        assert!(!seed::column(graph, "child", "note").unique);
+        assert!(!seed::column(graph, "child", "parent_code").unique);
+        let order = seed::column(graph, "lines", "order_id");
+        assert!(order.primary && !order.unique && !order.nullable);
+        assert!(seed::column(graph, "child", "x").foreign);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::{ColumnDefinition, RelationKind};
@@ -1299,6 +1505,27 @@ SELECT count(*) FROM counting
         assert_eq!(ahead.rows, vec![vec![Some("10000000".to_string())]]);
         let lane = lane.expect_err("the waiting statement should be dropped");
         assert_eq!(lane.message, "Cancelled before it was sent.");
+    }
+
+    #[test]
+    fn a_schema_graph_reads_keys_through_the_pragma_functions() {
+        let graph = memory(graph_fixture::GRAPH_FIXTURE)
+            .schema_graph("main")
+            .expect("the graph should read");
+        graph_fixture::assert_graph_fixture(&graph);
+    }
+
+    #[test]
+    fn a_without_rowid_primary_key_is_read_once() {
+        let graph = memory(
+            "CREATE TABLE kept (a INT NOT NULL, b INT NOT NULL, PRIMARY KEY (a, b)) WITHOUT ROWID;
+             CREATE TABLE alone (a INT NOT NULL PRIMARY KEY) WITHOUT ROWID;",
+        )
+        .schema_graph("main")
+        .expect("the graph should read");
+        let kept = crate::db::graph::seed::column(&graph, "kept", "a");
+        assert!(kept.primary && !kept.unique);
+        assert!(crate::db::graph::seed::column(&graph, "alone", "a").unique);
     }
 
     #[test]
@@ -2333,6 +2560,47 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
                 },
             ]
         );
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_SQLITE_PATH"]
+    fn live_a_schema_graph_reads_the_seeds_keys_back() {
+        use crate::db::graph::seed;
+
+        let graph = live().schema_graph("main").expect("the graph should read");
+
+        assert!(
+            graph
+                .tables
+                .iter()
+                .all(|table| table.name.as_ref() != "account_overview"),
+            "a view is not drawn"
+        );
+        seed::assert_keys_read_back(&graph);
+        assert_eq!(
+            graph.types[seed::column(&graph, "orders", "total").type_label as usize].as_ref(),
+            "NUMERIC"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_SQLITE_PATH"]
+    fn live_a_cancel_on_its_own_connection_stops_a_catalog_statement() {
+        // `schema_graph` is three `internal_query` calls, which is what is
+        // stopped here: no catalog read of a local file runs long enough to
+        // interrupt.
+        let side = live().alongside().expect("a side connection should open");
+        let canceller = side.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            canceller.cancel().expect("cancelling cannot fail");
+        });
+
+        let error = side
+            .internal_query(FOREVER)
+            .expect_err("the statement should be interrupted");
+        assert!(error.message.contains("interrupt"), "{}", error.message);
+        assert!(side.schema_graph("main").is_ok());
     }
 
     #[test]

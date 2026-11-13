@@ -1919,10 +1919,12 @@ impl Connection {
             Self::Postgres(connection) => connection.schema_graph(schema),
             Self::MySql(connection) => connection.schema_graph(schema),
             Self::SqlServer(connection) => connection.schema_graph(schema),
+            Self::Sqlite(connection) => connection.schema_graph(schema),
+            Self::Turso(connection) => connection.schema_graph(schema),
             // ponytail: read in the next slice of the diagram's first phase.
-            Self::Sqlite(_) | Self::Turso(_) | Self::DuckDb(_) | Self::Snowflake(_) => Err(
-                plain_error("The diagram is not read on this engine yet.".into()),
-            ),
+            Self::DuckDb(_) | Self::Snowflake(_) => Err(plain_error(
+                "The diagram is not read on this engine yet.".into(),
+            )),
             Self::ClickHouse(_) | Self::MongoDb(_) | Self::Redis(_) => Err(plain_error(
                 "This engine declares no foreign keys to draw.".into(),
             )),

@@ -515,7 +515,7 @@ pub(super) mod seed {
             .unwrap_or_else(|| panic!("{table}.{name} should be read"))
     }
 
-    fn names(graph: &SchemaGraph, table: u32, columns: &[u32]) -> Vec<String> {
+    pub fn names(graph: &SchemaGraph, table: u32, columns: &[u32]) -> Vec<String> {
         columns
             .iter()
             .map(|&column| {
