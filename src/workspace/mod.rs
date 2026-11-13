@@ -5,6 +5,7 @@
 //! inherent impl rather than types of their own.
 
 mod commands;
+mod diagrams;
 #[cfg(test)]
 mod e2e;
 mod editing;
@@ -1514,6 +1515,9 @@ impl Render for Workspace {
                 {
                     Some(ObjectBody::Relation { results, .. }) => Focus::Grid(results.clone()),
                     Some(ObjectBody::Structure { grid, .. }) => Focus::Structure(grid.clone()),
+                    Some(ObjectBody::Diagram { view, .. }) => {
+                        Focus::Diagram(view.read(cx).focus_handle().clone())
+                    }
                     // A routine's tab is read: nothing in it takes a
                     // keystroke. The window still has to hold focus, or the
                     // bindings that leave this tab go with it -- as it does
@@ -1555,6 +1559,7 @@ impl Render for Workspace {
             Some(Focus::Field(input)) => input.focus_handle(cx).focus(window, cx),
             Some(Focus::Grid(grid)) => grid.focus_handle(cx).focus(window, cx),
             Some(Focus::Structure(grid)) => grid.focus_handle(cx).focus(window, cx),
+            Some(Focus::Diagram(handle)) => handle.focus(window, cx),
             Some(Focus::Window) => self.focus.focus(window, cx),
             None => {}
         }
@@ -1972,7 +1977,7 @@ impl Render for Workspace {
             else {
                 return None;
             };
-            let ObjectKind::Relation(kind) = tab.kind else {
+            let Some(ObjectKind::Relation(kind)) = tab.kind else {
                 return None;
             };
             let connected = matches!(profile.state, ProfileState::Connected(_));

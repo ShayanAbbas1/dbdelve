@@ -1968,7 +1968,7 @@ impl Workspace {
         // the first moment there is anything to correct it from.
         if let CatalogState::Loaded(catalog, _) = &profile.catalog {
             for tab in &mut profile.session.objects {
-                if let ObjectKind::Relation(kind) = &mut tab.kind
+                if let Some(ObjectKind::Relation(kind)) = &mut tab.kind
                     && let Some(actual) = relation_kind(catalog, &tab.schema, &tab.name)
                 {
                     *kind = actual;

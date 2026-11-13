@@ -711,6 +711,7 @@ impl Workspace {
             }
             Command::RecallStatement(sql) => self.recall_statement(sql, window, cx),
             Command::ShowStructure(structure) => self.show_structure(structure, window, cx),
+            Command::ShowDiagram(schema) => self.open_diagram(schema, window, cx),
             Command::RefreshRelation(id) => self.refresh_relation(id, cx),
             Command::CountRows(id) => self.count_rows(id, cx),
             Command::NextPage => self.turn_page(true, cx),
@@ -833,7 +834,7 @@ impl Workspace {
             Command::CopyDdl => {
                 let front = self.profile().and_then(|profile| {
                     let tab = profile.session.active_object()?;
-                    match tab.kind {
+                    match tab.kind? {
                         ObjectKind::Relation(kind) => {
                             Some((tab.schema.clone(), tab.name.clone(), kind))
                         }

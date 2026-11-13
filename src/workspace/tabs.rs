@@ -928,6 +928,15 @@ impl Workspace {
             cx.notify();
             return;
         }
+        if let Some(ObjectBody::Diagram { view, .. }) = self
+            .profile()
+            .and_then(|profile| profile.session.active_object())
+            .map(|tab| &tab.body)
+            && view.read(cx).has_focus()
+        {
+            view.update(cx, |view, cx| view.clear_focus(cx));
+            return;
+        }
         // Nothing of dbdelve's is stacked over the tab, so the keystroke is not
         // ours. Handing it on is what lets the completion popup close and a
         // grid cell's input cancel its edit; this binding is unscoped and would
@@ -967,6 +976,7 @@ impl Workspace {
                 crate::result_grid::take_keyboard(table, window, cx)
             }),
             Focus::Structure(grid) => grid.focus_handle(cx).focus(window, cx),
+            Focus::Diagram(handle) => handle.focus(window, cx),
             Focus::Buffer(editor) => editor.focus_handle(cx).focus(window, cx),
             Focus::Field(_) | Focus::Window => return,
         }
@@ -1002,7 +1012,7 @@ impl Workspace {
                     .then(|| Focus::Grid(results.clone()))
             }
             ObjectBody::Structure { grid, .. } => Some(Focus::Structure(grid.clone())),
-            ObjectBody::Routine(_) => None,
+            ObjectBody::Routine(_) | ObjectBody::Diagram { .. } => None,
         }
     }
 

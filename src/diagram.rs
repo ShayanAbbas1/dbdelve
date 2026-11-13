@@ -8,7 +8,7 @@ pub mod index;
 pub mod layout;
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use crate::db::{GraphColumn, GraphKey, GraphTable, KeyTarget, SchemaGraph};
 
     use super::geometry::{Point, Rect};
@@ -27,7 +27,7 @@ mod tests {
 
     /// `tables` tables with an `id` primary key each, and a foreign key per
     /// `(child, parent)` pair, from a column of its own to the parent's `id`.
-    pub(super) fn graph(tables: usize, keys: &[(u32, u32)]) -> SchemaGraph {
+    pub(crate) fn graph(tables: usize, keys: &[(u32, u32)]) -> SchemaGraph {
         let mut graph = SchemaGraph {
             schema: "public".into(),
             tables: (0..tables)

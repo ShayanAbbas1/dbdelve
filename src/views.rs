@@ -772,6 +772,12 @@ fn render_object(
     // Scopes this tab's scroll state to its own id -- see the same line in
     // `render_query_surface`.
     let scope = Tab::Object(tab.id).scroll_scope(profile_id);
+    if let ObjectBody::Diagram { view, .. } = &tab.body {
+        return view
+            .clone()
+            .cached(gpui::StyleRefinement::default().size_full())
+            .into_any_element();
+    }
     if let ObjectBody::Structure {
         structure, grid, ..
     } = &tab.body
@@ -3294,7 +3300,8 @@ fn render_tab_strip(
                 t,
                 match object.body {
                     ObjectBody::Structure { .. } => icon::STRUCTURE,
-                    _ => object_icon(object.kind),
+                    ObjectBody::Diagram { .. } => icon::DIAGRAM,
+                    _ => object.kind.map_or(icon::TABLE, object_icon),
                 },
             ))
             .child(name_label(object.name.clone()))

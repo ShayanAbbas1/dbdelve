@@ -5,9 +5,11 @@ mod actions;
 mod completion;
 mod connection_form;
 mod db;
-// Nothing draws it until the diagram's view lands (phase 2).
+// The neighbourhood view and edge hit tests are reached by the diagram's
+// toolbar, which comes next (design §2.4).
 #[cfg_attr(not(test), allow(dead_code))]
 mod diagram;
+mod diagram_view;
 mod explain;
 mod explorer;
 mod export;

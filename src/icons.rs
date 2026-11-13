@@ -24,7 +24,7 @@ use crate::db::Syntax;
 /// The gpui-component widgets ask for their own paths — those are Lucide names
 /// too, so they resolve here as well. Add a row when something asks for one;
 /// an unlisted path simply draws nothing.
-const ICONS: [(&str, &IconData); 81] = [
+const ICONS: [(&str, &IconData); 82] = [
     ("icons/git-fork.svg", icondata_lu::LuGitFork),
     ("icons/chevron-down.svg", icondata_lu::LuChevronDown),
     ("icons/chevron-right.svg", icondata_lu::LuChevronRight),
@@ -95,6 +95,7 @@ const ICONS: [(&str, &IconData); 81] = [
     ),
     ("icons/keyboard.svg", icondata_lu::LuKeyboard),
     ("icons/link.svg", icondata_lu::LuLink),
+    ("icons/network.svg", icondata_lu::LuNetwork),
     ("icons/import.svg", icondata_lu::LuImport),
     ("icons/ban.svg", icondata_lu::LuBan),
     ("icons/rotate-ccw.svg", icondata_lu::LuRotateCcw),
@@ -195,6 +196,7 @@ pub mod icon {
     pub const FUNCTION: &str = "icons/square-function.svg";
     pub const PROCEDURE: &str = "icons/square-play.svg";
     pub const STRUCTURE: &str = "icons/list-tree.svg";
+    pub const DIAGRAM: &str = "icons/network.svg";
     pub const PLUS: &str = "icons/plus.svg";
     pub const CHECK: &str = "icons/check.svg";
     pub const CLOSE: &str = "icons/close.svg";
@@ -361,6 +363,7 @@ mod tests {
             icon::FUNCTION,
             icon::PROCEDURE,
             icon::STRUCTURE,
+            icon::DIAGRAM,
             icon::PLUS,
             icon::CHECK,
             icon::CLOSE,

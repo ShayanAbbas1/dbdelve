@@ -647,7 +647,9 @@ fn enter_opens_a_sidebar_row_and_its_structure_takes_the_keyboard(cx: &mut TestA
                     ObjectBody::Structure { grid, .. } => {
                         (true, grid.focus_handle(cx).is_focused(window))
                     }
-                    ObjectBody::Routine(_) => panic!("birds is a table"),
+                    ObjectBody::Routine(_) | ObjectBody::Diagram { .. } => {
+                        panic!("birds is a table")
+                    }
                 }
             })
         };
@@ -3991,6 +3993,68 @@ fn the_default_chip_puts_a_typed_then_emptied_insert_field_back_out_of_the_state
         assert_eq!(state(1, cx), nulled());
         let sql = statement(cx);
         assert!(sql.contains("NULL") && !sql.contains("robin"), "{sql}");
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_palette_opens_a_diagram_that_takes_the_keyboard_and_escape_clears_its_focus(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            "create table birds (id integer primary key, name text);
+             create table sightings (id integer primary key, bird integer not null references birds(id));",
+        );
+
+        cx.simulate_keystrokes("secondary-shift-p");
+        settle(cx);
+        cx.simulate_input("Show diagram of main");
+        settle(cx);
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+
+        let diagram = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                match workspace
+                    .read(cx)
+                    .profile()
+                    .and_then(|profile| profile.session.active_object())
+                    .map(|tab| &tab.body)
+                {
+                    Some(ObjectBody::Diagram { view, side }) => {
+                        assert!(side.is_none(), "the read landed and let its connection go");
+                        view.clone()
+                    }
+                    _ => panic!("the diagram is in front"),
+                }
+            })
+        };
+        let view = diagram(cx);
+        let keyboard = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| view.read(cx).focus_handle().is_focused(window))
+        };
+        assert!(keyboard(cx), "the canvas holds the keyboard");
+
+        let birds = cx
+            .update(|_, cx| view.read(cx).table_on_screen(0))
+            .expect("the diagram drew the birds");
+        cx.simulate_click(birds, gpui::Modifiers::default());
+        settle(cx);
+        assert!(
+            cx.update(|_, cx| view.read(cx).has_focus()),
+            "a click focuses a card"
+        );
+
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+        assert!(
+            !cx.update(|_, cx| view.read(cx).has_focus()),
+            "escape clears it"
+        );
+        assert!(keyboard(cx), "and leaves the keyboard on the canvas");
 
         quit(workspace, cx);
     });

@@ -159,7 +159,7 @@ impl Workspace {
             id,
             schema,
             name,
-            kind,
+            kind: Some(kind),
             body,
         });
         // See `new_query`'s own `place_last`. A session restored at launch
@@ -201,6 +201,10 @@ impl Workspace {
                 if !asked || matches!(structure, StructureState::Failed(_)) {
                     self.load_structure(id, schema, relation, cx);
                 }
+                return;
+            }
+            ObjectBody::Diagram { .. } => {
+                self.load_diagram(id, cx);
                 return;
             }
             ObjectBody::Routine(_) => return,
@@ -659,7 +663,7 @@ impl Workspace {
                             }
                             *structure = loaded(result);
                         }
-                        ObjectBody::Routine(_) => {}
+                        ObjectBody::Routine(_) | ObjectBody::Diagram { .. } => {}
                     }
                     cx.notify();
                     // The rows and the structure are two requests and either can
@@ -1151,7 +1155,7 @@ impl Workspace {
         else {
             return;
         };
-        let ObjectKind::Relation(kind) = tab.kind else {
+        let Some(ObjectKind::Relation(kind)) = tab.kind else {
             return;
         };
         let origin = match &tab.body {
@@ -1578,6 +1582,7 @@ impl Workspace {
         // A count outliving its tab would hold the connection for an answer
         // nothing is left to show.
         self.cancel_count(id, cx);
+        self.cancel_diagram(id, cx);
         let mut in_front = None;
         if let Some(profile) = self.profile_mut() {
             if profile.session.active == Tab::Object(id) {

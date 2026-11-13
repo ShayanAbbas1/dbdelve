@@ -54,7 +54,9 @@ impl Workspace {
                 };
                 let structure = match &tab.body {
                     ObjectBody::Relation { structure, .. } => structure,
-                    ObjectBody::Structure { .. } | ObjectBody::Routine(_) => return,
+                    ObjectBody::Structure { .. }
+                    | ObjectBody::Routine(_)
+                    | ObjectBody::Diagram { .. } => return,
                 };
                 if !tab.takes_inserts(self.target()) {
                     self.note("This view takes no inserts.".into(), cx);

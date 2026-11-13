@@ -2337,7 +2337,9 @@ impl Workspace {
                 .and_then(|profile| profile.session.objects.iter().find(|tab| tab.id == object))
                 .and_then(|tab| match &tab.body {
                     ObjectBody::Relation { limit, .. } => *limit,
-                    ObjectBody::Routine(_) | ObjectBody::Structure { .. } => None,
+                    ObjectBody::Routine(_)
+                    | ObjectBody::Structure { .. }
+                    | ObjectBody::Diagram { .. } => None,
                 }),
             Tab::Object(_) | Tab::Query(_) => None,
         };
