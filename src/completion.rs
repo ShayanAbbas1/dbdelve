@@ -562,6 +562,7 @@ impl SchemaCompletions {
             .into_iter()
             .map(|(binding, _)| binding)
             .collect::<Vec<_>>();
+        let here = sources(&reach(&code(around.head)));
         // A relation the statement already reaches into by name keeps it:
         // `SELECT orders.id FROM orders o` no longer has an `orders`.
         let alias = |relation: &str| {
@@ -572,7 +573,9 @@ impl SchemaCompletions {
             });
             // Unless it is held already: a second `employees` beside the
             // first needs a name of its own.
-            let held = taken.iter().any(|held| held.eq_ignore_ascii_case(relation));
+            let held = here
+                .iter()
+                .any(|held| held.relation.eq_ignore_ascii_case(relation));
             (!named || held).then(|| alias_for(relation, &taken))
         };
 
@@ -2739,6 +2742,11 @@ mod tests {
             "customers ON customers.id = o.customer_id"
         );
         assert_eq!(first("SELECT o.id FROM custo|"), "customers c");
+        // One in a subquery is not beside it.
+        assert_eq!(
+            first("SELECT employees.id FROM emp| WHERE EXISTS (SELECT 1 FROM employees e)"),
+            "employees"
+        );
         assert_eq!(
             first("SELECT employees.id FROM employees JOIN emp|"),
             "employees e ON e.id = employees.manager_id"
