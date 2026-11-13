@@ -1031,7 +1031,7 @@ impl Workspace {
         };
         match self.dialog_in_front.get() {
             Some("pending-run") => profile.session.pending_run.as_ref().is_some_and(|pending| {
-                match self.gate_run(profile, &pending.verdict, pending.own_run) {
+                match sql::gate(&pending.verdict, profile.mode, &profile.confirmed) {
                     Some(Stop::Confirm(kind)) => kind.suppressible(),
                     Some(Stop::RunOnce) => pending.own_run,
                     _ => false,
@@ -1609,8 +1609,11 @@ impl Workspace {
         let pending = profile.session.pending_run.as_ref()?;
         // Re-derived rather than trusted from when the prompt was raised: the
         // mode or the silenced list may have changed underneath it (the
-        // upgrade arm changes the mode itself, mid-prompt).
-        let stop = self.gate_run(profile, &pending.verdict, pending.own_run)?;
+        // upgrade arm changes the mode itself, mid-prompt). With the plain
+        // gate, not `gate_run`: the opt-in decides whether a prompt goes up,
+        // and one already up that it later waved through would vanish with
+        // its statement neither run nor cancelled.
+        let stop = sql::gate(&pending.verdict, profile.mode, &profile.confirmed)?;
         let name = profile.name.clone();
         let current_mode = profile.mode.label();
         let syntax = profile.config.engine().syntax();

@@ -175,8 +175,8 @@ impl Workspace {
     }
 
     /// `sql::gate` for a run on `profile`, with `Settings::run_unreadable`
-    /// applied where `session::skips_run_once` allows it. The one derivation,
-    /// so running, the prompt and its box cannot disagree about what it asks.
+    /// applied where `session::skips_run_once` allows it: whether a prompt
+    /// goes up at all. A prompt already up re-derives with the plain gate.
     pub(crate) fn gate_run(
         &self,
         profile: &Profile,
@@ -209,9 +209,10 @@ impl Workspace {
         else {
             return;
         };
+        // The plain gate, as the prompt is drawn with (`render_pending_run`).
         let Some(stop) = self
             .profile()
-            .and_then(|profile| self.gate_run(profile, &verdict, own_run))
+            .and_then(|profile| sql::gate(&verdict, profile.mode, &profile.confirmed))
         else {
             return;
         };

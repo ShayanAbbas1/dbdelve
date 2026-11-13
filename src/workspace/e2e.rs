@@ -1347,6 +1347,31 @@ fn the_ring_reaches_dont_ask_again_and_enter_or_space_ticks_it(cx: &mut TestAppC
     });
 }
 
+/// The opt-in coming into force under a prompt already up -- switched on, or
+/// a Read-only hold landing -- must not take the prompt down with its
+/// statement neither run nor cancelled.
+#[gpui::test]
+fn a_run_once_prompt_already_up_stays_up_when_the_opt_in_applies(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        cx.simulate_input("selec 1");
+        raise_run_once_prompt(&workspace, cx);
+
+        workspace.update(cx, |workspace, cx| workspace.set_run_unreadable(true, cx));
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("pending-run"));
+
+        press(cx, "enter");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), None);
+        query_tab(&workspace, cx, |tab, _, _| {
+            assert!(matches!(tab.query, QueryState::Failed(_)), "Run once ran");
+        });
+
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn ticking_run_once_s_box_runs_the_next_unreadable_statement_unasked(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
