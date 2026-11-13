@@ -1,0 +1,69 @@
+name: update-e2e-windows
+
+# The Windows self-update end to end: dev/update-e2e-windows.ps1 builds this
+# version and a 99.0.0 with update-test-hooks, signs the newer one with a key
+# made for the run, and has the older app update itself from a feed on
+# 127.0.0.1. No repository secret is involved, so it runs from any branch.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "src/update/**"
+      - "src/update.rs"
+      - "assets/windows/**"
+      - "dev/package-windows.ps1"
+      - "dev/update-e2e-windows.ps1"
+      - "dev/update-test-kit/**"
+      - ".github/workflows/update-e2e-windows.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-e2e-windows-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+# The update path does not care how the binary was optimised; two release
+# builds with the shipped thin LTO and one codegen unit are most of an hour.
+env:
+  CARGO_PROFILE_RELEASE_LTO: "false"
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - name: checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # A key of its own: ci.yml's Windows cache is a dev-profile build.
+      - name: rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: update-e2e
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: inno setup
+        run: choco install innosetup --no-progress --yes
+      - name: update end to end
+        run: pwsh -NoProfile -File dev/update-e2e-windows.ps1 -Work "$env:RUNNER_TEMP\update-e2e" -Kit "$env:RUNNER_TEMP\update-test-kit"
+        shell: pwsh
+      # For testing by hand what CI cannot: the click, the UAC prompt, the
+      # unelevated reopen (dev/update-test-kit/README.txt). Present only when
+      # it was built and its server checked out, failing scenarios or not.
+      - name: test kit
+        if: success() || failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: update-test-kit-windows
+          path: ${{ runner.temp }}/update-test-kit
+          if-no-files-found: ignore
+          retention-days: 3
+      - name: diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: update-e2e-diagnostics
+          path: ${{ runner.temp }}/update-e2e/diagnostics
+          if-no-files-found: ignore

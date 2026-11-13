@@ -1,13 +1,16 @@
+#[cfg(unix)]
 use std::{
     ffi::CString,
-    fs::{self, File},
-    io::{Read as _, Write as _},
     os::{
         fd::AsRawFd as _,
         unix::{ffi::OsStrExt as _, fs::DirBuilderExt as _},
     },
-    path::{Path, PathBuf},
     process::{Command, Stdio},
+};
+use std::{
+    fs::{self, File},
+    io::{Read, Write as _},
+    path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -50,6 +53,7 @@ fn parse_key(key: &str) -> Option<PublicKey> {
     PublicKey::from_base64(key.trim()).ok()
 }
 
+#[cfg(unix)]
 pub(super) fn writable(path: &Path) -> bool {
     let Ok(path) = CString::new(path.as_os_str().as_bytes()) else {
         return false;
@@ -58,9 +62,26 @@ pub(super) fn writable(path: &Path) -> bool {
     unsafe { libc::access(path.as_ptr(), libc::W_OK) == 0 }
 }
 
+/// Whether a file can be made in the folder `path`, by making one. Windows has
+/// no answer short of trying: a folder's ACL, not its read-only attribute,
+/// decides.
+#[cfg(windows)]
+pub(super) fn writable(path: &Path) -> bool {
+    let probe = path.join(format!(".dbdelve-write-probe-{}", unique()));
+    match File::create_new(&probe) {
+        Ok(file) => {
+            drop(file);
+            _ = fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 /// Held for the length of an install, so a second DBDelve process cannot
 /// clear the first one's staged copy as a leftover. Released when the
 /// returned file closes.
+#[cfg(unix)]
 pub(super) fn lock(installed: &Path) -> Result<File, String> {
     let parent = installed
         .parent()
@@ -71,6 +92,57 @@ pub(super) fn lock(installed: &Path) -> Result<File, String> {
         return Err(std::io::Error::last_os_error().to_string());
     }
     Ok(directory)
+}
+
+/// A file opened with no sharing stands in for `flock`. It lives in this
+/// user's temporary folder, named after the install's folder, since an
+/// all-users install's own folder is not writable without elevation.
+#[cfg(windows)]
+pub(super) fn lock(installed: &Path) -> Result<File, String> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    let parent = installed
+        .parent()
+        .ok_or("the app has no parent directory")?;
+    // One lock for every spelling of the folder, short names included.
+    let parent = fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+    let path = std::env::temp_dir().join(lock_name(&parent));
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .share_mode(0)
+        .open(&path)
+        .map_err(|error| format!("{}: {error}", path.display()))
+}
+
+/// The same for every spelling Windows treats as the same folder, and the
+/// same from one build to the next, which `DefaultHasher` does not promise.
+#[cfg(any(windows, test))]
+fn lock_name(folder: &Path) -> String {
+    let folder = folder.to_string_lossy().replace('/', "\\").to_lowercase();
+    let folder = if let Some(share) = folder.strip_prefix(r"\\?\unc\") {
+        format!(r"\\{share}")
+    } else if let Some(local) = folder.strip_prefix(r"\\?\") {
+        local.to_string()
+    } else {
+        folder
+    };
+    let folder = folder.trim_end_matches('\\');
+    let hash = folder
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+        });
+    format!("dbdelve-update-{hash:016x}.lock")
+}
+
+pub(super) fn unique() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    format!("{}-{nanos}", std::process::id())
 }
 
 pub(super) fn failed(reason: &'static str) -> impl FnOnce(String) -> &'static str {
@@ -96,22 +168,59 @@ pub(super) fn remove(path: &Path) {
 
 /// A fresh directory of its own, gone with everything in it when dropped.
 /// Only this user can enter it: what is verified in it is what gets installed,
-/// so nobody else may swap a file in between.
+/// so nobody else may swap a file in between. On Windows it is under
+/// LocalAppData, which is the user's own and what is made in it inherits that;
+/// the temporary folder can be pointed somewhere shared.
 pub(super) struct Scratch(pub(super) PathBuf);
 
 impl Scratch {
     pub(super) fn new() -> Result<Self, String> {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |since| since.as_nanos());
-        let path =
-            std::env::temp_dir().join(format!("dbdelve-update-{}-{nanos}", std::process::id()));
-        fs::DirBuilder::new()
-            .mode(0o700)
+        let path = scratch_root()?.join(format!("dbdelve-update-{}", unique()));
+        #[cfg(unix)]
+        let builder = {
+            let mut builder = fs::DirBuilder::new();
+            builder.mode(0o700);
+            builder
+        };
+        #[cfg(not(unix))]
+        let builder = fs::DirBuilder::new();
+        builder
             .create(&path)
             .map_err(|error| format!("{}: {error}", path.display()))?;
         Ok(Self(path))
     }
+}
+
+#[cfg(unix)]
+fn scratch_root() -> Result<PathBuf, String> {
+    Ok(std::env::temp_dir())
+}
+
+#[cfg(windows)]
+fn scratch_root() -> Result<PathBuf, String> {
+    let root = std::env::var_os("LOCALAPPDATA")
+        .filter(|root| !root.is_empty())
+        .ok_or("LOCALAPPDATA is not set")?;
+    let root = PathBuf::from(root).join("dbdelve").join("updates");
+    fs::create_dir_all(&root).map_err(|error| format!("{}: {error}", root.display()))?;
+    Ok(root)
+}
+
+/// The downloaded update, opened so that nothing else can write, rename or
+/// delete it until the handle closes. Taken before verifying and verified
+/// through, so what ran or was unpacked is what verified. Running it or
+/// reading it again still works: both only read.
+#[cfg(windows)]
+pub(super) fn hold(path: &Path) -> Result<File, String> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+
+    fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(path)
+        .map_err(|error| format!("{}: {error}", path.display()))
 }
 
 impl Drop for Scratch {
@@ -127,6 +236,10 @@ pub(super) fn agent() -> ureq::Agent {
         .timeout_connect(Some(Duration::from_secs(30)))
         .timeout_recv_response(Some(Duration::from_secs(30)))
         .timeout_recv_body(Some(Duration::from_secs(30 * 60)))
+        // The download follows the signature on the same host. A server that
+        // closed the first connection fails the second outright on Windows
+        // ("Peer disconnected") when the pool hands the dead one back.
+        .max_idle_connections(0)
         .user_agent(concat!("dbdelve/", env!("CARGO_PKG_VERSION")))
         .build()
         .into()
@@ -197,8 +310,20 @@ pub(super) fn fetch_signature(agent: &ureq::Agent, url: &str) -> Result<String, 
 /// the signature, and the name carries the version: without this, an older
 /// release's asset and its genuine signature, served under the new name,
 /// would verify.
+#[cfg(any(unix, test))]
 pub(super) fn verify(
     file: &Path,
+    signature: &str,
+    key: &PublicKey,
+    asset: &str,
+) -> Result<(), String> {
+    let file = File::open(file).map_err(|error| error.to_string())?;
+    verify_contents(file, signature, key, asset)
+}
+
+/// [`verify`], reading what to check from `file`.
+pub(super) fn verify_contents(
+    mut file: impl Read,
     signature: &str,
     key: &PublicKey,
     asset: &str,
@@ -207,7 +332,6 @@ pub(super) fn verify(
     let mut verifier = key
         .verify_stream(&signature)
         .map_err(|error| error.to_string())?;
-    let mut file = File::open(file).map_err(|error| error.to_string())?;
     let mut buffer = vec![0; 256 * 1024];
     loop {
         let read = file.read(&mut buffer).map_err(|error| error.to_string())?;
@@ -228,6 +352,7 @@ pub(super) fn verify(
 }
 
 /// Stdout on success; on failure, the exit status and what the tool said.
+#[cfg(unix)]
 pub(super) fn run(command: &mut Command) -> Result<String, String> {
     let program = command.get_program().to_string_lossy().into_owned();
     let output = command
@@ -246,11 +371,11 @@ pub(super) fn run(command: &mut Command) -> Result<String, String> {
 
 #[cfg(test)]
 pub(super) mod tests {
-    use std::{fs, os::unix::fs::PermissionsExt as _, path::PathBuf};
+    use std::{fs, path::PathBuf};
 
     use minisign_verify::PublicKey;
 
-    use super::{Scratch, lock, parse_key, remove, verify};
+    use super::{Scratch, lock, lock_name, parse_key, remove, verify};
 
     pub(in crate::update) fn scratch(name: &str) -> PathBuf {
         let directory =
@@ -345,16 +470,68 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn one_lock_per_folder_however_windows_spells_it() {
+        let name = lock_name(std::path::Path::new(
+            r"C:\Users\Me\AppData\Local\Programs\DBDelve",
+        ));
+        assert_eq!(
+            name,
+            lock_name(std::path::Path::new(
+                r"c:\users\me\appdata\local\programs\dbdelve\"
+            ))
+        );
+        assert_eq!(
+            name,
+            lock_name(std::path::Path::new(
+                "C:/Users/Me/AppData/Local/Programs/DBDelve"
+            ))
+        );
+        assert_eq!(
+            name,
+            lock_name(std::path::Path::new(
+                r"\\?\C:\Users\Me\AppData\Local\Programs\DBDelve"
+            ))
+        );
+        assert_eq!(
+            lock_name(std::path::Path::new(r"\\?\UNC\server\share\DBDelve")),
+            lock_name(std::path::Path::new(r"\\server\share\DBDelve"))
+        );
+        assert_ne!(
+            name,
+            lock_name(std::path::Path::new(r"C:\Program Files\DBDelve"))
+        );
+        assert!(name.starts_with("dbdelve-update-") && name.ends_with(".lock"));
+    }
+
+    #[test]
     fn the_scratch_directory_is_private_and_goes_when_dropped() {
         let scratch = Scratch::new().unwrap();
         let path = scratch.0.clone();
-        assert_eq!(
-            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-            0o700
-        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
         fs::write(path.join("download"), "x").unwrap();
         drop(scratch);
         assert!(!path.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_folder_is_writable_when_a_file_can_be_made_in_it() {
+        let directory = scratch("writable");
+        assert!(super::writable(&directory));
+        assert_eq!(
+            fs::read_dir(&directory).unwrap().count(),
+            0,
+            "the probe stays"
+        );
+        assert!(!super::writable(&directory.join("missing")));
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

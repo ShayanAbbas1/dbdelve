@@ -1033,6 +1033,9 @@ impl Workspace {
                     if let Some(found) = found.filter(|_| !running) {
                         workspace.update = Some(found);
                         cx.notify();
+                        if update::installs_unattended() {
+                            workspace.install_update(cx);
+                        }
                     }
                 });
                 if open.is_err() {

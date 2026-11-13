@@ -18,10 +18,8 @@ use super::{
         NOT_SIGNED, NOT_THE_APP, Scratch, agent, download, failed, fetch_signature, lock,
         release_key, remove, run, verify, writable,
     },
+    identity::{Identity, unchanged},
 };
-
-pub(super) const ALREADY_UPDATED: &str =
-    "DBDelve was updated since it started. Restart it to run that version.";
 
 /// Everything an install needs, found when the release was: having one is what
 /// makes this install eligible to update itself.
@@ -65,29 +63,6 @@ impl Kind {
         match self {
             Kind::AppImage(appimage) => appimage.clone(),
             Kind::Tarball { home } => home.join(".local/bin/dbdelve"),
-        }
-    }
-}
-
-/// A file, whatever path it is reached by or renamed to.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct Identity {
-    device: u64,
-    inode: u64,
-}
-
-impl Identity {
-    fn of(path: &Path) -> io::Result<Self> {
-        path.symlink_metadata()
-            .map(|metadata| Self::from(&metadata))
-    }
-}
-
-impl From<&fs::Metadata> for Identity {
-    fn from(metadata: &fs::Metadata) -> Self {
-        Self {
-            device: metadata.dev(),
-            inode: metadata.ino(),
         }
     }
 }
@@ -182,41 +157,10 @@ fn running(kind: &Kind, appimage_at_start: &OnceLock<Identity>) -> io::Result<Id
             .ok_or_else(|| io::Error::other("the AppImage was not recorded at startup")),
         // Still the file that was started even once it is replaced or
         // deleted, which the path `current_exe` reads is not.
-        Kind::Tarball { .. } => fs::metadata("/proc/self/exe").map(|metadata| Identity {
-            device: metadata.dev(),
-            inode: metadata.ino(),
-        }),
+        Kind::Tarball { .. } => {
+            fs::metadata("/proc/self/exe").map(|metadata| Identity::from(&metadata))
+        }
     }
-}
-
-/// Another process may have updated this install since it started, perhaps
-/// past the release this one offers: putting that over it would go backwards.
-/// [`ALREADY_UPDATED`], which offers a restart, only when another regular file
-/// has taken its place; anything else there could not be launched, and is a
-/// plain failure. The reason comes with the detail for the log.
-fn unchanged(installed: &Path, running: Identity) -> Result<(), (&'static str, String)> {
-    let metadata = installed.symlink_metadata().map_err(|error| {
-        (
-            COULD_NOT_REPLACE,
-            format!("{}: {error}", installed.display()),
-        )
-    })?;
-    if !metadata.is_file() {
-        return Err((
-            COULD_NOT_REPLACE,
-            format!("{} is no longer a file", installed.display()),
-        ));
-    }
-    if Identity::from(&metadata) != running {
-        return Err((
-            ALREADY_UPDATED,
-            format!(
-                "{} is no longer the file this DBDelve started from",
-                installed.display()
-            ),
-        ));
-    }
-    Ok(())
 }
 
 /// The one directory a release tarball holds.
@@ -565,11 +509,13 @@ mod tests {
     use flate2::{Compression, write::GzEncoder};
 
     use super::{
-        ALREADY_UPDATED, Identity, Kind, appimage_of, bundled_installer, kind_of, mount_point,
-        relaunchable, release_directory, remember, run, running, sibling, swap_in, unchanged,
-        unpack,
+        Identity, Kind, appimage_of, bundled_installer, kind_of, mount_point, relaunchable,
+        release_directory, remember, run, running, sibling, swap_in, unchanged, unpack,
     };
-    use crate::update::download::{COULD_NOT_REPLACE, NOT_THE_APP, tests::scratch};
+    use crate::update::{
+        download::{COULD_NOT_REPLACE, NOT_THE_APP, tests::scratch},
+        identity::ALREADY_UPDATED,
+    };
 
     /// macOS keeps its temp directory behind a symlink, and the executable
     /// path the app checks is always canonical.
@@ -806,7 +752,7 @@ mod tests {
             })
         };
         assert!(matches!(
-            State::stopped(super::ALREADY_UPDATED, installer()),
+            State::stopped(ALREADY_UPDATED, installer()),
             State::Superseded(path) if path == Path::new("/home/me/.local/bin/dbdelve")
         ));
         assert!(matches!(

@@ -14,6 +14,9 @@
 # the installer is skipped when iscc is missing; GitHub Actions installs it
 # first and this script fails if it still cannot find it.
 #
+# DBDELVE_FEATURES passes cargo features to the app's build (update-test-hooks
+# for dev/update-e2e-windows.ps1).
+#
 # Usage: powershell -File dev/package-windows.ps1
 
 $ErrorActionPreference = "Stop"
@@ -49,7 +52,8 @@ $OutDir = Join-Path $TargetDir "windows"
 $Stage = Join-Path $OutDir $Name
 $Zip = Join-Path $OutDir "$Name.zip"
 
-cargo build --release
+$Features = if ($env:DBDELVE_FEATURES) { @("--features", $env:DBDELVE_FEATURES) } else { @() }
+cargo build --release @Features
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 # The ODBC bridge: built here, never run -- the Windows build of it is untested.
 # It uses the system's odbc32, so nothing else travels with it.
