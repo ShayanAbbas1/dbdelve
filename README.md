@@ -120,7 +120,8 @@ statements you type run under the connection's mode. See
   ![An Explain Analyze plan for a join: each node with its actual and estimated rows and time, and a ×76 misestimate flagged](assets/screenshots/query-plan.png)
 
 - **Completion that knows your schema:** tables, and a table's columns after
-  its name and a dot.
+  its name and a dot. A table is written with an alias, and after `JOIN` with
+  the condition its foreign keys imply.
 
   ![Completing accounts. to its columns in a join](assets/screenshots/completion.png)
 

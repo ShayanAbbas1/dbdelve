@@ -75,6 +75,9 @@ pub(crate) struct Settings {
     /// Whether completing a relation writes it as `schema.relation`, for
     /// databases whose search path does not reach every schema.
     pub(crate) qualify_completions: bool,
+    /// Whether completing a table after FROM or JOIN adds a short alias, and
+    /// after JOIN offers the condition its foreign keys imply.
+    pub(crate) alias_completions: bool,
     /// Whether a statement the user runs that dbdelve cannot parse runs without
     /// the run-once prompt, for people who live in a dialect sqlparser misreads.
     pub(crate) run_unreadable: bool,
@@ -118,6 +121,7 @@ impl Default for Settings {
             color_titlebar: true,
             client_sort: false,
             qualify_completions: false,
+            alias_completions: true,
             run_unreadable: false,
             verbose_logging: false,
             welcomed: false,
@@ -603,6 +607,8 @@ impl Workspace {
                 workspace.settings.client_sort = stored_settings.client_sort.unwrap_or(false);
                 workspace.settings.qualify_completions =
                     stored_settings.qualify_completions.unwrap_or(false);
+                workspace.settings.alias_completions =
+                    stored_settings.alias_completions.unwrap_or(true);
                 workspace.settings.run_unreadable = stored_settings.run_unreadable.unwrap_or(false);
                 workspace.settings.verbose_logging =
                     stored_settings.verbose_logging.unwrap_or(false);
@@ -1255,6 +1261,29 @@ impl Workspace {
             .map(|profile| profile.id.clone())
             .collect();
         for id in ids {
+            self.install_completions(&id, cx);
+        }
+        self.remember_profiles(cx);
+        cx.notify();
+    }
+
+    /// Rebuilt on every profile now rather than at its next catalog load.
+    pub(crate) fn set_alias_completions(&mut self, alias: bool, cx: &mut Context<Self>) {
+        if self.settings.alias_completions == alias {
+            return;
+        }
+        self.settings.alias_completions = alias;
+        let ids: Vec<String> = self
+            .profiles
+            .iter()
+            .map(|profile| profile.id.clone())
+            .collect();
+        for id in ids {
+            if let Some(profile) = self.profiles.iter_mut().find(|profile| profile.id == id) {
+                // Columns cached while this was off were fetched without the
+                // reverse foreign keys the join conditions need.
+                profile.session.completion_columns = completion::ColumnCache::default();
+            }
             self.install_completions(&id, cx);
         }
         self.remember_profiles(cx);

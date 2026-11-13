@@ -3507,6 +3507,7 @@ mod tests {
             toml::from_str("color_titlebar = true").expect("older settings must still decode");
         assert_eq!(settings.client_sort, None);
         assert_eq!(settings.qualify_completions, None);
+        assert_eq!(settings.alias_completions, None);
         assert_eq!(
             Sorting::new(settings.client_sort.unwrap_or(false)),
             Sorting::Server

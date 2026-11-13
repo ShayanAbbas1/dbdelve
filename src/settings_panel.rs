@@ -109,6 +109,7 @@ enum SettingId {
     RowLimit,
     DefaultSorting,
     QualifyCompletions,
+    AliasCompletions,
     RunUnreadable,
     CheckForUpdates,
     VerboseLogging,
@@ -187,6 +188,15 @@ fn setting_rows() -> Vec<SettingRow> {
                 "prefix",
                 "qualified",
             ],
+        ),
+        row(
+            SettingId::AliasCompletions,
+            SettingsTab::General,
+            "Editor",
+            "Alias tables and suggest joins",
+            "Completing a table after FROM or JOIN adds a short alias, and \
+             after JOIN offers the condition its foreign keys imply.",
+            &["autocomplete", "completion", "alias", "join", "foreign key"],
         ),
         row(
             SettingId::RunUnreadable,
@@ -833,6 +843,12 @@ fn render_control(
                 }))
                 .into_any_element()
         }
+        SettingId::AliasCompletions => switch("alias-completions", settings.alias_completions, t)
+            .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
+                let alias = !workspace.settings.alias_completions;
+                workspace.set_alias_completions(alias, cx);
+            }))
+            .into_any_element(),
         SettingId::RunUnreadable => switch("run-unreadable", settings.run_unreadable, t)
             .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
                 let run = !workspace.settings.run_unreadable;
@@ -1111,6 +1127,7 @@ mod tests {
         assert!(found("sort").contains(&SettingId::DefaultSorting));
         assert!(found("titlebar").contains(&SettingId::ColorTitlebar));
         assert!(found("autocomplete").contains(&SettingId::QualifyCompletions));
+        assert!(found("alias").contains(&SettingId::AliasCompletions));
         assert!(found("unparseable").contains(&SettingId::RunUnreadable));
         assert!(found("transparency").contains(&SettingId::Opacity));
         assert!(found("updates").contains(&SettingId::CheckForUpdates));
@@ -1162,7 +1179,7 @@ mod tests {
                 SettingId::Keybinding("sort_active_column"),
             ]
         );
-        assert_eq!(found("!keyboard").len(), 15);
+        assert_eq!(found("!keyboard").len(), 16);
     }
 
     #[test]

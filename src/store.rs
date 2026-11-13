@@ -518,6 +518,7 @@ pub struct StoredSettings {
     #[serde(default)]
     pub qualify_completions: Option<bool>,
     #[serde(default)]
+    pub alias_completions: Option<bool>,
     pub run_unreadable: Option<bool>,
     #[serde(default)]
     pub verbose_logging: Option<bool>,
@@ -3961,6 +3962,7 @@ open_objects = []
                 color_titlebar: Some(false),
                 client_sort: Some(true),
                 qualify_completions: Some(true),
+                alias_completions: Some(true),
                 run_unreadable: Some(true),
                 verbose_logging: Some(true),
                 welcomed: Some(true),

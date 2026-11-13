@@ -33,7 +33,10 @@ use lsp_types::{
 
 use crate::{
     Workspace,
-    db::{Builtin, BuiltinKind, Catalog, Engine, RelationKind, Syntax},
+    db::{
+        Builtin, BuiltinKind, Catalog, Engine, ForeignKey, Reference, RelationKind, Structure,
+        Syntax,
+    },
     fuzzy::{Fuzzy, Query},
     mql::{self, Completing},
     redis_cmd, sql,
@@ -56,7 +59,7 @@ pub enum ColumnState {
     /// Held so a relation is asked about once rather than on every keystroke
     /// until it lands.
     Loading(u8),
-    Loaded(Vec<String>),
+    Loaded(Described),
     /// That many attempts have failed. Retried while it is under
     /// [`FETCH_ATTEMPTS`], and then not again for this connection.
     ///
@@ -67,6 +70,31 @@ pub enum ColumnState {
     /// queues on the connection mutex behind the last, so a slow failure would
     /// freeze the profile rather than degrade it.
     Failed(u8),
+}
+
+/// What a describe told completion about one relation: its columns, and the
+/// foreign keys a `JOIN` onto it or from it would follow.
+#[derive(Clone, Debug, Default)]
+pub struct Described {
+    pub columns: Vec<String>,
+    pub foreign_keys: Vec<ForeignKey>,
+    /// Empty when the describe did not ask who points back, which it only
+    /// does while joins are being suggested.
+    pub referenced_by: Vec<Reference>,
+}
+
+impl From<&Structure> for Described {
+    fn from(structure: &Structure) -> Self {
+        Self {
+            columns: structure
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect(),
+            foreign_keys: structure.foreign_keys.clone(),
+            referenced_by: structure.referenced_by.clone(),
+        }
+    }
 }
 
 /// How many times a relation's columns are asked for before dbdelve stops.
@@ -174,6 +202,11 @@ struct Candidate {
     /// The built-in it offers, whose call and documentation are spelled, like
     /// a qualified name, only for the few that survive ranking.
     builtin: Option<&'static Builtin>,
+    /// The alias a relation is written with, where one belongs.
+    alias: Option<String>,
+    /// The condition that joins it to a relation the statement already
+    /// holds, spelled with that alias.
+    on: Option<String>,
 }
 
 impl Candidate {
@@ -184,7 +217,13 @@ impl Candidate {
             kind,
             qualified: false,
             builtin: None,
+            alias: None,
+            on: None,
         }
+    }
+
+    fn qualified(self, qualified: bool) -> Self {
+        Self { qualified, ..self }
     }
 
     fn builtin(builtin: &'static Builtin) -> Self {
@@ -212,13 +251,25 @@ impl Candidate {
                 _ => format!("{}(", builtin.name),
             };
         }
-        match (self.qualified, &self.detail) {
+        let name = match (self.qualified, &self.detail) {
             (true, Some(schema)) => format!(
                 "{}.{}",
                 engine.quote_identifier_if_needed(schema),
                 engine.quote_identifier_if_needed(&self.label)
             ),
             _ => self.label.clone(),
+        };
+        format!("{name}{}", self.aliasing())
+    }
+
+    /// The alias and join condition that follow the name, in the buffer and
+    /// in the popup alike, so the row shows what accepting it writes.
+    fn aliasing(&self) -> String {
+        match (&self.alias, &self.on) {
+            (Some(alias), Some(on)) => format!(" {alias} ON {on}"),
+            (Some(alias), None) => format!(" {alias}"),
+            (None, Some(on)) => format!(" ON {on}"),
+            (None, None) => String::new(),
         }
     }
 
@@ -251,6 +302,9 @@ pub struct SchemaCompletions {
     catalog: Arc<Catalog>,
     columns: ColumnCache,
     qualify: bool,
+    /// Whether a relation completed after `FROM` or `JOIN` is given an alias,
+    /// and one after `JOIN` the condition its foreign keys imply.
+    alias: bool,
     /// Who to ask when a relation's columns are wanted and not yet held.
     ///
     /// `None` only in this module's own tests, which drive [`Self::items`]
@@ -267,6 +321,7 @@ impl SchemaCompletions {
         catalog: Arc<Catalog>,
         columns: ColumnCache,
         qualify: bool,
+        alias: bool,
         workspace: WeakEntity<Workspace>,
     ) -> Self {
         Self {
@@ -274,6 +329,7 @@ impl SchemaCompletions {
             catalog,
             columns,
             qualify,
+            alias,
             workspace: Some(workspace),
             fuzzy: RefCell::new(Fuzzy::new()),
         }
@@ -343,30 +399,216 @@ impl SchemaCompletions {
     /// describe on the wire, and a second would reset the first's count of
     /// failed attempts.
     fn columns_at(&self, key: (String, String), wanted: &mut Wanted) -> Vec<Candidate> {
+        let relation = key.1.clone();
+        self.described(key, wanted, |described| {
+            described
+                .columns
+                .iter()
+                .map(|column| {
+                    Candidate::new(column, Some(relation.clone()), CompletionItemKind::FIELD)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    /// What is held about one relation, read through `read`, recording it
+    /// into `wanted` when nothing is.
+    fn described<T>(
+        &self,
+        key: (String, String),
+        wanted: &mut Wanted,
+        read: impl FnOnce(&Described) -> T,
+    ) -> Option<T> {
         let mut want = |key| {
             if !wanted.contains(&key) {
                 wanted.push(key);
             }
         };
         match self.columns.borrow().get(&key) {
-            Some(ColumnState::Loaded(columns)) => columns
-                .iter()
-                .map(|column| {
-                    Candidate::new(column, Some(key.1.clone()), CompletionItemKind::FIELD)
-                })
-                .collect(),
+            Some(ColumnState::Loaded(described)) => return Some(read(described)),
             // Failed, but not yet often enough to give up on.
-            Some(ColumnState::Failed(attempts)) if *attempts < FETCH_ATTEMPTS => {
-                want(key);
-                Vec::new()
-            }
+            Some(ColumnState::Failed(attempts)) if *attempts < FETCH_ATTEMPTS => want(key),
             // In flight, or asked for as often as it is going to be.
-            Some(ColumnState::Loading(_) | ColumnState::Failed(_)) => Vec::new(),
-            None => {
-                want(key);
-                Vec::new()
+            Some(ColumnState::Loading(_) | ColumnState::Failed(_)) => {}
+            None => want(key),
+        }
+        None
+    }
+
+    /// The catalog's own listing of a relation a foreign key names. A key
+    /// that names no schema finds its relation when only one has that name.
+    fn listed(&self, schema: &str, relation: &str) -> Option<(String, String)> {
+        let mut named = self
+            .catalog
+            .schemas
+            .iter()
+            .filter(|listed| schema.is_empty() || listed.name == schema)
+            .flat_map(|listed| {
+                listed
+                    .relations
+                    .iter()
+                    .filter(|named| named.name == relation)
+                    .map(|named| (listed.name.clone(), named.name.clone()))
+            });
+        let first = named.next()?;
+        named.next().is_none().then_some(first)
+    }
+
+    /// The relations a foreign key joins to the ones `head`, the statement up
+    /// to the caret, already holds, in either direction.
+    ///
+    /// Not one the statement holds already: after `orders o JOIN order_items
+    /// oi` every key between the two would offer the other one again. A key
+    /// from a relation to itself is the exception, being the only way to ask
+    /// for a self-join.
+    fn joins(&self, head: &str, wanted: &mut Wanted) -> Vec<Join> {
+        let code = code(head);
+        let ctes = ctes(&code);
+        // A CTE hides the table it shares a name with, and has none of its
+        // keys.
+        let sources = sources(&reach(&code))
+            .into_iter()
+            .filter(|source| {
+                source.schema.is_some()
+                    || !ctes
+                        .iter()
+                        .any(|cte| cte.eq_ignore_ascii_case(&source.relation))
+            })
+            .collect::<Vec<_>>();
+        let held = |(schema, relation): &(String, String)| {
+            sources.iter().any(|source| {
+                source.relation.eq_ignore_ascii_case(relation)
+                    && source
+                        .schema
+                        .as_ref()
+                        .is_none_or(|named| named.eq_ignore_ascii_case(schema))
+            })
+        };
+        let mut joins: Vec<Join> = Vec::new();
+        for source in &sources {
+            let keys = self
+                .catalog
+                .schemas
+                .iter()
+                .filter(|schema| {
+                    source
+                        .schema
+                        .as_ref()
+                        .is_none_or(|named| named.eq_ignore_ascii_case(&schema.name))
+                })
+                .flat_map(|schema| {
+                    schema
+                        .relations
+                        .iter()
+                        .filter(|named| named.name.eq_ignore_ascii_case(&source.relation))
+                        .map(|named| (schema.name.clone(), named.name.clone()))
+                })
+                .collect::<Vec<_>>();
+            for key in keys {
+                let found = self.described(key.clone(), wanted, |described| {
+                    let mut found = foreign_keys(&described.foreign_keys);
+                    found.extend(described.referenced_by.iter().map(|reference| {
+                        (
+                            (reference.schema.clone(), reference.table.clone()),
+                            vec![(
+                                reference.column.clone(),
+                                reference.referenced_column.clone(),
+                            )],
+                        )
+                    }));
+                    found
+                });
+                for ((schema, relation), columns) in found.unwrap_or_default() {
+                    let Some(target) = self.listed(&schema, &relation) else {
+                        continue;
+                    };
+                    if held(&target) && target != key {
+                        continue;
+                    }
+                    let join = Join {
+                        target,
+                        onto: source.alias.clone().unwrap_or(source.relation.clone()),
+                        columns,
+                    };
+                    if !joins.contains(&join) {
+                        joins.push(join);
+                    }
+                }
             }
         }
+        joins
+    }
+
+    /// `relations` as the caret wants them written: each with an alias where
+    /// one belongs, led after `JOIN` by the ones a foreign key joins to the
+    /// relations already held, with the condition.
+    fn aliased(
+        &self,
+        around: &Around,
+        relations: Vec<Candidate>,
+        scope: Option<&(String, String)>,
+        wanted: &mut Wanted,
+    ) -> Vec<Candidate> {
+        // A filter bar's scope is a relation the text never names, so there
+        // is nothing an alias there could be used for.
+        if !self.alias || scope.is_some() || !around.takes_alias() {
+            return relations;
+        }
+        // Without the word being typed, which `FROM o` would otherwise bind
+        // as a relation called `o` and cost `orders` its alias.
+        let rest = code(&format!("{} {}", around.head, around.tail));
+        let taken = bindings(&rest)
+            .into_iter()
+            .map(|(binding, _)| binding)
+            .collect::<Vec<_>>();
+        let here = sources(&reach(&code(around.head)));
+        // A relation the statement already reaches into by name keeps it:
+        // `SELECT orders.id FROM orders o` no longer has an `orders`.
+        let alias = |relation: &str| {
+            let named = tokens(&rest).into_iter().any(|token| {
+                token
+                    .split_once('.')
+                    .is_some_and(|(qualifier, _)| qualifier.eq_ignore_ascii_case(relation))
+            });
+            // Unless it is held already: a second `employees` beside the
+            // first needs a name of its own.
+            let held = here
+                .iter()
+                .any(|held| held.relation.eq_ignore_ascii_case(relation));
+            (!named || held).then(|| alias_for(relation, &taken))
+        };
+
+        let mut candidates = Vec::new();
+        if around.takes_condition() {
+            for join in self.joins(around.head, wanted) {
+                let Some(relation) = relations.iter().find(|relation| {
+                    relation.label == join.target.1
+                        && relation.detail.as_ref() == Some(&join.target.0)
+                }) else {
+                    continue;
+                };
+                let alias = alias(&relation.label);
+                let name = alias.as_deref().unwrap_or(&relation.label);
+                let on = join
+                    .columns
+                    .iter()
+                    .map(|(theirs, ours)| format!("{name}.{theirs} = {}.{ours}", join.onto))
+                    .collect::<Vec<_>>()
+                    .join(" AND ");
+                candidates.push(Candidate {
+                    alias,
+                    on: Some(on),
+                    ..Candidate::new(&relation.label, relation.detail.clone(), relation.kind)
+                        .qualified(relation.qualified)
+                });
+            }
+        }
+        candidates.extend(relations.into_iter().map(|relation| Candidate {
+            alias: alias(&relation.label),
+            ..relation
+        }));
+        candidates
     }
 
     fn relations_in(&self, schema_name: &str) -> Vec<Candidate> {
@@ -434,12 +676,14 @@ impl SchemaCompletions {
     /// user sees after a `.`.
     fn candidates(
         &self,
-        statement: &str,
-        before: &str,
+        around: &Around,
         qualifier: Option<&str>,
         scope: Option<&(String, String)>,
         wanted: &mut Vec<(String, String)>,
     ) -> Vec<Candidate> {
+        let Around {
+            statement, before, ..
+        } = *around;
         if let Some(qualifier) = qualifier {
             // `x.` — `x` is an alias if the statement bound one, otherwise the
             // relation or schema it looks like. An alias wins: a query that
@@ -459,14 +703,14 @@ impl SchemaCompletions {
             // landed. Offering the schema's relations is the right answer when
             // the qualifier is a schema, and harmless when it is not: an
             // unknown name matches nothing.
-            return self.relations_in(qualifier);
+            return self.aliased(around, self.relations_in(qualifier), scope, wanted);
         }
 
         // A qualifier `qualifier_before` cannot read, `"audit".` say, is still
         // one, and qualifying after it would write a second.
         let qualify = self.qualify && !before.ends_with('.');
         if expects_relation(before) {
-            let mut candidates = self.all_relations(qualify);
+            let mut candidates = self.aliased(around, self.all_relations(qualify), scope, wanted);
             candidates.extend(self.schema_names());
             return candidates;
         }
@@ -623,11 +867,15 @@ impl SchemaCompletions {
         let statement = sql::Buffer::parse(sql)
             .statement_at(offset)
             .filter(|range| range.contains(&word.start) || range.end >= word.start)
-            .map(|range| &sql[range])
-            .unwrap_or(sql);
-        let before = &sql[..word.start];
+            .unwrap_or(0..sql.len());
+        let around = Around {
+            statement: &sql[statement.clone()],
+            before: &sql[..word.start],
+            head: &sql[statement.start.min(word.start)..word.start],
+            tail: &sql[offset..statement.end.max(offset)],
+        };
 
-        let candidates = self.candidates(statement, before, qualifier, scope, &mut wanted);
+        let candidates = self.candidates(&around, qualifier, scope, &mut wanted);
         let ranked = rank(candidates, prefix, &mut self.fuzzy.borrow_mut())
             .into_iter()
             .map(|candidate| (word.clone(), candidate))
@@ -738,7 +986,7 @@ impl SchemaCompletions {
                     new_text: candidate.written(self.engine),
                 })),
                 documentation: candidate.documentation(),
-                label: candidate.label,
+                label: format!("{}{}", candidate.label, candidate.aliasing()),
                 detail: candidate.detail,
                 kind: Some(candidate.kind),
                 ..Default::default()
@@ -856,7 +1104,9 @@ fn rank(candidates: Vec<Candidate>, prefix: &str, fuzzy: &mut Fuzzy) -> Vec<Cand
         .into_iter()
         .filter_map(|candidate| Some((fuzzy.score(&query, &candidate.label)?, candidate)))
         .collect::<Vec<_>>();
-    scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+    // A join the schema declares leads whatever its score: it has matched
+    // what was typed like every other row, and there are only ever a few.
+    scored.sort_by_key(|(score, candidate)| std::cmp::Reverse((candidate.on.is_some(), *score)));
     scored.truncate(MAX_ITEMS);
     scored.into_iter().map(|(_, candidate)| candidate).collect()
 }
@@ -1009,6 +1259,335 @@ fn is_keyword(token: &str) -> bool {
         .any(|keyword| keyword.eq_ignore_ascii_case(token))
 }
 
+/// The text around the word being completed.
+#[derive(Clone, Copy)]
+struct Around<'a> {
+    /// The statement the caret is in, whole.
+    statement: &'a str,
+    /// The buffer up to the word.
+    before: &'a str,
+    /// The statement up to the word, and from the caret on.
+    head: &'a str,
+    tail: &'a str,
+}
+
+impl Around<'_> {
+    /// The keyword the name being typed follows, past a schema typed in
+    /// front of it.
+    fn source(&self) -> Option<&str> {
+        let tokens = tokens(self.before);
+        let name = tokens.len().checked_sub(1)?;
+        match tokens[name].ends_with('.') {
+            true => tokens.get(name.checked_sub(1)?).copied(),
+            false => Some(tokens[name]),
+        }
+    }
+
+    /// Whether a relation written here can carry an alias: after `FROM` or
+    /// `JOIN`, with nothing behind the caret that already is one.
+    ///
+    /// Not `DELETE FROM`, where SQLite and SQL Server take no alias, nor the
+    /// other source keywords, where none does.
+    fn takes_alias(&self) -> bool {
+        let tokens = tokens(self.before);
+        let after_delete = tokens
+            .iter()
+            .rev()
+            .skip_while(|token| token.ends_with('.'))
+            .nth(1)
+            .is_some_and(|token| token.eq_ignore_ascii_case("delete"));
+        let follows = self.source().is_some_and(|keyword| {
+            ["from", "join"]
+                .iter()
+                .any(|k| keyword.eq_ignore_ascii_case(k))
+        });
+        follows && !after_delete && self.next().is_none_or(|next| next != Next::Name)
+    }
+
+    /// Whether a join condition can be written here as well: after `JOIN`,
+    /// in front of no `ON` of the statement's own. Not after `CROSS JOIN` or
+    /// `NATURAL JOIN`, which take none.
+    fn takes_condition(&self) -> bool {
+        let unconditional = tokens(self.before)
+            .iter()
+            .rev()
+            .skip_while(|token| token.ends_with('.'))
+            .skip(1)
+            .take_while(|token| is_join_modifier(token))
+            .any(|token| {
+                ["cross", "natural"]
+                    .iter()
+                    .any(|k| token.eq_ignore_ascii_case(k))
+            });
+        self.source()
+            .is_some_and(|keyword| keyword.eq_ignore_ascii_case("join"))
+            && !unconditional
+            && self.next().is_none_or(|next| next != Next::Condition)
+    }
+
+    /// What the text behind the caret opens with, when it is anything.
+    fn next(&self) -> Option<Next> {
+        let rest = self.tail.trim_start();
+        let first = *rest.as_bytes().first()?;
+        // The caret is inside a word, or in front of a quoted name or a
+        // call's arguments: whatever is written here is not the whole name.
+        let inside = rest.len() == self.tail.len() && is_ident_byte(first);
+        // Nor is it known past a comment, which may sit in front of an alias.
+        let comment = rest.starts_with("--") || rest.starts_with("/*");
+        if inside || comment || matches!(first, b'"' | b'`' | b'[' | b'(' | b'.') {
+            return Some(Next::Name);
+        }
+        if !is_ident_byte(first) {
+            return Some(Next::Other);
+        }
+        let token = tokens(rest).into_iter().next()?;
+        Some(match token {
+            token
+                if ["on", "using"]
+                    .iter()
+                    .any(|k| token.eq_ignore_ascii_case(k)) =>
+            {
+                Next::Condition
+            }
+            token if is_keyword(token) && !token.eq_ignore_ascii_case("as") => Next::Other,
+            _ => Next::Name,
+        })
+    }
+}
+
+/// A word that may stand between a join's kind and its `JOIN`.
+fn is_join_modifier(token: &str) -> bool {
+    [
+        "cross", "natural", "inner", "left", "right", "full", "outer",
+    ]
+    .iter()
+    .any(|modifier| token.eq_ignore_ascii_case(modifier))
+}
+
+/// The part of `head` whose relations a condition at its end can name: less
+/// every parenthesis already closed, and from the one the caret is inside.
+/// A subquery's relations, or a CTE's, are out of reach of the query around
+/// it, and the reverse.
+fn reach(head: &str) -> String {
+    let mut reach = String::new();
+    let mut opened = Vec::new();
+    for character in head.chars() {
+        match character {
+            '(' => opened.push(reach.len()),
+            ')' => reach.truncate(opened.pop().unwrap_or(0)),
+            _ => {}
+        }
+        // A space where a group closed, so the words around it stay two.
+        reach.push(if character == ')' { ' ' } else { character });
+    }
+    let mut reach = match opened.last() {
+        Some(&open) => reach.split_off(open),
+        None => reach,
+    };
+    // The query on the other side of a `UNION` is as far out of reach.
+    let operand = words(&reach)
+        .into_iter()
+        .filter(|word| {
+            ["union", "intersect", "except"]
+                .iter()
+                .any(|operator| reach[word.clone()].eq_ignore_ascii_case(operator))
+        })
+        .map(|word| word.end)
+        .next_back();
+    match operand {
+        Some(start) => reach.split_off(start),
+        None => reach,
+    }
+}
+
+/// `sql` with each string literal and comment blanked, so that the words in
+/// one are not read as the statement's own.
+fn code(sql: &str) -> String {
+    let bytes = sql.as_bytes();
+    let mut code = String::with_capacity(sql.len());
+    let (mut index, mut copied) = (0, 0);
+    while index < bytes.len() {
+        let end = match bytes[index] {
+            b'\'' => {
+                let mut end = index + 1;
+                loop {
+                    match bytes.get(end) {
+                        None => break end,
+                        Some(b'\'') if bytes.get(end + 1) == Some(&b'\'') => end += 2,
+                        Some(b'\'') => break end + 1,
+                        Some(_) => end += 1,
+                    }
+                }
+            }
+            b'-' if bytes.get(index + 1) == Some(&b'-') => sql[index..]
+                .find('\n')
+                .map_or(bytes.len(), |offset| index + offset),
+            b'/' if bytes.get(index + 1) == Some(&b'*') => sql[index + 2..]
+                .find("*/")
+                .map_or(bytes.len(), |offset| index + 2 + offset + 2),
+            _ => {
+                index += 1;
+                continue;
+            }
+        };
+        code.push_str(&sql[copied..index]);
+        code.push(' ');
+        (index, copied) = (end, end);
+    }
+    code.push_str(&sql[copied..]);
+    code
+}
+
+/// Where each word of `sql` sits.
+fn words(sql: &str) -> Vec<Range<usize>> {
+    let bytes = sql.as_bytes();
+    let mut words = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        let start = index;
+        while index < bytes.len() && is_ident_byte(bytes[index]) {
+            index += 1;
+        }
+        match index > start {
+            true => words.push(start..index),
+            false => index += 1,
+        }
+    }
+    words
+}
+
+/// The names a `WITH` gives its queries: each word followed by `AS (`.
+fn ctes(code: &str) -> Vec<&str> {
+    let words = words(code);
+    let mut ctes = Vec::new();
+    for (index, word) in words.iter().enumerate().skip(1) {
+        if !code[word.clone()].eq_ignore_ascii_case("as") {
+            continue;
+        }
+        // `AS NOT MATERIALIZED (` is the same query under a hint.
+        let body = words[index + 1..]
+            .iter()
+            .take_while(|hint| {
+                ["not", "materialized"]
+                    .iter()
+                    .any(|known| code[(*hint).clone()].eq_ignore_ascii_case(known))
+            })
+            .last()
+            .unwrap_or(word)
+            .end;
+        if code[body..].trim_start().starts_with('(') {
+            ctes.push(&code[words[index - 1].clone()]);
+        }
+    }
+    ctes
+}
+
+/// What follows the caret, as far as an alias written at it is concerned.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Next {
+    /// More of the name, or an alias the statement already gives it.
+    Name,
+    /// The join's own `ON` or `USING`.
+    Condition,
+    Other,
+}
+
+/// A relation a foreign key joins to one the statement holds.
+#[derive(PartialEq, Eq)]
+struct Join {
+    /// Its schema and name, as the catalog spells them.
+    target: (String, String),
+    /// The name the statement knows the held relation by.
+    onto: String,
+    /// Its column and the held relation's, for each column of the key.
+    columns: Vec<(String, String)>,
+}
+
+/// A relation's foreign keys, by the relation each points at, as that
+/// relation's column and this one's.
+///
+/// ponytail: a [`ForeignKey`] is one column of a key and does not say which
+/// key, so two keys onto one relation and one key of two columns arrive
+/// looking alike. No key names a column twice, so a column met again opens
+/// the next key: `created_by` and `updated_by` both onto `users.id` are two
+/// joins. That leans on a key's columns arriving together, and reads two
+/// single-column keys onto different columns of one relation as one key of
+/// two -- carry the constraint's name on `ForeignKey` if either is ever met.
+fn foreign_keys(keys: &[ForeignKey]) -> Vec<(JoinTarget, Vec<(String, String)>)> {
+    let mut grouped: Vec<(JoinTarget, Vec<(String, String)>)> = Vec::new();
+    for key in keys {
+        let target = (key.referenced_schema.clone(), key.referenced_table.clone());
+        let columns = (key.referenced_column.clone(), key.column.clone());
+        match grouped.iter_mut().find(|(held, _)| held == &target) {
+            Some((_, held)) => held.push(columns),
+            None => grouped.push((target, vec![columns])),
+        }
+    }
+    grouped
+        .into_iter()
+        .flat_map(|(target, columns)| {
+            let mut keys: Vec<Vec<(String, String)>> = Vec::new();
+            for (theirs, ours) in columns {
+                let repeats = keys.last().is_none_or(|key| {
+                    key.iter().any(|(held_theirs, held_ours)| {
+                        held_theirs == &theirs || held_ours == &ours
+                    })
+                });
+                match keys.last_mut().filter(|_| !repeats) {
+                    Some(key) => key.push((theirs, ours)),
+                    None => keys.push(vec![(theirs, ours)]),
+                }
+            }
+            keys.into_iter().map(move |key| (target.clone(), key))
+        })
+        .collect()
+}
+
+/// The schema and relation a foreign key points at, as the key spells them.
+type JoinTarget = (String, String);
+
+/// Words an alias cannot be without quoting, beyond the keywords completion
+/// offers. Short ones only: an alias is a relation's initials.
+const RESERVED_ALIASES: &[&str] = &[
+    "add", "all", "any", "at", "do", "for", "go", "if", "int", "key", "no", "of", "on", "or",
+    "row", "set", "to", "top", "use",
+];
+
+/// The alias a relation is given: the initials of the words in its name,
+/// numbered when the statement already uses them or they spell a keyword.
+fn alias_for(relation: &str, taken: &[String]) -> String {
+    let mut initials = String::new();
+    let mut previous: Option<char> = None;
+    for character in relation.chars() {
+        let starts_word = previous.is_none_or(|previous| {
+            !previous.is_ascii_alphanumeric()
+                || (previous.is_ascii_lowercase() && character.is_ascii_uppercase())
+        });
+        if starts_word && character.is_ascii_alphanumeric() {
+            initials.push(character.to_ascii_lowercase());
+        }
+        previous = Some(character);
+    }
+    // A name with no letters to take, or one whose first is a digit, which
+    // cannot open an identifier.
+    if !initials.starts_with(|first: char| first.is_ascii_lowercase()) {
+        initials.insert(0, 't');
+    }
+
+    let free = |alias: &str| {
+        !is_keyword(alias)
+            && !RESERVED_ALIASES.contains(&alias)
+            && !taken.iter().any(|held| held.eq_ignore_ascii_case(alias))
+    };
+    if free(&initials) {
+        return initials;
+    }
+    (2..)
+        .map(|number| format!("{initials}{number}"))
+        .find(|alias| free(alias))
+        .unwrap_or(initials)
+}
+
 /// Whether the caret sits where a relation name belongs — straight after
 /// `FROM`, `JOIN`, `UPDATE`, `INSERT INTO` or `TABLE`.
 fn expects_relation(before: &str) -> bool {
@@ -1025,8 +1604,26 @@ fn expects_relation(before: &str) -> bool {
 /// Returned as pairs rather than a map because the same alias can legitimately
 /// be bound twice in one buffer and the first binding is the one in scope.
 fn bindings(statement: &str) -> Vec<(String, String)> {
+    sources(statement)
+        .into_iter()
+        .flat_map(|source| {
+            let alias = source.alias.map(|alias| (alias, source.relation.clone()));
+            std::iter::once((source.relation.clone(), source.relation)).chain(alias)
+        })
+        .collect()
+}
+
+/// A relation a statement reads from or writes to, as it names it.
+struct Source {
+    schema: Option<String>,
+    relation: String,
+    alias: Option<String>,
+}
+
+/// Every relation named after a source keyword, in order.
+fn sources(statement: &str) -> Vec<Source> {
     let tokens = tokens(statement);
-    let mut bindings = Vec::new();
+    let mut sources = Vec::new();
     let mut index = 0;
 
     while index < tokens.len() {
@@ -1046,8 +1643,9 @@ fn bindings(statement: &str) -> Vec<(String, String)> {
         // A schema-qualified name binds under its last segment: `FROM
         // public.accounts` puts `accounts.` in reach, which is what anyone
         // types next.
-        let relation = name.rsplit('.').next().unwrap_or(name).to_string();
-        bindings.push((relation.clone(), relation.clone()));
+        let mut segments = name.rsplit('.');
+        let relation = segments.next().unwrap_or(name).to_string();
+        let schema = segments.next().map(str::to_string);
 
         let alias = if tokens
             .get(index + 2)
@@ -1057,14 +1655,18 @@ fn bindings(statement: &str) -> Vec<(String, String)> {
         } else {
             tokens.get(index + 2)
         };
-        if let Some(alias) = alias.filter(|alias| !is_keyword(alias)) {
-            bindings.push(((*alias).to_string(), relation));
-        }
+        sources.push(Source {
+            schema,
+            relation,
+            alias: alias
+                .filter(|alias| !is_keyword(alias))
+                .map(|alias| (*alias).to_string()),
+        });
 
         index += 2;
     }
 
-    bindings
+    sources
 }
 
 #[cfg(test)]
@@ -1084,7 +1686,10 @@ mod tests {
             .map(|(schema, relation, columns)| {
                 (
                     (schema.to_string(), relation.to_string()),
-                    ColumnState::Loaded(columns.iter().map(|column| column.to_string()).collect()),
+                    ColumnState::Loaded(Described {
+                        columns: columns.iter().map(|column| column.to_string()).collect(),
+                        ..Described::default()
+                    }),
                 )
             })
             .collect();
@@ -1093,6 +1698,7 @@ mod tests {
             catalog: Arc::new(catalog),
             columns: Rc::new(RefCell::new(held)),
             qualify: false,
+            alias: false,
             workspace: None,
             fuzzy: RefCell::new(Fuzzy::new()),
         }
@@ -1864,5 +2470,336 @@ mod tests {
             !offered.contains(&"email".to_string()),
             "a column leaked across a statement boundary: {offered:?}"
         );
+    }
+
+    fn key(column: &str, table: &str, referenced: &str) -> ForeignKey {
+        ForeignKey {
+            column: column.to_string(),
+            referenced_schema: "public".to_string(),
+            referenced_table: table.to_string(),
+            referenced_column: referenced.to_string(),
+        }
+    }
+
+    /// A shop whose every relation has been described, foreign keys and all,
+    /// with aliasing on.
+    fn shop() -> SchemaCompletions {
+        let reference = |table: &str, column: &str| Reference {
+            schema: "public".to_string(),
+            table: table.to_string(),
+            column: column.to_string(),
+            referenced_column: "id".to_string(),
+        };
+        let described: Vec<(&str, Vec<ForeignKey>, Vec<Reference>)> = vec![
+            (
+                "customers",
+                vec![],
+                vec![reference("orders", "customer_id")],
+            ),
+            (
+                "orders",
+                vec![key("customer_id", "customers", "id")],
+                vec![reference("order_items", "order_id")],
+            ),
+            ("order_items", vec![key("order_id", "orders", "id")], vec![]),
+            (
+                "employees",
+                vec![key("manager_id", "employees", "id")],
+                vec![reference("employees", "manager_id")],
+            ),
+            (
+                "posts",
+                vec![
+                    key("created_by", "users", "id"),
+                    key("updated_by", "users", "id"),
+                ],
+                vec![],
+            ),
+            ("users", vec![], vec![]),
+            (
+                "shipments",
+                vec![
+                    key("order_id", "order_lines", "order_id"),
+                    key("line_no", "order_lines", "line_no"),
+                ],
+                vec![],
+            ),
+            ("order_lines", vec![], vec![]),
+            ("OrderItems", vec![], vec![]),
+            ("is_new", vec![], vec![]),
+        ];
+        let catalog = Catalog {
+            schemas: vec![Schema {
+                name: "public".to_string(),
+                relations: described.iter().map(|(name, ..)| relation(name)).collect(),
+                routines: Vec::new(),
+            }],
+            database: None,
+        };
+        let held = described
+            .into_iter()
+            .map(|(name, foreign_keys, referenced_by)| {
+                (
+                    ("public".to_string(), name.to_string()),
+                    ColumnState::Loaded(Described {
+                        columns: vec!["id".to_string()],
+                        foreign_keys,
+                        referenced_by,
+                    }),
+                )
+            })
+            .collect();
+        SchemaCompletions {
+            columns: Rc::new(RefCell::new(held)),
+            alias: true,
+            ..detached(catalog, &[])
+        }
+    }
+
+    /// What the popup shows and accepting writes, which are one text for an
+    /// unqualified relation, for a caret at `|`.
+    fn offered(completions: &SchemaCompletions, sql: &str) -> Vec<String> {
+        let offset = sql.find('|').expect("the test must mark the caret");
+        let sql = sql.replace('|', "");
+        completions
+            .items(&sql, offset)
+            .0
+            .into_iter()
+            .map(|(_, candidate)| candidate.written(completions.engine))
+            .collect()
+    }
+
+    fn first(sql: &str) -> String {
+        offered(&shop(), sql).remove(0)
+    }
+
+    #[test]
+    fn a_relation_after_from_is_written_with_its_initials() {
+        assert_eq!(first("SELECT * FROM custo|"), "customers c");
+        assert_eq!(first("SELECT * FROM order_it|"), "order_items oi");
+        assert_eq!(first("SELECT * FROM OrderI|"), "OrderItems oi");
+        assert_eq!(first("SELECT * FROM public.custo|"), "customers c");
+    }
+
+    #[test]
+    fn an_alias_steps_around_the_statements_own_and_around_keywords() {
+        assert_eq!(
+            first("SELECT * FROM order_items oi JOIN OrderI|"),
+            "OrderItems oi2"
+        );
+        assert_eq!(
+            first("SELECT * FROM users o JOIN order_lin|"),
+            "order_lines ol"
+        );
+        assert_eq!(first("SELECT * FROM users c JOIN custo|"), "customers c2");
+        // `in` would not read back as a name.
+        assert_eq!(first("SELECT * FROM is_n|"), "is_new in2");
+        // The word being typed is not a relation the statement holds.
+        assert_eq!(first("SELECT * FROM c|"), "customers c");
+    }
+
+    #[test]
+    fn no_alias_is_written_where_none_belongs() {
+        for sql in [
+            "UPDATE custo|",
+            "INSERT INTO custo|",
+            "DELETE FROM custo|",
+            "SELECT * FROM custo| c",
+            "SELECT * FROM custo| AS c",
+            "SELECT * FROM custo|mers",
+        ] {
+            assert_eq!(first(sql), "customers", "{sql}");
+        }
+        assert_eq!(first("SELECT * FROM custo| WHERE true"), "customers c");
+        assert_eq!(
+            first("SELECT * FROM (SELECT * FROM custo|) x"),
+            "customers c"
+        );
+
+        let off = SchemaCompletions {
+            alias: false,
+            ..shop()
+        };
+        assert_eq!(
+            offered(&off, "SELECT * FROM orders o JOIN custo|")[0],
+            "customers"
+        );
+    }
+
+    #[test]
+    fn a_join_is_offered_with_the_condition_a_foreign_key_implies() {
+        // The key is the joined relation's own, found from who points back.
+        assert_eq!(
+            offered(&shop(), "SELECT * FROM orders o JOIN order_it|")[..2],
+            ["order_items oi ON oi.order_id = o.id", "order_items oi"]
+        );
+        // The key is the held relation's.
+        assert_eq!(
+            first("SELECT * FROM orders o JOIN cust|"),
+            "customers c ON c.id = o.customer_id"
+        );
+        // A relation with no alias is named in full.
+        assert_eq!(
+            first("SELECT * FROM public.orders LEFT JOIN cust|"),
+            "customers c ON c.id = orders.customer_id"
+        );
+        assert_eq!(
+            first("SELECT * FROM orders o JOIN public.cust|"),
+            "customers c ON c.id = o.customer_id"
+        );
+    }
+
+    #[test]
+    fn a_join_leads_a_relation_that_matches_better() {
+        assert_eq!(
+            offered(&shop(), "SELECT * FROM order_items oi JOIN o|")[0],
+            "orders o ON o.id = oi.order_id"
+        );
+    }
+
+    #[test]
+    fn keys_onto_one_relation_are_told_apart_from_one_key_of_many_columns() {
+        assert_eq!(
+            offered(&shop(), "SELECT * FROM posts p JOIN us|")[..3],
+            [
+                "users u ON u.id = p.created_by",
+                "users u ON u.id = p.updated_by",
+                "users u"
+            ]
+        );
+        assert_eq!(
+            first("SELECT * FROM shipments s JOIN order_l|"),
+            "order_lines ol ON ol.order_id = s.order_id AND ol.line_no = s.line_no"
+        );
+    }
+
+    #[test]
+    fn a_relation_already_held_is_joined_again_only_to_itself() {
+        assert_eq!(
+            offered(&shop(), "SELECT * FROM employees e JOIN emp|"),
+            [
+                "employees e2 ON e2.id = e.manager_id",
+                "employees e2 ON e2.manager_id = e.id",
+                "employees e2"
+            ]
+        );
+        assert_eq!(
+            offered(
+                &shop(),
+                "SELECT * FROM orders o JOIN order_items oi ON oi.order_id = o.id JOIN ord|"
+            )[0],
+            "orders o2"
+        );
+    }
+
+    #[test]
+    fn no_condition_is_written_in_front_of_the_statements_own() {
+        assert_eq!(
+            first("SELECT * FROM orders o JOIN cust| ON true"),
+            "customers c"
+        );
+        assert_eq!(first("SELECT * FROM orders o, cust|"), "customers");
+    }
+
+    #[test]
+    fn no_condition_follows_a_join_that_takes_none_or_names_a_relation_out_of_reach() {
+        for sql in [
+            "SELECT * FROM orders o CROSS JOIN cust|",
+            "SELECT * FROM orders o NATURAL LEFT JOIN cust|",
+            "SELECT * FROM orders o JOIN cust| /* keep */ ON true",
+            "WITH x AS (SELECT * FROM orders o) SELECT * FROM users u JOIN cust|",
+        ] {
+            assert!(!first(sql).contains(" ON "), "{sql}");
+        }
+        assert_eq!(
+            first("SELECT * FROM users u JOIN (SELECT * FROM orders o JOIN cust|"),
+            "customers c ON c.id = o.customer_id"
+        );
+    }
+
+    #[test]
+    fn a_condition_names_only_what_the_query_at_the_caret_can_see() {
+        for sql in [
+            "SELECT 'FROM orders o' AS note FROM users u JOIN cust|",
+            "SELECT 1 /* FROM orders o */ FROM users u JOIN cust|",
+            "WITH orders AS (SELECT id FROM users) SELECT * FROM orders o JOIN cust|",
+            "WITH orders AS MATERIALIZED (SELECT 1) SELECT * FROM orders o JOIN cust|",
+            "SELECT o.id FROM orders o UNION ALL SELECT u.id FROM users u JOIN cust|",
+        ] {
+            assert_eq!(first(sql), "customers c", "{sql}");
+        }
+        assert_eq!(
+            first("SELECT * FROM orders /* the shop's */ o JOIN cust|"),
+            "customers c ON c.id = o.customer_id"
+        );
+    }
+
+    #[test]
+    fn a_relation_the_statement_reaches_into_by_name_keeps_its_name() {
+        assert_eq!(first("SELECT customers.id FROM custo|"), "customers");
+        assert_eq!(
+            first("SELECT customers.id FROM orders o JOIN custo|"),
+            "customers ON customers.id = o.customer_id"
+        );
+        assert_eq!(first("SELECT o.id FROM custo|"), "customers c");
+        // One in a subquery is not beside it.
+        assert_eq!(
+            first("SELECT employees.id FROM emp| WHERE EXISTS (SELECT 1 FROM employees e)"),
+            "employees"
+        );
+        assert_eq!(
+            first("SELECT employees.id FROM employees JOIN emp|"),
+            "employees e ON e.id = employees.manager_id"
+        );
+    }
+
+    #[test]
+    fn a_key_into_a_schema_the_catalog_does_not_hold_joins_nothing() {
+        let completions = shop();
+        assert_eq!(
+            completions.listed("public", "users"),
+            Some(("public".to_string(), "users".to_string()))
+        );
+        assert_eq!(completions.listed("elsewhere", "users"), None);
+        assert_eq!(
+            completions.listed("", "users"),
+            Some(("public".to_string(), "users".to_string()))
+        );
+    }
+
+    #[test]
+    fn two_keys_of_two_columns_onto_one_relation_stay_whole() {
+        let keys = [
+            key("billing_tenant", "addresses", "tenant_id"),
+            key("billing_id", "addresses", "id"),
+            key("shipping_tenant", "addresses", "tenant_id"),
+            key("shipping_id", "addresses", "id"),
+        ];
+        let columns = foreign_keys(&keys)
+            .into_iter()
+            .map(|(_, columns)| columns.len())
+            .collect::<Vec<_>>();
+        assert_eq!(columns, [2, 2]);
+    }
+
+    #[test]
+    fn a_join_asks_for_the_keys_of_a_relation_not_yet_described() {
+        let completions = SchemaCompletions {
+            columns: ColumnCache::default(),
+            ..shop()
+        };
+        let sql = "SELECT * FROM orders o JOIN cust";
+        let (items, wanted) = completions.items(sql, sql.len());
+        assert_eq!(wanted, [("public".to_string(), "orders".to_string())]);
+        assert_eq!(items[0].1.written(Engine::Postgres), "customers c");
+    }
+
+    #[test]
+    fn a_filter_bar_writes_no_alias() {
+        let scope = ("public".to_string(), "orders".to_string());
+        let bar = FilterCompletions::new(Syntax::Sql, Rc::new(shop()), scope).unwrap();
+        let text = "id IN (SELECT id FROM cust";
+        let (items, _) = bar.items(text, text.len());
+        assert_eq!(items[0].1.written(Engine::Postgres), "customers");
     }
 }

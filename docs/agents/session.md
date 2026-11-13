@@ -555,6 +555,21 @@ timeout) kill completion for a relation for the rest of the connection; always
 retrying puts a describe on the wire per keystroke, each queued behind the last
 on the connection mutex, which freezes the profile rather than degrading it.
 
+A relation completed after `FROM` or `JOIN` is written with an alias, the
+initials of its name (`order_items oi`), numbered when the statement already
+uses them or they spell a keyword. After `JOIN` the relations a foreign key
+ties to the ones the statement already holds lead the list, written with the
+condition (`order_items oi ON oi.order_id = o.id`). Both are one setting,
+`alias_completions`, on by default, and neither reaches a filter bar. No alias
+is written after `DELETE FROM`, `UPDATE` or `INTO`, nor in front of text that
+already is one. The keys ride in the column cache, as `Described`, so a join
+costs no fetch the statement's columns had not already made; who points back at
+a relation is `Connection::references`, a second query the fetch only makes
+while the setting is on, which is why turning it on clears the cache. A
+`ForeignKey` is one column and does not name its key, so `foreign_keys` in
+`completion.rs` guesses where one key ends: see its comment before trusting it
+with something new.
+
 Two rules it exists under. **It is a lexer, not a parser**: half-typed SQL is a
 parse error by definition, and `SELECT * FROM ` is both the text a user most
 wants completed and the text the grammar returns an `ERROR` node for. And **it
