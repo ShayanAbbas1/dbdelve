@@ -1266,8 +1266,7 @@ pub(crate) fn group_thousands(value: u64) -> String {
     group_digits(&value.to_string())
 }
 
-/// A run of ASCII digits in threes. Taken as text so a `NUMERIC` wider than
-/// any integer type still groups.
+/// A run of ASCII digits in threes.
 pub(crate) fn group_digits(digits: &str) -> String {
     let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
     for (index, digit) in digits.chars().enumerate() {
