@@ -14,7 +14,10 @@ use std::{
     ops::Range,
     path::PathBuf,
     rc::Rc,
-    sync::Arc,
+    sync::{
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use gpui::{App, AppContext, Context, Entity, SharedString, Window};
@@ -67,6 +70,12 @@ pub(crate) struct Profile {
     pub(crate) confirmed_stale: bool,
     pub(crate) generation: u64,
     pub(crate) state: ProfileState,
+    /// Whether the server is known to hold this connection as `mode` says
+    /// (`Connection::set_read_only`): set when a connect lands, which fails
+    /// rather than open unheld, and by the latest hold `set_mode` sent, once
+    /// it lands. Cleared while one is on its way or after one failed.
+    pub(crate) held: bool,
+    pub(crate) holds: Arc<HoldLine>,
     /// Whether the user's statements on this connection have left a
     /// transaction open (`sql::Leaves`), which a fresh one opened for a
     /// queue's reads would not see. Read off what was sent, not asked of the
@@ -93,6 +102,50 @@ pub(crate) struct Profile {
     /// row id (`store::StoredProfile::folds`).
     pub(crate) folds: BTreeMap<String, bool>,
     pub(crate) session: Session,
+}
+
+/// Orders `set_mode`'s holds, which go out on tasks nothing else orders and
+/// meet on a connection mutex that is not first come, first served: each
+/// takes its turn here, and one a newer hold has overtaken is skipped rather
+/// than land after it and leave the session held the opposite way.
+#[derive(Default)]
+pub(crate) struct HoldLine {
+    latest: AtomicU64,
+    turn: Mutex<()>,
+}
+
+impl HoldLine {
+    /// Stamps a new hold, overtaking every one stamped before it.
+    pub(crate) fn stamp(&self) -> u64 {
+        self.latest.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    pub(crate) fn is_latest(&self, stamp: u64) -> bool {
+        self.latest.load(Ordering::SeqCst) == stamp
+    }
+
+    /// Sends the hold stamped `stamp` unless a newer one has been stamped
+    /// since; `Ok(false)` when it was skipped.
+    pub(crate) fn send(
+        &self,
+        stamp: u64,
+        hold: impl FnOnce() -> Result<(), DbError>,
+    ) -> Result<bool, DbError> {
+        let _turn = self.turn.lock().unwrap_or_else(PoisonError::into_inner);
+        if !self.is_latest(stamp) {
+            return Ok(false);
+        }
+        hold().map(|()| true)
+    }
+}
+
+/// Whether `Settings::run_unreadable` lets a statement dbdelve cannot parse
+/// skip the run-once prompt: only one the user just asked to run, and in
+/// Read-only only once the server's hold is known to be in place. With no
+/// prompt left, that hold is all that stands between such a statement and a
+/// write.
+pub(crate) fn skips_run_once(opted_in: bool, own_run: bool, mode: Mode, held: bool) -> bool {
+    opted_in && own_run && (mode != Mode::ReadOnly || held)
 }
 
 /// See [`Profile::shortcut_database`]. The shown catalog's own word comes
@@ -2995,6 +3048,48 @@ pub(crate) fn result_pane_is_expanded(query: &QueryState) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hold_overtaken_by_a_newer_one_is_skipped_and_the_newer_one_sent() {
+        let holds = HoldLine::default();
+        let read_only = holds.stamp();
+        let read_write = holds.stamp();
+        let mut sent = Vec::new();
+        assert!(matches!(
+            holds.send(read_write, || {
+                sent.push("read-write");
+                Ok(())
+            }),
+            Ok(true)
+        ));
+        assert!(matches!(
+            holds.send(read_only, || {
+                sent.push("read-only");
+                Ok(())
+            }),
+            Ok(false)
+        ));
+        assert_eq!(sent, ["read-write"]);
+        assert!(holds.is_latest(read_write) && !holds.is_latest(read_only));
+    }
+
+    #[test]
+    fn read_only_runs_the_unreadable_unasked_only_once_its_hold_has_landed() {
+        let unreadable = sql::classify(Engine::Postgres, "SELCT 1");
+        let gate = |own_run, mode, held| {
+            sql::gate_own_run(
+                &unreadable,
+                mode,
+                &[],
+                skips_run_once(true, own_run, mode, held),
+            )
+        };
+        assert_eq!(gate(true, Mode::ReadOnly, true), None);
+        // On its way, or failed: the prompt, as if nobody had opted in.
+        assert_eq!(gate(true, Mode::ReadOnly, false), Some(sql::Stop::RunOnce));
+        assert_eq!(gate(true, Mode::ReadWrite, false), None);
+        assert_eq!(gate(false, Mode::ReadWrite, true), Some(sql::Stop::RunOnce));
+    }
     use crate::sql;
 
     #[test]

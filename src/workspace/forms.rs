@@ -1030,24 +1030,13 @@ impl Workspace {
             return false;
         };
         match self.dialog_in_front.get() {
-            Some("pending-run") => {
-                profile
-                    .session
-                    .pending_run
-                    .as_ref()
-                    .is_some_and(|pending| {
-                        match sql::gate_own_run(
-                            &pending.verdict,
-                            profile.mode,
-                            &profile.confirmed,
-                            pending.own_run && self.settings.run_unreadable,
-                        ) {
-                            Some(Stop::Confirm(kind)) => kind.suppressible(),
-                            Some(Stop::RunOnce) => pending.own_run,
-                            _ => false,
-                        }
-                    })
-            }
+            Some("pending-run") => profile.session.pending_run.as_ref().is_some_and(|pending| {
+                match self.gate_run(profile, &pending.verdict, pending.own_run) {
+                    Some(Stop::Confirm(kind)) => kind.suppressible(),
+                    Some(Stop::RunOnce) => pending.own_run,
+                    _ => false,
+                }
+            }),
             Some("stale-edit") => profile
                 .session
                 .stale_edit
@@ -1621,12 +1610,7 @@ impl Workspace {
         // Re-derived rather than trusted from when the prompt was raised: the
         // mode or the silenced list may have changed underneath it (the
         // upgrade arm changes the mode itself, mid-prompt).
-        let stop = sql::gate_own_run(
-            &pending.verdict,
-            profile.mode,
-            &profile.confirmed,
-            pending.own_run && self.settings.run_unreadable,
-        )?;
+        let stop = self.gate_run(profile, &pending.verdict, pending.own_run)?;
         let name = profile.name.clone();
         let current_mode = profile.mode.label();
         let syntax = profile.config.engine().syntax();

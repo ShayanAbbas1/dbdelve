@@ -201,6 +201,8 @@ impl Workspace {
             confirmed_stale: stored.confirmed.iter().any(|slug| slug == STALE_ROWS),
             generation: 0,
             state: ProfileState::Idle,
+            held: false,
+            holds: Arc::default(),
             in_transaction: false,
             session_changed: false,
             catalog: CatalogState::Loading,
@@ -260,6 +262,8 @@ impl Workspace {
             confirmed_stale: false,
             generation: 0,
             state: ProfileState::Idle,
+            held: false,
+            holds: Arc::default(),
             in_transaction: false,
             session_changed: false,
             catalog: CatalogState::Loading,
@@ -1872,6 +1876,7 @@ impl Workspace {
                         profile.session.notice = Some(unpicked.message.clone());
                     }
                     let reported = result.as_ref().ok().and_then(Reported::of);
+                    profile.held = result.is_ok();
                     profile.state = match result {
                         Ok(connection) => ProfileState::Connected(Box::new(connection)),
                         Err(message) => ProfileState::Failed(message),

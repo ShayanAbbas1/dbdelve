@@ -2018,14 +2018,9 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let verdict = sql::classify(self.engine(), &sql);
-        let stopped = self.profile().and_then(|profile| {
-            sql::gate_own_run(
-                &verdict,
-                profile.mode,
-                &profile.confirmed,
-                own_run && self.settings.run_unreadable,
-            )
-        });
+        let stopped = self
+            .profile()
+            .and_then(|profile| self.gate_run(profile, &verdict, own_run));
 
         if stopped.is_some() {
             if let Some(profile) = self.profile_mut() {

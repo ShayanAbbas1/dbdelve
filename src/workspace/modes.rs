@@ -14,6 +14,7 @@ impl Workspace {
             return;
         };
         profile.mode = mode;
+        profile.held = false;
         // Every open grid caches the mode `editable` reads (`result_grid.rs`),
         // because that predicate is asked from the mouse and the palette with
         // no route back to the profile. Without this push a grid opened before
@@ -29,34 +30,49 @@ impl Workspace {
         // The server-side backstop behind the gate this door already guards --
         // see `Connection::set_read_only`. `query` blocks on the connection
         // mutex, so it goes to the background executor rather than running
-        // here, same as `cancel_query` (queries.rs).
-        //
-        // ponytail: nothing orders these tasks against each other, so flipping
-        // modes faster than a round trip can land them out of order and leave
-        // the session held the opposite way to the mode on screen. Not only a
-        // stale backstop: where `Engine::holds_read_only`, the gate runs a
-        // statement it cannot read in Read-only on the strength of this hold.
-        // Stamp each task with a per-profile counter and drop the stale ones.
-        // A connect under way has no connection here at all; its landing
-        // checks the mode again (`begin_connect`).
-        let Some(connection) = self.profile().and_then(Profile::connection) else {
+        // here, same as `cancel_query` (queries.rs). Where
+        // `Engine::holds_read_only`, a statement the gate cannot read may run
+        // in Read-only on the strength of this hold, unasked once the user has
+        // opted in, so `held` stays false until the latest one lands
+        // (`HoldLine`). A connect under way has no connection here at all; its
+        // landing checks the mode again (`begin_connect`).
+        let Some(profile) = self.profile() else {
             return;
         };
+        let Some(connection) = profile.connection() else {
+            return;
+        };
+        let (id, generation, holds) = (
+            profile.id.clone(),
+            profile.generation,
+            profile.holds.clone(),
+        );
+        let stamp = holds.stamp();
         let entering_read_only = mode == Mode::ReadOnly;
-        let read_only_task = spawn_blocking(cx.background_executor(), move || {
-            connection.set_read_only(entering_read_only)
+        let read_only_task = spawn_blocking(cx.background_executor(), {
+            let holds = holds.clone();
+            move || holds.send(stamp, || connection.set_read_only(entering_read_only))
         });
         cx.spawn(async move |workspace, cx| {
-            if let Err(error) = read_only_task.await {
+            let result = read_only_task.await;
+            _ = workspace.update(cx, |workspace, cx| {
+                if let Some(profile) = workspace.issued_to(&id, generation)
+                    && holds.is_latest(stamp)
+                {
+                    profile.held = matches!(result, Ok(true));
+                    cx.notify();
+                }
                 // Only entering Read-only is worth a notice: a failure here
                 // leaves the user believing they have protection they don't.
                 // Leaving Read-only on a failed statement leaves the server
                 // still held to reads -- more than asked for, not less -- so
                 // that direction fails silently on purpose.
-                if entering_read_only {
-                    _ = workspace.update(cx, |workspace, cx| workspace.note(error.message, cx));
+                if let Err(error) = result
+                    && entering_read_only
+                {
+                    workspace.note(error.message, cx);
                 }
-            }
+            });
         })
         .detach();
     }
@@ -158,27 +174,45 @@ impl Workspace {
         cx.notify();
     }
 
+    /// `sql::gate` for a run on `profile`, with `Settings::run_unreadable`
+    /// applied where `session::skips_run_once` allows it. The one derivation,
+    /// so running, the prompt and its box cannot disagree about what it asks.
+    pub(crate) fn gate_run(
+        &self,
+        profile: &Profile,
+        verdict: &sql::Verdict,
+        own_run: bool,
+    ) -> Option<Stop> {
+        sql::gate_own_run(
+            verdict,
+            profile.mode,
+            &profile.confirmed,
+            crate::session::skips_run_once(
+                self.settings.run_unreadable,
+                own_run,
+                profile.mode,
+                profile.held,
+            ),
+        )
+    }
+
     pub(crate) fn approve_pending_run(&mut self, cx: &mut Context<Self>) {
-        let run_unreadable = self.settings.run_unreadable;
-        let Some(profile) = self.profile_mut() else {
-            return;
-        };
         let Some(PendingRun {
             resume,
             verdict,
             dont_ask,
             commit_cell,
             own_run,
-        }) = profile.session.pending_run.take()
+        }) = self
+            .profile_mut()
+            .and_then(|profile| profile.session.pending_run.take())
         else {
             return;
         };
-        let Some(stop) = sql::gate_own_run(
-            &verdict,
-            profile.mode,
-            &profile.confirmed,
-            own_run && run_unreadable,
-        ) else {
+        let Some(stop) = self
+            .profile()
+            .and_then(|profile| self.gate_run(profile, &verdict, own_run))
+        else {
             return;
         };
 

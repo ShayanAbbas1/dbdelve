@@ -149,7 +149,11 @@ server, and how `IF` conditions and `CycleMode` are read, are in
   never joins a profile's silenced list; and only a run the user just asked
   for (`Workspace::execute_own`: Run, its queue, Explain) consults it.
   Previews, edits and refreshes go through `execute_and_then` and keep
-  asking, so a missed refresh stays the worst it can do.
+  asking, so a missed refresh stays the worst it can do. In Read-only the
+  server's hold is then all that stops such a statement writing, so the opt-in
+  applies there only once that hold is known to have landed
+  (`session::skips_run_once`, `Profile::held`); until then, or after it
+  failed, the prompt shows.
 - Unknown statements and `ALTER` operations other than `ADD COLUMN` need Full.
   Keep it that strict.
 - **`IF`/`ELSEIF` conditions are classified, not treated as unreadable.** Every
