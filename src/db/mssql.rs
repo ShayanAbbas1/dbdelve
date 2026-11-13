@@ -747,7 +747,8 @@ enum Origin {
     /// edit: run under [`SESSION_OPTIONS`], and cancellable.
     Generated,
     /// dbdelve's catalog and structure queries: under [`SESSION_OPTIONS`],
-    /// never editable, and not what Cancel is for.
+    /// never editable, and not what Cancel is for, but for a diagram's read on
+    /// a connection of its own ([`Connection::schema_graph`]).
     Internal,
 }
 
@@ -761,7 +762,8 @@ struct InFlight {
     /// does not have.
     socket: Option<std::net::TcpStream>,
     /// A statement Cancel is for holds the session. A catalog load does not
-    /// count: Cancel stops the user's statement, never the explorer's.
+    /// count: Cancel stops the user's statement, never the explorer's. A
+    /// diagram's read on a connection of its own does.
     running: bool,
     stopped: bool,
     /// Statements Cancel is for, waiting for the session.
@@ -925,23 +927,30 @@ impl Connection {
     /// connection, which takes the user's transaction and temporary tables
     /// with it.
     pub fn query(&self, sql: &str, fetch: Fetch) -> Result<QueryResult, DbError> {
-        self.run(sql, Origin::User, fetch)
+        self.run(sql, Origin::User, fetch, true)
     }
 
     /// A statement dbdelve wrote at the user's ask, run under the session
     /// options it was written for.
     pub fn generated(&self, sql: &str, fetch: Fetch) -> Result<QueryResult, DbError> {
-        self.run(sql, Origin::Generated, fetch)
+        self.run(sql, Origin::Generated, fetch, true)
     }
 
     /// dbdelve's own SQL. Its rows are never editable, so it does not pay for
     /// the describe that would say where they came from.
     fn internal_query(&self, sql: &str) -> Result<QueryResult, DbError> {
-        self.run(sql, Origin::Internal, Fetch::default())
+        self.run(sql, Origin::Internal, Fetch::default(), false)
     }
 
-    fn run(&self, sql: &str, origin: Origin, fetch: Fetch) -> Result<QueryResult, DbError> {
-        let cancellable = origin != Origin::Internal;
+    /// `cancellable` is apart from `origin` because only the bookkeeping Cancel
+    /// reads depends on it: what runs around the statement is the origin's.
+    fn run(
+        &self,
+        sql: &str,
+        origin: Origin,
+        fetch: Fetch,
+        cancellable: bool,
+    ) -> Result<QueryResult, DbError> {
         if cancellable {
             self.in_flight().queued += 1;
         }
@@ -1279,12 +1288,18 @@ impl Connection {
         self.structure_for(schema, relation, false)
     }
 
+    /// Cancel stops it only on a connection of its own ([`Self::alongside`]):
+    /// there the reset takes no session of the user's with it, while on the
+    /// profile's connection it is a catalog load like any other.
     pub fn schema_graph(&self, schema: &str) -> Result<SchemaGraph, DbError> {
         let query = |template: &str| {
-            self.internal_query(
+            self.run(
                 &template
                     .replace("{type}", TYPE_SQL)
                     .replace("{schema}", &Engine::SqlServer.quote_literal(schema)),
+                Origin::Internal,
+                Fetch::default(),
+                self.alongside,
             )
         };
         let columns = query(GRAPH_COLUMNS_SQL)?;
@@ -4847,6 +4862,73 @@ mod tests {
             error.message
         );
         assert!(connection.query("SELECT 1", Fetch::default()).is_ok());
+    }
+
+    #[test]
+    #[ignore = "requires a local SQL Server configured through dbdelve_MSSQL_URL"]
+    fn live_a_cancel_on_its_own_connection_stops_a_schema_graph_read() {
+        // A table created in a transaction left open holds its catalog rows,
+        // which the read's scan of `sys.tables` waits on. The timeout is the
+        // floor under a Cancel that fails to land, so the test fails rather
+        // than hanging.
+        let locker = live();
+        let side = Connection::open(&ServerConfig {
+            statement_timeout: 30,
+            ..live_config()
+        })
+        .expect("connection should open")
+        .alongside();
+        // Signed in first, so the Cancel cannot land on the login.
+        side.query("SELECT 1", Fetch::default()).unwrap();
+        locker.query("BEGIN TRANSACTION", Fetch::default()).unwrap();
+        locker
+            .query(
+                "CREATE TABLE dbo.graph_cancel_hold (id int)",
+                Fetch::default(),
+            )
+            .unwrap();
+        let reader = side.clone();
+        let read = std::thread::spawn(move || reader.schema_graph("dbo"));
+        while side.session.try_lock().is_ok() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        side.cancel().unwrap();
+
+        let error = read
+            .join()
+            .unwrap()
+            .expect_err("the read should be cancelled");
+        locker.query("ROLLBACK", Fetch::default()).unwrap();
+        assert!(error.message.starts_with(CANCELLED), "{}", error.message);
+    }
+
+    #[test]
+    fn a_cancel_while_a_side_connection_signs_in_stops_its_schema_graph_read() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let side = Connection {
+            session: Arc::new(Mutex::new(None)),
+            in_flight: Arc::default(),
+            server: config_from_url(&format!(
+                "mssql://someone@127.0.0.1:{port}/db?sslmode=require"
+            ))
+            .unwrap(),
+            tunnel: None,
+            alongside: true,
+        };
+        let reader = side.clone();
+        let read = std::thread::spawn(move || reader.schema_graph("dbo"));
+        let (socket, _) = listener.accept().unwrap();
+        side.cancel().unwrap();
+        drop((socket, listener));
+
+        let error = read.join().unwrap().expect_err("the read was cancelled");
+        assert!(
+            error.message.starts_with("Cancelled before it started"),
+            "{}",
+            error.message
+        );
     }
 
     #[test]
