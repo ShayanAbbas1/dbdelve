@@ -559,8 +559,8 @@ source: src/sql_snapshots.rs
 [sqlite] edits_key_column field => |false|
 [sqlite] edits_key_column id => |false|
 [sqlite] generates (no default) => |false|
-[sqlite] generates GENERATED ALWAYS AS (a + 1) STORED => |false|
-[sqlite] generates GENERATED ALWAYS AS ((a)) => |false|
+[sqlite] generates GENERATED ALWAYS AS (a + 1) STORED => |true|
+[sqlite] generates GENERATED ALWAYS AS ((a)) => |true|
 [sqlite] generates AUTO_INCREMENT => |false|
 [sqlite] generates IDENTITY(1,1) => |false|
 [sqlite] generates AS ([a]+(1)) => |false|
@@ -714,8 +714,8 @@ source: src/sql_snapshots.rs
 [turso] edits_key_column field => |false|
 [turso] edits_key_column id => |false|
 [turso] generates (no default) => |false|
-[turso] generates GENERATED ALWAYS AS (a + 1) STORED => |false|
-[turso] generates GENERATED ALWAYS AS ((a)) => |false|
+[turso] generates GENERATED ALWAYS AS (a + 1) STORED => |true|
+[turso] generates GENERATED ALWAYS AS ((a)) => |true|
 [turso] generates AUTO_INCREMENT => |false|
 [turso] generates IDENTITY(1,1) => |false|
 [turso] generates AS ([a]+(1)) => |false|

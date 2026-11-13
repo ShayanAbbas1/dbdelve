@@ -885,6 +885,14 @@ pub(crate) const MARIADB: EngineSpec = EngineSpec {
     },
 };
 
+/// What `sqlite::Schema::structure` writes into a generated column's default:
+/// the expression where the table's `CREATE` parses, the bare mode where not.
+const SQLITE_GENERATED: &[DefaultMarker] = &[
+    DefaultMarker::Prefix("GENERATED ALWAYS AS ("),
+    DefaultMarker::Exact("GENERATED ALWAYS VIRTUAL"),
+    DefaultMarker::Exact("GENERATED ALWAYS STORED"),
+];
+
 pub(crate) const SQLITE: EngineSpec = EngineSpec {
     id: "sqlite",
     built_in_driver: true,
@@ -920,8 +928,7 @@ pub(crate) const SQLITE: EngineSpec = EngineSpec {
         typed_explain: TypedExplain::Sqlite,
         parser_dialect: ParserDialect::Sqlite,
         substring: SubstringMatch::Instr,
-        // No `generated_defaults`: `table_info` leaves generated columns out
-        // altogether.
+        generated_defaults: SQLITE_GENERATED,
         builtins: builtins::sqlite::BUILTINS,
         ..SqlSpec::ANSI
     },
@@ -967,6 +974,7 @@ pub(crate) const TURSO: EngineSpec = EngineSpec {
         },
         parser_dialect: ParserDialect::Sqlite,
         substring: SubstringMatch::Instr,
+        generated_defaults: SQLITE_GENERATED,
         builtins: builtins::sqlite::BUILTINS,
         ..SqlSpec::ANSI
     },
