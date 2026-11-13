@@ -246,6 +246,6 @@ mod tests {
             visible.cards.len(),
             visible.edges.len(),
         );
-        assert!(laid_out < Duration::from_millis(250), "{laid_out:?}");
+        assert!(laid_out < Duration::from_millis(50), "{laid_out:?}");
     }
 }
