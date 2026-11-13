@@ -30,7 +30,7 @@ use ::mysql::{Conn, OptsBuilder, SslOpts, Value};
 use super::ssh::{Tunnel, tunnelled};
 use super::{
     Catalog, Column, DbError, EditTarget, Engine, Fetch, Index, IndexKind, QueryResult, Reference,
-    RowBuilder, ServerConfig, Sizes, SslMode, Stopped, Structure, assemble_catalog,
+    RowBuilder, Schema, ServerConfig, Sizes, SslMode, Stopped, Structure, assemble_catalog,
     assemble_databases, assemble_foreign_keys, assemble_references, assemble_sizes,
     assemble_structure, non_utf8_error, optional_cell, plain_error, required_cell,
 };
@@ -57,13 +57,22 @@ const CANCEL_TIMEOUT_SECONDS: u64 = 5;
 const BINARY_COLLATION: u16 = 63;
 
 /// The four schemas the server owns. Nobody wrote them and nobody wants them in
-/// a sidebar listing what they wrote.
+/// a sidebar listing what they wrote, unless they picked one: every query that
+/// leaves these out keeps the database the connection selected.
 const SYSTEM_SCHEMAS: &str = "('information_schema', 'mysql', 'performance_schema', 'sys')";
 
 const DATABASES_SQL: &str = "
 SELECT SCHEMA_NAME AS name, SCHEMA_NAME = DATABASE() AS is_current
 FROM information_schema.SCHEMATA
 ORDER BY SCHEMA_NAME";
+
+// Apart from `RELATIONS_SQL` because a database with nothing in it has no
+// relation to be listed by, and one just created is exactly that.
+const SCHEMAS_SQL: &str = "
+SELECT SCHEMA_NAME AS schema_name
+FROM information_schema.SCHEMATA
+WHERE SCHEMA_NAME NOT IN {system} OR SCHEMA_NAME = DATABASE()
+";
 
 const RELATIONS_SQL: &str = "
 SELECT TABLE_SCHEMA AS schema_name,
@@ -73,7 +82,7 @@ SELECT TABLE_SCHEMA AS schema_name,
            WHEN 'VIEW' THEN 'view'
        END AS relation_kind
 FROM information_schema.TABLES
-WHERE TABLE_SCHEMA NOT IN {system}
+WHERE (TABLE_SCHEMA NOT IN {system} OR TABLE_SCHEMA = DATABASE())
   AND TABLE_TYPE IN ('BASE TABLE', 'VIEW')
 ORDER BY TABLE_SCHEMA, TABLE_NAME
 ";
@@ -88,7 +97,7 @@ SELECT TABLE_SCHEMA AS schema_name,
        DATA_LENGTH + INDEX_LENGTH AS size_bytes,
        TABLE_ROWS AS row_estimate
 FROM information_schema.TABLES
-WHERE TABLE_SCHEMA NOT IN {system}
+WHERE (TABLE_SCHEMA NOT IN {system} OR TABLE_SCHEMA = DATABASE())
   AND TABLE_TYPE = 'BASE TABLE'
 ";
 
@@ -119,7 +128,7 @@ SELECT routine.ROUTINE_SCHEMA AS schema_name,
        LOWER(COALESCE(routine.ROUTINE_BODY, '')) AS language,
        COALESCE(routine.ROUTINE_DEFINITION, '') AS definition
 FROM information_schema.ROUTINES AS routine
-WHERE routine.ROUTINE_SCHEMA NOT IN {system}
+WHERE (routine.ROUTINE_SCHEMA NOT IN {system} OR routine.ROUTINE_SCHEMA = DATABASE())
   AND routine.ROUTINE_TYPE IN ('FUNCTION', 'PROCEDURE')
 ORDER BY routine.ROUTINE_SCHEMA, routine.ROUTINE_NAME
 ";
@@ -810,7 +819,18 @@ impl Connection {
 
     pub fn catalog(&self) -> Result<Catalog, DbError> {
         let relations = self.internal_query(&RELATIONS_SQL.replace("{system}", SYSTEM_SCHEMAS))?;
-        assemble_catalog(relations, QueryResult::default())
+        let mut catalog = assemble_catalog(relations, QueryResult::default())?;
+        let schemas = self.internal_query(&SCHEMAS_SQL.replace("{system}", SYSTEM_SCHEMAS))?;
+        for name in column_of(&schemas, "schema_name")? {
+            if !catalog.schemas.iter().any(|schema| schema.name == name) {
+                catalog.schemas.push(Schema {
+                    name,
+                    relations: Vec::new(),
+                    routines: Vec::new(),
+                });
+            }
+        }
+        Ok(catalog)
     }
 
     pub fn routines(&self) -> Result<Catalog, DbError> {
@@ -1971,6 +1991,33 @@ mod tests {
         );
     }
 
+    /// The user's own database alone is no proof: the system schemas have to
+    /// stay out while the one selected comes in. `information_schema` is the
+    /// one an ordinary user may select, and it holds no table or view, so it
+    /// also stands for a database just created.
+    fn live_the_selected_database_is_listed_even_when_the_server_owns_it(engine: Engine) {
+        let connection = Connection::open(
+            &ServerConfig {
+                sslmode: SslMode::Disable,
+                database: "information_schema".into(),
+                ..live_config(engine)
+            },
+            engine,
+        )
+        .expect("connection should open");
+        let catalog = connection.catalog().expect("catalog should load");
+        let names = catalog
+            .schemas
+            .iter()
+            .map(|schema| schema.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(names.contains(&"information_schema"), "{names:?}");
+        assert!(names.contains(&"dbdelve_dev"), "{names:?}");
+        assert!(!names.contains(&"mysql"), "{names:?}");
+        assert!(!names.contains(&"performance_schema"), "{names:?}");
+    }
+
     fn live_structure_round_trip(engine: Engine) {
         let structure = live(engine)
             .structure("dbdelve_dev", "accounts")
@@ -2543,6 +2590,7 @@ mod tests {
         live_a_multi_statement_selection_keeps_one_result_shape,
         live_a_column_is_tagged_with_the_type_the_server_would_name,
         live_catalog_round_trip,
+        live_the_selected_database_is_listed_even_when_the_server_owns_it,
         live_structure_round_trip,
         live_a_single_table_select_is_editable_by_its_primary_key,
         live_an_aliased_or_computed_column_reports_what_the_table_calls_it,
