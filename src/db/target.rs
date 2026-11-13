@@ -248,6 +248,15 @@ impl Target {
     pub fn exact_row_estimates(self) -> bool {
         self.abilities().exact_row_estimates
     }
+
+    /// Whether a schema can be drawn as an ER diagram, through
+    /// [`super::Connection::schema_graph`]. Never through a plugin yet: its
+    /// driver has no message that reads keys in bulk.
+    // Nothing asks it until the diagram tab lands (phase 3).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn draws_diagrams(self) -> bool {
+        self.abilities().draws_diagrams
+    }
 }
 
 /// Whether `error` is the user's Cancel landing, in the words each engine's
@@ -396,6 +405,7 @@ mod tests {
                 target.catalog_is_per_database(),
                 target.exact_row_estimates(),
                 target.takes_service(),
+                target.draws_diagrams(),
             ]
             .into_iter()
             .chain(
