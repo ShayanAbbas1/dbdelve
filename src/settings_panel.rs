@@ -193,10 +193,12 @@ fn setting_rows() -> Vec<SettingRow> {
             SettingsTab::General,
             "Queries",
             "Run statements DBDelve can't parse",
-            "Runs a statement DBDelve can't parse without asking first, as \
-             far as the connection's mode allows. Where nothing on the server \
-             holds a connection to Read-only, it still asks to switch to \
-             Read-write.",
+            "Runs a statement DBDelve can't parse without asking first. \
+             DBDelve can't tell whether such a statement reads, writes or \
+             drops, so it can't check it against the connection's mode: in \
+             Read-write or Full, that includes writes and drops. Where nothing \
+             on the server holds a connection to Read-only, it still asks to \
+             switch to Read-write.",
             &[
                 "parse",
                 "unparseable",

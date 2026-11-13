@@ -1756,6 +1756,18 @@ impl Workspace {
                                 )
                             }),
                         )
+                        .children((stop == Stop::RunOnce && own_run).then(|| {
+                            div()
+                                .text_size(px(layout::chrome(layout::TEXT_XS)))
+                                .text_color(t.text_muted)
+                                .child(
+                                    "dbdelve can't tell whether a statement it can't parse \
+                                     reads, writes or drops, so it can't check it against \
+                                     this connection's mode. With this on, such statements \
+                                     run unasked, and in Read-write or Full that includes \
+                                     writes and drops. You can change it any time in Settings.",
+                                )
+                        }))
                         .child(
                             div()
                                 .flex()
