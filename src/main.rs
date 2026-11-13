@@ -5,6 +5,9 @@ mod actions;
 mod completion;
 mod connection_form;
 mod db;
+// Nothing draws it until the diagram's view lands (phase 2).
+#[cfg_attr(not(test), allow(dead_code))]
+mod diagram;
 mod explain;
 mod explorer;
 mod export;
