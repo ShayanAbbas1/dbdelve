@@ -10,8 +10,17 @@ introduce limits.
 
 Ideas and discussion on [Discord](https://discord.gg/7PegWzwqCm).
 
-Like DBDelve? [Support its development](https://www.patreon.com/cw/ShayanAbbas1).
-Support is voluntary and does not provide any additional benefits.
+Support DBDelve's development on [Patreon](https://www.patreon.com/membership/30003257).
+
+| Tier | Price | You get |
+|---|---|---|
+| Supporter | $5/month | Name in the README |
+| Bronze | $20/month | Name in the README and on the site |
+| Silver | $50/month | Name in the README and on the site, linked to your site |
+| Gold | $100/month | Logo in the README and on the site, linked to your site |
+| Platinum | $200/month | Larger logo in the README and on the site, linked to your site |
+
+<a href="https://dbdelve.github.io/#sponsors"><img src="https://dbdelve.github.io/sponsors/sponsors.svg" alt="DBDelve's sponsors"></a>
 
 
 ![DBDelve in Gruvbox Dark Glass: a SELECT on the events table in the editor and its result grid below](assets/screenshots/query-dark.png)
