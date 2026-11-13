@@ -2161,6 +2161,7 @@ dependencies = [
  "sqlformat",
  "sqlparser",
  "tar",
+ "strum 0.28.0",
  "tiberius",
  "time",
  "tokio",
