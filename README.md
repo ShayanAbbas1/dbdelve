@@ -199,3 +199,11 @@ Support DBDelve's development on [Patreon](https://www.patreon.com/membership/30
 | Platinum | $200/month | Larger logo in the README and on the site, linked to your site |
 
 <a href="https://dbdelve.github.io/#sponsors"><img src="https://dbdelve.github.io/sponsors/sponsors.svg" alt="DBDelve's sponsors"></a>
+
+## Contributors
+
+Thank you to everyone who has contributed to DBDelve.
+
+<a href="https://github.com/ShayanAbbas1/dbdelve/graphs/contributors"><img src="https://contrib.rocks/image?repo=ShayanAbbas1/dbdelve" alt="DBDelve's contributors"></a>
+
+Want to join them? Read [CONTRIBUTING.md](CONTRIBUTING.md).
