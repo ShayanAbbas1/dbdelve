@@ -321,6 +321,14 @@ mod tests {
     }
 
     #[test]
+    fn a_graph_reads_a_descending_integer_key_as_nullable_and_a_key_beside_an_index_named_alike() {
+        let graph = memory(crate::db::sqlite::graph_fixture::EDGE_FIXTURE)
+            .schema_graph("main")
+            .expect("the graph should read");
+        crate::db::sqlite::graph_fixture::assert_edge_fixture(&graph);
+    }
+
+    #[test]
     fn every_value_renders_as_something_a_statement_can_contain() {
         let connection = memory("");
         let result = connection

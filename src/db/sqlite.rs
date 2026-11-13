@@ -535,7 +535,8 @@ impl<F: Fn(&str) -> Result<QueryResult, DbError>> Schema<F> {
                     CASE
                         WHEN columns.\"notnull\" THEN 'no'
                         -- The rowid alias cannot hold a null, which the pragma
-                        -- does not say; see `structure`.
+                        -- does not say; see `structure`. `PRIMARY KEY DESC` is
+                        -- not an alias: it keeps an index, which marks it.
                         WHEN columns.pk = 1
                              AND upper(columns.type) = 'INTEGER'
                              AND (
@@ -543,6 +544,11 @@ impl<F: Fn(&str) -> Result<QueryResult, DbError>> Schema<F> {
                                  FROM pragma_table_info(tables.name{argument})
                                  WHERE pk > 0
                              ) = 1
+                             AND NOT EXISTS (
+                                 SELECT 1
+                                 FROM pragma_index_list(tables.name{argument})
+                                 WHERE origin = 'pk'
+                             )
                             THEN 'no'
                         ELSE 'yes'
                     END AS nullable
@@ -561,7 +567,9 @@ impl<F: Fn(&str) -> Result<QueryResult, DbError>> Schema<F> {
             "SELECT table_name, constraint_name, column_name, key_kind
              FROM (
                  SELECT tables.name AS table_name,
-                        'PRIMARY KEY' AS constraint_name,
+                        -- Index names are the user's, so the two kinds are
+                        -- prefixed apart: an index may be called anything.
+                        'p' AS constraint_name,
                         columns.name AS column_name,
                         'primary' AS key_kind,
                         columns.pk AS key_position
@@ -570,7 +578,7 @@ impl<F: Fn(&str) -> Result<QueryResult, DbError>> Schema<F> {
                  WHERE {filter} AND columns.pk > 0
                  UNION ALL
                  SELECT tables.name,
-                        index_list.name,
+                        'i' || index_list.name,
                         key_column.name,
                         'unique',
                         key_column.seqno
@@ -599,7 +607,7 @@ impl<F: Fn(&str) -> Result<QueryResult, DbError>> Schema<F> {
                     CAST(keys.id AS text) AS constraint_name,
                     COALESCE((
                         SELECT name
-                        FROM pragma_table_info(tables.name{argument})
+                        FROM pragma_table_xinfo(tables.name{argument})
                         WHERE name = keys.\"from\" COLLATE NOCASE
                     ), keys.\"from\") AS column_name,
                     {schema_literal} AS referenced_schema,
@@ -610,7 +618,7 @@ impl<F: Fn(&str) -> Result<QueryResult, DbError>> Schema<F> {
                     ), keys.\"table\") AS referenced_table,
                     COALESCE((
                         SELECT name
-                        FROM pragma_table_info(keys.\"table\"{argument})
+                        FROM pragma_table_xinfo(keys.\"table\"{argument})
                         WHERE CASE
                                   WHEN COALESCE(keys.\"to\", '') = '' THEN pk = keys.seq + 1
                                   ELSE name = keys.\"to\" COLLATE NOCASE
@@ -643,6 +651,12 @@ impl<F: Fn(&str) -> Result<QueryResult, DbError>> Schema<F> {
                                  FROM pragma_table_info({relation}{schema})
                                  WHERE pk > 0
                              ) = 1
+                             -- `PRIMARY KEY DESC` is no alias: it keeps an index.
+                             AND NOT EXISTS (
+                                 SELECT 1
+                                 FROM pragma_index_list({relation}{schema})
+                                 WHERE origin = 'pk'
+                             )
                             THEN 'no'
                         ELSE 'yes'
                     END AS nullable,
@@ -1372,6 +1386,23 @@ pub(super) mod graph_fixture {
         CREATE VIEW seen AS SELECT 1 AS one;
     ";
 
+    /// A rowid alias in its one disguise that is not one, and an index named
+    /// like the primary key.
+    pub const EDGE_FIXTURE: &str = "
+        CREATE TABLE desc_key (id INTEGER PRIMARY KEY DESC);
+        CREATE TABLE named (id INTEGER PRIMARY KEY, code TEXT);
+        CREATE UNIQUE INDEX \"PRIMARY KEY\" ON named (code);
+    ";
+
+    pub fn assert_edge_fixture(graph: &SchemaGraph) {
+        use crate::db::graph::seed;
+
+        assert!(seed::column(graph, "desc_key", "id").nullable);
+        let id = seed::column(graph, "named", "id");
+        assert!(id.primary && id.unique);
+        assert!(seed::column(graph, "named", "code").unique);
+    }
+
     pub fn assert_graph_fixture(graph: &SchemaGraph) {
         use crate::db::graph::{KeyTarget, seed};
 
@@ -1526,6 +1557,28 @@ SELECT count(*) FROM counting
         let kept = crate::db::graph::seed::column(&graph, "kept", "a");
         assert!(kept.primary && !kept.unique);
         assert!(crate::db::graph::seed::column(&graph, "alone", "a").unique);
+    }
+
+    #[test]
+    fn a_graph_reads_a_descending_integer_key_as_nullable_and_a_key_beside_an_index_named_alike() {
+        let graph = memory(graph_fixture::EDGE_FIXTURE)
+            .schema_graph("main")
+            .expect("the graph should read");
+        graph_fixture::assert_edge_fixture(&graph);
+    }
+
+    #[test]
+    fn a_key_on_a_generated_column_survives_a_difference_in_case() {
+        let graph = memory(
+            "CREATE TABLE owner (
+                 id INTEGER PRIMARY KEY, base TEXT,
+                 code TEXT GENERATED ALWAYS AS (lower(base)) VIRTUAL UNIQUE
+             );
+             CREATE TABLE owned (owner_code TEXT REFERENCES owner (CODE));",
+        )
+        .schema_graph("main")
+        .expect("the graph should read");
+        assert_eq!(graph.keys.len(), 1);
     }
 
     #[test]
@@ -2173,6 +2226,14 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_descending_integer_primary_key_is_not_a_rowid_alias_and_stays_nullable() {
+        let structure = memory("CREATE TABLE t (id INTEGER PRIMARY KEY DESC);")
+            .structure("main", "t")
+            .expect("structure should load");
+        assert!(structure.columns[0].nullable);
     }
 
     #[test]
