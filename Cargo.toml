@@ -1,7 +1,7 @@
 # First in the file: the release scripts read the version from the first line
 # that starts with `version`, and the plugin crates under plugins/ share it.
 [workspace.package]
-version = "0.7.1"
+version = "0.7.2"
 edition = "2024"
 license = "GPL-3.0-only"
 
