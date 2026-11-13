@@ -268,7 +268,8 @@ impl Candidate {
         match (&self.alias, &self.on) {
             (Some(alias), Some(on)) => format!(" {alias} ON {on}"),
             (Some(alias), None) => format!(" {alias}"),
-            _ => String::new(),
+            (None, Some(on)) => format!(" ON {on}"),
+            (None, None) => String::new(),
         }
     }
 
@@ -435,24 +436,23 @@ impl SchemaCompletions {
         None
     }
 
-    /// The catalog's own spelling of a relation a foreign key names. A key
-    /// whose schema the catalog spells differently still finds its relation
-    /// when only one has that name.
+    /// The catalog's own listing of a relation a foreign key names. A key
+    /// that names no schema finds its relation when only one has that name.
     fn listed(&self, schema: &str, relation: &str) -> Option<(String, String)> {
-        let mut named = self.catalog.schemas.iter().flat_map(|listed| {
-            listed
-                .relations
-                .iter()
-                .filter(|named| named.name == relation)
-                .map(|named| (listed.name.clone(), named.name.clone()))
-        });
+        let mut named = self
+            .catalog
+            .schemas
+            .iter()
+            .filter(|listed| schema.is_empty() || listed.name == schema)
+            .flat_map(|listed| {
+                listed
+                    .relations
+                    .iter()
+                    .filter(|named| named.name == relation)
+                    .map(|named| (listed.name.clone(), named.name.clone()))
+            });
         let first = named.next()?;
-        let rest = named.collect::<Vec<_>>();
-        std::iter::once(&first)
-            .chain(&rest)
-            .find(|(listed, _)| listed == schema)
-            .cloned()
-            .or(rest.is_empty().then_some(first))
+        named.next().is_none().then_some(first)
     }
 
     /// The relations a foreign key joins to the ones `head`, the statement up
@@ -463,7 +463,19 @@ impl SchemaCompletions {
     /// from a relation to itself is the exception, being the only way to ask
     /// for a self-join.
     fn joins(&self, head: &str, wanted: &mut Wanted) -> Vec<Join> {
-        let sources = sources(&reach(head));
+        let code = code(head);
+        let ctes = ctes(&code);
+        // A CTE hides the table it shares a name with, and has none of its
+        // keys.
+        let sources = sources(&reach(&code))
+            .into_iter()
+            .filter(|source| {
+                source.schema.is_some()
+                    || !ctes
+                        .iter()
+                        .any(|cte| cte.eq_ignore_ascii_case(&source.relation))
+            })
+            .collect::<Vec<_>>();
         let held = |(schema, relation): &(String, String)| {
             sources.iter().any(|source| {
                 source.relation.eq_ignore_ascii_case(relation)
@@ -545,10 +557,21 @@ impl SchemaCompletions {
         }
         // Without the word being typed, which `FROM o` would otherwise bind
         // as a relation called `o` and cost `orders` its alias.
-        let taken = bindings(&format!("{} {}", around.head, around.tail))
+        let rest = code(&format!("{} {}", around.head, around.tail));
+        let taken = bindings(&rest)
             .into_iter()
             .map(|(binding, _)| binding)
             .collect::<Vec<_>>();
+        // A relation the statement already reaches into by name keeps it:
+        // `SELECT orders.id FROM orders o` no longer has an `orders`.
+        let alias = |relation: &str| {
+            let named = tokens(&rest).into_iter().any(|token| {
+                token
+                    .split_once('.')
+                    .is_some_and(|(qualifier, _)| qualifier.eq_ignore_ascii_case(relation))
+            });
+            (!named).then(|| alias_for(relation, &taken))
+        };
 
         let mut candidates = Vec::new();
         if around.takes_condition() {
@@ -559,15 +582,16 @@ impl SchemaCompletions {
                 }) else {
                     continue;
                 };
-                let alias = alias_for(&relation.label, &taken);
+                let alias = alias(&relation.label);
+                let name = alias.as_deref().unwrap_or(&relation.label);
                 let on = join
                     .columns
                     .iter()
-                    .map(|(theirs, ours)| format!("{alias}.{theirs} = {}.{ours}", join.onto))
+                    .map(|(theirs, ours)| format!("{name}.{theirs} = {}.{ours}", join.onto))
                     .collect::<Vec<_>>()
                     .join(" AND ");
                 candidates.push(Candidate {
-                    alias: Some(alias),
+                    alias,
                     on: Some(on),
                     ..Candidate::new(&relation.label, relation.detail.clone(), relation.kind)
                         .qualified(relation.qualified)
@@ -575,7 +599,7 @@ impl SchemaCompletions {
             }
         }
         candidates.extend(relations.into_iter().map(|relation| Candidate {
-            alias: Some(alias_for(&relation.label, &taken)),
+            alias: alias(&relation.label),
             ..relation
         }));
         candidates
@@ -1350,10 +1374,106 @@ fn reach(head: &str) -> String {
         // A space where a group closed, so the words around it stay two.
         reach.push(if character == ')' { ' ' } else { character });
     }
-    match opened.last() {
+    let mut reach = match opened.last() {
         Some(&open) => reach.split_off(open),
         None => reach,
+    };
+    // The query on the other side of a `UNION` is as far out of reach.
+    let operand = words(&reach)
+        .into_iter()
+        .filter(|word| {
+            ["union", "intersect", "except"]
+                .iter()
+                .any(|operator| reach[word.clone()].eq_ignore_ascii_case(operator))
+        })
+        .map(|word| word.end)
+        .next_back();
+    match operand {
+        Some(start) => reach.split_off(start),
+        None => reach,
     }
+}
+
+/// `sql` with each string literal and comment blanked, so that the words in
+/// one are not read as the statement's own.
+fn code(sql: &str) -> String {
+    let bytes = sql.as_bytes();
+    let mut code = String::with_capacity(sql.len());
+    let (mut index, mut copied) = (0, 0);
+    while index < bytes.len() {
+        let end = match bytes[index] {
+            b'\'' => {
+                let mut end = index + 1;
+                loop {
+                    match bytes.get(end) {
+                        None => break end,
+                        Some(b'\'') if bytes.get(end + 1) == Some(&b'\'') => end += 2,
+                        Some(b'\'') => break end + 1,
+                        Some(_) => end += 1,
+                    }
+                }
+            }
+            b'-' if bytes.get(index + 1) == Some(&b'-') => sql[index..]
+                .find('\n')
+                .map_or(bytes.len(), |offset| index + offset),
+            b'/' if bytes.get(index + 1) == Some(&b'*') => sql[index + 2..]
+                .find("*/")
+                .map_or(bytes.len(), |offset| index + 2 + offset + 2),
+            _ => {
+                index += 1;
+                continue;
+            }
+        };
+        code.push_str(&sql[copied..index]);
+        code.push(' ');
+        (index, copied) = (end, end);
+    }
+    code.push_str(&sql[copied..]);
+    code
+}
+
+/// Where each word of `sql` sits.
+fn words(sql: &str) -> Vec<Range<usize>> {
+    let bytes = sql.as_bytes();
+    let mut words = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        let start = index;
+        while index < bytes.len() && is_ident_byte(bytes[index]) {
+            index += 1;
+        }
+        match index > start {
+            true => words.push(start..index),
+            false => index += 1,
+        }
+    }
+    words
+}
+
+/// The names a `WITH` gives its queries: each word followed by `AS (`.
+fn ctes(code: &str) -> Vec<&str> {
+    let words = words(code);
+    let mut ctes = Vec::new();
+    for (index, word) in words.iter().enumerate().skip(1) {
+        if !code[word.clone()].eq_ignore_ascii_case("as") {
+            continue;
+        }
+        // `AS NOT MATERIALIZED (` is the same query under a hint.
+        let body = words[index + 1..]
+            .iter()
+            .take_while(|hint| {
+                ["not", "materialized"]
+                    .iter()
+                    .any(|known| code[(*hint).clone()].eq_ignore_ascii_case(known))
+            })
+            .last()
+            .unwrap_or(word)
+            .end;
+        if code[body..].trim_start().starts_with('(') {
+            ctes.push(&code[words[index - 1].clone()]);
+        }
+    }
+    ctes
 }
 
 /// What follows the caret, as far as an alias written at it is concerned.
@@ -2588,6 +2708,47 @@ mod tests {
         assert_eq!(
             first("SELECT * FROM users u JOIN (SELECT * FROM orders o JOIN cust|"),
             "customers c ON c.id = o.customer_id"
+        );
+    }
+
+    #[test]
+    fn a_condition_names_only_what_the_query_at_the_caret_can_see() {
+        for sql in [
+            "SELECT 'FROM orders o' AS note FROM users u JOIN cust|",
+            "SELECT 1 /* FROM orders o */ FROM users u JOIN cust|",
+            "WITH orders AS (SELECT id FROM users) SELECT * FROM orders o JOIN cust|",
+            "WITH orders AS MATERIALIZED (SELECT 1) SELECT * FROM orders o JOIN cust|",
+            "SELECT o.id FROM orders o UNION ALL SELECT u.id FROM users u JOIN cust|",
+        ] {
+            assert_eq!(first(sql), "customers c", "{sql}");
+        }
+        assert_eq!(
+            first("SELECT * FROM orders /* the shop's */ o JOIN cust|"),
+            "customers c ON c.id = o.customer_id"
+        );
+    }
+
+    #[test]
+    fn a_relation_the_statement_reaches_into_by_name_keeps_its_name() {
+        assert_eq!(first("SELECT customers.id FROM custo|"), "customers");
+        assert_eq!(
+            first("SELECT customers.id FROM orders o JOIN custo|"),
+            "customers ON customers.id = o.customer_id"
+        );
+        assert_eq!(first("SELECT o.id FROM custo|"), "customers c");
+    }
+
+    #[test]
+    fn a_key_into_a_schema_the_catalog_does_not_hold_joins_nothing() {
+        let completions = shop();
+        assert_eq!(
+            completions.listed("public", "users"),
+            Some(("public".to_string(), "users".to_string()))
+        );
+        assert_eq!(completions.listed("elsewhere", "users"), None);
+        assert_eq!(
+            completions.listed("", "users"),
+            Some(("public".to_string(), "users".to_string()))
         );
     }
 
