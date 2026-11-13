@@ -142,7 +142,8 @@ The shape a change to the main pane has to fit (`session.rs`, with the
 - **A dialog's keyboard is its ring** (`Workspace::dialog_layer`): the layer
   holds focus, and `left`/`right`/`tab` step a ring across its buttons and
   then its one other control, the "Don't ask again" box (`enter` or `space`
-  ticks it) or the import question's project (`enter` lists the projects in
+  ticks it; on the unreadable prompt it is the app-wide opt-in, set only when
+  Run once is pressed with it ticked) or the import question's project (`enter` lists the projects in
   the palette). `space` never presses a button: a space typed on as a prompt
   takes the keyboard would otherwise press Run. Import Rows has fields and
   lists of its own, so it has no ring: Tab moves real focus through it,

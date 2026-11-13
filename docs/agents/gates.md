@@ -194,7 +194,9 @@ The core of the mode check is in `AGENTS.md`, "Connection modes". The detail:
   `Engine::holds_read_only` is false on SQLite, DuckDB, Snowflake and SQL
   Server, so a statement `sqlparser` cannot parse carries Read-write there, not
   Read-only, and the gate asks for that. A statement it parses keeps its own
-  verdict. ClickHouse holds Read-only (`readonly=2`) but not for every
+  verdict. The opt-in to run unreadable statements unasked
+  (`sql::gate_own_run`) lets only `Stop::RunOnce` through, so this upgrade
+  still asks: the setting is about being asked, not about the mode. ClickHouse holds Read-only (`readonly=2`) but not for every
   statement, so what it cannot parse is read by its first keyword
   (`UnreadableFloor::FirstKeyword`): reads stay Read-only and run once on
   confirmation, writes need Read-write, DDL, server control and `BACKUP` and
