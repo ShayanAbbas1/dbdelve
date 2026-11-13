@@ -309,8 +309,9 @@ pub fn config_from_url(url: &str) -> Result<ServerConfig, String> {
     super::server_from_url(url, "MySQL")
 }
 
-/// The fields every connection needs, query or cancel alike. `dial` is a
-/// tunnel's address, which replaces the server's.
+/// The fields every connection needs, query or cancel alike. `dial` is an
+/// address in place of the server's host: a tunnel's, or the one of the
+/// host's own addresses a session reached when the first was not there.
 fn base_options(server: &ServerConfig, dial: Option<SocketAddr>) -> OptsBuilder {
     let (host, port) = match dial {
         Some(dial) => (dial.ip().to_string(), dial.port()),
@@ -321,37 +322,48 @@ fn base_options(server: &ServerConfig, dial: Option<SocketAddr>) -> OptsBuilder 
         .tcp_port(port)
         // A loopback address would otherwise have the driver ask the server
         // for its socket path and reconnect to that path here, on this
-        // machine: past the tunnel, to whatever server is listening locally.
+        // machine: past the tunnel, or past the TLS the profile asked for,
+        // since a socket is never encrypted, to whatever server is listening
+        // locally.
         .prefer_socket(dial.is_none())
         .db_name((!server.database.is_empty()).then(|| server.database.clone()))
         .user(Some(server.user.clone()))
         .tcp_connect_timeout(Some(Duration::from_secs(CONNECT_TIMEOUT_SECONDS)))
 }
 
-/// Open a connection built from `options`, falling back to plaintext exactly
-/// where `sslmode=prefer` allows it, and to the host's other addresses where
-/// the first one it resolves to is not there. Shared by the query connection
-/// and the cancel connection so neither fallback can drift between them.
+/// Open a connection to `dial`, or to the host by name where there is none,
+/// falling back to plaintext exactly where `sslmode=prefer` allows it. With
+/// `fail_over`, a name whose first address is not there is tried at the
+/// others, and the address reached comes back with the connection, for
+/// everything opened beside it to reach the same server. Shared by the query
+/// connection and the cancel connection so the fallbacks cannot drift between
+/// them.
 fn open(
     server: &ServerConfig,
     engine: Engine,
-    options: impl Fn() -> OptsBuilder,
-) -> Result<Conn, DbError> {
+    dial: Option<SocketAddr>,
+    fail_over: bool,
+    options: impl Fn(Option<SocketAddr>) -> OptsBuilder,
+) -> Result<(Conn, Option<SocketAddr>), DbError> {
     let password = server.login_password(engine)?;
     // Offered only when there is one. An empty password is not the same as no
     // password, and IAM auth relies on the latter.
-    let options = || options().pass((!password.is_empty()).then(|| password.to_string()));
-    let opened = match handshake(options(), server) {
+    let options = |dial| options(dial).pass((!password.is_empty()).then(|| password.to_string()));
+    let opened = match handshake(options(dial), server) {
         // verify-full checks the certificate against the host dialled, so an
         // address in the name's place would check the certificate against
         // something the user never typed.
-        Err(error) if unusable_address(&error) && server.sslmode != SslMode::VerifyFull => {
-            let addresses = resolved(&options());
-            on_any_address(options(), addresses, error, |options| {
-                handshake(options, server)
+        Err(error)
+            if fail_over
+                && dial.is_none()
+                && unusable_address(&error)
+                && server.sslmode != SslMode::VerifyFull =>
+        {
+            on_any_address(resolved(server), error, |address| {
+                handshake(options(Some(address)), server)
             })
         }
-        opened => opened,
+        opened => opened.map(|connection| (connection, dial)),
     };
     server.forgetting_on_failure(
         engine,
@@ -366,23 +378,35 @@ fn handshake(options: OptsBuilder, server: &ServerConfig) -> Result<Conn, ::mysq
         // you can" in one attempt, so this is two — which is what libpq's own
         // `prefer` amounts to. No other mode falls back, and not where nothing
         // answered at all: plaintext would find nobody there either.
-        Err(error) if server.sslmode == SslMode::Prefer && !unusable_address(&error) => {
-            Conn::new(over(options, server, None))
+        Err(encrypted) if server.sslmode == SslMode::Prefer && !unusable_address(&encrypted) => {
+            // A server did answer the first attempt, so a plaintext one that
+            // finds nobody must not read as nothing there.
+            Conn::new(over(options, server, None)).map_err(|plaintext| {
+                if unusable_address(&plaintext) {
+                    encrypted
+                } else {
+                    plaintext
+                }
+            })
         }
         connected => connected,
     }
 }
 
-/// Every address the host in `options` resolves to, in the resolver's order.
-fn resolved(options: &OptsBuilder) -> Vec<SocketAddr> {
-    let opts = ::mysql::Opts::from(options.clone());
-    (opts.get_ip_or_hostname().as_ref(), opts.get_tcp_port())
+/// Every address the server's host resolves to, in the resolver's order.
+///
+/// ponytail: the first is dialled again, though the name already failed
+/// there: the driver does not say which address it tried, and under DNS
+/// round-robin it need not be the first of a fresh lookup. One more refusal
+/// is cheap; matching it up would need the driver's own lookup.
+fn resolved(server: &ServerConfig) -> Vec<SocketAddr> {
+    (server.host.as_str(), server.port.unwrap_or(DEFAULT_PORT))
         .to_socket_addrs()
         .map_or_else(|_| Vec::new(), Iterator::collect)
 }
 
-/// `attempt` at each of `addresses` in turn, as an address rather than the
-/// name, after `first` came back from the name.
+/// `attempt` at each of `addresses` in turn, after `first` came back from the
+/// name, until one is there: the connection and the address it reached.
 ///
 /// The driver dials only the first address a name resolves to: its connect
 /// gives up at the first one that refuses rather than moving to the next. So
@@ -391,23 +415,17 @@ fn resolved(options: &OptsBuilder) -> Vec<SocketAddr> {
 /// has nothing left to try, and the first error is the one the user can act
 /// on, since it names what they typed.
 fn on_any_address(
-    options: OptsBuilder,
     addresses: Vec<SocketAddr>,
     first: ::mysql::Error,
-    attempt: impl Fn(OptsBuilder) -> Result<Conn, ::mysql::Error>,
-) -> Result<Conn, ::mysql::Error> {
+    attempt: impl Fn(SocketAddr) -> Result<Conn, ::mysql::Error>,
+) -> Result<(Conn, Option<SocketAddr>), ::mysql::Error> {
     if addresses.len() < 2 {
         return Err(first);
     }
     for address in addresses {
-        match attempt(
-            options
-                .clone()
-                .ip_or_hostname(Some(address.ip().to_string()))
-                .tcp_port(address.port()),
-        ) {
+        match attempt(address) {
             Err(error) if unusable_address(&error) => {}
-            reached => return reached,
+            reached => return reached.map(|connection| (connection, Some(address))),
         }
     }
     Err(first)
@@ -436,13 +454,20 @@ fn over(options: OptsBuilder, server: &ServerConfig, tls: Option<SslOpts>) -> Op
     options.ssl_opts(tls).enable_cleartext_plugin(cleartext)
 }
 
-/// The connection a profile keeps.
+/// Another session at the server `dial` names, as the one a profile keeps.
 fn connect(
     server: &ServerConfig,
     engine: Engine,
     dial: Option<SocketAddr>,
 ) -> Result<Conn, DbError> {
-    open(server, engine, || match server.statement_timeout {
+    open(server, engine, dial, false, |dial| {
+        session_options(server, engine, dial)
+    })
+    .map(|(connection, _)| connection)
+}
+
+fn session_options(server: &ServerConfig, engine: Engine, dial: Option<SocketAddr>) -> OptsBuilder {
+    match server.statement_timeout {
         0 => base_options(server, dial),
         // Run once at connect as a session default, never spliced into the
         // user's own submission — see `ServerConfig::statement_timeout` for
@@ -458,7 +483,16 @@ fn connect(
                 u64::from(seconds) * 1_000
             )
         }]),
-    })
+    }
+}
+
+/// Where a session's every socket goes: through its tunnel, which may have
+/// closed, or else to the address it reached, or else to its host by name.
+fn dialled(
+    tunnel: Option<&Tunnel>,
+    address: Option<SocketAddr>,
+) -> Result<Option<SocketAddr>, DbError> {
+    tunnel.map_or(Ok(address), |tunnel| tunnel.dial().map(Some))
 }
 
 /// The throwaway connection a cancel opens: the same fields, but bounded end
@@ -496,6 +530,11 @@ pub struct Connection {
     /// What the cancel socket dials too, and held so ssh runs as long as any
     /// clone does.
     tunnel: Option<Arc<Tunnel>>,
+    /// The address this session reached in its host's place, where the
+    /// name's first address was not there. Every socket opened beside it
+    /// dials the same one: a `KILL QUERY` names a session by a number only
+    /// its own server knows, and another server would stop someone else's.
+    address: Option<SocketAddr>,
     /// A second session, for stopping a statement at the row limit while
     /// this one is busy reading its rows. Opened the first time it is needed
     /// and kept, so a run does not pay for a connect.
@@ -510,13 +549,16 @@ impl Connection {
         }
         tunnelled(server, DEFAULT_PORT, |tunnel| {
             let dial = tunnel.as_deref().map(Tunnel::dial).transpose()?;
-            let connection = connect(server, engine, dial)?;
+            let (connection, address) = open(server, engine, dial, true, |dial| {
+                session_options(server, engine, dial)
+            })?;
             Ok(Self {
                 connection_id: connection.connection_id(),
                 server: server.clone(),
                 engine,
                 connection: Arc::new(Mutex::new(connection)),
                 tunnel,
+                address,
                 side: Arc::default(),
             })
         })
@@ -547,7 +589,7 @@ impl Connection {
     }
 
     fn dial(&self) -> Result<Option<SocketAddr>, DbError> {
-        self.tunnel.as_deref().map(Tunnel::dial).transpose()
+        dialled(self.tunnel.as_deref(), self.address)
     }
 
     /// `KILL QUERY` over a connection of its own, because the connection being
@@ -563,7 +605,9 @@ impl Connection {
     pub fn cancel(&self) -> Result<(), DbError> {
         let server = &self.server;
         let dial = self.dial()?;
-        let mut connection = open(server, self.engine, || cancel_options(server, dial))?;
+        let (mut connection, _) = open(server, self.engine, dial, false, |dial| {
+            cancel_options(server, dial)
+        })?;
         connection
             .query_drop(format!("KILL QUERY {}", self.connection_id))
             .map_err(|error| DbError {
@@ -596,9 +640,10 @@ impl Connection {
         for _ in 0..2 {
             if side.is_none() {
                 let dial = self.dial().ok()?;
-                *side = open(&self.server, self.engine, || {
+                *side = open(&self.server, self.engine, dial, false, |dial| {
                     cancel_options(&self.server, dial)
                 })
+                .map(|(connection, _)| connection)
                 .ok();
             }
             match ask(side.as_mut()?) {
@@ -849,6 +894,7 @@ impl Connection {
             engine: self.engine,
             connection: Arc::new(Mutex::new(connection)),
             tunnel: self.tunnel.clone(),
+            address: self.address,
             side: Arc::default(),
         };
         assemble_sizes(side.internal_query(&SIZES_SQL.replace("{system}", SYSTEM_SCHEMAS))?)
@@ -1572,17 +1618,44 @@ mod tests {
         // Hanging up is enough: the handshake then fails as something other
         // than a refusal, which only reaching the listener can cause.
         let reached = std::thread::spawn(move || listener.accept().is_ok());
-        let options = OptsBuilder::new()
-            .ip_or_hostname(Some(closed.ip().to_string()))
-            .tcp_port(closed.port())
-            .prefer_socket(false);
-        let first = Conn::new(options.clone()).expect_err("nothing listens on a closed port");
+        let at = |address| Conn::new(base_options(&ServerConfig::default(), Some(address)));
+        let first = at(closed).expect_err("nothing listens on a closed port");
         assert!(unusable_address(&first), "{first}");
 
-        let error = on_any_address(options, vec![closed, listening], first, Conn::new)
+        let error = on_any_address(vec![closed, listening], first, at)
             .expect_err("the listener speaks no MySQL");
         assert!(!unusable_address(&error), "{error}");
         assert!(reached.join().unwrap());
+    }
+
+    #[test]
+    fn an_address_dialled_for_a_name_never_switches_to_a_local_socket() {
+        let server = ServerConfig {
+            host: "db.example.test".into(),
+            ..ServerConfig::default()
+        };
+        let opts: ::mysql::Opts = session_options(
+            &server,
+            Engine::MySql,
+            Some("127.0.0.1:3306".parse().unwrap()),
+        )
+        .into();
+        assert_eq!(opts.get_ip_or_hostname(), "127.0.0.1");
+        assert!(!opts.get_prefer_socket());
+    }
+
+    #[test]
+    fn a_cancel_dials_the_address_its_session_reached() {
+        let server = ServerConfig {
+            host: "db.example.test".into(),
+            ..ServerConfig::default()
+        };
+        let reached = "192.0.2.7:3307".parse().unwrap();
+        let opts: ::mysql::Opts =
+            cancel_options(&server, dialled(None, Some(reached)).unwrap()).into();
+        assert_eq!(opts.get_ip_or_hostname(), "192.0.2.7");
+        assert_eq!(opts.get_tcp_port(), 3307);
+        assert!(!opts.get_prefer_socket());
     }
 
     #[test]
