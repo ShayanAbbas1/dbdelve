@@ -23,12 +23,15 @@ use std::time::{Duration, Instant};
 use rusqlite::fallible_iterator::FallibleIterator;
 use rusqlite::types::ValueRef;
 use rusqlite::{Batch, InterruptHandle, OpenFlags};
+use sqlparser::ast::{ColumnOption, GeneratedExpressionMode, Statement};
+use sqlparser::dialect::SQLiteDialect;
+use sqlparser::parser::Parser;
 
 use super::{
-    Catalog, Column, DbError, EditTarget, Engine, Fetch, ForeignKey, Index, IndexKind,
-    NamedDefinition, QueryResult, Reference, RowBuilder, Stopped, Structure, assemble_catalog,
-    assemble_references, assemble_structure, non_utf8_error, optional_cell, percent_decoded,
-    plain_error, required_cell,
+    Catalog, Column, ColumnDefinition, DbError, EditTarget, Engine, Fetch, ForeignKey, Index,
+    IndexKind, NamedDefinition, QueryResult, Reference, RowBuilder, Stopped, Structure,
+    assemble_catalog, assemble_references, assemble_structure, non_utf8_error, optional_cell,
+    percent_decoded, plain_error, required_cell,
 };
 
 /// The path out of a `sqlite:` or `file:` URL.
@@ -527,8 +530,15 @@ impl<F: Fn(&str) -> Result<QueryResult, DbError>> Schema<F> {
                             THEN 'no'
                         ELSE 'yes'
                     END AS nullable,
-                    COALESCE(dflt_value, '') AS column_default
-             FROM pragma_table_info({relation}{schema})
+                    CASE hidden
+                        WHEN 2 THEN 'GENERATED ALWAYS VIRTUAL'
+                        WHEN 3 THEN 'GENERATED ALWAYS STORED'
+                        ELSE COALESCE(dflt_value, '')
+                    END AS column_default
+             FROM pragma_table_xinfo({relation}{schema})
+             -- A virtual table's hidden columns, which `SELECT *` leaves out
+             -- too. 2 and 3 are generated columns.
+             WHERE hidden <> 1
              ORDER BY cid",
             relation = self.engine.quote_literal(relation),
             schema = self.argument(schema),
@@ -539,10 +549,74 @@ impl<F: Fn(&str) -> Result<QueryResult, DbError>> Schema<F> {
         // pragmas rather than queried as definitions.
         let mut structure =
             assemble_structure(columns, QueryResult::default(), QueryResult::default())?;
+        if structure
+            .columns
+            .iter()
+            .any(|column| self.engine.generates(column))
+        {
+            self.spell_generated(schema, relation, &mut structure.columns)?;
+        }
         structure.indexes = self.indexes(schema, relation)?;
         structure.constraints = self.constraints(schema, relation)?;
         structure.foreign_keys = self.foreign_keys(schema, relation)?;
         Ok(structure)
+    }
+
+    /// SQLite keeps a generated column's expression nowhere but in the
+    /// table's `CREATE`, so it is read from there. One that does not parse
+    /// keeps the default without its expression, which still marks the column
+    /// as generated.
+    fn spell_generated(
+        &self,
+        schema: &str,
+        table: &str,
+        columns: &mut [ColumnDefinition],
+    ) -> Result<(), DbError> {
+        let listed = (self.run)(&format!(
+            "SELECT sql FROM {}.sqlite_master
+             WHERE type = 'table' AND name = {} COLLATE NOCASE",
+            self.engine.quote_identifier(schema),
+            self.engine.quote_literal(table),
+        ))?;
+        let Some(created) = column_of(&listed, "sql")?.pop() else {
+            return Ok(());
+        };
+        let Ok(statements) = Parser::parse_sql(&SQLiteDialect {}, &created) else {
+            return Ok(());
+        };
+        let [Statement::CreateTable(created)] = statements.as_slice() else {
+            return Ok(());
+        };
+        for definition in &created.columns {
+            let Some((expression, mode)) =
+                definition
+                    .options
+                    .iter()
+                    .find_map(|option| match &option.option {
+                        ColumnOption::Generated {
+                            generation_expr: Some(expression),
+                            generation_expr_mode,
+                            ..
+                        } => Some((expression, generation_expr_mode)),
+                        _ => None,
+                    })
+            else {
+                continue;
+            };
+            let Some(column) = columns
+                .iter_mut()
+                .find(|column| column.name.eq_ignore_ascii_case(&definition.name.value))
+            else {
+                continue;
+            };
+            // Without a word for it, SQLite stores nothing and computes on read.
+            let mode = match mode {
+                Some(GeneratedExpressionMode::Stored) => "STORED",
+                Some(GeneratedExpressionMode::Virtual) | None => "VIRTUAL",
+            };
+            column.default = Some(format!("GENERATED ALWAYS AS ({expression}) {mode}"));
+        }
+        Ok(())
     }
 
     /// The relation's own `CREATE` first, then its indexes and triggers in
@@ -1871,6 +1945,42 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
                     default: None,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn a_generated_column_is_listed_with_its_expression_and_left_out_of_inserts() {
+        let structure = memory(
+            "CREATE TABLE test (
+                id INTEGER PRIMARY KEY NOT NULL,
+                id_doubled INTEGER AS (
+                    id * 2
+                ) STORED,
+                label TEXT GENERATED ALWAYS AS ('#' || id),
+                body TEXT
+            );",
+        )
+        .structure("main", "test")
+        .expect("structure should load");
+
+        let defaults: Vec<_> = structure
+            .columns
+            .iter()
+            .map(|column| (column.name.as_str(), column.default.as_deref()))
+            .collect();
+        assert_eq!(
+            defaults,
+            [
+                ("id", None),
+                ("id_doubled", Some("GENERATED ALWAYS AS (id * 2) STORED")),
+                ("label", Some("GENERATED ALWAYS AS ('#' || id) VIRTUAL")),
+                ("body", None),
+            ]
+        );
+        assert_eq!(
+            crate::sql::insert_template(Engine::Sqlite, "main", "test", &structure.columns)
+                .as_deref(),
+            Some("INSERT INTO \"main\".\"test\" (\"id\", \"body\") VALUES (?, ?);")
         );
     }
 

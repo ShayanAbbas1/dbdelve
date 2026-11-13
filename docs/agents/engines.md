@@ -394,6 +394,11 @@ Decided, and not to be re-litigated:
 - **`CHECK` constraints are absent** from the Structure tab on MySQL and SQLite.
   SQLite keeps them only in the `CREATE TABLE` text; MySQL's
   `information_schema.CHECK_CONSTRAINTS` only exists from 8.0.16.
+- **A SQLite generated column's expression is parsed out of the `CREATE
+  TABLE`**, the only place SQLite keeps it. `pragma_table_xinfo` says which
+  columns are generated (`table_info` leaves them out); one whose `CREATE`
+  will not parse shows `GENERATED ALWAYS STORED`/`VIRTUAL` without the
+  expression and is still kept out of inserts.
 - **An index's kind, key and partial condition come from the catalog, never
   from parsing its definition** (`db::Index`). A key crosses `assemble_structure`
   joined by `chr(31)`, since `, ` splits `coalesce(a, b)`. Where a catalog falls
