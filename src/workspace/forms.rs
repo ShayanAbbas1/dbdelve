@@ -1030,23 +1030,24 @@ impl Workspace {
             return false;
         };
         match self.dialog_in_front.get() {
-            Some("pending-run") => profile
-                .session
-                .pending_run
-                .as_ref()
-                .and_then(|pending| {
-                    sql::gate_own_run(
-                        &pending.verdict,
-                        profile.mode,
-                        &profile.confirmed,
-                        self.settings.run_unreadable,
-                    )
-                })
-                .is_some_and(|stop| match stop {
-                    Stop::Confirm(kind) => kind.suppressible(),
-                    Stop::RunOnce => true,
-                    Stop::Upgrade(_) => false,
-                }),
+            Some("pending-run") => {
+                profile
+                    .session
+                    .pending_run
+                    .as_ref()
+                    .is_some_and(|pending| {
+                        match sql::gate_own_run(
+                            &pending.verdict,
+                            profile.mode,
+                            &profile.confirmed,
+                            pending.own_run && self.settings.run_unreadable,
+                        ) {
+                            Some(Stop::Confirm(kind)) => kind.suppressible(),
+                            Some(Stop::RunOnce) => pending.own_run,
+                            _ => false,
+                        }
+                    })
+            }
             Some("stale-edit") => profile
                 .session
                 .stale_edit
@@ -1624,7 +1625,7 @@ impl Workspace {
             &pending.verdict,
             profile.mode,
             &profile.confirmed,
-            self.settings.run_unreadable,
+            pending.own_run && self.settings.run_unreadable,
         )?;
         let name = profile.name.clone();
         let current_mode = profile.mode.label();
@@ -1635,6 +1636,7 @@ impl Workspace {
             .map(|resume| code_lines(&resume.sql, syntax, &cx.theme().highlight_theme));
         let code = fonts(cx).editor.clone();
         let dont_ask = pending.dont_ask;
+        let own_run = pending.own_run;
 
         let (title, message, confirm, tone) = match stop {
             Stop::Upgrade(needed) => (
@@ -1731,7 +1733,7 @@ impl Workspace {
                                 Stop::Confirm(kind) if kind.suppressible() => {
                                     Some(format!("Don't ask again for {} on {name}", kind.label()))
                                 }
-                                Stop::RunOnce => Some(
+                                Stop::RunOnce if own_run => Some(
                                     "Run statements dbdelve can't parse without asking".to_string(),
                                 ),
                                 _ => None,

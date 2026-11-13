@@ -83,6 +83,7 @@ impl Workspace {
             },
             dont_ask: false,
             commit_cell: false,
+            own_run: false,
         });
         cx.notify();
         false
@@ -167,13 +168,17 @@ impl Workspace {
             verdict,
             dont_ask,
             commit_cell,
+            own_run,
         }) = profile.session.pending_run.take()
         else {
             return;
         };
-        let Some(stop) =
-            sql::gate_own_run(&verdict, profile.mode, &profile.confirmed, run_unreadable)
-        else {
+        let Some(stop) = sql::gate_own_run(
+            &verdict,
+            profile.mode,
+            &profile.confirmed,
+            own_run && run_unreadable,
+        ) else {
             return;
         };
 
@@ -204,12 +209,13 @@ impl Workspace {
                 let Some(resume) = resume else {
                     return;
                 };
-                self.execute_and_then(
+                self.execute_gated(
                     resume.sql,
                     resume.tab,
                     resume.refresh,
                     resume.keep_rows,
                     resume.explain,
+                    own_run,
                     cx,
                 );
             }

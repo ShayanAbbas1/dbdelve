@@ -146,8 +146,10 @@ server, and how `IF` conditions and `CycleMode` are read, are in
   turns on an app-wide setting (`Settings::run_unreadable`, read through
   `sql::gate_own_run`) that runs the user's own unreadable statements unasked.
   It skips that prompt and never an upgrade, so Read-only keeps meaning it; it
-  never joins a profile's silenced list; and SQL DBDelve runs on its own never
-  consults it, so a missed refresh stays the worst it can do.
+  never joins a profile's silenced list; and only a run the user just asked
+  for (`Workspace::execute_own`: Run, its queue, Explain) consults it.
+  Previews, edits and refreshes go through `execute_and_then` and keep
+  asking, so a missed refresh stays the worst it can do.
 - Unknown statements and `ALTER` operations other than `ADD COLUMN` need Full.
   Keep it that strict.
 - **`IF`/`ELSEIF` conditions are classified, not treated as unreadable.** Every

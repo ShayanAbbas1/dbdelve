@@ -783,6 +783,8 @@ pub(crate) struct PendingRun {
     /// The mode refused a grid cell's commit, whose input waits open behind
     /// the prompt: raising the mode carries the commit through.
     pub(crate) commit_cell: bool,
+    /// Raised by `execute_own`, so `Settings::run_unreadable` applies to it.
+    pub(crate) own_run: bool,
 }
 
 /// Export over a grid holding less than its result, waiting on the dialog

@@ -1391,6 +1391,16 @@ fn ticking_run_once_s_box_runs_the_next_unreadable_statement_unasked(cx: &mut Te
             _ => panic!("the pragma never ran"),
         });
 
+        // What an edit's refresh reruns, unasked: that still asks, and offers
+        // no box, because nobody pressed Run.
+        workspace.update(cx, |workspace, cx| {
+            let tab = workspace.profile().unwrap().session.active;
+            workspace.execute_sql("PRAGMA table_info(t)".into(), tab, cx);
+        });
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("pending-run"));
+        workspace.read_with(cx, |workspace, _| assert!(!workspace.dialog_checkbox()));
+
         quit(workspace, cx);
     });
 }
