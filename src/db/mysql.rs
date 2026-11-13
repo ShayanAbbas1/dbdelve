@@ -19,7 +19,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashSet;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -30,7 +30,7 @@ use ::mysql::{Conn, OptsBuilder, SslOpts, Value};
 use super::ssh::{Tunnel, tunnelled};
 use super::{
     Catalog, Column, DbError, EditTarget, Engine, Fetch, Index, IndexKind, QueryResult, Reference,
-    RowBuilder, ServerConfig, Sizes, SslMode, Stopped, Structure, assemble_catalog,
+    RowBuilder, Schema, ServerConfig, Sizes, SslMode, Stopped, Structure, assemble_catalog,
     assemble_databases, assemble_foreign_keys, assemble_references, assemble_sizes,
     assemble_structure, non_utf8_error, optional_cell, plain_error, required_cell,
 };
@@ -57,24 +57,45 @@ const CANCEL_TIMEOUT_SECONDS: u64 = 5;
 const BINARY_COLLATION: u16 = 63;
 
 /// The four schemas the server owns. Nobody wrote them and nobody wants them in
-/// a sidebar listing what they wrote.
+/// a sidebar listing what they wrote, unless they picked one: every query that
+/// leaves these out keeps the database the connection selected.
 const SYSTEM_SCHEMAS: &str = "('information_schema', 'mysql', 'performance_schema', 'sys')";
+
+/// What `TABLE_TYPE` calls a table that holds rows: MariaDB names one it keeps
+/// the history of apart.
+const STORED_TABLES: &str = "('BASE TABLE', 'SYSTEM VERSIONED')";
+
+/// Every table, with MariaDB's sequence among them: there is no kind of its
+/// own for one, and it reads as the one-row table it is to a `SELECT`.
+const TABLES: &str = "('BASE TABLE', 'SYSTEM VERSIONED', 'SEQUENCE')";
+
+/// `SYSTEM VIEW` is `information_schema`'s own, and listed only where it is
+/// the database selected.
+const VIEWS: &str = "('VIEW', 'SYSTEM VIEW')";
 
 const DATABASES_SQL: &str = "
 SELECT SCHEMA_NAME AS name, SCHEMA_NAME = DATABASE() AS is_current
 FROM information_schema.SCHEMATA
 ORDER BY SCHEMA_NAME";
 
+// Apart from `RELATIONS_SQL` because a database with nothing in it has no
+// relation to be listed by, and one just created is exactly that.
+const SCHEMAS_SQL: &str = "
+SELECT SCHEMA_NAME AS schema_name
+FROM information_schema.SCHEMATA
+WHERE SCHEMA_NAME NOT IN {system} OR SCHEMA_NAME = DATABASE()
+";
+
 const RELATIONS_SQL: &str = "
 SELECT TABLE_SCHEMA AS schema_name,
        TABLE_NAME AS relation_name,
-       CASE TABLE_TYPE
-           WHEN 'BASE TABLE' THEN 'table'
-           WHEN 'VIEW' THEN 'view'
+       CASE
+           WHEN TABLE_TYPE IN {tables} THEN 'table'
+           WHEN TABLE_TYPE IN {views} THEN 'view'
        END AS relation_kind
 FROM information_schema.TABLES
-WHERE TABLE_SCHEMA NOT IN {system}
-  AND TABLE_TYPE IN ('BASE TABLE', 'VIEW')
+WHERE (TABLE_SCHEMA NOT IN {system} OR TABLE_SCHEMA = DATABASE())
+  AND (TABLE_TYPE IN {tables} OR TABLE_TYPE IN {views})
 ORDER BY TABLE_SCHEMA, TABLE_NAME
 ";
 
@@ -88,8 +109,8 @@ SELECT TABLE_SCHEMA AS schema_name,
        DATA_LENGTH + INDEX_LENGTH AS size_bytes,
        TABLE_ROWS AS row_estimate
 FROM information_schema.TABLES
-WHERE TABLE_SCHEMA NOT IN {system}
-  AND TABLE_TYPE = 'BASE TABLE'
+WHERE (TABLE_SCHEMA NOT IN {system} OR TABLE_SCHEMA = DATABASE())
+  AND TABLE_TYPE IN {stored}
 ";
 
 // Every column is coalesced because the assembler refuses a null, and several of
@@ -119,7 +140,7 @@ SELECT routine.ROUTINE_SCHEMA AS schema_name,
        LOWER(COALESCE(routine.ROUTINE_BODY, '')) AS language,
        COALESCE(routine.ROUTINE_DEFINITION, '') AS definition
 FROM information_schema.ROUTINES AS routine
-WHERE routine.ROUTINE_SCHEMA NOT IN {system}
+WHERE (routine.ROUTINE_SCHEMA NOT IN {system} OR routine.ROUTINE_SCHEMA = DATABASE())
   AND routine.ROUTINE_TYPE IN ('FUNCTION', 'PROCEDURE')
 ORDER BY routine.ROUTINE_SCHEMA, routine.ROUTINE_NAME
 ";
@@ -300,8 +321,9 @@ pub fn config_from_url(url: &str) -> Result<ServerConfig, String> {
     super::server_from_url(url, "MySQL")
 }
 
-/// The fields every connection needs, query or cancel alike. `dial` is a
-/// tunnel's address, which replaces the server's.
+/// The fields every connection needs, query or cancel alike. `dial` is an
+/// address in place of the server's host: a tunnel's, or the one of the
+/// host's own addresses a session reached when the first was not there.
 fn base_options(server: &ServerConfig, dial: Option<SocketAddr>) -> OptsBuilder {
     let (host, port) = match dial {
         Some(dial) => (dial.ip().to_string(), dial.port()),
@@ -312,37 +334,126 @@ fn base_options(server: &ServerConfig, dial: Option<SocketAddr>) -> OptsBuilder 
         .tcp_port(port)
         // A loopback address would otherwise have the driver ask the server
         // for its socket path and reconnect to that path here, on this
-        // machine: past the tunnel, to whatever server is listening locally.
+        // machine: past the tunnel, or past the TLS the profile asked for,
+        // since a socket is never encrypted, to whatever server is listening
+        // locally.
         .prefer_socket(dial.is_none())
         .db_name((!server.database.is_empty()).then(|| server.database.clone()))
         .user(Some(server.user.clone()))
         .tcp_connect_timeout(Some(Duration::from_secs(CONNECT_TIMEOUT_SECONDS)))
 }
 
-/// Open a connection built from `options`, falling back to plaintext exactly
-/// where `sslmode=prefer` allows it. Shared by the query connection and the
-/// cancel connection so the fallback behaviour cannot drift between them.
+/// Open a connection to `dial`, or to the host by name where there is none,
+/// falling back to plaintext exactly where `sslmode=prefer` allows it. With
+/// `fail_over`, a name whose first address is not there is tried at the
+/// others, and the address reached comes back with the connection, for
+/// everything opened beside it to reach the same server. Shared by the query
+/// connection and the cancel connection so the fallbacks cannot drift between
+/// them.
 fn open(
     server: &ServerConfig,
     engine: Engine,
-    options: impl Fn() -> OptsBuilder,
-) -> Result<Conn, DbError> {
+    dial: Option<SocketAddr>,
+    fail_over: bool,
+    options: impl Fn(Option<SocketAddr>) -> OptsBuilder,
+) -> Result<(Conn, Option<SocketAddr>), DbError> {
     let password = server.login_password(engine)?;
     // Offered only when there is one. An empty password is not the same as no
     // password, and IAM auth relies on the latter.
-    let options = || options().pass((!password.is_empty()).then(|| password.to_string()));
-    let opened = match Conn::new(over(options(), server, ssl_options(server))) {
-        Ok(connection) => Ok(connection),
+    let options = |dial| options(dial).pass((!password.is_empty()).then(|| password.to_string()));
+    let opened = match handshake(options(dial), server) {
+        // verify-full checks the certificate against the host dialled, so an
+        // address in the name's place would check the certificate against
+        // something the user never typed.
+        Err(error)
+            if fail_over
+                && dial.is_none()
+                && unusable_address(&error)
+                && server.sslmode != SslMode::VerifyFull =>
+        {
+            on_any_address(resolved(server), error, |address| {
+                handshake(options(Some(address)), server)
+            })
+        }
+        opened => opened.map(|connection| (connection, dial)),
+    };
+    server.forgetting_on_failure(
+        engine,
+        opened.map_err(|error| connect_error(&error, server)),
+    )
+}
+
+fn handshake(options: OptsBuilder, server: &ServerConfig) -> Result<Conn, ::mysql::Error> {
+    match Conn::new(over(options.clone(), server, ssl_options(server))) {
         // `prefer` is the one rung where a weaker connection is reachable, and
         // reaching it is what the word means. The driver cannot say "encrypt if
         // you can" in one attempt, so this is two — which is what libpq's own
-        // `prefer` amounts to. No other mode falls back.
-        Err(_) if server.sslmode == SslMode::Prefer => {
-            Conn::new(over(options(), server, None)).map_err(|error| connect_error(&error, server))
+        // `prefer` amounts to. No other mode falls back, and not where nothing
+        // answered at all: plaintext would find nobody there either.
+        Err(encrypted) if server.sslmode == SslMode::Prefer && !unusable_address(&encrypted) => {
+            // A server did answer the first attempt, so a plaintext one that
+            // finds nobody must not read as nothing there.
+            Conn::new(over(options, server, None)).map_err(|plaintext| {
+                if unusable_address(&plaintext) {
+                    encrypted
+                } else {
+                    plaintext
+                }
+            })
         }
-        Err(error) => Err(connect_error(&error, server)),
+        connected => connected,
+    }
+}
+
+/// Every address the server's host resolves to, in the resolver's order.
+///
+/// ponytail: the first is dialled again, though the name already failed
+/// there: the driver does not say which address it tried, and under DNS
+/// round-robin it need not be the first of a fresh lookup. One more refusal
+/// is cheap; matching it up would need the driver's own lookup.
+fn resolved(server: &ServerConfig) -> Vec<SocketAddr> {
+    (server.host.as_str(), server.port.unwrap_or(DEFAULT_PORT))
+        .to_socket_addrs()
+        .map_or_else(|_| Vec::new(), Iterator::collect)
+}
+
+/// `attempt` at each of `addresses` in turn, after `first` came back from the
+/// name, until one is there: the connection and the address it reached.
+///
+/// The driver dials only the first address a name resolves to: its connect
+/// gives up at the first one that refuses rather than moving to the next. So
+/// `localhost` resolving to `::1` first never reaches a server listening on
+/// `127.0.0.1` alone, which every other client does. A name with one address
+/// has nothing left to try, and the first error is the one the user can act
+/// on, since it names what they typed.
+fn on_any_address(
+    addresses: Vec<SocketAddr>,
+    first: ::mysql::Error,
+    attempt: impl Fn(SocketAddr) -> Result<Conn, ::mysql::Error>,
+) -> Result<(Conn, Option<SocketAddr>), ::mysql::Error> {
+    if addresses.len() < 2 {
+        return Err(first);
+    }
+    for address in addresses {
+        match attempt(address) {
+            Err(error) if unusable_address(&error) => {}
+            reached => return reached.map(|connection| (connection, Some(address))),
+        }
+    }
+    Err(first)
+}
+
+/// Nothing answered at the address dialled, where another may. A timeout is
+/// left out: it costs `CONNECT_TIMEOUT_SECONDS` an address to find out.
+fn unusable_address(error: &::mysql::Error) -> bool {
+    use std::io::ErrorKind::{
+        AddrNotAvailable, ConnectionRefused, HostUnreachable, NetworkUnreachable,
     };
-    server.forgetting_on_failure(engine, opened)
+    matches!(
+        error,
+        ::mysql::Error::DriverError(::mysql::DriverError::CouldNotConnect(Some((_, _, kind))))
+            if matches!(kind, ConnectionRefused | HostUnreachable | NetworkUnreachable | AddrNotAvailable)
+    )
 }
 
 /// `options` over `tls`, answering a server that asks for
@@ -355,13 +466,20 @@ fn over(options: OptsBuilder, server: &ServerConfig, tls: Option<SslOpts>) -> Op
     options.ssl_opts(tls).enable_cleartext_plugin(cleartext)
 }
 
-/// The connection a profile keeps.
+/// Another session at the server `dial` names, as the one a profile keeps.
 fn connect(
     server: &ServerConfig,
     engine: Engine,
     dial: Option<SocketAddr>,
 ) -> Result<Conn, DbError> {
-    open(server, engine, || match server.statement_timeout {
+    open(server, engine, dial, false, |dial| {
+        session_options(server, engine, dial)
+    })
+    .map(|(connection, _)| connection)
+}
+
+fn session_options(server: &ServerConfig, engine: Engine, dial: Option<SocketAddr>) -> OptsBuilder {
+    match server.statement_timeout {
         0 => base_options(server, dial),
         // Run once at connect as a session default, never spliced into the
         // user's own submission — see `ServerConfig::statement_timeout` for
@@ -377,7 +495,16 @@ fn connect(
                 u64::from(seconds) * 1_000
             )
         }]),
-    })
+    }
+}
+
+/// Where a session's every socket goes: through its tunnel, which may have
+/// closed, or else to the address it reached, or else to its host by name.
+fn dialled(
+    tunnel: Option<&Tunnel>,
+    address: Option<SocketAddr>,
+) -> Result<Option<SocketAddr>, DbError> {
+    tunnel.map_or(Ok(address), |tunnel| tunnel.dial().map(Some))
 }
 
 /// The throwaway connection a cancel opens: the same fields, but bounded end
@@ -415,6 +542,11 @@ pub struct Connection {
     /// What the cancel socket dials too, and held so ssh runs as long as any
     /// clone does.
     tunnel: Option<Arc<Tunnel>>,
+    /// The address this session reached in its host's place, where the
+    /// name's first address was not there. Every socket opened beside it
+    /// dials the same one: a `KILL QUERY` names a session by a number only
+    /// its own server knows, and another server would stop someone else's.
+    address: Option<SocketAddr>,
     /// A second session, for stopping a statement at the row limit while
     /// this one is busy reading its rows. Opened the first time it is needed
     /// and kept, so a run does not pay for a connect.
@@ -429,13 +561,16 @@ impl Connection {
         }
         tunnelled(server, DEFAULT_PORT, |tunnel| {
             let dial = tunnel.as_deref().map(Tunnel::dial).transpose()?;
-            let connection = connect(server, engine, dial)?;
+            let (connection, address) = open(server, engine, dial, true, |dial| {
+                session_options(server, engine, dial)
+            })?;
             Ok(Self {
                 connection_id: connection.connection_id(),
                 server: server.clone(),
                 engine,
                 connection: Arc::new(Mutex::new(connection)),
                 tunnel,
+                address,
                 side: Arc::default(),
             })
         })
@@ -466,7 +601,7 @@ impl Connection {
     }
 
     fn dial(&self) -> Result<Option<SocketAddr>, DbError> {
-        self.tunnel.as_deref().map(Tunnel::dial).transpose()
+        dialled(self.tunnel.as_deref(), self.address)
     }
 
     /// `KILL QUERY` over a connection of its own, because the connection being
@@ -482,7 +617,9 @@ impl Connection {
     pub fn cancel(&self) -> Result<(), DbError> {
         let server = &self.server;
         let dial = self.dial()?;
-        let mut connection = open(server, self.engine, || cancel_options(server, dial))?;
+        let (mut connection, _) = open(server, self.engine, dial, false, |dial| {
+            cancel_options(server, dial)
+        })?;
         connection
             .query_drop(format!("KILL QUERY {}", self.connection_id))
             .map_err(|error| DbError {
@@ -515,9 +652,10 @@ impl Connection {
         for _ in 0..2 {
             if side.is_none() {
                 let dial = self.dial().ok()?;
-                *side = open(&self.server, self.engine, || {
+                *side = open(&self.server, self.engine, dial, false, |dial| {
                     cancel_options(&self.server, dial)
                 })
+                .map(|(connection, _)| connection)
                 .ok();
             }
             match ask(side.as_mut()?) {
@@ -737,8 +875,24 @@ impl Connection {
     }
 
     pub fn catalog(&self) -> Result<Catalog, DbError> {
-        let relations = self.internal_query(&RELATIONS_SQL.replace("{system}", SYSTEM_SCHEMAS))?;
-        assemble_catalog(relations, QueryResult::default())
+        let relations = self.internal_query(
+            &RELATIONS_SQL
+                .replace("{system}", SYSTEM_SCHEMAS)
+                .replace("{tables}", TABLES)
+                .replace("{views}", VIEWS),
+        )?;
+        let mut catalog = assemble_catalog(relations, QueryResult::default())?;
+        let schemas = self.internal_query(&SCHEMAS_SQL.replace("{system}", SYSTEM_SCHEMAS))?;
+        for name in column_of(&schemas, "schema_name")? {
+            if !catalog.schemas.iter().any(|schema| schema.name == name) {
+                catalog.schemas.push(Schema {
+                    name,
+                    relations: Vec::new(),
+                    routines: Vec::new(),
+                });
+            }
+        }
+        Ok(catalog)
     }
 
     pub fn routines(&self) -> Result<Catalog, DbError> {
@@ -757,9 +911,16 @@ impl Connection {
             engine: self.engine,
             connection: Arc::new(Mutex::new(connection)),
             tunnel: self.tunnel.clone(),
+            address: self.address,
             side: Arc::default(),
         };
-        assemble_sizes(side.internal_query(&SIZES_SQL.replace("{system}", SYSTEM_SCHEMAS))?)
+        assemble_sizes(
+            side.internal_query(
+                &SIZES_SQL
+                    .replace("{system}", SYSTEM_SCHEMAS)
+                    .replace("{stored}", STORED_TABLES),
+            )?,
+        )
     }
 
     pub fn references(&self, schema: &str, relation: &str) -> Result<Vec<Reference>, DbError> {
@@ -1084,9 +1245,15 @@ fn connect_error(error: &::mysql::Error, server: &ServerConfig) -> DbError {
     // A refused connection is the most common failure by a wide margin, and the
     // driver's own wording buries the endpoint. Say what happened, and nothing
     // about what the user should do -- we cannot see their machine.
-    if let ::mysql::Error::IoError(io) = error
-        && io.kind() == std::io::ErrorKind::ConnectionRefused
-    {
+    let refused = match error {
+        ::mysql::Error::IoError(io) => io.kind() == std::io::ErrorKind::ConnectionRefused,
+        // How the driver reports a TCP connect it could not make.
+        ::mysql::Error::DriverError(::mysql::DriverError::CouldNotConnect(Some((_, _, kind)))) => {
+            *kind == std::io::ErrorKind::ConnectionRefused
+        }
+        _ => false,
+    };
+    if refused {
         return plain_error(format!(
             "Connection refused: nothing is listening on {}",
             server.endpoint()
@@ -1462,6 +1629,74 @@ mod tests {
         assert_eq!(opts.get_ip_or_hostname(), "127.0.0.1");
         assert_eq!(opts.get_tcp_port(), 40000);
         assert!(!opts.get_prefer_socket());
+    }
+
+    #[test]
+    fn a_name_whose_first_address_refuses_is_tried_at_its_others() {
+        let closed = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|listener| listener.local_addr())
+            .unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let listening = listener.local_addr().unwrap();
+        // Hanging up is enough: the handshake then fails as something other
+        // than a refusal, which only reaching the listener can cause.
+        let reached = std::thread::spawn(move || listener.accept().is_ok());
+        let at = |address| Conn::new(base_options(&ServerConfig::default(), Some(address)));
+        let first = at(closed).expect_err("nothing listens on a closed port");
+        assert!(unusable_address(&first), "{first}");
+
+        let error = on_any_address(vec![closed, listening], first, at)
+            .expect_err("the listener speaks no MySQL");
+        assert!(!unusable_address(&error), "{error}");
+        assert!(reached.join().unwrap());
+    }
+
+    #[test]
+    fn an_address_dialled_for_a_name_never_switches_to_a_local_socket() {
+        let server = ServerConfig {
+            host: "db.example.test".into(),
+            ..ServerConfig::default()
+        };
+        let opts: ::mysql::Opts = session_options(
+            &server,
+            Engine::MySql,
+            Some("127.0.0.1:3306".parse().unwrap()),
+        )
+        .into();
+        assert_eq!(opts.get_ip_or_hostname(), "127.0.0.1");
+        assert!(!opts.get_prefer_socket());
+    }
+
+    #[test]
+    fn a_cancel_dials_the_address_its_session_reached() {
+        let server = ServerConfig {
+            host: "db.example.test".into(),
+            ..ServerConfig::default()
+        };
+        let reached = "192.0.2.7:3307".parse().unwrap();
+        let opts: ::mysql::Opts =
+            cancel_options(&server, dialled(None, Some(reached)).unwrap()).into();
+        assert_eq!(opts.get_ip_or_hostname(), "192.0.2.7");
+        assert_eq!(opts.get_tcp_port(), 3307);
+        assert!(!opts.get_prefer_socket());
+    }
+
+    #[test]
+    fn a_refused_connect_names_the_endpoint() {
+        let server = ServerConfig {
+            host: "db.example.test".into(),
+            port: Some(3307),
+            ..ServerConfig::default()
+        };
+        let refused = ::mysql::Error::DriverError(::mysql::DriverError::CouldNotConnect(Some((
+            "db.example.test:3307".into(),
+            "Connection refused (os error 111)".into(),
+            std::io::ErrorKind::ConnectionRefused,
+        ))));
+        assert_eq!(
+            connect_error(&refused, &server).message,
+            "Connection refused: nothing is listening on db.example.test:3307"
+        );
     }
 
     #[test]
@@ -1849,6 +2084,107 @@ mod tests {
                 .filter(|schema| schema.name == "dbdelve_dev")
                 .flat_map(|schema| &schema.relations)
                 .any(|relation| relation.name == "accounts" && relation.size.is_some())
+        );
+    }
+
+    /// The user's own database alone is no proof: the system schemas have to
+    /// stay out while the one selected comes in. `information_schema` is the
+    /// one an ordinary user may select.
+    fn live_the_selected_database_is_listed_even_when_the_server_owns_it(engine: Engine) {
+        let connection = Connection::open(
+            &ServerConfig {
+                sslmode: SslMode::Disable,
+                database: "information_schema".into(),
+                ..live_config(engine)
+            },
+            engine,
+        )
+        .expect("connection should open");
+        let catalog = connection.catalog().expect("catalog should load");
+        let names = catalog
+            .schemas
+            .iter()
+            .map(|schema| schema.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(names.contains(&"dbdelve_dev"), "{names:?}");
+        assert!(!names.contains(&"mysql"), "{names:?}");
+        assert!(!names.contains(&"performance_schema"), "{names:?}");
+        let selected = catalog
+            .schemas
+            .iter()
+            .find(|schema| schema.name == "information_schema")
+            .expect("the selected database should be listed");
+        assert!(
+            selected
+                .relations
+                .iter()
+                .any(|relation| relation.name == "TABLES" && relation.kind == RelationKind::View)
+        );
+    }
+
+    fn live_an_empty_database_is_listed(engine: Engine) {
+        let catalog = live(engine).catalog().expect("catalog should load");
+        let empty = catalog
+            .schemas
+            .iter()
+            .find(|schema| schema.name == "dbdelve_empty")
+            .expect("the seeded empty database should be listed");
+        assert!(empty.relations.is_empty());
+    }
+
+    /// MariaDB's own two kinds of table, which MySQL has neither of.
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MARIADB_URL"]
+    fn live_mariadb_lists_a_versioned_table_and_a_sequence() {
+        let connection = live(Engine::MariaDb);
+        connection
+            .query(
+                "DROP TABLE IF EXISTS dbdelve_test_versioned; \
+                 DROP SEQUENCE IF EXISTS dbdelve_test_sequence; \
+                 CREATE TABLE dbdelve_test_versioned (id INT PRIMARY KEY, label TEXT) \
+                     WITH SYSTEM VERSIONING; \
+                 CREATE SEQUENCE dbdelve_test_sequence",
+                Fetch::default(),
+            )
+            .expect("the fixtures should create");
+        let catalog = connection.catalog();
+        let sizes = connection.sizes();
+        let versioned = connection.query("SELECT * FROM dbdelve_test_versioned", Fetch::default());
+        let sequence = connection.query("SELECT * FROM dbdelve_test_sequence", Fetch::default());
+        connection
+            .query(
+                "DROP TABLE dbdelve_test_versioned; DROP SEQUENCE dbdelve_test_sequence",
+                Fetch::default(),
+            )
+            .expect("the fixtures should drop");
+
+        let catalog = catalog.expect("catalog should load");
+        let relations = &catalog
+            .schemas
+            .iter()
+            .find(|schema| schema.name == "dbdelve_dev")
+            .expect("dbdelve_dev should exist")
+            .relations;
+        for name in ["dbdelve_test_versioned", "dbdelve_test_sequence"] {
+            assert!(
+                relations
+                    .iter()
+                    .any(|relation| relation.name == name && relation.kind == RelationKind::Table),
+                "{name}"
+            );
+        }
+        assert!(
+            sizes.expect("sizes should load")["dbdelve_dev"].contains_key("dbdelve_test_versioned")
+        );
+        let edit = versioned
+            .expect("the versioned table should read")
+            .edit
+            .expect("a versioned table is edited by its primary key");
+        assert_eq!(edit.table, "dbdelve_test_versioned");
+        assert!(
+            sequence.expect("the sequence should read").edit.is_none(),
+            "a sequence has no primary key to name a row by"
         );
     }
 
@@ -2424,6 +2760,8 @@ mod tests {
         live_a_multi_statement_selection_keeps_one_result_shape,
         live_a_column_is_tagged_with_the_type_the_server_would_name,
         live_catalog_round_trip,
+        live_the_selected_database_is_listed_even_when_the_server_owns_it,
+        live_an_empty_database_is_listed,
         live_structure_round_trip,
         live_a_single_table_select_is_editable_by_its_primary_key,
         live_an_aliased_or_computed_column_reports_what_the_table_calls_it,
