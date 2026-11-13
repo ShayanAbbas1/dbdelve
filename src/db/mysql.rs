@@ -19,7 +19,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashSet;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -320,8 +320,9 @@ fn base_options(server: &ServerConfig, dial: Option<SocketAddr>) -> OptsBuilder 
 }
 
 /// Open a connection built from `options`, falling back to plaintext exactly
-/// where `sslmode=prefer` allows it. Shared by the query connection and the
-/// cancel connection so the fallback behaviour cannot drift between them.
+/// where `sslmode=prefer` allows it, and to the host's other addresses where
+/// the first one it resolves to is not there. Shared by the query connection
+/// and the cancel connection so neither fallback can drift between them.
 fn open(
     server: &ServerConfig,
     engine: Engine,
@@ -331,18 +332,89 @@ fn open(
     // Offered only when there is one. An empty password is not the same as no
     // password, and IAM auth relies on the latter.
     let options = || options().pass((!password.is_empty()).then(|| password.to_string()));
-    let opened = match Conn::new(over(options(), server, ssl_options(server))) {
-        Ok(connection) => Ok(connection),
+    let opened = match handshake(options(), server) {
+        // verify-full checks the certificate against the host dialled, so an
+        // address in the name's place would check the certificate against
+        // something the user never typed.
+        Err(error) if unusable_address(&error) && server.sslmode != SslMode::VerifyFull => {
+            let addresses = resolved(&options());
+            on_any_address(options(), addresses, error, |options| {
+                handshake(options, server)
+            })
+        }
+        opened => opened,
+    };
+    server.forgetting_on_failure(
+        engine,
+        opened.map_err(|error| connect_error(&error, server)),
+    )
+}
+
+fn handshake(options: OptsBuilder, server: &ServerConfig) -> Result<Conn, ::mysql::Error> {
+    match Conn::new(over(options.clone(), server, ssl_options(server))) {
         // `prefer` is the one rung where a weaker connection is reachable, and
         // reaching it is what the word means. The driver cannot say "encrypt if
         // you can" in one attempt, so this is two — which is what libpq's own
-        // `prefer` amounts to. No other mode falls back.
-        Err(_) if server.sslmode == SslMode::Prefer => {
-            Conn::new(over(options(), server, None)).map_err(|error| connect_error(&error, server))
+        // `prefer` amounts to. No other mode falls back, and not where nothing
+        // answered at all: plaintext would find nobody there either.
+        Err(error) if server.sslmode == SslMode::Prefer && !unusable_address(&error) => {
+            Conn::new(over(options, server, None))
         }
-        Err(error) => Err(connect_error(&error, server)),
+        connected => connected,
+    }
+}
+
+/// Every address the host in `options` resolves to, in the resolver's order.
+fn resolved(options: &OptsBuilder) -> Vec<SocketAddr> {
+    let opts = ::mysql::Opts::from(options.clone());
+    (opts.get_ip_or_hostname().as_ref(), opts.get_tcp_port())
+        .to_socket_addrs()
+        .map_or_else(|_| Vec::new(), Iterator::collect)
+}
+
+/// `attempt` at each of `addresses` in turn, as an address rather than the
+/// name, after `first` came back from the name.
+///
+/// The driver dials only the first address a name resolves to: its connect
+/// gives up at the first one that refuses rather than moving to the next. So
+/// `localhost` resolving to `::1` first never reaches a server listening on
+/// `127.0.0.1` alone, which every other client does. A name with one address
+/// has nothing left to try, and the first error is the one the user can act
+/// on, since it names what they typed.
+fn on_any_address(
+    options: OptsBuilder,
+    addresses: Vec<SocketAddr>,
+    first: ::mysql::Error,
+    attempt: impl Fn(OptsBuilder) -> Result<Conn, ::mysql::Error>,
+) -> Result<Conn, ::mysql::Error> {
+    if addresses.len() < 2 {
+        return Err(first);
+    }
+    for address in addresses {
+        match attempt(
+            options
+                .clone()
+                .ip_or_hostname(Some(address.ip().to_string()))
+                .tcp_port(address.port()),
+        ) {
+            Err(error) if unusable_address(&error) => {}
+            reached => return reached,
+        }
+    }
+    Err(first)
+}
+
+/// Nothing answered at the address dialled, where another may. A timeout is
+/// left out: it costs `CONNECT_TIMEOUT_SECONDS` an address to find out.
+fn unusable_address(error: &::mysql::Error) -> bool {
+    use std::io::ErrorKind::{
+        AddrNotAvailable, ConnectionRefused, HostUnreachable, NetworkUnreachable,
     };
-    server.forgetting_on_failure(engine, opened)
+    matches!(
+        error,
+        ::mysql::Error::DriverError(::mysql::DriverError::CouldNotConnect(Some((_, _, kind))))
+            if matches!(kind, ConnectionRefused | HostUnreachable | NetworkUnreachable | AddrNotAvailable)
+    )
 }
 
 /// `options` over `tls`, answering a server that asks for
@@ -1084,9 +1156,15 @@ fn connect_error(error: &::mysql::Error, server: &ServerConfig) -> DbError {
     // A refused connection is the most common failure by a wide margin, and the
     // driver's own wording buries the endpoint. Say what happened, and nothing
     // about what the user should do -- we cannot see their machine.
-    if let ::mysql::Error::IoError(io) = error
-        && io.kind() == std::io::ErrorKind::ConnectionRefused
-    {
+    let refused = match error {
+        ::mysql::Error::IoError(io) => io.kind() == std::io::ErrorKind::ConnectionRefused,
+        // How the driver reports a TCP connect it could not make.
+        ::mysql::Error::DriverError(::mysql::DriverError::CouldNotConnect(Some((_, _, kind)))) => {
+            *kind == std::io::ErrorKind::ConnectionRefused
+        }
+        _ => false,
+    };
+    if refused {
         return plain_error(format!(
             "Connection refused: nothing is listening on {}",
             server.endpoint()
@@ -1462,6 +1540,47 @@ mod tests {
         assert_eq!(opts.get_ip_or_hostname(), "127.0.0.1");
         assert_eq!(opts.get_tcp_port(), 40000);
         assert!(!opts.get_prefer_socket());
+    }
+
+    #[test]
+    fn a_name_whose_first_address_refuses_is_tried_at_its_others() {
+        let closed = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|listener| listener.local_addr())
+            .unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let listening = listener.local_addr().unwrap();
+        // Hanging up is enough: the handshake then fails as something other
+        // than a refusal, which only reaching the listener can cause.
+        let reached = std::thread::spawn(move || listener.accept().is_ok());
+        let options = OptsBuilder::new()
+            .ip_or_hostname(Some(closed.ip().to_string()))
+            .tcp_port(closed.port())
+            .prefer_socket(false);
+        let first = Conn::new(options.clone()).expect_err("nothing listens on a closed port");
+        assert!(unusable_address(&first), "{first}");
+
+        let error = on_any_address(options, vec![closed, listening], first, Conn::new)
+            .expect_err("the listener speaks no MySQL");
+        assert!(!unusable_address(&error), "{error}");
+        assert!(reached.join().unwrap());
+    }
+
+    #[test]
+    fn a_refused_connect_names_the_endpoint() {
+        let server = ServerConfig {
+            host: "db.example.test".into(),
+            port: Some(3307),
+            ..ServerConfig::default()
+        };
+        let refused = ::mysql::Error::DriverError(::mysql::DriverError::CouldNotConnect(Some((
+            "db.example.test:3307".into(),
+            "Connection refused (os error 111)".into(),
+            std::io::ErrorKind::ConnectionRefused,
+        ))));
+        assert_eq!(
+            connect_error(&refused, &server).message,
+            "Connection refused: nothing is listening on db.example.test:3307"
+        );
     }
 
     #[test]
