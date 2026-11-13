@@ -19,10 +19,10 @@ use crate::tls;
 use super::ssh::{self, Bridged, SocketBridge, Tunnel, tunnelled};
 use super::{
     Catalog, Column, DbError, EditTarget, Engine, Feed, Fetch, QueryResult, Reference,
-    RelationKind, Row, RowBuilder, ServerConfig, Sizes, Stopped, Structure, assemble_catalog,
-    assemble_databases, assemble_foreign_keys, assemble_references, assemble_sizes,
-    assemble_structure, create_table, non_utf8_error, optional_cell, plain_error, required_cell,
-    terminated,
+    RelationKind, Row, RowBuilder, SchemaGraph, ServerConfig, Sizes, Stopped, Structure,
+    assemble_catalog, assemble_databases, assemble_foreign_keys, assemble_references,
+    assemble_schema_graph, assemble_sizes, assemble_structure, create_table, non_utf8_error,
+    optional_cell, plain_error, required_cell, terminated,
 };
 
 mod pgpass;
@@ -370,6 +370,100 @@ WHERE referenced_namespace.nspname = {schema}
     AND table_constraint.contype = 'f'
     AND table_constraint.conparentid = 0
 ORDER BY namespace.nspname, class.relname, table_constraint.conname, key.key_position
+";
+
+// The ER diagram's three reads, each over a whole schema. A diagram draws base
+// tables, so partitions (`relispartition`) are left out wherever a table is
+// named: they are folded into the parent the diagram draws instead. A table
+// with no columns still comes back, as one row of NULLs, so it is drawn.
+const GRAPH_COLUMNS_SQL: &str = "
+SELECT
+    class.relname AS table_name,
+    attribute.attname AS column_name,
+    pg_catalog.format_type(attribute.atttypid, attribute.atttypmod) AS data_type,
+    CASE WHEN attribute.attnotnull THEN 'no' ELSE 'yes' END AS nullable
+FROM pg_catalog.pg_class AS class
+JOIN pg_catalog.pg_namespace AS namespace
+    ON namespace.oid = class.relnamespace
+LEFT JOIN pg_catalog.pg_attribute AS attribute
+    ON attribute.attrelid = class.oid
+    AND attribute.attnum > 0
+    AND NOT attribute.attisdropped
+WHERE namespace.nspname = {schema}
+    AND class.relkind IN ('r', 'p')
+    AND NOT class.relispartition
+ORDER BY class.relname, attribute.attnum
+";
+
+// From the indexes rather than the constraints, because a unique index makes a
+// column as unique as a constraint does. A partial index or one over an
+// expression does not, nor does an index still being built; columns past
+// `indnkeyatts` are `INCLUDE`d, not key.
+const GRAPH_UNIQUE_KEYS_SQL: &str = "
+SELECT
+    class.relname AS table_name,
+    index_class.relname AS constraint_name,
+    attribute.attname AS column_name,
+    CASE WHEN index_entry.indisprimary THEN 'primary' ELSE 'unique' END AS key_kind
+FROM pg_catalog.pg_index AS index_entry
+JOIN pg_catalog.pg_class AS index_class
+    ON index_class.oid = index_entry.indexrelid
+JOIN pg_catalog.pg_class AS class
+    ON class.oid = index_entry.indrelid
+JOIN pg_catalog.pg_namespace AS namespace
+    ON namespace.oid = class.relnamespace
+CROSS JOIN LATERAL generate_series(0, index_entry.indnkeyatts - 1) AS key(position)
+JOIN pg_catalog.pg_attribute AS attribute
+    ON attribute.attrelid = class.oid
+    AND attribute.attnum = index_entry.indkey[key.position]
+WHERE namespace.nspname = {schema}
+    AND class.relkind IN ('r', 'p')
+    AND NOT class.relispartition
+    AND index_entry.indisunique
+    AND index_entry.indisvalid
+    AND index_entry.indpred IS NULL
+    AND index_entry.indexprs IS NULL
+ORDER BY class.relname, index_class.relname, key.position
+";
+
+// `conparentid = 0` keeps a key declared on a partitioned table to the one row
+// it was declared as, as `REFERENCES_SQL` does; the server's clones of it onto
+// each partition, at either end, are not keys anyone wrote.
+//
+// ponytail: a key declared on one partition alone, or into one, is dropped
+// with the partition rather than drawn on its parent, which holds it for only
+// some of its rows. Drawing it there, marked as partial, is the upgrade.
+const GRAPH_FOREIGN_KEYS_SQL: &str = "
+SELECT
+    class.relname AS table_name,
+    table_constraint.conname AS constraint_name,
+    source_attribute.attname AS column_name,
+    referenced_namespace.nspname AS referenced_schema,
+    referenced_class.relname AS referenced_table,
+    referenced_attribute.attname AS referenced_column
+FROM pg_catalog.pg_constraint AS table_constraint
+JOIN pg_catalog.pg_class AS class
+    ON class.oid = table_constraint.conrelid
+JOIN pg_catalog.pg_namespace AS namespace
+    ON namespace.oid = class.relnamespace
+JOIN pg_catalog.pg_class AS referenced_class
+    ON referenced_class.oid = table_constraint.confrelid
+JOIN pg_catalog.pg_namespace AS referenced_namespace
+    ON referenced_namespace.oid = referenced_class.relnamespace
+CROSS JOIN LATERAL unnest(table_constraint.conkey, table_constraint.confkey)
+    WITH ORDINALITY AS key(source_attnum, referenced_attnum, key_position)
+JOIN pg_catalog.pg_attribute AS source_attribute
+    ON source_attribute.attrelid = table_constraint.conrelid
+    AND source_attribute.attnum = key.source_attnum
+JOIN pg_catalog.pg_attribute AS referenced_attribute
+    ON referenced_attribute.attrelid = table_constraint.confrelid
+    AND referenced_attribute.attnum = key.referenced_attnum
+WHERE namespace.nspname = {schema}
+    AND table_constraint.contype = 'f'
+    AND table_constraint.conparentid = 0
+    AND NOT class.relispartition
+    AND NOT referenced_class.relispartition
+ORDER BY class.relname, table_constraint.conname, key.key_position
 ";
 
 // Keyed by oid rather than by name: two schemas can hold a table of the same
@@ -1403,6 +1497,13 @@ impl Connection {
         Ok(structure)
     }
 
+    pub fn schema_graph(&self, schema: &str) -> Result<SchemaGraph, DbError> {
+        let columns = self.internal_query(&schema_sql(GRAPH_COLUMNS_SQL, schema))?;
+        let unique_keys = self.internal_query(&schema_sql(GRAPH_UNIQUE_KEYS_SQL, schema))?;
+        let foreign_keys = self.internal_query(&schema_sql(GRAPH_FOREIGN_KEYS_SQL, schema))?;
+        assemble_schema_graph(schema, &columns, &unique_keys, &foreign_keys)
+    }
+
     /// A view's options are its `WITH (…)`, its check option among them.
     ///
     /// ponytail: a partition is written as a table of its own, without its
@@ -1643,6 +1744,10 @@ fn resolve_edit_target(probed: &[ProbedColumn], table: &KeyedTable) -> Option<Ed
         keys,
         ..Default::default()
     })
+}
+
+fn schema_sql(template: &str, schema: &str) -> String {
+    template.replace("{schema}", &super::Engine::Postgres.quote_literal(schema))
 }
 
 /// A relation name is user data and can contain a quote.
@@ -3244,6 +3349,120 @@ mod tests {
             "SELECT pg_sleep(30), 1",
             "SELECT pg_sleep(6), 1",
         );
+    }
+
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_a_schema_graph_reads_the_seeds_keys_back() {
+        use crate::db::SchemaGraph;
+        use crate::db::graph::{GraphColumn, KeyTarget};
+
+        fn table_index(graph: &SchemaGraph, name: &str) -> u32 {
+            graph
+                .tables
+                .iter()
+                .position(|table| table.name.as_ref() == name)
+                .unwrap_or_else(|| panic!("{name} should be drawn")) as u32
+        }
+        fn column<'a>(graph: &'a SchemaGraph, table: &str, name: &str) -> &'a GraphColumn {
+            graph.tables[table_index(graph, table) as usize]
+                .columns
+                .iter()
+                .find(|column| column.name.as_ref() == name)
+                .unwrap_or_else(|| panic!("{table}.{name} should be read"))
+        }
+        fn names(graph: &SchemaGraph, table: u32, columns: &[u32]) -> Vec<String> {
+            columns
+                .iter()
+                .map(|&column| {
+                    graph.tables[table as usize].columns[column as usize]
+                        .name
+                        .to_string()
+                })
+                .collect()
+        }
+
+        let graph = live_profile()
+            .schema_graph("public")
+            .expect("the graph should read");
+
+        assert!(
+            graph
+                .tables
+                .iter()
+                .all(|table| table.name.as_ref() != "account_overview"),
+            "a view is not drawn"
+        );
+        let items = graph
+            .keys
+            .iter()
+            .find(|key| key.table == table_index(&graph, "order_items"))
+            .expect("order_items' key should be read");
+        assert_eq!(
+            names(&graph, items.table, &items.columns),
+            ["order_account_id", "order_number"]
+        );
+        let KeyTarget::Table {
+            table: orders,
+            columns,
+        } = &items.referenced
+        else {
+            panic!("orders is in the same schema: {:?}", items.referenced);
+        };
+        assert_eq!(*orders, table_index(&graph, "orders"));
+        assert_eq!(names(&graph, *orders, columns), ["account_id", "number"]);
+
+        let account_id = column(&graph, "orders", "account_id");
+        assert!(account_id.primary && account_id.foreign && !account_id.unique);
+        assert!(!account_id.nullable);
+        assert!(column(&graph, "accounts", "external_id").unique);
+        assert_eq!(
+            graph.types[column(&graph, "orders", "total").type_label as usize].as_ref(),
+            "numeric(14,2)"
+        );
+
+        let archive = live_profile()
+            .schema_graph("archive")
+            .expect("the graph should read");
+        assert_eq!(
+            archive.keys[0].referenced,
+            KeyTarget::Elsewhere {
+                schema: "public".into(),
+                table: "accounts".into()
+            }
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_a_cancel_on_its_own_connection_stops_a_schema_graph_read() {
+        // The read takes no lock a user's statement would hold, so a lock on
+        // the catalog its key statement reads is what keeps it running long
+        // enough to cancel. It is held for half a second.
+        let locker = Connection::open(&live_config()).expect("connection should open");
+        let side = live_profile()
+            .apart()
+            .expect("a side connection should open");
+        locker.query("BEGIN", Fetch::default()).unwrap();
+        locker
+            .query(
+                "LOCK TABLE pg_catalog.pg_constraint IN ACCESS EXCLUSIVE MODE",
+                Fetch::default(),
+            )
+            .expect("the dev role is a superuser");
+        let canceller = side.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            canceller
+                .cancel(&crate::db::CancelToken::default())
+                .expect("the cancel request should send");
+        });
+
+        let error = side
+            .schema_graph("public")
+            .expect_err("the read should be cancelled");
+        locker.query("ROLLBACK", Fetch::default()).unwrap();
+        assert!(error.message.contains("cancel"), "{}", error.message);
     }
 
     #[test]

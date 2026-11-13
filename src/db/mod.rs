@@ -26,6 +26,8 @@ mod clickhouse;
 mod conformance;
 mod duckdb;
 mod external;
+mod graph;
+use graph::assemble_schema_graph;
 mod mongo;
 mod mssql;
 mod mysql;
@@ -47,6 +49,7 @@ pub use duckdb::IN_MEMORY as DUCKDB_IN_MEMORY;
 pub use external::ExternalConfig;
 #[cfg(test)]
 pub(crate) use external::echo;
+pub use graph::SchemaGraph;
 pub use password_command::{PasswordCommand, loggable_error};
 pub use plugin::Plugin;
 pub use ssh::askpass;
@@ -1898,6 +1901,37 @@ impl Connection {
             Self::MongoDb(connection) => connection.structure(schema, relation),
             Self::Redis(connection) => connection.structure(schema, relation),
             Self::External(connection) => connection.structure(schema, relation),
+        }
+    }
+
+    /// One schema's tables and foreign keys in bulk, for the ER diagram: a
+    /// few catalog statements for the whole schema rather than
+    /// [`Connection::structure`]'s several per relation. Run it on a
+    /// connection from [`Connection::apart`], so it never queues behind the
+    /// profile's statements, and so a [`Connection::cancel`] on that
+    /// connection stops nothing but this read.
+    ///
+    /// Asked only where [`Target::draws_diagrams`].
+    // Nothing calls it until the diagram canvas lands (phase 2).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn schema_graph(&self, schema: &str) -> Result<SchemaGraph, DbError> {
+        match self {
+            Self::Postgres(connection) => connection.schema_graph(schema),
+            // ponytail: read in the next slice of the diagram's first phase.
+            Self::MySql(_)
+            | Self::SqlServer(_)
+            | Self::Sqlite(_)
+            | Self::Turso(_)
+            | Self::DuckDb(_)
+            | Self::Snowflake(_) => Err(plain_error(
+                "The diagram is not read on this engine yet.".into(),
+            )),
+            Self::ClickHouse(_) | Self::MongoDb(_) | Self::Redis(_) => Err(plain_error(
+                "This engine declares no foreign keys to draw.".into(),
+            )),
+            Self::External(_) => Err(plain_error(
+                "A diagram is not drawn through a plugin driver.".into(),
+            )),
         }
     }
 
