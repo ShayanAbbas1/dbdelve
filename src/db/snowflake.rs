@@ -24,8 +24,9 @@ use serde_json::{Value, json};
 
 use super::{
     CancelToken, Cancelling, Catalog, Column, Databases, DbError, Engine, Fetch, ForeignKey,
-    NamedDefinition, QueryResult, RelationKind, Row, Stopped, Structure, assemble_catalog,
-    assemble_databases, assemble_structure, plain_error, terminated,
+    NamedDefinition, QueryResult, RelationKind, Row, RowBuilder, SchemaGraph, Stopped, Structure,
+    assemble_catalog, assemble_databases, assemble_schema_graph, assemble_structure, plain_error,
+    terminated,
 };
 
 /// What it takes to reach one database in one Snowflake account.
@@ -1075,6 +1076,7 @@ impl Connection {
         let within = Engine::Snowflake.qualified(&database, schema);
         let [columns, primary, unique, imported] = self.at_once([
             COLUMNS_SQL
+                .replace("{type}", TYPE_SQL)
                 .replace("{schema}", &literal(schema))
                 .replace("{relation}", &literal(relation)),
             format!("SHOW PRIMARY KEYS IN SCHEMA {within}"),
@@ -1113,6 +1115,63 @@ impl Connection {
         .concat();
         structure.foreign_keys = foreign_keys(&imported, relation, &database);
         Ok(structure)
+    }
+
+    /// Four statements at once: the columns of the schema's tables, and the
+    /// three key `SHOW`s [`Connection::structure`] reads, here over the whole
+    /// schema because that is the one place they already are. A key into
+    /// another database is left out, as it is there: a [`GraphKey`] names a
+    /// schema and a table, and a profile is bound to one database.
+    ///
+    /// Keys are declared and not enforced, so what this reads is what the
+    /// schema says, not what the data holds.
+    ///
+    /// ponytail: a `SHOW` stops at 10 000 rows, so a schema with more key
+    /// columns than that loses some keys, as in `structure`. Not cancellable:
+    /// `Cancel` reaches only a statement that registered a handle, and the
+    /// catalog's do not.
+    pub fn schema_graph(&self, schema: &str) -> Result<SchemaGraph, DbError> {
+        let database = self.config.stored_database();
+        let within = Engine::Snowflake.qualified(&database, schema);
+        let [columns, primary, unique, imported] = self.at_once([
+            GRAPH_COLUMNS_SQL
+                .replace("{type}", TYPE_SQL)
+                .replace("{schema}", &Engine::Snowflake.quote_literal(schema)),
+            format!("SHOW PRIMARY KEYS IN SCHEMA {within}"),
+            format!("SHOW UNIQUE KEYS IN SCHEMA {within}"),
+            format!("SHOW IMPORTED KEYS IN SCHEMA {within}"),
+        ])?;
+
+        let same_columns = [
+            ("table_name", "table_name"),
+            ("constraint_name", "constraint_name"),
+            ("column_name", "column_name"),
+        ];
+        let unique_keys = appended(
+            graph_keys(
+                &primary,
+                &same_columns,
+                Some(("key_kind", "primary")),
+                |_| true,
+            )?,
+            graph_keys(&unique, &same_columns, Some(("key_kind", "unique")), |_| {
+                true
+            })?,
+        )?;
+        let foreign_keys = graph_keys(
+            &imported,
+            &[
+                ("table_name", "fk_table_name"),
+                ("constraint_name", "fk_name"),
+                ("column_name", "fk_column_name"),
+                ("referenced_schema", "pk_schema_name"),
+                ("referenced_table", "pk_table_name"),
+                ("referenced_column", "pk_column_name"),
+            ],
+            None,
+            |row| shown(&imported, row, "pk_database_name") == Some(database.as_str()),
+        )?;
+        assemble_schema_graph(schema, &columns, &unique_keys, &foreign_keys)
     }
 
     /// Named from the database down, like a `SHOW`, so the answer does not
@@ -1258,9 +1317,8 @@ fn appended(mut first: QueryResult, second: QueryResult) -> Result<QueryResult, 
 
 /// The type is spelled the way a result column's is, lower case with its
 /// precision, so a relation reads the same in its Structure tab and its grid.
-const COLUMNS_SQL: &str = r#"
-SELECT COLUMN_NAME AS "column_name",
-       LOWER(CASE
+const TYPE_SQL: &str = r#"
+LOWER(CASE
            WHEN DATA_TYPE = 'NUMBER'
                THEN 'NUMBER(' || NUMERIC_PRECISION || ',' || NUMERIC_SCALE || ')'
            -- A VARCHAR declared without a length reports the most the account
@@ -1271,12 +1329,32 @@ SELECT COLUMN_NAME AS "column_name",
            WHEN DATA_TYPE = 'TEXT'
                THEN 'VARCHAR(' || CHARACTER_MAXIMUM_LENGTH || ')'
            ELSE DATA_TYPE
-       END) AS "data_type",
+       END)"#;
+
+const COLUMNS_SQL: &str = r#"
+SELECT COLUMN_NAME AS "column_name",
+       {type} AS "data_type",
        LOWER(IS_NULLABLE) AS "nullable",
        COALESCE(COLUMN_DEFAULT, '') AS "column_default"
 FROM INFORMATION_SCHEMA.COLUMNS
 WHERE TABLE_SCHEMA = {schema} AND TABLE_NAME = {relation}
 ORDER BY ORDINAL_POSITION"#;
+
+/// Every base table of a schema, one row per column, and a row of NULLs for a
+/// table with none. External tables are a kind of their own in the catalog and
+/// are not drawn.
+const GRAPH_COLUMNS_SQL: &str = r#"
+SELECT tables.TABLE_NAME AS "table_name",
+       columns.COLUMN_NAME AS "column_name",
+       {type} AS "data_type",
+       LOWER(columns.IS_NULLABLE) AS "nullable"
+FROM INFORMATION_SCHEMA.TABLES AS tables
+LEFT JOIN INFORMATION_SCHEMA.COLUMNS AS columns
+       ON columns.TABLE_SCHEMA = tables.TABLE_SCHEMA
+      AND columns.TABLE_NAME = tables.TABLE_NAME
+WHERE tables.TABLE_SCHEMA = {schema}
+  AND tables.TABLE_TYPE NOT IN ('VIEW', 'MATERIALIZED VIEW', 'EXTERNAL TABLE')
+ORDER BY tables.TABLE_NAME, columns.ORDINAL_POSITION"#;
 
 /// A cell of a `SHOW` result by its column's fixed name.
 fn shown<'a>(result: &'a QueryResult, row: &'a Row, name: &str) -> Option<&'a str> {
@@ -1285,6 +1363,55 @@ fn shown<'a>(result: &'a QueryResult, row: &'a Row, name: &str) -> Option<&'a st
         .iter()
         .position(|column| column.name == name)?;
     row.get(index)
+}
+
+/// A key `SHOW` as the shape `assemble_schema_graph` reads: `names` pairs the
+/// name it wants with the `SHOW`'s column that holds it, the rows kept are the
+/// ones `keep` admits, and `constant` adds a column of one value. Ordered by
+/// table, constraint and `key_sequence`, since the `SHOW` makes no promise.
+fn graph_keys(
+    result: &QueryResult,
+    names: &[(&str, &str)],
+    constant: Option<(&str, &str)>,
+    keep: impl Fn(&Row) -> bool,
+) -> Result<QueryResult, DbError> {
+    let source = |row: &Row, name: &str| shown(result, row, name).map(str::to_string);
+    let first = names[0].1;
+    let second = names[1].1;
+    let mut rows: Vec<&Row> = result.rows.iter().filter(|row| keep(row)).collect();
+    rows.sort_by_cached_key(|row| {
+        (
+            source(row, first),
+            source(row, second),
+            shown(result, row, "key_sequence")
+                .and_then(|sequence| sequence.parse::<u32>().ok())
+                .unwrap_or(0),
+        )
+    });
+
+    let mut kept = QueryResult {
+        columns: names
+            .iter()
+            .map(|(name, _)| *name)
+            .chain(constant.map(|(name, _)| name))
+            .map(|name| Column {
+                name: name.to_string(),
+                data_type: None,
+            })
+            .collect(),
+        ..QueryResult::default()
+    };
+    let mut builder = RowBuilder::default();
+    for row in rows {
+        for (_, from) in names {
+            builder.push(shown(result, row, from));
+        }
+        if let Some((_, value)) = constant {
+            builder.push(Some(value));
+        }
+        kept.rows.push(builder.finish()?);
+    }
+    Ok(kept)
 }
 
 /// The rows of a key `SHOW` that belong to `relation`, in key order.
@@ -2231,6 +2358,13 @@ mod tests {
             .expect("described");
         assert_eq!(view.columns.len(), 2);
         assert!(view.constraints.is_empty());
+        let graph = connection
+            .schema_graph("DBDELVE_TEST")
+            .expect("the graph reads");
+        assert_eq!(graph.tables.len(), 2, "the view is not drawn");
+        assert_eq!(graph.keys.len(), 1);
+        assert!(crate::db::graph::seed::column(&graph, "ORDER_LINES", "ORDER_ID").foreign);
+        assert!(crate::db::graph::seed::column(&graph, "ORDERS", "ID").unique);
         let ddl = connection
             .ddl("DBDELVE_TEST", "ORDERS", super::super::RelationKind::Table)
             .expect("the table's DDL loads");
@@ -3317,6 +3451,59 @@ mod tests {
                     .is_some_and(|sql| !sql.contains("CURRENT_VERSION")))
                 .all(|request| request.target.is_empty())
         );
+    }
+
+    #[test]
+    fn a_schema_graph_is_read_from_the_recorded_keys() {
+        // The three `SHOW`s are the recordings the structure test replays. The
+        // column listing is hand-written in their shape (`graph_columns_SALES`),
+        // with a table of no columns, since no account was at hand to record the
+        // join.
+        use crate::db::graph::{KeyTarget, seed};
+        let mock = Mock::start();
+        let within = "IN SCHEMA \"DBDELVE_TEST\".\"SALES\"";
+        for (statement, name) in [
+            ("INFORMATION_SCHEMA.TABLES AS tables", "graph_columns_SALES"),
+            (&format!("SHOW PRIMARY KEYS {within}"), "show_primary"),
+            (&format!("SHOW UNIQUE KEYS {within}"), "show_unique"),
+            (&format!("SHOW IMPORTED KEYS {within}"), "show_imported"),
+        ] {
+            mock.on_statement(
+                "",
+                statement,
+                [Response::fixture(200, &format!("{name}.json"))],
+            );
+        }
+
+        let graph = connected(&mock)
+            .schema_graph("SALES")
+            .expect("the graph reads");
+
+        let mut tables: Vec<_> = graph.tables.iter().map(|t| t.name.as_ref()).collect();
+        tables.sort();
+        assert_eq!(tables, ["CUSTOMERS", "EMPTY_ONE", "ORDERS", "ORDER_LINES"]);
+        let empty = seed::table_index(&graph, "EMPTY_ONE") as usize;
+        assert!(graph.tables[empty].columns.is_empty());
+
+        let lines = seed::table_index(&graph, "ORDER_LINES");
+        let key = graph
+            .keys
+            .iter()
+            .find(|key| key.table == lines)
+            .expect("the key is read");
+        assert_eq!(seed::names(&graph, lines, &key.columns), ["ORDER_ID"]);
+        let KeyTarget::Table { table, columns } = &key.referenced else {
+            panic!("{:?}", key.referenced);
+        };
+        assert_eq!(*table, seed::table_index(&graph, "ORDERS"));
+        assert_eq!(seed::names(&graph, *table, columns), ["ID"]);
+        assert_eq!(graph.keys.len(), 2);
+
+        // The recorded `SHOW` lists LINE_NO (key_sequence 2) before ORDER_ID.
+        let order_id = seed::column(&graph, "ORDER_LINES", "ORDER_ID");
+        assert!(order_id.primary && order_id.foreign && !order_id.unique && !order_id.nullable);
+        assert!(seed::column(&graph, "CUSTOMERS", "ID").unique);
+        assert!(!seed::column(&graph, "ORDER_LINES", "LINE_NO").unique);
     }
 
     #[test]
