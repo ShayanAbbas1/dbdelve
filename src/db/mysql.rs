@@ -285,8 +285,9 @@ WHERE base_table.TABLE_SCHEMA = {schema}
 ORDER BY base_table.TABLE_NAME, column_entry.ORDINAL_POSITION
 ";
 
-// An index with a prefix part (`SUB_PART`) or a functional one (no
-// `COLUMN_NAME`) is not unique in its columns, whatever it enforces.
+// A functional part (no `COLUMN_NAME`) leaves the columns not unique in
+// themselves. A prefix part (`SUB_PART`) does not: equal values have equal
+// prefixes, so the full columns are unique too.
 const GRAPH_UNIQUE_KEYS_SQL: &str = "
 SELECT statistic.TABLE_NAME AS table_name,
        statistic.INDEX_NAME AS constraint_name,
@@ -301,7 +302,7 @@ WHERE statistic.TABLE_SCHEMA = {schema}
       WHERE part.TABLE_SCHEMA = statistic.TABLE_SCHEMA
         AND part.TABLE_NAME = statistic.TABLE_NAME
         AND part.INDEX_NAME = statistic.INDEX_NAME
-        AND (part.SUB_PART IS NOT NULL OR part.COLUMN_NAME IS NULL)
+        AND part.COLUMN_NAME IS NULL
   )
 ORDER BY statistic.TABLE_NAME, statistic.INDEX_NAME, statistic.SEQ_IN_INDEX
 ";
@@ -1240,9 +1241,10 @@ fn resolve_edit_target(
 }
 
 fn graph_sql(template: &str, schema: &str) -> String {
+    // The quoted name goes in last: a database may be called `{stored}`.
     template
-        .replace("{schema}", &Engine::MySql.quote_literal(schema))
         .replace("{stored}", STORED_TABLES)
+        .replace("{schema}", &Engine::MySql.quote_literal(schema))
 }
 
 fn structure_sql(template: &str, schema: &str, relation: &str) -> String {
@@ -1941,6 +1943,34 @@ mod tests {
             .schema_graph("dbdelve_archive")
             .expect("the graph should read");
         seed::assert_archive_points_at_accounts(&archive, "dbdelve_dev");
+    }
+
+    fn live_a_unique_index_on_a_prefix_makes_its_column_unique(engine: Engine) {
+        let connection = live(engine);
+        connection
+            .query(
+                "DROP TABLE IF EXISTS dbdelve_test_prefix; \
+                 CREATE TABLE dbdelve_test_prefix (id INT PRIMARY KEY, email VARCHAR(80), \
+                     UNIQUE KEY by_email (email(10)))",
+                Fetch::default(),
+            )
+            .expect("the fixture table should be created");
+        let graph = connection.schema_graph("dbdelve_dev");
+        connection
+            .query("DROP TABLE dbdelve_test_prefix", Fetch::default())
+            .expect("the fixture table should be cleaned up");
+        let graph = graph.expect("the graph should read");
+        assert!(crate::db::graph::seed::column(&graph, "dbdelve_test_prefix", "email").unique);
+    }
+
+    #[test]
+    fn a_schema_named_like_a_placeholder_keeps_its_name_in_the_graph_sql() {
+        let sql = graph_sql(GRAPH_COLUMNS_SQL, "tenant{stored}");
+        assert!(sql.contains("'tenant{stored}'"), "{sql}");
+        assert!(
+            sql.contains("IN ('BASE TABLE', 'SYSTEM VERSIONED')"),
+            "{sql}"
+        );
     }
 
     fn live_a_cancel_on_its_own_connection_stops_a_catalog_statement(engine: Engine) {
@@ -2886,6 +2916,7 @@ mod tests {
         live_the_rendered_foreign_key_ddl_survives_beside_the_structured_form,
         live_the_ddl_of_a_table_and_a_view_is_the_servers_own,
         live_a_schema_graph_reads_the_seeds_keys_back,
+        live_a_unique_index_on_a_prefix_makes_its_column_unique,
         live_a_cancel_on_its_own_connection_stops_a_catalog_statement,
     );
 }
