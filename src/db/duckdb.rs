@@ -489,10 +489,9 @@ impl Connection {
         // A constraint row carries its columns as a list, so each is unnested
         // by position rather than by two `unnest`s that only happen to stay
         // paired. The explicit indexes are read as their expressions, which
-        // is all `duckdb_indexes` has: an element that is not a bare
-        // identifier is an expression, and an index with one makes nothing
-        // unique. (A column spelled with quotes is missed that way, and just
-        // is not flagged.)
+        // is all `duckdb_indexes` has: each is unquoted, then looked up among
+        // the table's columns, and an index with an element that is none (an
+        // expression) makes nothing unique.
         let unique_keys = self.internal_query(&format!(
             "SELECT table_name, constraint_name, column_name, key_kind
              FROM (
@@ -509,20 +508,33 @@ impl Connection {
                        AND constraint_type IN ('PRIMARY KEY', 'UNIQUE')
                  )
                  UNION ALL
-                 SELECT table_name, index_name, expressions[position], 'unique', position
+                 SELECT chosen.table_name, chosen.index_name, columns.column_name, 'unique',
+                        chosen.position
                  FROM (
-                     SELECT table_name, index_name,
-                            expressions::VARCHAR[] AS expressions,
-                            unnest(range(1, len(expressions::VARCHAR[]) + 1)) AS position
-                     FROM duckdb_indexes()
-                     WHERE database_name = current_database()
-                       AND schema_name = {schema_literal}
-                       AND is_unique
-                 )
-                 WHERE len(list_filter(
-                     expressions,
-                     lambda element: NOT regexp_matches(element, '^[A-Za-z_][A-Za-z0-9_]*$')
-                 )) = 0
+                     SELECT table_name, index_name, len(names) AS size, names,
+                            unnest(range(1, len(names) + 1)) AS position
+                     FROM (
+                         SELECT table_name, index_name,
+                                list_transform(
+                                    expressions::VARCHAR[],
+                                    lambda element: CASE
+                                        WHEN regexp_matches(element, '^\"([^\"]|\"\")*\"$')
+                                        THEN replace(substr(element, 2, len(element) - 2), '\"\"', '\"')
+                                        ELSE element
+                                    END
+                                ) AS names
+                         FROM duckdb_indexes()
+                         WHERE database_name = current_database()
+                           AND schema_name = {schema_literal}
+                           AND is_unique
+                     )
+                 ) AS chosen
+                 JOIN duckdb_columns() AS columns
+                   ON columns.database_name = current_database()
+                  AND columns.schema_name = {schema_literal}
+                  AND columns.table_name = chosen.table_name
+                  AND lower(columns.column_name) = lower(chosen.names[chosen.position])
+                 QUALIFY count(*) OVER (PARTITION BY chosen.table_name, chosen.index_name) = chosen.size
              )
              ORDER BY table_name, constraint_name, position"
         ))?;
@@ -1865,13 +1877,22 @@ mod tests {
             "CREATE TABLE t (a INT, b INT, c TEXT);
              CREATE UNIQUE INDEX t_a ON t (a);
              CREATE UNIQUE INDEX t_ab ON t (a, b);
-             CREATE UNIQUE INDEX t_lowered ON t (lower(c));",
+             CREATE UNIQUE INDEX t_lowered ON t (lower(c));
+             CREATE TABLE q (\"account code\" INT, \"say \"\"hi\"\"\" INT, d INT, e INT);
+             CREATE UNIQUE INDEX q_code ON q (\"account code\");
+             CREATE UNIQUE INDEX q_hi ON q (\"say \"\"hi\"\"\");
+             CREATE UNIQUE INDEX q_d ON q (D);
+             CREATE UNIQUE INDEX q_glued ON q (\"d\" || \"e\");",
         )
         .schema_graph("main")
         .expect("the graph should read");
         assert!(seed::column(&graph, "t", "a").unique);
         assert!(!seed::column(&graph, "t", "b").unique);
         assert!(!seed::column(&graph, "t", "c").unique);
+        assert!(seed::column(&graph, "q", "account code").unique);
+        assert!(seed::column(&graph, "q", "say \"hi\"").unique);
+        assert!(seed::column(&graph, "q", "d").unique);
+        assert!(!seed::column(&graph, "q", "e").unique);
     }
 
     #[test]
