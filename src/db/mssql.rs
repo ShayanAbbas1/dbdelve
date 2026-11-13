@@ -35,9 +35,9 @@ use tracing::span;
 use super::ssh::{Tunnel, tunnelled};
 use super::{
     Catalog, Cell, Column, DbError, EditTarget, Engine, Fetch, QueryResult, Reference,
-    RelationKind, Row, ServerConfig, SslMode, Stopped, Structure, assemble_catalog,
-    assemble_databases, assemble_foreign_keys, assemble_references, assemble_structure,
-    create_table, plain_error, required_cell, terminated,
+    RelationKind, Row, SchemaGraph, ServerConfig, SslMode, Stopped, Structure, assemble_catalog,
+    assemble_databases, assemble_foreign_keys, assemble_references, assemble_schema_graph,
+    assemble_structure, create_table, plain_error, required_cell, terminated,
 };
 
 const DATABASES_SQL: &str = "
@@ -327,6 +327,71 @@ JOIN sys.columns AS referenced_column
     AND referenced_column.column_id = fc.referenced_column_id
 WHERE fc.parent_object_id = {object}
 ORDER BY f.name, fc.constraint_column_id
+";
+
+// The ER diagram's three reads, each over a whole schema. A table with no
+// columns still comes back, as one row of NULLs, so it is drawn.
+const GRAPH_COLUMNS_SQL: &str = "
+SELECT
+    t.name AS table_name,
+    p.name AS column_name,
+    {type} AS data_type,
+    CASE WHEN p.is_nullable = 1 THEN 'yes' ELSE 'no' END AS nullable
+FROM sys.tables AS t
+JOIN sys.schemas AS s ON s.schema_id = t.schema_id
+LEFT JOIN sys.columns AS p ON p.object_id = t.object_id
+WHERE s.name = {schema} AND t.is_ms_shipped = 0
+ORDER BY t.name, p.column_id
+";
+
+// From the indexes rather than `sys.key_constraints`, because a unique index
+// makes a column as unique as a constraint does. A filtered or disabled index
+// does not.
+const GRAPH_UNIQUE_KEYS_SQL: &str = "
+SELECT
+    t.name AS table_name,
+    i.name AS constraint_name,
+    c.name AS column_name,
+    CASE WHEN i.is_primary_key = 1 THEN 'primary' ELSE 'unique' END AS key_kind
+FROM sys.indexes AS i
+JOIN sys.tables AS t ON t.object_id = i.object_id
+JOIN sys.schemas AS s ON s.schema_id = t.schema_id
+JOIN sys.index_columns AS ic
+    ON ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.is_included_column = 0
+JOIN sys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+WHERE s.name = {schema}
+    AND t.is_ms_shipped = 0
+    AND i.is_unique = 1
+    AND i.has_filter = 0
+    AND i.is_disabled = 0
+    AND i.is_hypothetical = 0
+ORDER BY t.name, i.name, ic.key_ordinal
+";
+
+// The referenced table is joined rather than named by `OBJECT_NAME`, which is
+// NULL for an object the login cannot see.
+const GRAPH_FOREIGN_KEYS_SQL: &str = "
+SELECT
+    t.name AS table_name,
+    f.name AS constraint_name,
+    source_column.name AS column_name,
+    referenced_schema.name AS referenced_schema,
+    referenced_table.name AS referenced_table,
+    referenced_column.name AS referenced_column
+FROM sys.foreign_key_columns AS fc
+JOIN sys.foreign_keys AS f ON f.object_id = fc.constraint_object_id
+JOIN sys.tables AS t ON t.object_id = fc.parent_object_id
+JOIN sys.schemas AS s ON s.schema_id = t.schema_id
+JOIN sys.columns AS source_column
+    ON source_column.object_id = fc.parent_object_id
+    AND source_column.column_id = fc.parent_column_id
+JOIN sys.tables AS referenced_table ON referenced_table.object_id = fc.referenced_object_id
+JOIN sys.schemas AS referenced_schema ON referenced_schema.schema_id = referenced_table.schema_id
+JOIN sys.columns AS referenced_column
+    ON referenced_column.object_id = fc.referenced_object_id
+    AND referenced_column.column_id = fc.referenced_column_id
+WHERE s.name = {schema} AND t.is_ms_shipped = 0
+ORDER BY t.name, f.name, fc.constraint_column_id
 ";
 
 // The same catalog read from the referenced side: who points at this relation.
@@ -1212,6 +1277,20 @@ impl Connection {
 
     pub fn structure(&self, schema: &str, relation: &str) -> Result<Structure, DbError> {
         self.structure_for(schema, relation, false)
+    }
+
+    pub fn schema_graph(&self, schema: &str) -> Result<SchemaGraph, DbError> {
+        let query = |template: &str| {
+            self.internal_query(
+                &template
+                    .replace("{type}", TYPE_SQL)
+                    .replace("{schema}", &Engine::SqlServer.quote_literal(schema)),
+            )
+        };
+        let columns = query(GRAPH_COLUMNS_SQL)?;
+        let unique_keys = query(GRAPH_UNIQUE_KEYS_SQL)?;
+        let foreign_keys = query(GRAPH_FOREIGN_KEYS_SQL)?;
+        assemble_schema_graph(schema, &columns, &unique_keys, &foreign_keys)
     }
 
     fn structure_for(&self, schema: &str, relation: &str, ddl: bool) -> Result<Structure, DbError> {
@@ -2727,6 +2806,32 @@ mod tests {
             )
             .expect("query should succeed");
         assert_eq!(first(&result), vec![Some("5000")]);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_schema_graph_reads_the_seeds_keys_back() {
+        use crate::db::graph::seed;
+
+        let graph = live().schema_graph("dbo").expect("the graph should read");
+
+        assert!(
+            graph
+                .tables
+                .iter()
+                .all(|table| table.name.as_ref() != "account_overview"),
+            "a view is not drawn"
+        );
+        seed::assert_keys_read_back(&graph);
+        assert_eq!(
+            graph.types[seed::column(&graph, "orders", "total").type_label as usize].as_ref(),
+            "decimal(14,2)"
+        );
+
+        let archive = live()
+            .schema_graph("archive")
+            .expect("the graph should read");
+        seed::assert_archive_points_at_accounts(&archive, "dbo");
     }
 
     #[test]
