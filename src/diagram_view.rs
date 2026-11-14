@@ -52,6 +52,8 @@ const WHEEL_ZOOM: f32 = 1.0 / 200.0;
 /// How far a press may travel and still be a click, in pixels.
 const CLICK_SLOP: f32 = 3.0;
 const CIRCLE_STEPS: usize = 16;
+/// How near an edge the pointer must come to light it, in pixels.
+const EDGE_REACH: f32 = 4.0;
 /// Dimmed ink keeps this much of its colour.
 const DIM: f32 = 0.3;
 /// The dot grid's spacing, in world units, doubled until the dots stand at
@@ -239,11 +241,19 @@ impl Minimap {
     }
 }
 
+/// What the pointer is over, while nothing is pressed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Hover {
+    Card(u32),
+    Edge(u32),
+}
+
 /// How an edge is drawn under the current focus and hover.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum EdgeLook {
     Plain,
-    /// The focus's or the hovered card's own: the accent, a little heavier.
+    /// The focus's, the hovered card's own or the hovered edge: the accent, a
+    /// little heavier.
     Lit,
     Dimmed,
 }
@@ -304,9 +314,9 @@ pub struct DiagramView {
     viewport: Bounds<Pixels>,
     /// The card in focus. Its neighbours stay sharp and the rest dim.
     focus: Option<u32>,
-    /// The card under the pointer, whose edges are lit while nothing is in
-    /// focus.
-    hover: Option<u32>,
+    /// The card under the pointer, whose edges are lit, or the edge, lit with
+    /// the rows it joins, while nothing is in focus.
+    hover: Option<Hover>,
     gesture: Option<Gesture>,
     lines: HashMap<LineKey, ShapedLine>,
     stamp: Option<Stamp>,
@@ -648,7 +658,7 @@ impl DiagramView {
                         let world = self.transform.to_world(at);
                         let zoom = self.transform.zoom;
                         self.ready()
-                            .and_then(|ready| ready.scene.card_at(world, zoom))
+                            .and_then(|ready| hover_at(&ready.scene, world, zoom))
                     }
                     false => None,
                 };
@@ -1425,7 +1435,7 @@ impl DiagramView {
                 }
             }
 
-            let washed = joined_rows(ready, focus);
+            let washed = joined_rows(ready, focus, hover);
             for &card in &visible.cards {
                 let dimmed = card_dimmed(layout, focus, card);
                 let rect = layout.card_rect(card, detail, zoom);
@@ -1948,26 +1958,41 @@ fn card_dimmed(layout: &Layout, focus: Option<u32>, card: u32) -> bool {
             .any(|&edge| other_end(layout, edge, focus) == Some(card))
 }
 
+/// What lies under a world point: a card, else the nearest edge within
+/// [`EDGE_REACH`] pixels.
+fn hover_at(scene: &Scene, world: Point, zoom: f32) -> Option<Hover> {
+    match scene.card_at(world, zoom) {
+        Some(card) => Some(Hover::Card(card)),
+        None => scene
+            .edge_at(world, EDGE_REACH / zoom, zoom)
+            .map(Hover::Edge),
+    }
+}
+
 /// An edge under the focus, or with nothing in focus, under the hover.
-fn edge_look(layout: &Layout, focus: Option<u32>, hover: Option<u32>, edge: u32) -> EdgeLook {
+fn edge_look(layout: &Layout, focus: Option<u32>, hover: Option<Hover>, edge: u32) -> EdgeLook {
     let touches = |card: u32| other_end(layout, edge, card).is_some();
     match (focus, hover) {
         (Some(focus), _) if touches(focus) => EdgeLook::Lit,
         (Some(_), _) => EdgeLook::Dimmed,
-        (None, Some(hover)) if touches(hover) => EdgeLook::Lit,
+        (None, Some(Hover::Card(card))) if touches(card) => EdgeLook::Lit,
+        (None, Some(Hover::Edge(hovered))) if hovered == edge => EdgeLook::Lit,
         (None, _) => EdgeLook::Plain,
     }
 }
 
-/// The column rows at both ends of the focus's keys, every column of a
-/// composite key included: `(card, column)`.
-fn joined_rows(ready: &Ready, focus: Option<u32>) -> HashSet<(u32, u32)> {
-    let Some(focus) = focus else {
-        return HashSet::new();
-    };
+/// The column rows at both ends of the focus's keys, or with nothing in
+/// focus of the hovered edge's, every column of a composite key included:
+/// `(card, column)`.
+fn joined_rows(ready: &Ready, focus: Option<u32>, hover: Option<Hover>) -> HashSet<(u32, u32)> {
     let layout = ready.scene.layout();
+    let edges = match (focus, hover) {
+        (Some(focus), _) => layout.cards[focus as usize].edges.as_slice(),
+        (None, Some(Hover::Edge(edge))) => &[edge][..],
+        (None, _) => return HashSet::new(),
+    };
     let mut rows = HashSet::new();
-    for &edge in &layout.cards[focus as usize].edges {
+    for &edge in edges {
         let edge = &layout.edges[edge as usize];
         let key = &ready.graph.keys[edge.key as usize];
         rows.extend(key.columns.iter().map(|&column| (edge.child, column)));
@@ -2148,15 +2173,69 @@ mod tests {
                 .unwrap() as u32
         };
         let (near, far) = (edge(card_of(&layout, 1)), edge(t2));
+        let card = |card| Some(Hover::Card(card));
         assert_eq!(edge_look(&layout, None, None, near), EdgeLook::Plain);
-        assert_eq!(edge_look(&layout, None, Some(t0), near), EdgeLook::Lit);
-        assert_eq!(edge_look(&layout, None, Some(t0), far), EdgeLook::Plain);
+        assert_eq!(edge_look(&layout, None, card(t0), near), EdgeLook::Lit);
+        assert_eq!(edge_look(&layout, None, card(t0), far), EdgeLook::Plain);
         assert_eq!(edge_look(&layout, Some(t0), None, near), EdgeLook::Lit);
         assert_eq!(
-            edge_look(&layout, Some(t0), Some(t2), far),
+            edge_look(&layout, Some(t0), card(t2), far),
             EdgeLook::Dimmed,
             "the hover gives way to the focus"
         );
         assert_eq!(edge_look(&layout, Some(t3), None, near), EdgeLook::Dimmed);
+
+        let hovered = Some(Hover::Edge(far));
+        assert_eq!(edge_look(&layout, None, hovered, far), EdgeLook::Lit);
+        assert_eq!(edge_look(&layout, None, hovered, near), EdgeLook::Plain);
+        assert_eq!(edge_look(&layout, Some(t0), hovered, far), EdgeLook::Dimmed);
+    }
+
+    #[test]
+    fn the_pointer_finds_a_card_before_an_edge_and_an_edge_within_reach() {
+        let graph = crate::diagram::tests::graph(2, &[(1, 0)]);
+        let scene = Scene::new(layout::schema(&graph, false));
+        let layout = scene.layout();
+        for zoom in [1.0, 0.7, 0.3] {
+            let detail = layout.detail(zoom);
+            let on_card = layout.card_rect(1, detail, zoom).centre();
+            assert_eq!(hover_at(&scene, on_card, zoom), Some(Hover::Card(1)));
+            let points = layout.edge_path(0, detail, zoom).polyline();
+            let middle = points[points.len() / 2];
+            assert_eq!(hover_at(&scene, middle, zoom), Some(Hover::Edge(0)));
+            // The reach is in pixels, so it covers more of the world zoomed out.
+            let near = Point::new(middle.x, middle.y + (EDGE_REACH - 1.0) / zoom);
+            let far = Point::new(middle.x, middle.y + (EDGE_REACH + 2.0) / zoom);
+            assert_eq!(hover_at(&scene, near, zoom), Some(Hover::Edge(0)), "{zoom}");
+            assert_eq!(hover_at(&scene, far, zoom), None, "{zoom}");
+        }
+    }
+
+    #[test]
+    fn a_hovered_edge_washes_the_rows_it_joins_and_the_focus_wins() {
+        // `t2.t0_id` and `t1.t0_id` both reference `t0.id`.
+        let graph = crate::diagram::tests::graph(3, &[(1, 0), (2, 0)]);
+        let scene = Scene::new(layout::schema(&graph, false));
+        let ready = Ready::new(graph, scene);
+        let layout = ready.scene.layout();
+        let [t0, t1, t2] = [0, 1, 2].map(|table| card_of(layout, table));
+        let edge = layout
+            .edges
+            .iter()
+            .position(|edge| edge.child == t2)
+            .unwrap() as u32;
+        let rows = |focus, hover| {
+            let mut rows: Vec<_> = joined_rows(&ready, focus, hover).into_iter().collect();
+            rows.sort();
+            rows
+        };
+        assert!(rows(None, None).is_empty());
+        assert!(rows(None, Some(Hover::Card(t2))).is_empty());
+        let mut joined = vec![(t0, 0), (t2, 1)];
+        joined.sort();
+        assert_eq!(rows(None, Some(Hover::Edge(edge))), joined);
+        let mut focused = vec![(t0, 0), (t1, 1)];
+        focused.sort();
+        assert_eq!(rows(Some(t1), Some(Hover::Edge(edge))), focused);
     }
 }

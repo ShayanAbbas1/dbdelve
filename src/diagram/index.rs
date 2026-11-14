@@ -232,7 +232,7 @@ fn cells(rect: Rect) -> (i32, i32, i32, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diagram::geometry::CARD_WIDTH;
+    use crate::diagram::geometry::{CARD_WIDTH, Detail};
     use crate::diagram::layout::{LAYER_GAP, schema};
     use crate::diagram::tests::graph;
 
@@ -322,5 +322,28 @@ mod tests {
             scene.visible(rect(1990.0, 1490.0, 20.0, 20.0), 1.0).cards,
             vec![1]
         );
+    }
+
+    #[test]
+    fn an_edge_hit_is_the_nearest_edge_at_the_level_drawn_and_a_loop_counts() {
+        // Tables 1 and 2 both reference 0, and 0 references itself.
+        let scene = Scene::new(schema(&graph(3, &[(1, 0), (2, 0), (0, 0)]), false));
+        let layout = scene.layout();
+        for zoom in [1.0, 0.3] {
+            let detail = layout.detail(zoom);
+            for edge in 0..layout.edges.len() as u32 {
+                let points = layout.edge_path(edge, detail, zoom).polyline();
+                let middle = points[points.len() / 2];
+                assert_eq!(scene.edge_at(middle, 4.0, zoom), Some(edge), "{zoom}");
+            }
+        }
+
+        // Between the two keys into table 0, nearer the first.
+        let path = |edge: u32| layout.edge_path(edge, Detail::Columns, 1.0).polyline();
+        let (a, b) = (path(0), path(1));
+        let (a, b) = (a[a.len() / 2], b[b.len() / 2]);
+        let nearer_a = Point::new(a.x + (b.x - a.x) * 0.3, a.y + (b.y - a.y) * 0.3);
+        let reach = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
+        assert_eq!(scene.edge_at(nearer_a, reach, 1.0), Some(0));
     }
 }
