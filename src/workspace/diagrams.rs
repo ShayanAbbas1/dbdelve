@@ -1,7 +1,7 @@
 //! Opening a schema's ER diagram and reading what it draws.
 
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use super::*;
 
@@ -190,13 +190,18 @@ impl Workspace {
             CatalogState::Loaded(catalog, _) => drawn_table_count(catalog, &schema),
             _ => None,
         };
-        let reading = Arc::new(OnceLock::new());
+        let reading = Arc::new(SideRead::new());
         *side = Some(reading.clone());
         let issued = reading.clone();
         let saved_under = profile_id.clone();
         let task = spawn_blocking(cx.background_executor(), move || {
-            let own = connection.apart()?;
-            let graph = reading.get_or_init(|| own).schema_graph(&schema)?;
+            if reading.cancelled() {
+                return Ok(None);
+            }
+            let Some(own) = reading.publish(connection.apart()?) else {
+                return Ok(None);
+            };
+            let graph = own.schema_graph(&schema)?;
             let keys_only =
                 wanted.unwrap_or(known_tables.unwrap_or(graph.tables.len()) > KEYS_ONLY_ABOVE);
             let scene = Scene::new(layout::schema(&graph, keys_only));
@@ -208,7 +213,7 @@ impl Workspace {
                 let cards = store::read_diagram(&saved_under, database.as_deref(), &schema);
                 ready.adopt(placements(cards));
             }
-            Ok::<_, DbError>(ready)
+            Ok::<_, DbError>(Some(ready))
         });
         cx.spawn(async move |workspace, cx| {
             let result = task.await;
@@ -242,7 +247,10 @@ impl Workspace {
                     // A Refresh while this was out: it may predate the change.
                     let again = *stale;
                     let load = match result {
-                        Ok(ready) => Load::Ready(Box::new(ready)),
+                        Ok(Some(ready)) => Load::Ready(Box::new(ready)),
+                        // Only a read its tab let go stops short, and that tab
+                        // no longer holds it.
+                        Ok(None) => return,
                         Err(error) => {
                             tracing::debug!(error = %error.message, "schema graph read failed");
                             let message =
@@ -289,11 +297,64 @@ impl Workspace {
             return;
         };
         spawn_cancel(cx.background_executor(), move || {
-            if let Some(connection) = side.get() {
+            if let Some(connection) = side.cancel() {
                 let _ = connection.cancel(&CancelToken::default());
             }
         })
         .detach();
+    }
+}
+
+/// The connection a diagram's read runs on, shared by the tab and the read so
+/// that closing the tab stops the read wherever it is: before its connection
+/// is opened, while it opens (a Postgres or MySQL handshake), or once its
+/// statements are out.
+pub(crate) struct SideRead<T> {
+    state: Mutex<Side<T>>,
+}
+
+enum Side<T> {
+    Opening,
+    Open(Arc<T>),
+    Cancelled,
+}
+
+impl<T> SideRead<T> {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(Side::Opening),
+        }
+    }
+
+    fn cancelled(&self) -> bool {
+        matches!(
+            *self.state.lock().unwrap_or_else(PoisonError::into_inner),
+            Side::Cancelled
+        )
+    }
+
+    /// Hands over the connection the read opened, to run on. None once the
+    /// tab has let the read go: the connection is dropped, which closes it.
+    fn publish(&self, own: T) -> Option<Arc<T>> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        match *state {
+            Side::Opening => {
+                let own = Arc::new(own);
+                *state = Side::Open(own.clone());
+                Some(own)
+            }
+            Side::Open(_) | Side::Cancelled => None,
+        }
+    }
+
+    /// Lets the read go, with its connection if it has one, so what runs on
+    /// it can be cancelled.
+    fn cancel(&self) -> Option<Arc<T>> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        match std::mem::replace(&mut *state, Side::Cancelled) {
+            Side::Open(connection) => Some(connection),
+            Side::Opening | Side::Cancelled => None,
+        }
     }
 }
 
@@ -375,6 +436,36 @@ fn stored_cards<'a>(
 mod tests {
     use super::*;
     use crate::db::{Relation, Schema};
+
+    /// Counts its drops, standing in for a connection, which closes on drop.
+    struct Counted(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl Drop for Counted {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn a_read_let_go_while_its_connection_opens_never_runs_on_it() {
+        let dropped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let closed = || dropped.load(std::sync::atomic::Ordering::SeqCst);
+
+        let side = SideRead::new();
+        assert!(!side.cancelled());
+        assert!(side.cancel().is_none(), "nothing to cancel yet");
+        assert!(side.cancelled(), "so the read need not open one");
+        assert!(side.publish(Counted(dropped.clone())).is_none());
+        assert_eq!(closed(), 1, "and one it opened anyway is closed");
+
+        let side = SideRead::new();
+        let running = side.publish(Counted(dropped.clone())).expect("not let go");
+        let cancelled = side.cancel().expect("the close reaches the connection");
+        assert!(Arc::ptr_eq(&running, &cancelled));
+        assert!(side.cancelled());
+        drop((running, cancelled));
+        assert_eq!(closed(), 2);
+    }
 
     #[test]
     fn an_arrangement_goes_to_its_file_and_back_as_it_was() {

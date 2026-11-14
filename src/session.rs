@@ -2748,7 +2748,7 @@ pub(crate) enum ObjectBody {
         /// The side connection the read runs on while it runs, so closing the
         /// tab can cancel it. Dropped when the read lands, so an open diagram
         /// holds no connection.
-        side: Option<std::sync::Arc<std::sync::OnceLock<Connection>>>,
+        side: Option<std::sync::Arc<crate::workspace::SideRead<Connection>>>,
         /// Read before a Refresh or a reconnect, so read again the next time
         /// the tab is looked at, with the old diagram on screen meanwhile.
         stale: bool,
