@@ -4440,7 +4440,7 @@ fn a_diagram_tab_comes_back_after_a_relaunch_as_it_was_left(cx: &mut TestAppCont
             })
         };
         let (origin, size, zoom) = state(&view, cx);
-        let arranged = store::read_diagram("e2e", "main");
+        let arranged = store::read_diagram("e2e", None, "main");
         assert_eq!(
             arranged
                 .iter()

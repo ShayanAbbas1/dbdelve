@@ -507,13 +507,17 @@ The shape a change to the main pane has to fit (`session.rs`, with the
 - **A diagram tab comes back as it was left, and its arrangement lives
   beside `profiles.toml`.** The tab is a `StoredObject` with `diagram = true`
   and a `diagram_view` table (view, centre, Keys only, zoom and pan); the cards
-  the user moved or sized go to `diagrams/<profile>/d-<schema>.toml`
+  the user moved or sized go to `diagrams/<profile>/d-<database>.<schema>.toml`
   (`store::write_diagram`), written at the end of a drag, so that however many
   there are they never grow the file that is moved aside when it breaks. Names
-  are values in it, never keys, and the file name escapes the schema as a grid
-  key does. It belongs to the schema, not the tab: closing the tab or
-  switching database keeps it, a dropped table leaves it on the next write, and
-  it goes with the profile. One that will not read is no arrangement. The
+  are values in it, never keys, and the file name escapes both as a grid key
+  does. The database is the one a pin names (`Profile::shortcut_database`):
+  blank where the catalog lists every database as a schema or the profile has
+  one, and while it is not known nothing is read or written, so a same-named
+  schema in another database never takes the arrangement. It belongs to the
+  schema, not the tab: closing the tab or switching database and back keeps
+  it, a dropped table leaves it on the next write, and it goes with the
+  profile. One that will not read is no arrangement. The
   restored tab reads its graph again when shown and applies both then. Zoom
   and pan change on every wheel event, too often to write each, so
   `profiles.toml` is also written on quit and on window close.

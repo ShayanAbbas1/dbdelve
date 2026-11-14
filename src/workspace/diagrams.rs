@@ -86,8 +86,16 @@ impl Workspace {
                     structure,
                 } => workspace.open_diagram_table(schema, table, *structure, window, cx),
                 DiagramEvent::Arranged => {
+                    let Some(database) = (workspace.profiles.iter())
+                        .find(|profile| profile.id == profile_id)
+                        .and_then(arrangement_database)
+                    else {
+                        return;
+                    };
                     let cards = stored_cards(view.read(cx).arranged());
-                    if let Err(message) = store::write_diagram(&profile_id, &drawn, &cards) {
+                    if let Err(message) =
+                        store::write_diagram(&profile_id, database.as_deref(), &drawn, &cards)
+                    {
                         workspace.note(message, cx);
                     }
                 }
@@ -147,6 +155,7 @@ impl Workspace {
             return;
         };
         let (profile_id, generation) = (profile.id.clone(), profile.generation);
+        let database = arrangement_database(profile);
         let Some(tab) = profile.session.objects.iter_mut().find(|tab| tab.id == id) else {
             return;
         };
@@ -171,8 +180,11 @@ impl Workspace {
             let scene = Scene::new(layout::schema(&graph, keys_only));
             let mut ready = Ready::new(graph, scene);
             // A diagram read again keeps the arrangement on screen instead.
-            if shown.is_none() {
-                ready.adopt(placements(store::read_diagram(&saved_under, &schema)));
+            if shown.is_none()
+                && let Some(database) = database
+            {
+                let cards = store::read_diagram(&saved_under, database.as_deref(), &schema);
+                ready.adopt(placements(cards));
             }
             Ok::<_, DbError>(ready)
         });
@@ -260,6 +272,19 @@ impl Workspace {
             }
         })
         .detach();
+    }
+}
+
+/// The database a diagram's arrangement is filed under, named as a pin names
+/// its own: none where the catalog lists every database as a schema or the
+/// profile has one. Unknown, nothing is read or written: an arrangement filed
+/// without its database would come back for the same schema in whatever
+/// database came next.
+fn arrangement_database(profile: &Profile) -> Option<Option<String>> {
+    match profile.shortcut_database() {
+        crate::explorer::ShortcutDatabase::Unnamed => Some(None),
+        crate::explorer::ShortcutDatabase::On(database) => Some(Some(database)),
+        crate::explorer::ShortcutDatabase::Unknown => None,
     }
 }
 

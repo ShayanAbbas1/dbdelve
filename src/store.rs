@@ -1720,11 +1720,12 @@ pub fn prune_grids(profile_id: &str, live: &HashSet<String>) {
     }
 }
 
-/// The cards of `schema`'s diagram the user moved or sized. A file that is
-/// not there, will not read or will not parse is none: the diagram is laid
-/// out afresh, which is all a lost arrangement costs.
-pub fn read_diagram(profile_id: &str, schema: &str) -> Vec<StoredCard> {
-    let Ok(path) = diagram_path(profile_id, schema) else {
+/// The cards of `schema`'s diagram the user moved or sized, in `database`,
+/// which is none where a schema names its database or a profile has only
+/// one. A file that is not there, will not read or will not parse is none:
+/// the diagram is laid out afresh, which is all a lost arrangement costs.
+pub fn read_diagram(profile_id: &str, database: Option<&str>, schema: &str) -> Vec<StoredCard> {
+    let Ok(path) = diagram_path(profile_id, database, schema) else {
         return Vec::new();
     };
     let Ok(text) = fs::read_to_string(&path) else {
@@ -1740,10 +1741,15 @@ pub fn read_diagram(profile_id: &str, schema: &str) -> Vec<StoredCard> {
     }
 }
 
-/// Writes `schema`'s arranged cards atomically, or with none left, removes
-/// the file.
-pub fn write_diagram(profile_id: &str, schema: &str, cards: &[StoredCard]) -> Result<(), String> {
-    let path = diagram_path(profile_id, schema)?;
+/// Writes `schema`'s arranged cards in `database` atomically, or with none
+/// left, removes the file.
+pub fn write_diagram(
+    profile_id: &str,
+    database: Option<&str>,
+    schema: &str,
+    cards: &[StoredCard],
+) -> Result<(), String> {
+    let path = diagram_path(profile_id, database, schema)?;
     if cards.is_empty() {
         return match fs::remove_file(&path) {
             Ok(()) => Ok(()),
@@ -1956,10 +1962,15 @@ fn diagrams_directory(profile_id: &str) -> Result<PathBuf, String> {
     Ok(dbdelve_directory()?.join("diagrams").join(profile_id))
 }
 
-/// A schema's name can hold anything, so it is escaped as a grid key's
-/// parts are, behind a prefix that keeps an empty name a file name.
-fn diagram_path(profile_id: &str, schema: &str) -> Result<PathBuf, String> {
-    let key = format!("d-{}", escape_grid_key(schema));
+/// A database's and a schema's names can hold anything, so each is escaped
+/// as a grid key's parts are, `.` included, and the `.` between them is the
+/// only one in the name. Behind a prefix that keeps empty names a file name.
+fn diagram_path(profile_id: &str, database: Option<&str>, schema: &str) -> Result<PathBuf, String> {
+    let key = format!(
+        "d-{}.{}",
+        escape_grid_key(database.unwrap_or_default()),
+        escape_grid_key(schema)
+    );
     Ok(diagrams_directory(profile_id)?.join(format!("{key}.toml")))
 }
 
@@ -5244,28 +5255,74 @@ name = \"accounts\"
                     height: None,
                 },
             ];
-            for schema in ["public", "", "../x", ".hidden", "a.b", "a%2Eb"] {
-                write_diagram("dev", schema, &cards).expect("an arrangement must write");
+            // `a.b` + `c` and `a` + `b.c` must not meet on one file.
+            let diagrams = [
+                (None, "public"),
+                (None, ""),
+                (None, "../x"),
+                (None, ".hidden"),
+                (None, "a%2Eb"),
+                (Some("a.b"), "c"),
+                (Some("a"), "b.c"),
+                (Some("other"), "public"),
+                (Some("../y"), "public"),
+            ];
+            for (database, schema) in diagrams {
+                write_diagram("dev", database, schema, &cards).expect("an arrangement must write");
             }
-            for schema in ["public", "", "../x", ".hidden", "a.b", "a%2Eb"] {
-                assert_eq!(read_diagram("dev", schema), cards, "{schema:?}");
+            for (database, schema) in diagrams {
+                assert_eq!(
+                    read_diagram("dev", database, schema),
+                    cards,
+                    "{database:?} {schema:?}"
+                );
             }
             let directory = dbdelve_directory().unwrap().join("diagrams").join("dev");
             assert_eq!(
                 fs::read_dir(&directory).unwrap().count(),
-                6,
-                "no two schemas share a file and none lands outside"
+                diagrams.len(),
+                "no two diagrams share a file and none lands outside"
             );
-            assert_eq!(read_diagram("dev", "never"), Vec::new());
+            assert_eq!(read_diagram("dev", None, "never"), Vec::new());
 
-            write_diagram("dev", "public", &[]).expect("none left removes the file");
-            assert_eq!(read_diagram("dev", "public"), Vec::new());
-            assert_eq!(fs::read_dir(&directory).unwrap().count(), 5);
+            write_diagram("dev", Some("other"), "public", &[]).expect("none left removes the file");
+            assert_eq!(read_diagram("dev", Some("other"), "public"), Vec::new());
+            assert_eq!(
+                read_diagram("dev", None, "public"),
+                cards,
+                "the same schema in another database keeps its own"
+            );
+            assert_eq!(
+                fs::read_dir(&directory).unwrap().count(),
+                diagrams.len() - 1
+            );
 
             delete_diagrams("dev").expect("the profile's arrangements must be removable");
             assert!(!directory.exists(), "they go with the profile");
-            assert_eq!(read_diagram("dev", "a.b"), Vec::new());
+            assert_eq!(read_diagram("dev", None, "a.b"), Vec::new());
             delete_diagrams("dev").expect("none left is not a failure");
+        });
+    }
+
+    #[test]
+    fn an_arrangement_filed_by_schema_alone_is_never_taken_for_one_filed_by_database() {
+        with_home(|| {
+            let directory = dbdelve_directory().unwrap().join("diagrams").join("dev");
+            fs::create_dir_all(&directory).unwrap();
+            let text = toml::to_string(&DiagramFileOut {
+                cards: &[StoredCard {
+                    schema: "public".into(),
+                    name: "orders".into(),
+                    ..StoredCard::default()
+                }],
+            })
+            .unwrap();
+            fs::write(directory.join("d-public.toml"), &text).unwrap();
+            for database in [None, Some(""), Some("public")] {
+                assert_eq!(read_diagram("dev", database, "public"), Vec::new());
+                assert_eq!(read_diagram("dev", database, ""), Vec::new());
+            }
+            delete_diagrams("dev").unwrap();
         });
     }
 
@@ -5280,18 +5337,18 @@ name = \"accounts\"
                 width: None,
                 height: None,
             };
-            write_diagram("dev", "public", std::slice::from_ref(&card)).unwrap();
-            let path = diagram_path("dev", "public").unwrap();
+            write_diagram("dev", None, "public", std::slice::from_ref(&card)).unwrap();
+            let path = diagram_path("dev", None, "public").unwrap();
 
             fs::write(&path, "[[cards]\nschema = ").unwrap();
-            assert_eq!(read_diagram("dev", "public"), Vec::new());
+            assert_eq!(read_diagram("dev", None, "public"), Vec::new());
 
             let text = toml::to_string(&DiagramFileOut {
                 cards: std::slice::from_ref(&card),
             })
             .unwrap();
             fs::write(&path, format!("{text}\n[[cards]]\nschema = 7\n")).unwrap();
-            assert_eq!(read_diagram("dev", "public"), vec![card]);
+            assert_eq!(read_diagram("dev", None, "public"), vec![card]);
 
             // The profiles file never reads it, so it cannot break that.
             delete_diagrams("dev").unwrap();
