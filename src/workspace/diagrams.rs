@@ -186,6 +186,10 @@ impl Workspace {
         let wanted = view.read(cx).wanted_keys_only();
         *stale = false;
         let schema = tab.schema.clone();
+        let known_tables = match &profile.catalog {
+            CatalogState::Loaded(catalog, _) => drawn_table_count(catalog, &schema),
+            _ => None,
+        };
         let reading = Arc::new(OnceLock::new());
         *side = Some(reading.clone());
         let issued = reading.clone();
@@ -193,7 +197,8 @@ impl Workspace {
         let task = spawn_blocking(cx.background_executor(), move || {
             let own = connection.apart()?;
             let graph = reading.get_or_init(|| own).schema_graph(&schema)?;
-            let keys_only = wanted.unwrap_or(graph.tables.len() > KEYS_ONLY_ABOVE);
+            let keys_only =
+                wanted.unwrap_or(known_tables.unwrap_or(graph.tables.len()) > KEYS_ONLY_ABOVE);
             let scene = Scene::new(layout::schema(&graph, keys_only));
             let mut ready = Ready::new(graph, scene);
             // A diagram read again keeps the arrangement on screen instead.
@@ -292,6 +297,17 @@ impl Workspace {
     }
 }
 
+/// How many cards the loaded catalog says a schema's diagram holds, so the
+/// first layout is made in the right mode without waiting on the read.
+fn drawn_table_count(catalog: &Catalog, schema: &str) -> Option<usize> {
+    let schema = catalog.schemas.iter().find(|found| found.name == schema)?;
+    Some(
+        (schema.relations.iter())
+            .filter(|relation| drawn_in_diagrams(relation.kind) && relation.partition_of.is_none())
+            .count(),
+    )
+}
+
 /// Whether a relation of this kind is drawn as a card of its schema's
 /// diagram, so has a neighbourhood to show.
 pub(crate) fn drawn_in_diagrams(kind: RelationKind) -> bool {
@@ -358,6 +374,7 @@ fn stored_cards<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::{Relation, Schema};
 
     #[test]
     fn an_arrangement_goes_to_its_file_and_back_as_it_was() {
@@ -403,5 +420,31 @@ mod tests {
             }
         );
         assert!(placements(vec![card(f64::INFINITY, None)]).is_empty());
+    }
+
+    #[test]
+    fn the_catalog_counts_the_cards_a_schema_will_draw() {
+        let relation = |name: &str, kind, partition_of: Option<&str>| Relation {
+            name: name.into(),
+            kind,
+            partition_of: partition_of.map(Into::into),
+            size: None,
+            rows: None,
+        };
+        let catalog = Catalog {
+            schemas: vec![Schema {
+                name: "public".into(),
+                relations: vec![
+                    relation("orders", RelationKind::PartitionedTable, None),
+                    relation("orders_2024", RelationKind::Table, Some("orders")),
+                    relation("users", RelationKind::Table, None),
+                    relation("active_users", RelationKind::View, None),
+                ],
+                routines: Vec::new(),
+            }],
+            database: None,
+        };
+        assert_eq!(drawn_table_count(&catalog, "public"), Some(2));
+        assert_eq!(drawn_table_count(&catalog, "other"), None);
     }
 }
