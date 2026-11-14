@@ -88,7 +88,7 @@ impl Workspace {
 
     /// Give a schema's diagram a tab, unread and not shown, looked at as
     /// `restore` says once read when it comes back from disk. None where the
-    /// profile's target draws no diagrams.
+    /// profile draws no diagrams.
     pub(crate) fn diagram_tab(
         &mut self,
         schema: String,
@@ -97,7 +97,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Option<u64> {
         let profile = self.profile_mut()?;
-        if !profile.config.target().draws_diagrams() {
+        if !profile.draws_diagrams() {
             return None;
         }
         let id = profile.session.next_object_id;

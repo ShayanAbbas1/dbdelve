@@ -530,7 +530,9 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   Diagram button) goes through `Workspace::open_diagram`, which fronts the
   schema's one tab; a table's way in also shows its neighbourhood
   (`DiagramView::centre_on`), held as the restored centre until the first
-  read lands.
+  read lands. Each is offered where `Profile::draws_diagrams` says, which asks
+  the live connection: a plugin draws only once it offered `graph`, which its
+  `Target` cannot know.
 - **`clip` reads only the window a cell shows, not the whole value.**
   `ResultGrid::shown` clips a cell as it is drawn, on the frame thread, for
   every visible cell of every frame. Nothing clipped is kept: a stored second

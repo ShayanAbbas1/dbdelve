@@ -270,6 +270,18 @@ impl Profile {
         self.schema_refresh == Some(self.generation)
     }
 
+    /// Whether this profile's schemas can be drawn. Asked of the live
+    /// connection, because a plugin draws only once it offered `graph`,
+    /// which its target cannot know; a built-in answers by its target,
+    /// connected or not.
+    pub(crate) fn draws_diagrams(&self) -> bool {
+        let target = self.config.target();
+        match &self.state {
+            ProfileState::Connected(connection) => connection.draws_diagrams(target),
+            _ => target.draws_diagrams(),
+        }
+    }
+
     pub(crate) fn connection(&self) -> Option<Connection> {
         match &self.state {
             ProfileState::Connected(connection) => Some((**connection).clone()),

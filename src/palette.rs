@@ -3847,7 +3847,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
                 ObjectBody::Relation { .. } | ObjectBody::Structure { .. }
             )
             && crate::workspace::drawn_in_diagrams(kind)
-            && profile.config.target().draws_diagrams()
+            && profile.draws_diagrams()
             && profile.connection().is_some()
         {
             items.push(command(
@@ -4357,7 +4357,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             "select_database",
         ));
     }
-    if profile.config.target().draws_diagrams() && profile.connection().is_some() {
+    if profile.draws_diagrams() && profile.connection().is_some() {
         items.extend(
             Workspace::diagram_schemas(profile)
                 .into_iter()

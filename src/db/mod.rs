@@ -1930,6 +1930,16 @@ impl Connection {
         }
     }
 
+    /// Whether [`Self::schema_graph`] answers on this connection: what
+    /// `target`, the profile's, says for a built-in driver, and for a plugin
+    /// whether it offered `graph` when it opened, which `target` cannot know.
+    pub fn draws_diagrams(&self, target: Target) -> bool {
+        match self {
+            Self::External(connection) => connection.draws_diagrams(),
+            _ => target.draws_diagrams(),
+        }
+    }
+
     /// The statements that would create this relation, for the clipboard:
     /// nothing dbdelve does runs them. The server's own rendering wherever it
     /// has one; Postgres and SQL Server tables are written back out of their

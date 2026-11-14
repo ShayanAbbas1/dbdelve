@@ -2474,7 +2474,7 @@ impl Workspace {
         let active_schema = profile.active_schema().map(gpui::SharedString::from);
         let menu_schema = active_schema.clone();
         let picks_schema = profile.config.target().picks_schema();
-        let draws_diagrams = profile.config.target().draws_diagrams();
+        let draws_diagrams = profile.draws_diagrams();
         let drop_line = self.explorer_drop.clone();
         let open_queries: HashSet<String> = profile
             .session

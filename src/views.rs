@@ -167,6 +167,7 @@ pub fn render_main_content(
             tab,
             &profile.id,
             profile.config.target(),
+            profile.draws_diagrams(),
             matches!(profile.state, ProfileState::Failed(_)),
             row_panel,
             profile
@@ -761,6 +762,7 @@ fn render_object(
     tab: &ObjectTab,
     profile_id: &str,
     target: Target,
+    draws_diagrams: bool,
     disconnected: bool,
     row_panel: &RowPanel,
     form: Option<&InsertForm>,
@@ -792,7 +794,7 @@ fn render_object(
                     .border_b_1()
                     .border_color(t.border)
                     .child(div().flex_1())
-                    .children(diagram_button(tab, target, cx))
+                    .children(diagram_button(tab, draws_diagrams, cx))
                     .child(relation_controls(true, false, cx)),
             )
             .child(
@@ -3685,13 +3687,17 @@ fn relation_controls(
         .children(takes_inserts.then(|| insert_button("new-row", "Insert".into(), t)))
 }
 
-/// A table's neighbourhood in its schema's diagram, where the engine draws
+/// A table's neighbourhood in its schema's diagram, where the profile draws
 /// one and the table is a card in it.
-fn diagram_button(tab: &ObjectTab, target: Target, cx: &mut Context<Workspace>) -> Option<Button> {
+fn diagram_button(
+    tab: &ObjectTab,
+    draws_diagrams: bool,
+    cx: &mut Context<Workspace>,
+) -> Option<Button> {
     let Some(crate::explorer::ObjectKind::Relation(kind)) = tab.kind else {
         return None;
     };
-    if !target.draws_diagrams() || !crate::workspace::drawn_in_diagrams(kind) {
+    if !draws_diagrams || !crate::workspace::drawn_in_diagrams(kind) {
         return None;
     }
     let command = Command::ShowDiagram {

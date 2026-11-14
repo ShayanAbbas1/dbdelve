@@ -2462,6 +2462,12 @@ mod tests {
     fn a_plugin_that_did_not_offer_graph_draws_no_diagram_and_is_sent_none() {
         let plain = open_with(&[("DBDELVE_ECHO_PLAIN", "1")]).unwrap();
         assert!(!plain.draws_diagrams());
+        let profile = crate::db::Connection::External(plain.clone());
+        let target = crate::db::Target {
+            engine: Engine::Postgres,
+            driver: crate::db::Driver::Plugin(echo::plugin()),
+        };
+        assert!(!profile.draws_diagrams(target));
         let error = plain.schema_graph("main").unwrap_err();
         assert_eq!(
             error.message,
@@ -2472,6 +2478,8 @@ mod tests {
                 .query("last", &CancelToken::default(), Fetch::default())
                 .is_ok()
         );
+        let offered = crate::db::Connection::External(open_with(&[]).unwrap());
+        assert!(offered.draws_diagrams(target));
     }
 
     /// The read is no run's, so a Cancel under any token on its connection
