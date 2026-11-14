@@ -35,15 +35,23 @@ impl Png {
     }
 }
 
-/// The scale an image `width` by `height` at 100% is drawn at: [`SCALE`],
-/// or whatever keeps it inside both caps.
-pub fn scale_for(width: f32, height: f32) -> f32 {
-    let (width, height) = (width.max(1.0), height.max(1.0));
-    let side = MAX_SIDE as f32;
-    SCALE
+/// The pixel size and scale a drawing `width` by `height` at 100% is
+/// written at: [`SCALE`], or whatever keeps it inside both caps. The scale
+/// bounds the exact size, so rounding the pixels up can pass a cap by a
+/// row; rounded down they cannot, and lose under a pixel of margin.
+pub fn fit(width: f32, height: f32) -> (u32, u32, f32) {
+    let (width, height) = (f64::from(width.max(1.0)), f64::from(height.max(1.0)));
+    let side = f64::from(MAX_SIDE);
+    let scale = f64::from(SCALE)
         .min(side / width)
         .min(side / height)
-        .min((MAX_PIXELS as f32 / (width * height)).sqrt())
+        .min((MAX_PIXELS as f64 / (width * height)).sqrt());
+    let within = |w: f64, h: f64| w <= side && h <= side && w * h <= MAX_PIXELS as f64;
+    let (mut w, mut h) = ((width * scale).ceil(), (height * scale).ceil());
+    if !within(w, h) {
+        (w, h) = ((width * scale).floor(), (height * scale).floor());
+    }
+    ((w as u32).max(1), (h as u32).max(1), scale as f32)
 }
 
 /// The bundled families, and the system's behind them for a family the user
@@ -74,10 +82,8 @@ fn render_with(svg: &str, fonts: Arc<fontdb::Database>) -> Result<Png, String> {
     let tree = usvg::Tree::from_str(svg, &options)
         .map_err(|error| format!("Could not draw the diagram: {error}"))?;
     let size = tree.size();
-    let scale = scale_for(size.width(), size.height());
-    let width = (size.width() * scale).ceil() as u32;
-    let height = (size.height() * scale).ceil() as u32;
-    let mut pixmap = Pixmap::new(width.max(1), height.max(1))
+    let (width, height, scale) = fit(size.width(), size.height());
+    let mut pixmap = Pixmap::new(width, height)
         .ok_or_else(|| format!("Could not make a {width} by {height} image."))?;
     resvg::render(
         &tree,
@@ -155,13 +161,27 @@ mod tests {
 
     #[test]
     fn a_huge_diagram_is_shrunk_to_the_caps_rather_than_allocated_whole() {
-        assert_eq!(scale_for(100.0, 100.0), SCALE);
-        let wide = scale_for(40_000.0, 200.0);
-        assert!((40_000.0 * wide).ceil() as u32 <= MAX_SIDE, "{wide}");
-        let big = scale_for(12_000.0, 12_000.0);
-        let pixels = (12_000.0 * big).ceil() as u64 * (12_000.0 * big).ceil() as u64;
-        assert!(pixels <= MAX_PIXELS + 2 * 12_000, "{big}: {pixels}");
-        assert!(big < SCALE);
+        assert_eq!(fit(100.0, 50.5), (200, 101, SCALE));
+        for (width, height) in [
+            (40_000.0, 200.0),
+            (12_000.0, 12_000.0),
+            (12_000.0, 8_000.0),
+            (8_192.4, 10.0),
+            (4_096.7, 4_096.3),
+            (1.0e6, 1.0e6),
+        ] {
+            let (w, h, scale) = fit(width, height);
+            assert!(scale < SCALE, "{width} by {height}");
+            assert!(
+                w <= MAX_SIDE && h <= MAX_SIDE,
+                "{width} by {height}: {w} by {h}"
+            );
+            assert!(
+                u64::from(w) * u64::from(h) <= MAX_PIXELS,
+                "{width} by {height}: {w} by {h}"
+            );
+            assert!(w >= 1 && h >= 1);
+        }
 
         let document = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100000" height="10"><rect width="100000" height="10" fill="red"/></svg>"#;
         let png = render_with(document, bundled_only()).unwrap();
