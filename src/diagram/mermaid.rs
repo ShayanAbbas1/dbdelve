@@ -160,10 +160,18 @@ fn word(text: &str) -> String {
             _ => '_',
         })
         .collect();
-    if !out
-        .chars()
-        .next()
-        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+    // Mermaid reads PK, FK or UK as a key marker, case blind, wherever a
+    // word boundary follows, before it tries an attribute word.
+    let marker = out.get(..2).is_some_and(|start| {
+        ["pk", "fk", "uk"].contains(&start.to_ascii_lowercase().as_str())
+            && !(out[2..].chars().next())
+                .is_some_and(|next| next.is_ascii_alphanumeric() || next == '_')
+    });
+    if marker
+        || !out
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
     {
         out.insert(0, '_');
     }
@@ -303,6 +311,36 @@ mod tests {
                 text.contains(&format!("    \"{name}\" {{\n")),
                 "{name}: {text}"
             );
+        }
+    }
+
+    /// Inside a block, Mermaid reads PK, FK and UK as key markers before an
+    /// attribute word, case blind, wherever a word boundary follows them.
+    #[test]
+    fn a_column_or_type_spelled_like_a_key_marker_is_prefixed() {
+        let mut graph = graph(1, &[]);
+        let names = ["PK", "fk", "uk-ref", "Pk(1)", "pk_id", "fkey"];
+        graph.tables[0].columns = (names.iter())
+            .map(|name| GraphColumn {
+                name: (*name).into(),
+                type_label: 0,
+                nullable: false,
+                primary: false,
+                foreign: false,
+                unique: false,
+            })
+            .collect();
+        graph.types = vec!["UK".into()];
+        let text = mermaid(&graph, &schema(&graph, false));
+        for line in [
+            "        _UK _PK \"PK UK\"\n",
+            "        _UK _fk \"fk UK\"\n",
+            "        _UK _uk-ref \"uk-ref UK\"\n",
+            "        _UK _Pk(1) \"Pk(1) UK\"\n",
+            "        _UK pk_id \"UK\"\n",
+            "        _UK fkey \"UK\"\n",
+        ] {
+            assert!(text.contains(line), "{line}: {text}");
         }
     }
 
