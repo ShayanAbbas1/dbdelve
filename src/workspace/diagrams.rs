@@ -201,8 +201,19 @@ impl Workspace {
             let Some(path) = chosen.await else {
                 return;
             };
+            let file = DiagramFile::for_path(&path, file);
+            // A large PNG takes seconds to draw, with nothing else to show
+            // for it until it is written.
+            if file == DiagramFile::Png {
+                let (id, notice) = (id.clone(), "Exporting the diagram as PNG…".to_string());
+                _ = workspace.update(cx, |workspace, cx| {
+                    if let Some(profile) = workspace.issued_to(&id, generation) {
+                        profile.session.notice = Some(notice);
+                        cx.notify();
+                    }
+                });
+            }
             let written = spawn_blocking(cx.background_executor(), move || {
-                let file = DiagramFile::for_path(&path, file);
                 let written = write_drawing(&drawing, file, &path);
                 match &written {
                     Ok(_) => tracing::info!(format = file.extension(), "diagram export finished"),
