@@ -895,34 +895,48 @@ impl Layout {
     /// a sliver of the view, so each level is fitted at the zooms that draw
     /// it.
     pub fn fitting(&self, viewport: Rect, margin: f32) -> Transform {
-        let fit = |detail: Detail, zoom: f32| {
-            Transform::fitting(self.drawn_bounds(detail, zoom), viewport, margin)
+        // Tracing every edge costs a tenth of a second on thousands of
+        // tables, so the cards alone rule a level out first: the edges only
+        // ever add to them.
+        let cards_fit = |detail: Detail| {
+            let cards = self.cards_bounds(detail, 1.0);
+            Transform::fitting(cards, viewport, margin).zoom
         };
-        let columns = fit(Detail::Columns, 1.0);
-        if self.detail(columns.zoom) == Detail::Columns {
-            return columns;
+        if self.detail(cards_fit(Detail::Columns)) == Detail::Columns {
+            let columns = self.drawn_bounds(Detail::Columns, 1.0);
+            let fit = Transform::fitting(columns, viewport, margin);
+            if self.detail(fit.zoom) == Detail::Columns {
+                return fit;
+            }
         }
-        let keys = fit(Detail::Keys, 1.0);
-        if self.detail(keys.zoom) != Detail::Names {
-            let zoom = match self.keys_only {
-                true => keys.zoom,
-                false => keys.zoom.min(KEYS_BELOW - 0.01),
-            };
-            let drawn = self.drawn_bounds(Detail::Keys, zoom);
-            return Transform::fitting_at(drawn, viewport, zoom);
+        // Keys draw the same at every zoom.
+        if self.detail(cards_fit(Detail::Keys)) != Detail::Names {
+            let keys = self.drawn_bounds(Detail::Keys, 1.0);
+            let fit = Transform::fitting(keys, viewport, margin);
+            if self.detail(fit.zoom) != Detail::Names {
+                let zoom = match self.keys_only {
+                    true => fit.zoom,
+                    false => fit.zoom.min(KEYS_BELOW - 0.01),
+                };
+                return Transform::fitting_at(keys, viewport, zoom);
+            }
         }
-        // A name block is the same height on screen at any zoom, so the
-        // block's world height, and with it what fits, changes with the zoom.
+        // A name block is the same height on screen at any zoom, so its
+        // height in the world, and what fits, changes with the zoom. The
+        // halving goes by the cards alone and the edges have the last word.
         let (mut fits, mut over) = (MIN_ZOOM, NAMES_BELOW);
         for _ in 0..16 {
             let zoom = (fits + over) / 2.0;
-            if fit(Detail::Names, zoom).zoom >= zoom {
+            let cards = self.cards_bounds(Detail::Names, zoom);
+            if Transform::fitting(cards, viewport, margin).zoom >= zoom {
                 fits = zoom;
             } else {
                 over = zoom;
             }
         }
-        Transform::fitting_at(self.drawn_bounds(Detail::Names, fits), viewport, fits)
+        let names = self.drawn_bounds(Detail::Names, fits);
+        let zoom = fits.min(Transform::fitting(names, viewport, margin).zoom);
+        Transform::fitting_at(names, viewport, zoom)
     }
 
     fn anchor_y(&self, card: u32, column: Option<u32>, detail: Detail, zoom: f32) -> f32 {
@@ -1155,6 +1169,44 @@ mod tests {
         let layout = schema(&tall, false);
         let every_column = Transform::fitting(layout.bounds(), viewport, 32.0);
         assert!(layout.fitting(viewport, 32.0).zoom > 2.0 * every_column.zoom);
+    }
+
+    #[test]
+    fn a_fit_lands_on_the_most_detailed_level_that_fits() {
+        let viewport = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1200.0,
+            height: 800.0,
+        };
+        let level = |graph: &crate::db::SchemaGraph, keys_only: bool| {
+            let layout = schema(graph, keys_only);
+            let fit = layout.fitting(viewport, 32.0);
+            (layout.detail(fit.zoom), fit.zoom)
+        };
+        let small = graph(3, &[(1, 0), (2, 1)]);
+        assert_eq!(level(&small, false), (Detail::Columns, 1.0));
+        assert_eq!(level(&small, true), (Detail::Keys, 1.0));
+        let mut wide = small.clone();
+        for table in &mut wide.tables {
+            table.columns.extend((0..40).map(|column| GraphColumn {
+                name: format!("c{column}").into(),
+                type_label: 0,
+                nullable: true,
+                primary: false,
+                foreign: false,
+                unique: false,
+            }));
+        }
+        let (detail, zoom) = level(&wide, false);
+        assert_eq!(detail, Detail::Keys);
+        assert!(zoom < KEYS_BELOW, "{zoom} would draw every column");
+        let many = graph(400, &[]);
+        let (detail, zoom) = level(&many, false);
+        assert_eq!(detail, Detail::Names);
+        assert!(zoom > MIN_ZOOM, "{zoom}");
+        let empty = graph(0, &[]);
+        assert_eq!(level(&empty, false).1, 1.0);
     }
 
     #[test]
