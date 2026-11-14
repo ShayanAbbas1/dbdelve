@@ -1,6 +1,7 @@
 //! Opening a schema's ER diagram and reading what it draws.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use super::*;
@@ -8,7 +9,9 @@ use super::*;
 use crate::diagram::geometry::{MAX_CARD_WIDTH, MIN_CARD_WIDTH, Point, WORLD_LIMIT};
 use crate::diagram::index::{Placement, Scene};
 use crate::diagram::layout;
-use crate::diagram_view::{DiagramEvent, DiagramView, Load, Ready, TableKey};
+use crate::diagram_view::{DiagramEvent, DiagramFile, DiagramView, Drawing, Load, Ready, TableKey};
+
+use super::exports::{Ended, choose_path, could_not_write, write_replacing};
 
 /// Above this many tables a diagram opens with key columns only (design §6.5).
 const KEYS_ONLY_ABOVE: usize = 300;
@@ -118,6 +121,7 @@ impl Workspace {
                 }
                 DiagramEvent::Viewed => workspace.remember_profiles(cx),
                 DiagramEvent::Moved => workspace.remember_profiles_soon(cx),
+                DiagramEvent::Export(file) => workspace.export_diagram(view, *file, cx),
             },
         )
         .detach();
@@ -135,6 +139,75 @@ impl Workspace {
         });
         profile.session.place_last(session::TabKey::Object(id));
         Some(id)
+    }
+
+    /// The diagram tab in front, written as its Export menu would.
+    pub(crate) fn export_front_diagram(&mut self, file: DiagramFile, cx: &mut Context<Self>) {
+        let view = (self.profile())
+            .and_then(|profile| profile.session.active_object())
+            .and_then(|tab| match &tab.body {
+                ObjectBody::Diagram { view, .. } => Some(view.clone()),
+                _ => None,
+            });
+        if let Some(view) = view {
+            self.export_diagram(&view, file, cx);
+        }
+    }
+
+    /// Write a diagram to a file the user picks, as it is drawn now. The
+    /// drawing is taken before the panel opens, which is modeless: what was
+    /// on screen when they asked is what they asked for.
+    pub(crate) fn export_diagram(
+        &mut self,
+        view: &Entity<DiagramView>,
+        file: DiagramFile,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(drawing) = view.read(cx).drawing(cx) else {
+            return;
+        };
+        let Some(profile) = self.profile() else {
+            return;
+        };
+        let (id, generation) = (profile.id.clone(), profile.generation);
+        let chosen = choose_path(&drawing.stem, file.extension(), cx);
+        cx.spawn(async move |workspace, cx| {
+            let Some(path) = chosen.await else {
+                return;
+            };
+            let written = spawn_blocking(cx.background_executor(), move || {
+                let file = DiagramFile::for_path(&path, file);
+                let written = write_drawing(&drawing, file, &path);
+                match &written {
+                    Ok(()) => tracing::info!(format = file.extension(), "diagram export finished"),
+                    Err(_) => tracing::warn!(format = file.extension(), "diagram export failed"),
+                }
+                written
+                    .map(|()| {
+                        format!(
+                            "Exported the diagram as {} to {}.",
+                            file.label(),
+                            path.display()
+                        )
+                    })
+                    .map_err(|ended| ended.notice(&path))
+            })
+            .await;
+            _ = workspace.update(cx, |workspace, cx| {
+                let Some(profile) = workspace.issued_to(&id, generation) else {
+                    return;
+                };
+                match written {
+                    Ok(message) => {
+                        profile.session.notice = Some(message.clone());
+                        workspace.clear_notice_later(id, generation, message, cx);
+                    }
+                    Err(message) => profile.session.notice = Some(message),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// A table off a diagram, in the tab the explorer opens for it: its rows,
@@ -461,6 +534,16 @@ fn stored_cards<'a>(
         .collect();
     cards.sort_by(|a, b| (&a.schema, &a.name).cmp(&(&b.schema, &b.name)));
     cards
+}
+
+/// A drawing written to `path` as `file`, whole or not at all.
+fn write_drawing(drawing: &Drawing, file: DiagramFile, path: &Path) -> Result<(), Ended> {
+    let bytes = match file {
+        DiagramFile::Svg => drawing.svg().into_bytes(),
+    };
+    write_replacing(path, |out| {
+        std::io::Write::write_all(out, &bytes).map_err(could_not_write(path))
+    })
 }
 
 #[cfg(test)]

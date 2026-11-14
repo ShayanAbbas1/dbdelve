@@ -735,6 +735,7 @@ impl Workspace {
             Command::NextEdit => self.next_edit(&NextEdit, window, cx),
             Command::PreviousEdit => self.previous_edit(&PreviousEdit, window, cx),
             Command::ExportResults(format) => self.export_results(format, cx),
+            Command::ExportDiagram(file) => self.export_front_diagram(file, cx),
             Command::CancelExport => self.cancel_export(cx),
             Command::CopyRow => self.copy_row(&CopyRow, window, cx),
             Command::CopyResults(format) => self.copy_results_as(format, cx),

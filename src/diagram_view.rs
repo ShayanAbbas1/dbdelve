@@ -16,12 +16,14 @@ use gpui::{
     InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     ParentElement, Path, PathBuilder, PinchEvent, Pixels, Render, ScrollWheelEvent, ShapedLine,
     SharedString, StatefulInteractiveElement, Styled, Subscription, TextAlign, TextRun,
-    TransformationMatrix, Window, canvas, div, point, prelude::FluentBuilder, px, quad, size,
+    TransformationMatrix, WeakEntity, Window, canvas, div, point, prelude::FluentBuilder, px, quad,
+    size,
 };
 
 use gpui_component::{
     Disableable,
     input::{Input, InputEvent, InputState},
+    menu::{DropdownMenu, PopupMenu, PopupMenuItem},
 };
 
 use crate::actions::{
@@ -36,6 +38,7 @@ use crate::diagram::geometry::{
 };
 use crate::diagram::index::{Placement, Scene};
 use crate::diagram::layout::{Layout, Subject};
+use crate::diagram::svg;
 use crate::fuzzy::{Fuzzy, Query};
 use crate::icons::icon;
 use crate::store;
@@ -290,6 +293,57 @@ pub enum DiagramEvent {
     /// The zoom or the pan moved under a wheel, a pinch or the keyboard, or
     /// a layout landed: worth writing down once it is still.
     Moved,
+    /// The user asked to write the diagram to a file of this kind.
+    Export(DiagramFile),
+}
+
+/// A kind of file the diagram is written as.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiagramFile {
+    Svg,
+}
+
+impl DiagramFile {
+    pub const ALL: [Self; 1] = [Self::Svg];
+
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Svg => "svg",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Svg => "SVG",
+        }
+    }
+
+    /// The kind a path's extension names, else `asked`: someone who typed
+    /// `.png` over the suggested `.svg` asked for a PNG.
+    pub fn for_path(path: &std::path::Path, asked: Self) -> Self {
+        let extension = path.extension().and_then(|extension| extension.to_str());
+        Self::ALL
+            .into_iter()
+            .find(|file| extension.is_some_and(|ext| ext.eq_ignore_ascii_case(file.extension())))
+            .unwrap_or(asked)
+    }
+}
+
+/// The diagram as it stands, taken on the UI thread to be written out off
+/// it: where the user left each card, at the view and Keys only on screen.
+pub struct Drawing {
+    pub graph: Arc<SchemaGraph>,
+    pub layout: Layout,
+    pub style: svg::Style,
+    /// What the file is named after: the schema, and the table in the middle
+    /// of a neighbourhood.
+    pub stem: String,
+}
+
+impl Drawing {
+    pub fn svg(&self) -> String {
+        svg::svg(&self.graph, &self.layout, &self.style)
+    }
 }
 
 /// A press in progress, and what it moves.
@@ -701,6 +755,31 @@ impl DiagramView {
             Load::Ready(ready) => Some(ready),
             _ => None,
         }
+    }
+
+    /// The diagram as it is drawn, for an export. None until it is read.
+    pub fn drawing(&self, cx: &gpui::App) -> Option<Drawing> {
+        let ready = self.ready()?;
+        let graph = &ready.graph;
+        let stem = match ready.view {
+            View::Schema => graph.schema.to_string(),
+            View::Neighbourhood(table) => {
+                format!("{}-{}", graph.schema, graph.tables[table as usize].name)
+            }
+        };
+        let fonts = fonts(cx);
+        Some(Drawing {
+            graph: graph.clone(),
+            layout: ready.scene.layout().clone(),
+            style: svg::Style {
+                palette: file_palette(*theme(cx)),
+                chrome: fonts.chrome.to_string(),
+                grid: fonts.grid.to_string(),
+                name_size: geometry::text_size(1.0, layout::chrome(layout::TEXT_MD)),
+                type_size: geometry::text_size(1.0, layout::grid(layout::TEXT_SM)),
+            },
+            stem: stem.replace(['/', '\\', ':'], "_"),
+        })
     }
 
     fn local(&self, position: gpui::Point<Pixels>) -> Point {
@@ -1310,12 +1389,13 @@ impl DiagramView {
                         .tooltip_with_action("Find table", &FindInDiagram, Some("Diagram"))
                         .on_click(cx.listener(|view, _, window, cx| view.find(window, cx))),
                 )
-                // ponytail: a stub until export lands (design §9, phase 4).
-                .child(
+                .child({
+                    let view = cx.entity().downgrade();
                     tool("diagram-export", icon::EXPORT)
-                        .disabled(true)
-                        .tooltip("Export comes in a later build"),
-                ),
+                        .debug_selector(|| "diagram-export".into())
+                        .tooltip("Export")
+                        .dropdown_menu(move |menu, _, _| export_menu(menu, &view))
+                }),
         )
     }
 
@@ -2413,6 +2493,39 @@ impl Render for DiagramView {
     }
 }
 
+/// The toolbar's Export menu, laid out as the result grid's is: the
+/// clipboard first, then the files.
+fn export_menu(menu: PopupMenu, view: &WeakEntity<DiagramView>) -> PopupMenu {
+    DiagramFile::ALL.into_iter().fold(menu, |menu, file| {
+        let view = view.clone();
+        menu.item(
+            PopupMenuItem::new(format!("Export {}\u{2026}", file.label())).on_click(
+                move |_, _, cx| {
+                    _ = view.update(cx, |_, cx| cx.emit(DiagramEvent::Export(file)));
+                },
+            ),
+        )
+    })
+}
+
+/// A theme's tones for a file. A file has no backdrop for glass to show, so
+/// every plane is the theme's own opaque tone, and the washes are flattened
+/// onto the card they sit on.
+fn file_palette(t: Theme) -> svg::Palette {
+    let card = t.overlay;
+    svg::Palette {
+        canvas: t.panel,
+        card,
+        header: t.element_hover.flatten(card),
+        border: t.border.flatten(card),
+        text: t.text,
+        muted: t.text_muted,
+        edge: t.edge_ink(),
+        primary: t.accent,
+        foreign: t.syntax_type,
+    }
+}
+
 /// The hairline between groups of a floating card's controls.
 fn rule(t: Theme) -> gpui::Div {
     div()
@@ -2757,6 +2870,27 @@ fn paint_dots(bounds: Bounds<Pixels>, transform: Transform, t: Theme, window: &m
 mod tests {
     use super::*;
     use crate::diagram::layout;
+    use crate::theme::color::contrast_ratio;
+
+    /// A file has no glass, so its tones are the theme's opaque ones, and
+    /// what is read on them holds the floors the canvas holds to.
+    #[test]
+    fn a_files_inks_hold_on_its_opaque_cards_in_every_theme() {
+        for t in Theme::all() {
+            let p = file_palette(t);
+            for (what, ink, plane, floor) in [
+                ("a name on a card", p.text, p.card, 4.5),
+                ("a name on a header", p.text, p.header, 4.5),
+                ("a type on a card", p.muted, p.card, 3.0),
+                ("a primary key icon", p.primary, p.card, 3.0),
+                ("a foreign key icon", p.foreign, p.card, 3.0),
+                ("an edge on the canvas", p.edge, p.canvas, 3.0),
+            ] {
+                let ratio = contrast_ratio(ink, plane);
+                assert!(ratio >= floor, "{}: {what} at {ratio:.2}", t.name);
+            }
+        }
+    }
 
     /// Three tables in a chain, `t2 -> t1 -> t0`, and one on its own.
     fn chain() -> Layout {

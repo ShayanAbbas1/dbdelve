@@ -5051,3 +5051,82 @@ fn a_diagrams_minimap_shows_once_it_overflows_and_a_press_on_it_moves_the_view(
         quit(workspace, cx);
     });
 }
+
+/// Opens the diagram toolbar's Export menu and picks its item `downs` down.
+fn pick_diagram_export(downs: usize, cx: &mut VisualTestContext) {
+    let bounds = cx
+        .debug_bounds("diagram-export")
+        .expect("the toolbar draws Export");
+    cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+    settle(cx);
+    for _ in 0..downs {
+        cx.simulate_keystrokes("down");
+    }
+    press(cx, "enter");
+}
+
+/// Waits for an export running off the UI thread to write `path`.
+fn exported_file(path: &std::path::Path, cx: &mut VisualTestContext) -> Vec<u8> {
+    for _ in 0..500 {
+        settle(cx);
+        if path.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    std::fs::read(path).expect("the file is written")
+}
+
+#[gpui::test]
+fn the_diagram_export_menu_writes_the_drawing_to_the_file_picked(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, DIAGRAM_SCHEMA);
+        cx.executor().allow_parking();
+        show_diagram(&workspace, cx);
+        let directory = store::dbdelve_directory().unwrap();
+
+        super::exports::SUGGESTED_NAMES.with_borrow_mut(Vec::clear);
+        pick_diagram_export(1, cx);
+        let path = directory.join("main.svg");
+        let chosen = path.clone();
+        cx.simulate_new_path_selection(|_| Some(chosen));
+        let svg = String::from_utf8(exported_file(&path, cx)).unwrap();
+        assert_eq!(
+            super::exports::SUGGESTED_NAMES.with_borrow(Clone::clone),
+            ["main.svg"],
+            "named after the schema"
+        );
+        assert!(svg.starts_with("<?xml"), "{svg}");
+        assert!(svg.contains(">birds</text>") && svg.contains(">sightings</text>"));
+        settle(cx);
+        let notice =
+            cx.update(|_, cx| workspace.read(cx).profile().unwrap().session.notice.clone());
+        assert_eq!(
+            notice,
+            Some(format!(
+                "Exported the diagram as SVG to {}.",
+                path.display()
+            ))
+        );
+
+        // The palette asks for the same file, and a neighbourhood is named
+        // after the table in its middle too.
+        let view = show_diagram(&workspace, cx);
+        view.update(cx, |view, cx| view.centre_on("sightings", cx));
+        settle(cx);
+        super::exports::SUGGESTED_NAMES.with_borrow_mut(Vec::clear);
+        cx.simulate_keystrokes("secondary-shift-p");
+        settle(cx);
+        cx.simulate_input("Export diagram as SVG");
+        settle(cx);
+        cx.simulate_keystrokes("enter");
+        cx.simulate_new_path_selection(|_| None);
+        settle(cx);
+        assert_eq!(
+            super::exports::SUGGESTED_NAMES.with_borrow(Clone::clone),
+            ["main-sightings.svg"]
+        );
+
+        quit(workspace, cx);
+    });
+}

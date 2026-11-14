@@ -44,6 +44,7 @@ use crate::{
         PalettePreviousScope, PaletteRowActions, PaletteScopeLeft, PaletteScopeRight,
     },
     db::{ConnectionConfig, ExplainMode, RelationKind, RoutineKind, Syntax},
+    diagram_view::DiagramFile,
     explorer::ROW_LIMITS,
     explorer::{ExplorerTarget, ObjectKind},
     export::{ClipboardFormat, FileAs, Format, RowsAs},
@@ -357,6 +358,8 @@ pub enum Command {
     /// the file is written as is read back off the path the user confirmed, so
     /// these rows are one code path — see `export::FileAs::for_path`.
     ExportResults(FileAs),
+    /// Write the diagram in front to a file, as its toolbar's Export menu does.
+    ExportDiagram(DiagramFile),
     /// Stop the export of every row this connection is running.
     CancelExport,
     CopyRow,
@@ -3663,6 +3666,19 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
     }
 
     if let Some(tab) = session.active_object() {
+        // Once read: before that there is nothing drawn to write out.
+        if let ObjectBody::Diagram { view, .. } = &tab.body
+            && view.read(cx).keys_only().is_some()
+        {
+            items.extend(DiagramFile::ALL.into_iter().map(|file| {
+                command(
+                    &format!("Export diagram as {}…", file.label()),
+                    icon::EXPORT,
+                    Command::ExportDiagram(file),
+                    TAB,
+                )
+            }));
+        }
         if let ObjectBody::Structure {
             structure, grid, ..
         } = &tab.body
