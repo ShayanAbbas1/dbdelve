@@ -17,12 +17,15 @@ use crate::sql::{Destructive, Mode};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// The rows on an object tab were read from what the server held then. Their
-/// statement is dbdelve's own, so it re-runs the moment the tab is looked at
-/// again -- a query tab holds SQL the user wrote and is theirs to re-run.
-fn mark_rows_stale(profile: &mut Profile) {
+/// The rows on an object tab, and a diagram's tables and keys, were read from
+/// what the server held then. Their statements are dbdelve's own, so they run
+/// again the moment the tab is looked at -- a query tab holds SQL the user
+/// wrote and is theirs to re-run.
+fn mark_objects_stale(profile: &mut Profile) {
     for tab in &mut profile.session.objects {
-        if let ObjectBody::Relation { stale, .. } = &mut tab.body {
+        if let ObjectBody::Relation { stale, .. } | ObjectBody::Diagram { stale, .. } =
+            &mut tab.body
+        {
             *stale = true;
         }
     }
@@ -915,7 +918,7 @@ impl Workspace {
         let Some(profile) = self.profiles.get_mut(index) else {
             return;
         };
-        mark_rows_stale(profile);
+        mark_objects_stale(profile);
         self.begin_connect(index, cx);
     }
 
@@ -1028,7 +1031,7 @@ impl Workspace {
                     }
                     profile.catalog = CatalogState::Loaded(catalog, routines);
                     profile.session.structure_requests.clear();
-                    mark_rows_stale(profile);
+                    mark_objects_stale(profile);
                     workspace.catalog_replaced(&id, generation, true, cx);
                     workspace.reload_front_object(&id, cx);
                     workspace.load_sizes(&id, generation, cx);
@@ -1270,7 +1273,7 @@ impl Workspace {
         profile.in_transaction = false;
         profile.session_changed = false;
         profile.session.clear_prompts();
-        mark_rows_stale(profile);
+        mark_objects_stale(profile);
         let name = profile.name.clone();
         self.active = None;
         self.remember_profiles(cx);

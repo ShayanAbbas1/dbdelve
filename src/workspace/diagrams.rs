@@ -72,7 +72,11 @@ impl Workspace {
                     schema,
                     name: String::new(),
                     kind: None,
-                    body: ObjectBody::Diagram { view, side: None },
+                    body: ObjectBody::Diagram {
+                        view,
+                        side: None,
+                        stale: false,
+                    },
                 });
                 profile.session.place_last(session::TabKey::Object(id));
                 id
@@ -106,7 +110,9 @@ impl Workspace {
     }
 
     /// Read a diagram's schema on a connection of its own and lay it out, both
-    /// off the UI thread, unless it is read or being read already.
+    /// off the UI thread, unless it is read or being read already. A stale
+    /// diagram is read again at the keys-only setting on screen, and stays on
+    /// screen until the new one replaces it.
     pub(crate) fn load_diagram(&mut self, id: u64, cx: &mut Context<Self>) {
         let Some(profile) = self.profile_mut() else {
             return;
@@ -118,19 +124,22 @@ impl Workspace {
         let Some(tab) = profile.session.objects.iter_mut().find(|tab| tab.id == id) else {
             return;
         };
-        let ObjectBody::Diagram { view, side } = &mut tab.body else {
+        let ObjectBody::Diagram { view, side, stale } = &mut tab.body else {
             return;
         };
-        if side.is_some() || !view.read(cx).is_loading() {
+        let shown = view.read(cx).keys_only();
+        if side.is_some() || (shown.is_some() && !*stale) {
             return;
         }
+        *stale = false;
         let schema = tab.schema.clone();
         let reading = Arc::new(OnceLock::new());
         *side = Some(reading.clone());
+        let issued = reading.clone();
         let task = spawn_blocking(cx.background_executor(), move || {
             let own = connection.apart()?;
             let graph = reading.get_or_init(|| own).schema_graph(&schema)?;
-            let keys_only = graph.tables.len() > KEYS_ONLY_ABOVE;
+            let keys_only = shown.unwrap_or(graph.tables.len() > KEYS_ONLY_ABOVE);
             let scene = Scene::new(layout::schema(&graph, keys_only));
             Ok::<_, DbError>(Ready::new(graph, scene))
         });
@@ -138,27 +147,58 @@ impl Workspace {
             let result = task.await;
             workspace
                 .update(cx, |workspace, cx| {
-                    let Some(profile) = workspace.issued_to(&profile_id, generation) else {
+                    let current = workspace.issued_to(&profile_id, generation).is_some();
+                    let Some(profile) =
+                        (workspace.profiles.iter_mut()).find(|profile| profile.id == profile_id)
+                    else {
                         return;
                     };
                     let Some(tab) = profile.session.objects.iter_mut().find(|tab| tab.id == id)
                     else {
                         return;
                     };
-                    let ObjectBody::Diagram { view, side } = &mut tab.body else {
+                    let ObjectBody::Diagram { view, side, stale } = &mut tab.body else {
                         return;
                     };
+                    // The slot is freed even when the answer is dropped, or a
+                    // read that outlived its connection would block every
+                    // later one.
+                    if !side.as_ref().is_some_and(|side| Arc::ptr_eq(side, &issued)) {
+                        return;
+                    }
                     *side = None;
+                    if !current {
+                        *stale = true;
+                        return;
+                    }
+                    let shown = view.read(cx).keys_only().is_some();
+                    // A Refresh while this was out: it may predate the change.
+                    let again = *stale;
                     let load = match result {
                         Ok(ready) => Load::Ready(Box::new(ready)),
                         Err(error) => {
                             tracing::debug!(error = %error.message, "schema graph read failed");
-                            Load::Failed(
-                                format!("Could not read {}: {}", tab.schema, error.message).into(),
-                            )
+                            let message =
+                                format!("Could not read {}: {}", tab.schema, error.message);
+                            // A diagram already drawn stays, with the reason in
+                            // the status bar, and is tried again when next shown.
+                            if shown {
+                                *stale = true;
+                                profile.session.notice = Some(message);
+                                cx.notify();
+                                return;
+                            }
+                            Load::Failed(message.into())
                         }
                     };
                     view.update(cx, |view, cx| view.set_load(load, cx));
+                    if again
+                        && workspace
+                            .profile()
+                            .is_some_and(|front| front.id == profile_id)
+                    {
+                        workspace.load_diagram(id, cx);
+                    }
                 })
                 .ok();
         })

@@ -115,6 +115,9 @@ pub struct Ready {
     nullable_types: Vec<SharedString>,
     /// A stub's schema-qualified name, by the key into it, for the same reason.
     stub_names: HashMap<u32, SharedString>,
+    /// Where the user dragged cards in the schema view, by table, so a layout
+    /// made again (keys only, or a new read) puts them back there.
+    moved: HashMap<(SharedString, SharedString), Point>,
 }
 
 impl Ready {
@@ -140,6 +143,25 @@ impl Ready {
             stash: None,
             nullable_types,
             stub_names,
+            moved: HashMap::new(),
+        }
+    }
+
+    /// The card that stands for a table, by its schema and name.
+    fn card_of_table(&self, table: &(SharedString, SharedString)) -> Option<u32> {
+        (0..self.scene.layout().cards.len() as u32).find(|&card| self.table(card) == *table)
+    }
+
+    /// Puts the cards the user dragged back where they left them, on a scene
+    /// laid out afresh.
+    fn place_moved(&mut self) {
+        if self.moved.is_empty() {
+            return;
+        }
+        for card in 0..self.scene.layout().cards.len() as u32 {
+            if let Some(&origin) = self.moved.get(&self.table(card)) {
+                self.scene.move_card(card, origin);
+            }
         }
     }
 
@@ -371,11 +393,18 @@ impl DiagramView {
         &self.focus_handle
     }
 
-    pub fn is_loading(&self) -> bool {
-        matches!(self.load, Load::Loading)
+    /// Whether keys only is on, once there is a diagram to show it on.
+    pub fn keys_only(&self) -> Option<bool> {
+        self.ready().map(|_| self.keys_only)
     }
 
+    /// A read landed. Over a diagram already drawn, it is that diagram read
+    /// again ([`Self::refresh`]); otherwise it starts the view afresh.
     pub fn set_load(&mut self, load: Load, cx: &mut Context<Self>) {
+        let load = match (load, &self.load) {
+            (Load::Ready(fresh), Load::Ready(_)) => return self.refresh(*fresh, cx),
+            (load, _) => load,
+        };
         self.load = load;
         self.keys_only = self
             .ready()
@@ -387,6 +416,49 @@ impl DiagramView {
         self.hover = None;
         self.gesture = None;
         self.paths.clear();
+        cx.notify();
+    }
+
+    /// Swaps in a diagram read again, keeping what the user made of the old
+    /// one: the cards they dragged, the view and the table it centres on, the
+    /// focus and where they were looking, for every table still there.
+    fn refresh(&mut self, mut fresh: Ready, cx: &mut Context<Self>) {
+        let Load::Ready(old) = &mut self.load else {
+            return;
+        };
+        let focus = self.focus.map(|card| old.table(card));
+        let centre = match old.view {
+            View::Neighbourhood(table) => Some(old.graph.tables[table as usize].name.clone()),
+            View::Schema => None,
+        };
+        let looked = old.stash.as_ref().map_or(self.transform, |(_, at)| *at);
+        fresh.moved = std::mem::take(&mut old.moved);
+        fresh.place_moved();
+        let centre = centre.and_then(|name| {
+            (fresh.graph.tables.iter())
+                .position(|table| table.name == name)
+                .map(|table| table as u32)
+        });
+        match centre {
+            Some(table) => {
+                let around =
+                    crate::diagram::layout::neighbourhood(&fresh.graph, table, self.keys_only);
+                let schema = std::mem::replace(&mut fresh.scene, Scene::new(around));
+                fresh.stash = Some((schema, looked));
+                fresh.view = View::Neighbourhood(table);
+            }
+            None => self.transform = looked,
+        }
+        fresh.bounds = fresh.scene.layout().bounds();
+        self.focus = focus.and_then(|table| fresh.card_of_table(&table));
+        self.load = Load::Ready(Box::new(fresh));
+        self.layouts += 1;
+        self.hover = None;
+        self.gesture = None;
+        self.paths.clear();
+        if let Some(text) = self.find.as_ref().map(|find| find.input.read(cx).value()) {
+            self.rank(&text);
+        }
         cx.notify();
     }
 
@@ -561,6 +633,9 @@ impl DiagramView {
             (View::Schema, None) => None,
         };
         let old = std::mem::replace(&mut ready.scene, scene);
+        if view == View::Schema && transform.is_none() {
+            ready.place_moved();
+        }
         ready.bounds = ready.scene.layout().bounds();
         if ready.view == View::Schema && matches!(view, View::Neighbourhood(_)) {
             ready.stash = Some((old, self.transform));
@@ -648,6 +723,10 @@ impl DiagramView {
                 let world = self.transform.to_world(at);
                 let origin = Point::new(world.x - grab.x, world.y - grab.y);
                 if let Load::Ready(ready) = &mut self.load {
+                    if ready.view == View::Schema {
+                        let table = ready.table(card);
+                        ready.moved.insert(table, origin);
+                    }
                     let edges = ready.scene.move_card(card, origin).to_vec();
                     let moved = ready.scene.layout().card_rect(card, Detail::Columns, 1.0);
                     ready.bounds = ready.bounds.union(&moved);
@@ -1329,6 +1408,16 @@ impl DiagramView {
     #[cfg(test)]
     pub fn toggle_keys_only(&mut self, cx: &mut Context<Self>) {
         self.set_keys_only(!self.keys_only, cx);
+    }
+
+    /// Where a table's card is in the world, its top-left corner.
+    #[cfg(test)]
+    pub fn table_origin(&self, name: &str) -> Option<(f32, f32)> {
+        let ready = self.ready()?;
+        let layout = ready.scene.layout();
+        let card = (0..layout.cards.len() as u32).find(|&card| ready.name(card) == name)?;
+        let origin = layout.cards[card as usize].origin;
+        Some((origin.x, origin.y))
     }
 
     /// Where a table's card is on screen, in window coordinates, once drawn.

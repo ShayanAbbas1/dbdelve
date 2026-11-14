@@ -4019,7 +4019,7 @@ fn show_diagram(
             .and_then(|profile| profile.session.active_object())
             .map(|tab| &tab.body)
         {
-            Some(ObjectBody::Diagram { view, side }) => {
+            Some(ObjectBody::Diagram { view, side, .. }) => {
                 assert!(side.is_none(), "the read landed and let its connection go");
                 view.clone()
             }
@@ -4195,6 +4195,98 @@ fn the_zoom_chords_zoom_a_diagram_and_its_views_and_keys_only_lay_it_out_again(
         assert!(
             cx.update(|_, cx| view.read(cx).has_focus()),
             "keeping the focus on its table"
+        );
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_refresh_reads_a_diagram_again_and_keeps_the_cards_the_user_moved(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            &format!("{DIAGRAM_SCHEMA} create table weather (id integer primary key);"),
+        );
+        let view = show_diagram(&workspace, cx);
+        let origin = |name: &str, cx: &mut VisualTestContext| {
+            cx.update(|_, cx| view.read(cx).table_origin(name))
+        };
+        let names = |cx: &mut VisualTestContext| {
+            let (mut names, _) = cx
+                .update(|_, cx| view.read(cx).laid_out())
+                .expect("the diagram is laid out");
+            names.sort();
+            names
+        };
+        let change = |sql: &str| {
+            let database = store::dbdelve_directory()
+                .expect("the test home has a data directory")
+                .join("e2e.db");
+            rusqlite::Connection::open(database)
+                .and_then(|connection| connection.execute_batch(sql))
+                .expect("the schema change must apply");
+        };
+
+        let before = origin("birds", cx);
+        let birds = cx
+            .update(|_, cx| view.read(cx).table_on_screen("birds"))
+            .expect("the diagram drew the birds");
+        let to = gpui::point(birds.x + gpui::px(40.0), birds.y + gpui::px(160.0));
+        let left = gpui::MouseButton::Left;
+        cx.simulate_mouse_down(birds, left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(to, left, gpui::Modifiers::default());
+        cx.simulate_mouse_up(to, left, gpui::Modifiers::default());
+        settle(cx);
+        let dragged = origin("birds", cx);
+        assert_ne!(dragged, before, "the drag moved the birds");
+        let sightings = cx
+            .update(|_, cx| view.read(cx).table_on_screen("sightings"))
+            .expect("the diagram drew the sightings");
+        cx.simulate_click(sightings, gpui::Modifiers::default());
+        settle(cx);
+
+        change(
+            "create table nests (id integer primary key, bird integer references birds(id));
+             drop table weather;",
+        );
+        cx.simulate_keystrokes("secondary-shift-r");
+        settle(cx);
+        assert_eq!(
+            names(cx),
+            ["birds", "nests", "sightings"],
+            "the diagram in front is read again"
+        );
+        assert_eq!(origin("birds", cx), dragged, "the card moved stays put");
+        assert_eq!(
+            cx.update(|_, cx| view.read(cx).focused_name()).as_deref(),
+            Some("sightings"),
+            "and the focus stays on its table"
+        );
+
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        assert_eq!(
+            front_relation(&workspace, cx),
+            Some(("sightings".to_string(), false))
+        );
+        change("create table eggs (id integer primary key, nest integer references nests(id));");
+        cx.simulate_keystrokes("secondary-shift-r");
+        settle(cx);
+        show_diagram(&workspace, cx);
+        assert_eq!(
+            names(cx),
+            ["birds", "eggs", "nests", "sightings"],
+            "one behind another tab is read again when it is shown"
+        );
+        assert_eq!(origin("birds", cx), dragged);
+        let view = show_diagram(&workspace, cx);
+        view.update(cx, |view, cx| view.toggle_keys_only(cx));
+        settle(cx);
+        assert_eq!(
+            cx.update(|_, cx| view.read(cx).table_origin("birds")),
+            dragged,
+            "keys only lays the rest out again around it"
         );
 
         quit(workspace, cx);
