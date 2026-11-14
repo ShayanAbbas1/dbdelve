@@ -121,16 +121,19 @@ fn run(payload: &str) -> io::Result<i32> {
         use std::os::windows::process::CommandExt;
         command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
     }
-    let mut child = crate::db::spawn(&mut command)?;
     #[cfg(windows)]
-    let job = match super::super::ssh::kill_on_close_job(&child) {
-        Ok(job) => job,
-        Err(error) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(error);
-        }
+    let job = {
+        use std::os::windows::io::BorrowedHandle;
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+        // Join before spawning: Windows only enrolls children born after the
+        // parent joins a job. Closing this job ends the watchdog too, which
+        // owns no resources that need to survive tunnel teardown.
+        // SAFETY: the current-process pseudo handle is valid for this borrow
+        // and is never closed by BorrowedHandle.
+        let process = unsafe { BorrowedHandle::borrow_raw(GetCurrentProcess()) };
+        super::super::ssh::kill_on_close_job(&process)?
     };
+    let mut child = crate::db::spawn(&mut command)?;
     let ended = Arc::new(AtomicBool::new(false));
     let eof = ended.clone();
     thread::spawn(move || {
@@ -285,6 +288,157 @@ mod tests {
         assert_eq!(
             process.child.as_mut().unwrap().wait().unwrap().code(),
             Some(7)
+        );
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use std::{
+        io::BufRead,
+        net::TcpListener,
+        os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
+        sync::mpsc,
+    };
+    use windows_sys::Win32::{
+        Foundation::WAIT_OBJECT_0,
+        System::{
+            JobObjects::{JobObjectBasicProcessIdList, QueryInformationJobObject},
+            Threading::{
+                OpenProcess, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, TerminateProcess,
+                WaitForSingleObject,
+            },
+        },
+    };
+
+    const FIXTURE: &str = "DBDELVE_TEST_WINDOWS_SSM";
+    const TEST: &str = "db::ssm::process::windows_tests::process_fixture";
+
+    fn fixture() -> Command {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", TEST, "--nocapture"])
+            .env(FIXTURE, "cli");
+        command
+    }
+
+    // Runs only in explicitly launched subprocesses, never in the test runner.
+    #[test]
+    fn process_fixture() {
+        let Ok(role) = std::env::var(FIXTURE) else {
+            return;
+        };
+        if std::env::var_os(COMMAND).is_some() {
+            let program = std::env::current_exe().unwrap();
+            let pid = std::process::id().to_string();
+            let args = ["--exact", TEST, "--nocapture", "--skip", &pid];
+            let payload = serde_json::to_string(&(program, args)).unwrap();
+            std::process::exit(run(&payload).unwrap());
+        }
+        if role == "plugin" {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            println!(
+                "SSM_TEST_READY {} {}",
+                std::process::id(),
+                listener.local_addr().unwrap().port()
+            );
+            io::stdout().flush().unwrap();
+            // Bound even on a broken cleanup path, so a failed test leaves no
+            // permanent listener behind.
+            thread::sleep(Duration::from_secs(15));
+            drop(listener);
+            std::process::exit(0);
+        }
+        let watchdog: usize = std::env::args().next_back().unwrap().parse().unwrap();
+        // Check before creating descendants, then again after the old
+        // spawn-then-assign implementation would have moved us to its job.
+        for delay in [Duration::ZERO, Duration::from_millis(250)] {
+            thread::sleep(delay);
+            #[repr(C)]
+            struct Members {
+                assigned: u32,
+                count: u32,
+                ids: [usize; 16],
+            }
+            let mut members = Members {
+                assigned: 0,
+                count: 0,
+                ids: [0; 16],
+            };
+            // SAFETY: null queries this process's immediate job. The buffer
+            // has the documented variable-length process-ID-list layout.
+            assert_ne!(
+                unsafe {
+                    QueryInformationJobObject(
+                        std::ptr::null_mut(),
+                        JobObjectBasicProcessIdList,
+                        (&raw mut members).cast(),
+                        size_of_val(&members) as u32,
+                        std::ptr::null_mut(),
+                    )
+                },
+                0
+            );
+            assert!(
+                members.ids[..members.count as usize].contains(&watchdog),
+                "CLI must inherit the watchdog's job before it runs"
+            );
+        }
+        let mut plugin = fixture();
+        plugin.env(FIXTURE, "plugin");
+        crate::db::spawn(&mut plugin).unwrap().wait().unwrap();
+        std::process::exit(0);
+    }
+
+    #[test]
+    fn watchdog_job_is_inherited_and_disconnect_ends_plugin() {
+        let mut command = fixture();
+        // The CLI inherits this override through run; only the watchdog test
+        // dispatch uses COMMAND, which run removes before spawning the CLI.
+        command
+            .env(FIXTURE, "cli")
+            .env(COMMAND, "test")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped());
+        let mut process = Process {
+            child: Some(crate::db::spawn(&mut command).unwrap()),
+        };
+        let stdout = process.child.as_mut().unwrap().stdout.take().unwrap();
+        let (send, receive) = mpsc::channel();
+        thread::spawn(move || {
+            for line in io::BufReader::new(stdout).lines().map_while(Result::ok) {
+                if let Some((_, ready)) = line.split_once("SSM_TEST_READY ") {
+                    let _ = send.send(ready.to_owned());
+                    break;
+                }
+            }
+        });
+        let ready = receive
+            .recv_timeout(Duration::from_secs(5))
+            .expect("plugin readiness");
+        let (pid, port) = ready.split_once(' ').unwrap();
+        // Hold a real handle so PID reuse cannot make the exit check pass.
+        let raw = unsafe {
+            OpenProcess(
+                PROCESS_SYNCHRONIZE | PROCESS_TERMINATE,
+                0,
+                pid.parse().unwrap(),
+            )
+        };
+        assert!(!raw.is_null());
+        let plugin = unsafe { OwnedHandle::from_raw_handle(raw) };
+        process.stop();
+        let exited = unsafe { WaitForSingleObject(plugin.as_raw_handle(), 5000) };
+        if exited != WAIT_OBJECT_0 {
+            unsafe {
+                TerminateProcess(plugin.as_raw_handle(), 1);
+            }
+        }
+        assert_eq!(exited, WAIT_OBJECT_0, "plugin survived disconnect");
+        assert!(
+            TcpListener::bind(format!("127.0.0.1:{port}")).is_ok(),
+            "listener survived disconnect"
         );
     }
 }

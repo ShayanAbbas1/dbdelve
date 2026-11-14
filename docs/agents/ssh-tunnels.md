@@ -254,8 +254,10 @@ EOF ends the CLI's process group on Unix, or closes its Windows Job Object.
 It clears inherited signal masks on Unix, gives the plugin a brief TERM grace
 period, and kills the whole group afterward. SIGPIPE is ignored so reporting
 child exit cannot interrupt cleanup. Its libtest constructor runs the same
-entry point before the test harness. Like the existing SSH Job Object path,
-Windows has a short spawn-to-assignment window; suspended spawn is the upgrade.
+entry point before the test harness. On Windows the watchdog joins its own
+kill-on-close job before spawning the CLI, so the CLI and plugin inherit job
+membership from birth. Closing the job ends the watchdog as well as its children;
+no spawn-to-assignment window is left in this SSM path.
 
 A `ConnectAttempt` is runtime-only, never serialized. The form's Running test
 and profile's Connecting state own cancellation guards; replacing either

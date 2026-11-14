@@ -1223,7 +1223,9 @@ fn spawn(
 // ponytail: ssh runs for a moment before it joins the job, so a DBDelve killed
 // in that window leaves it behind. Upgrade: spawn suspended, assign, resume.
 #[cfg(windows)]
-pub(super) fn kill_on_close_job(process: &Child) -> io::Result<std::os::windows::io::OwnedHandle> {
+pub(super) fn kill_on_close_job(
+    process: &impl std::os::windows::io::AsRawHandle,
+) -> io::Result<std::os::windows::io::OwnedHandle> {
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
