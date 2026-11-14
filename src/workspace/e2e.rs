@@ -5158,15 +5158,15 @@ fn copy_as_mermaid_puts_the_diagram_on_the_clipboard_from_the_menu_and_the_palet
         let (workspace, cx) = launch_on_sqlite_holding(cx, DIAGRAM_SCHEMA);
         let view = show_diagram(&workspace, cx);
         let expected = "erDiagram
-    birds {
+    \"birds\" {
         INTEGER id PK
         TEXT name
     }
-    sightings {
+    \"sightings\" {
         INTEGER id PK
         INTEGER bird FK
     }
-    birds ||..o{ sightings : \"bird\"
+    \"birds\" ||..o{ \"sightings\" : \"bird\"
 ";
         let copied = |cx: &mut VisualTestContext| {
             cx.read_from_clipboard()

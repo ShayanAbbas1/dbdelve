@@ -4,8 +4,8 @@
 //! Keys only says, and a relationship per foreign key, labelled with its
 //! columns.
 //!
-//! Mermaid's grammar is narrow. An entity name is a bare word or quoted
-//! (with no `"`, `%` or backslash inside); an attribute's type and name are
+//! Mermaid's grammar is narrow. An entity name is quoted here (with no
+//! `"`, `%` or backslash inside); an attribute's type and name are
 //! bare words of letters, digits, `_`, `-`, brackets and parentheses. So
 //! names and types are spelled into those, and an attribute whose spelling
 //! lost something carries its real name or type in its comment.
@@ -116,17 +116,10 @@ pub fn mermaid(graph: &SchemaGraph, layout: &Layout) -> String {
     out
 }
 
-/// An entity's name: bare where Mermaid reads it bare, else quoted, with
-/// what a quoted name cannot hold spelled otherwise.
+/// An entity's name as Mermaid identifies it, once its quotes are
+/// stripped: what a quoted name cannot hold spelled otherwise, and never
+/// empty.
 fn entity(name: &str) -> String {
-    let mut chars = name.chars();
-    let bare = chars
-        .next()
-        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'));
-    if bare {
-        return name.to_string();
-    }
     let inside: String = name
         .chars()
         .map(|c| match c {
@@ -138,25 +131,24 @@ fn entity(name: &str) -> String {
         })
         .collect();
     match inside.trim() {
-        "" => "\"_\"".to_string(),
-        inside => format!("\"{inside}\""),
+        "" => "_".to_string(),
+        inside => inside.to_string(),
     }
 }
 
-/// `name`, or with a number after it where an earlier entity took it, as two
-/// names can become one once spelled for Mermaid.
+/// `name` quoted, with a number after it where an earlier entity took it,
+/// as two names can become one once spelled for Mermaid. Always quoted:
+/// Mermaid's lexer tries its keywords before a bare name, case blind and
+/// without a word boundary, so a bare `classes` reads as `class` and `es`.
 fn unique(name: String, taken: &mut HashSet<String>) -> String {
-    if taken.insert(name.clone()) {
-        return name;
-    }
-    let (open, close) = match name.strip_suffix('"') {
-        Some(quoted) => (quoted.to_string(), "\""),
-        None => (name.clone(), ""),
+    let name = match taken.insert(name.clone()) {
+        true => name,
+        false => (2..)
+            .map(|n| format!("{name}_{n}"))
+            .find(|candidate| taken.insert(candidate.clone()))
+            .expect("some number is free"),
     };
-    (2..)
-        .map(|n| format!("{open}_{n}{close}"))
-        .find(|candidate| taken.insert(candidate.clone()))
-        .expect("some number is free")
+    format!("\"{name}\"")
 }
 
 /// A type or column name as one of Mermaid's attribute words.
@@ -213,19 +205,19 @@ mod tests {
         assert_eq!(
             text,
             "erDiagram
-    t0 {
+    \"t0\" {
         bigint id PK
     }
-    t1 {
+    \"t1\" {
         bigint id PK
         bigint t0_id FK, UK
     }
-    t2 {
+    \"t2\" {
         bigint id PK
         bigint t1_id FK
     }
-    t0 ||..o| t1 : \"t0_id\"
-    t1 |o..o{ t2 : \"t1_id\"
+    \"t0\" ||..o| \"t1\" : \"t0_id\"
+    \"t1\" |o..o{ \"t2\" : \"t1_id\"
 "
         );
     }
@@ -269,6 +261,49 @@ mod tests {
             text.contains(" \"x%_{init:{'theme':'dark'}}%_\"\n"),
             "{text}"
         );
+    }
+
+    /// Mermaid strips an entity's quotes, so `_` and `"_"` are one entity.
+    #[test]
+    fn names_that_spell_alike_once_unquoted_stay_apart() {
+        let mut graph = graph(3, &[]);
+        graph.tables[0].name = "_".into();
+        graph.tables[1].name = "%".into();
+        graph.tables[2].name = "__2".into();
+        let text = mermaid(&graph, &schema(&graph, false));
+        let entities: Vec<&str> = (text.lines())
+            .filter_map(|line| line.strip_suffix(" {"))
+            .map(|line| line.trim().trim_matches('"'))
+            .collect();
+        let distinct: HashSet<&str> = entities.iter().copied().collect();
+        assert_eq!(distinct.len(), 3, "{text}");
+    }
+
+    /// Mermaid's lexer tries its keywords before a bare name, case blind
+    /// and without a word boundary, so `classes` reads as `class` + `es`.
+    #[test]
+    fn a_name_that_starts_like_a_keyword_is_quoted() {
+        let names = [
+            "style",
+            "One",
+            "classes",
+            "tokens",
+            "many_more",
+            "end",
+            "1",
+            "u-turn",
+        ];
+        let mut graph = graph(names.len(), &[]);
+        for (table, name) in graph.tables.iter_mut().zip(names) {
+            table.name = name.into();
+        }
+        let text = mermaid(&graph, &schema(&graph, false));
+        for name in names {
+            assert!(
+                text.contains(&format!("    \"{name}\" {{\n")),
+                "{name}: {text}"
+            );
+        }
     }
 
     #[test]
@@ -319,7 +354,7 @@ mod tests {
         );
         assert!(!text.contains("payload"), "keys only: {text}");
         assert!(
-            text.contains("    \"auth.users\" ||..o{ t0 : \"owner\"\n"),
+            text.contains("    \"auth.users\" ||..o{ \"t0\" : \"owner\"\n"),
             "{text}"
         );
     }
@@ -328,11 +363,11 @@ mod tests {
     fn a_neighbourhood_lists_its_tables_only_and_a_self_reference_is_one_relationship() {
         let graph = graph(4, &[(1, 0), (2, 1), (3, 3)]);
         let text = mermaid(&graph, &neighbourhood(&graph, 1, false));
-        assert!(!text.contains("t3"), "{text}");
+        assert!(!text.contains("\"t3\""), "{text}");
         assert_eq!(text.matches(" : ").count(), 2);
         let looped = mermaid(&graph, &neighbourhood(&graph, 3, false));
         assert!(
-            looped.contains("    t3 ||..o{ t3 : \"t3_id\"\n"),
+            looped.contains("    \"t3\" ||..o{ \"t3\" : \"t3_id\"\n"),
             "{looped}"
         );
     }
