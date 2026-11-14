@@ -287,6 +287,9 @@ pub enum DiagramEvent {
     /// The view, Keys only, the zoom or the pan changed, at the end of a
     /// gesture or on a command, and the tab is worth writing down.
     Viewed,
+    /// The zoom or the pan moved under a wheel, a pinch or the keyboard, or
+    /// a layout landed: worth writing down once it is still.
+    Moved,
 }
 
 /// A press in progress, and what it moves.
@@ -689,6 +692,7 @@ impl DiagramView {
             self.lay_out(view, cx);
         }
         self.release_if_hidden();
+        cx.emit(DiagramEvent::Moved);
         cx.notify();
     }
 
@@ -859,6 +863,7 @@ impl DiagramView {
                     this.update(cx, |this, cx| {
                         if this.layouts == asked {
                             this.install(scene, view, None, cx);
+                            cx.emit(DiagramEvent::Moved);
                         }
                     })
                     .ok();
@@ -1614,6 +1619,7 @@ impl DiagramView {
         self.transform = centred;
         self.focus = Some(card);
         self.hover = None;
+        cx.emit(DiagramEvent::Moved);
         cx.notify();
     }
 
@@ -1677,6 +1683,7 @@ impl DiagramView {
             && rect.bottom() <= screen.bottom();
         if !seen && let Some(centred) = self.centring(card, zoom) {
             self.transform = centred;
+            cx.emit(DiagramEvent::Moved);
         }
         self.focus = Some(card);
         self.hover = None;
@@ -1933,6 +1940,7 @@ impl DiagramView {
             ),
             false => self.transform.panned(Point::new(dx, dy)),
         };
+        cx.emit(DiagramEvent::Moved);
         cx.notify();
     }
 
@@ -1941,6 +1949,7 @@ impl DiagramView {
             self.local(event.position),
             self.transform.zoom * (1.0 + event.delta),
         );
+        cx.emit(DiagramEvent::Moved);
         cx.notify();
     }
 

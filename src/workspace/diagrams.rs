@@ -117,6 +117,7 @@ impl Workspace {
                     }
                 }
                 DiagramEvent::Viewed => workspace.remember_profiles(cx),
+                DiagramEvent::Moved => workspace.remember_profiles_soon(cx),
             },
         )
         .detach();

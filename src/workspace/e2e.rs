@@ -4085,6 +4085,73 @@ fn the_palette_opens_a_diagram_that_takes_the_keyboard_and_escape_clears_its_foc
     });
 }
 
+/// Zooms the diagram under the pointer at `at` with the wheel, as many
+/// events as `steps`.
+fn wheel_zoom(at: gpui::Point<gpui::Pixels>, steps: usize, cx: &mut VisualTestContext) {
+    for _ in 0..steps {
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: at,
+            delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(-40.0))),
+            modifiers: gpui::Modifiers::secondary_key(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        settle(cx);
+    }
+}
+
+#[gpui::test]
+fn a_wheel_zoom_is_written_once_the_wheel_stops_and_a_quit_writes_only_what_is_pending(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, DIAGRAM_SCHEMA);
+        let view = show_diagram(&workspace, cx);
+        let path = store::dbdelve_directory().unwrap().join("profiles.toml");
+        let written = || std::fs::read_to_string(&path).expect("profiles.toml is there");
+        let unsaved = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| workspace.profiles_unsaved)
+        };
+        let before = written();
+        let fitted = cx.update(|_, cx| view.read(cx).zoom());
+        let birds = cx
+            .update(|_, cx| view.read(cx).table_on_screen("birds"))
+            .expect("the diagram drew the birds");
+
+        wheel_zoom(birds, 3, cx);
+        assert_ne!(cx.update(|_, cx| view.read(cx).zoom()), fitted);
+        assert_eq!(written(), before, "not written on every event");
+        assert!(unsaved(cx));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(600));
+        settle(cx);
+        assert_ne!(written(), before, "written once the wheel stops");
+        assert!(!unsaved(cx));
+
+        // Another instance saved since; with nothing pending here, quitting
+        // leaves its file alone.
+        let theirs = format!("{}\n# theirs\n", written());
+        std::fs::write(&path, &theirs).unwrap();
+        quit(workspace, cx);
+        assert_eq!(written(), theirs);
+    });
+}
+
+#[gpui::test]
+fn a_quit_before_the_wheel_has_stopped_writes_the_zoom(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, DIAGRAM_SCHEMA);
+        let view = show_diagram(&workspace, cx);
+        let path = store::dbdelve_directory().unwrap().join("profiles.toml");
+        let before = std::fs::read_to_string(&path).unwrap();
+        let birds = cx
+            .update(|_, cx| view.read(cx).table_on_screen("birds"))
+            .expect("the diagram drew the birds");
+        wheel_zoom(birds, 2, cx);
+        quit(workspace, cx);
+        assert_ne!(std::fs::read_to_string(&path).unwrap(), before);
+    });
+}
+
 #[gpui::test]
 fn a_diagram_behind_another_tab_lets_its_render_caches_go_and_draws_again_when_shown(
     cx: &mut TestAppContext,

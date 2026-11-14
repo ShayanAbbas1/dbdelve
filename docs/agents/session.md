@@ -519,8 +519,13 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   it, a dropped table leaves it on the next write, and it goes with the
   profile. One that will not read is no arrangement. The
   restored tab reads its graph again when shown and applies both then. Zoom
-  and pan change on every wheel event, too often to write each, so
-  `profiles.toml` is also written on quit and on window close. Every way in
+  and pan change on every wheel and pinch event, too often to write each, so
+  those (and the keyboard's and a layout's moves) mark the profiles unsaved
+  and write them half a second after the last
+  (`Workspace::remember_profiles_soon`, one timer, replaced by each event);
+  quit and window close write `profiles.toml` only while that is pending, so
+  a session that never moved a diagram never puts its copy over one another
+  instance saved since. Every way in
   (the palette, a schema's or a table's sidebar menu, a Structure tab's
   Diagram button) goes through `Workspace::open_diagram`, which fronts the
   schema's one tab; a table's way in also shows its neighbourhood

@@ -17,6 +17,9 @@ use crate::sql::{Destructive, Mode};
 use std::collections::BTreeMap;
 use std::path::Path;
 
+/// How long [`Workspace::remember_profiles_soon`] waits after the last change.
+const PROFILES_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// The rows on an object tab, and a diagram's tables and keys, were read from
 /// what the server held then. Their statements are dbdelve's own, so they run
 /// again the moment the tab is looked at -- a query tab holds SQL the user
@@ -33,9 +36,27 @@ fn mark_objects_stale(profile: &mut Profile) {
 
 impl Workspace {
     pub(crate) fn remember_profiles(&mut self, cx: &mut Context<Self>) {
-        if let Err(message) = self.save_profiles(cx) {
-            self.note(message, cx);
+        match self.save_profiles(cx) {
+            Ok(()) => self.profiles_unsaved = false,
+            Err(message) => self.note(message, cx),
         }
+    }
+
+    /// [`Self::remember_profiles`] once things have been still for a moment,
+    /// for what changes with every event of a gesture (a diagram's wheel
+    /// zoom and pan), too often to write each. A quit before then writes it.
+    pub(crate) fn remember_profiles_soon(&mut self, cx: &mut Context<Self>) {
+        self.profiles_unsaved = true;
+        self.profiles_save = Some(cx.spawn(async move |workspace, cx| {
+            cx.background_executor().timer(PROFILES_SETTLE).await;
+            workspace
+                .update(cx, |workspace, cx| {
+                    if workspace.profiles_unsaved {
+                        workspace.remember_profiles(cx);
+                    }
+                })
+                .ok();
+        }));
     }
 
     /// Writes `profiles.toml` from what this session holds, as

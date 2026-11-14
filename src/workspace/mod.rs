@@ -386,6 +386,11 @@ pub(crate) struct Workspace {
     pub(crate) update: Option<update::Update>,
     /// The launch check and the ones after it; dropped, they stop.
     update_checks: Option<gpui::Task<()>>,
+    /// Something `profiles.toml` holds changed and is waiting on
+    /// [`Self::remember_profiles_soon`]'s timer, so quitting writes it.
+    pub(crate) profiles_unsaved: bool,
+    /// That timer; replaced, the one before it stops.
+    profiles_save: Option<gpui::Task<()>>,
 }
 
 impl Workspace {
@@ -537,6 +542,8 @@ impl Workspace {
             welcome_project_focus: std::cell::RefCell::default(),
             update: None,
             update_checks: None,
+            profiles_unsaved: false,
+            profiles_save: None,
         };
 
         let mut load_failure = None;
@@ -767,20 +774,23 @@ impl Workspace {
         .detach();
 
         // Finish writes synchronously: the process is going, and nothing
-        // would wait for background work to finish.
-        // The profiles too: a diagram's zoom and pan move with every wheel
-        // and pinch event, too often to write each, so the last of them is
-        // written here.
+        // would wait for background work to finish. The profiles only when a
+        // write is pending: written unasked, they would put this session's
+        // copy over one another instance saved since.
         cx.on_app_quit(|workspace: &mut Self, cx: &mut Context<Self>| {
             workspace.persist_buffers(cx);
-            let _ = workspace.save_profiles(cx);
+            if workspace.profiles_unsaved {
+                let _ = workspace.save_profiles(cx);
+            }
             async {}
         })
         .detach();
         // Window release also persists when the window closes without Quit.
         cx.on_release(|workspace, cx| {
             workspace.persist_buffers(cx);
-            let _ = workspace.save_profiles(cx);
+            if workspace.profiles_unsaved {
+                let _ = workspace.save_profiles(cx);
+            }
         })
         .detach();
 
