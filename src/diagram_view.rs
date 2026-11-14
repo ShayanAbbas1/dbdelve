@@ -11,8 +11,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use gpui::{
-    AppContext, BorderStyle, Bounds, BoxShadow, ContentMask, Context, DispatchPhase, Entity,
-    EventEmitter, FocusHandle, Focusable, Font, FontWeight, Hitbox, HitboxBehavior, Hsla,
+    AppContext, BorderStyle, Bounds, BoxShadow, ContentMask, Context, CursorStyle, DispatchPhase,
+    Entity, EventEmitter, FocusHandle, Focusable, Font, FontWeight, Hitbox, HitboxBehavior, Hsla,
     InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     ParentElement, Path, PathBuilder, PinchEvent, Pixels, Render, ScrollWheelEvent, ShapedLine,
     SharedString, StatefulInteractiveElement, Styled, Subscription, TextAlign, TextRun,
@@ -30,9 +30,10 @@ use crate::actions::{
 };
 use crate::db::{KeyTarget, SchemaGraph};
 use crate::diagram::geometry::{
-    self, Detail, Fit, HEADER_HEIGHT, Point, Rect, Segment, Stroke, Transform,
+    self, CARD_WIDTH, Detail, Fit, HEADER_HEIGHT, Handle, MAX_CARD_WIDTH, MIN_CARD_WIDTH, Point,
+    Rect, Segment, Stroke, Transform,
 };
-use crate::diagram::index::Scene;
+use crate::diagram::index::{Placement, Scene};
 use crate::diagram::layout::{Layout, Subject};
 use crate::fuzzy::{Fuzzy, Query};
 use crate::icons::icon;
@@ -54,6 +55,9 @@ const CLICK_SLOP: f32 = 3.0;
 const CIRCLE_STEPS: usize = 16;
 /// How near an edge the pointer must come to light it, in pixels.
 const EDGE_REACH: f32 = 4.0;
+/// How near a card's right or bottom edge the pointer must come to resize
+/// it, in pixels, either side of the edge.
+const HANDLE_REACH: f32 = 5.0;
 /// Dimmed ink keeps this much of its colour.
 const DIM: f32 = 0.3;
 /// The dot grid's spacing, in world units, doubled until the dots stand at
@@ -91,6 +95,10 @@ pub enum Load {
     Ready(Box<Ready>),
 }
 
+/// A table by its schema and name: what a card the user moved or sized is
+/// remembered by, since card numbers change with every layout.
+type TableKey = (SharedString, SharedString);
+
 /// Which of the two views the scene is laid out as (design §2.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum View {
@@ -115,9 +123,10 @@ pub struct Ready {
     nullable_types: Vec<SharedString>,
     /// A stub's schema-qualified name, by the key into it, for the same reason.
     stub_names: HashMap<u32, SharedString>,
-    /// Where the user dragged cards in the schema view, by table, so a layout
-    /// made again (keys only, or a new read) puts them back there.
-    moved: HashMap<(SharedString, SharedString), Point>,
+    /// Where the user dragged cards in the schema view and the sizes they
+    /// gave them, by table, so a layout made again (keys only, or a new read)
+    /// puts them back.
+    placed: HashMap<TableKey, Placement>,
 }
 
 impl Ready {
@@ -143,31 +152,83 @@ impl Ready {
             stash: None,
             nullable_types,
             stub_names,
-            moved: HashMap::new(),
+            placed: HashMap::new(),
         }
     }
 
     /// The card that stands for a table, by its schema and name.
-    fn card_of_table(&self, table: &(SharedString, SharedString)) -> Option<u32> {
+    fn card_of_table(&self, table: &TableKey) -> Option<u32> {
         (0..self.scene.layout().cards.len() as u32).find(|&card| self.table(card) == *table)
     }
 
-    /// Puts the cards the user dragged back where they left them, on a scene
-    /// laid out afresh.
-    fn place_moved(&mut self) {
-        if self.moved.is_empty() {
+    /// Takes over where the user left cards and the sizes they gave them,
+    /// for the tables this read still has, and puts the cards there. What a
+    /// dropped table had is forgotten.
+    pub fn adopt(&mut self, mut placed: HashMap<TableKey, Placement>) {
+        let tables: HashSet<TableKey> = (0..self.scene.layout().cards.len() as u32)
+            .map(|card| self.table(card))
+            .collect();
+        placed.retain(|table, placement| tables.contains(table) && !placement.is_empty());
+        self.placed = placed;
+        self.place_saved();
+        self.bounds = self.scene.layout().bounds();
+    }
+
+    /// Puts the cards the user dragged or sized back as they left them, on a
+    /// scene laid out afresh.
+    fn place_saved(&mut self) {
+        if self.placed.is_empty() {
             return;
         }
         for card in 0..self.scene.layout().cards.len() as u32 {
-            if let Some(&origin) = self.moved.get(&self.table(card)) {
-                self.scene.move_card(card, origin);
+            if let Some(placement) = self.placed.get(&self.table(card)) {
+                self.scene.place(card, placement);
             }
         }
     }
 
+    /// The width and height a card was given, none where it has the
+    /// layout's own. The schema view's are remembered whatever the layout
+    /// now shows; a neighbourhood's are read off its cards.
+    fn size_of(&self, card: u32) -> (Option<f32>, Option<f32>) {
+        match self.view {
+            View::Schema => self
+                .placed
+                .get(&self.table(card))
+                .map_or((None, None), |placement| {
+                    (placement.width, placement.height)
+                }),
+            View::Neighbourhood(_) => {
+                let layout = self.scene.layout();
+                let shown = &layout.cards[card as usize];
+                (
+                    (shown.width != CARD_WIDTH).then_some(shown.width),
+                    (shown.height < layout.full_height(card)).then_some(shown.height),
+                )
+            }
+        }
+    }
+
+    /// Sizes a card, remembering it in the schema view. Returns the edges
+    /// that end at it, whose paths changed.
+    fn resize(&mut self, card: u32, width: Option<f32>, height: Option<f32>) -> Vec<u32> {
+        if self.view == View::Schema {
+            let table = self.table(card);
+            let placement = self.placed.entry(table.clone()).or_default();
+            (placement.width, placement.height) = (width, height);
+            if placement.is_empty() {
+                self.placed.remove(&table);
+            }
+        }
+        let edges = self.scene.resize_card(card, width, height).to_vec();
+        let sized = self.scene.layout().card_rect(card, Detail::Columns, 1.0);
+        self.bounds = self.bounds.union(&sized);
+        edges
+    }
+
     /// The schema and name of the table a card stands for, a stub's in its
     /// own schema.
-    fn table(&self, card: u32) -> (SharedString, SharedString) {
+    fn table(&self, card: u32) -> TableKey {
         let table = |table: u32| {
             (
                 self.graph.schema.clone(),
@@ -231,6 +292,16 @@ enum Gesture {
     },
     /// The minimap held down: the view follows the pointer over it.
     Minimap,
+    /// A card's edge or corner, dragged to size it.
+    Resize {
+        card: u32,
+        handle: Handle,
+        /// Where the pointer was pressed, in world units.
+        from: Point,
+        /// The card as drawn then, in world units.
+        width: f32,
+        height: f32,
+    },
 }
 
 /// Where the minimap drew the world, so a press on it finds the point meant.
@@ -287,6 +358,8 @@ enum Face {
     Title,
     Column,
     Type,
+    /// The "+N more" row of a card cut short.
+    More,
 }
 
 /// How a line is set. A shaped line bakes its colour in, so the face and the
@@ -348,8 +421,12 @@ pub struct DiagramView {
     /// The card under the pointer, whose edges are lit, or the edge, lit with
     /// the rows it joins, while nothing is in focus.
     hover: Option<Hover>,
+    /// The resize handle under the pointer, which sets the cursor.
+    handle: Option<Handle>,
     gesture: Option<Gesture>,
     lines: HashMap<LineKey, ShapedLine>,
+    /// "+N more" by N, made once each so a frame formats none.
+    more_labels: HashMap<usize, SharedString>,
     stamp: Option<Stamp>,
     /// Edges tessellated at `paths_zoom`, with no pan: panning offsets a copy,
     /// which `paint_path` makes anyway, and only a zoom tessellates again.
@@ -377,8 +454,10 @@ impl DiagramView {
             viewport: Bounds::default(),
             focus: None,
             hover: None,
+            handle: None,
             gesture: None,
             lines: HashMap::new(),
+            more_labels: HashMap::new(),
             stamp: None,
             paths: HashMap::new(),
             paths_zoom: 0.0,
@@ -432,8 +511,7 @@ impl DiagramView {
             View::Schema => None,
         };
         let looked = old.stash.as_ref().map_or(self.transform, |(_, at)| *at);
-        fresh.moved = std::mem::take(&mut old.moved);
-        fresh.place_moved();
+        fresh.adopt(std::mem::take(&mut old.placed));
         let centre = centre.and_then(|name| {
             (fresh.graph.tables.iter())
                 .position(|table| table.name == name)
@@ -634,7 +712,7 @@ impl DiagramView {
         };
         let old = std::mem::replace(&mut ready.scene, scene);
         if view == View::Schema && transform.is_none() {
-            ready.place_moved();
+            ready.place_saved();
         }
         ready.bounds = ready.scene.layout().bounds();
         if ready.view == View::Schema && matches!(view, View::Neighbourhood(_)) {
@@ -669,6 +747,29 @@ impl DiagramView {
         let at = self.local(event.position);
         let zoom = self.transform.zoom;
         let world = self.transform.to_world(at);
+        let handle = self
+            .ready()
+            .and_then(|ready| ready.scene.handle_at(world, HANDLE_REACH / zoom, zoom));
+        if let Some((card, handle)) = handle {
+            self.gesture = None;
+            match event.click_count {
+                1 => {
+                    let rect = self.ready().map_or(Rect::default(), |ready| {
+                        let layout = ready.scene.layout();
+                        layout.card_rect(card, layout.detail(zoom), zoom)
+                    });
+                    self.gesture = Some(Gesture::Resize {
+                        card,
+                        handle,
+                        from: world,
+                        width: rect.width,
+                        height: rect.height,
+                    });
+                }
+                _ => self.unsize(card, handle, cx),
+            }
+            return;
+        }
         let card = self
             .ready()
             .and_then(|ready| ready.scene.card_at(world, zoom));
@@ -725,7 +826,7 @@ impl DiagramView {
                 if let Load::Ready(ready) = &mut self.load {
                     if ready.view == View::Schema {
                         let table = ready.table(card);
-                        ready.moved.insert(table, origin);
+                        ready.placed.entry(table).or_default().origin = Some(origin);
                     }
                     let edges = ready.scene.move_card(card, origin).to_vec();
                     let moved = ready.scene.layout().card_rect(card, Detail::Columns, 1.0);
@@ -740,16 +841,53 @@ impl DiagramView {
                 });
                 cx.notify();
             }
+            Some(Gesture::Resize {
+                card,
+                handle,
+                from,
+                width,
+                height,
+            }) => {
+                let world = self.transform.to_world(at);
+                let zoom = self.transform.zoom;
+                if let Load::Ready(ready) = &mut self.load {
+                    let (mut sized_width, mut sized_height) = ready.size_of(card);
+                    if handle.widens() {
+                        sized_width =
+                            Some((width + world.x - from.x).clamp(MIN_CARD_WIDTH, MAX_CARD_WIDTH));
+                    }
+                    if handle.heightens() {
+                        let layout = ready.scene.layout();
+                        let rows = geometry::rows_for_height(height + world.y - from.y);
+                        sized_height = (rows < layout.listed(card, layout.detail(zoom)))
+                            .then(|| geometry::card_height(rows));
+                    }
+                    if (sized_width, sized_height) != ready.size_of(card) {
+                        let edges = ready.resize(card, sized_width, sized_height);
+                        self.paths.retain(|(edge, _), _| !edges.contains(edge));
+                        cx.notify();
+                    }
+                }
+            }
             None => {
-                let hover = match hovered {
+                let (hover, handle) = match hovered {
                     true => {
                         let world = self.transform.to_world(at);
                         let zoom = self.transform.zoom;
-                        self.ready()
-                            .and_then(|ready| hover_at(&ready.scene, world, zoom))
+                        self.ready().map_or((None, None), |ready| {
+                            (
+                                hover_at(&ready.scene, world, zoom),
+                                (ready.scene.handle_at(world, HANDLE_REACH / zoom, zoom))
+                                    .map(|(_, handle)| handle),
+                            )
+                        })
                     }
-                    false => None,
+                    false => (None, None),
                 };
+                if handle != self.handle {
+                    self.handle = handle;
+                    cx.notify();
+                }
                 if hover != self.hover {
                     self.hover = hover;
                     if self.focus.is_none() {
@@ -791,8 +929,44 @@ impl DiagramView {
             Some(Gesture::Card {
                 card, moved: false, ..
             }) => self.set_focus(Some(card), cx),
+            // The cursor it held goes back.
+            Some(Gesture::Resize { .. }) => cx.notify(),
             _ => {}
         }
+    }
+
+    /// Gives a card back the layout's size along the handle double-clicked:
+    /// its width, its height, or at the corner both.
+    fn unsize(&mut self, card: u32, handle: Handle, cx: &mut Context<Self>) {
+        let Load::Ready(ready) = &mut self.load else {
+            return;
+        };
+        let (mut width, mut height) = ready.size_of(card);
+        if handle.widens() {
+            width = None;
+        }
+        if handle.heightens() {
+            height = None;
+        }
+        let edges = ready.resize(card, width, height);
+        self.paths.retain(|(edge, _), _| !edges.contains(edge));
+        cx.notify();
+    }
+
+    /// The cursor a resize handle wears, and whether a drag holds it, which
+    /// keeps it however far the pointer strays.
+    fn cursor(&self) -> Option<(CursorStyle, bool)> {
+        let (handle, held) = match self.gesture {
+            Some(Gesture::Resize { handle, .. }) => (handle, true),
+            Some(_) => return None,
+            None => (self.handle?, false),
+        };
+        let style = match handle {
+            Handle::Right => CursorStyle::ResizeLeftRight,
+            Handle::Bottom => CursorStyle::ResizeUpDown,
+            Handle::Corner => CursorStyle::ResizeUpLeftDownRight,
+        };
+        Some((style, held))
     }
 
     fn set_focus(&mut self, focus: Option<u32>, cx: &mut Context<Self>) {
@@ -1420,6 +1594,34 @@ impl DiagramView {
         Some((origin.x, origin.y))
     }
 
+    /// A table's card's width and height, in world units.
+    #[cfg(test)]
+    pub fn table_size(&self, name: &str) -> Option<(f32, f32)> {
+        let ready = self.ready()?;
+        let layout = ready.scene.layout();
+        let card = (0..layout.cards.len() as u32).find(|&card| ready.name(card) == name)?;
+        let card = &layout.cards[card as usize];
+        Some((card.width, card.height))
+    }
+
+    /// Just inside a table's card's bottom-right corner, in window
+    /// coordinates, once drawn.
+    #[cfg(test)]
+    pub fn table_corner_on_screen(&self, name: &str) -> Option<gpui::Point<Pixels>> {
+        let ready = self.ready()?;
+        let layout = ready.scene.layout();
+        let card = (0..layout.cards.len() as u32).find(|&card| ready.name(card) == name)?;
+        let zoom = self.transform.zoom;
+        let rect = layout.card_rect(card, layout.detail(zoom), zoom);
+        let at = self
+            .transform
+            .to_screen(Point::new(rect.right(), rect.bottom()));
+        Some(point(
+            self.viewport.origin.x + px(at.x - 1.0),
+            self.viewport.origin.y + px(at.y - 1.0),
+        ))
+    }
+
     /// Where a table's card is on screen, in window coordinates, once drawn.
     #[cfg(test)]
     pub fn table_on_screen(&self, name: &str) -> Option<gpui::Point<Pixels>> {
@@ -1478,6 +1680,7 @@ impl DiagramView {
         let Self {
             load,
             lines,
+            more_labels,
             stamp,
             paths,
             focus,
@@ -1721,6 +1924,50 @@ impl DiagramView {
                         cx,
                     );
                 }
+                if let Some(more) = layout.more(card, detail) {
+                    let row_bounds = Bounds {
+                        origin: to_screen(Point::new(more.rect.x, more.rect.y)),
+                        size: size(px(more.rect.width * zoom), px(more.rect.height * zoom)),
+                    };
+                    // A key into a column the cut hid ends here, so this row
+                    // is what lights for it.
+                    if washed.iter().any(|&(washed_card, column)| {
+                        washed_card == card && layout.row_of(card, column, detail) == Some(more.row)
+                    }) {
+                        window.paint_quad(quad(
+                            row_bounds,
+                            px(0.0),
+                            Hsla::from(inks.accent.alpha(layout::ACCENT_WASH)),
+                            px(0.0),
+                            Hsla::from(t.border),
+                            BorderStyle::Solid,
+                        ));
+                    }
+                    let text = more_labels
+                        .entry(more.hidden)
+                        .or_insert_with(|| format!("+{} more", more.hidden).into())
+                        .clone();
+                    let (line, ellipsis) = label(
+                        lines,
+                        stamp,
+                        &inks,
+                        text,
+                        Pen::new(Face::More, name_size, dimmed),
+                        window,
+                    );
+                    let icon_size = (name_size * 0.9).min(more.rect.height * zoom * 0.7);
+                    let x = row_bounds.origin.x + px(pad + icon_size + ICON_GAP * zoom);
+                    let room = row_bounds.origin.x + row_bounds.size.width - px(pad) - x;
+                    paint_label(
+                        &line,
+                        &ellipsis,
+                        fit(&line, &ellipsis, room),
+                        point(x, row_bounds.origin.y),
+                        row_bounds.size.height,
+                        window,
+                        cx,
+                    );
+                }
             }
         });
     }
@@ -1735,6 +1982,11 @@ impl DiagramView {
             },
             move |bounds, hitbox: Hitbox, window, cx| {
                 view.update(cx, |diagram, cx| diagram.paint(bounds, window, cx));
+                match view.read(cx).cursor() {
+                    Some((style, true)) => window.set_window_cursor_style(style),
+                    Some((style, false)) => window.set_cursor_style(style, &hitbox),
+                    None => {}
+                }
                 listen(&view, &hitbox, window);
             },
         )
@@ -1946,7 +2198,7 @@ fn shape(
     }
     let family = match pen.face {
         Face::Type => stamp.grid.clone(),
-        Face::Title | Face::Column => stamp.chrome.clone(),
+        Face::Title | Face::Column | Face::More => stamp.chrome.clone(),
     };
     let mut font: Font = gpui::font(family);
     if pen.face == Face::Title {
@@ -1954,7 +2206,7 @@ fn shape(
     }
     let colour = match pen.face {
         Face::Title | Face::Column => inks.text,
-        Face::Type => inks.text_muted,
+        Face::Type | Face::More => inks.text_muted,
     };
     let colour: Hsla = match pen.dimmed {
         true => colour.alpha(DIM).into(),
@@ -2204,6 +2456,51 @@ mod tests {
             .iter()
             .position(|card| card.subject == Subject::Table(table))
             .unwrap() as u32
+    }
+
+    #[test]
+    fn a_sized_card_keeps_its_size_through_a_new_layout_until_its_table_goes() {
+        let graph = crate::diagram::tests::graph(3, &[(1, 0), (2, 1)]);
+        let mut ready = Ready::new(graph.clone(), Scene::new(layout::schema(&graph, false)));
+        let short = geometry::card_height(1);
+        let t1 = card_of(ready.scene.layout(), 1);
+        ready.resize(t1, Some(320.0), Some(short));
+        assert_eq!(ready.size_of(t1), (Some(320.0), Some(short)));
+        let sized = |ready: &Ready| {
+            let layout = ready.scene.layout();
+            let card = &layout.cards[card_of(layout, 1) as usize];
+            (card.width, card.height)
+        };
+        assert_eq!(sized(&ready), (320.0, short));
+
+        ready.scene = Scene::new(layout::schema(&graph, true));
+        ready.place_saved();
+        assert_eq!(sized(&ready), (320.0, short), "keys only keeps the size");
+
+        let t1 = card_of(ready.scene.layout(), 1);
+        ready.resize(t1, None, Some(short));
+        assert_eq!(sized(&ready).0, CARD_WIDTH, "the width alone given back");
+        ready.resize(t1, None, None);
+        assert!(ready.placed.is_empty(), "nothing left to remember");
+
+        ready.resize(t1, Some(300.0), None);
+        let mut placed = ready.placed.clone();
+        let gone: TableKey = ("public".into(), "gone".into());
+        placed.insert(
+            gone.clone(),
+            Placement {
+                origin: Some(Point::new(5.0, 5.0)),
+                ..Placement::default()
+            },
+        );
+        let fewer = crate::diagram::tests::graph(2, &[(1, 0)]);
+        let mut fresh = Ready::new(fewer.clone(), Scene::new(layout::schema(&fewer, false)));
+        fresh.adopt(placed);
+        assert_eq!(sized(&fresh).0, 300.0, "a new read puts the size back");
+        assert!(
+            !fresh.placed.contains_key(&gone),
+            "a dropped table is forgotten"
+        );
     }
 
     #[test]

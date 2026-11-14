@@ -4294,6 +4294,77 @@ fn a_refresh_reads_a_diagram_again_and_keeps_the_cards_the_user_moved(cx: &mut T
 }
 
 #[gpui::test]
+fn a_diagram_card_resizes_from_its_corner_and_a_double_click_there_gives_its_size_back(
+    cx: &mut TestAppContext,
+) {
+    use crate::diagram::geometry::{CARD_WIDTH, card_height};
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, DIAGRAM_SCHEMA);
+        let view = show_diagram(&workspace, cx);
+        let size = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| view.read(cx).table_size("birds"))
+                .expect("the diagram drew the birds")
+        };
+        let corner = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| view.read(cx).table_corner_on_screen("birds"))
+                .expect("the diagram drew the birds")
+        };
+        assert_eq!(size(cx), (CARD_WIDTH, card_height(2)));
+        let zoom = cx.update(|_, cx| view.read(cx).zoom());
+
+        let from = corner(cx);
+        let to = gpui::point(
+            from.x + gpui::px(80.0 * zoom),
+            from.y - gpui::px(30.0 * zoom),
+        );
+        let left = gpui::MouseButton::Left;
+        cx.simulate_mouse_down(from, left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(to, left, gpui::Modifiers::default());
+        cx.simulate_mouse_up(to, left, gpui::Modifiers::default());
+        settle(cx);
+        let (width, height) = size(cx);
+        assert!((width - (CARD_WIDTH + 80.0)).abs() < 0.5, "wider: {width}");
+        assert_eq!(height, card_height(1), "a row shorter, in whole rows");
+        assert!(
+            !cx.update(|_, cx| view.read(cx).has_focus()),
+            "a resize focuses nothing"
+        );
+
+        view.update(cx, |view, cx| view.toggle_keys_only(cx));
+        settle(cx);
+        assert_eq!(size(cx), (width, height), "keys only keeps the size");
+        view.update(cx, |view, cx| view.toggle_keys_only(cx));
+        settle(cx);
+
+        let corner = corner(cx);
+        cx.simulate_click(corner, gpui::Modifiers::default());
+        cx.simulate_event(gpui::MouseDownEvent {
+            position: corner,
+            modifiers: gpui::Modifiers::default(),
+            button: left,
+            click_count: 2,
+            first_mouse: false,
+        });
+        cx.simulate_event(gpui::MouseUpEvent {
+            position: corner,
+            modifiers: gpui::Modifiers::default(),
+            button: left,
+            click_count: 2,
+        });
+        settle(cx);
+        assert_eq!(size(cx), (CARD_WIDTH, card_height(2)), "its own size back");
+        assert_eq!(
+            front_relation(&workspace, cx),
+            None,
+            "a double-click on the corner opens no table"
+        );
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn secondary_f_finds_a_table_in_a_diagram_and_escape_puts_the_field_away(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite_holding(

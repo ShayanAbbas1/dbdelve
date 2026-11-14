@@ -4,6 +4,10 @@
 use super::layout::{Card, Edge, Layout};
 
 pub const CARD_WIDTH: f32 = 216.0;
+/// The narrowest a card can be dragged to: room for a few characters of its
+/// name and the ellipsis.
+pub const MIN_CARD_WIDTH: f32 = 120.0;
+pub const MAX_CARD_WIDTH: f32 = 960.0;
 pub const HEADER_HEIGHT: f32 = 34.0;
 pub const ROW_HEIGHT: f32 = 24.0;
 pub const BOTTOM_PAD: f32 = 8.0;
@@ -231,6 +235,126 @@ pub fn card_height(rows: usize) -> f32 {
     }
 }
 
+/// The whole rows nearest a height a card is dragged to, never none.
+pub fn rows_for_height(height: f32) -> usize {
+    ((height - HEADER_HEIGHT - BOTTOM_PAD) / ROW_HEIGHT)
+        .round()
+        .max(1.0) as usize
+}
+
+/// An edge of a card that a drag resizes it by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Handle {
+    Right,
+    Bottom,
+    Corner,
+}
+
+impl Handle {
+    pub fn widens(self) -> bool {
+        self != Self::Bottom
+    }
+
+    pub fn heightens(self) -> bool {
+        self != Self::Right
+    }
+}
+
+/// The handle of a card drawn as `rect` that `point` is on: within `reach`
+/// of its right or bottom edge, either side of it, and within twice that of
+/// the corner. The reach never takes more than a quarter of the card, so a
+/// card small on screen can still be grabbed to move. `heightens` is false
+/// where the card's height cannot change, which leaves the right edge only.
+pub fn handle_at(rect: Rect, point: Point, reach: f32, heightens: bool) -> Option<Handle> {
+    let (quarter_x, quarter_y) = (rect.width / 4.0, rect.height / 4.0);
+    let (reach_x, reach_y) = (reach.min(quarter_x), reach.min(quarter_y));
+    let (dx, dy) = (
+        (point.x - rect.right()).abs(),
+        (point.y - rect.bottom()).abs(),
+    );
+    let across = point.x >= rect.x && point.x <= rect.right() + reach_x;
+    let down = point.y >= rect.y && point.y <= rect.bottom() + reach_y;
+    if heightens && dx <= (2.0 * reach).min(quarter_x) && dy <= (2.0 * reach).min(quarter_y) {
+        return Some(Handle::Corner);
+    }
+    match (dx <= reach_x && down, heightens && dy <= reach_y && across) {
+        (true, _) => Some(Handle::Right),
+        (false, true) => Some(Handle::Bottom),
+        (false, false) => None,
+    }
+}
+
+/// How a card's height cuts the rows a level of detail lists: `kept` of
+/// `listed` are drawn, and a "+N more" row after them when that is fewer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Cut {
+    listed: usize,
+    kept: usize,
+}
+
+impl Card {
+    fn cut(&self, detail: Detail) -> Cut {
+        let listed = match detail {
+            Detail::Columns => self.columns as usize,
+            Detail::Keys => self.key_rows.len(),
+            Detail::Names => 0,
+        };
+        // A hair of slack, so a height made of whole rows holds them all.
+        let room = ((self.height - HEADER_HEIGHT - BOTTOM_PAD) / ROW_HEIGHT + 1e-3)
+            .floor()
+            .max(0.0) as usize;
+        let kept = match room < listed {
+            true => room.saturating_sub(1),
+            false => listed,
+        };
+        Cut { listed, kept }
+    }
+
+    /// The row a kept column is drawn on with every column listed: the key
+    /// columns are kept first, then the rest, and the kept ones are drawn in
+    /// column order.
+    fn column_row(&self, cut: Cut, column: u32) -> Option<usize> {
+        let kept_keys = cut.kept.min(self.key_rows.len());
+        let kept_others = cut.kept - kept_keys;
+        let (keys_before, key) = match self.key_rows.binary_search(&column) {
+            Ok(at) => (at, true),
+            Err(at) => (at, false),
+        };
+        let others_before = column as usize - keys_before;
+        let kept = match key {
+            true => keys_before < kept_keys,
+            false => others_before < kept_others,
+        };
+        kept.then(|| keys_before.min(kept_keys) + others_before.min(kept_others))
+    }
+
+    /// The row a column is met on at a level of detail: its own, or the
+    /// "+N more" row when the card's height cut it. None where the level does
+    /// not list it.
+    fn row_of(&self, column: u32, detail: Detail) -> Option<usize> {
+        let cut = self.cut(detail);
+        let kept = match detail {
+            Detail::Names => return None,
+            Detail::Keys => {
+                let at = self.key_rows.binary_search(&column).ok()?;
+                (at < cut.kept).then_some(at)
+            }
+            Detail::Columns if column < self.columns => self.column_row(cut, column),
+            Detail::Columns => return None,
+        };
+        Some(kept.unwrap_or(cut.kept))
+    }
+
+    fn row_rect(&self, row: usize) -> Rect {
+        Rect {
+            x: self.origin.x,
+            y: self.origin.y + HEADER_HEIGHT + row as f32 * ROW_HEIGHT,
+            width: self.width,
+            height: ROW_HEIGHT,
+        }
+    }
+}
+
 /// World to screen: `screen = world * zoom + pan`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Transform {
@@ -443,6 +567,15 @@ pub struct Row {
     pub rect: Rect,
 }
 
+/// The row that ends a card cut short by its height.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct More {
+    /// The columns it stands for.
+    pub hidden: usize,
+    pub row: usize,
+    pub rect: Rect,
+}
+
 /// Where an edge meets a card or a lane, with the direction its curve leaves
 /// in. At a card's end, `top` and `bottom` bound where the anchor can be at
 /// any level of detail, which is what the spatial index needs.
@@ -473,24 +606,75 @@ impl Layout {
         Rect {
             x: card.origin.x,
             y: card.origin.y,
-            width: CARD_WIDTH,
+            width: card.width,
             height: height.min(card.height),
         }
     }
 
+    /// The column rows a level of detail draws, less any the card's height
+    /// cut: see [`Self::more`].
     pub fn rows(&self, card: u32, detail: Detail) -> impl Iterator<Item = Row> + '_ {
         let card = &self.cards[card as usize];
-        let every = (0..card.columns).filter(move |_| detail == Detail::Columns);
-        let keys = (card.key_rows.iter().copied()).filter(move |_| detail == Detail::Keys);
+        let cut = card.cut(detail);
+        let every = (0..card.columns).filter(move |&column| {
+            detail == Detail::Columns && card.column_row(cut, column).is_some()
+        });
+        let keys = (card.key_rows.iter().copied())
+            .take(cut.kept)
+            .filter(move |_| detail == Detail::Keys);
         every.chain(keys).enumerate().map(|(row, column)| Row {
             column,
-            rect: Rect {
-                x: card.origin.x,
-                y: card.origin.y + HEADER_HEIGHT + row as f32 * ROW_HEIGHT,
-                width: CARD_WIDTH,
-                height: ROW_HEIGHT,
-            },
+            rect: card.row_rect(row),
         })
+    }
+
+    /// The "+N more" row a card cut short by its height ends with.
+    pub fn more(&self, card: u32, detail: Detail) -> Option<More> {
+        let card = &self.cards[card as usize];
+        let cut = card.cut(detail);
+        (cut.kept < cut.listed).then(|| More {
+            hidden: cut.listed - cut.kept,
+            row: cut.kept,
+            rect: card.row_rect(cut.kept),
+        })
+    }
+
+    /// The row a column is met on: see [`row_offset`].
+    pub fn row_of(&self, card: u32, column: u32, detail: Detail) -> Option<usize> {
+        self.cards[card as usize].row_of(column, detail)
+    }
+
+    /// A card's height with nothing cut: room for every row it shows.
+    pub fn full_height(&self, card: u32) -> f32 {
+        let card = &self.cards[card as usize];
+        card_height(match self.keys_only {
+            true => card.key_rows.len(),
+            false => card.columns as usize,
+        })
+    }
+
+    /// Whether a drag can change a card's height at a level of detail: the
+    /// level lists more than the one row a card keeps however short.
+    pub fn heightens(&self, card: u32, detail: Detail) -> bool {
+        self.cards[card as usize].cut(detail).listed > 1
+    }
+
+    /// How many rows a level of detail lists on a card before any cut.
+    pub fn listed(&self, card: u32, detail: Detail) -> usize {
+        self.cards[card as usize].cut(detail).listed
+    }
+
+    /// Sizes a card: its width held between the narrowest and widest a card
+    /// can be, and its height cut to `height` in whole rows, never taller
+    /// than [`Self::full_height`]; none is that full height.
+    pub(super) fn set_size(&mut self, card: u32, width: f32, height: Option<f32>) {
+        let full = self.full_height(card);
+        let card = &mut self.cards[card as usize];
+        card.width = width.clamp(MIN_CARD_WIDTH, MAX_CARD_WIDTH);
+        card.height = match height {
+            Some(height) => card_height(rows_for_height(height)).min(full),
+            None => full,
+        };
     }
 
     /// An edge at a level of detail, from its child's end to its parent's.
@@ -504,7 +688,8 @@ impl Layout {
         let (child, parent) = if edge.child == edge.parent {
             let (child, _) = anchor(edge.child, Some(edge.child_column));
             let (parent, _) = anchor(edge.parent, edge.parent_column);
-            let x = self.cards[edge.child as usize].origin.x + CARD_WIDTH;
+            let child_card = &self.cards[edge.child as usize];
+            let x = child_card.origin.x + child_card.width;
             let spread = match (parent - child).abs() < ROW_HEIGHT / 2.0 {
                 true => ROW_HEIGHT / 2.0,
                 false => 0.0,
@@ -577,7 +762,8 @@ impl Layout {
         };
         if edge.child == edge.parent {
             let (top, bottom) = extent(edge.child, None);
-            let x = self.cards[edge.child as usize].origin.x + CARD_WIDTH;
+            let card = &self.cards[edge.child as usize];
+            let x = card.origin.x + card.width;
             return vec![Rect {
                 x,
                 y: top - ROW_HEIGHT / 2.0,
@@ -632,13 +818,17 @@ impl Layout {
     /// The child's end, then the near and far end of each lane, then the
     /// parent's end. Pairs alternate: a curve, a lane, a curve, and so on.
     fn stops(&self, edge: &Edge, anchor: impl Fn(u32, Option<u32>) -> (f32, f32)) -> Vec<Stop> {
-        let centre = |card: u32| self.cards[card as usize].origin.x + CARD_WIDTH / 2.0;
+        let centre = |card: u32| {
+            let card = &self.cards[card as usize];
+            card.origin.x + card.width / 2.0
+        };
         let lane_centre = |lane: &super::layout::Lane| (lane.left + lane.right) / 2.0;
         let toward_parent = edge.lanes.first().map_or(centre(edge.parent), lane_centre);
         let toward_child = edge.lanes.last().map_or(centre(edge.child), lane_centre);
         let side = |card: u32, toward: f32, (top, bottom): (f32, f32)| {
-            let origin = self.cards[card as usize].origin.x;
-            match toward < origin + CARD_WIDTH / 2.0 {
+            let Card { origin, width, .. } = self.cards[card as usize];
+            let origin = origin.x;
+            match toward < origin + width / 2.0 {
                 true => Stop {
                     x: origin,
                     top,
@@ -646,7 +836,7 @@ impl Layout {
                     outward: -1.0,
                 },
                 false => Stop {
-                    x: origin + CARD_WIDTH,
+                    x: origin + width,
                     top,
                     bottom,
                     outward: 1.0,
@@ -685,14 +875,10 @@ fn control_reach(from: Stop, to: Stop, tangent: f32) -> f32 {
 }
 
 /// Where a column's row centre sits below the card's top, at a level of
-/// detail that shows rows. A stub, or a column the level hides, is met at
-/// the header.
+/// detail that shows rows. A stub, or a column the level does not list, is
+/// met at the header, and one the card's height cut at its "+N more" row.
 pub(super) fn row_offset(card: &Card, column: Option<u32>, detail: Detail) -> f32 {
-    let row = column.and_then(|column| match detail {
-        Detail::Columns => Some(column as usize),
-        Detail::Keys => card.key_rows.binary_search(&column).ok(),
-        Detail::Names => None,
-    });
+    let row = column.and_then(|column| card.row_of(column, detail));
     row.map_or(HEADER_HEIGHT / 2.0, |row| {
         HEADER_HEIGHT + (row as f32 + 0.5) * ROW_HEIGHT
     })
@@ -910,6 +1096,198 @@ mod tests {
             let rect = layout.card_rect(card, Detail::Columns, 1.0);
             assert_eq!(bounds.union(&rect), bounds);
         }
+    }
+
+    /// Table 1: `id`, two notes, its key into table 0, and a third note.
+    /// Its key rows are `id` and the key, columns 0 and 3.
+    fn keyed_between_notes() -> Layout {
+        let mut graph = graph(2, &[(1, 0)]);
+        let note = |name: &str| GraphColumn {
+            name: name.to_string().into(),
+            type_label: 0,
+            nullable: true,
+            primary: false,
+            foreign: false,
+            unique: false,
+        };
+        let columns = &mut graph.tables[1].columns;
+        columns.insert(1, note("note_a"));
+        columns.insert(2, note("note_b"));
+        columns.push(note("note_c"));
+        graph.keys[0].columns = vec![3];
+        schema(&graph, false)
+    }
+
+    fn shown(layout: &Layout, detail: Detail) -> Vec<u32> {
+        layout.rows(1, detail).map(|row| row.column).collect()
+    }
+
+    #[test]
+    fn a_card_cut_short_keeps_its_keys_first_and_ends_with_the_rest_counted() {
+        let mut layout = keyed_between_notes();
+        assert_eq!(layout.cards[1].key_rows, [0, 3]);
+        assert_eq!(shown(&layout, Detail::Columns), [0, 1, 2, 3, 4]);
+        assert_eq!(layout.more(1, Detail::Columns), None);
+
+        // Four rows: the two keys, the first other column, then "+2 more".
+        layout.set_size(1, CARD_WIDTH, Some(card_height(4)));
+        assert_eq!(
+            shown(&layout, Detail::Columns),
+            [0, 1, 3],
+            "in column order"
+        );
+        let more = layout
+            .more(1, Detail::Columns)
+            .expect("the rest are counted");
+        assert_eq!((more.hidden, more.row), (2, 3));
+        assert_eq!(
+            more.rect.y,
+            layout.cards[1].origin.y + HEADER_HEIGHT + 3.0 * ROW_HEIGHT
+        );
+        assert_eq!(
+            layout.card_rect(1, Detail::Columns, 1.0).height,
+            card_height(4)
+        );
+        assert_eq!(layout.row_of(1, 3, Detail::Columns), Some(2));
+        assert_eq!(
+            layout.row_of(1, 2, Detail::Columns),
+            Some(3),
+            "met at +N more"
+        );
+        assert_eq!(layout.row_of(1, 4, Detail::Columns), Some(3));
+        assert_eq!(shown(&layout, Detail::Keys), [0, 3], "keys only still fit");
+        assert_eq!(layout.more(1, Detail::Keys), None);
+
+        // Two rows: one key and "+4 more", and both keys at keys only.
+        layout.set_size(1, CARD_WIDTH, Some(card_height(2)));
+        assert_eq!(shown(&layout, Detail::Columns), [0]);
+        assert_eq!(
+            layout.more(1, Detail::Columns).map(|more| more.hidden),
+            Some(4)
+        );
+        assert_eq!(shown(&layout, Detail::Keys), [0, 3]);
+        assert_eq!(layout.row_of(1, 3, Detail::Keys), Some(1));
+
+        // One row, the shortest a card goes: "+5 more", or "+2 more".
+        layout.set_size(1, CARD_WIDTH, Some(card_height(1)));
+        assert!(shown(&layout, Detail::Columns).is_empty());
+        assert_eq!(
+            layout.more(1, Detail::Columns).map(|more| more.hidden),
+            Some(5)
+        );
+        assert!(shown(&layout, Detail::Keys).is_empty());
+        assert_eq!(
+            layout.more(1, Detail::Keys).map(|more| more.hidden),
+            Some(2)
+        );
+        assert_eq!(layout.row_of(1, 3, Detail::Keys), Some(0));
+        assert_eq!(
+            layout.row_of(1, 1, Detail::Keys),
+            None,
+            "keys only lists no note"
+        );
+        assert_eq!(layout.row_of(1, 3, Detail::Names), None);
+    }
+
+    #[test]
+    fn an_edge_into_a_column_the_cut_hid_meets_the_more_row() {
+        let mut layout = keyed_between_notes();
+        layout.set_size(1, CARD_WIDTH, Some(card_height(2)));
+        let more = layout.more(1, Detail::Columns).unwrap();
+        let Segment::Move(start) = layout.edge_path(0, Detail::Columns, 1.0).segments[0] else {
+            panic!("a path starts with a move");
+        };
+        assert_eq!(start.y, more.rect.centre().y);
+        assert!(
+            layout
+                .edge_envelopes(0)
+                .iter()
+                .any(|envelope| envelope.contains(start)),
+            "the index still files the edge where it now starts"
+        );
+    }
+
+    #[test]
+    fn a_card_is_sized_within_its_bounds_and_in_whole_rows() {
+        let mut layout = keyed_between_notes();
+        let full = layout.full_height(1);
+        assert_eq!(full, card_height(5));
+        layout.set_size(1, 10.0, Some(0.0));
+        assert_eq!(layout.cards[1].width, MIN_CARD_WIDTH);
+        assert_eq!(layout.cards[1].height, card_height(1), "a header and a row");
+        layout.set_size(1, 5000.0, Some(10_000.0));
+        assert_eq!(layout.cards[1].width, MAX_CARD_WIDTH);
+        assert_eq!(layout.cards[1].height, full, "never taller than its rows");
+        layout.set_size(1, 300.0, Some(card_height(3) + 0.4 * ROW_HEIGHT));
+        assert_eq!(layout.cards[1].height, card_height(3));
+        layout.set_size(1, 300.0, Some(card_height(3) + 0.6 * ROW_HEIGHT));
+        assert_eq!(layout.cards[1].height, card_height(4));
+        layout.set_size(1, 300.0, None);
+        assert_eq!(layout.cards[1].height, full);
+
+        let rect = layout.card_rect(1, Detail::Columns, 1.0);
+        assert_eq!(rect.width, 300.0);
+        assert!(
+            layout
+                .rows(1, Detail::Columns)
+                .all(|row| row.rect.width == 300.0)
+        );
+        let Segment::Move(start) = layout.edge_path(0, Detail::Columns, 1.0).segments[0] else {
+            panic!("a path starts with a move");
+        };
+        assert!(
+            start.x == rect.x || start.x == rect.right(),
+            "an edge leaves from a side of the card as sized"
+        );
+
+        assert!(layout.heightens(1, Detail::Columns) && layout.heightens(1, Detail::Keys));
+        assert!(
+            !layout.heightens(1, Detail::Names),
+            "a name block's height is fixed"
+        );
+        assert!(
+            !layout.heightens(0, Detail::Columns),
+            "one row cannot be cut"
+        );
+    }
+
+    #[test]
+    fn a_handle_is_the_edge_or_corner_under_the_pointer_either_side() {
+        let rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        };
+        let at = |x, y| handle_at(rect, Point::new(x, y), 5.0, true);
+        assert_eq!(at(198.0, 50.0), Some(Handle::Right));
+        assert_eq!(at(204.0, 50.0), Some(Handle::Right), "just outside");
+        assert_eq!(at(206.0, 50.0), None);
+        assert_eq!(at(100.0, 103.0), Some(Handle::Bottom));
+        assert_eq!(
+            at(192.0, 92.0),
+            Some(Handle::Corner),
+            "the corner reaches further"
+        );
+        assert_eq!(at(205.0, 105.0), Some(Handle::Corner));
+        assert_eq!(at(100.0, 50.0), None, "the body moves the card");
+        assert_eq!(at(198.0, -3.0), None, "not above the card");
+        assert_eq!(
+            handle_at(rect, Point::new(198.0, 98.0), 5.0, false),
+            Some(Handle::Right),
+            "no height to change leaves the right edge"
+        );
+        assert_eq!(handle_at(rect, Point::new(100.0, 101.0), 5.0, false), None);
+        let small = Rect {
+            width: 12.0,
+            height: 8.0,
+            ..rect
+        };
+        assert_eq!(
+            handle_at(small, Point::new(6.0, 4.0), 5.0, true),
+            None,
+            "the middle of a card small on screen still moves it"
+        );
     }
 
     #[test]

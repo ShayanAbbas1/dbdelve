@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use super::geometry::{Point, Rect};
+use super::geometry::{self, CARD_WIDTH, Handle, Point, Rect};
 use super::layout::Layout;
 
 /// Wider than a card, so a pointer looks in one or two cells.
@@ -25,6 +25,22 @@ pub struct Scene {
     /// The cells that hold anything, so a query zoomed far out visits only
     /// those rather than every cell of the viewport.
     occupied: Option<(i32, i32, i32, i32)>,
+}
+
+/// Where the user left a card and what size they gave it, each part only
+/// where it differs from what the layout gave it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Placement {
+    pub origin: Option<Point>,
+    pub width: Option<f32>,
+    /// A height the card is cut to, in whole rows.
+    pub height: Option<f32>,
+}
+
+impl Placement {
+    pub fn is_empty(&self) -> bool {
+        self.origin.is_none() && self.width.is_none() && self.height.is_none()
+    }
 }
 
 /// What a frame draws: cards and edges whose rectangles meet the viewport,
@@ -141,15 +157,67 @@ impl Scene {
             .map(|(_, edge)| edge)
     }
 
+    /// The resize handle under a world point, `reach` world units from an
+    /// edge: on the card the point is on, else on the topmost card it is
+    /// just outside of, so a handle never reaches over another card.
+    pub fn handle_at(&self, point: Point, reach: f32, zoom: f32) -> Option<(u32, Handle)> {
+        let detail = self.layout.detail(zoom);
+        let on = self.card_at(point, zoom);
+        let probe = Rect {
+            x: point.x,
+            y: point.y,
+            width: 0.0,
+            height: 0.0,
+        }
+        .inflate(2.0 * reach);
+        self.entries(probe)
+            .filter_map(|entry| match entry {
+                Entry::Card(card) if on.is_none_or(|on| on == card) => Some(card),
+                _ => None,
+            })
+            .filter_map(|card| {
+                let rect = self.layout.card_rect(card, detail, zoom);
+                let heightens = self.layout.heightens(card, detail);
+                Some((card, geometry::handle_at(rect, point, reach, heightens)?))
+            })
+            .max_by_key(|&(card, _)| card)
+    }
+
     /// Moves a card and refiles it and the edges that end at it, and only
     /// those. Returns them, so their cached paths can be dropped.
     pub fn move_card(&mut self, card: u32, origin: Point) -> &[u32] {
+        self.reshape(card, |layout| layout.cards[card as usize].origin = origin)
+    }
+
+    /// Sizes a card ([`Layout::set_size`]), refiling as [`Self::move_card`]
+    /// does: none is the size the layout gave it.
+    pub fn resize_card(&mut self, card: u32, width: Option<f32>, height: Option<f32>) -> &[u32] {
+        self.reshape(card, |layout| {
+            layout.set_size(card, width.unwrap_or(CARD_WIDTH), height)
+        })
+    }
+
+    /// Puts a card where the user left it, at the size they gave it.
+    pub fn place(&mut self, card: u32, placement: &Placement) -> &[u32] {
+        self.reshape(card, |layout| {
+            if let Some(origin) = placement.origin {
+                layout.cards[card as usize].origin = origin;
+            }
+            layout.set_size(
+                card,
+                placement.width.unwrap_or(CARD_WIDTH),
+                placement.height,
+            );
+        })
+    }
+
+    fn reshape(&mut self, card: u32, change: impl FnOnce(&mut Layout)) -> &[u32] {
         self.unfile(Entry::Card(card));
         let edges = self.layout.cards[card as usize].edges.clone();
         for &edge in &edges {
             self.unfile(Entry::Edge(edge));
         }
-        self.layout.cards[card as usize].origin = origin;
+        change(&mut self.layout);
         self.file(Entry::Card(card));
         for edge in edges {
             self.envelopes[edge as usize] = self.layout.edge_envelopes(edge);
@@ -165,7 +233,7 @@ impl Scene {
                 vec![Rect {
                     x: card.origin.x,
                     y: card.origin.y,
-                    width: super::geometry::CARD_WIDTH,
+                    width: card.width,
                     height: card.height,
                 }]
             }
@@ -232,7 +300,7 @@ fn cells(rect: Rect) -> (i32, i32, i32, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diagram::geometry::{CARD_WIDTH, Detail};
+    use crate::diagram::geometry::{CARD_WIDTH, Detail, Handle};
     use crate::diagram::layout::{LAYER_GAP, schema};
     use crate::diagram::tests::graph;
 
@@ -322,6 +390,48 @@ mod tests {
             scene.visible(rect(1990.0, 1490.0, 20.0, 20.0), 1.0).cards,
             vec![1]
         );
+    }
+
+    #[test]
+    fn a_handle_is_found_on_the_card_under_the_pointer_and_a_resize_refiles_it() {
+        let mut scene = scene();
+        let card = scene.layout().card_rect(1, Detail::Columns, 1.0);
+        let corner = Point::new(card.right() - 1.0, card.bottom() - 1.0);
+        assert_eq!(scene.handle_at(corner, 5.0, 1.0), Some((1, Handle::Corner)));
+        assert_eq!(
+            scene.handle_at(Point::new(card.right() + 3.0, card.y + 4.0), 5.0, 1.0),
+            Some((1, Handle::Right))
+        );
+        assert_eq!(scene.handle_at(card.centre(), 5.0, 1.0), None);
+
+        let wider = Point::new(card.right() + 100.0, card.centre().y);
+        assert_eq!(scene.card_at(wider, 1.0), None);
+        assert_eq!(scene.resize_card(1, Some(card.width + 200.0), None), &[0]);
+        assert_eq!(
+            scene.card_at(wider, 1.0),
+            Some(1),
+            "refiled at its new width"
+        );
+        assert_eq!(
+            scene.visible(rect(wider.x, wider.y, 1.0, 1.0), 1.0).cards,
+            vec![1]
+        );
+        scene.resize_card(1, None, None);
+        assert_eq!(scene.layout().cards[1].width, CARD_WIDTH);
+    }
+
+    #[test]
+    fn a_handle_never_reaches_over_another_card() {
+        // Zoomed far out, a handle's reach in world units is wider than the
+        // gap between two cards.
+        let mut scene = scene();
+        let left = scene.layout().card_rect(0, Detail::Columns, 1.0);
+        let gap = 10.0;
+        scene.move_card(1, Point::new(left.right() + gap, left.y));
+        let on_right_card = Point::new(left.right() + gap + 2.0, left.y + 10.0);
+        assert_eq!(scene.handle_at(on_right_card, 40.0, 1.0), None);
+        let in_gap = Point::new(left.right() + gap / 2.0, left.y + 10.0);
+        assert_eq!(scene.handle_at(in_gap, 40.0, 1.0), Some((0, Handle::Right)));
     }
 
     #[test]
