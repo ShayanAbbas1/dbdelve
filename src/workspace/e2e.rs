@@ -4589,6 +4589,72 @@ fn secondary_f_finds_a_table_in_a_diagram_and_escape_puts_the_field_away(cx: &mu
 }
 
 #[gpui::test]
+fn the_arrow_keys_walk_a_diagrams_cards_and_leave_the_find_field_its_own(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, DIAGRAM_SCHEMA);
+        let view = show_diagram(&workspace, cx);
+        let focused = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| view.read(cx).focused_name())
+                .map(|name| name.to_string())
+        };
+        assert_eq!(focused(cx), None);
+
+        cx.simulate_keystrokes("down");
+        settle(cx);
+        assert!(
+            focused(cx).is_some(),
+            "with nothing in focus, an arrow focuses the card nearest the middle"
+        );
+
+        cx.simulate_keystrokes("left");
+        settle(cx);
+        assert_eq!(
+            focused(cx).as_deref(),
+            Some("birds"),
+            "the referenced table"
+        );
+        cx.simulate_keystrokes("right");
+        settle(cx);
+        assert_eq!(
+            focused(cx).as_deref(),
+            Some("sightings"),
+            "the table that references it"
+        );
+        cx.simulate_keystrokes("right");
+        settle(cx);
+        assert_eq!(
+            focused(cx).as_deref(),
+            Some("sightings"),
+            "nothing further that way keeps the focus"
+        );
+
+        cx.simulate_keystrokes("secondary-f");
+        settle(cx);
+        cx.simulate_input("birds");
+        settle(cx);
+        assert_eq!(focused(cx).as_deref(), Some("birds"));
+        cx.simulate_keystrokes("right");
+        settle(cx);
+        assert_eq!(
+            focused(cx).as_deref(),
+            Some("birds"),
+            "an arrow in the field, even at the end of its text, never walks the cards"
+        );
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+        cx.simulate_keystrokes("right");
+        settle(cx);
+        assert_eq!(
+            focused(cx).as_deref(),
+            Some("sightings"),
+            "and the canvas takes it back with the keyboard"
+        );
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn a_diagrams_minimap_shows_once_it_overflows_and_a_press_on_it_moves_the_view(
     cx: &mut TestAppContext,
 ) {

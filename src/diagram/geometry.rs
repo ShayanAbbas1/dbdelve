@@ -284,6 +284,63 @@ pub fn handle_at(rect: Rect, point: Point, reach: f32, heightens: bool) -> Optio
     }
 }
 
+/// Which way an arrow key moves the focus from card to card.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Direction {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+/// The card nearest `from` in `direction`, among `cards` (not `from` itself),
+/// each by the rect it is drawn as: one whose centre lies that way of
+/// `from`'s. Distance is along the direction between centres, plus twice the
+/// gap across it between the cards, so a card in line, overlapping `from`
+/// across the direction, beats one off to the side at the same distance, and
+/// a near card slightly off line beats one in line far beyond it. Ties go to
+/// the centre nearer across, then to the lower card number.
+pub fn nearest_card(
+    from: Rect,
+    direction: Direction,
+    cards: impl IntoIterator<Item = (u32, Rect)>,
+) -> Option<u32> {
+    let centre = from.centre();
+    let gap = |start: f32, end: f32, from_start: f32, from_end: f32| {
+        (start - from_end).max(from_start - end).max(0.0)
+    };
+    cards
+        .into_iter()
+        .filter_map(|(card, rect)| {
+            let at = rect.centre();
+            let (along, across, apart) = match direction {
+                Direction::Left | Direction::Right => (
+                    match direction {
+                        Direction::Left => centre.x - at.x,
+                        _ => at.x - centre.x,
+                    },
+                    (at.y - centre.y).abs(),
+                    gap(rect.y, rect.bottom(), from.y, from.bottom()),
+                ),
+                Direction::Up | Direction::Down => (
+                    match direction {
+                        Direction::Up => centre.y - at.y,
+                        _ => at.y - centre.y,
+                    },
+                    (at.x - centre.x).abs(),
+                    gap(rect.x, rect.right(), from.x, from.right()),
+                ),
+            };
+            (along > 0.0).then_some((along + 2.0 * apart, across, card))
+        })
+        .min_by(|a, b| {
+            (a.0.total_cmp(&b.0))
+                .then(a.1.total_cmp(&b.1))
+                .then(a.2.cmp(&b.2))
+        })
+        .map(|(_, _, card)| card)
+}
+
 /// How a card's height cuts the rows a level of detail lists: `kept` of
 /// `listed` are drawn, and a "+N more" row after them when that is fewer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -922,6 +979,59 @@ mod tests {
     use crate::db::GraphColumn;
     use crate::diagram::layout::schema;
     use crate::diagram::tests::graph;
+
+    #[test]
+    fn an_arrow_finds_the_nearest_card_that_way_and_prefers_one_in_line() {
+        let card = |x: f32, y: f32| Rect {
+            x,
+            y,
+            width: 200.0,
+            height: 100.0,
+        };
+        let from = card(0.0, 0.0);
+        // A grid of layers: one to the right in line, one up and right a
+        // little off line, one far right in line, one below, one above.
+        let cards = [
+            (1, card(300.0, 40.0)),
+            (2, card(300.0, -130.0)),
+            (3, card(1200.0, 0.0)),
+            (4, card(0.0, 160.0)),
+            (5, card(10.0, -300.0)),
+        ];
+        let towards = |direction| nearest_card(from, direction, cards);
+        assert_eq!(
+            towards(Direction::Right),
+            Some(1),
+            "in line before off line"
+        );
+        assert_eq!(towards(Direction::Down), Some(4));
+        assert_eq!(
+            towards(Direction::Up),
+            Some(5),
+            "in line, though further along than 2"
+        );
+        assert_eq!(towards(Direction::Left), None, "nothing that way");
+
+        let without_one = cards.into_iter().filter(|&(card, _)| card != 1);
+        assert_eq!(
+            nearest_card(from, Direction::Right, without_one),
+            Some(2),
+            "a near card a little off line before one in line far beyond"
+        );
+
+        let level = [(7, card(300.0, 30.0)), (6, card(300.0, -30.0))];
+        assert_eq!(
+            nearest_card(from, Direction::Right, level),
+            Some(6),
+            "equally near across: the lower card"
+        );
+        let stacked = [(8, card(0.0, 0.0)), (9, card(100.0, 0.0))];
+        assert_eq!(
+            nearest_card(from, Direction::Down, stacked),
+            None,
+            "a centre level with the card's is not below it"
+        );
+    }
 
     #[test]
     fn the_level_of_detail_follows_the_zoom_and_keys_only_caps_it() {

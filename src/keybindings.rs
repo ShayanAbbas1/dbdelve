@@ -29,7 +29,8 @@ use crate::{
         AcceptCompletion, AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseTab,
         CollapseAllSchemas, CommandPalette, ConfirmDialog, CopyCell, CopyDiagnostics, CopyPlan,
         CopyResults, CopyRow, CopyRows, CopySelection, CycleMode, DeleteRow, DiagramFindNext,
-        DiagramFindPick, DiagramFindPrevious, DiscardEdits, Disconnect, EditCell, ExpandAllSchemas,
+        DiagramFindPick, DiagramFindPrevious, DiagramFocusDown, DiagramFocusLeft,
+        DiagramFocusRight, DiagramFocusUp, DiscardEdits, Disconnect, EditCell, ExpandAllSchemas,
         ExplainQuery, FindInDiagram, FocusSidebar, FollowForeignKey, FormatQuery, FuzzyOpen,
         GoToColumn, HideColumn, ImportConnections, ImportRows, ImportRowsFromClipboard, Minimize,
         MoveTabLeft, MoveTabRight, NewConnection, NewProject, NewQuery, NewRow, NextDialogButton,
@@ -292,6 +293,13 @@ registry! {
     // Run Query's chord, which a diagram hands on: see `INERT_IN`.
     ("diagram_open_structure", "Diagram: Open Structure", Some("Diagram"), ["secondary-enter"], OpenDiagramStructure),
     ("diagram_find", "Diagram: Find Table", Some("Diagram"), ["secondary-f"], FindInDiagram),
+    // The find field's caret takes left and right first, being deeper on the
+    // focus path, but hands them on at the end of its text; the diagram
+    // ignores them while the field is open.
+    ("diagram_focus_left", "Diagram: Focus Card Left", Some("Diagram"), ["left"], DiagramFocusLeft),
+    ("diagram_focus_right", "Diagram: Focus Card Right", Some("Diagram"), ["right"], DiagramFocusRight),
+    ("diagram_focus_up", "Diagram: Focus Card Above", Some("Diagram"), ["up"], DiagramFocusUp),
+    ("diagram_focus_down", "Diagram: Focus Card Below", Some("Diagram"), ["down"], DiagramFocusDown),
     // Against the field, as the palette's are: a descendant predicate is what
     // takes the arrows back from the input (AGENTS.md, "GPUI hazards").
     ("diagram_find_next", "Diagram: Next Match", Some("DiagramFind > Input"), ["down"], DiagramFindNext),

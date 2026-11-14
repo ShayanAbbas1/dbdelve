@@ -247,5 +247,9 @@ actions!(
         DiagramFindNext,
         DiagramFindPrevious,
         DiagramFindPick,
+        DiagramFocusLeft,
+        DiagramFocusRight,
+        DiagramFocusUp,
+        DiagramFocusDown,
     ]
 );

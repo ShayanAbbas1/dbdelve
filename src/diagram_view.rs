@@ -25,13 +25,14 @@ use gpui_component::{
 };
 
 use crate::actions::{
-    DiagramFindNext, DiagramFindPick, DiagramFindPrevious, FindInDiagram, OpenDiagramStructure,
-    OpenDiagramTable, ResetEditorZoom, ZoomEditorIn, ZoomEditorOut,
+    DiagramFindNext, DiagramFindPick, DiagramFindPrevious, DiagramFocusDown, DiagramFocusLeft,
+    DiagramFocusRight, DiagramFocusUp, FindInDiagram, OpenDiagramStructure, OpenDiagramTable,
+    ResetEditorZoom, ZoomEditorIn, ZoomEditorOut,
 };
 use crate::db::{KeyTarget, SchemaGraph};
 use crate::diagram::geometry::{
-    self, CARD_WIDTH, Detail, Fit, HEADER_HEIGHT, Handle, MAX_CARD_WIDTH, MIN_CARD_WIDTH, Point,
-    Rect, Segment, Stroke, Transform,
+    self, CARD_WIDTH, Detail, Direction, Fit, HEADER_HEIGHT, Handle, MAX_CARD_WIDTH,
+    MIN_CARD_WIDTH, Point, Rect, Segment, Stroke, Transform,
 };
 use crate::diagram::index::{Placement, Scene};
 use crate::diagram::layout::{Layout, Subject};
@@ -1531,13 +1532,21 @@ impl DiagramView {
     }
 
     /// Puts a card in focus and in the middle of the view, at a zoom its
-    /// columns can be read at; a card taller than the view shows its top.
+    /// columns can be read at.
     fn jump(&mut self, card: u32, cx: &mut Context<Self>) {
-        let Some(ready) = self.ready() else {
+        let Some(centred) = self.centring(card, self.transform.zoom.max(1.0)) else {
             return;
         };
-        let zoom = self.transform.zoom.max(1.0);
-        let layout = ready.scene.layout();
+        self.transform = centred;
+        self.focus = Some(card);
+        self.hover = None;
+        cx.notify();
+    }
+
+    /// The view at `zoom` with a card in the middle; a card taller than the
+    /// view shows its top.
+    fn centring(&self, card: u32, zoom: f32) -> Option<Transform> {
+        let layout = self.ready()?.scene.layout();
         let rect = layout.card_rect(card, layout.detail(zoom), zoom);
         let screen = self.screen();
         let middle = screen.centre();
@@ -1545,10 +1554,56 @@ impl DiagramView {
             true => FIT_MARGIN - rect.y * zoom,
             false => middle.y - rect.centre().y * zoom,
         };
-        self.transform = Transform {
+        Some(Transform {
             zoom,
             pan: Point::new(middle.x - rect.centre().x * zoom, top),
+        })
+    }
+
+    /// Moves the focus to the nearest card `direction` of the focused one,
+    /// or with none in focus, to the card nearest the middle of the view; the
+    /// view follows a card that is not wholly on screen.
+    fn step_focus(&mut self, direction: Direction, cx: &mut Context<Self>) {
+        // The field's caret hands an arrow on at the end of its text, and
+        // walking the cards from under the user's typing is not what it meant.
+        if self.find.is_some() {
+            return;
+        }
+        let Some(ready) = self.ready() else {
+            return;
         };
+        let layout = ready.scene.layout();
+        let zoom = self.transform.zoom;
+        let detail = layout.detail(zoom);
+        let rect = |card: u32| layout.card_rect(card, detail, zoom);
+        let cards = 0..layout.cards.len() as u32;
+        let next = match self.focus {
+            Some(from) => geometry::nearest_card(
+                rect(from),
+                direction,
+                cards
+                    .filter(|&card| card != from)
+                    .map(|card| (card, rect(card))),
+            ),
+            None => {
+                let middle = self.transform.to_world(self.screen().centre());
+                cards.min_by(|&a, &b| {
+                    distance(rect(a).centre(), middle)
+                        .total_cmp(&distance(rect(b).centre(), middle))
+                })
+            }
+        };
+        let Some(card) = next else {
+            return;
+        };
+        let (rect, screen) = (rect(card), self.transform.world_rect(self.screen()));
+        let seen = screen.x <= rect.x
+            && screen.y <= rect.y
+            && rect.right() <= screen.right()
+            && rect.bottom() <= screen.bottom();
+        if !seen && let Some(centred) = self.centring(card, zoom) {
+            self.transform = centred;
+        }
         self.focus = Some(card);
         self.hover = None;
         cx.notify();
@@ -2191,28 +2246,43 @@ fn listen(view: &gpui::Entity<DiagramView>, hitbox: &Hitbox, window: &mut Window
 impl Render for DiagramView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = *theme(cx);
-        let surface = div()
-            .id("diagram")
-            .key_context("Diagram")
-            .track_focus(&self.focus_handle)
-            .on_action(cx.listener(|view, _: &OpenDiagramTable, _, cx| view.open(false, cx)))
-            .on_action(cx.listener(|view, _: &OpenDiagramStructure, _, cx| view.open(true, cx)))
-            // The app's zoom chords, which zoom whatever is in front: here,
-            // the diagram, and Reset Zoom fits it.
-            .on_action(cx.listener(|view, _: &ZoomEditorIn, _, cx| view.step_zoom(true, cx)))
-            .on_action(cx.listener(|view, _: &ZoomEditorOut, _, cx| view.step_zoom(false, cx)))
-            .on_action(cx.listener(|view, _: &ResetEditorZoom, _, cx| view.fit(cx)))
-            .on_action(cx.listener(|view, _: &FindInDiagram, window, cx| view.find(window, cx)))
-            .on_action(cx.listener(|view, _: &DiagramFindNext, _, cx| view.step_find(true, cx)))
-            .on_action(
-                cx.listener(|view, _: &DiagramFindPrevious, _, cx| view.step_find(false, cx)),
-            )
-            .on_action(
-                cx.listener(|view, _: &DiagramFindPick, window, cx| view.pick_selected(window, cx)),
-            )
-            .size_full()
-            .overflow_hidden()
-            .bg(t.panel_glass());
+        let surface =
+            div()
+                .id("diagram")
+                .key_context("Diagram")
+                .track_focus(&self.focus_handle)
+                .on_action(cx.listener(|view, _: &OpenDiagramTable, _, cx| view.open(false, cx)))
+                .on_action(cx.listener(|view, _: &OpenDiagramStructure, _, cx| view.open(true, cx)))
+                // The app's zoom chords, which zoom whatever is in front: here,
+                // the diagram, and Reset Zoom fits it.
+                .on_action(cx.listener(|view, _: &ZoomEditorIn, _, cx| view.step_zoom(true, cx)))
+                .on_action(cx.listener(|view, _: &ZoomEditorOut, _, cx| view.step_zoom(false, cx)))
+                .on_action(cx.listener(|view, _: &ResetEditorZoom, _, cx| view.fit(cx)))
+                .on_action(cx.listener(|view, _: &FindInDiagram, window, cx| view.find(window, cx)))
+                .on_action(cx.listener(|view, _: &DiagramFocusLeft, _, cx| {
+                    view.step_focus(Direction::Left, cx)
+                }))
+                .on_action(cx.listener(|view, _: &DiagramFocusRight, _, cx| {
+                    view.step_focus(Direction::Right, cx)
+                }))
+                .on_action(
+                    cx.listener(|view, _: &DiagramFocusUp, _, cx| {
+                        view.step_focus(Direction::Up, cx)
+                    }),
+                )
+                .on_action(cx.listener(|view, _: &DiagramFocusDown, _, cx| {
+                    view.step_focus(Direction::Down, cx)
+                }))
+                .on_action(cx.listener(|view, _: &DiagramFindNext, _, cx| view.step_find(true, cx)))
+                .on_action(
+                    cx.listener(|view, _: &DiagramFindPrevious, _, cx| view.step_find(false, cx)),
+                )
+                .on_action(cx.listener(|view, _: &DiagramFindPick, window, cx| {
+                    view.pick_selected(window, cx)
+                }))
+                .size_full()
+                .overflow_hidden()
+                .bg(t.panel_glass());
         let note = |text: SharedString, colour: Hsla| {
             div()
                 .size_full()
