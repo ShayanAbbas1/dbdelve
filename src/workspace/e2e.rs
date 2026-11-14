@@ -5086,7 +5086,7 @@ fn the_diagram_export_menu_writes_the_drawing_to_the_file_picked(cx: &mut TestAp
         let directory = store::dbdelve_directory().unwrap();
 
         super::exports::SUGGESTED_NAMES.with_borrow_mut(Vec::clear);
-        pick_diagram_export(1, cx);
+        pick_diagram_export(2, cx);
         let path = directory.join("main.svg");
         let chosen = path.clone();
         cx.simulate_new_path_selection(|_| Some(chosen));
@@ -5109,18 +5109,24 @@ fn the_diagram_export_menu_writes_the_drawing_to_the_file_picked(cx: &mut TestAp
             ))
         );
 
-        pick_diagram_export(2, cx);
+        pick_diagram_export(3, cx);
         let path = directory.join("main.png");
         let chosen = path.clone();
         cx.simulate_new_path_selection(|_| Some(chosen));
         let png = exported_file(&path, cx);
         assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"), "a PNG");
         // The extension typed decides, as it does for a result's export.
-        pick_diagram_export(1, cx);
+        pick_diagram_export(2, cx);
         let path = directory.join("typed.png");
         let chosen = path.clone();
         cx.simulate_new_path_selection(|_| Some(chosen));
         assert!(exported_file(&path, cx).starts_with(b"\x89PNG"));
+        pick_diagram_export(4, cx);
+        let path = directory.join("main.mmd");
+        let chosen = path.clone();
+        cx.simulate_new_path_selection(|_| Some(chosen));
+        let text = String::from_utf8(exported_file(&path, cx)).unwrap();
+        assert!(text.starts_with("erDiagram\n"), "{text}");
 
         // The palette asks for the same file, and a neighbourhood is named
         // after the table in its middle too.
@@ -5139,6 +5145,54 @@ fn the_diagram_export_menu_writes_the_drawing_to_the_file_picked(cx: &mut TestAp
             super::exports::SUGGESTED_NAMES.with_borrow(Clone::clone),
             ["main-sightings.svg"]
         );
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn copy_as_mermaid_puts_the_diagram_on_the_clipboard_from_the_menu_and_the_palette(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, DIAGRAM_SCHEMA);
+        let view = show_diagram(&workspace, cx);
+        let expected = "erDiagram
+    birds {
+        INTEGER id PK
+        TEXT name
+    }
+    sightings {
+        INTEGER id PK
+        INTEGER bird FK
+    }
+    birds ||..o{ sightings : \"bird\"
+";
+        let copied = |cx: &mut VisualTestContext| {
+            cx.read_from_clipboard()
+                .and_then(|item| item.text())
+                .expect("the copy wrote the clipboard")
+        };
+
+        pick_diagram_export(1, cx);
+        assert_eq!(copied(cx), expected);
+        assert_eq!(
+            cx.update(|_, cx| workspace.read(cx).profile().unwrap().session.notice.clone()),
+            Some("Copied the diagram as Mermaid.".to_string())
+        );
+        assert!(
+            cx.update(|window, cx| view.read(cx).focus_handle().is_focused(window)),
+            "the menu hands the keyboard back to the canvas"
+        );
+
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(String::new()));
+        cx.simulate_keystrokes("secondary-shift-p");
+        settle(cx);
+        cx.simulate_input("Copy diagram as Mermaid");
+        settle(cx);
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        assert_eq!(copied(cx), expected);
 
         quit(workspace, cx);
     });

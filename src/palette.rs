@@ -360,6 +360,7 @@ pub enum Command {
     ExportResults(FileAs),
     /// Write the diagram in front to a file, as its toolbar's Export menu does.
     ExportDiagram(DiagramFile),
+    CopyDiagramMermaid,
     /// Stop the export of every row this connection is running.
     CancelExport,
     CopyRow,
@@ -3670,6 +3671,12 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         if let ObjectBody::Diagram { view, .. } = &tab.body
             && view.read(cx).keys_only().is_some()
         {
+            items.push(command(
+                "Copy diagram as Mermaid",
+                icon::COPY,
+                Command::CopyDiagramMermaid,
+                TAB,
+            ));
             items.extend(DiagramFile::ALL.into_iter().map(|file| {
                 command(
                     &format!("Export diagram as {}…", file.label()),

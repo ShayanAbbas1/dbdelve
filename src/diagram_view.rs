@@ -38,7 +38,7 @@ use crate::diagram::geometry::{
 };
 use crate::diagram::index::{Placement, Scene};
 use crate::diagram::layout::{Layout, Subject};
-use crate::diagram::svg;
+use crate::diagram::{mermaid, svg};
 use crate::fuzzy::{Fuzzy, Query};
 use crate::icons::icon;
 use crate::store;
@@ -295,6 +295,8 @@ pub enum DiagramEvent {
     Moved,
     /// The user asked to write the diagram to a file of this kind.
     Export(DiagramFile),
+    /// The user asked for the diagram as Mermaid text on the clipboard.
+    CopyMermaid,
 }
 
 /// A kind of file the diagram is written as.
@@ -302,15 +304,17 @@ pub enum DiagramEvent {
 pub enum DiagramFile {
     Svg,
     Png,
+    Mermaid,
 }
 
 impl DiagramFile {
-    pub const ALL: [Self; 2] = [Self::Svg, Self::Png];
+    pub const ALL: [Self; 3] = [Self::Svg, Self::Png, Self::Mermaid];
 
     pub fn extension(self) -> &'static str {
         match self {
             Self::Svg => "svg",
             Self::Png => "png",
+            Self::Mermaid => "mmd",
         }
     }
 
@@ -318,6 +322,7 @@ impl DiagramFile {
         match self {
             Self::Svg => "SVG",
             Self::Png => "PNG",
+            Self::Mermaid => "Mermaid",
         }
     }
 
@@ -346,6 +351,10 @@ pub struct Drawing {
 impl Drawing {
     pub fn svg(&self) -> String {
         svg::svg(&self.graph, &self.layout, &self.style)
+    }
+
+    pub fn mermaid(&self) -> String {
+        mermaid::mermaid(&self.graph, &self.layout)
     }
 }
 
@@ -2499,6 +2508,14 @@ impl Render for DiagramView {
 /// The toolbar's Export menu, laid out as the result grid's is: the
 /// clipboard first, then the files.
 fn export_menu(menu: PopupMenu, view: &WeakEntity<DiagramView>) -> PopupMenu {
+    let copy = view.clone();
+    let menu = menu
+        .item(
+            PopupMenuItem::new("Copy as Mermaid").on_click(move |_, _, cx| {
+                _ = copy.update(cx, |_, cx| cx.emit(DiagramEvent::CopyMermaid));
+            }),
+        )
+        .separator();
     DiagramFile::ALL.into_iter().fold(menu, |menu, file| {
         let view = view.clone();
         menu.item(

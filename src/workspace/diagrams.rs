@@ -122,6 +122,7 @@ impl Workspace {
                 DiagramEvent::Viewed => workspace.remember_profiles(cx),
                 DiagramEvent::Moved => workspace.remember_profiles_soon(cx),
                 DiagramEvent::Export(file) => workspace.export_diagram(view, *file, cx),
+                DiagramEvent::CopyMermaid => workspace.copy_diagram_mermaid(view, cx),
             },
         )
         .detach();
@@ -141,17 +142,42 @@ impl Workspace {
         Some(id)
     }
 
-    /// The diagram tab in front, written as its Export menu would.
-    pub(crate) fn export_front_diagram(&mut self, file: DiagramFile, cx: &mut Context<Self>) {
-        let view = (self.profile())
+    fn front_diagram(&self) -> Option<Entity<DiagramView>> {
+        (self.profile())
             .and_then(|profile| profile.session.active_object())
             .and_then(|tab| match &tab.body {
                 ObjectBody::Diagram { view, .. } => Some(view.clone()),
                 _ => None,
-            });
-        if let Some(view) = view {
+            })
+    }
+
+    /// The diagram tab in front, written as its Export menu would.
+    pub(crate) fn export_front_diagram(&mut self, file: DiagramFile, cx: &mut Context<Self>) {
+        if let Some(view) = self.front_diagram() {
             self.export_diagram(&view, file, cx);
         }
+    }
+
+    /// The diagram tab in front, copied as Mermaid as its Export menu would.
+    pub(crate) fn copy_front_diagram_mermaid(&mut self, cx: &mut Context<Self>) {
+        if let Some(view) = self.front_diagram() {
+            self.copy_diagram_mermaid(&view, cx);
+        }
+    }
+
+    /// A diagram as Mermaid text on the clipboard, which pastes into a
+    /// GitHub issue and draws there. Cheap enough for the UI thread: text,
+    /// a line per column and per key.
+    pub(crate) fn copy_diagram_mermaid(
+        &mut self,
+        view: &Entity<DiagramView>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(drawing) = view.read(cx).drawing(cx) else {
+            return;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(drawing.mermaid()));
+        self.confirm("Copied the diagram as Mermaid.".to_string(), cx);
     }
 
     /// Write a diagram to a file the user picks, as it is drawn now. The
@@ -536,6 +562,7 @@ fn stored_cards<'a>(
 fn write_drawing(drawing: &Drawing, file: DiagramFile, path: &Path) -> Result<Option<f32>, Ended> {
     let (bytes, shrunk) = match file {
         DiagramFile::Svg => (drawing.svg().into_bytes(), None),
+        DiagramFile::Mermaid => (drawing.mermaid().into_bytes(), None),
         DiagramFile::Png => {
             let png = png::render(&drawing.svg()).map_err(Ended::Failed)?;
             tracing::info!(png.width, png.height, png.scale, "diagram drawn as a PNG");
