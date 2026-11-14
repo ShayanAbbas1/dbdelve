@@ -11,6 +11,11 @@ pub const MAX_CARD_WIDTH: f32 = 960.0;
 pub const HEADER_HEIGHT: f32 = 34.0;
 pub const ROW_HEIGHT: f32 = 24.0;
 pub const BOTTOM_PAD: f32 = 8.0;
+/// The most rows a card is laid out with, its "+N more" row included: a
+/// table of hundreds of columns would otherwise stand as a wall that pushes
+/// its layer apart and that Fit and the minimap have to make room for. A
+/// drag can still make it as tall as its rows.
+pub const AUTO_ROWS: usize = 30;
 /// A name block's height on screen, at every zoom that draws one.
 pub const NAME_BLOCK_HEIGHT: f32 = 26.0;
 /// Labels are cut with an ellipsis below this size rather than drawn smaller.
@@ -239,6 +244,11 @@ pub fn card_height(rows: usize) -> f32 {
     }
 }
 
+/// The height a card listing `rows` is laid out with: see [`AUTO_ROWS`].
+pub fn auto_height(rows: usize) -> f32 {
+    card_height(rows.min(AUTO_ROWS))
+}
+
 /// The whole rows nearest a height a card is dragged to, never none.
 pub fn rows_for_height(height: f32) -> usize {
     ((height - HEADER_HEIGHT - BOTTOM_PAD) / ROW_HEIGHT)
@@ -354,6 +364,14 @@ struct Cut {
 }
 
 impl Card {
+    /// The rows a layout made for keys only, or for every column, lists.
+    fn laid_out_rows(&self, keys_only: bool) -> usize {
+        match keys_only {
+            true => self.key_rows.len(),
+            false => self.columns as usize,
+        }
+    }
+
     fn cut(&self, detail: Detail) -> Cut {
         let listed = match detail {
             Detail::Columns => self.columns as usize,
@@ -711,11 +729,25 @@ impl Layout {
 
     /// A card's height with nothing cut: room for every row it shows.
     pub fn full_height(&self, card: u32) -> f32 {
-        let card = &self.cards[card as usize];
-        card_height(match self.keys_only {
-            true => card.key_rows.len(),
-            false => card.columns as usize,
-        })
+        card_height(self.cards[card as usize].laid_out_rows(self.keys_only))
+    }
+
+    /// The height a card is laid out with: every row it shows, up to
+    /// [`AUTO_ROWS`].
+    pub fn auto_height(&self, card: u32) -> f32 {
+        auto_height(self.cards[card as usize].laid_out_rows(self.keys_only))
+    }
+
+    /// The height a drag to `rows` rows asks for at a level of detail, none
+    /// where that is [`Self::auto_height`]: dragged past every row the level
+    /// lists, the card shows them all, and never fewer than the cap does.
+    pub fn dragged_height(&self, card: u32, rows: usize, detail: Detail) -> Option<f32> {
+        let (listed, auto) = (self.listed(card, detail), self.auto_height(card));
+        let height = match rows < listed {
+            true => card_height(rows),
+            false => card_height(listed).max(auto),
+        };
+        (height != auto).then_some(height)
     }
 
     /// Whether a drag can change a card's height at a level of detail: the
@@ -731,14 +763,14 @@ impl Layout {
 
     /// Sizes a card: its width held between the narrowest and widest a card
     /// can be, and its height cut to `height` in whole rows, never taller
-    /// than [`Self::full_height`]; none is that full height.
+    /// than [`Self::full_height`]; none is [`Self::auto_height`].
     pub(super) fn set_size(&mut self, card: u32, width: f32, height: Option<f32>) {
-        let full = self.full_height(card);
+        let (full, auto) = (self.full_height(card), self.auto_height(card));
         let card = &mut self.cards[card as usize];
         card.width = width.clamp(MIN_CARD_WIDTH, MAX_CARD_WIDTH);
         card.height = match height {
             Some(height) => card_height(rows_for_height(height)).min(full),
-            None => full,
+            None => auto,
         };
     }
 
@@ -1166,9 +1198,100 @@ mod tests {
                 fit.zoom
             );
         }
-        let layout = schema(&tall, false);
+        // Opened to every column by a drag, the card is as tall as ever.
+        let mut layout = schema(&tall, false);
+        layout.set_size(11, CARD_WIDTH, Some(f32::MAX));
         let every_column = Transform::fitting(layout.bounds(), viewport, 32.0);
         assert!(layout.fitting(viewport, 32.0).zoom > 2.0 * every_column.zoom);
+    }
+
+    fn note(name: String) -> GraphColumn {
+        GraphColumn {
+            name: name.into(),
+            type_label: 0,
+            nullable: true,
+            primary: false,
+            foreign: false,
+            unique: false,
+        }
+    }
+
+    #[test]
+    fn a_tall_card_is_laid_out_at_thirty_rows_keys_first_and_a_drag_opens_it() {
+        // Table 1: `id`, 100 notes, then its key into table 0.
+        let mut tall = graph(2, &[(1, 0)]);
+        let columns = &mut tall.tables[1].columns;
+        let key = columns.pop().unwrap();
+        columns.extend((0..100).map(|column| note(format!("note_{column}"))));
+        columns.push(key);
+        tall.keys[0].columns = vec![101];
+
+        let mut layout = schema(&tall, false);
+        assert_eq!(layout.cards[1].height, card_height(AUTO_ROWS));
+        assert_eq!(layout.auto_height(1), card_height(AUTO_ROWS));
+        assert_eq!(layout.full_height(1), card_height(102));
+        let shown: Vec<u32> = layout
+            .rows(1, Detail::Columns)
+            .map(|row| row.column)
+            .collect();
+        assert_eq!(shown.len(), AUTO_ROWS - 1);
+        assert_eq!(shown[0], 0);
+        assert_eq!(
+            shown.last(),
+            Some(&101),
+            "the key is kept, drawn in its own place"
+        );
+        let more = layout.more(1, Detail::Columns).expect("the rest counted");
+        assert_eq!(
+            (more.hidden, more.row),
+            (102 - (AUTO_ROWS - 1), AUTO_ROWS - 1)
+        );
+        assert_eq!(
+            layout.row_of(1, 101, Detail::Columns),
+            Some(AUTO_ROWS - 2),
+            "its edge meets its own row"
+        );
+        assert_eq!(layout.row_of(1, 60, Detail::Columns), Some(AUTO_ROWS - 1));
+
+        layout.set_size(1, CARD_WIDTH, Some(card_height(50)));
+        assert_eq!(layout.cards[1].height, card_height(50), "taller by a drag");
+        layout.set_size(1, CARD_WIDTH, Some(f32::MAX));
+        assert_eq!(layout.cards[1].height, layout.full_height(1));
+        assert_eq!(layout.more(1, Detail::Columns), None);
+        layout.set_size(1, CARD_WIDTH, None);
+        assert_eq!(
+            layout.cards[1].height,
+            card_height(AUTO_ROWS),
+            "the cap back"
+        );
+        let drag = |rows| layout.dragged_height(1, rows, Detail::Columns);
+        assert_eq!(drag(12), Some(card_height(12)));
+        assert_eq!(drag(AUTO_ROWS), None, "the cap is the card's own size");
+        assert_eq!(drag(60), Some(card_height(60)));
+        assert_eq!(drag(500), Some(card_height(102)), "past the end: every row");
+        assert_eq!(
+            layout.dragged_height(1, 500, Detail::Keys),
+            None,
+            "past its two key rows at keys: the cap"
+        );
+
+        // Keys only caps a card of more key rows than that the same way.
+        for column in &mut tall.tables[1].columns[1..=40] {
+            column.unique = true;
+        }
+        let keys = schema(&tall, true);
+        assert_eq!(keys.cards[1].key_rows.len(), 42);
+        assert_eq!(keys.cards[1].height, card_height(AUTO_ROWS));
+        assert_eq!(
+            keys.more(1, Detail::Keys).map(|more| more.hidden),
+            Some(42 - (AUTO_ROWS - 1))
+        );
+        let full = schema(&tall, false);
+        assert_eq!(
+            full.rows(1, Detail::Keys).count(),
+            AUTO_ROWS - 1,
+            "and the key rows drawn zoomed out of every column"
+        );
     }
 
     #[test]
@@ -1187,16 +1310,13 @@ mod tests {
         let small = graph(3, &[(1, 0), (2, 1)]);
         assert_eq!(level(&small, false), (Detail::Columns, 1.0));
         assert_eq!(level(&small, true), (Detail::Keys, 1.0));
-        let mut wide = small.clone();
+        // Five layers of cards too wide for every column at a zoom that
+        // draws them.
+        let mut wide = graph(5, &[(1, 0), (2, 1), (3, 2), (4, 3)]);
         for table in &mut wide.tables {
-            table.columns.extend((0..40).map(|column| GraphColumn {
-                name: format!("c{column}").into(),
-                type_label: 0,
-                nullable: true,
-                primary: false,
-                foreign: false,
-                unique: false,
-            }));
+            table
+                .columns
+                .extend((0..40).map(|column| note(format!("c{column}"))));
         }
         let (detail, zoom) = level(&wide, false);
         assert_eq!(detail, Detail::Keys);

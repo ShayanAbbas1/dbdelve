@@ -213,7 +213,7 @@ impl Ready {
                 let shown = &layout.cards[card as usize];
                 (
                     (shown.width != CARD_WIDTH).then_some(shown.width),
-                    (shown.height < layout.full_height(card)).then_some(shown.height),
+                    (shown.height != layout.auto_height(card)).then_some(shown.height),
                 )
             }
         }
@@ -1145,8 +1145,7 @@ impl DiagramView {
                     if handle.heightens() {
                         let layout = ready.scene.layout();
                         let rows = geometry::rows_for_height(height + world.y - from.y);
-                        sized_height = (rows < layout.listed(card, layout.detail(zoom)))
-                            .then(|| geometry::card_height(rows));
+                        sized_height = layout.dragged_height(card, rows, layout.detail(zoom));
                     }
                     if (sized_width, sized_height) != ready.size_of(card) {
                         let edges = ready.resize(card, sized_width, sized_height);

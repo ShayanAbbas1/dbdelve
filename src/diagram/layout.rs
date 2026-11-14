@@ -8,7 +8,8 @@ use std::collections::HashMap;
 use crate::db::{KeyTarget, SchemaGraph};
 
 use super::geometry::{
-    CARD_WIDTH, ChildMark, Detail, LOOP_CONTROL, ParentMark, Point, card_height, row_offset,
+    CARD_WIDTH, ChildMark, Detail, LOOP_CONTROL, ParentMark, Point, auto_height, card_height,
+    row_offset,
 };
 
 /// The space between layers. An edge's curve and both its marks live in it,
@@ -55,8 +56,8 @@ pub struct Card {
     pub origin: Point,
     /// [`CARD_WIDTH`], or the width the user dragged it to.
     pub width: f32,
-    /// The height the layout made room for, or the shorter one the user
-    /// dragged it to. Every level of detail draws inside it.
+    /// The height the layout made room for, or the one the user dragged it
+    /// to. Every level of detail draws inside it.
     pub height: f32,
     pub columns: u32,
     /// The columns shown when only keys are, in column order: those in a
@@ -303,7 +304,7 @@ impl<'a> Builder<'a> {
             subject: Subject::Table(table),
             origin: Point::default(),
             width: CARD_WIDTH,
-            height: card_height(rows),
+            height: auto_height(rows),
             columns: columns.len() as u32,
             key_rows,
             edges: Vec::new(),
