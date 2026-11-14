@@ -14,10 +14,10 @@ use gpui::{
     AppContext, BorderStyle, Bounds, BoxShadow, ContentMask, Context, CursorStyle, DispatchPhase,
     Entity, EventEmitter, FocusHandle, Focusable, Font, FontWeight, Hitbox, HitboxBehavior, Hsla,
     InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement, Path, PathBuilder, PinchEvent, Pixels, Render, ScrollWheelEvent, ShapedLine,
-    SharedString, StatefulInteractiveElement, Styled, Subscription, TextAlign, TextRun,
-    TransformationMatrix, WeakEntity, Window, canvas, div, point, prelude::FluentBuilder, px, quad,
-    size,
+    ParentElement, Path, PathBuilder, PathStyle, PinchEvent, Pixels, Render, ScrollWheelEvent,
+    ShapedLine, SharedString, StatefulInteractiveElement, StrokeOptions, Styled, Subscription,
+    TextAlign, TextRun, TransformationMatrix, WeakEntity, Window, canvas, div, point,
+    prelude::FluentBuilder, px, quad, size,
 };
 
 use gpui_component::{
@@ -47,6 +47,11 @@ use crate::ui::{self, Control, Tone};
 /// Room left around the diagram when it is fitted to the view, in pixels.
 const FIT_MARGIN: f32 = 32.0;
 const EDGE_WIDTH: f32 = 1.25;
+/// How far a tessellated edge may stray from its curve, in screen pixels,
+/// which is where edges are built: the anti-aliasing hides half a pixel,
+/// and lyon's default of a tenth costs several times the vertices, built
+/// again every frame the edges are all on screen.
+const TOLERANCE: f32 = 0.4;
 const LIT_EDGE_WIDTH: f32 = 1.75;
 /// A card's inner padding, in world units.
 const CARD_PAD: f32 = 10.0;
@@ -2820,8 +2825,9 @@ fn edge_paths(layout: &Layout, edge: u32, detail: Detail, zoom: f32, look: EdgeL
         EdgeLook::Lit => LIT_EDGE_WIDTH,
         EdgeLook::Plain | EdgeLook::Dimmed => EDGE_WIDTH,
     });
+    let stroke = || stroke(width);
     let mut pieces = Vec::new();
-    let mut line = PathBuilder::stroke(width);
+    let mut line = stroke();
     for segment in &shape.segments {
         match *segment {
             Segment::Move(to) => line.move_to(screen_point(to, zoom)),
@@ -2838,7 +2844,7 @@ fn edge_paths(layout: &Layout, edge: u32, detail: Detail, zoom: f32, look: EdgeL
         }
     }
     pieces.extend(line.build().ok().map(|path| (path, Paint::Ink)));
-    let mut strokes = PathBuilder::stroke(width);
+    let mut strokes = stroke();
     let mut circles = Vec::new();
     for mark in &shape.marks {
         match *mark {
@@ -2867,11 +2873,20 @@ fn edge_paths(layout: &Layout, edge: u32, detail: Detail, zoom: f32, look: EdgeL
         let mut hole = PathBuilder::fill();
         hole.add_polygon(&ring, true);
         pieces.extend(hole.build().ok().map(|path| (path, Paint::Hole)));
-        let mut outline = PathBuilder::stroke(width);
+        let mut outline = stroke();
         outline.add_polygon(&ring, true);
         pieces.extend(outline.build().ok().map(|path| (path, Paint::Ink)));
     }
     pieces
+}
+
+/// A stroke `width` wide, flattened to [`TOLERANCE`].
+fn stroke(width: Pixels) -> PathBuilder {
+    PathBuilder::stroke(width).with_style(PathStyle::Stroke(
+        StrokeOptions::default()
+            .with_line_width(f32::from(width))
+            .with_tolerance(TOLERANCE),
+    ))
 }
 
 fn translated(path: &Path<Pixels>, by: gpui::Point<Pixels>) -> Path<Pixels> {
@@ -3033,6 +3048,26 @@ mod tests {
                 fit.zoom
             );
         }
+    }
+
+    #[test]
+    fn an_edge_is_flattened_to_a_fraction_of_a_pixel_and_no_finer() {
+        let vertices = |mut builder: PathBuilder| {
+            builder.move_to(point(px(0.0), px(0.0)));
+            builder.cubic_bezier_to(
+                point(px(300.0), px(200.0)),
+                point(px(150.0), px(0.0)),
+                point(px(150.0), px(200.0)),
+            );
+            builder.build().unwrap().vertices.len()
+        };
+        let width = px(EDGE_WIDTH);
+        let ours = vertices(stroke(width));
+        let lyons = vertices(PathBuilder::stroke(width));
+        assert!(
+            5 * ours <= 3 * lyons,
+            "{ours} vertices against lyon's {lyons}"
+        );
     }
 
     #[test]
