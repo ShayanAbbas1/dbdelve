@@ -248,4 +248,81 @@ pub(crate) mod tests {
         );
         assert!(laid_out < Duration::from_millis(50), "{laid_out:?}");
     }
+
+    /// What a frame and a drag cost on the large graph, against the 8 ms frame
+    /// budget (design §6.7). The painting itself needs a window and is not
+    /// measured here: these are the model's share of it.
+    #[cfg(not(debug_assertions))]
+    #[test]
+    #[ignore = "a wall-clock budget, meaningful in a release build only"]
+    fn a_thousand_table_frame_and_drag_fit_their_time_budgets() {
+        use std::time::{Duration, Instant};
+
+        use super::geometry::{Point, Rect};
+        use super::index::Scene;
+
+        let graph = synthetic(1000, 2000);
+        let mut scene = Scene::new(schema(&graph, false));
+        let world = scene.layout().bounds();
+        let tries = 200u32;
+        let at = |step: u32, width: f32, height: f32| Rect {
+            x: world.x + (world.width - width).max(0.0) * (step % 20) as f32 / 19.0,
+            y: world.y + (world.height - height).max(0.0) * (step / 20 % 10) as f32 / 9.0,
+            width,
+            height,
+        };
+
+        for zoom in [1.0f32, 0.7, 0.3] {
+            let (width, height) = (1600.0 / zoom, 1000.0 / zoom);
+            let (mut cull, mut paths, mut hits) = (Duration::ZERO, Duration::ZERO, Duration::ZERO);
+            let (mut cards, mut edges) = (0, 0);
+            let detail = scene.layout().detail(zoom);
+            for step in 0..tries {
+                let view = at(step, width, height);
+                let started = Instant::now();
+                let visible = scene.visible(view, zoom);
+                cull += started.elapsed();
+                let started = Instant::now();
+                for &edge in &visible.edges {
+                    std::hint::black_box(scene.layout().edge_path(edge, detail, zoom));
+                }
+                paths += started.elapsed();
+                let started = Instant::now();
+                std::hint::black_box(scene.card_at(
+                    Point::new(view.x + width / 2.0, view.y + height / 2.0),
+                    zoom,
+                ));
+                hits += started.elapsed();
+                cards += visible.cards.len();
+                edges += visible.edges.len();
+            }
+            let (cull, paths, hits) = (cull / tries, paths / tries, hits / tries);
+            println!(
+                "zoom {zoom}: a 1600x1000 viewport culls in {cull:?} to {} cards and {} edges \
+                 on average; their edge paths take {paths:?}; a hit test {hits:?}",
+                cards / tries as usize,
+                edges / tries as usize,
+            );
+            assert!(cull < Duration::from_millis(1), "{cull:?}");
+            assert!(paths < Duration::from_millis(4), "{paths:?}");
+            assert!(hits < Duration::from_micros(500), "{hits:?}");
+        }
+
+        let count = scene.layout().cards.len() as u32;
+        let (mut moved, mut resized) = (Duration::ZERO, Duration::ZERO);
+        for step in 0..tries {
+            let card = step * 5 % count;
+            let origin = scene.layout().cards[card as usize].origin;
+            let started = Instant::now();
+            scene.move_card(card, Point::new(origin.x + 40.0, origin.y - 25.0));
+            moved += started.elapsed();
+            let started = Instant::now();
+            scene.resize_card(card, Some(300.0), None);
+            resized += started.elapsed();
+        }
+        let (moved, resized) = (moved / tries, resized / tries);
+        println!("a card moves in {moved:?} and is resized in {resized:?}, edges refiled");
+        assert!(moved < Duration::from_millis(1), "{moved:?}");
+        assert!(resized < Duration::from_millis(1), "{resized:?}");
+    }
 }
