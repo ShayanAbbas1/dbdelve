@@ -30,7 +30,7 @@ use crate::actions::{
 };
 use crate::db::{KeyTarget, SchemaGraph};
 use crate::diagram::geometry::{
-    self, Detail, HEADER_HEIGHT, Point, Rect, Segment, Stroke, Transform,
+    self, Detail, Fit, HEADER_HEIGHT, Point, Rect, Segment, Stroke, Transform,
 };
 use crate::diagram::index::Scene;
 use crate::diagram::layout::{Layout, Subject};
@@ -81,6 +81,7 @@ const MINIMAP_MAX_HEIGHT: f32 = 144.0;
 /// Room around the drawn world inside the minimap, in pixels.
 const MINIMAP_PAD: f32 = 8.0;
 const MINIMAP_CARD_ALPHA: f32 = 0.6;
+const ELLIPSIS: &str = "…";
 
 pub enum Load {
     Loading,
@@ -110,6 +111,8 @@ pub struct Ready {
     /// Each type label with the `?` a nullable column's type wears, made once
     /// so a frame never formats one.
     nullable_types: Vec<SharedString>,
+    /// A stub's schema-qualified name, by the key into it, for the same reason.
+    stub_names: HashMap<u32, SharedString>,
 }
 
 impl Ready {
@@ -119,6 +122,14 @@ impl Ready {
             .iter()
             .map(|label| SharedString::from(format!("{label}?")))
             .collect();
+        let stub_names = (graph.keys.iter().enumerate())
+            .filter_map(|(key, graph_key)| match &graph_key.referenced {
+                KeyTarget::Elsewhere { schema, table } => {
+                    Some((key as u32, format!("{schema}.{table}").into()))
+                }
+                KeyTarget::Table { .. } => None,
+            })
+            .collect();
         Self {
             graph: Arc::new(graph),
             bounds: scene.layout().bounds(),
@@ -126,6 +137,7 @@ impl Ready {
             view: View::Schema,
             stash: None,
             nullable_types,
+            stub_names,
         }
     }
 
@@ -151,7 +163,7 @@ impl Ready {
         match self.scene.layout().cards[card as usize].subject {
             Subject::Table(table) => self.graph.tables[table as usize].name.clone(),
             Subject::Stub(key) => match &self.graph.keys[key as usize].referenced {
-                KeyTarget::Elsewhere { schema, table } => format!("{schema}.{table}").into(),
+                KeyTarget::Elsewhere { .. } => self.stub_names[&key].clone(),
                 KeyTarget::Table { table, .. } => self.graph.tables[*table as usize].name.clone(),
             },
         }
@@ -1496,20 +1508,30 @@ impl DiagramView {
                     &inks,
                     window,
                 );
-                let inner = Bounds {
-                    origin: point(header.origin.x + px(pad), header.origin.y),
-                    size: size(header.size.width - px(2.0 * pad), header.size.height),
-                };
-                window.with_content_mask(Some(ContentMask { bounds: inner }), |window| {
-                    let _ = title.paint(
-                        inner.origin,
-                        inner.size.height,
-                        TextAlign::Left,
-                        None,
+                let ellipsis = |face, size, ink, lines: &mut _, window: &mut Window| {
+                    shape(
+                        lines,
+                        stamp,
+                        ELLIPSIS.into(),
+                        face,
+                        size,
+                        ink,
+                        dimmed,
+                        &inks,
                         window,
-                        cx,
-                    );
-                });
+                    )
+                };
+                let title_ellipsis = ellipsis(Face::Title, name_size, Ink::Text, lines, window);
+                let room = header.size.width - px(2.0 * pad);
+                paint_label(
+                    &title,
+                    &title_ellipsis,
+                    fit(&title, &title_ellipsis, room),
+                    point(header.origin.x + px(pad), header.origin.y),
+                    header.size.height,
+                    window,
+                    cx,
+                );
 
                 let Subject::Table(table) = layout.cards[card as usize].subject else {
                     continue;
@@ -1560,35 +1582,9 @@ impl DiagramView {
                         );
                     }
                     let name_x = icon_at.x + px(icon_size + ICON_GAP * zoom);
-                    let mut name_right = row_bounds.origin.x + row_bounds.size.width - px(pad);
-                    if detail.types() {
-                        let label = match column.nullable {
-                            true => ready.nullable_types[column.type_label as usize].clone(),
-                            false => ready.graph.types[column.type_label as usize].clone(),
-                        };
-                        let shaped = shape(
-                            lines,
-                            stamp,
-                            label,
-                            Face::Type,
-                            type_size,
-                            Ink::Muted,
-                            dimmed,
-                            &inks,
-                            window,
-                        );
-                        let x = name_right - shaped.width();
-                        let _ = shaped.paint(
-                            point(x, row_bounds.origin.y),
-                            row_bounds.size.height,
-                            TextAlign::Left,
-                            None,
-                            window,
-                            cx,
-                        );
-                        name_right = x - px(ICON_GAP * zoom);
-                    }
-                    let shaped = shape(
+                    let right = row_bounds.origin.x + row_bounds.size.width - px(pad);
+                    let mut room = right - name_x;
+                    let name = shape(
                         lines,
                         stamp,
                         column.name.clone(),
@@ -1599,20 +1595,57 @@ impl DiagramView {
                         &inks,
                         window,
                     );
-                    let clip = Bounds {
-                        origin: point(name_x, row_bounds.origin.y),
-                        size: size((name_right - name_x).max(px(0.0)), row_bounds.size.height),
-                    };
-                    window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
-                        let _ = shaped.paint(
-                            clip.origin,
-                            clip.size.height,
-                            TextAlign::Left,
-                            None,
+                    let name_ellipsis = ellipsis(Face::Column, name_size, Ink::Text, lines, window);
+                    if detail.types() {
+                        let label = match column.nullable {
+                            true => ready.nullable_types[column.type_label as usize].clone(),
+                            false => ready.graph.types[column.type_label as usize].clone(),
+                        };
+                        let label = shape(
+                            lines,
+                            stamp,
+                            label,
+                            Face::Type,
+                            type_size,
+                            Ink::Muted,
+                            dimmed,
+                            &inks,
+                            window,
+                        );
+                        let label_ellipsis =
+                            ellipsis(Face::Type, type_size, Ink::Muted, lines, window);
+                        let gap = ICON_GAP * zoom;
+                        let label_room = geometry::type_room(
+                            f32::from(room),
+                            f32::from(name.width()),
+                            f32::from(label.width()),
+                            gap,
+                        );
+                        let label_fit = fit(&label, &label_ellipsis, px(label_room));
+                        let drawn = px(label_fit
+                            .width(f32::from(label.width()), f32::from(label_ellipsis.width())));
+                        paint_label(
+                            &label,
+                            &label_ellipsis,
+                            label_fit,
+                            point(right - drawn, row_bounds.origin.y),
+                            row_bounds.size.height,
                             window,
                             cx,
                         );
-                    });
+                        if drawn > px(0.0) {
+                            room -= drawn + px(gap);
+                        }
+                    }
+                    paint_label(
+                        &name,
+                        &name_ellipsis,
+                        fit(&name, &name_ellipsis, room),
+                        point(name_x, row_bounds.origin.y),
+                        row_bounds.size.height,
+                        window,
+                        cx,
+                    );
                 }
             }
         });
@@ -1764,6 +1797,50 @@ fn floating(t: Theme) -> gpui::Div {
         .border_1()
         .border_color(t.border)
         .map(|card| ui::frosted_card(card, t))
+}
+
+/// How a shaped label fits `room`, cut with `ellipsis` when it must be.
+fn fit(line: &ShapedLine, ellipsis: &ShapedLine, room: Pixels) -> Fit {
+    let starts = (line.runs.iter())
+        .flat_map(|run| &run.glyphs)
+        .map(|glyph| (glyph.index, f32::from(glyph.position.x)));
+    Fit::of(
+        &line.text,
+        f32::from(line.width()),
+        f32::from(room),
+        f32::from(ellipsis.width()),
+        starts,
+    )
+}
+
+/// A label painted from `origin` as `fit` says: whole, or clipped where its
+/// cut falls with the ellipsis after it, so a cut never shapes new text.
+fn paint_label(
+    line: &ShapedLine,
+    ellipsis: &ShapedLine,
+    fit: Fit,
+    origin: gpui::Point<Pixels>,
+    height: Pixels,
+    window: &mut Window,
+    cx: &mut gpui::App,
+) {
+    match fit {
+        Fit::Whole => {
+            let _ = line.paint(origin, height, TextAlign::Left, None, window, cx);
+        }
+        Fit::Cut(x) => {
+            let kept = Bounds {
+                origin,
+                size: size(px(x), height),
+            };
+            window.with_content_mask(Some(ContentMask { bounds: kept }), |window| {
+                let _ = line.paint(origin, height, TextAlign::Left, None, window, cx);
+            });
+            let at = point(origin.x + px(x), origin.y);
+            let _ = ellipsis.paint(at, height, TextAlign::Left, None, window, cx);
+        }
+        Fit::Hidden => {}
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

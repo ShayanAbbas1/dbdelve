@@ -157,6 +157,73 @@ pub fn text_size(zoom: f32, base: f32) -> f32 {
     (base * step).max(MIN_TEXT_SIZE)
 }
 
+/// How a label fits the room it is given.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Fit {
+    Whole,
+    /// Drawn up to the character that starts this far in, with the ellipsis
+    /// there.
+    Cut(f32),
+    /// Not even the ellipsis fits.
+    Hidden,
+}
+
+impl Fit {
+    /// A label shaped `width` wide, cut so it and an `ellipsis` fit `room`.
+    /// `starts` are where its characters start, in order; a cut never leaves
+    /// a space before the ellipsis.
+    pub fn of(
+        text: &str,
+        width: f32,
+        room: f32,
+        ellipsis: f32,
+        starts: impl Iterator<Item = (usize, f32)>,
+    ) -> Self {
+        if width <= room {
+            return Self::Whole;
+        }
+        if ellipsis > room {
+            return Self::Hidden;
+        }
+        let mut cut = 0.0;
+        for (at, x) in starts {
+            if x + ellipsis > room {
+                break;
+            }
+            if text.get(..at).is_some_and(|kept| {
+                kept.chars()
+                    .next_back()
+                    .is_some_and(|last| !last.is_whitespace())
+            }) {
+                cut = x;
+            }
+        }
+        Self::Cut(cut)
+    }
+
+    /// The label's width as drawn.
+    pub fn width(self, width: f32, ellipsis: f32) -> f32 {
+        match self {
+            Self::Whole => width,
+            Self::Cut(x) => x + ellipsis,
+            Self::Hidden => 0.0,
+        }
+    }
+}
+
+/// The share of a row a column's type keeps when the name and type together
+/// overflow it, so a long name cannot push the type out entirely.
+const TYPE_SHARE: f32 = 0.4;
+
+/// The room a column's type gets in a row `room` wide: all it needs when it
+/// fits beside the name, else whatever the name leaves, but never under
+/// [`TYPE_SHARE`] of the row. The name takes what the type does not.
+pub fn type_room(room: f32, name: f32, label: f32, gap: f32) -> f32 {
+    label
+        .min((room - gap - name).max(room * TYPE_SHARE))
+        .max(0.0)
+}
+
 pub fn card_height(rows: usize) -> f32 {
     match rows {
         0 => HEADER_HEIGHT,
@@ -702,6 +769,58 @@ mod tests {
             }
         }
         assert_eq!(text_size(1.0, 13.0), 13.0);
+    }
+
+    #[test]
+    fn a_long_label_is_cut_at_a_character_with_room_for_the_ellipsis() {
+        // Every character 10 wide, the ellipsis 8.
+        let starts = |text: &str| {
+            text.char_indices()
+                .enumerate()
+                .map(|(n, (at, _))| (at, n as f32 * 10.0))
+                .collect::<Vec<_>>()
+        };
+        let fit = |text: &str, room: f32| {
+            let width = text.chars().count() as f32 * 10.0;
+            Fit::of(text, width, room, 8.0, starts(text).into_iter())
+        };
+        assert_eq!(fit("orders", 60.0), Fit::Whole);
+        assert_eq!(fit("orders", 100.0), Fit::Whole);
+        assert_eq!(fit("orders", 59.0), Fit::Cut(50.0));
+        assert_eq!(fit("orders", 48.0), Fit::Cut(40.0));
+        assert_eq!(
+            fit("order lines", 68.0),
+            Fit::Cut(50.0),
+            "no space before the ellipsis"
+        );
+        assert_eq!(fit("orders", 12.0), Fit::Cut(0.0));
+        assert_eq!(fit("orders", 7.0), Fit::Hidden);
+        assert_eq!(
+            fit("åäöü", 25.0),
+            Fit::Cut(10.0),
+            "cut on a character, not a byte"
+        );
+        assert_eq!(Fit::Cut(40.0).width(60.0, 8.0), 48.0);
+        assert_eq!(Fit::Whole.width(60.0, 8.0), 60.0);
+        assert_eq!(Fit::Hidden.width(60.0, 8.0), 0.0);
+    }
+
+    #[test]
+    fn a_columns_type_keeps_a_share_of_a_row_its_name_overflows() {
+        assert_eq!(type_room(200.0, 80.0, 60.0, 6.0), 60.0, "both fit");
+        assert_eq!(type_room(200.0, 150.0, 120.0, 6.0), 80.0, "never under 40%");
+        assert_eq!(
+            type_room(200.0, 150.0, 60.0, 6.0),
+            60.0,
+            "nor over its width"
+        );
+        assert_eq!(
+            type_room(200.0, 100.0, 120.0, 6.0),
+            94.0,
+            "what the name leaves"
+        );
+        assert_eq!(type_room(200.0, 20.0, 300.0, 6.0), 174.0);
+        assert_eq!(type_room(0.0, 20.0, 30.0, 6.0), 0.0);
     }
 
     #[test]
