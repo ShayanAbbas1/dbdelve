@@ -91,18 +91,19 @@ allocated for it.
 **Messages** (`plugins/protocol/src/message.rs`, `tag = "type"`). Host to
 plugin: `hello`, `prepare`, `open`, `query { sql, eligible }`, `credit`,
 `stop`, `cancel`, `catalog`, `structure`, `references`, `write { statements }`,
-`close`. Plugin to host:
+`graph { schema }`, `close`. Plugin to host:
 `hello`, `prepared`, `opened`, `end`, `error { kind, message, sqlstate,
-position, lost }`, `catalog`, `structure`, `references`, `closed`. `credit`,
+position, lost }`, `catalog`, `structure`, `references`, `graph`, `closed`. `credit`,
 `stop` and `cancel` carry the id of the query they target and get no answer of
 their own: that query's terminal frame is the answer. Unknown fields are
 ignored; an unknown `type` is a violation on the host and `error { kind:
 unsupported }` from a plugin.
 
-- **Optional messages exist only once something sends them.** v1 defines two,
-  `references` and `write`, each sent only when both the host's `hello` and
-  the plugin's `opened` list it. A later one is added beside them with no
-  protocol bump, because a host never sends what a plugin did not list.
+- **Optional messages exist only once something sends them.** v1 defines
+  three, `references`, `write` and `graph`, each sent only when both the
+  plugin's `hello` and its `opened` list it. A later one is added beside them
+  with no protocol bump, because a host never sends what a plugin did not
+  list, and a plugin from before one keeps working as it did.
 - **`write` is the grid's edits, one transaction.** Statements DBDelve wrote,
   each meant to change exactly one row, run through the driver's own
   transaction control, never as `BEGIN` text, which a driver that commits each
@@ -111,6 +112,18 @@ unsupported }` from a plugin.
   `end { rows: 0, rows_affected: total }` or by `error`, and a `cancel` rolls
   the lot back. The session is in autocommit again either way, and an `error {
   lost: true }` says it could not be rolled back or put back in autocommit.
+- **`graph` is one schema for the ER diagram**: its base tables (never
+  views) with their columns, every primary key, unique constraint and unique
+  index (partial and expression indexes left out), and every foreign key
+  declared on those tables, each key's columns in key order and its name
+  distinct among its table's keys of that kind. The host turns the answer
+  into the three results `db::graph::assemble_schema_graph` takes, so a
+  plugin's graph is assembled exactly as a built-in's. Unlike the other
+  catalog requests it is cancelled as a query is and has no deadline (see
+  Cancel below). Whether a connection draws diagrams is asked of it
+  (`Connection::draws_diagrams`), not of `Target`: a plugin that did not offer
+  `graph` shows no diagram entry anywhere, and `schema_graph` refuses one
+  unsent.
 - **The password travels only in `open`**, never in `prepare`, and in its own
   `Password` type whose `Debug` prints nothing, so no log of a request can carry
   it.
@@ -218,6 +231,11 @@ tested.
   `CANCEL_DEADLINE`, or 300 s with no timeout (`catalog_deadline`). They belong
   to no run, so no Cancel reaches them, and a driver wedged in one would hold
   the session until disconnect.
+- **`graph` is the exception**: a driver reading keys a table at a time makes
+  three calls per table, which no fixed deadline fits, so it waits as a query
+  does and any Cancel on its connection stops it, `CANCEL_DEADLINE` and all.
+  It belongs to no run either, but it runs alone on a connection of its own
+  (`apart`), so a Cancel there can only be for it.
 - **A crash is a reported reset, never a replay.** On a violation, EOF or exit
   every pending request gets "The ODBC plugin stopped (exit status: 139). The
   connection was reset: any open transaction, temporary tables and session

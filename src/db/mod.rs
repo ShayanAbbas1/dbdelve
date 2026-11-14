@@ -1926,9 +1926,7 @@ impl Connection {
             Self::ClickHouse(_) | Self::MongoDb(_) | Self::Redis(_) => Err(plain_error(
                 "This engine declares no foreign keys to draw.".into(),
             )),
-            Self::External(_) => Err(plain_error(
-                "A diagram is not drawn through a plugin driver.".into(),
-            )),
+            Self::External(connection) => connection.schema_graph(schema),
         }
     }
 

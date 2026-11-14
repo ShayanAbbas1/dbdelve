@@ -43,8 +43,8 @@ pub enum Request {
     /// early if that is provably safe, or fetch it to the end without sending.
     Stop,
     /// The user's Cancel, which may abort their transaction. The host
-    /// cancels only a `query`; a `catalog`, `structure` or `references` request
-    /// is bounded by a deadline instead. A cancel is answered within
+    /// cancels only a `query`, a `write` and a `graph`; a `catalog`,
+    /// `structure` or `references` request is bounded by a deadline instead. A cancel is answered within
     /// [`crate::limits::CANCEL_DEADLINE`] by that request's own answer or an
     /// `error { kind: cancelled }`; a plugin that does neither is killed.
     Cancel,
@@ -72,6 +72,13 @@ pub enum Request {
     Write {
         statements: Vec<String>,
     },
+    /// Optional, as `references` is. The base tables of the schema named
+    /// exactly `schema`, with their columns and declared keys, for the ER
+    /// diagram. Unlike the other catalog requests a `cancel` reaches it: a
+    /// driver that reads keys a table at a time makes a call per table.
+    Graph {
+        schema: String,
+    },
     Close,
 }
 
@@ -86,13 +93,16 @@ impl fmt::Debug for Password {
     }
 }
 
-/// The optional message v1 defines. A later one is added beside it and
-/// negotiated the same way, with no protocol bump, because a host never sends
-/// what a plugin did not list.
+/// The first optional message v1 defined. A later one is added beside it
+/// and negotiated the same way, with no protocol bump, because a host never
+/// sends what a plugin did not list.
 pub const REFERENCES: &str = "references";
 
 /// The optional `write` request.
 pub const WRITE: &str = "write";
+
+/// The optional `graph` request.
+pub const GRAPH: &str = "graph";
 
 /// Arrow field metadata a plugin sets to `"true"` on a column whose values it
 /// sends as text the server reads back as the same value, so a row can be
@@ -160,6 +170,7 @@ pub enum Response {
     References {
         references: Vec<Reference>,
     },
+    Graph(Graph),
     Closed,
 }
 
@@ -247,6 +258,51 @@ pub struct Reference {
     pub referenced_column: String,
 }
 
+/// One schema's base tables and declared keys. Views are left out: they
+/// declare no keys.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Graph {
+    /// In the catalog's order, each with its columns in table order.
+    pub tables: Vec<GraphTable>,
+    /// Every primary key, unique constraint and unique index of `tables`,
+    /// leaving out partial and expression indexes, which make no column
+    /// unique.
+    pub unique_keys: Vec<UniqueKey>,
+    /// Every foreign key declared on `tables`, wherever it points.
+    pub foreign_keys: Vec<GraphKey>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphTable {
+    pub name: String,
+    /// `default` is not read for a graph and is always `None`.
+    pub columns: Vec<Column>,
+}
+
+/// A key's `name` is distinct among its table's keys of the same kind, so
+/// two keys never read as one; where the driver names none, the plugin makes
+/// one up.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UniqueKey {
+    pub table: String,
+    pub name: String,
+    /// In key order.
+    pub columns: Vec<String>,
+    pub primary: bool,
+}
+
+/// See [`UniqueKey`] for `name`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphKey {
+    pub table: String,
+    pub name: String,
+    /// In key order, paired by position with `referenced_columns`.
+    pub columns: Vec<String>,
+    pub referenced_schema: String,
+    pub referenced_table: String,
+    pub referenced_columns: Vec<String>,
+}
+
 impl Request {
     pub fn to_payload(&self) -> Vec<u8> {
         to_payload(self)
@@ -317,6 +373,9 @@ mod tests {
             },
             Request::Write {
                 statements: vec!["UPDATE t SET a = 1 WHERE id = 2".to_string()],
+            },
+            Request::Graph {
+                schema: "s".to_string(),
             },
             Request::Close,
         ];
@@ -414,6 +473,31 @@ mod tests {
                     referenced_column: "id".to_string(),
                 }],
             },
+            Response::Graph(Graph {
+                tables: vec![GraphTable {
+                    name: "orders".to_string(),
+                    columns: vec![Column {
+                        name: "account_id".to_string(),
+                        data_type: "BIGINT".to_string(),
+                        nullable: false,
+                        default: None,
+                    }],
+                }],
+                unique_keys: vec![UniqueKey {
+                    table: "orders".to_string(),
+                    name: "pk".to_string(),
+                    columns: vec!["account_id".to_string(), "number".to_string()],
+                    primary: true,
+                }],
+                foreign_keys: vec![GraphKey {
+                    table: "orders".to_string(),
+                    name: "fk".to_string(),
+                    columns: vec!["account_id".to_string()],
+                    referenced_schema: "billing".to_string(),
+                    referenced_table: "accounts".to_string(),
+                    referenced_columns: vec!["id".to_string()],
+                }],
+            }),
             Response::Closed,
         ];
         for response in responses {

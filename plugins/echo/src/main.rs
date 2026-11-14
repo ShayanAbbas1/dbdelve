@@ -35,6 +35,10 @@
 //! empty structure for anything else, as the ODBC bridge does for a relation
 //! that does not exist; in any other schema every relation is `accounts`.
 //!
+//! `graph` answers the dev seed's `accounts`, `orders` and `order_items`, with
+//! a key into `elsewhere`, for any schema but `fail`, which answers as that
+//! statement does, and `sleep`, which waits up to 60 s for a `cancel`.
+//!
 //! `write` runs its statements as one fake transaction: each changes one row,
 //! but one holding `'missing'` changes none, which fails the lot with nothing
 //! kept. `last` then answers with the statements, one a line.
@@ -45,8 +49,8 @@
 //!
 //! Environment: `DBDELVE_ECHO_PROTOCOL=<n>` makes `hello` claim protocol n;
 //! `DBDELVE_ECHO_STDERR=<text>` writes the text to stderr and exits before
-//! `hello`; `DBDELVE_ECHO_PLAIN=1` leaves `references` and `write` out of
-//! `optional`;
+//! `hello`; `DBDELVE_ECHO_PLAIN=1` leaves `references`, `write` and `graph` out
+//! of `optional`;
 //! `DBDELVE_ECHO_DRAINS=1` opens with `stops_early: false`;
 //! `DBDELVE_ECHO_REFUSE_SET=1` answers every `SET …` as `fail` does;
 //! `DBDELVE_ECHO_HELD_ENDS=1` holds `commit` and `rollback` up to 60 s for a
@@ -86,8 +90,8 @@ use dbdelve_plugin_protocol as wire;
 use dbdelve_plugin_protocol::arrow::{encode_batch, encode_schema};
 use dbdelve_plugin_protocol::limits::{BATCH_ROWS, MAX_FRAME, WINDOW, credit_cost};
 use dbdelve_plugin_protocol::{
-    BASE_COLUMN, BASE_SCHEMA, BASE_TABLE, EXACT, ErrorKind, Kind, PROTOCOL, REFERENCES, Request,
-    Response, Tls, WRITE, read_frame, write_frame,
+    BASE_COLUMN, BASE_SCHEMA, BASE_TABLE, EXACT, ErrorKind, GRAPH, Kind, PROTOCOL, REFERENCES,
+    Request, Response, Tls, WRITE, read_frame, write_frame,
 };
 
 const CLOSING: Duration = Duration::from_millis(200);
@@ -149,6 +153,7 @@ fn main() {
                             | Request::Catalog
                             | Request::Structure { .. }
                             | Request::References { .. }
+                            | Request::Graph { .. }
                     ) {
                         control.start(id);
                     }
@@ -294,6 +299,104 @@ fn accounts(schema: &str, relation: &str) -> wire::Structure {
     }
 }
 
+/// The dev seed's keys, as every engine's graph test reads them back: a
+/// composite key given against its columns' order, a unique column, and a
+/// key into another schema.
+fn graph() -> wire::Graph {
+    let column = |name: &str, data_type: &str, nullable| wire::Column {
+        name: name.into(),
+        data_type: data_type.into(),
+        nullable,
+        default: None,
+    };
+    let table = |name: &str, columns| wire::GraphTable {
+        name: name.into(),
+        columns,
+    };
+    let names = |names: &[&str]| names.iter().map(|name| (*name).into()).collect();
+    let unique = |table: &str, name: &str, columns: &[&str], primary| wire::UniqueKey {
+        table: table.into(),
+        name: name.into(),
+        columns: names(columns),
+        primary,
+    };
+    let key = |table: &str, name: &str, columns: &[&str], schema: &str, to: &str, onto: &[&str]| {
+        wire::GraphKey {
+            table: table.into(),
+            name: name.into(),
+            columns: names(columns),
+            referenced_schema: schema.into(),
+            referenced_table: to.into(),
+            referenced_columns: names(onto),
+        }
+    };
+    wire::Graph {
+        tables: vec![
+            table(
+                "accounts",
+                vec![
+                    column("id", "bigint", false),
+                    column("external_id", "uuid", false),
+                ],
+            ),
+            table(
+                "orders",
+                vec![
+                    column("account_id", "bigint", false),
+                    column("number", "integer", false),
+                ],
+            ),
+            table(
+                "order_items",
+                vec![
+                    column("id", "integer", false),
+                    column("order_account_id", "bigint", true),
+                    column("order_number", "integer", true),
+                    column("owner_id", "bigint", true),
+                ],
+            ),
+            table("empty", Vec::new()),
+        ],
+        unique_keys: vec![
+            unique("accounts", "accounts_pkey", &["id"], true),
+            unique(
+                "accounts",
+                "accounts_external_id_key",
+                &["external_id"],
+                false,
+            ),
+            unique("orders", "orders_pkey", &["account_id", "number"], true),
+            unique("order_items", "order_items_pkey", &["id"], true),
+        ],
+        foreign_keys: vec![
+            key(
+                "orders",
+                "orders_account_id_fkey",
+                &["account_id"],
+                "main",
+                "accounts",
+                &["id"],
+            ),
+            key(
+                "order_items",
+                "order_items_order_fkey",
+                &["order_account_id", "order_number"],
+                "main",
+                "orders",
+                &["account_id", "number"],
+            ),
+            key(
+                "order_items",
+                "order_items_owner_fkey",
+                &["owner_id"],
+                "elsewhere",
+                "owners",
+                &["id"],
+            ),
+        ],
+    }
+}
+
 enum Job {
     Run(u64, Request),
     Refuse(u64, ErrorKind, String),
@@ -414,7 +517,7 @@ impl Echo {
             last: String::new(),
             optional: match plain {
                 true => Vec::new(),
-                false => vec![REFERENCES.to_string(), WRITE.to_string()],
+                false => vec![REFERENCES.to_string(), WRITE.to_string(), GRAPH.to_string()],
             },
         }
     }
@@ -501,6 +604,13 @@ impl Echo {
                     }],
                 },
             ),
+            Request::Graph { schema } => match schema.as_str() {
+                "fail" => self.error(id, ErrorKind::Server, "no such schema".into(), None, false),
+                "sleep" if self.control.cancelled_within(Duration::from_secs(60)) => {
+                    self.cancelled(id);
+                }
+                _ => self.reply(id, Response::Graph(graph())),
+            },
             Request::Close => {
                 // Written before `closed` goes out: once it has, the host may
                 // end stdin at once, and the reader's exit on EOF would race
