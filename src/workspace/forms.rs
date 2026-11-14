@@ -567,22 +567,25 @@ impl Workspace {
                     .into_any_element(),
             );
             if form.ssm {
-                for (id, label, input) in [
+                for (index, (id, label, input)) in [
                     ("ssm-target", "Target instance", &form.ssm_target),
                     ("ssm-profile", "AWS profile", &form.ssm_profile),
                     ("ssm-region", "AWS region", &form.ssm_region),
                     ("ssm-aws-cli", "AWS CLI path", &form.ssm_aws_cli),
                     ("ssm-plugin", "Plugin path", &form.ssm_plugin),
-                ] {
+                ]
+                .into_iter()
+                .enumerate()
+                {
                     let row = nested_field_row(layout::SPACE_MD, id, label, input, bare(input), t);
-                    security.push(if id == "ssm-plugin" {
-                        div()
-                            .child(row)
-                            .child(help("Executable paths are optional. Leave blank to find the tools on PATH."))
-                            .into_any_element()
+                    let row = if id == "ssm-plugin" {
+                        div().child(row).child(help(
+                            "Executable paths are optional. Leave blank to find the tools on PATH.",
+                        ))
                     } else {
-                        row.into_any_element()
-                    });
+                        row
+                    };
+                    security.push(revealed(row, "ssm-reveal", index, !cx.reduce_motion()));
                 }
             }
             if form.ssh {
@@ -634,7 +637,7 @@ impl Workspace {
                 security.extend(
                     rows.into_iter()
                         .enumerate()
-                        .map(|(index, row)| revealed(row, index, reveal)),
+                        .map(|(index, row)| revealed(row, "ssh-reveal", index, reveal)),
                 );
             }
         }
@@ -3615,20 +3618,20 @@ fn port_field(input: &Entity<InputState>, t: Theme) -> gpui::Div {
         .child(div().flex_1().min_w_0().child(bare(input)))
 }
 
-const SSH_REVEAL_MS: u64 = 220;
-const SSH_REVEAL_PX: f32 = 4.;
+const TUNNEL_REVEAL_MS: u64 = 220;
+const TUNNEL_REVEAL_PX: f32 = 4.;
 
-/// The SSH rows, settling in once as the tunnel is switched on. Keyed by the
+/// The tunnel rows, settling in once as the tunnel is switched on. Keyed by the
 /// row, so it plays each time they mount and never again while they stay.
-fn revealed(row: gpui::Div, index: usize, animate: bool) -> AnyElement {
+fn revealed(row: gpui::Div, section: &'static str, index: usize, animate: bool) -> AnyElement {
     if !animate {
         return row.into_any_element();
     }
     row.relative()
         .with_animation(
-            ("ssh-reveal", index),
-            Animation::new(Duration::from_millis(SSH_REVEAL_MS)).with_easing(ease_out_quint()),
-            |row, delta| row.opacity(delta).top(px(-SSH_REVEAL_PX * (1. - delta))),
+            (section, index),
+            Animation::new(Duration::from_millis(TUNNEL_REVEAL_MS)).with_easing(ease_out_quint()),
+            |row, delta| row.opacity(delta).top(px(-TUNNEL_REVEAL_PX * (1. - delta))),
         )
         .into_any_element()
 }
