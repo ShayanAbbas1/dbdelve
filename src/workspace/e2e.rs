@@ -4086,6 +4086,47 @@ fn the_palette_opens_a_diagram_that_takes_the_keyboard_and_escape_clears_its_foc
 }
 
 #[gpui::test]
+fn a_diagram_behind_another_tab_lets_its_render_caches_go_and_draws_again_when_shown(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, DIAGRAM_SCHEMA);
+        let view = show_diagram(&workspace, cx);
+        let caches =
+            |cx: &mut VisualTestContext| cx.update(|_, cx| view.read(cx).holds_render_caches());
+        assert!(caches(cx), "drawn from its caches");
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_relation_view(
+                "main".into(),
+                "birds".into(),
+                crate::db::RelationKind::Table,
+                false,
+                window,
+                cx,
+            );
+        });
+        settle(cx);
+        assert!(!caches(cx), "let go behind the birds' rows");
+
+        show_diagram(&workspace, cx);
+        assert!(caches(cx), "built again when shown");
+        let sightings = cx
+            .update(|_, cx| view.read(cx).table_on_screen("sightings"))
+            .expect("the diagram drew the sightings");
+        cx.simulate_click(sightings, gpui::Modifiers::default());
+        settle(cx);
+        assert_eq!(
+            cx.update(|_, cx| view.read(cx).focused_name()).as_deref(),
+            Some("sightings"),
+            "and a click finds its card"
+        );
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn a_diagram_read_outlived_by_a_reconnect_is_read_again_for_the_tab_in_front(
     cx: &mut TestAppContext,
 ) {

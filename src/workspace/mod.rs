@@ -235,6 +235,9 @@ pub(crate) struct Workspace {
     pub(crate) form: Option<ConnectionForm>,
     /// Whether the menu bar last set lists Import Rows.
     menu_imports_rows: bool,
+    /// The diagram in front at the last render, told to let its render caches
+    /// go once it is not.
+    shown_diagram: Option<gpui::WeakEntity<crate::diagram_view::DiagramView>>,
     /// Bumped by every import asked for, so a paste still being read when
     /// another is asked for opens nothing when it lands.
     import_requests: u64,
@@ -465,6 +468,7 @@ impl Workspace {
             active: None,
             form: None,
             menu_imports_rows: false,
+            shown_diagram: None,
             import_requests: 0,
             projects: Vec::new(),
             project_name: None,
@@ -1417,6 +1421,7 @@ impl Render for Workspace {
             self.menu_imports_rows = imports_rows;
             cx.set_menus(crate::app_menus(imports_rows));
         }
+        self.track_shown_diagram(cx);
         self.settle_sidebar(window, cx);
         self.reveal_landed_column(window, cx);
         if !self.row_panel.on_screen.get() {

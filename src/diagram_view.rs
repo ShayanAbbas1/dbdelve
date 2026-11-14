@@ -457,6 +457,9 @@ pub struct DiagramView {
     /// How the tab was being looked at when it was written to disk, until
     /// its first read lands and it is applied.
     restore: Option<store::StoredDiagram>,
+    /// Behind another tab or profile since it was last painted, so holding
+    /// none of what only drawing needs ([`Self::hide`]).
+    hidden: bool,
 }
 
 impl EventEmitter<DiagramEvent> for DiagramView {}
@@ -483,6 +486,7 @@ impl DiagramView {
             minimap: None,
             layouts: 0,
             restore: None,
+            hidden: false,
         }
     }
 
@@ -571,6 +575,34 @@ impl DiagramView {
         &self.focus_handle
     }
 
+    /// The tab went behind another, or its profile did: drops the shaped
+    /// lines, the tessellated edges and both scenes' grids, keeping the
+    /// graph, the layouts and where the cards are (design §6.6). The next
+    /// paint builds what it draws again, the grid in about 5 ms on a
+    /// thousand tables.
+    pub fn hide(&mut self) {
+        self.hidden = true;
+        self.lines = HashMap::new();
+        self.more_labels = HashMap::new();
+        self.stamp = None;
+        self.paths = HashMap::new();
+        self.hover = None;
+        if let Load::Ready(ready) = &mut self.load {
+            ready.scene.release();
+            if let Some((schema, _)) = &mut ready.stash {
+                schema.release();
+            }
+        }
+    }
+
+    /// A scene that lands while the tab is hidden is laid out with its grid,
+    /// which nothing draws from until it is shown.
+    fn release_if_hidden(&mut self) {
+        if self.hidden {
+            self.hide();
+        }
+    }
+
     /// Whether keys only is on, once there is a diagram to show it on.
     pub fn keys_only(&self) -> Option<bool> {
         self.ready().map(|_| self.keys_only)
@@ -599,6 +631,7 @@ impl DiagramView {
         {
             self.apply_restore(restore);
         }
+        self.release_if_hidden();
         cx.notify();
     }
 
@@ -655,6 +688,7 @@ impl DiagramView {
         if switched && view == View::Schema {
             self.lay_out(view, cx);
         }
+        self.release_if_hidden();
         cx.notify();
     }
 
@@ -888,6 +922,7 @@ impl DiagramView {
         if let Some(text) = self.find.as_ref().map(|find| find.input.read(cx).value()) {
             self.rank(&text);
         }
+        self.release_if_hidden();
         cx.notify();
     }
 
@@ -1803,6 +1838,18 @@ impl DiagramView {
         self.transform.zoom
     }
 
+    /// Whether anything only drawing needs is held: shaped lines,
+    /// tessellated edges, a scene's grid.
+    #[cfg(test)]
+    pub fn holds_render_caches(&self) -> bool {
+        !self.lines.is_empty()
+            || !self.paths.is_empty()
+            || self.ready().is_some_and(|ready| {
+                ready.scene.is_filed()
+                    || (ready.stash.as_ref()).is_some_and(|(schema, _)| schema.is_filed())
+            })
+    }
+
     /// The tables on screen and whether their cards were given room for keys
     /// only, once laid out.
     #[cfg(test)]
@@ -1898,6 +1945,10 @@ impl DiagramView {
     }
 
     fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        self.hidden = false;
+        if let Load::Ready(ready) = &mut self.load {
+            ready.scene.refile();
+        }
         let t = *theme(cx);
         let inks = popup_theme(cx);
         let stamp = Stamp {

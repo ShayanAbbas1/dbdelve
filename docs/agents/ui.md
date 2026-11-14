@@ -131,6 +131,12 @@ the model for any other that must.
   changes (`Stamp`), since each line holds its colour and family. Sizes are
   quantized to a few steps because gpui's glyph atlas never evicts a size.
   Labels never go under 11 px.
+- **A diagram behind another tab holds nothing only drawing needs.** When
+  another tab or profile comes to the front (`Workspace::track_shown_diagram`,
+  checked each render), `DiagramView::hide` drops the shaped lines, the
+  tessellated edges and both scenes' grids (`Scene::release`), keeping the
+  graph, the layouts and the cards' places; the next paint files the grid
+  again (`Scene::refile`).
 - **Nothing animates.** No timer, no repeating animation (`AGENTS.md`, GPUI
   hazards): a frame is drawn when a gesture or a load notifies the view, and the
   view is mounted cached so a redraw elsewhere reuses its last frame. Idle is

@@ -31,6 +31,9 @@ pub struct Scene {
     /// The cells that hold anything, so a query zoomed far out visits only
     /// those rather than every cell of the viewport.
     occupied: Option<(i32, i32, i32, i32)>,
+    /// Whether the grid and envelopes are built: not while the diagram is
+    /// behind another tab ([`Self::release`]).
+    filed: bool,
 }
 
 /// Where the user left a card and what size they gave it, each part only
@@ -59,23 +62,48 @@ pub struct Visible {
 
 impl Scene {
     pub fn new(layout: Layout) -> Self {
-        let envelopes = (0..layout.edges.len() as u32)
-            .map(|edge| layout.edge_envelopes(edge))
-            .collect();
         let mut scene = Self {
             layout,
-            envelopes,
+            envelopes: Vec::new(),
             cells: HashMap::new(),
             wide: Vec::new(),
             occupied: None,
+            filed: false,
         };
-        for card in 0..scene.layout.cards.len() as u32 {
-            scene.file(Entry::Card(card));
-        }
-        for edge in 0..scene.layout.edges.len() as u32 {
-            scene.file(Entry::Edge(edge));
-        }
+        scene.refile();
         scene
+    }
+
+    /// Drops the grid and the edges' envelopes and keeps the layout, for a
+    /// diagram not on screen. Until [`Self::refile`], nothing is found.
+    pub fn release(&mut self) {
+        self.envelopes = Vec::new();
+        self.cells = HashMap::new();
+        self.wide = Vec::new();
+        self.occupied = None;
+        self.filed = false;
+    }
+
+    /// Builds the grid again after [`Self::release`]; nothing when built.
+    pub fn refile(&mut self) {
+        if self.filed {
+            return;
+        }
+        self.filed = true;
+        self.envelopes = (0..self.layout.edges.len() as u32)
+            .map(|edge| self.layout.edge_envelopes(edge))
+            .collect();
+        for card in 0..self.layout.cards.len() as u32 {
+            self.file(Entry::Card(card));
+        }
+        for edge in 0..self.layout.edges.len() as u32 {
+            self.file(Entry::Edge(edge));
+        }
+    }
+
+    #[cfg(test)]
+    pub fn is_filed(&self) -> bool {
+        self.filed
     }
 
     pub fn layout(&self) -> &Layout {
@@ -219,6 +247,10 @@ impl Scene {
     }
 
     fn reshape(&mut self, card: u32, change: impl FnOnce(&mut Layout)) -> &[u32] {
+        if !self.filed {
+            change(&mut self.layout);
+            return &self.layout.cards[card as usize].edges;
+        }
         self.unfile(Entry::Card(card));
         let edges = self.layout.cards[card as usize].edges.clone();
         for &edge in &edges {
@@ -476,6 +508,26 @@ mod tests {
         assert_eq!(
             scene.visible(rect(-10.0, -10.0, 2000.0, 2000.0), 1.0).cards,
             vec![0, 1]
+        );
+    }
+
+    #[test]
+    fn a_released_scene_keeps_its_layout_and_files_it_again_as_it_was_moved() {
+        let mut scene = scene();
+        let everything = rect(-10.0, -10.0, 4000.0, 4000.0);
+        let whole = scene.visible(everything, 1.0);
+        scene.release();
+        assert!(!scene.is_filed() && scene.cells.is_empty() && scene.envelopes.is_empty());
+        assert_eq!(scene.visible(everything, 1.0), Visible::default());
+        assert_eq!(scene.layout().cards.len(), 2, "the layout stays");
+
+        assert_eq!(scene.move_card(1, Point::new(2000.0, 1500.0)), &[0]);
+        scene.refile();
+        assert_eq!(scene.visible(everything, 1.0), whole);
+        assert_eq!(
+            scene.visible(rect(1990.0, 1490.0, 20.0, 20.0), 1.0).cards,
+            vec![1],
+            "filed where it was moved while released"
         );
     }
 

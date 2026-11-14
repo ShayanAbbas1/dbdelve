@@ -289,6 +289,27 @@ impl Workspace {
         .detach();
     }
 
+    /// Tells the diagram that was in front at the last render, if another
+    /// tab or profile is now, to let its render caches go (design §6.6).
+    /// Here rather than at each way a tab leaves the front, which are many.
+    pub(crate) fn track_shown_diagram(&mut self, cx: &mut Context<Self>) {
+        let front = (self.profile())
+            .and_then(|profile| profile.session.active_object())
+            .and_then(|tab| match &tab.body {
+                ObjectBody::Diagram { view, .. } => Some(view.clone()),
+                _ => None,
+            });
+        let was = std::mem::replace(
+            &mut self.shown_diagram,
+            front.as_ref().map(Entity::downgrade),
+        );
+        if let Some(was) = was.and_then(|was| was.upgrade())
+            && front.as_ref() != Some(&was)
+        {
+            was.update(cx, |view, _| view.hide());
+        }
+    }
+
     /// Stops a diagram's read that is still out, on its own connection, so a
     /// closed tab does not leave the server working for nobody.
     pub(crate) fn cancel_diagram(&mut self, id: u64, cx: &mut Context<Self>) {
