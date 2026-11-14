@@ -7,7 +7,7 @@ use std::{
     io::Read,
     net::{Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Child, Command},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU8, Ordering},
@@ -333,6 +333,23 @@ fn diagnostic(line: &str) -> Option<&'static str> {
         None
     }
 }
+// Both long-lived sessions and best-effort cleanup must drain both pipes:
+// an unread pipe can block the CLI before it exits.
+fn capture_output(child: &mut Child) -> Arc<Mutex<Output>> {
+    let output = Arc::new(Mutex::new(Output::default()));
+    drain(
+        child.stdout.take().expect("stdout piped"),
+        output.clone(),
+        true,
+    );
+    drain(
+        child.stderr.take().expect("stderr piped"),
+        output.clone(),
+        false,
+    );
+    output
+}
+
 fn drain(reader: impl Read + Send + 'static, output: Arc<Mutex<Output>>, stdout: bool) {
     thread::spawn(move || {
         let mut reader = reader;
@@ -391,29 +408,7 @@ impl Tunnel {
         let args = arguments(config, host, port)?;
         let mut process = process::Process::spawn(command(config, &args)?)
             .map_err(|e| plain_error(format!("Could not start SSM tunnel: {e}")))?;
-        let output = Arc::new(Mutex::new(Output::default()));
-        drain(
-            process
-                .child
-                .as_mut()
-                .unwrap()
-                .stdout
-                .take()
-                .expect("stdout piped"),
-            output.clone(),
-            true,
-        );
-        drain(
-            process
-                .child
-                .as_mut()
-                .unwrap()
-                .stderr
-                .take()
-                .expect("stderr piped"),
-            output.clone(),
-            false,
-        );
+        let output = capture_output(process.child.as_mut().unwrap());
         let mut tunnel = Self {
             local: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
             process: Arc::new(Mutex::new(process)),
@@ -527,17 +522,7 @@ impl Drop for Tunnel {
         if let Some(command) = terminate {
             thread::spawn(move || {
                 if let Ok(mut process) = process::Process::spawn(command) {
-                    let output = Arc::new(Mutex::new(Output::default()));
-                    drain(
-                        process.child.as_mut().unwrap().stdout.take().unwrap(),
-                        output.clone(),
-                        true,
-                    );
-                    drain(
-                        process.child.as_mut().unwrap().stderr.take().unwrap(),
-                        output,
-                        false,
-                    );
+                    capture_output(process.child.as_mut().unwrap());
                     let deadline = Instant::now() + Duration::from_secs(3);
                     while process.running() && Instant::now() < deadline {
                         thread::sleep(Duration::from_millis(20));
