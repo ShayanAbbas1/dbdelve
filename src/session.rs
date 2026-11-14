@@ -2435,6 +2435,17 @@ impl ObjectTab {
         matches!(self.kind, Some(ObjectKind::Relation(kind)) if target.takes_imports(kind))
     }
 
+    /// What the tab strip calls the tab: its relation's or routine's name, and
+    /// a diagram's schema, since a diagram's own name is kept blank.
+    pub(crate) fn label(&self) -> &str {
+        match &self.body {
+            ObjectBody::Diagram { .. } => &self.schema,
+            ObjectBody::Relation { .. } | ObjectBody::Routine(_) | ObjectBody::Structure { .. } => {
+                &self.name
+            }
+        }
+    }
+
     /// The `WHERE` this tab reads the relation under, and `""` for a routine
     /// and for an unfiltered relation -- which is what makes an unfiltered tab
     /// dedupe exactly as it did before the filter joined the key.

@@ -4050,6 +4050,14 @@ fn the_palette_opens_a_diagram_that_takes_the_keyboard_and_escape_clears_its_foc
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite_holding(cx, DIAGRAM_SCHEMA);
         let view = show_diagram(&workspace, cx);
+        assert_eq!(
+            cx.update(|_, cx| {
+                let tab = workspace.read(cx).profile()?.session.active_object()?;
+                Some((tab.label().to_string(), tab.name.clone()))
+            }),
+            Some(("main".to_string(), String::new())),
+            "the strip names the tab after its schema, which its stored name leaves out"
+        );
         let keyboard = |cx: &mut VisualTestContext| {
             cx.update(|window, cx| view.read(cx).focus_handle().is_focused(window))
         };

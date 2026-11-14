@@ -3305,7 +3305,7 @@ fn render_tab_strip(
                     _ => object.kind.map_or(icon::TABLE, object_icon),
                 },
             ))
-            .child(name_label(object.name.clone()))
+            .child(name_label(object.label().to_string()))
             // One relation can have as many tabs as it has filters (spec §6.3),
             // so a strip that labelled them all `customers` would cost a click
             // each to tell apart. Bounded and ellipsized: a filter can be long.
