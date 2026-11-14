@@ -567,7 +567,7 @@ impl Workspace {
         // change into live grids this form has no route to.
         if form.editing.is_none() {
             let access = Mode::ALL.into_iter().enumerate().map(|(index, mode)| {
-                ui::segmented_choice(("access", index), mode.label(), mode == form.mode, t)
+                ui::segmented_choice(("access", index), mode.label(), mode == form.mode, true, t)
                     .on_click(cx.listener(move |workspace, _, _, cx| {
                         if let Some(form) = &mut workspace.form {
                             form.mode = mode;

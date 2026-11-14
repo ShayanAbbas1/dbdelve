@@ -13,7 +13,7 @@ use gpui::{
     prelude::FluentBuilder, px,
 };
 use gpui_component::{
-    InteractiveElementExt, POPOVER_BLUR, Selectable,
+    Disableable, InteractiveElementExt, POPOVER_BLUR, Selectable,
     button::{Button, ButtonCustomVariant, ButtonVariants},
     highlighter::{HighlightTheme, SyntaxHighlighter},
     input::{Input, InputState, Rope},
@@ -958,6 +958,10 @@ pub(crate) fn picker(
         )
 }
 
+/// What a control that cannot be used keeps of itself, as gpui-component's
+/// own disabled buttons do.
+const DISABLED_OPACITY: f32 = 0.5;
+
 /// A track of segments, one picked: either-or-or that reads as one control.
 /// Hold [`segmented_choice`]s.
 pub(crate) fn segmented(t: Theme) -> Div {
@@ -971,16 +975,20 @@ pub(crate) fn segmented(t: Theme) -> Div {
 }
 
 /// One segment of a [`segmented`] track. A button underneath, so Tab reaches
-/// it and Space or Enter picks it; the caller adds the click.
+/// it and Space or Enter picks it; the caller adds the click. One that is not
+/// `enabled` is disabled here rather than by the caller: the label carries its
+/// own ink, which the button's disabled style would never reach.
 pub(crate) fn segmented_choice(
     id: impl Into<gpui::ElementId>,
     label: &'static str,
     selected: bool,
+    enabled: bool,
     t: Theme,
 ) -> Button {
     control(id, Tone::Quiet, Control::Compact)
         .p_0()
         .rounded(px(layout::RADIUS_CONTROL))
+        .disabled(!enabled)
         .child(
             div()
                 .h_full()
@@ -999,6 +1007,9 @@ pub(crate) fn segmented_choice(
                     } else {
                         segment.text_color(t.text_muted)
                     }
+                })
+                .when(!enabled, |segment| {
+                    segment.text_color(t.text_faint).opacity(DISABLED_OPACITY)
                 })
                 .child(label),
         )

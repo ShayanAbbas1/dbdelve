@@ -21,7 +21,6 @@ use gpui::{
 };
 
 use gpui_component::{
-    Disableable,
     input::{Input, InputEvent, InputState},
     menu::{DropdownMenu, PopupMenu, PopupMenuItem},
 };
@@ -1334,17 +1333,23 @@ impl DiagramView {
                 .child(
                     ui::segmented(inks)
                         .child(
-                            ui::segmented_choice("diagram-schema", "Schema", !neighbourhood, inks)
-                                .on_click(cx.listener(|view, _, _, cx| view.show(false, cx))),
+                            ui::segmented_choice(
+                                "diagram-schema",
+                                "Schema",
+                                !neighbourhood,
+                                true,
+                                inks,
+                            )
+                            .on_click(cx.listener(|view, _, _, cx| view.show(false, cx))),
                         )
                         .child(
                             ui::segmented_choice(
                                 "diagram-neighbourhood",
                                 "Neighbourhood",
                                 neighbourhood,
+                                centrable,
                                 inks,
                             )
-                            .disabled(!centrable)
                             .tooltip(match (centrable, neighbourhood) {
                                 (false, _) => "Focus a table to see its neighbourhood",
                                 (true, false) => "The focused table, its parents and children",
