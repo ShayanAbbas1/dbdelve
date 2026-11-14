@@ -61,8 +61,8 @@ use crate::{
     tab_drag::{DragTab, TabStrip},
     theme::{Theme, fonts, layout, theme},
     ui::{
-        Code, Control, Tone, button, button_label, choice_button, chord_hint, code_highlights,
-        compact_count, control, group_thousands, icon_button, key_hint, keycap_text, kind_color,
+        Code, Control, Tone, button, choice_button, chord_hint, code_highlights, compact_count,
+        group_thousands, icon_button, icon_label_button, key_hint, keycap_text, kind_color,
         object_icon, reconnect_button, row_icon, section_label,
     },
     workspace::error_in_buffer,
@@ -3687,23 +3687,11 @@ fn relation_controls(
 /// Insert reads as an action, not a third view beside Data and Plan: a plus
 /// leads it and it takes the same button box as the controls around it.
 fn insert_button(id: &'static str, label: String, t: Theme) -> Button {
-    control(id, Tone::Quiet, Control::Compact)
-        .px(px(Control::Compact.padding()))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(layout::SPACE_XS))
-                .child(
-                    icon(icon::PLUS)
-                        .size(px(layout::chrome(layout::ICON_SIZE)))
-                        .text_color(Tone::Quiet.ink(t)),
-                )
-                .child(button_label(label, Tone::Quiet, Control::Compact, t)),
-        )
-        .on_click(|_, window, cx| {
+    icon_label_button(id, icon::PLUS, label, Tone::Quiet, Control::Compact, t).on_click(
+        |_, window, cx| {
             window.dispatch_action(Box::new(NewRow), cx);
-        })
+        },
+    )
 }
 
 /// One choice of a handful, in the row-limit chips' clothes: all of them on

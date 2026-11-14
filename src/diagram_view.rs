@@ -14,7 +14,7 @@ use gpui::{
     Font, FontWeight, Hitbox, HitboxBehavior, Hsla, InteractiveElement, IntoElement, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Path, PathBuilder, PinchEvent,
     Pixels, Render, ScrollWheelEvent, ShapedLine, SharedString, Styled, TextAlign, TextRun,
-    TransformationMatrix, Window, canvas, div, point, px, quad, size,
+    TransformationMatrix, Window, canvas, div, point, prelude::FluentBuilder, px, quad, size,
 };
 
 use crate::actions::{OpenDiagramStructure, OpenDiagramTable};
@@ -26,6 +26,7 @@ use crate::diagram::index::Scene;
 use crate::diagram::layout::{Layout, Subject};
 use crate::icons::icon;
 use crate::theme::{Theme, fonts, layout, popup_theme, theme};
+use crate::ui::{self, Control, Tone};
 
 /// Room left around the diagram when it is fitted to the view, in pixels.
 const FIT_MARGIN: f32 = 32.0;
@@ -51,6 +52,7 @@ const DOT_SIZE: f32 = 1.5;
 /// Shaped lines kept before the cache starts again. Keys are text, size step
 /// and ink, so a session of zooming over one schema stays well under it.
 const LINE_CACHE_LIMIT: usize = 8192;
+const FOCUS_BAR_MAX_WIDTH: f32 = 560.0;
 
 pub enum Load {
     Loading,
@@ -404,6 +406,94 @@ impl DiagramView {
             table,
             structure,
         });
+    }
+
+    /// The card in focus, its name and Open data and Structure, at the bottom
+    /// left, out of the minimap's corner.
+    fn focus_bar(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let card = self.focus?;
+        let ready = self.ready()?;
+        let (t, inks) = (*theme(cx), popup_theme(cx));
+        let (schema, _) = ready.table(card);
+        let detail: SharedString = match ready.scene.layout().cards[card as usize].subject {
+            Subject::Table(table) => match ready.graph.tables[table as usize].columns.len() {
+                1 => "1 column".into(),
+                columns => format!("{columns} columns").into(),
+            },
+            Subject::Stub(_) => format!("in {schema}").into(),
+        };
+        let action = |id: &'static str, path, label: &'static str, structure: bool| {
+            let binding: &dyn gpui::Action = match structure {
+                true => &OpenDiagramStructure,
+                false => &OpenDiagramTable,
+            };
+            ui::icon_label_button(id, path, label, Tone::Quiet, Control::Compact, inks)
+                .tooltip_with_action(label, binding, Some("Diagram"))
+                .on_click(cx.listener(move |view, _, _, cx| view.open(structure, cx)))
+        };
+        Some(
+            floating(t)
+                .left(px(layout::SPACE_MD))
+                .bottom(px(layout::SPACE_MD))
+                .max_w(px(layout::chrome(FOCUS_BAR_MAX_WIDTH)))
+                .gap(px(layout::SPACE_SM))
+                .py(px(layout::SPACE_XS))
+                .pl(px(layout::SPACE_MD))
+                .pr(px(layout::SPACE_XS))
+                .child(
+                    icon(icon::TABLE)
+                        .flex_none()
+                        .size(px(layout::chrome(layout::ICON_SIZE)))
+                        .text_color(inks.accent),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex()
+                        .items_baseline()
+                        .gap(px(layout::SPACE_SM))
+                        .whitespace_nowrap()
+                        .child(
+                            div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .text_size(px(layout::chrome(layout::TEXT_MD)))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(inks.text)
+                                .child(ready.name(card)),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                                .text_color(inks.text_muted)
+                                .child(detail),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(1.0))
+                        .h(px(
+                            layout::chrome(layout::CONTROL_HEIGHT_COMPACT) - layout::SPACE_SM
+                        ))
+                        .bg(inks.border),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .gap(px(layout::SPACE_XS))
+                        .child(action("diagram-open-data", icon::TABLE, "Open data", false))
+                        .child(action(
+                            "diagram-structure",
+                            icon::STRUCTURE,
+                            "Structure",
+                            true,
+                        )),
+                ),
+        )
     }
 
     /// Whether a card is in focus, for `escape` to clear before it goes on to
@@ -826,9 +916,26 @@ impl Render for DiagramView {
         match &self.load {
             Load::Loading => surface.child(note("Reading the schema…".into(), t.text_muted.into())),
             Load::Failed(message) => surface.child(note(message.clone(), t.danger.into())),
-            Load::Ready(_) => surface.child(self.canvas(cx)),
+            Load::Ready(_) => surface
+                .relative()
+                .child(self.canvas(cx))
+                .children(self.focus_bar(cx)),
         }
     }
+}
+
+/// A frosted card floating over the canvas. `occlude`, so a press on it never
+/// reaches the canvas beneath and starts a pan.
+fn floating(t: Theme) -> gpui::Div {
+    div()
+        .absolute()
+        .occlude()
+        .flex()
+        .items_center()
+        .rounded(px(layout::RADIUS_PANEL))
+        .border_1()
+        .border_color(t.border)
+        .map(|card| ui::frosted_card(card, t))
 }
 
 #[allow(clippy::too_many_arguments)]

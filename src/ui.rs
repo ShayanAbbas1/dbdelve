@@ -759,6 +759,30 @@ pub(crate) fn icon_button(
     )
 }
 
+/// A button led by its icon: an action that reads as one, beside controls
+/// that are views or settings.
+pub(crate) fn icon_label_button(
+    id: impl Into<gpui::ElementId>,
+    path: &'static str,
+    label: impl Into<gpui::SharedString>,
+    tone: Tone,
+    size: Control,
+    t: Theme,
+) -> Button {
+    control(id, tone, size).px(px(size.padding())).child(
+        div()
+            .flex()
+            .items_center()
+            .gap(px(layout::SPACE_XS))
+            .child(
+                icon(path)
+                    .size(px(layout::chrome(layout::ICON_SIZE)))
+                    .text_color(tone.ink(t)),
+            )
+            .child(button_label(label, tone, size, t)),
+    )
+}
+
 /// A button's words. Separate so the two delete buttons, which grow a
 /// confirmation beside their icon once armed, can add them without becoming a
 /// different control.
