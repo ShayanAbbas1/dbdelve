@@ -812,7 +812,10 @@ impl DiagramView {
             && bounds.size.height > px(0.0)
             && let Some(ready) = self.ready()
         {
-            self.transform = ready.scene.layout().fitting(self.screen(), FIT_MARGIN);
+            self.transform = ready
+                .scene
+                .layout()
+                .fitting(fit_area(self.screen()), FIT_MARGIN);
             self.fitted = true;
             stale = true;
         }
@@ -847,7 +850,10 @@ impl DiagramView {
         let Some(ready) = self.ready() else {
             return;
         };
-        self.transform = ready.scene.layout().fitting(self.screen(), FIT_MARGIN);
+        self.transform = ready
+            .scene
+            .layout()
+            .fitting(fit_area(self.screen()), FIT_MARGIN);
         cx.emit(DiagramEvent::Viewed);
         cx.notify();
     }
@@ -1722,10 +1728,10 @@ impl DiagramView {
     fn centring(&self, card: u32, zoom: f32) -> Option<Transform> {
         let layout = self.ready()?.scene.layout();
         let rect = layout.card_rect(card, layout.detail(zoom), zoom);
-        let screen = self.screen();
-        let middle = screen.centre();
-        let top = match rect.height * zoom > screen.height - 2.0 * FIT_MARGIN {
-            true => FIT_MARGIN - rect.y * zoom,
+        let area = fit_area(self.screen());
+        let middle = area.centre();
+        let top = match rect.height * zoom > area.height - 2.0 * FIT_MARGIN {
+            true => area.y + FIT_MARGIN - rect.y * zoom,
             false => middle.y - rect.centre().y * zoom,
         };
         Some(Transform {
@@ -2507,6 +2513,26 @@ impl Render for DiagramView {
     }
 }
 
+/// How far down the canvas the floating toolbar reaches: its offset, its
+/// border and padding, and the segmented track, its tallest control.
+fn toolbar_bottom() -> f32 {
+    layout::SPACE_MD
+        + 2.0 * (1.0 + layout::SPACE_XS + layout::SEGMENT_INSET)
+        + layout::chrome(layout::CONTROL_HEIGHT_COMPACT)
+}
+
+/// The part of the canvas a fit fills: below the toolbar, which floats over
+/// the top of it. The focus bar comes and goes with the focus, and the
+/// minimap keeps to a corner, so neither is reserved.
+fn fit_area(screen: Rect) -> Rect {
+    let top = toolbar_bottom().min(screen.height);
+    Rect {
+        y: screen.y + top,
+        height: screen.height - top,
+        ..screen
+    }
+}
+
 /// The toolbar's Export menu, laid out as the result grid's is: the
 /// clipboard first, then the files.
 fn export_menu(menu: PopupMenu, view: &WeakEntity<DiagramView>) -> PopupMenu {
@@ -2978,6 +3004,30 @@ mod tests {
             !fresh.placed.contains_key(&gone),
             "a dropped table is forgotten"
         );
+    }
+
+    #[test]
+    fn a_fit_puts_the_diagram_below_the_toolbar() {
+        let screen = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1200.0,
+            height: 800.0,
+        };
+        for graph in [
+            crate::diagram::tests::graph(3, &[(1, 0), (2, 1)]),
+            crate::diagram::tests::synthetic(300, 600),
+        ] {
+            let layout = layout::schema(&graph, false);
+            let fit = layout.fitting(fit_area(screen), FIT_MARGIN);
+            let detail = layout.detail(fit.zoom);
+            let top = layout.cards_bounds(detail, fit.zoom).y * fit.zoom + fit.pan.y;
+            assert!(
+                top >= toolbar_bottom() + FIT_MARGIN - 0.5,
+                "{top} at {}",
+                fit.zoom
+            );
+        }
     }
 
     #[test]

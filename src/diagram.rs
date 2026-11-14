@@ -62,7 +62,7 @@ pub(crate) mod tests {
     /// keys into earlier tables, some into later ones (cycles), self
     /// references, composite keys, keys into another schema, nullable and
     /// one-to-one keys, and every eleventh table with no key either way.
-    pub(super) fn synthetic(tables: usize, keys: usize) -> SchemaGraph {
+    pub(crate) fn synthetic(tables: usize, keys: usize) -> SchemaGraph {
         let mut state: u64 = 0x2545_f491_4f6c_dd1d;
         let mut next = move |bound: usize| {
             state = state
