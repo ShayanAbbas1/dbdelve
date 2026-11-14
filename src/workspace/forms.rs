@@ -496,12 +496,22 @@ impl Workspace {
             // Host and Port are the far end of the forward, which is easy to
             // read as this machine's view of the network.
             let socket = form.target().reaches_socket_over_ssh();
-            let hint = if socket {
-                "Host and port are as the SSH host sees them: localhost is the SSH host \
-                 itself. A Host such as /var/run/postgresql is its Unix socket directory; \
-                 Run as is the OS user sudo opens the socket as, for peer authentication."
+            let hint = if form.ssm {
+                "Connect through an AWS managed instance. Database host and port are as that \
+                 instance sees them. AWS credentials come from the CLI; sign in first when using SSO."
+            } else if form.ssh {
+                "Connect through an SSH host. Database host and port are as the SSH host sees \
+                 them; localhost refers to the SSH host itself."
             } else {
-                "Host and port are as the SSH host sees them: localhost is the SSH host itself."
+                "Connect directly to the database."
+            };
+            let help = |text: &'static str| {
+                div()
+                    .px(px(layout::SPACE_LG))
+                    .pb(px(layout::SPACE_MD))
+                    .text_size(px(layout::chrome(layout::TEXT_SM)))
+                    .text_color(t.text_muted)
+                    .child(text)
             };
             let selected = if form.ssm {
                 2
@@ -543,21 +553,36 @@ impl Workspace {
                             }
                         }))
                 });
-            security.push(ui::option_row("Tunnel", Some(if form.ssm {
-                "Database host and port are as the managed instance sees them. AWS credentials come from the CLI; run aws sso login first when using SSO.".into()
-            } else { hint.into() }), ui::segmented(t).children(choices), t).into_any_element());
+            security.push(
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(ui::option_row(
+                        "Tunnel",
+                        None,
+                        ui::segmented(t).children(choices),
+                        t,
+                    ))
+                    .child(help(hint))
+                    .into_any_element(),
+            );
             if form.ssm {
                 for (id, label, input) in [
                     ("ssm-target", "Target instance", &form.ssm_target),
                     ("ssm-profile", "AWS profile", &form.ssm_profile),
                     ("ssm-region", "AWS region", &form.ssm_region),
-                    ("ssm-aws-cli", "AWS CLI path (optional)", &form.ssm_aws_cli),
-                    ("ssm-plugin", "Plugin path (optional)", &form.ssm_plugin),
+                    ("ssm-aws-cli", "AWS CLI path", &form.ssm_aws_cli),
+                    ("ssm-plugin", "Plugin path", &form.ssm_plugin),
                 ] {
-                    security.push(
-                        nested_field_row(layout::SPACE_MD, id, label, input, bare(input), t)
-                            .into_any_element(),
-                    );
+                    let row = nested_field_row(layout::SPACE_MD, id, label, input, bare(input), t);
+                    security.push(if id == "ssm-plugin" {
+                        div()
+                            .child(row)
+                            .child(help("Executable paths are optional. Leave blank to find the tools on PATH."))
+                            .into_any_element()
+                    } else {
+                        row.into_any_element()
+                    });
                 }
             }
             if form.ssh {
@@ -592,12 +617,19 @@ impl Workspace {
                     ),
                 ];
                 if socket {
-                    rows.push(nested(
-                        "ssh-run-as",
-                        "Run as",
-                        &form.ssh_run_as,
-                        bare(&form.ssh_run_as),
-                    ));
+                    rows.push(
+                        div()
+                            .child(nested(
+                                "ssh-run-as",
+                                "Run as",
+                                &form.ssh_run_as,
+                                bare(&form.ssh_run_as),
+                            ))
+                            .child(help(
+                                "For a Unix socket host such as /var/run/postgresql, sudo opens \
+                                 the socket as this OS user for peer authentication.",
+                            )),
+                    );
                 }
                 security.extend(
                     rows.into_iter()
