@@ -35,6 +35,17 @@ impl Workspace {
         }
     }
 
+    /// The schemas the palette offers a diagram of: the one a diagram opens
+    /// on when nothing names one, then every other schema of the catalog
+    /// with a table to draw.
+    pub(crate) fn diagram_schemas(profile: &Profile) -> Vec<String> {
+        let catalog = match &profile.catalog {
+            CatalogState::Loaded(catalog, _) => Some(catalog),
+            _ => None,
+        };
+        offered_schemas(Self::diagram_schema(profile), catalog)
+    }
+
     /// Bring a schema's diagram to the front, opening and reading it if it
     /// has no tab yet, and with a `centre`, showing that table's
     /// neighbourhood.
@@ -497,11 +508,22 @@ impl<T> SideRead<T> {
 /// first layout is made in the right mode without waiting on the read.
 fn drawn_table_count(catalog: &Catalog, schema: &str) -> Option<usize> {
     let schema = catalog.schemas.iter().find(|found| found.name == schema)?;
-    Some(
-        (schema.relations.iter())
-            .filter(|relation| drawn_in_diagrams(relation.kind) && relation.partition_of.is_none())
-            .count(),
-    )
+    Some(drawn_tables(schema))
+}
+
+fn drawn_tables(schema: &crate::db::Schema) -> usize {
+    (schema.relations.iter())
+        .filter(|relation| drawn_in_diagrams(relation.kind) && relation.partition_of.is_none())
+        .count()
+}
+
+/// `first`, then the catalog's other schemas that have a table to draw.
+fn offered_schemas(first: Option<String>, catalog: Option<&Catalog>) -> Vec<String> {
+    let rest = (catalog.into_iter())
+        .flat_map(|catalog| &catalog.schemas)
+        .filter(|schema| first.as_ref() != Some(&schema.name) && drawn_tables(schema) > 0)
+        .map(|schema| schema.name.clone());
+    first.clone().into_iter().chain(rest).collect()
 }
 
 /// Whether a relation of this kind is drawn as a card of its schema's
@@ -727,5 +749,39 @@ mod tests {
         };
         assert_eq!(drawn_table_count(&catalog, "public"), Some(2));
         assert_eq!(drawn_table_count(&catalog, "other"), None);
+    }
+
+    #[test]
+    fn the_palette_offers_the_diagram_of_every_schema_with_a_table_the_default_first() {
+        let schema = |name: &str, kind| Schema {
+            name: name.into(),
+            relations: vec![Relation {
+                name: "t".into(),
+                kind,
+                partition_of: None,
+                size: None,
+                rows: None,
+            }],
+            routines: Vec::new(),
+        };
+        let catalog = Catalog {
+            schemas: vec![
+                schema("archive", RelationKind::Table),
+                schema("public", RelationKind::Table),
+                schema("reports", RelationKind::View),
+                schema("billing", RelationKind::PartitionedTable),
+            ],
+            database: None,
+        };
+        assert_eq!(
+            offered_schemas(Some("public".into()), Some(&catalog)),
+            ["public", "archive", "billing"]
+        );
+        assert_eq!(
+            offered_schemas(Some("public".into()), None),
+            ["public"],
+            "before the catalog is read"
+        );
+        assert!(offered_schemas(None, None).is_empty());
     }
 }

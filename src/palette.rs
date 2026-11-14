@@ -4357,19 +4357,22 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             "select_database",
         ));
     }
-    if profile.config.target().draws_diagrams()
-        && profile.connection().is_some()
-        && let Some(schema) = Workspace::diagram_schema(profile)
-    {
-        items.push(command(
-            &format!("Show diagram of {schema}"),
-            icon::DIAGRAM,
-            Command::ShowDiagram {
-                schema,
-                centre: None,
-            },
-            CONNECTION,
-        ));
+    if profile.config.target().draws_diagrams() && profile.connection().is_some() {
+        items.extend(
+            Workspace::diagram_schemas(profile)
+                .into_iter()
+                .map(|schema| {
+                    command(
+                        &format!("Show diagram of {schema}"),
+                        icon::DIAGRAM,
+                        Command::ShowDiagram {
+                            schema,
+                            centre: None,
+                        },
+                        CONNECTION,
+                    )
+                }),
+        );
     }
     if profile.config.target().picks_schema() {
         items.push(command(
