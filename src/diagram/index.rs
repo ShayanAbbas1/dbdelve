@@ -449,7 +449,11 @@ mod tests {
 
     #[test]
     fn a_handle_is_found_on_the_card_under_the_pointer_and_a_resize_refiles_it() {
-        let mut scene = scene();
+        // Three columns, so its height can be cut.
+        let mut graph = graph(2, &[(1, 0)]);
+        let note = graph.tables[1].columns[1].clone();
+        graph.tables[1].columns.push(note);
+        let mut scene = Scene::new(schema(&graph, false));
         let card = scene.layout().card_rect(1, Detail::Columns, 1.0);
         let corner = Point::new(card.right() - 1.0, card.bottom() - 1.0);
         assert_eq!(scene.handle_at(corner, 5.0, 1.0), Some((1, Handle::Corner)));

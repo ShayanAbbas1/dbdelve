@@ -3998,8 +3998,8 @@ fn the_default_chip_puts_a_typed_then_emptied_insert_field_back_out_of_the_state
     });
 }
 
-const DIAGRAM_SCHEMA: &str = "create table birds (id integer primary key, name text);
-     create table sightings (id integer primary key, bird integer not null references birds(id));";
+const DIAGRAM_SCHEMA: &str = "create table birds (id integer primary key, name text, latin text);
+     create table sightings (id integer primary key, bird integer not null references birds(id), seen_at text);";
 
 /// The diagram of `main`, opened from the palette and read.
 fn show_diagram(
@@ -4664,7 +4664,7 @@ fn a_diagram_card_resizes_from_its_corner_and_a_double_click_there_gives_its_siz
             cx.update(|_, cx| view.read(cx).table_corner_on_screen("birds"))
                 .expect("the diagram drew the birds")
         };
-        assert_eq!(size(cx), (CARD_WIDTH, card_height(2)));
+        assert_eq!(size(cx), (CARD_WIDTH, card_height(3)));
         let zoom = cx.update(|_, cx| view.read(cx).zoom());
 
         let from = corner(cx);
@@ -4679,17 +4679,23 @@ fn a_diagram_card_resizes_from_its_corner_and_a_double_click_there_gives_its_siz
         settle(cx);
         let (width, height) = size(cx);
         assert!((width - (CARD_WIDTH + 80.0)).abs() < 0.5, "wider: {width}");
-        assert_eq!(height, card_height(1), "a row shorter, in whole rows");
+        assert_eq!(height, card_height(2), "a row shorter, in whole rows");
         assert!(
             !cx.update(|_, cx| view.read(cx).has_focus()),
             "a resize focuses nothing"
         );
 
+        // Keys only lists the birds' one key, which is shorter still.
         view.update(cx, |view, cx| view.toggle_keys_only(cx));
         settle(cx);
-        assert_eq!(size(cx), (width, height), "keys only keeps the size");
+        assert_eq!(
+            size(cx),
+            (width, card_height(1)),
+            "keys only keeps the width"
+        );
         view.update(cx, |view, cx| view.toggle_keys_only(cx));
         settle(cx);
+        assert_eq!(size(cx), (width, height), "and every column the height");
 
         let corner = corner(cx);
         cx.simulate_click(corner, gpui::Modifiers::default());
@@ -4707,7 +4713,7 @@ fn a_diagram_card_resizes_from_its_corner_and_a_double_click_there_gives_its_siz
             click_count: 2,
         });
         settle(cx);
-        assert_eq!(size(cx), (CARD_WIDTH, card_height(2)), "its own size back");
+        assert_eq!(size(cx), (CARD_WIDTH, card_height(3)), "its own size back");
         assert_eq!(
             front_relation(&workspace, cx),
             None,
@@ -5161,10 +5167,12 @@ fn copy_as_mermaid_puts_the_diagram_on_the_clipboard_from_the_menu_and_the_palet
     \"birds\" {
         INTEGER id PK
         TEXT name
+        TEXT latin
     }
     \"sightings\" {
         INTEGER id PK
         INTEGER bird FK
+        TEXT seen_at
     }
     \"birds\" ||..o{ \"sightings\" : \"bird\"
 ";

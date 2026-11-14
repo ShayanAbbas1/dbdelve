@@ -249,11 +249,17 @@ pub fn auto_height(rows: usize) -> f32 {
     card_height(rows.min(AUTO_ROWS))
 }
 
-/// The whole rows nearest a height a card is dragged to, never none.
+/// The fewest rows a card is cut to: a column and the "+N more" row after
+/// it, since a card of a name and a count says nothing of its columns.
+const MIN_ROWS: usize = 2;
+
+/// The whole rows nearest a height a card is dragged to, never fewer than
+/// [`MIN_ROWS`].
 pub fn rows_for_height(height: f32) -> usize {
-    ((height - HEADER_HEIGHT - BOTTOM_PAD) / ROW_HEIGHT)
+    (((height - HEADER_HEIGHT - BOTTOM_PAD) / ROW_HEIGHT)
         .round()
-        .max(1.0) as usize
+        .max(0.0) as usize)
+        .max(MIN_ROWS)
 }
 
 /// An edge of a card that a drag resizes it by.
@@ -751,9 +757,9 @@ impl Layout {
     }
 
     /// Whether a drag can change a card's height at a level of detail: the
-    /// level lists more than the one row a card keeps however short.
+    /// level lists more than the rows a card keeps however short.
     pub fn heightens(&self, card: u32, detail: Detail) -> bool {
-        self.cards[card as usize].cut(detail).listed > 1
+        self.cards[card as usize].cut(detail).listed > MIN_ROWS
     }
 
     /// How many rows a level of detail lists on a card before any cut.
@@ -1574,19 +1580,15 @@ mod tests {
         assert_eq!(shown(&layout, Detail::Keys), [0, 3]);
         assert_eq!(layout.row_of(1, 3, Detail::Keys), Some(1));
 
-        // One row, the shortest a card goes: "+5 more", or "+2 more".
+        // Two rows are the shortest a card goes: one asked for still shows a
+        // column.
         layout.set_size(1, CARD_WIDTH, Some(card_height(1)));
-        assert!(shown(&layout, Detail::Columns).is_empty());
+        assert_eq!(layout.cards[1].height, card_height(2));
+        assert_eq!(shown(&layout, Detail::Columns), [0]);
         assert_eq!(
             layout.more(1, Detail::Columns).map(|more| more.hidden),
-            Some(5)
+            Some(4)
         );
-        assert!(shown(&layout, Detail::Keys).is_empty());
-        assert_eq!(
-            layout.more(1, Detail::Keys).map(|more| more.hidden),
-            Some(2)
-        );
-        assert_eq!(layout.row_of(1, 3, Detail::Keys), Some(0));
         assert_eq!(
             layout.row_of(1, 1, Detail::Keys),
             None,
@@ -1620,7 +1622,17 @@ mod tests {
         assert_eq!(full, card_height(5));
         layout.set_size(1, 10.0, Some(0.0));
         assert_eq!(layout.cards[1].width, MIN_CARD_WIDTH);
-        assert_eq!(layout.cards[1].height, card_height(1), "a header and a row");
+        assert_eq!(
+            layout.cards[1].height,
+            card_height(2),
+            "a header, a column and the rest counted"
+        );
+        layout.set_size(0, CARD_WIDTH, Some(0.0));
+        assert_eq!(
+            layout.cards[0].height,
+            card_height(1),
+            "a header and a row where there is nothing to count"
+        );
         layout.set_size(1, 5000.0, Some(10_000.0));
         assert_eq!(layout.cards[1].width, MAX_CARD_WIDTH);
         assert_eq!(layout.cards[1].height, full, "never taller than its rows");
@@ -1646,7 +1658,11 @@ mod tests {
             "an edge leaves from a side of the card as sized"
         );
 
-        assert!(layout.heightens(1, Detail::Columns) && layout.heightens(1, Detail::Keys));
+        assert!(layout.heightens(1, Detail::Columns));
+        assert!(
+            !layout.heightens(1, Detail::Keys),
+            "two key rows, which the shortest card holds"
+        );
         assert!(
             !layout.heightens(1, Detail::Names),
             "a name block's height is fixed"

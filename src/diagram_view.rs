@@ -2930,9 +2930,16 @@ mod tests {
 
     #[test]
     fn a_sized_card_keeps_its_size_through_a_new_layout_until_its_table_goes() {
-        let graph = crate::diagram::tests::graph(3, &[(1, 0), (2, 1)]);
+        let mut graph = crate::diagram::tests::graph(3, &[(1, 0), (2, 1)]);
+        let note = graph.tables[1].columns[0].clone();
+        graph.tables[1].columns.push(crate::db::GraphColumn {
+            name: "note".into(),
+            primary: false,
+            unique: false,
+            ..note
+        });
         let mut ready = Ready::new(graph.clone(), Scene::new(layout::schema(&graph, false)));
-        let short = geometry::card_height(1);
+        let short = geometry::card_height(2);
         let t1 = card_of(ready.scene.layout(), 1);
         ready.resize(t1, Some(320.0), Some(short));
         assert_eq!(ready.size_of(t1), (Some(320.0), Some(short)));
