@@ -30,17 +30,33 @@ impl PartialEq for ConnectAttempt {
 }
 impl Eq for ConnectAttempt {}
 impl ConnectAttempt {
+    // Cancellation and completion can only win while the attempt is opening.
+    const OPENING: u8 = 0;
+    const CANCELLED: u8 = 1;
+    const FINISHED: u8 = 2;
+
     pub fn cancel(&self) {
-        let _ = self
-            .0
-            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire);
+        let _ = self.0.compare_exchange(
+            Self::OPENING,
+            Self::CANCELLED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
     }
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Acquire) == 1
+        self.0.load(Ordering::Acquire) == Self::CANCELLED
+    }
+    fn is_finished(&self) -> bool {
+        self.0.load(Ordering::Acquire) == Self::FINISHED
     }
     pub fn finish(&self) -> Result<(), DbError> {
         self.0
-            .compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire)
+            .compare_exchange(
+                Self::OPENING,
+                Self::FINISHED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
             .map(|_| ())
             .map_err(|_| plain_error("Connection cancelled.".into()))
     }
@@ -407,7 +423,7 @@ impl Tunnel {
         if let Some(attempt) = config.attempt.clone() {
             let weak = Arc::downgrade(&tunnel.process);
             thread::spawn(move || {
-                while attempt.0.load(Ordering::Acquire) != 2 {
+                while !attempt.is_finished() {
                     let Some(process) = weak.upgrade() else {
                         return;
                     };
