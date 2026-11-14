@@ -33,15 +33,16 @@ use crate::{
         FormatQuery, FuzzyOpen, GoToColumn, HideColumn, ImportConnections, ImportRows,
         ImportRowsFromClipboard, Minimize, MoveTabLeft, MoveTabRight, NewConnection, NewProject,
         NewQuery, NewRow, NextDialogButton, NextEdit, NextPage, NextProfile, NextResult, NextTab,
-        OpenLogsFolder, OpenSettings, OpenSidebarItem, PaletteHistoryFilter, PaletteHistorySort,
-        PaletteNext, PaletteNextScope, PalettePrevious, PalettePreviousScope, PaletteRowActions,
-        PaletteScopeLeft, PaletteScopeRight, PreviousDialogButton, PreviousEdit, PreviousPage,
-        PreviousProfile, PreviousResult, PreviousTab, Quit, RefreshConnection, RefreshRelation,
-        ResetConfirmations, ResetEditorZoom, RunQuery, SaveQuery, SearchEverything, SelectDatabase,
-        SelectTheme, SetDefault, SetEmpty, SetMode, SetNull, ShowAllColumns, ShowEditor,
-        ShowMessages, ShowReferences, SortActiveColumn, SubmitConnection, SwitchConnection,
-        TickDialogBox, ToggleComment, ToggleNextJoin, TogglePinColumn, ToggleResultsFocus,
-        ToggleRowEdit, ToggleRowPanel, ToggleSidebar, ToggleStructure, ZoomEditorIn, ZoomEditorOut,
+        OpenDiagramStructure, OpenDiagramTable, OpenLogsFolder, OpenSettings, OpenSidebarItem,
+        PaletteHistoryFilter, PaletteHistorySort, PaletteNext, PaletteNextScope, PalettePrevious,
+        PalettePreviousScope, PaletteRowActions, PaletteScopeLeft, PaletteScopeRight,
+        PreviousDialogButton, PreviousEdit, PreviousPage, PreviousProfile, PreviousResult,
+        PreviousTab, Quit, RefreshConnection, RefreshRelation, ResetConfirmations, ResetEditorZoom,
+        RunQuery, SaveQuery, SearchEverything, SelectDatabase, SelectTheme, SetDefault, SetEmpty,
+        SetMode, SetNull, ShowAllColumns, ShowEditor, ShowMessages, ShowReferences,
+        SortActiveColumn, SubmitConnection, SwitchConnection, TickDialogBox, ToggleComment,
+        ToggleNextJoin, TogglePinColumn, ToggleResultsFocus, ToggleRowEdit, ToggleRowPanel,
+        ToggleSidebar, ToggleStructure, ZoomEditorIn, ZoomEditorOut,
     },
     db::ExplainMode,
     export::RowsAs,
@@ -286,6 +287,9 @@ registry! {
     ("previous_edit", "Previous Edit", None, [], PreviousEdit),
     ("import_dbeaver", "Import Connections from DBeaver", None, [], ImportConnections { source: Source::DBeaver }),
     ("import_tableplus", "Import Connections from TablePlus", None, [], ImportConnections { source: Source::TablePlus }),
+    ("diagram_open_table", "Diagram: Open Table", Some("Diagram"), ["enter"], OpenDiagramTable),
+    // Run Query's chord, which a diagram hands on: see `INERT_IN`.
+    ("diagram_open_structure", "Diagram: Open Structure", Some("Diagram"), ["secondary-enter"], OpenDiagramStructure),
 }
 
 /// The bindings that exist on this platform. macOS-only actions stay out of
@@ -309,9 +313,10 @@ fn contexts_overlap(a: Option<&str>, b: Option<&str>) -> bool {
 
 /// Global actions with no handler inside a context, so a binding scoped there
 /// may take their chord. GPUI tries the unscoped binding first (AGENTS.md,
-/// "GPUI hazards"), nothing on the connection form handles Run Query, and the
-/// keystroke goes on to the form's own binding.
-const INERT_IN: &[(&str, &str)] = &[("run_query", "ConnectionForm")];
+/// "GPUI hazards"), nothing on the connection form handles Run Query (a
+/// diagram's hands it on), and the keystroke goes on to the context's own
+/// binding.
+const INERT_IN: &[(&str, &str)] = &[("run_query", "ConnectionForm"), ("run_query", "Diagram")];
 
 fn inert(id: &str, context: Option<&str>) -> bool {
     INERT_IN

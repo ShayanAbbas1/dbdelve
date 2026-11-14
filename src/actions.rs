@@ -241,5 +241,7 @@ actions!(
         SubmitConnection,
         Quit,
         Minimize,
+        OpenDiagramTable,
+        OpenDiagramStructure,
     ]
 );

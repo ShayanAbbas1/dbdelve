@@ -344,6 +344,16 @@ impl Workspace {
         // An object tab has no buffer of its own: running it again is a refresh
         // of the rows dbdelve fetched, which is the only thing there is to run.
         if let Tab::Object(id) = tab {
+            // A diagram has nothing to run, and its own `secondary-enter`
+            // (Open Structure) sits behind this unscoped binding: handing the
+            // keystroke on is what lets that one have it.
+            if matches!(
+                profile.session.active_object().map(|tab| &tab.body),
+                Some(ObjectBody::Diagram { .. })
+            ) {
+                cx.propagate();
+                return;
+            }
             self.refresh_relation(id, cx);
             return;
         }

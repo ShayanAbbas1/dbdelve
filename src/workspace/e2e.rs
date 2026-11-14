@@ -3998,48 +3998,65 @@ fn the_default_chip_puts_a_typed_then_emptied_insert_field_back_out_of_the_state
     });
 }
 
+const DIAGRAM_SCHEMA: &str = "create table birds (id integer primary key, name text);
+     create table sightings (id integer primary key, bird integer not null references birds(id));";
+
+/// The diagram of `main`, opened from the palette and read.
+fn show_diagram(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) -> Entity<crate::diagram_view::DiagramView> {
+    cx.simulate_keystrokes("secondary-shift-p");
+    settle(cx);
+    cx.simulate_input("Show diagram of main");
+    settle(cx);
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    cx.update(|_, cx| {
+        match workspace
+            .read(cx)
+            .profile()
+            .and_then(|profile| profile.session.active_object())
+            .map(|tab| &tab.body)
+        {
+            Some(ObjectBody::Diagram { view, side }) => {
+                assert!(side.is_none(), "the read landed and let its connection go");
+                view.clone()
+            }
+            _ => panic!("the diagram is in front"),
+        }
+    })
+}
+
+/// The tab in front, as `(name, is structure)`, when it is a relation's.
+fn front_relation(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) -> Option<(String, bool)> {
+    cx.update(|_, cx| {
+        let tab = workspace.read(cx).profile()?.session.active_object()?;
+        match tab.body {
+            ObjectBody::Relation { .. } => Some((tab.name.clone(), false)),
+            ObjectBody::Structure { .. } => Some((tab.name.clone(), true)),
+            _ => None,
+        }
+    })
+}
+
 #[gpui::test]
 fn the_palette_opens_a_diagram_that_takes_the_keyboard_and_escape_clears_its_focus(
     cx: &mut TestAppContext,
 ) {
     store::tests::with_home(|| {
-        let (workspace, cx) = launch_on_sqlite_holding(
-            cx,
-            "create table birds (id integer primary key, name text);
-             create table sightings (id integer primary key, bird integer not null references birds(id));",
-        );
-
-        cx.simulate_keystrokes("secondary-shift-p");
-        settle(cx);
-        cx.simulate_input("Show diagram of main");
-        settle(cx);
-        cx.simulate_keystrokes("enter");
-        settle(cx);
-
-        let diagram = |cx: &mut VisualTestContext| {
-            cx.update(|_, cx| {
-                match workspace
-                    .read(cx)
-                    .profile()
-                    .and_then(|profile| profile.session.active_object())
-                    .map(|tab| &tab.body)
-                {
-                    Some(ObjectBody::Diagram { view, side }) => {
-                        assert!(side.is_none(), "the read landed and let its connection go");
-                        view.clone()
-                    }
-                    _ => panic!("the diagram is in front"),
-                }
-            })
-        };
-        let view = diagram(cx);
+        let (workspace, cx) = launch_on_sqlite_holding(cx, DIAGRAM_SCHEMA);
+        let view = show_diagram(&workspace, cx);
         let keyboard = |cx: &mut VisualTestContext| {
             cx.update(|window, cx| view.read(cx).focus_handle().is_focused(window))
         };
         assert!(keyboard(cx), "the canvas holds the keyboard");
 
         let birds = cx
-            .update(|_, cx| view.read(cx).table_on_screen(0))
+            .update(|_, cx| view.read(cx).table_on_screen("birds"))
             .expect("the diagram drew the birds");
         cx.simulate_click(birds, gpui::Modifiers::default());
         settle(cx);
@@ -4055,6 +4072,71 @@ fn the_palette_opens_a_diagram_that_takes_the_keyboard_and_escape_clears_its_foc
             "escape clears it"
         );
         assert!(keyboard(cx), "and leaves the keyboard on the canvas");
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_double_click_opens_a_diagram_cards_table_and_the_keyboard_the_focused_ones(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, DIAGRAM_SCHEMA);
+        let view = show_diagram(&workspace, cx);
+        let at = |name: &str, cx: &mut VisualTestContext| {
+            cx.update(|_, cx| view.read(cx).table_on_screen(name))
+                .expect("the diagram drew the table")
+        };
+
+        let birds = at("birds", cx);
+        cx.simulate_click(birds, gpui::Modifiers::default());
+        cx.simulate_event(gpui::MouseDownEvent {
+            position: birds,
+            modifiers: gpui::Modifiers::default(),
+            button: gpui::MouseButton::Left,
+            click_count: 2,
+            first_mouse: false,
+        });
+        cx.simulate_event(gpui::MouseUpEvent {
+            position: birds,
+            modifiers: gpui::Modifiers::default(),
+            button: gpui::MouseButton::Left,
+            click_count: 2,
+        });
+        settle(cx);
+        assert_eq!(
+            front_relation(&workspace, cx),
+            Some(("birds".to_string(), false)),
+            "a double-click opens the table's rows"
+        );
+
+        let view = show_diagram(&workspace, cx);
+        let sightings = cx
+            .update(|_, cx| view.read(cx).table_on_screen("sightings"))
+            .expect("the diagram drew the sightings");
+        cx.simulate_click(sightings, gpui::Modifiers::default());
+        settle(cx);
+        cx.simulate_keystrokes("secondary-enter");
+        settle(cx);
+        assert_eq!(
+            front_relation(&workspace, cx),
+            Some(("sightings".to_string(), true)),
+            "Run Query's chord gives way to the diagram's Open Structure"
+        );
+
+        let view = show_diagram(&workspace, cx);
+        assert!(
+            cx.update(|_, cx| view.read(cx).has_focus()),
+            "the diagram kept its focus while away"
+        );
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        assert_eq!(
+            front_relation(&workspace, cx),
+            Some(("sightings".to_string(), false)),
+            "enter opens the focused table's rows"
+        );
 
         quit(workspace, cx);
     });

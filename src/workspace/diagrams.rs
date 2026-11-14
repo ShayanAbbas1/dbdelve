@@ -5,7 +5,7 @@ use std::sync::{Arc, OnceLock};
 use super::*;
 
 use crate::diagram::{index::Scene, layout};
-use crate::diagram_view::{DiagramView, Load, Ready};
+use crate::diagram_view::{DiagramEvent, DiagramView, Load, Ready};
 
 /// Above this many tables a diagram opens with key columns only (design §6.5).
 const KEYS_ONLY_ABOVE: usize = 300;
@@ -55,6 +55,18 @@ impl Workspace {
                 let id = profile.session.next_object_id;
                 profile.session.next_object_id += 1;
                 let view = cx.new(DiagramView::new);
+                cx.subscribe_in(
+                    &view,
+                    window,
+                    |workspace, _, event, window, cx| match event {
+                        DiagramEvent::Open {
+                            schema,
+                            table,
+                            structure,
+                        } => workspace.open_diagram_table(schema, table, *structure, window, cx),
+                    },
+                )
+                .detach();
                 profile.session.objects.push(ObjectTab {
                     id,
                     schema,
@@ -67,6 +79,30 @@ impl Workspace {
             }
         };
         self.activate_tab(Tab::Object(id), window, cx);
+    }
+
+    /// A table off a diagram, in the tab the explorer opens for it: its rows,
+    /// or its structure.
+    fn open_diagram_table(
+        &mut self,
+        schema: &str,
+        table: &str,
+        structure: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let kind = match self.catalog() {
+            Some(catalog) => relation_kind(catalog, schema, table).unwrap_or_default(),
+            None => RelationKind::default(),
+        };
+        self.open_relation_view(
+            schema.to_string(),
+            table.to_string(),
+            kind,
+            structure,
+            window,
+            cx,
+        );
     }
 
     /// Read a diagram's schema on a connection of its own and lay it out, both

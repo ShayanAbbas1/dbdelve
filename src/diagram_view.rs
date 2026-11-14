@@ -10,13 +10,14 @@
 use std::collections::{HashMap, HashSet};
 
 use gpui::{
-    BorderStyle, Bounds, BoxShadow, ContentMask, Context, DispatchPhase, FocusHandle, Font,
-    FontWeight, Hitbox, HitboxBehavior, Hsla, InteractiveElement, IntoElement, MouseButton,
+    BorderStyle, Bounds, BoxShadow, ContentMask, Context, DispatchPhase, EventEmitter, FocusHandle,
+    Font, FontWeight, Hitbox, HitboxBehavior, Hsla, InteractiveElement, IntoElement, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Path, PathBuilder, PinchEvent,
     Pixels, Render, ScrollWheelEvent, ShapedLine, SharedString, Styled, TextAlign, TextRun,
     TransformationMatrix, Window, canvas, div, point, px, quad, size,
 };
 
+use crate::actions::{OpenDiagramStructure, OpenDiagramTable};
 use crate::db::{KeyTarget, SchemaGraph};
 use crate::diagram::geometry::{
     self, Detail, HEADER_HEIGHT, Point, Rect, Segment, Stroke, Transform,
@@ -80,6 +81,24 @@ impl Ready {
         }
     }
 
+    /// The schema and name of the table a card stands for, a stub's in its
+    /// own schema.
+    fn table(&self, card: u32) -> (SharedString, SharedString) {
+        let table = |table: u32| {
+            (
+                self.graph.schema.clone(),
+                self.graph.tables[table as usize].name.clone(),
+            )
+        };
+        match self.scene.layout().cards[card as usize].subject {
+            Subject::Table(index) => table(index),
+            Subject::Stub(key) => match &self.graph.keys[key as usize].referenced {
+                KeyTarget::Elsewhere { schema, table } => (schema.clone(), table.clone()),
+                KeyTarget::Table { table: index, .. } => table(*index),
+            },
+        }
+    }
+
     fn name(&self, card: u32) -> SharedString {
         match self.scene.layout().cards[card as usize].subject {
             Subject::Table(table) => self.graph.tables[table as usize].name.clone(),
@@ -89,6 +108,16 @@ impl Ready {
             },
         }
     }
+}
+
+/// What the view asks of the workspace around it.
+pub enum DiagramEvent {
+    /// A table's rows, or its structure, in the tab the explorer would open.
+    Open {
+        schema: SharedString,
+        table: SharedString,
+        structure: bool,
+    },
 }
 
 /// A press in progress, and what it moves.
@@ -184,6 +213,8 @@ pub struct DiagramView {
     paths_zoom: f32,
 }
 
+impl EventEmitter<DiagramEvent> for DiagramView {}
+
 impl DiagramView {
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
@@ -252,19 +283,23 @@ impl DiagramView {
         self.fitted = true;
     }
 
-    fn press(
-        &mut self,
-        position: gpui::Point<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn press(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_handle.focus(window, cx);
-        let at = self.local(position);
+        let at = self.local(event.position);
         let zoom = self.transform.zoom;
         let world = self.transform.to_world(at);
         let card = self
             .ready()
             .and_then(|ready| ready.scene.card_at(world, zoom));
+        // The first click of the pair already focused the card.
+        if event.click_count >= 2
+            && let Some(card) = card
+        {
+            self.gesture = None;
+            self.set_focus(Some(card), cx);
+            self.open(false, cx);
+            return;
+        }
         self.gesture = Some(match card {
             Some(card) => {
                 let origin = self.ready().map_or(Point::default(), |ready| {
@@ -357,6 +392,20 @@ impl DiagramView {
         }
     }
 
+    /// The focused card's table, opened by the workspace. Nothing in focus,
+    /// nothing opens.
+    fn open(&mut self, structure: bool, cx: &mut Context<Self>) {
+        let Some((schema, table)) = self.focus.and_then(|card| Some(self.ready()?.table(card)))
+        else {
+            return;
+        };
+        cx.emit(DiagramEvent::Open {
+            schema,
+            table,
+            structure,
+        });
+    }
+
     /// Whether a card is in focus, for `escape` to clear before it goes on to
     /// whatever else it closes.
     pub fn has_focus(&self) -> bool {
@@ -369,12 +418,10 @@ impl DiagramView {
 
     /// Where a table's card is on screen, in window coordinates, once drawn.
     #[cfg(test)]
-    pub fn table_on_screen(&self, table: u32) -> Option<gpui::Point<Pixels>> {
-        let layout = self.ready()?.scene.layout();
-        let card = layout
-            .cards
-            .iter()
-            .position(|card| card.subject == Subject::Table(table))? as u32;
+    pub fn table_on_screen(&self, name: &str) -> Option<gpui::Point<Pixels>> {
+        let ready = self.ready()?;
+        let layout = ready.scene.layout();
+        let card = (0..layout.cards.len() as u32).find(|&card| ready.name(card) == name)?;
         let zoom = self.transform.zoom;
         let rect = layout.card_rect(card, layout.detail(zoom), zoom);
         let at = self.transform.to_screen(rect.centre());
@@ -712,7 +759,7 @@ fn listen(view: &gpui::Entity<DiagramView>, hitbox: &Hitbox, window: &mut Window
                 && event.button == MouseButton::Left
                 && hitbox.is_hovered(window)
             {
-                view.update(cx, |view, cx| view.press(event.position, window, cx));
+                view.update(cx, |view, cx| view.press(event, window, cx));
             }
         }
     });
@@ -760,6 +807,8 @@ impl Render for DiagramView {
             .id("diagram")
             .key_context("Diagram")
             .track_focus(&self.focus_handle)
+            .on_action(cx.listener(|view, _: &OpenDiagramTable, _, cx| view.open(false, cx)))
+            .on_action(cx.listener(|view, _: &OpenDiagramStructure, _, cx| view.open(true, cx)))
             .size_full()
             .overflow_hidden()
             .bg(t.panel_glass());
