@@ -2474,6 +2474,7 @@ impl Workspace {
         let active_schema = profile.active_schema().map(gpui::SharedString::from);
         let menu_schema = active_schema.clone();
         let picks_schema = profile.config.target().picks_schema();
+        let draws_diagrams = profile.config.target().draws_diagrams();
         let drop_line = self.explorer_drop.clone();
         let open_queries: HashSet<String> = profile
             .session
@@ -2833,21 +2834,36 @@ impl Workspace {
                     );
                 }
                 let Some(leaf) = menu_leaves.get(id.as_ref()).copied() else {
-                    if !picks_schema || !is_schema_row(entry.item().id.as_str()) {
+                    if !is_schema_row(entry.item().id.as_str()) {
                         return menu;
                     }
-                    let workspace = menu_workspace.clone();
                     let schema = entry.item().label.to_string();
-                    return menu.item(
-                        PopupMenuItem::new("Set as Active Schema")
-                            .checked(menu_schema.as_ref() == Some(&entry.item().label))
-                            .on_click(move |_, _, cx| {
+                    let mut menu = menu;
+                    if draws_diagrams {
+                        let (workspace, schema) = (menu_workspace.clone(), schema.clone());
+                        menu = menu.item(PopupMenuItem::new("Show Diagram").on_click(
+                            move |_, window, cx| {
                                 let schema = schema.clone();
                                 _ = workspace.update(cx, |workspace, cx| {
-                                    workspace.set_schema(schema, cx);
+                                    workspace.open_diagram(schema, None, window, cx);
                                 });
-                            }),
-                    );
+                            },
+                        ));
+                    }
+                    if picks_schema {
+                        let workspace = menu_workspace.clone();
+                        menu = menu.item(
+                            PopupMenuItem::new("Set as Active Schema")
+                                .checked(menu_schema.as_ref() == Some(&entry.item().label))
+                                .on_click(move |_, _, cx| {
+                                    let schema = schema.clone();
+                                    _ = workspace.update(cx, |workspace, cx| {
+                                        workspace.set_schema(schema, cx);
+                                    });
+                                }),
+                        );
+                    }
+                    return menu;
                 };
                 let Some(workspace) = menu_workspace.upgrade() else {
                     return menu;
@@ -2924,6 +2940,18 @@ impl Workspace {
                 let mut menu = menu
                     .item(open("Open Data", false))
                     .item(open("Open Structure", true));
+                if draws_diagrams && super::drawn_in_diagrams(kind) {
+                    let workspace = menu_workspace.clone();
+                    let (schema, relation) = (schema.clone(), relation.clone());
+                    menu = menu.item(PopupMenuItem::new("Show in Diagram").on_click(
+                        move |_, window, cx| {
+                            let (schema, relation) = (schema.clone(), relation.clone());
+                            _ = workspace.update(cx, |workspace, cx| {
+                                workspace.open_diagram(schema, Some(relation), window, cx);
+                            });
+                        },
+                    ));
+                }
                 if target.takes_imports(kind) {
                     menu = menu.item(PopupMenuItem::new("Import Rows…").on_click(
                         move |_, window, cx| {

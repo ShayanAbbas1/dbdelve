@@ -520,7 +520,12 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   profile. One that will not read is no arrangement. The
   restored tab reads its graph again when shown and applies both then. Zoom
   and pan change on every wheel event, too often to write each, so
-  `profiles.toml` is also written on quit and on window close.
+  `profiles.toml` is also written on quit and on window close. Every way in
+  (the palette, a schema's or a table's sidebar menu, a Structure tab's
+  Diagram button) goes through `Workspace::open_diagram`, which fronts the
+  schema's one tab; a table's way in also shows its neighbourhood
+  (`DiagramView::centre_on`), held as the restored centre until the first
+  read lands.
 - **`clip` reads only the window a cell shows, not the whole value.**
   `ResultGrid::shown` clips a cell as it is drawn, on the frame thread, for
   every visible cell of every frame. Nothing clipped is kept: a stored second

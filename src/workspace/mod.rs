@@ -30,6 +30,7 @@ use std::collections::{HashMap, HashSet};
 use crate::export::ClipboardFormat;
 use gpui_component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
 
+pub(crate) use diagrams::drawn_in_diagrams;
 pub(crate) use import_dialog::PreviewGrid;
 pub(crate) use profiles::unavailable_reason;
 pub(crate) use projects::project_name_refusal;

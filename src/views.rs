@@ -792,6 +792,7 @@ fn render_object(
                     .border_b_1()
                     .border_color(t.border)
                     .child(div().flex_1())
+                    .children(diagram_button(tab, target, cx))
                     .child(relation_controls(true, false, cx)),
             )
             .child(
@@ -3682,6 +3683,37 @@ fn relation_controls(
                 )),
         )
         .children(takes_inserts.then(|| insert_button("new-row", "Insert".into(), t)))
+}
+
+/// A table's neighbourhood in its schema's diagram, where the engine draws
+/// one and the table is a card in it.
+fn diagram_button(tab: &ObjectTab, target: Target, cx: &mut Context<Workspace>) -> Option<Button> {
+    let Some(crate::explorer::ObjectKind::Relation(kind)) = tab.kind else {
+        return None;
+    };
+    if !target.draws_diagrams() || !crate::workspace::drawn_in_diagrams(kind) {
+        return None;
+    }
+    let command = Command::ShowDiagram {
+        schema: tab.schema.clone(),
+        centre: Some(tab.name.clone()),
+    };
+    let t = *theme(cx);
+    Some(
+        icon_label_button(
+            "show-diagram",
+            icon::DIAGRAM,
+            "Diagram",
+            Tone::Quiet,
+            Control::Compact,
+            t,
+        )
+        .debug_selector(|| "show-diagram".into())
+        .tooltip("Show this table among its parents and children")
+        .on_click(cx.listener(move |workspace, _: &ClickEvent, window, cx| {
+            workspace.run_command(command.clone(), window, cx);
+        })),
+    )
 }
 
 /// Insert reads as an action, not a third view beside Data and Plan: a plus

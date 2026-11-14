@@ -33,24 +33,41 @@ impl Workspace {
     }
 
     /// Bring a schema's diagram to the front, opening and reading it if it
-    /// has no tab yet.
+    /// has no tab yet, and with a `centre`, showing that table's
+    /// neighbourhood.
     pub(crate) fn open_diagram(
         &mut self,
         schema: String,
+        centre: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(profile) = self.profile_mut() else {
             return;
         };
-        let existing = profile
-            .session
-            .objects
-            .iter()
-            .find(|tab| matches!(tab.body, ObjectBody::Diagram { .. }) && tab.schema == schema)
-            .map(|tab| tab.id);
-        let Some(id) = existing.or_else(|| self.diagram_tab(schema, None, window, cx)) else {
-            return;
+        let existing = (profile.session.objects.iter()).find_map(|tab| match &tab.body {
+            ObjectBody::Diagram { view, .. } if tab.schema == schema => {
+                Some((tab.id, view.clone()))
+            }
+            _ => None,
+        });
+        let id = match existing {
+            Some((id, view)) => {
+                if let Some(table) = &centre {
+                    view.update(cx, |view, cx| view.centre_on(table, cx));
+                }
+                id
+            }
+            None => {
+                let restore = centre.map(|centre| store::StoredDiagram {
+                    centre: Some(centre),
+                    ..store::StoredDiagram::default()
+                });
+                let Some(id) = self.diagram_tab(schema, restore, window, cx) else {
+                    return;
+                };
+                id
+            }
         };
         self.activate_tab(Tab::Object(id), window, cx);
     }
@@ -273,6 +290,12 @@ impl Workspace {
         })
         .detach();
     }
+}
+
+/// Whether a relation of this kind is drawn as a card of its schema's
+/// diagram, so has a neighbourhood to show.
+pub(crate) fn drawn_in_diagrams(kind: RelationKind) -> bool {
+    matches!(kind, RelationKind::Table | RelationKind::PartitionedTable)
 }
 
 /// The database a diagram's arrangement is filed under, named as a pin names

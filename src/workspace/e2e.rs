@@ -4201,6 +4201,160 @@ fn the_zoom_chords_zoom_a_diagram_and_its_views_and_keys_only_lay_it_out_again(
     });
 }
 
+/// The diagram tab in front, once read, and how many diagram tabs are open.
+fn diagram_in_front(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) -> (Entity<crate::diagram_view::DiagramView>, usize) {
+    cx.update(|_, cx| {
+        let session = &workspace.read(cx).profile().unwrap().session;
+        let open = (session.objects.iter())
+            .filter(|tab| matches!(tab.body, ObjectBody::Diagram { .. }))
+            .count();
+        match session.active_object().map(|tab| &tab.body) {
+            Some(ObjectBody::Diagram { view, side, .. }) => {
+                assert!(side.is_none(), "the read landed");
+                (view.clone(), open)
+            }
+            _ => panic!("a diagram is in front"),
+        }
+    })
+}
+
+/// A right-click on a sidebar row, then the `nth` item of the menu it opens.
+fn pick_from_row_menu(
+    workspace: &Entity<Workspace>,
+    row: &str,
+    nth: usize,
+    cx: &mut VisualTestContext,
+) {
+    let at = explorer_row(workspace, row, cx).center();
+    let none = gpui::Modifiers::default();
+    cx.simulate_mouse_down(at, gpui::MouseButton::Right, none);
+    cx.simulate_mouse_up(at, gpui::MouseButton::Right, none);
+    settle(cx);
+    for _ in 0..nth {
+        cx.simulate_keystrokes("down");
+    }
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+}
+
+#[gpui::test]
+fn the_sidebar_shows_a_schemas_diagram_and_a_tables_neighbourhood_in_one_tab(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            &format!("{DIAGRAM_SCHEMA} create table weather (id integer primary key);"),
+        );
+        let names = |view: &Entity<crate::diagram_view::DiagramView>,
+                     cx: &mut VisualTestContext| {
+            let (mut names, _) = cx
+                .update(|_, cx| view.read(cx).laid_out())
+                .expect("the diagram is laid out");
+            names.sort();
+            names
+        };
+
+        pick_from_row_menu(&workspace, &explorer::schema_row("main"), 1, cx);
+        let (view, open) = diagram_in_front(&workspace, cx);
+        assert_eq!(open, 1);
+        assert_eq!(names(&view, cx), ["birds", "sightings", "weather"]);
+
+        // Open Data, Open Structure, Show in Diagram.
+        pick_from_row_menu(&workspace, &explorer::relation_row("main", "birds"), 3, cx);
+        let (view, open) = diagram_in_front(&workspace, cx);
+        assert_eq!(open, 1, "the schema's diagram is reused");
+        assert_eq!(
+            names(&view, cx),
+            ["birds", "sightings"],
+            "showing the table's neighbourhood"
+        );
+        assert_eq!(
+            cx.update(|_, cx| view.read(cx).focused_name())
+                .as_deref()
+                .map(|name| name.to_string()),
+            Some("birds".to_string())
+        );
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_structure_tab_shows_its_tables_neighbourhood_and_a_double_click_there_opens_a_neighbour(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            &format!("{DIAGRAM_SCHEMA} create table weather (id integer primary key);"),
+        );
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_relation_view(
+                "main".into(),
+                "sightings".into(),
+                crate::db::RelationKind::Table,
+                true,
+                window,
+                cx,
+            );
+        });
+        settle(cx);
+        let button = cx
+            .debug_bounds("show-diagram")
+            .expect("the structure offers the diagram");
+        cx.simulate_click(button.center(), gpui::Modifiers::default());
+        settle(cx);
+        let (view, open) = diagram_in_front(&workspace, cx);
+        assert_eq!(open, 1);
+        let (mut names, _) = cx
+            .update(|_, cx| view.read(cx).laid_out())
+            .expect("the diagram is laid out");
+        names.sort();
+        assert_eq!(names, ["birds", "sightings"], "the neighbourhood");
+        assert_eq!(
+            cx.update(|_, cx| view.read(cx).focused_name())
+                .map(|name| name.to_string()),
+            Some("sightings".to_string()),
+            "centred on the table"
+        );
+        assert!(
+            cx.update(|window, cx| view.read(cx).focus_handle().is_focused(window)),
+            "and the canvas holds the keyboard"
+        );
+
+        let birds = cx
+            .update(|_, cx| view.read(cx).table_on_screen("birds"))
+            .expect("the neighbourhood drew the birds");
+        let none = gpui::Modifiers::default();
+        cx.simulate_click(birds, none);
+        cx.simulate_event(gpui::MouseDownEvent {
+            position: birds,
+            modifiers: none,
+            button: gpui::MouseButton::Left,
+            click_count: 2,
+            first_mouse: false,
+        });
+        cx.simulate_event(gpui::MouseUpEvent {
+            position: birds,
+            modifiers: none,
+            button: gpui::MouseButton::Left,
+            click_count: 2,
+        });
+        settle(cx);
+        assert_eq!(
+            front_relation(&workspace, cx),
+            Some(("birds".to_string(), false)),
+            "a double-click on a neighbour opens it, as in the schema view"
+        );
+
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn a_refresh_reads_a_diagram_again_and_keeps_the_cards_the_user_moved(cx: &mut TestAppContext) {
     store::tests::with_home(|| {

@@ -292,8 +292,12 @@ impl Mode {
 #[derive(Clone)]
 pub enum Command {
     OpenObject(ExplorerTarget),
-    /// A schema's ER diagram, by name.
-    ShowDiagram(String),
+    /// A schema's ER diagram, by name, showing the neighbourhood of `centre`
+    /// where one is named.
+    ShowDiagram {
+        schema: String,
+        centre: Option<String>,
+    },
     OpenQuery(String),
     SetTarget(crate::db::Target),
     OpenScratch,
@@ -3814,6 +3818,25 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
                 ));
             }
         }
+        if let Some(ObjectKind::Relation(kind)) = tab.kind
+            && matches!(
+                tab.body,
+                ObjectBody::Relation { .. } | ObjectBody::Structure { .. }
+            )
+            && crate::workspace::drawn_in_diagrams(kind)
+            && profile.config.target().draws_diagrams()
+            && profile.connection().is_some()
+        {
+            items.push(command(
+                &format!("Show {} in diagram", tab.name),
+                icon::DIAGRAM,
+                Command::ShowDiagram {
+                    schema: tab.schema.clone(),
+                    centre: Some(tab.name.clone()),
+                },
+                TAB,
+            ));
+        }
         // The explorer's menu for this relation, clipboard and all.
         if let Some(ObjectKind::Relation(kind)) = tab.kind {
             items.extend(
@@ -4318,7 +4341,10 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         items.push(command(
             &format!("Show diagram of {schema}"),
             icon::DIAGRAM,
-            Command::ShowDiagram(schema),
+            Command::ShowDiagram {
+                schema,
+                centre: None,
+            },
             CONNECTION,
         ));
     }

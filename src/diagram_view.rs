@@ -763,6 +763,31 @@ impl DiagramView {
         self.lay_out(view, cx);
     }
 
+    /// Shows a table's neighbourhood with the table in focus, from outside
+    /// the diagram: the explorer or a Structure tab. Before the first read it
+    /// is held for when the read lands; a table the diagram does not draw (a
+    /// view, a partition) leaves the view as it is.
+    pub fn centre_on(&mut self, table: &str, cx: &mut Context<Self>) {
+        let Some(ready) = self.ready() else {
+            self.restore.get_or_insert_with(Default::default).centre = Some(table.to_string());
+            return;
+        };
+        let Some(index) = (ready.graph.tables.iter())
+            .position(|drawn| drawn.name.as_ref() == table)
+            .map(|index| index as u32)
+        else {
+            return;
+        };
+        let view = View::Neighbourhood(index);
+        if view == ready.view {
+            self.focus = card_of(ready.scene.layout(), Subject::Table(index));
+            cx.notify();
+            return;
+        }
+        cx.emit(DiagramEvent::Viewed);
+        self.lay_out(view, cx);
+    }
+
     /// Lays `view` out at the keys-only setting asked for. A neighbourhood is
     /// a handful of cards and is laid out at once; a schema can be thousands,
     /// and is laid out off the UI thread while the old scene stays on screen.
