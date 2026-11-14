@@ -1914,8 +1914,6 @@ impl Connection {
     /// connection stops nothing but this read.
     ///
     /// Asked only where [`Target::draws_diagrams`].
-    // Nothing calls it until the diagram canvas lands (phase 2).
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn schema_graph(&self, schema: &str) -> Result<SchemaGraph, DbError> {
         match self {
             Self::Postgres(connection) => connection.schema_graph(schema),

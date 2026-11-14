@@ -353,6 +353,7 @@ pub struct EdgePath {
 impl EdgePath {
     /// Every point and control point, and the marks: a curve lies inside the
     /// hull of its control points.
+    #[cfg(test)]
     pub fn bounds(&self) -> Rect {
         let mut points = self.segments.iter().flat_map(|segment| match *segment {
             Segment::Move(point) | Segment::Line(point) => vec![point],

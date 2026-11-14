@@ -252,8 +252,6 @@ impl Target {
     /// Whether a schema can be drawn as an ER diagram, through
     /// [`super::Connection::schema_graph`]. Never through a plugin yet: its
     /// driver has no message that reads keys in bulk.
-    // Nothing asks it until the diagram tab lands (phase 3).
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn draws_diagrams(self) -> bool {
         self.abilities().draws_diagrams
     }

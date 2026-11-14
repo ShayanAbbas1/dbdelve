@@ -63,7 +63,7 @@ const DOT_STEP: f32 = 32.0;
 const DOT_MIN_GAP: f32 = 24.0;
 const DOT_SIZE: f32 = 1.5;
 /// Shaped lines kept before the cache starts again. Keys are text, size step
-/// and ink, so a session of zooming over one schema stays well under it.
+/// and face, so a session of zooming over one schema stays well under it.
 const LINE_CACHE_LIMIT: usize = 8192;
 const FOCUS_BAR_MAX_WIDTH: f32 = 560.0;
 /// The zooms the toolbar's buttons and the zoom chords step through, so the
@@ -258,15 +258,8 @@ enum EdgeLook {
     Dimmed,
 }
 
-/// The colour roles text is shaped in. A shaped line bakes its colour in, so
-/// the role is part of the cache key, and a dimmed role is a role of its own.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum Ink {
-    Text,
-    Muted,
-}
-
-/// The three faces a card's text is set in.
+/// The three faces a card's text is set in, each with its family, weight
+/// and ink.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Face {
     Title,
@@ -274,13 +267,29 @@ enum Face {
     Type,
 }
 
+/// How a line is set. A shaped line bakes its colour in, so the face and the
+/// dimmed form of it are part of the cache key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct Pen {
+    face: Face,
+    size: u32,
+    dimmed: bool,
+}
+
+impl Pen {
+    fn new(face: Face, size: f32, dimmed: bool) -> Self {
+        Self {
+            face,
+            size: size.to_bits(),
+            dimmed,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct LineKey {
     text: SharedString,
-    face: Face,
-    size: u32,
-    ink: Ink,
-    dimmed: bool,
+    pen: Pen,
 }
 
 /// What the shaped lines were shaped against: a change of theme or font
@@ -1507,31 +1516,14 @@ impl DiagramView {
 
                 let pad = CARD_PAD * zoom;
                 let name_size = geometry::text_size(zoom, layout::chrome(layout::TEXT_MD));
-                let title = shape(
+                let (title, title_ellipsis) = label(
                     lines,
                     stamp,
-                    ready.name(card),
-                    Face::Title,
-                    name_size,
-                    Ink::Text,
-                    dimmed,
                     &inks,
+                    ready.name(card),
+                    Pen::new(Face::Title, name_size, dimmed),
                     window,
                 );
-                let ellipsis = |face, size, ink, lines: &mut _, window: &mut Window| {
-                    shape(
-                        lines,
-                        stamp,
-                        ELLIPSIS.into(),
-                        face,
-                        size,
-                        ink,
-                        dimmed,
-                        &inks,
-                        window,
-                    )
-                };
-                let title_ellipsis = ellipsis(Face::Title, name_size, Ink::Text, lines, window);
                 let room = header.size.width - px(2.0 * pad);
                 paint_label(
                     &title,
@@ -1548,6 +1540,10 @@ impl DiagramView {
                 };
                 let columns = &ready.graph.tables[table as usize].columns;
                 let type_size = geometry::text_size(zoom, layout::grid(layout::TEXT_SM));
+                let (column_pen, type_pen) = (
+                    Pen::new(Face::Column, name_size, dimmed),
+                    Pen::new(Face::Type, type_size, dimmed),
+                );
                 for row in layout.rows(card, detail) {
                     let column = &columns[row.column as usize];
                     let row_bounds = Bounds {
@@ -1594,36 +1590,15 @@ impl DiagramView {
                     let name_x = icon_at.x + px(icon_size + ICON_GAP * zoom);
                     let right = row_bounds.origin.x + row_bounds.size.width - px(pad);
                     let mut room = right - name_x;
-                    let name = shape(
-                        lines,
-                        stamp,
-                        column.name.clone(),
-                        Face::Column,
-                        name_size,
-                        Ink::Text,
-                        dimmed,
-                        &inks,
-                        window,
-                    );
-                    let name_ellipsis = ellipsis(Face::Column, name_size, Ink::Text, lines, window);
+                    let (name, name_ellipsis) =
+                        label(lines, stamp, &inks, column.name.clone(), column_pen, window);
                     if detail.types() {
-                        let label = match column.nullable {
+                        let type_label = match column.nullable {
                             true => ready.nullable_types[column.type_label as usize].clone(),
                             false => ready.graph.types[column.type_label as usize].clone(),
                         };
-                        let label = shape(
-                            lines,
-                            stamp,
-                            label,
-                            Face::Type,
-                            type_size,
-                            Ink::Muted,
-                            dimmed,
-                            &inks,
-                            window,
-                        );
-                        let label_ellipsis =
-                            ellipsis(Face::Type, type_size, Ink::Muted, lines, window);
+                        let (label, label_ellipsis) =
+                            label(lines, stamp, &inks, type_label, type_pen, window);
                         let gap = ICON_GAP * zoom;
                         let label_room = geometry::type_room(
                             f32::from(room),
@@ -1853,41 +1828,46 @@ fn paint_label(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// A label shaped in `pen`, and the ellipsis it is cut with, both cached.
+fn label(
+    lines: &mut HashMap<LineKey, ShapedLine>,
+    stamp: &Stamp,
+    inks: &Theme,
+    text: SharedString,
+    pen: Pen,
+    window: &mut Window,
+) -> (ShapedLine, ShapedLine) {
+    (
+        shape(lines, stamp, inks, text, pen, window),
+        shape(lines, stamp, inks, ELLIPSIS.into(), pen, window),
+    )
+}
+
 fn shape(
     lines: &mut HashMap<LineKey, ShapedLine>,
     stamp: &Stamp,
-    text: SharedString,
-    face: Face,
-    size: f32,
-    ink: Ink,
-    dimmed: bool,
     inks: &Theme,
+    text: SharedString,
+    pen: Pen,
     window: &mut Window,
 ) -> ShapedLine {
-    let key = LineKey {
-        text,
-        face,
-        size: size.to_bits(),
-        ink,
-        dimmed,
-    };
+    let key = LineKey { text, pen };
     if let Some(line) = lines.get(&key) {
         return line.clone();
     }
-    let family = match face {
+    let family = match pen.face {
         Face::Type => stamp.grid.clone(),
         Face::Title | Face::Column => stamp.chrome.clone(),
     };
     let mut font: Font = gpui::font(family);
-    if face == Face::Title {
+    if pen.face == Face::Title {
         font.weight = FontWeight::SEMIBOLD;
     }
-    let colour = match ink {
-        Ink::Text => inks.text,
-        Ink::Muted => inks.text_muted,
+    let colour = match pen.face {
+        Face::Title | Face::Column => inks.text,
+        Face::Type => inks.text_muted,
     };
-    let colour: Hsla = match dimmed {
+    let colour: Hsla = match pen.dimmed {
         true => colour.alpha(DIM).into(),
         false => colour.into(),
     };
@@ -1899,9 +1879,12 @@ fn shape(
         underline: None,
         strikethrough: None,
     };
-    let line = window
-        .text_system()
-        .shape_line(key.text.clone(), px(size), &[run], None);
+    let line = window.text_system().shape_line(
+        key.text.clone(),
+        px(f32::from_bits(pen.size)),
+        &[run],
+        None,
+    );
     lines.insert(key, line.clone());
     line
 }

@@ -5,8 +5,6 @@ mod actions;
 mod completion;
 mod connection_form;
 mod db;
-// Edge hit tests are reached by hovering an edge, which comes next.
-#[cfg_attr(not(test), allow(dead_code))]
 mod diagram;
 mod diagram_view;
 mod explain;
