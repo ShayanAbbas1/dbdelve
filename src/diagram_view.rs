@@ -47,6 +47,11 @@ use crate::ui::{self, Control, Tone};
 /// Room left around the diagram when it is fitted to the view, in pixels.
 const FIT_MARGIN: f32 = 32.0;
 const EDGE_WIDTH: f32 = 1.25;
+/// What an edge at rest thins to, and the share of its ink it keeps, zoomed
+/// out to [`FADED_AT`] and beyond: see [`resting_edge`].
+const HAIRLINE: f32 = 1.0;
+const FADED: f32 = 0.35;
+const FADED_AT: f32 = 0.15;
 /// How far a tessellated edge may stray from its curve, in screen pixels,
 /// which is where edges are built: the anti-aliasing hides half a pixel,
 /// and lyon's default of a tenth costs several times the vertices, built
@@ -67,6 +72,12 @@ const EDGE_REACH: f32 = 4.0;
 /// How near a card's right or bottom edge the pointer must come to resize
 /// it, in pixels, either side of the edge.
 const HANDLE_REACH: f32 = 5.0;
+/// The fewest characters of a name a name block shows: fewer, with the
+/// ellipsis, say nothing ("t0…"), and the bare block reads better. The
+/// pointer still names it.
+const MIN_NAME_CHARS: usize = 4;
+/// Between a card and the name shown over it under the pointer, in pixels.
+const HOVER_NAME_GAP: f32 = 4.0;
 /// Dimmed ink keeps this much of its colour.
 const DIM: f32 = 0.3;
 /// The tint behind a joined row. Lighter than the accent's usual wash, because
@@ -1193,7 +1204,12 @@ impl DiagramView {
                 }
                 if hover != self.hover {
                     self.hover = hover;
-                    if self.focus.is_none() {
+                    // With a card in focus, a hover lights nothing, but zoomed
+                    // out to name blocks it names the card under the pointer.
+                    let named = self.ready().is_some_and(|ready| {
+                        ready.scene.layout().detail(self.transform.zoom) == Detail::Names
+                    });
+                    if self.focus.is_none() || named {
                         cx.notify();
                     }
                 }
@@ -2124,11 +2140,7 @@ impl DiagramView {
             let canvas_tone: Hsla = t.panel_glass().into();
             for &edge in &visible.edges {
                 let look = edge_look(layout, focus, hover, edge);
-                let colour: Hsla = match look {
-                    EdgeLook::Plain => t.edge_ink().into(),
-                    EdgeLook::Lit => t.accent.into(),
-                    EdgeLook::Dimmed => t.edge_ink().alpha(DIM).into(),
-                };
+                let colour = edge_colour(t, look, zoom);
                 let pan = point(
                     origin.x + px(transform.pan.x),
                     origin.y + px(transform.pan.y),
@@ -2146,6 +2158,8 @@ impl DiagramView {
             }
 
             let washed = joined_rows(ready, focus, hover);
+            // The hovered card, where its block is too small for its name.
+            let mut unnamed = None;
             for &card in &visible.cards {
                 let dimmed = card_dimmed(layout, focus, card);
                 let rect = layout.card_rect(card, detail, zoom);
@@ -2226,15 +2240,24 @@ impl DiagramView {
                     window,
                 );
                 let room = header.size.width - px(2.0 * pad);
-                paint_label(
-                    &title,
-                    &title_ellipsis,
-                    fit(&title, &title_ellipsis, room),
-                    point(header.origin.x + px(pad), header.origin.y),
-                    header.size.height,
-                    window,
-                    cx,
-                );
+                let title_fit = fit(&title, &title_ellipsis, room);
+                if detail != Detail::Names || title_fit.shows(MIN_NAME_CHARS, starts(&title)) {
+                    paint_label(
+                        &title,
+                        &title_ellipsis,
+                        title_fit,
+                        point(header.origin.x + px(pad), header.origin.y),
+                        header.size.height,
+                        window,
+                        cx,
+                    );
+                }
+                if detail == Detail::Names
+                    && title_fit != Fit::Whole
+                    && hover == Some(Hover::Card(card))
+                {
+                    unnamed = Some((card, card_bounds));
+                }
 
                 let Subject::Table(table) = layout.cards[card as usize].subject else {
                     continue;
@@ -2377,6 +2400,18 @@ impl DiagramView {
                         cx,
                     );
                 }
+            }
+            if let Some((card, under)) = unnamed {
+                let size = layout::chrome(layout::TEXT_MD);
+                let (name, _) = label(
+                    lines,
+                    stamp,
+                    &inks,
+                    ready.name(card),
+                    Pen::new(Face::Title, size, false),
+                    window,
+                );
+                paint_hover_name(&name, under, bounds, t, window, cx);
             }
         });
     }
@@ -2612,16 +2647,57 @@ fn floating(t: Theme) -> gpui::Div {
 
 /// How a shaped label fits `room`, cut with `ellipsis` when it must be.
 fn fit(line: &ShapedLine, ellipsis: &ShapedLine, room: Pixels) -> Fit {
-    let starts = (line.runs.iter())
-        .flat_map(|run| &run.glyphs)
-        .map(|glyph| (glyph.index, f32::from(glyph.position.x)));
     Fit::of(
         &line.text,
         f32::from(line.width()),
         f32::from(room),
         f32::from(ellipsis.width()),
-        starts,
+        starts(line),
     )
+}
+
+/// Where a shaped line's characters start, as [`Fit`] takes them.
+fn starts(line: &ShapedLine) -> impl Iterator<Item = (usize, f32)> + '_ {
+    (line.runs.iter())
+        .flat_map(|run| &run.glyphs)
+        .map(|glyph| (glyph.index, f32::from(glyph.position.x)))
+}
+
+/// A card's name on a frosted pill just above it, or below where the canvas
+/// has no room above: what the pointer finds on a block too small to name.
+fn paint_hover_name(
+    name: &ShapedLine,
+    card: Bounds<Pixels>,
+    canvas: Bounds<Pixels>,
+    t: Theme,
+    window: &mut Window,
+    cx: &mut gpui::App,
+) {
+    let pad = px(layout::SPACE_SM);
+    let height = px(layout::chrome(geometry::NAME_BLOCK_HEIGHT));
+    let width = name.width() + pad * 2.0;
+    let gap = px(HOVER_NAME_GAP);
+    let above = card.origin.y - gap - height;
+    let y = match above < canvas.origin.y {
+        true => card.origin.y + card.size.height + gap,
+        false => above,
+    };
+    let x = (card.origin.x)
+        .min(canvas.origin.x + canvas.size.width - width)
+        .max(canvas.origin.x);
+    let pill = Bounds {
+        origin: point(x, y),
+        size: size(width, height),
+    };
+    window.paint_quad(quad(
+        pill,
+        px(6.0),
+        Hsla::from(t.overlay_glass()),
+        px(1.0),
+        Hsla::from(t.border),
+        BorderStyle::Solid,
+    ));
+    let _ = name.paint(point(x + pad, y), height, TextAlign::Left, None, window, cx);
 }
 
 /// A label painted from `origin` as `fit` says: whole, or clipped where its
@@ -2816,6 +2892,32 @@ fn screen_point(world: Point, zoom: f32) -> gpui::Point<Pixels> {
     point(px(world.x * zoom), px(world.y * zoom))
 }
 
+/// How an edge at rest is drawn at a zoom: the share of its ink it keeps,
+/// and its width in pixels. Zoomed out past the name blocks, hundreds of
+/// edges share each lane; at full strength their strokes merge into solid
+/// walls, so they fade and thin to a hairline, and a bundle reads as how
+/// many run through it. At [`geometry::NAMES_BELOW`] and above they are
+/// drawn whole, which is what the contrast floors hold.
+fn resting_edge(zoom: f32) -> (f32, f32) {
+    let faded =
+        ((geometry::NAMES_BELOW - zoom) / (geometry::NAMES_BELOW - FADED_AT)).clamp(0.0, 1.0);
+    (
+        1.0 - (1.0 - FADED) * faded,
+        EDGE_WIDTH - (EDGE_WIDTH - HAIRLINE) * faded,
+    )
+}
+
+/// An edge's colour under the focus and hover at a zoom. A lit edge keeps
+/// its full strength however far out: it is the one the user asked to see.
+fn edge_colour(t: Theme, look: EdgeLook, zoom: f32) -> Hsla {
+    let (strength, _) = resting_edge(zoom);
+    match look {
+        EdgeLook::Plain => t.edge_ink().alpha(strength).into(),
+        EdgeLook::Lit => t.accent.into(),
+        EdgeLook::Dimmed => t.edge_ink().alpha(DIM * strength).into(),
+    }
+}
+
 /// An edge and its marks tessellated at `zoom` with no pan, in the order they
 /// are painted: the line, the marks' strokes, then each circle's hole and its
 /// ring.
@@ -2823,7 +2925,7 @@ fn edge_paths(layout: &Layout, edge: u32, detail: Detail, zoom: f32, look: EdgeL
     let shape = layout.edge_path(edge, detail, zoom);
     let width = px(match look {
         EdgeLook::Lit => LIT_EDGE_WIDTH,
-        EdgeLook::Plain | EdgeLook::Dimmed => EDGE_WIDTH,
+        EdgeLook::Plain | EdgeLook::Dimmed => resting_edge(zoom).1,
     });
     let stroke = || stroke(width);
     let mut pieces = Vec::new();
@@ -3068,6 +3170,38 @@ mod tests {
             5 * ours <= 3 * lyons,
             "{ours} vertices against lyon's {lyons}"
         );
+    }
+
+    /// The contrast floors in `theme` hold `edge_ink` and `accent` on the
+    /// canvas; these are what an edge is drawn in at rest from the name
+    /// blocks' zoom up, and lit at any zoom. Zoomed further out, an edge at
+    /// rest fades on purpose (design §8.1).
+    #[test]
+    fn an_edge_is_drawn_whole_down_to_name_blocks_and_fades_and_thins_past_them() {
+        for t in Theme::all() {
+            for zoom in [geometry::MAX_ZOOM, 1.0, geometry::NAMES_BELOW] {
+                assert_eq!(
+                    edge_colour(t, EdgeLook::Plain, zoom),
+                    Hsla::from(t.edge_ink())
+                );
+            }
+            for zoom in [1.0, 0.3, geometry::MIN_ZOOM] {
+                assert_eq!(edge_colour(t, EdgeLook::Lit, zoom), Hsla::from(t.accent));
+            }
+        }
+        assert_eq!(resting_edge(1.0), (1.0, EDGE_WIDTH));
+        let (strength, width) = resting_edge(geometry::MIN_ZOOM);
+        assert!((strength - FADED).abs() < 1e-6 && (width - HAIRLINE).abs() < 1e-6);
+        let mut previous = resting_edge(geometry::NAMES_BELOW);
+        for step in 1..=20 {
+            let zoom = geometry::NAMES_BELOW * (1.0 - step as f32 / 20.0);
+            let now = resting_edge(zoom.max(geometry::MIN_ZOOM));
+            assert!(
+                now.0 <= previous.0 && now.1 <= previous.1,
+                "{now:?} at {zoom}"
+            );
+            previous = now;
+        }
     }
 
     #[test]

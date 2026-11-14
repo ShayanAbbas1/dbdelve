@@ -29,7 +29,7 @@ pub const WORLD_LIMIT: f32 = 1.0e6;
 
 /// Between the levels the design names (100%, about 70%, 45% and below).
 const KEYS_BELOW: f32 = 0.85;
-const NAMES_BELOW: f32 = 0.55;
+pub const NAMES_BELOW: f32 = 0.55;
 
 /// The text sizes a zoom may pick, as multiples of the user's base size. gpui
 /// keeps a raster per glyph per size and never evicts one, so text shaped at
@@ -212,6 +212,17 @@ impl Fit {
             }
         }
         Self::Cut(cut)
+    }
+
+    /// Whether the label as fitted shows at least `chars` of its
+    /// characters, or the whole of a shorter one. `starts` are where its
+    /// characters start, as [`Self::of`] takes them.
+    pub fn shows(self, chars: usize, starts: impl Iterator<Item = (usize, f32)>) -> bool {
+        match self {
+            Self::Whole => true,
+            Self::Cut(x) => starts.filter(|&(_, start)| start < x).count() >= chars,
+            Self::Hidden => false,
+        }
     }
 
     /// The label's width as drawn.
@@ -1399,6 +1410,12 @@ mod tests {
             Fit::Cut(10.0),
             "cut on a character, not a byte"
         );
+        let shows = |text: &str, room: f32| fit(text, room).shows(4, starts(text).into_iter());
+        assert!(shows("orders", 59.0), "five characters and the ellipsis");
+        assert!(shows("orders", 48.0), "four");
+        assert!(!shows("orders", 38.0), "three");
+        assert!(shows("t01", 30.0), "a short name whole");
+        assert!(!shows("orders", 7.0), "nothing");
         assert_eq!(Fit::Cut(40.0).width(60.0, 8.0), 48.0);
         assert_eq!(Fit::Whole.width(60.0, 8.0), 60.0);
         assert_eq!(Fit::Hidden.width(60.0, 8.0), 0.0);
