@@ -435,10 +435,12 @@ fn family(name: &str, fallback: &str) -> String {
 
 /// Text for an XML element or attribute. Names come from the database and
 /// can hold anything, and XML 1.0 has no way to write most control
-/// characters even escaped, so those become a replacement character, and
+/// characters or U+FFFE and U+FFFF even escaped, so those become a
+/// replacement character (as do the C1 controls it merely discourages), and
 /// line breaks and tabs a space.
 pub fn escape(text: &str) -> Cow<'_, str> {
-    let clean = |c: char| !matches!(c, '<' | '>' | '&' | '"' | '\'') && !c.is_control();
+    let forbidden = |c: char| c.is_control() || matches!(c, '\u{FFFE}' | '\u{FFFF}');
+    let clean = |c: char| !matches!(c, '<' | '>' | '&' | '"' | '\'') && !forbidden(c);
     if text.chars().all(clean) {
         return Cow::Borrowed(text);
     }
@@ -451,7 +453,7 @@ pub fn escape(text: &str) -> Cow<'_, str> {
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&apos;"),
             '\t' | '\n' | '\r' => out.push(' '),
-            c if c.is_control() => out.push('\u{FFFD}'),
+            c if forbidden(c) => out.push('\u{FFFD}'),
             c => out.push(c),
         }
     }
@@ -569,6 +571,17 @@ pub(crate) mod tests {
             !document.chars().any(|c| c.is_control() && c != '\n'),
             "no control character but the line breaks between elements"
         );
+        parses(&document);
+    }
+
+    #[test]
+    fn noncharacters_xml_forbids_are_replaced_too() {
+        let mut graph = graph(1, &[]);
+        graph.schema = "s\u{FFFE}".into();
+        graph.tables[0].name = "t\u{FFFF}".into();
+        let document = svg(&graph, &schema(&graph, false), &style());
+        assert!(document.contains("<title>s\u{FFFD}</title>"));
+        assert!(document.contains(">t\u{FFFD}</text>"));
         parses(&document);
     }
 
