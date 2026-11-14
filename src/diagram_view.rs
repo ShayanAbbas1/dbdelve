@@ -62,6 +62,9 @@ const EDGE_REACH: f32 = 4.0;
 const HANDLE_REACH: f32 = 5.0;
 /// Dimmed ink keeps this much of its colour.
 const DIM: f32 = 0.3;
+/// The tint behind a joined row. Lighter than the accent's usual wash, because
+/// the row's name and type are read through it, on glass over the worst backdrop.
+pub(crate) const JOINED_ROW_WASH: f32 = 0.06;
 /// The dot grid's spacing, in world units, doubled until the dots stand at
 /// least [`DOT_MIN_GAP`] pixels apart, so zooming out never fills the screen
 /// with dots.
@@ -1941,9 +1944,9 @@ impl DiagramView {
             for &edge in &visible.edges {
                 let look = edge_look(layout, focus, hover, edge);
                 let colour: Hsla = match look {
-                    EdgeLook::Plain => t.text_faint.into(),
+                    EdgeLook::Plain => t.edge_ink().into(),
                     EdgeLook::Lit => t.accent.into(),
-                    EdgeLook::Dimmed => t.text_faint.alpha(DIM).into(),
+                    EdgeLook::Dimmed => t.edge_ink().alpha(DIM).into(),
                 };
                 let pan = point(
                     origin.x + px(transform.pan.x),
@@ -2071,7 +2074,7 @@ impl DiagramView {
                         window.paint_quad(quad(
                             row_bounds,
                             px(0.0),
-                            Hsla::from(inks.accent.alpha(layout::ACCENT_WASH)),
+                            Hsla::from(inks.accent.alpha(JOINED_ROW_WASH)),
                             px(0.0),
                             Hsla::from(t.border),
                             BorderStyle::Solid,
@@ -2162,7 +2165,7 @@ impl DiagramView {
                         window.paint_quad(quad(
                             row_bounds,
                             px(0.0),
-                            Hsla::from(inks.accent.alpha(layout::ACCENT_WASH)),
+                            Hsla::from(inks.accent.alpha(JOINED_ROW_WASH)),
                             px(0.0),
                             Hsla::from(t.border),
                             BorderStyle::Solid,
