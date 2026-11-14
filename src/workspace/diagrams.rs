@@ -241,6 +241,15 @@ impl Workspace {
                     *side = None;
                     if !current {
                         *stale = true;
+                        // A reconnect's own read was refused while this one
+                        // held the slot, so a tab in front would wait on
+                        // nothing.
+                        let front = (workspace.profile()).is_some_and(|front| {
+                            front.id == profile_id && front.session.active == Tab::Object(id)
+                        });
+                        if front {
+                            workspace.load_diagram(id, cx);
+                        }
                         return;
                     }
                     let shown = view.read(cx).keys_only().is_some();

@@ -4086,6 +4086,28 @@ fn the_palette_opens_a_diagram_that_takes_the_keyboard_and_escape_clears_its_foc
 }
 
 #[gpui::test]
+fn a_diagram_read_outlived_by_a_reconnect_is_read_again_for_the_tab_in_front(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, DIAGRAM_SCHEMA);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_diagram("main".into(), None, window, cx);
+            // A reconnect landed while the read was out, and its own read
+            // was refused because this one still held the slot.
+            workspace.profile_mut().unwrap().generation += 1;
+        });
+        settle(cx);
+        let view = diagram_in_front(&workspace, cx).0;
+        assert!(
+            cx.update(|_, cx| view.read(cx).laid_out()).is_some(),
+            "the old answer was dropped and the diagram read again"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn a_double_click_opens_a_diagram_cards_table_and_the_keyboard_the_focused_ones(
     cx: &mut TestAppContext,
 ) {
