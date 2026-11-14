@@ -1963,15 +1963,31 @@ fn diagrams_directory(profile_id: &str) -> Result<PathBuf, String> {
 }
 
 /// A database's and a schema's names can hold anything, so each is escaped
-/// as a grid key's parts are, `.` included, and the `.` between them is the
-/// only one in the name. Behind a prefix that keeps empty names a file name.
+/// ([`escape_file_name`]), `.` included, and the `.` between them is the only
+/// one in the name. Behind a prefix that keeps empty names a file name.
 fn diagram_path(profile_id: &str, database: Option<&str>, schema: &str) -> Result<PathBuf, String> {
     let key = format!(
         "d-{}.{}",
-        escape_grid_key(database.unwrap_or_default()),
-        escape_grid_key(schema)
+        escape_file_name(database.unwrap_or_default()),
+        escape_file_name(schema)
     );
     Ok(diagrams_directory(profile_id)?.join(format!("{key}.toml")))
+}
+
+/// Like [`escape_grid_key`], but upper-case letters are escaped too and the
+/// hex is lower-case, so nothing it writes has a letter to fold: on a
+/// case-insensitive file system (macOS, Windows) `"Sales"` and `"sales"`
+/// would otherwise share one file.
+fn escape_file_name(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'-' {
+            escaped.push(byte as char);
+        } else {
+            escaped.push_str(&format!("%{byte:02x}"));
+        }
+    }
+    escaped
 }
 
 fn grid_path(profile_id: &str, key: &str) -> Result<PathBuf, String> {
@@ -5266,6 +5282,10 @@ name = \"accounts\"
                 (Some("a"), "b.c"),
                 (Some("other"), "public"),
                 (Some("../y"), "public"),
+                (None, "Sales"),
+                (None, "sales"),
+                (Some("Shop"), "x"),
+                (Some("shop"), "x"),
             ];
             for (database, schema) in diagrams {
                 write_diagram("dev", database, schema, &cards).expect("an arrangement must write");
@@ -5282,6 +5302,15 @@ name = \"accounts\"
                 fs::read_dir(&directory).unwrap().count(),
                 diagrams.len(),
                 "no two diagrams share a file and none lands outside"
+            );
+            let folded: HashSet<String> = fs::read_dir(&directory)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().to_lowercase())
+                .collect();
+            assert_eq!(
+                folded.len(),
+                diagrams.len(),
+                "nor would on a file system that folds case: {folded:?}"
             );
             assert_eq!(read_diagram("dev", None, "never"), Vec::new());
 
