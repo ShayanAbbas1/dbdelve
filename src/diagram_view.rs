@@ -301,20 +301,23 @@ pub enum DiagramEvent {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DiagramFile {
     Svg,
+    Png,
 }
 
 impl DiagramFile {
-    pub const ALL: [Self; 1] = [Self::Svg];
+    pub const ALL: [Self; 2] = [Self::Svg, Self::Png];
 
     pub fn extension(self) -> &'static str {
         match self {
             Self::Svg => "svg",
+            Self::Png => "png",
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Svg => "SVG",
+            Self::Png => "PNG",
         }
     }
 

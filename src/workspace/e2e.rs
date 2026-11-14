@@ -5109,6 +5109,19 @@ fn the_diagram_export_menu_writes_the_drawing_to_the_file_picked(cx: &mut TestAp
             ))
         );
 
+        pick_diagram_export(2, cx);
+        let path = directory.join("main.png");
+        let chosen = path.clone();
+        cx.simulate_new_path_selection(|_| Some(chosen));
+        let png = exported_file(&path, cx);
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"), "a PNG");
+        // The extension typed decides, as it does for a result's export.
+        pick_diagram_export(1, cx);
+        let path = directory.join("typed.png");
+        let chosen = path.clone();
+        cx.simulate_new_path_selection(|_| Some(chosen));
+        assert!(exported_file(&path, cx).starts_with(b"\x89PNG"));
+
         // The palette asks for the same file, and a neighbourhood is named
         // after the table in its middle too.
         let view = show_diagram(&workspace, cx);

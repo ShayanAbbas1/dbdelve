@@ -8,7 +8,7 @@ use super::*;
 
 use crate::diagram::geometry::{MAX_CARD_WIDTH, MIN_CARD_WIDTH, Point, WORLD_LIMIT};
 use crate::diagram::index::{Placement, Scene};
-use crate::diagram::layout;
+use crate::diagram::{layout, png};
 use crate::diagram_view::{DiagramEvent, DiagramFile, DiagramView, Drawing, Load, Ready, TableKey};
 
 use super::exports::{Ended, choose_path, could_not_write, write_replacing};
@@ -179,17 +179,11 @@ impl Workspace {
                 let file = DiagramFile::for_path(&path, file);
                 let written = write_drawing(&drawing, file, &path);
                 match &written {
-                    Ok(()) => tracing::info!(format = file.extension(), "diagram export finished"),
+                    Ok(_) => tracing::info!(format = file.extension(), "diagram export finished"),
                     Err(_) => tracing::warn!(format = file.extension(), "diagram export failed"),
                 }
                 written
-                    .map(|()| {
-                        format!(
-                            "Exported the diagram as {} to {}.",
-                            file.label(),
-                            path.display()
-                        )
-                    })
+                    .map(|shrunk| exported_drawing(file, &path, shrunk))
                     .map_err(|ended| ended.notice(&path))
             })
             .await;
@@ -536,14 +530,40 @@ fn stored_cards<'a>(
     cards
 }
 
-/// A drawing written to `path` as `file`, whole or not at all.
-fn write_drawing(drawing: &Drawing, file: DiagramFile, path: &Path) -> Result<(), Ended> {
-    let bytes = match file {
-        DiagramFile::Svg => drawing.svg().into_bytes(),
+/// A drawing written to `path` as `file`, whole or not at all. A PNG too
+/// large to draw at full size is shrunk, and the scale it was drawn at comes
+/// back.
+fn write_drawing(drawing: &Drawing, file: DiagramFile, path: &Path) -> Result<Option<f32>, Ended> {
+    let (bytes, shrunk) = match file {
+        DiagramFile::Svg => (drawing.svg().into_bytes(), None),
+        DiagramFile::Png => {
+            let png = png::render(&drawing.svg()).map_err(Ended::Failed)?;
+            tracing::info!(png.width, png.height, png.scale, "diagram drawn as a PNG");
+            let shrunk = png.shrunk().then_some(png.scale);
+            (png.bytes, shrunk)
+        }
     };
     write_replacing(path, |out| {
         std::io::Write::write_all(out, &bytes).map_err(could_not_write(path))
-    })
+    })?;
+    Ok(shrunk)
+}
+
+fn exported_drawing(file: DiagramFile, path: &Path, shrunk: Option<f32>) -> String {
+    match shrunk {
+        None => format!(
+            "Exported the diagram as {} to {}.",
+            file.label(),
+            path.display()
+        ),
+        Some(scale) => format!(
+            "Exported the diagram as {} to {}, drawn at {:.0}% because it is too large \
+             to draw whole. SVG keeps every detail.",
+            file.label(),
+            path.display(),
+            (scale * 100.0).floor().max(1.0),
+        ),
+    }
 }
 
 #[cfg(test)]

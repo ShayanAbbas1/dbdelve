@@ -6,6 +6,7 @@
 pub mod geometry;
 pub mod index;
 pub mod layout;
+pub mod png;
 pub mod svg;
 
 #[cfg(test)]

@@ -2151,6 +2151,7 @@ dependencies = [
  "num-bigint 0.4.8",
  "percent-encoding",
  "redis",
+ "resvg 0.46.0",
  "ring",
  "rusqlite",
  "rustls 0.23.46",

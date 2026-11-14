@@ -511,6 +511,12 @@ pub(crate) mod tests {
         document.matches(needle).count()
     }
 
+    /// The document is well-formed SVG: usvg refuses malformed markup.
+    fn parses(document: &str) {
+        resvg::usvg::Tree::from_str(document, &resvg::usvg::Options::default())
+            .expect("the file is well-formed SVG");
+    }
+
     #[test]
     fn a_file_has_a_card_per_table_a_path_per_key_and_text_for_every_name() {
         let graph = graph(3, &[(1, 0), (2, 1)]);
@@ -563,6 +569,7 @@ pub(crate) mod tests {
             !document.chars().any(|c| c.is_control() && c != '\n'),
             "no control character but the line breaks between elements"
         );
+        parses(&document);
     }
 
     #[test]
@@ -586,6 +593,7 @@ pub(crate) mod tests {
             1 + 3 + 2,
             "a crow's foot and two bars: {path}"
         );
+        parses(&document);
     }
 
     #[test]
@@ -618,6 +626,7 @@ pub(crate) mod tests {
             1,
             "a nullable key's zero-or-one circle"
         );
+        parses(&document);
     }
 
     #[test]
