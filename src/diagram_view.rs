@@ -8,6 +8,7 @@
 //! so a redraw elsewhere in the window reuses its last frame.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use gpui::{
     BorderStyle, Bounds, BoxShadow, ContentMask, Context, DispatchPhase, EventEmitter, FocusHandle,
@@ -17,7 +18,11 @@ use gpui::{
     TransformationMatrix, Window, canvas, div, point, prelude::FluentBuilder, px, quad, size,
 };
 
-use crate::actions::{OpenDiagramStructure, OpenDiagramTable};
+use gpui_component::Disableable;
+
+use crate::actions::{
+    OpenDiagramStructure, OpenDiagramTable, ResetEditorZoom, ZoomEditorIn, ZoomEditorOut,
+};
 use crate::db::{KeyTarget, SchemaGraph};
 use crate::diagram::geometry::{
     self, Detail, HEADER_HEIGHT, Point, Rect, Segment, Stroke, Transform,
@@ -53,6 +58,13 @@ const DOT_SIZE: f32 = 1.5;
 /// and ink, so a session of zooming over one schema stays well under it.
 const LINE_CACHE_LIMIT: usize = 8192;
 const FOCUS_BAR_MAX_WIDTH: f32 = 560.0;
+/// The zooms the toolbar's buttons and the zoom chords step through, so the
+/// readout lands on round numbers whatever a pinch left it at.
+const ZOOM_STEPS: [f32; 15] = [
+    0.05, 0.1, 0.25, 0.33, 0.5, 0.67, 0.75, 0.9, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0,
+];
+/// Wide enough for "400%", so the toolbar does not shift as the zoom changes.
+const ZOOM_READOUT_WIDTH: f32 = 52.0;
 
 pub enum Load {
     Loading,
@@ -60,10 +72,22 @@ pub enum Load {
     Ready(Box<Ready>),
 }
 
+/// Which of the two views the scene is laid out as (design §2.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum View {
+    Schema,
+    /// One table, by its index in the graph, with its parents and children.
+    Neighbourhood(u32),
+}
+
 /// A read schema and its laid-out, indexed scene.
 pub struct Ready {
-    graph: SchemaGraph,
+    graph: Arc<SchemaGraph>,
     scene: Scene,
+    view: View,
+    /// The schema view and where it was looked at, kept while a neighbourhood
+    /// is shown, so going back finds the cards where the user dragged them.
+    stash: Option<(Scene, Transform)>,
     /// Each type label with the `?` a nullable column's type wears, made once
     /// so a frame never formats one.
     nullable_types: Vec<SharedString>,
@@ -77,8 +101,10 @@ impl Ready {
             .map(|label| SharedString::from(format!("{label}?")))
             .collect();
         Self {
-            graph,
+            graph: Arc::new(graph),
             scene,
+            view: View::Schema,
+            stash: None,
             nullable_types,
         }
     }
@@ -213,6 +239,12 @@ pub struct DiagramView {
     /// which `paint_path` makes anyway, and only a zoom tessellates again.
     paths: HashMap<(u32, EdgeLook), Vec<Piece>>,
     paths_zoom: f32,
+    /// Keys only as asked for: the switch shows it at once, while the layout
+    /// it asks for may still be on its way.
+    keys_only: bool,
+    /// Counts layouts asked for, so one that lands after a later one was
+    /// asked for, or after a new read, is dropped.
+    layouts: u64,
 }
 
 impl EventEmitter<DiagramEvent> for DiagramView {}
@@ -232,6 +264,8 @@ impl DiagramView {
             stamp: None,
             paths: HashMap::new(),
             paths_zoom: 0.0,
+            keys_only: false,
+            layouts: 0,
         }
     }
 
@@ -245,6 +279,10 @@ impl DiagramView {
 
     pub fn set_load(&mut self, load: Load, cx: &mut Context<Self>) {
         self.load = load;
+        self.keys_only = self
+            .ready()
+            .is_some_and(|ready| ready.scene.layout().keys_only);
+        self.layouts += 1;
         self.fitted = false;
         self.focus = None;
         self.hover = None;
@@ -275,14 +313,168 @@ impl DiagramView {
         let Some(ready) = self.ready() else {
             return;
         };
-        let screen = Rect {
+        self.transform =
+            Transform::fitting(ready.scene.layout().bounds(), self.screen(), FIT_MARGIN);
+        self.fitted = true;
+    }
+
+    fn screen(&self) -> Rect {
+        Rect {
             x: 0.0,
             y: 0.0,
-            width: f32::from(bounds.size.width),
-            height: f32::from(bounds.size.height),
+            width: f32::from(self.viewport.size.width),
+            height: f32::from(self.viewport.size.height),
+        }
+    }
+
+    /// Zoomed to `zoom` about the middle of the view.
+    fn zoom_to(&mut self, zoom: f32, cx: &mut Context<Self>) {
+        self.transform = self.transform.zoomed_at(self.screen().centre(), zoom);
+        cx.notify();
+    }
+
+    fn step_zoom(&mut self, zoom_in: bool, cx: &mut Context<Self>) {
+        self.zoom_to(zoom_step(self.transform.zoom, zoom_in), cx);
+    }
+
+    /// The whole scene in view, never zoomed past 100%.
+    fn fit(&mut self, cx: &mut Context<Self>) {
+        let Some(ready) = self.ready() else {
+            return;
         };
-        self.transform = Transform::fitting(ready.scene.layout().bounds(), screen, FIT_MARGIN);
-        self.fitted = true;
+        self.transform =
+            Transform::fitting(ready.scene.layout().bounds(), self.screen(), FIT_MARGIN);
+        cx.notify();
+    }
+
+    fn set_keys_only(&mut self, keys_only: bool, cx: &mut Context<Self>) {
+        if self.keys_only == keys_only {
+            return;
+        }
+        self.keys_only = keys_only;
+        let Some(view) = self.ready().map(|ready| ready.view) else {
+            return;
+        };
+        if let Load::Ready(ready) = &mut self.load {
+            ready.stash = None;
+        }
+        self.lay_out(view, cx);
+        cx.notify();
+    }
+
+    /// The schema view, or the neighbourhood of the table in focus. Asked
+    /// again on a neighbourhood, it moves the centre to the focused table.
+    fn show(&mut self, neighbourhood: bool, cx: &mut Context<Self>) {
+        let Some(ready) = self.ready() else {
+            return;
+        };
+        let view = match neighbourhood {
+            false => View::Schema,
+            true => match self
+                .focus
+                .map(|card| ready.scene.layout().cards[card as usize].subject)
+            {
+                Some(Subject::Table(table)) => View::Neighbourhood(table),
+                _ => return,
+            },
+        };
+        if view == ready.view {
+            return;
+        }
+        let Load::Ready(ready) = &mut self.load else {
+            return;
+        };
+        if view == View::Schema
+            && let Some((scene, transform)) = ready.stash.take()
+        {
+            self.install(scene, view, Some(transform), cx);
+            return;
+        }
+        self.lay_out(view, cx);
+    }
+
+    /// Lays `view` out at the keys-only setting asked for. A neighbourhood is
+    /// a handful of cards and is laid out at once; a schema can be thousands,
+    /// and is laid out off the UI thread while the old scene stays on screen.
+    fn lay_out(&mut self, view: View, cx: &mut Context<Self>) {
+        let Some(graph) = self.ready().map(|ready| ready.graph.clone()) else {
+            return;
+        };
+        let keys_only = self.keys_only;
+        self.layouts += 1;
+        let asked = self.layouts;
+        match view {
+            View::Neighbourhood(table) => {
+                let scene = Scene::new(crate::diagram::layout::neighbourhood(
+                    &graph, table, keys_only,
+                ));
+                self.install(scene, view, None, cx);
+            }
+            View::Schema => {
+                let task = cx.background_executor().spawn(async move {
+                    Scene::new(crate::diagram::layout::schema(&graph, keys_only))
+                });
+                cx.spawn(async move |this, cx| {
+                    let scene = task.await;
+                    this.update(cx, |this, cx| {
+                        if this.layouts == asked {
+                            this.install(scene, view, None, cx);
+                        }
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+        }
+    }
+
+    /// Puts a newly laid-out scene on screen, keeping the focus on the same
+    /// table. A neighbourhood is fitted; a schema view is looked at where it
+    /// was (`transform`), else with the focused card held where it stood.
+    fn install(
+        &mut self,
+        scene: Scene,
+        view: View,
+        transform: Option<Transform>,
+        cx: &mut Context<Self>,
+    ) {
+        let Load::Ready(ready) = &mut self.load else {
+            return;
+        };
+        let zoom = self.transform.zoom;
+        let focused = self.focus.map(|card| {
+            let layout = ready.scene.layout();
+            (
+                layout.cards[card as usize].subject,
+                layout.cards[card as usize].origin,
+            )
+        });
+        let focus = match (view, focused) {
+            (View::Neighbourhood(table), _) => card_of(scene.layout(), Subject::Table(table)),
+            (View::Schema, Some((subject, _))) => card_of(scene.layout(), subject),
+            (View::Schema, None) => None,
+        };
+        let old = std::mem::replace(&mut ready.scene, scene);
+        if ready.view == View::Schema && matches!(view, View::Neighbourhood(_)) {
+            ready.stash = Some((old, self.transform));
+        }
+        ready.view = view;
+        match (view, transform, focused.zip(focus)) {
+            (View::Neighbourhood(_), _, _) => self.fitted = false,
+            (View::Schema, Some(transform), _) => self.transform = transform,
+            (View::Schema, None, Some(((_, was), card))) => {
+                let now = ready.scene.layout().cards[card as usize].origin;
+                self.transform = self
+                    .transform
+                    .panned(Point::new((was.x - now.x) * zoom, (was.y - now.y) * zoom));
+            }
+            (View::Schema, None, None) => {}
+        }
+        self.focus = focus;
+        self.hover = None;
+        self.gesture = None;
+        self.paths.clear();
+        cx.notify();
     }
 
     fn press(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -408,6 +600,106 @@ impl DiagramView {
         });
     }
 
+    /// The view switch, Keys only, the zoom and Fit, at the top left.
+    fn toolbar(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let ready = self.ready()?;
+        let (t, inks) = (*theme(cx), popup_theme(cx));
+        let neighbourhood = matches!(ready.view, View::Neighbourhood(_));
+        let centrable = self.focus.is_some_and(|card| {
+            matches!(
+                ready.scene.layout().cards[card as usize].subject,
+                Subject::Table(_)
+            )
+        });
+        let zoom = self.transform.zoom;
+        let tool = |id: &'static str, path: &'static str| {
+            ui::icon_button(id, path, Tone::Quiet, Control::Compact, inks)
+        };
+        Some(
+            floating(t)
+                .top(px(layout::SPACE_MD))
+                .left(px(layout::SPACE_MD))
+                .gap(px(layout::SPACE_XS))
+                .p(px(layout::SPACE_XS))
+                .child(
+                    ui::segmented(inks)
+                        .child(
+                            ui::segmented_choice("diagram-schema", "Schema", !neighbourhood, inks)
+                                .on_click(cx.listener(|view, _, _, cx| view.show(false, cx))),
+                        )
+                        .child(
+                            ui::segmented_choice(
+                                "diagram-neighbourhood",
+                                "Neighbourhood",
+                                neighbourhood,
+                                inks,
+                            )
+                            .disabled(!centrable)
+                            .tooltip(match (centrable, neighbourhood) {
+                                (false, _) => "Focus a table to see its neighbourhood",
+                                (true, false) => "The focused table, its parents and children",
+                                (true, true) => "Centre on the focused table",
+                            })
+                            .on_click(cx.listener(|view, _, _, cx| view.show(true, cx))),
+                        ),
+                )
+                .child(rule(inks))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(layout::SPACE_SM))
+                        .px(px(layout::SPACE_SM))
+                        .text_size(px(layout::chrome(layout::TEXT_SM)))
+                        .text_color(inks.text_muted)
+                        .whitespace_nowrap()
+                        .child("Keys only")
+                        .child(
+                            ui::switch("diagram-keys-only", self.keys_only, inks).on_click(
+                                cx.listener(|view, _, _, cx| {
+                                    view.set_keys_only(!view.keys_only, cx)
+                                }),
+                            ),
+                        ),
+                )
+                .child(rule(inks))
+                .child(
+                    tool("diagram-zoom-out", icon::MINIMIZE)
+                        .tooltip_with_action("Zoom out", &ZoomEditorOut, Some("Diagram"))
+                        .on_click(cx.listener(|view, _, _, cx| view.step_zoom(false, cx))),
+                )
+                .child(
+                    ui::button(
+                        "diagram-zoom",
+                        format!("{:.0}%", zoom * 100.0),
+                        Tone::Quiet,
+                        Control::Compact,
+                        inks,
+                    )
+                    .w(px(layout::chrome(ZOOM_READOUT_WIDTH)))
+                    .tooltip("Zoom to 100%")
+                    .on_click(cx.listener(|view, _, _, cx| view.zoom_to(1.0, cx))),
+                )
+                .child(
+                    tool("diagram-zoom-in", icon::PLUS)
+                        .tooltip_with_action("Zoom in", &ZoomEditorIn, Some("Diagram"))
+                        .on_click(cx.listener(|view, _, _, cx| view.step_zoom(true, cx))),
+                )
+                .child(
+                    tool("diagram-fit", icon::FIT)
+                        .tooltip_with_action("Fit", &ResetEditorZoom, Some("Diagram"))
+                        .on_click(cx.listener(|view, _, _, cx| view.fit(cx))),
+                )
+                .child(rule(inks))
+                // ponytail: a stub until export lands (design §9, phase 4).
+                .child(
+                    tool("diagram-export", icon::EXPORT)
+                        .disabled(true)
+                        .tooltip("Export comes in a later build"),
+                ),
+        )
+    }
+
     /// The card in focus, its name and Open data and Structure, at the bottom
     /// left, out of the minimap's corner.
     fn focus_bar(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
@@ -471,15 +763,7 @@ impl DiagramView {
                                 .child(detail),
                         ),
                 )
-                .child(
-                    div()
-                        .flex_none()
-                        .w(px(1.0))
-                        .h(px(
-                            layout::chrome(layout::CONTROL_HEIGHT_COMPACT) - layout::SPACE_SM
-                        ))
-                        .bg(inks.border),
-                )
+                .child(rule(inks))
                 .child(
                     div()
                         .flex_none()
@@ -504,6 +788,31 @@ impl DiagramView {
 
     pub fn clear_focus(&mut self, cx: &mut Context<Self>) {
         self.set_focus(None, cx);
+    }
+
+    #[cfg(test)]
+    pub fn zoom(&self) -> f32 {
+        self.transform.zoom
+    }
+
+    /// The tables on screen and whether their cards were given room for keys
+    /// only, once laid out.
+    #[cfg(test)]
+    pub fn laid_out(&self) -> Option<(Vec<SharedString>, bool)> {
+        let ready = self.ready()?;
+        let layout = ready.scene.layout();
+        let names = (0..layout.cards.len() as u32).map(|card| ready.name(card));
+        Some((names.collect(), layout.keys_only))
+    }
+
+    #[cfg(test)]
+    pub fn show_neighbourhood(&mut self, neighbourhood: bool, cx: &mut Context<Self>) {
+        self.show(neighbourhood, cx);
+    }
+
+    #[cfg(test)]
+    pub fn toggle_keys_only(&mut self, cx: &mut Context<Self>) {
+        self.set_keys_only(!self.keys_only, cx);
     }
 
     /// Where a table's card is on screen, in window coordinates, once drawn.
@@ -899,6 +1208,11 @@ impl Render for DiagramView {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|view, _: &OpenDiagramTable, _, cx| view.open(false, cx)))
             .on_action(cx.listener(|view, _: &OpenDiagramStructure, _, cx| view.open(true, cx)))
+            // The app's zoom chords, which zoom whatever is in front: here,
+            // the diagram, and Reset Zoom fits it.
+            .on_action(cx.listener(|view, _: &ZoomEditorIn, _, cx| view.step_zoom(true, cx)))
+            .on_action(cx.listener(|view, _: &ZoomEditorOut, _, cx| view.step_zoom(false, cx)))
+            .on_action(cx.listener(|view, _: &ResetEditorZoom, _, cx| view.fit(cx)))
             .size_full()
             .overflow_hidden()
             .bg(t.panel_glass());
@@ -919,9 +1233,22 @@ impl Render for DiagramView {
             Load::Ready(_) => surface
                 .relative()
                 .child(self.canvas(cx))
+                .children(self.toolbar(cx))
                 .children(self.focus_bar(cx)),
         }
     }
+}
+
+/// The hairline between groups of a floating card's controls.
+fn rule(t: Theme) -> gpui::Div {
+    div()
+        .flex_none()
+        .w(px(1.0))
+        .h(px(
+            layout::chrome(layout::CONTROL_HEIGHT_COMPACT) - layout::SPACE_SM
+        ))
+        .mx(px(layout::SPACE_XS))
+        .bg(t.border)
 }
 
 /// A frosted card floating over the canvas. `occlude`, so a press on it never
@@ -989,6 +1316,31 @@ fn shape(
         .shape_line(key.text.clone(), px(size), &[run], None);
     lines.insert(key, line.clone());
     line
+}
+
+/// The next step in or out from `zoom`, which need not be a step itself.
+fn zoom_step(zoom: f32, zoom_in: bool) -> f32 {
+    // A pinch can leave the zoom a hair off a step; that counts as on it.
+    const NEAR: f32 = 0.005;
+    match zoom_in {
+        true => ZOOM_STEPS
+            .into_iter()
+            .find(|&step| step > zoom + NEAR)
+            .unwrap_or(geometry::MAX_ZOOM),
+        false => ZOOM_STEPS
+            .into_iter()
+            .rev()
+            .find(|&step| step < zoom - NEAR)
+            .unwrap_or(geometry::MIN_ZOOM),
+    }
+}
+
+fn card_of(layout: &Layout, subject: Subject) -> Option<u32> {
+    layout
+        .cards
+        .iter()
+        .position(|card| card.subject == subject)
+        .map(|card| card as u32)
 }
 
 fn distance(a: Point, b: Point) -> f32 {
@@ -1177,6 +1529,21 @@ mod tests {
             .iter()
             .position(|card| card.subject == Subject::Table(table))
             .unwrap() as u32
+    }
+
+    #[test]
+    fn zoom_steps_land_on_round_numbers_from_anywhere() {
+        assert_eq!(zoom_step(1.0, true), 1.25);
+        assert_eq!(zoom_step(1.0, false), 0.9);
+        assert_eq!(
+            zoom_step(0.8, true),
+            0.9,
+            "a pinch's zoom goes to the next step"
+        );
+        assert_eq!(zoom_step(0.8, false), 0.75);
+        assert_eq!(zoom_step(1.002, true), 1.25, "a hair off a step is on it");
+        assert_eq!(zoom_step(geometry::MAX_ZOOM, true), geometry::MAX_ZOOM);
+        assert_eq!(zoom_step(geometry::MIN_ZOOM, false), geometry::MIN_ZOOM);
     }
 
     #[test]

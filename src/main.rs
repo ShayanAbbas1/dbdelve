@@ -5,8 +5,7 @@ mod actions;
 mod completion;
 mod connection_form;
 mod db;
-// The neighbourhood view and edge hit tests are reached by the diagram's
-// toolbar, which comes next (design §2.4).
+// Edge hit tests are reached by hovering an edge, which comes next.
 #[cfg_attr(not(test), allow(dead_code))]
 mod diagram;
 mod diagram_view;

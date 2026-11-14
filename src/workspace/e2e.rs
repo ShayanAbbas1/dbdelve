@@ -4141,3 +4141,62 @@ fn a_double_click_opens_a_diagram_cards_table_and_the_keyboard_the_focused_ones(
         quit(workspace, cx);
     });
 }
+
+#[gpui::test]
+fn the_zoom_chords_zoom_a_diagram_and_its_views_and_keys_only_lay_it_out_again(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            &format!("{DIAGRAM_SCHEMA} create table weather (id integer primary key);"),
+        );
+        let view = show_diagram(&workspace, cx);
+        let zoom = |cx: &mut VisualTestContext| cx.update(|_, cx| view.read(cx).zoom());
+        let fitted = zoom(cx);
+
+        cx.simulate_keystrokes("secondary-=");
+        settle(cx);
+        assert!(zoom(cx) > fitted, "secondary-= zooms the diagram in");
+        cx.simulate_keystrokes("secondary-0");
+        settle(cx);
+        assert_eq!(zoom(cx), fitted, "secondary-0 fits it again");
+
+        let laid_out = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| view.read(cx).laid_out())
+                .expect("the diagram is laid out")
+        };
+        let sightings = cx
+            .update(|_, cx| view.read(cx).table_on_screen("sightings"))
+            .expect("the diagram drew the sightings");
+        cx.simulate_click(sightings, gpui::Modifiers::default());
+        settle(cx);
+        view.update(cx, |view, cx| view.show_neighbourhood(true, cx));
+        settle(cx);
+        let (mut names, _) = laid_out(cx);
+        names.sort();
+        assert_eq!(
+            names,
+            ["birds", "sightings"],
+            "the neighbourhood leaves the weather out"
+        );
+        assert!(
+            cx.update(|_, cx| view.read(cx).has_focus()),
+            "on the table it centres on"
+        );
+
+        view.update(cx, |view, cx| view.show_neighbourhood(false, cx));
+        settle(cx);
+        assert_eq!(laid_out(cx).0.len(), 3, "the schema view is back whole");
+
+        view.update(cx, |view, cx| view.toggle_keys_only(cx));
+        settle(cx);
+        assert!(laid_out(cx).1, "keys only lays the schema out again");
+        assert!(
+            cx.update(|_, cx| view.read(cx).has_focus()),
+            "keeping the focus on its table"
+        );
+
+        quit(workspace, cx);
+    });
+}
