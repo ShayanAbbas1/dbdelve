@@ -781,6 +781,9 @@ impl Workspace {
             .map_or(form.mode, |profile| profile.mode);
         form.error = None;
 
+        let attempt = crate::db::ConnectAttempt::default();
+        config.set_connect_attempt(attempt.clone());
+        let guard = attempt.guard();
         let engine = config.target().label();
         let probe = spawn_blocking(cx.background_executor(), move || {
             let started = std::time::Instant::now();
@@ -833,14 +836,14 @@ impl Workspace {
                     Ok(reported) => ConnectionTest::Passed(reported),
                     Err(message) => ConnectionTest::Failed(message),
                 };
-                if let Some(ConnectionTest::Running(task)) = form.test.replace(finished) {
+                if let Some(ConnectionTest::Running(task, _guard)) = form.test.replace(finished) {
                     // This task: dropping it here would cancel it mid-run.
                     task.detach();
                 }
                 cx.notify();
             });
         });
-        form.test = Some(ConnectionTest::Running(task));
+        form.test = Some(ConnectionTest::Running(task, guard));
         cx.notify();
     }
 
@@ -1464,7 +1467,7 @@ impl Workspace {
         }
         // A connect in flight was handed the config before this, and the
         // reconnect that would hand it the new one can be refused.
-        if matches!(profile.state, ProfileState::Connecting) {
+        if matches!(profile.state, ProfileState::Connecting { .. }) {
             self.note(
                 "The connection is still opening, so the schema was not switched.".into(),
                 cx,
@@ -1745,7 +1748,10 @@ impl Workspace {
             return;
         };
         profile.generation = generation;
-        profile.state = ProfileState::Connecting;
+        let attempt = crate::db::ConnectAttempt::default();
+        profile.state = ProfileState::Connecting {
+            _attempt: attempt.guard(),
+        };
         profile.in_transaction = false;
         profile.session_changed = false;
         profile.catalog = CatalogState::Loading;
@@ -1762,6 +1768,7 @@ impl Workspace {
 
         let id = profile.id.clone();
         let mut config = profile.config.clone();
+        config.set_connect_attempt(attempt.clone());
         let mode = profile.mode;
         // The sidebar draws the tree whenever there are saved queries, so the
         // old catalog's rows have to leave it with the catalog.
@@ -1838,6 +1845,7 @@ impl Workspace {
                         .map_err(|error| failed("read-only hold", error.message))?;
                 }
                 connection.warm();
+                attempt.finish().map_err(|error| error.message)?;
                 let elapsed = started.elapsed();
                 tracing::info!(connection = number, engine, ?elapsed, "connected");
                 Ok(connection)
@@ -2557,6 +2565,17 @@ fn restored_config(
     sslmode: SslMode,
     plugins: &[&'static Plugin],
 ) -> Result<(ConnectionConfig, Option<String>), String> {
+    if stored.ssm.is_some() {
+        if stored.ssh.is_some() {
+            return Err("Choose either SSH or AWS SSM, not both.".into());
+        }
+        if let Some(tag) = stored.engine.as_deref()
+            && !tag.starts_with(store::PLUGIN_TAG)
+            && Engine::parse(tag).is_ok_and(|engine| engine.fields() != crate::db::Fields::Server)
+        {
+            return Err("SSM needs a TCP database connection.".into());
+        }
+    }
     let Some(tag) = stored.engine.as_deref() else {
         return Ok((stored_config(stored, Engine::Postgres, sslmode), None));
     };
@@ -2573,6 +2592,7 @@ fn restored_config(
                 // Never on disk. Read from the Keychain when connecting.
                 password: String::new(),
                 statement_timeout: stored.statement_timeout.unwrap_or_default(),
+                ssm: stored.ssm.clone(),
                 ssh: stored.ssh.clone(),
             }),
             None,
@@ -2633,6 +2653,7 @@ fn stored_config(
                 sslmode,
                 root_certificate: stored.root_certificate.clone(),
                 statement_timeout: stored.statement_timeout.unwrap_or_default(),
+                ssm: stored.ssm.clone(),
                 ssh: stored.ssh.clone(),
                 schema: stored.schema.clone(),
             };
@@ -2876,6 +2897,36 @@ mod tests {
             .find(|(_, config)| config.engine() == Engine::Sqlite)
             .expect("the fixture has a SQLite profile");
         assert_eq!(sqlite.1.ssh(), None);
+    }
+
+    #[test]
+    fn ssm_restore_preserves_settings_and_refuses_ambiguous_routes() {
+        let text = r#"[[profiles]]
+id = 'ssm'
+name = 'Private database'
+engine = 'postgres'
+host = 'private.example.test'
+port = 5432
+database = 'app'
+user = 'reader'
+[profiles.ssm]
+target = 'i-0123456789abcdef0'
+profile = 'production'
+region = 'ap-northeast-1'
+"#;
+        let mut stored = store::decode_profiles(text, &[])
+            .unwrap()
+            .profiles
+            .remove(0);
+        let (config, _) = restored_config(&stored, SslMode::VerifyFull, &[]).unwrap();
+        assert_eq!(config.ssm(), stored.ssm.as_ref());
+        assert_eq!(config.server().unwrap().host, "private.example.test");
+        assert_eq!(config.server().unwrap().sslmode, SslMode::VerifyFull);
+        stored.ssh = Some(crate::db::SshTunnel::default());
+        assert!(restored_config(&stored, SslMode::VerifyFull, &[]).is_err());
+        stored.ssh = None;
+        stored.engine = Some("sqlite".into());
+        assert!(restored_config(&stored, SslMode::VerifyFull, &[]).is_err());
     }
 
     #[test]

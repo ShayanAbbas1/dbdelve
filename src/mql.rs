@@ -902,7 +902,7 @@ impl<'s> Walk<'s> {
         let mut cursor: Vec<Call<CursorMethod>> = Vec::new();
         while links.peek().is_some() {
             let (link, dot, at) = self.member(&mut links, end, "a cursor method")?;
-            if !method.returns_cursor() && !(method.takes_explain() && link == "explain") {
+            if !(method.returns_cursor() || method.takes_explain() && link == "explain") {
                 return Err(error(
                     dot,
                     format!("`{name}` returns no cursor, so nothing can be chained after it"),

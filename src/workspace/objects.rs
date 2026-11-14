@@ -186,7 +186,7 @@ impl Workspace {
         // snapshot it was restored with.
         if matches!(
             self.profile().map(|profile| &profile.state),
-            Some(ProfileState::Connecting)
+            Some(ProfileState::Connecting { .. })
         ) {
             return;
         }

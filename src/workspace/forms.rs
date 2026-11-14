@@ -496,24 +496,98 @@ impl Workspace {
             // Host and Port are the far end of the forward, which is easy to
             // read as this machine's view of the network.
             let socket = form.target().reaches_socket_over_ssh();
-            let hint = if socket {
-                "Host and port are as the SSH host sees them: localhost is the SSH host \
-                 itself. A Host such as /var/run/postgresql is its Unix socket directory; \
-                 Run as is the OS user sudo opens the socket as, for peer authentication."
+            let hint = if form.ssm {
+                "Connect through an AWS managed instance. Database host and port are as that \
+                 instance sees them. AWS credentials come from the CLI; sign in first when using SSO."
+            } else if form.ssh {
+                "Connect through an SSH host. Database host and port are as the SSH host sees \
+                 them; localhost refers to the SSH host itself."
             } else {
-                "Host and port are as the SSH host sees them: localhost is the SSH host itself."
+                "Connect directly to the database."
             };
+            let help = |text: &'static str| {
+                div()
+                    .px(px(layout::SPACE_LG))
+                    .pb(px(layout::SPACE_MD))
+                    .text_size(px(layout::chrome(layout::TEXT_SM)))
+                    .text_color(t.text_muted)
+                    .child(text)
+            };
+            let selected = if form.ssm {
+                2
+            } else if form.ssh {
+                1
+            } else {
+                0
+            };
+            let choices = ["None", "SSH", "AWS SSM"]
+                .into_iter()
+                .enumerate()
+                .filter(|(index, _)| *index != 2 || form.target().takes_ssm_tunnel())
+                .map(|(index, label)| {
+                    ui::segmented_choice(("tunnel-kind", index), label, selected == index, t)
+                        .debug_selector(move || {
+                            if index == 1 {
+                                "ssh-tunnel".into()
+                            } else {
+                                format!("tunnel-kind-{index}")
+                            }
+                        })
+                        .on_click(cx.listener(move |workspace, _, _, cx| {
+                            if let Some(form) = &mut workspace.form {
+                                form.ssh = index == 1;
+                                form.ssm = index == 2;
+                                form.test = None;
+                                form.needs_focus = Some(match index {
+                                    1 => form.ssh_host.clone(),
+                                    2 => form.ssm_target.clone(),
+                                    _ => {
+                                        if form.target().fields() == Fields::Server {
+                                            form.password.clone()
+                                        } else {
+                                            form.connection.clone()
+                                        }
+                                    }
+                                });
+                                cx.notify();
+                            }
+                        }))
+                });
             security.push(
-                ui::option_row(
-                    "SSH tunnel",
-                    Some(hint.into()),
-                    ui::switch("ssh-tunnel", form.ssh, t)
-                        .debug_selector(|| "ssh-tunnel".into())
-                        .on_click(cx.listener(Self::toggle_ssh_tunnel)),
-                    t,
-                )
-                .into_any_element(),
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(ui::option_row(
+                        "Tunnel",
+                        None,
+                        ui::segmented(t).children(choices),
+                        t,
+                    ))
+                    .child(help(hint))
+                    .into_any_element(),
             );
+            if form.ssm {
+                for (index, (id, label, input)) in [
+                    ("ssm-target", "Target instance", &form.ssm_target),
+                    ("ssm-profile", "AWS profile", &form.ssm_profile),
+                    ("ssm-region", "AWS region", &form.ssm_region),
+                    ("ssm-aws-cli", "AWS CLI path", &form.ssm_aws_cli),
+                    ("ssm-plugin", "Plugin path", &form.ssm_plugin),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let row = nested_field_row(layout::SPACE_MD, id, label, input, bare(input), t);
+                    let row = if id == "ssm-plugin" {
+                        div().child(row).child(help(
+                            "Executable paths are optional. Leave blank to find the tools on PATH.",
+                        ))
+                    } else {
+                        row
+                    };
+                    security.push(revealed(row, "ssm-reveal", index, !cx.reduce_motion()));
+                }
+            }
             if form.ssh {
                 let reveal = !cx.reduce_motion();
                 let nested = |id: &'static str,
@@ -546,17 +620,24 @@ impl Workspace {
                     ),
                 ];
                 if socket {
-                    rows.push(nested(
-                        "ssh-run-as",
-                        "Run as",
-                        &form.ssh_run_as,
-                        bare(&form.ssh_run_as),
-                    ));
+                    rows.push(
+                        div()
+                            .child(nested(
+                                "ssh-run-as",
+                                "Run as",
+                                &form.ssh_run_as,
+                                bare(&form.ssh_run_as),
+                            ))
+                            .child(help(
+                                "For a Unix socket host such as /var/run/postgresql, sudo opens \
+                                 the socket as this OS user for peer authentication.",
+                            )),
+                    );
                 }
                 security.extend(
                     rows.into_iter()
                         .enumerate()
-                        .map(|(index, row)| revealed(row, index, reveal)),
+                        .map(|(index, row)| revealed(row, "ssh-reveal", index, reveal)),
                 );
             }
         }
@@ -805,32 +886,6 @@ impl Workspace {
             )
             .into_any_element(),
         )
-    }
-
-    fn toggle_ssh_tunnel(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(form) = &mut self.form else {
-            return;
-        };
-        form.ssh = !form.ssh;
-        if form.ssh {
-            form.needs_focus = Some(form.ssh_host.clone());
-        } else if [
-            &form.ssh_host,
-            &form.ssh_port,
-            &form.ssh_user,
-            &form.ssh_identity_file,
-            &form.ssh_passphrase,
-            &form.ssh_run_as,
-        ]
-        .iter()
-        .any(|input| input.focus_handle(cx).is_focused(window))
-        {
-            // The rows going take the focus with them.
-            form.needs_focus = Some(form.password.clone());
-        }
-        // A pass without the tunnel did not test it.
-        form.test = None;
-        cx.notify();
     }
 
     /// The native Open dialog, for a file found rather than typed into
@@ -3563,20 +3618,20 @@ fn port_field(input: &Entity<InputState>, t: Theme) -> gpui::Div {
         .child(div().flex_1().min_w_0().child(bare(input)))
 }
 
-const SSH_REVEAL_MS: u64 = 220;
-const SSH_REVEAL_PX: f32 = 4.;
+const TUNNEL_REVEAL_MS: u64 = 220;
+const TUNNEL_REVEAL_PX: f32 = 4.;
 
-/// The SSH rows, settling in once as the tunnel is switched on. Keyed by the
+/// The tunnel rows, settling in once as the tunnel is switched on. Keyed by the
 /// row, so it plays each time they mount and never again while they stay.
-fn revealed(row: gpui::Div, index: usize, animate: bool) -> AnyElement {
+fn revealed(row: gpui::Div, section: &'static str, index: usize, animate: bool) -> AnyElement {
     if !animate {
         return row.into_any_element();
     }
     row.relative()
         .with_animation(
-            ("ssh-reveal", index),
-            Animation::new(Duration::from_millis(SSH_REVEAL_MS)).with_easing(ease_out_quint()),
-            |row, delta| row.opacity(delta).top(px(-SSH_REVEAL_PX * (1. - delta))),
+            (section, index),
+            Animation::new(Duration::from_millis(TUNNEL_REVEAL_MS)).with_easing(ease_out_quint()),
+            |row, delta| row.opacity(delta).top(px(-TUNNEL_REVEAL_PX * (1. - delta))),
         )
         .into_any_element()
 }
@@ -3602,7 +3657,7 @@ fn footer_status(
     }
     match (error, test) {
         (Some(error), _) => Some((Status::Failed, one_line(error))),
-        (None, Some(ConnectionTest::Running(_))) => {
+        (None, Some(ConnectionTest::Running(_, _))) => {
             Some((Status::Connecting, "Testing connection…".to_string()))
         }
         (None, Some(ConnectionTest::Passed(reported))) => Some((

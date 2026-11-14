@@ -157,6 +157,8 @@ pub struct StoredProfile {
     /// it: the key's passphrase is skipped here and kept in the Keychain.
     #[serde(default)]
     pub ssh: Option<SshTunnel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssm: Option<crate::db::SsmTunnel>,
     /// The query buffers this profile had open, in strip order.
     #[serde(default)]
     pub open_queries: Vec<StoredQueryTab>,
@@ -3016,6 +3018,7 @@ user = "shayan"
                 mode: Some("full".into()),
                 confirmed: vec!["drop".into(), "truncate".into()],
                 open_query: None,
+                ssm: None,
                 ssh: None,
                 open_queries: Vec::new(),
                 open_objects: Vec::new(),
@@ -3074,6 +3077,7 @@ user = "shayan"
             mode: None,
             confirmed: Vec::new(),
             open_query: Some("daily".into()),
+            ssm: None,
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![
@@ -3214,6 +3218,7 @@ open_objects = []
             mode: None,
             confirmed: Vec::new(),
             open_query: None,
+            ssm: None,
             ssh: None,
             open_queries: Vec::new(),
             open_objects: Vec::new(),
@@ -3400,8 +3405,33 @@ folder = "Hot"
     }
 
     #[test]
+    fn ssm_profile_round_trip_preserves_the_route() {
+        let mut profile = a_stored_profile();
+        profile.ssm = Some(crate::db::SsmTunnel {
+            target: "i-0123456789abcdef0".into(),
+            profile: Some("production".into()),
+            region: Some("ap-northeast-1".into()),
+            aws_cli: Some("/opt/tools/aws".into()),
+            session_manager_plugin: Some("/opt/tools/session-manager-plugin".into()),
+            ..Default::default()
+        });
+        let text = toml::to_string(&profile).unwrap();
+        let decoded: StoredProfile = toml::from_str(&text).unwrap();
+        assert_eq!(decoded, profile);
+        assert!(!text.contains("attempt"));
+        let legacy = toml::to_string(&a_stored_profile()).unwrap();
+        assert!(
+            toml::from_str::<StoredProfile>(&legacy)
+                .unwrap()
+                .ssm
+                .is_none()
+        );
+    }
+
+    #[test]
     fn an_ssh_tunnel_with_every_field_survives_the_round_trip_through_toml() {
         let profile = StoredProfile {
+            ssm: None,
             ssh: Some(SshTunnel {
                 host: "dbdelve-bastion".into(),
                 port: Some(2222),
@@ -3429,6 +3459,7 @@ folder = "Hot"
     #[test]
     fn an_ssh_tunnel_with_only_a_host_survives_the_round_trip_through_toml() {
         let profile = StoredProfile {
+            ssm: None,
             ssh: Some(SshTunnel {
                 host: "dbdelve-bastion".into(),
                 port: None,
@@ -3469,6 +3500,7 @@ folder = "Hot"
             settings: None,
             projects: Vec::new(),
             profiles: vec![StoredProfile {
+                ssm: None,
                 ssh: Some(tunnel.clone()),
                 ..a_stored_profile()
             }],
@@ -3492,6 +3524,7 @@ folder = "Hot"
     fn an_active_schema_survives_the_round_trip_through_toml_beside_a_tunnel() {
         let profile = StoredProfile {
             schema: Some(r#"Sales "EU""#.into()),
+            ssm: None,
             ssh: Some(SshTunnel {
                 host: "dbdelve-bastion".into(),
                 ..SshTunnel::default()
@@ -3541,6 +3574,7 @@ folder = "Hot"
         let profile = StoredProfile {
             password_command: Some("printf %s \"$TOKEN\" # %USERNAME%".into()),
             password_expires: Some(900),
+            ssm: None,
             ssh: Some(SshTunnel {
                 host: "bastion".into(),
                 port: None,
@@ -3615,6 +3649,7 @@ folder = "Hot"
             mode: None,
             confirmed: Vec::new(),
             open_query: None,
+            ssm: None,
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![StoredObject {
@@ -3697,6 +3732,7 @@ folder = "Hot"
             mode: None,
             confirmed: Vec::new(),
             open_query: None,
+            ssm: None,
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![StoredObject {
@@ -3765,6 +3801,7 @@ folder = "Hot"
             mode: None,
             confirmed: Vec::new(),
             open_query: None,
+            ssm: None,
             ssh: None,
             open_queries: Vec::new(),
             open_objects: Vec::new(),
@@ -3882,6 +3919,7 @@ open_objects = []
             mode: None,
             confirmed: Vec::new(),
             open_query: None,
+            ssm: None,
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![StoredObject {
@@ -4014,6 +4052,7 @@ open_objects = []
                     mode: None,
                     confirmed: Vec::new(),
                     open_query: None,
+                    ssm: None,
                     ssh: None,
                     open_queries: Vec::new(),
                     open_objects: Vec::new(),
@@ -4052,6 +4091,7 @@ open_objects = []
                     mode: None,
                     confirmed: Vec::new(),
                     open_query: None,
+                    ssm: None,
                     ssh: None,
                     open_queries: Vec::new(),
                     open_objects: Vec::new(),
@@ -4698,6 +4738,7 @@ open_objects = []
             mode: None,
             confirmed: Vec::new(),
             open_query: Some("daily".into()),
+            ssm: None,
             ssh: None,
             open_queries: vec![
                 StoredQueryTab {
@@ -5066,6 +5107,7 @@ name = \"accounts\"
             mode: None,
             confirmed: Vec::new(),
             open_query: None,
+            ssm: None,
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![
@@ -5184,6 +5226,7 @@ name = \"accounts\"
             mode: None,
             confirmed: Vec::new(),
             open_query: None,
+            ssm: None,
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![object],

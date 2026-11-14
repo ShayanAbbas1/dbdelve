@@ -374,6 +374,7 @@ impl Profile {
             // property of its tab now. Kept on the stored shape only so a
             // profile written by an older build still loads with its buffer.
             open_query: None,
+            ssm: self.config.ssm().cloned(),
             ssh: self.config.ssh().cloned(),
             open_queries: self
                 .session
@@ -475,7 +476,7 @@ pub(crate) fn restored_shortcuts(
 
 pub(crate) enum ProfileState {
     Idle,
-    Connecting,
+    Connecting { _attempt: crate::db::ConnectGuard },
     // Boxed: a server profile's `ssh` tunnel made `Connection` far larger than
     // `Failed`'s `String`, and this variant is the one every idle profile pays
     // for.

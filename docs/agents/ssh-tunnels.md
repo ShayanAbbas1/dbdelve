@@ -231,3 +231,39 @@ It is not a forward.
   `ponytail:` the upgrade is a DBDelve-owned master (`-M -S <private path>
   -o ControlPersist=no`, watched like a tunnel) the bridges multiplex over;
   Windows' OpenSSH cannot multiplex.
+
+## AWS SSM
+
+`db::tunnel::Tunnel` is the closed SSH/SSM dispatch for TCP forwarding; the
+Unix socket bridge remains in `ssh`. Every driver keeps calling `dial` before
+opening another socket. Both transport selections must reach the same TLS,
+MongoDB discovery, and ODBC endpoint safety gates. A profile containing both
+is refused, never given precedence silently.
+
+`ssm` invokes the installed CLI with argument vectors and JSON parameters,
+using `localPortNumber=0`. The Session Manager plugin prints its assigned port
+after binding `localhost`; that stdout line, not a TCP probe or StartSession
+banner, is the readiness signal. The AWS CLI waits synchronously for its plugin.
+The watchdog reports child exit before its cleanup grace period so an exited
+CLI cannot leave a seemingly live tunnel during that wait. Unknown readiness
+output times out. Raw output must never reach logs or errors: a CLI traceback
+can include the plugin's argv and AWS session token.
+
+A re-exec watchdog runs before GPUI starts. Its stdin belongs to the app;
+EOF ends the CLI's process group on Unix, or closes its Windows Job Object.
+It clears inherited signal masks on Unix, gives the plugin a brief TERM grace
+period, and kills the whole group afterward. SIGPIPE is ignored so reporting
+child exit cannot interrupt cleanup. Its libtest constructor runs the same
+entry point before the test harness. On Windows the watchdog joins its own
+kill-on-close job before spawning the CLI, so the CLI and plugin inherit job
+membership from birth. Closing the job ends the watchdog as well as its children;
+no spawn-to-assignment window is left in this SSM path.
+
+A `ConnectAttempt` is runtime-only, never serialized. The form's Running test
+and profile's Connecting state own cancellation guards; replacing either
+cancels the old attempt. Completion atomically disarms cancellation so dropping
+the guard cannot close a successful connection. The token travels in SSM's
+runtime config to preserve existing driver interfaces. A weak process watcher
+also interrupts a database handshake after tunnel readiness if cancelled.
+Remote termination is best effort with its own three-second budget; local
+teardown never waits for AWS.

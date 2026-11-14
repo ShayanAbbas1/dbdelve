@@ -159,12 +159,13 @@ jobs:
           docker compose up -d --wait
       # nextest for the retries .config/nextest.toml gives the live tests. Its
       # test() matches any part of a name, as cargo test's filters do. CI has
-      # no Snowflake account, and the live Snowflake tests panic without one;
-      # the mock tests cover the same ground offline.
+      # no Snowflake account or AWS SSM target/credentials; those live tests
+      # are explicitly opt-in. Their offline tests still run here.
       - name: test
         run: >-
           cargo nextest run --run-ignored all -E 'not (test(snowflake::tests::live_)
-          | test(turso::tests::live_) | test(reads_run_at_once) | test(conformance)
+          | test(turso::tests::live_) | test(live_ssm_)
+          | test(reads_run_at_once) | test(conformance)
           | test(external::db2::) | test(external::psqlodbc::))'
       # These time two reads run at once against the same two in turn. With
       # the rest of the suite sharing the runner's cores, a CPU-bound engine

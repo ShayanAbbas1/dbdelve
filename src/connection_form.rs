@@ -17,8 +17,8 @@ use crate::{
     Workspace,
     db::{
         ConnectionConfig, Driver, Engine, ExternalConfig, Fields, MongoConfig, PasswordCommand,
-        Plugin, PostgresConfig, ServerConfig, SnowflakeConfig, SshTunnel, SslMode, Target,
-        odbc_string,
+        Plugin, PostgresConfig, ServerConfig, SnowflakeConfig, SshTunnel, SslMode, SsmTunnel,
+        Target, odbc_string,
     },
     explorer::Shortcuts,
     session::Profile,
@@ -66,6 +66,12 @@ pub(crate) struct ConnectionForm {
     /// Off, the SSH fields are kept but not read, the way another engine's
     /// fields are, so turning it back on finds them as they were typed.
     pub(crate) ssh: bool,
+    pub(crate) ssm: bool,
+    pub(crate) ssm_target: Entity<InputState>,
+    pub(crate) ssm_profile: Entity<InputState>,
+    pub(crate) ssm_region: Entity<InputState>,
+    pub(crate) ssm_aws_cli: Entity<InputState>,
+    pub(crate) ssm_plugin: Entity<InputState>,
     pub(crate) ssh_host: Entity<InputState>,
     pub(crate) ssh_port: Entity<InputState>,
     pub(crate) ssh_user: Entity<InputState>,
@@ -306,6 +312,25 @@ impl ConnectionForm {
                     .default_value(value)
             })
         };
+        let ssm = config
+            .and_then(ConnectionConfig::ssm)
+            .cloned()
+            .unwrap_or_default();
+        let ssm_target = input("i-… or mi-…", ssm.target);
+        let ssm_profile = input("AWS default", ssm.profile.unwrap_or_default());
+        let ssm_region = input("AWS configured region", ssm.region.unwrap_or_default());
+        let ssm_aws_cli = input(
+            "aws on PATH",
+            ssm.aws_cli
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+        );
+        let ssm_plugin = input(
+            "session-manager-plugin on PATH",
+            ssm.session_manager_plugin
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+        );
         let ssh_host = input("Host or ~/.ssh/config alias", ssh_host);
         let ssh_port = input("22", ssh_port);
         let ssh_user = input("Optional", ssh_user);
@@ -387,6 +412,11 @@ impl ConnectionForm {
             &user,
             &service,
             &ssh_host,
+            &ssm_target,
+            &ssm_profile,
+            &ssm_region,
+            &ssm_aws_cli,
+            &ssm_plugin,
             &account_name,
             // And the Password field, disabled while a command is typed.
             &password_command,
@@ -418,6 +448,12 @@ impl ConnectionForm {
             sslmode: server.map(|server| server.sslmode).unwrap_or_default(),
             root_certificate,
             ssh: ssh.is_some(),
+            ssm: config.and_then(ConnectionConfig::ssm).is_some(),
+            ssm_target,
+            ssm_profile,
+            ssm_region,
+            ssm_aws_cli,
+            ssm_plugin,
             ssh_host,
             ssh_port,
             ssh_user,
@@ -600,8 +636,36 @@ impl ConnectionForm {
             user: read(&self.user),
             password: self.password.read(cx).unmask_value().to_string(),
             statement_timeout: self.statement_timeout(cx)?,
+            ssm: self.ssm_tunnel(cx)?,
             ssh: self.ssh_tunnel(cx)?,
         })
+    }
+
+    fn ssm_tunnel(&self, cx: &App) -> Result<Option<SsmTunnel>, String> {
+        if !self.ssm {
+            return Ok(None);
+        }
+        if !self.target().takes_ssm_tunnel() {
+            return Err("SSM is not supported for this database driver.".into());
+        }
+        if self.ssh {
+            return Err("Choose either SSH or AWS SSM, not both.".into());
+        }
+        let read = |field: &Entity<InputState>| field.read(cx).value().trim().to_owned();
+        let optional = |field: &Entity<InputState>| {
+            let s = read(field);
+            (!s.is_empty()).then_some(s)
+        };
+        let config = SsmTunnel {
+            target: read(&self.ssm_target),
+            profile: optional(&self.ssm_profile),
+            region: optional(&self.ssm_region),
+            aws_cli: optional(&self.ssm_aws_cli).map(Into::into),
+            session_manager_plugin: optional(&self.ssm_plugin).map(Into::into),
+            ..Default::default()
+        };
+        config.validate()?;
+        Ok(Some(config))
     }
 
     fn ssh_tunnel(&self, cx: &App) -> Result<Option<SshTunnel>, String> {
@@ -629,7 +693,7 @@ impl ConnectionForm {
     pub(crate) fn tunnel_line(&self, cx: &App) -> Option<Result<String, String>> {
         let connection = self.connection.read(cx).value();
         let connection = connection.trim();
-        (self.ssh && !connection.is_empty()).then(|| tunnel_line(connection))
+        ((self.ssh || self.ssm) && !connection.is_empty()).then(|| tunnel_line(connection))
     }
 
     /// The placeholders that say what a blank field means, which is the
@@ -815,6 +879,7 @@ impl ConnectionForm {
             sslmode: self.sslmode,
             root_certificate,
             statement_timeout: self.statement_timeout(cx)?,
+            ssm: self.ssm_tunnel(cx)?,
             ssh: self.ssh_tunnel(cx)?,
             schema: None,
         };
@@ -822,6 +887,9 @@ impl ConnectionForm {
         // may be a socket directory; connect checks the Host it resolves to.
         if server.host.is_empty() && service.is_some() {
             return Ok(server);
+        }
+        if server.ssm.is_some() && (server.host.starts_with('/') || server.port == Some(0)) {
+            return Err("SSM requires a TCP host and a nonzero database port.".into());
         }
         match self.target().ssh_socket_error(&server) {
             Some(error) => Err(error),
@@ -1018,7 +1086,7 @@ pub(crate) fn summary(target: Target, srv: bool, typed: &Typed) -> Option<String
             // is not where it points.
             let place = match (typed.host, typed.port, typed.service) {
                 ("", _, Some(service)) => format!("service {service}"),
-                (host, port, _) if !port.is_empty() && !(srv && engine.resolves_srv()) => {
+                (host, port, _) if !(port.is_empty() || srv && engine.resolves_srv()) => {
                     format!("{host}:{port}")
                 }
                 (host, ..) => host.to_string(),
@@ -1053,7 +1121,7 @@ fn checked_external(config: ExternalConfig) -> Result<ExternalConfig, String> {
         return Err("DSN or connection string is required.".into());
     }
     odbc_string::storable(&config.connection).map_err(|refusal| refusal.0)?;
-    if config.ssh.is_some() {
+    if config.ssh.is_some() || config.ssm.is_some() {
         odbc_string::endpoint(&config.connection).map_err(|refusal| refusal.0)?;
     }
     Ok(config)
@@ -1176,7 +1244,7 @@ fn parse_port(label: &str, value: &str) -> Result<Option<u16>, String> {
 /// The Test button's last answer. Dropping `Running` drops its task, so a
 /// form closed or retested mid-connect never hears back from the stale one.
 pub(crate) enum ConnectionTest {
-    Running(Task<()>),
+    Running(Task<()>, crate::db::ConnectGuard),
     /// What a plugin's driver said it reached, which a built-in leaves out.
     Passed(Option<Reported>),
     Failed(String),
@@ -1684,6 +1752,7 @@ mod tests {
             sslmode: SslMode::default(),
             root_certificate: None,
             statement_timeout: 0,
+            ssm: None,
             ssh: None,
             schema: None,
         };
@@ -1722,6 +1791,7 @@ mod tests {
     fn a_typed_key_passphrase_goes_to_the_keychain_and_blank_is_none() {
         let tunnelled = |passphrase: &str| {
             ConnectionConfig::MySql(ServerConfig {
+                ssm: None,
                 ssh: Some(SshTunnel {
                     host: "bastion".into(),
                     passphrase: passphrase.into(),
@@ -1757,6 +1827,7 @@ mod tests {
                 user: "a@b.example".into(),
                 password: password.into(),
                 statement_timeout: 0,
+                ssm: None,
                 ssh: None,
             })
         };
@@ -1786,6 +1857,7 @@ mod tests {
             password: String::new(),
             statement_timeout: 0,
             ssh,
+            ssm: None,
         }
     }
 

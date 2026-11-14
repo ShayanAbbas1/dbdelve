@@ -30,7 +30,7 @@ use ::redis::{
     RedisConnectionInfo, RedisError, ServerError, TlsCertificates, Value,
 };
 
-use super::ssh::{Tunnel, tunnelled};
+use super::tunnel::{Tunnel, tunnelled};
 use super::{
     Catalog, Cell, Column, ColumnDefinition, DbError, EditTarget, Engine, Fetch, NamedDefinition,
     QueryResult, Relation, RelationKind, Row, RowBuilder, Schema, ServerConfig, SslMode, Stopped,
@@ -127,6 +127,7 @@ pub fn config_from_url(url: &str) -> Result<ServerConfig, String> {
         root_certificate,
         // A URL has nowhere to say either; the form is where they are set.
         statement_timeout: 0,
+        ssm: None,
         ssh: None,
         schema: None,
     })
@@ -199,11 +200,12 @@ impl Connection {
     pub fn open(server: &ServerConfig) -> Result<Self, DbError> {
         database_number(&server.database)?;
         // Before the tunnel, which may have cost a hardware-key touch.
-        if server.ssh.is_some() && server.sslmode == SslMode::VerifyFull {
+        if server.has_tunnel() && server.sslmode == SslMode::VerifyFull {
             return Err(plain_error(format!(
-                "sslmode=verify-full cannot be honoured through an SSH tunnel on Redis: the \
+                "sslmode=verify-full cannot be honoured through an {} tunnel on Redis: the \
                  driver checks the certificate against the address it dials, which is the \
                  tunnel's loopback address rather than {}.",
+                if server.ssm.is_some() { "SSM" } else { "SSH" },
                 server.host
             )));
         }
@@ -3882,6 +3884,7 @@ mod tests {
         let connection = Connection::open(&ServerConfig {
             host: "redis".into(),
             port: Some(DEFAULT_PORT),
+            ssm: None,
             ssh: live_bastion("dbdelve-bastion"),
             ..live_config()
         })

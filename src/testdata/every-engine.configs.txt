@@ -13,6 +13,7 @@ legacy Postgres(
             root_certificate: None,
             statement_timeout: 0,
             ssh: None,
+            ssm: None,
             schema: None,
         },
         service: None,
@@ -48,6 +49,7 @@ pg Postgres(
                     ..
                 },
             ),
+            ssm: None,
             schema: Some(
                 "billing",
             ),
@@ -68,6 +70,7 @@ alias Postgres(
             root_certificate: None,
             statement_timeout: 0,
             ssh: None,
+            ssm: None,
             schema: None,
         },
         service: Some(
@@ -89,6 +92,7 @@ mysql MySql(
         root_certificate: None,
         statement_timeout: 0,
         ssh: None,
+        ssm: None,
         schema: None,
     },
 )
@@ -106,6 +110,7 @@ maria MariaDb(
         root_certificate: None,
         statement_timeout: 0,
         ssh: None,
+        ssm: None,
         schema: None,
     },
 )
@@ -160,6 +165,7 @@ mssql SqlServer(
         ),
         statement_timeout: 0,
         ssh: None,
+        ssm: None,
         schema: Some(
             "dbo",
         ),
@@ -178,6 +184,7 @@ mongo MongoDb(
             root_certificate: None,
             statement_timeout: 0,
             ssh: None,
+            ssm: None,
             schema: None,
         },
         srv: true,
@@ -201,6 +208,7 @@ redis Redis(
         root_certificate: None,
         statement_timeout: 0,
         ssh: None,
+        ssm: None,
         schema: None,
     },
 )
@@ -229,6 +237,7 @@ clk ClickHouse(
                 ..
             },
         ),
+        ssm: None,
         schema: None,
     },
 )
