@@ -243,5 +243,9 @@ actions!(
         Minimize,
         OpenDiagramTable,
         OpenDiagramStructure,
+        FindInDiagram,
+        DiagramFindNext,
+        DiagramFindPrevious,
+        DiagramFindPick,
     ]
 );

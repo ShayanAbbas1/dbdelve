@@ -28,21 +28,22 @@ use crate::{
     actions::{
         AcceptCompletion, AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseTab,
         CollapseAllSchemas, CommandPalette, ConfirmDialog, CopyCell, CopyDiagnostics, CopyPlan,
-        CopyResults, CopyRow, CopyRows, CopySelection, CycleMode, DeleteRow, DiscardEdits,
-        Disconnect, EditCell, ExpandAllSchemas, ExplainQuery, FocusSidebar, FollowForeignKey,
-        FormatQuery, FuzzyOpen, GoToColumn, HideColumn, ImportConnections, ImportRows,
-        ImportRowsFromClipboard, Minimize, MoveTabLeft, MoveTabRight, NewConnection, NewProject,
-        NewQuery, NewRow, NextDialogButton, NextEdit, NextPage, NextProfile, NextResult, NextTab,
-        OpenDiagramStructure, OpenDiagramTable, OpenLogsFolder, OpenSettings, OpenSidebarItem,
-        PaletteHistoryFilter, PaletteHistorySort, PaletteNext, PaletteNextScope, PalettePrevious,
-        PalettePreviousScope, PaletteRowActions, PaletteScopeLeft, PaletteScopeRight,
-        PreviousDialogButton, PreviousEdit, PreviousPage, PreviousProfile, PreviousResult,
-        PreviousTab, Quit, RefreshConnection, RefreshRelation, ResetConfirmations, ResetEditorZoom,
-        RunQuery, SaveQuery, SearchEverything, SelectDatabase, SelectTheme, SetDefault, SetEmpty,
-        SetMode, SetNull, ShowAllColumns, ShowEditor, ShowMessages, ShowReferences,
-        SortActiveColumn, SubmitConnection, SwitchConnection, TickDialogBox, ToggleComment,
-        ToggleNextJoin, TogglePinColumn, ToggleResultsFocus, ToggleRowEdit, ToggleRowPanel,
-        ToggleSidebar, ToggleStructure, ZoomEditorIn, ZoomEditorOut,
+        CopyResults, CopyRow, CopyRows, CopySelection, CycleMode, DeleteRow, DiagramFindNext,
+        DiagramFindPick, DiagramFindPrevious, DiscardEdits, Disconnect, EditCell, ExpandAllSchemas,
+        ExplainQuery, FindInDiagram, FocusSidebar, FollowForeignKey, FormatQuery, FuzzyOpen,
+        GoToColumn, HideColumn, ImportConnections, ImportRows, ImportRowsFromClipboard, Minimize,
+        MoveTabLeft, MoveTabRight, NewConnection, NewProject, NewQuery, NewRow, NextDialogButton,
+        NextEdit, NextPage, NextProfile, NextResult, NextTab, OpenDiagramStructure,
+        OpenDiagramTable, OpenLogsFolder, OpenSettings, OpenSidebarItem, PaletteHistoryFilter,
+        PaletteHistorySort, PaletteNext, PaletteNextScope, PalettePrevious, PalettePreviousScope,
+        PaletteRowActions, PaletteScopeLeft, PaletteScopeRight, PreviousDialogButton, PreviousEdit,
+        PreviousPage, PreviousProfile, PreviousResult, PreviousTab, Quit, RefreshConnection,
+        RefreshRelation, ResetConfirmations, ResetEditorZoom, RunQuery, SaveQuery,
+        SearchEverything, SelectDatabase, SelectTheme, SetDefault, SetEmpty, SetMode, SetNull,
+        ShowAllColumns, ShowEditor, ShowMessages, ShowReferences, SortActiveColumn,
+        SubmitConnection, SwitchConnection, TickDialogBox, ToggleComment, ToggleNextJoin,
+        TogglePinColumn, ToggleResultsFocus, ToggleRowEdit, ToggleRowPanel, ToggleSidebar,
+        ToggleStructure, ZoomEditorIn, ZoomEditorOut,
     },
     db::ExplainMode,
     export::RowsAs,
@@ -290,6 +291,14 @@ registry! {
     ("diagram_open_table", "Diagram: Open Table", Some("Diagram"), ["enter"], OpenDiagramTable),
     // Run Query's chord, which a diagram hands on: see `INERT_IN`.
     ("diagram_open_structure", "Diagram: Open Structure", Some("Diagram"), ["secondary-enter"], OpenDiagramStructure),
+    ("diagram_find", "Diagram: Find Table", Some("Diagram"), ["secondary-f"], FindInDiagram),
+    // Against the field, as the palette's are: a descendant predicate is what
+    // takes the arrows back from the input (AGENTS.md, "GPUI hazards").
+    ("diagram_find_next", "Diagram: Next Match", Some("DiagramFind > Input"), ["down"], DiagramFindNext),
+    ("diagram_find_previous", "Diagram: Previous Match", Some("DiagramFind > Input"), ["up"], DiagramFindPrevious),
+    // Its own rather than the input's submit, which hands the keystroke on to
+    // Open Table behind it.
+    ("diagram_find_pick", "Diagram: Pick Match", Some("DiagramFind > Input"), ["enter"], DiagramFindPick),
 }
 
 /// The bindings that exist on this platform. macOS-only actions stay out of

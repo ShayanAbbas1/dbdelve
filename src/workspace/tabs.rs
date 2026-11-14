@@ -928,14 +928,21 @@ impl Workspace {
             cx.notify();
             return;
         }
+        // The find field first, then the focus: each `escape` puts one away.
         if let Some(ObjectBody::Diagram { view, .. }) = self
             .profile()
             .and_then(|profile| profile.session.active_object())
             .map(|tab| &tab.body)
-            && view.read(cx).has_focus()
         {
-            view.update(cx, |view, cx| view.clear_focus(cx));
-            return;
+            let (finding, focused) = (view.read(cx).finding(), view.read(cx).has_focus());
+            if finding || focused {
+                let view = view.clone();
+                view.update(cx, |view, cx| match finding {
+                    true => view.close_find(window, cx),
+                    false => view.clear_focus(cx),
+                });
+                return;
+            }
         }
         // Nothing of dbdelve's is stacked over the tab, so the keystroke is not
         // ours. Handing it on is what lets the completion popup close and a

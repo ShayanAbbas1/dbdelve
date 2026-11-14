@@ -11,17 +11,22 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use gpui::{
-    BorderStyle, Bounds, BoxShadow, ContentMask, Context, DispatchPhase, EventEmitter, FocusHandle,
-    Font, FontWeight, Hitbox, HitboxBehavior, Hsla, InteractiveElement, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Path, PathBuilder, PinchEvent,
-    Pixels, Render, ScrollWheelEvent, ShapedLine, SharedString, Styled, TextAlign, TextRun,
+    AppContext, BorderStyle, Bounds, BoxShadow, ContentMask, Context, DispatchPhase, Entity,
+    EventEmitter, FocusHandle, Focusable, Font, FontWeight, Hitbox, HitboxBehavior, Hsla,
+    InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ParentElement, Path, PathBuilder, PinchEvent, Pixels, Render, ScrollWheelEvent, ShapedLine,
+    SharedString, StatefulInteractiveElement, Styled, Subscription, TextAlign, TextRun,
     TransformationMatrix, Window, canvas, div, point, prelude::FluentBuilder, px, quad, size,
 };
 
-use gpui_component::Disableable;
+use gpui_component::{
+    Disableable,
+    input::{Input, InputEvent, InputState},
+};
 
 use crate::actions::{
-    OpenDiagramStructure, OpenDiagramTable, ResetEditorZoom, ZoomEditorIn, ZoomEditorOut,
+    DiagramFindNext, DiagramFindPick, DiagramFindPrevious, FindInDiagram, OpenDiagramStructure,
+    OpenDiagramTable, ResetEditorZoom, ZoomEditorIn, ZoomEditorOut,
 };
 use crate::db::{KeyTarget, SchemaGraph};
 use crate::diagram::geometry::{
@@ -29,6 +34,7 @@ use crate::diagram::geometry::{
 };
 use crate::diagram::index::Scene;
 use crate::diagram::layout::{Layout, Subject};
+use crate::fuzzy::{Fuzzy, Query};
 use crate::icons::icon;
 use crate::theme::{Theme, fonts, layout, popup_theme, theme};
 use crate::ui::{self, Control, Tone};
@@ -65,6 +71,10 @@ const ZOOM_STEPS: [f32; 15] = [
 ];
 /// Wide enough for "400%", so the toolbar does not shift as the zoom changes.
 const ZOOM_READOUT_WIDTH: f32 = 52.0;
+const FIND_WIDTH: f32 = 300.0;
+/// Matches listed under the find field; typing narrows the rest.
+const FIND_SHOWN: usize = 8;
+const FIND_ROW_HEIGHT: f32 = 28.0;
 
 pub enum Load {
     Loading,
@@ -136,6 +146,17 @@ impl Ready {
             },
         }
     }
+}
+
+/// The find field and what it matched.
+struct Find {
+    input: Entity<InputState>,
+    query: Query,
+    fuzzy: Fuzzy,
+    /// Cards whose names match, best first.
+    results: Vec<u32>,
+    selected: usize,
+    _changes: Subscription,
 }
 
 /// What the view asks of the workspace around it.
@@ -242,6 +263,7 @@ pub struct DiagramView {
     /// Keys only as asked for: the switch shows it at once, while the layout
     /// it asks for may still be on its way.
     keys_only: bool,
+    find: Option<Find>,
     /// Counts layouts asked for, so one that lands after a later one was
     /// asked for, or after a new read, is dropped.
     layouts: u64,
@@ -265,6 +287,7 @@ impl DiagramView {
             paths: HashMap::new(),
             paths_zoom: 0.0,
             keys_only: false,
+            find: None,
             layouts: 0,
         }
     }
@@ -283,6 +306,7 @@ impl DiagramView {
             .ready()
             .is_some_and(|ready| ready.scene.layout().keys_only);
         self.layouts += 1;
+        self.find = None;
         self.fitted = false;
         self.focus = None;
         self.hover = None;
@@ -474,11 +498,16 @@ impl DiagramView {
         self.hover = None;
         self.gesture = None;
         self.paths.clear();
+        // The matches were card numbers in the scene just replaced.
+        if let Some(text) = self.find.as_ref().map(|find| find.input.read(cx).value()) {
+            self.rank(&text);
+        }
         cx.notify();
     }
 
     fn press(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_handle.focus(window, cx);
+        self.find = None;
         let at = self.local(event.position);
         let zoom = self.transform.zoom;
         let world = self.transform.to_world(at);
@@ -691,6 +720,11 @@ impl DiagramView {
                         .on_click(cx.listener(|view, _, _, cx| view.fit(cx))),
                 )
                 .child(rule(inks))
+                .child(
+                    tool("diagram-find", icon::SEARCH)
+                        .tooltip_with_action("Find table", &FindInDiagram, Some("Diagram"))
+                        .on_click(cx.listener(|view, _, window, cx| view.find(window, cx))),
+                )
                 // ponytail: a stub until export lands (design §9, phase 4).
                 .child(
                     tool("diagram-export", icon::EXPORT)
@@ -780,6 +814,248 @@ impl DiagramView {
         )
     }
 
+    /// Opens the find field, or takes the keyboard back to it.
+    fn find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.ready().is_none() {
+            return;
+        }
+        let find = match &mut self.find {
+            Some(find) => find,
+            None => {
+                let input = cx.new(|cx| InputState::new(window, cx).placeholder("Find a table…"));
+                let changes = cx.subscribe_in(&input, window, Self::find_event);
+                self.find.insert(Find {
+                    input,
+                    query: Query::new(""),
+                    fuzzy: Fuzzy::new(),
+                    results: Vec::new(),
+                    selected: 0,
+                    _changes: changes,
+                })
+            }
+        };
+        find.input.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    fn find_event(
+        &mut self,
+        input: &Entity<InputState>,
+        event: &InputEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(event, InputEvent::Change) {
+            let text = input.read(cx).value();
+            self.search(&text, cx);
+        }
+    }
+
+    /// Ranks the cards against `text` and jumps to the best.
+    fn search(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.rank(text);
+        match self.find.as_ref().and_then(|find| find.results.first()) {
+            Some(&card) => self.jump(card, cx),
+            None => cx.notify(),
+        }
+    }
+
+    /// The find field's matches among the cards on screen, best first.
+    fn rank(&mut self, text: &str) {
+        let (Load::Ready(ready), Some(find)) = (&self.load, &mut self.find) else {
+            return;
+        };
+        find.query = Query::new(text);
+        find.selected = 0;
+        find.results = match find.query.is_empty() {
+            true => Vec::new(),
+            false => {
+                let cards = (0..ready.scene.layout().cards.len() as u32)
+                    .map(|card| (card, ready.name(card)));
+                let no_aliases: &[String] = &[];
+                find.fuzzy
+                    .rank(
+                        &find.query,
+                        cards,
+                        |(_, name)| name.as_ref(),
+                        |_| no_aliases,
+                    )
+                    .into_iter()
+                    .map(|((card, _), _)| card)
+                    .collect()
+            }
+        };
+    }
+
+    /// The next match, or the previous one, wrapping.
+    fn step_find(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let Some(find) = &mut self.find else {
+            return;
+        };
+        let count = find.results.len().min(FIND_SHOWN);
+        if count == 0 {
+            return;
+        }
+        find.selected = match forward {
+            true => (find.selected + 1) % count,
+            false => (find.selected + count - 1) % count,
+        };
+        let card = find.results[find.selected];
+        self.jump(card, cx);
+    }
+
+    fn pick_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let selected = self.find.as_ref().map_or(0, |find| find.selected);
+        self.pick(selected, window, cx);
+    }
+
+    fn pick(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(&card) = self.find.as_ref().and_then(|find| find.results.get(index)) {
+            self.jump(card, cx);
+        }
+        self.close_find(window, cx);
+    }
+
+    /// Puts a card in focus and in the middle of the view, at a zoom its
+    /// columns can be read at; a card taller than the view shows its top.
+    fn jump(&mut self, card: u32, cx: &mut Context<Self>) {
+        let Some(ready) = self.ready() else {
+            return;
+        };
+        let zoom = self.transform.zoom.max(1.0);
+        let layout = ready.scene.layout();
+        let rect = layout.card_rect(card, layout.detail(zoom), zoom);
+        let screen = self.screen();
+        let middle = screen.centre();
+        let top = match rect.height * zoom > screen.height - 2.0 * FIT_MARGIN {
+            true => FIT_MARGIN - rect.y * zoom,
+            false => middle.y - rect.centre().y * zoom,
+        };
+        self.transform = Transform {
+            zoom,
+            pan: Point::new(middle.x - rect.centre().x * zoom, top),
+        };
+        self.focus = Some(card);
+        self.hover = None;
+        cx.notify();
+    }
+
+    /// Whether the find field is open, for `escape` to close first.
+    pub fn finding(&self) -> bool {
+        self.find.is_some()
+    }
+
+    /// Closes the find field, leaving its match in focus and the keyboard on
+    /// the canvas, where `enter` opens it.
+    pub fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.find = None;
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    /// The find field and its best matches, at the top right.
+    fn find_card(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let (t, inks) = (*theme(cx), popup_theme(cx));
+        let (Load::Ready(ready), Some(find)) = (&self.load, &mut self.find) else {
+            return None;
+        };
+        let count: SharedString = match (find.query.is_empty(), find.results.len()) {
+            (true, _) => "".into(),
+            (false, 0) => "None".into(),
+            (false, matches) => matches.to_string().into(),
+        };
+        let rows = find
+            .results
+            .iter()
+            .take(FIND_SHOWN)
+            .enumerate()
+            .map(|(index, &card)| {
+                let name = ready.name(card);
+                let ranges = find.fuzzy.highlights(&find.query, &name);
+                let selected = index == find.selected;
+                div()
+                    .id(("diagram-find-match", index))
+                    .h(px(layout::chrome(FIND_ROW_HEIGHT)))
+                    .flex()
+                    .items_center()
+                    .gap(px(layout::SPACE_SM))
+                    .px(px(layout::SPACE_SM))
+                    .rounded(px(layout::RADIUS_CONTROL))
+                    .whitespace_nowrap()
+                    .overflow_hidden()
+                    .text_size(px(layout::chrome(layout::TEXT_MD)))
+                    .text_color(inks.text)
+                    .map(|row| match selected {
+                        true => row.bg(inks.element_active),
+                        false => row.hover(|style| style.bg(inks.element_hover)),
+                    })
+                    .child(
+                        icon(icon::TABLE)
+                            .flex_none()
+                            .size(px(layout::chrome(layout::ICON_SIZE)))
+                            .text_color(match selected {
+                                true => inks.accent,
+                                false => inks.text_faint,
+                            }),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(ui::highlighted(name, &ranges, inks)),
+                    )
+                    .on_click(cx.listener(move |view, _, window, cx| view.pick(index, window, cx)))
+            })
+            .collect::<Vec<_>>();
+        let listed = !rows.is_empty();
+        Some(
+            floating(t)
+                .key_context("DiagramFind")
+                .top(px(layout::SPACE_MD))
+                .right(px(layout::SPACE_MD))
+                .w(px(layout::chrome(FIND_WIDTH)))
+                .flex_col()
+                .items_stretch()
+                .child(
+                    div()
+                        .h(px(layout::chrome(layout::CONTROL_HEIGHT)))
+                        .flex()
+                        .items_center()
+                        .gap(px(layout::SPACE_SM))
+                        .px(px(layout::SPACE_MD))
+                        .when(listed, |row| row.border_b_1().border_color(inks.border))
+                        .child(
+                            icon(icon::SEARCH)
+                                .flex_none()
+                                .size(px(layout::chrome(layout::ICON_SIZE)))
+                                .text_color(inks.text_muted),
+                        )
+                        .child(
+                            div().flex_1().min_w_0().overflow_hidden().child(
+                                Input::new(&find.input).appearance(false).w_full().min_w_0(),
+                            ),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                                .text_color(inks.text_muted)
+                                .child(count),
+                        ),
+                )
+                .when(listed, |card| {
+                    card.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .p(px(layout::SPACE_XS))
+                            .children(rows),
+                    )
+                }),
+        )
+    }
+
     /// Whether a card is in focus, for `escape` to clear before it goes on to
     /// whatever else it closes.
     pub fn has_focus(&self) -> bool {
@@ -788,6 +1064,11 @@ impl DiagramView {
 
     pub fn clear_focus(&mut self, cx: &mut Context<Self>) {
         self.set_focus(None, cx);
+    }
+
+    #[cfg(test)]
+    pub fn focused_name(&self) -> Option<SharedString> {
+        Some(self.ready()?.name(self.focus?))
     }
 
     #[cfg(test)]
@@ -1213,6 +1494,14 @@ impl Render for DiagramView {
             .on_action(cx.listener(|view, _: &ZoomEditorIn, _, cx| view.step_zoom(true, cx)))
             .on_action(cx.listener(|view, _: &ZoomEditorOut, _, cx| view.step_zoom(false, cx)))
             .on_action(cx.listener(|view, _: &ResetEditorZoom, _, cx| view.fit(cx)))
+            .on_action(cx.listener(|view, _: &FindInDiagram, window, cx| view.find(window, cx)))
+            .on_action(cx.listener(|view, _: &DiagramFindNext, _, cx| view.step_find(true, cx)))
+            .on_action(
+                cx.listener(|view, _: &DiagramFindPrevious, _, cx| view.step_find(false, cx)),
+            )
+            .on_action(
+                cx.listener(|view, _: &DiagramFindPick, window, cx| view.pick_selected(window, cx)),
+            )
             .size_full()
             .overflow_hidden()
             .bg(t.panel_glass());
@@ -1234,6 +1523,7 @@ impl Render for DiagramView {
                 .relative()
                 .child(self.canvas(cx))
                 .children(self.toolbar(cx))
+                .children(self.find_card(cx))
                 .children(self.focus_bar(cx)),
         }
     }

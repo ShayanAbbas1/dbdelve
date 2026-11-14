@@ -4200,3 +4200,86 @@ fn the_zoom_chords_zoom_a_diagram_and_its_views_and_keys_only_lay_it_out_again(
         quit(workspace, cx);
     });
 }
+
+#[gpui::test]
+fn secondary_f_finds_a_table_in_a_diagram_and_escape_puts_the_field_away(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            &format!("{DIAGRAM_SCHEMA} create table weather (id integer primary key);"),
+        );
+        let view = show_diagram(&workspace, cx);
+        let canvas = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| view.read(cx).focus_handle().is_focused(window))
+        };
+        let focused = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| view.read(cx).focused_name())
+                .map(|name| name.to_string())
+        };
+
+        cx.simulate_keystrokes("secondary-f");
+        settle(cx);
+        assert!(
+            cx.update(|_, cx| view.read(cx).finding()),
+            "the field opens"
+        );
+        assert!(!canvas(cx), "and takes the keyboard");
+        cx.simulate_input("sight");
+        settle(cx);
+        assert_eq!(
+            focused(cx).as_deref(),
+            Some("sightings"),
+            "typing jumps to the match"
+        );
+
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+        assert!(
+            !cx.update(|_, cx| view.read(cx).finding()),
+            "escape closes the field"
+        );
+        assert!(canvas(cx), "handing the keyboard back to the canvas");
+        assert_eq!(
+            focused(cx).as_deref(),
+            Some("sightings"),
+            "with the match in focus"
+        );
+
+        cx.simulate_keystrokes("secondary-f");
+        settle(cx);
+        cx.simulate_input("i");
+        settle(cx);
+        let first = focused(cx);
+        cx.simulate_keystrokes("down");
+        settle(cx);
+        assert_ne!(focused(cx), first, "down moves to the next match");
+        cx.simulate_keystrokes("up");
+        settle(cx);
+        assert_eq!(focused(cx), first, "and up back");
+
+        cx.simulate_keystrokes("backspace");
+        cx.simulate_input("weath");
+        settle(cx);
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        assert!(
+            !cx.update(|_, cx| view.read(cx).finding()),
+            "enter picks the match"
+        );
+        assert_eq!(focused(cx).as_deref(), Some("weather"));
+        assert_eq!(
+            front_relation(&workspace, cx),
+            None,
+            "and opens nothing yet"
+        );
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        assert_eq!(
+            front_relation(&workspace, cx),
+            Some(("weather".to_string(), false)),
+            "the next enter opens it"
+        );
+
+        quit(workspace, cx);
+    });
+}
