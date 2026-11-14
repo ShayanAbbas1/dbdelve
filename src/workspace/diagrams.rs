@@ -5,7 +5,7 @@ use std::sync::{Arc, OnceLock};
 
 use super::*;
 
-use crate::diagram::geometry::Point;
+use crate::diagram::geometry::{MAX_CARD_WIDTH, MIN_CARD_WIDTH, Point, WORLD_LIMIT};
 use crate::diagram::index::{Placement, Scene};
 use crate::diagram::layout;
 use crate::diagram_view::{DiagramEvent, DiagramView, Load, Ready, TableKey};
@@ -330,20 +330,20 @@ fn arrangement_database(profile: &Profile) -> Option<Option<String>> {
 /// The cards a diagram's file holds, by table. A value no card can take,
 /// which only a hand edit writes, is dropped with its card's other parts kept.
 fn placements(cards: Vec<store::StoredCard>) -> HashMap<TableKey, Placement> {
-    let finite = |value: Option<f64>| {
+    // Checked as `f32`, which is what is kept: `1e100` is finite as read.
+    let within = |value: Option<f64>, low: f32, high: f32| {
         value
-            .filter(|value| value.is_finite())
             .map(|value| value as f32)
+            .filter(|value| (low..=high).contains(value))
     };
+    let at = |value| within(value, -WORLD_LIMIT, WORLD_LIMIT);
     cards
         .into_iter()
         .map(|card| {
             let placement = Placement {
-                origin: finite(card.x)
-                    .zip(finite(card.y))
-                    .map(|(x, y)| Point::new(x, y)),
-                width: finite(card.width),
-                height: finite(card.height),
+                origin: at(card.x).zip(at(card.y)).map(|(x, y)| Point::new(x, y)),
+                width: within(card.width, MIN_CARD_WIDTH, MAX_CARD_WIDTH),
+                height: within(card.height, f32::MIN_POSITIVE, WORLD_LIMIT),
             };
             ((card.schema.into(), card.name.into()), placement)
         })
@@ -420,6 +420,24 @@ mod tests {
             }
         );
         assert!(placements(vec![card(f64::INFINITY, None)]).is_empty());
+        assert!(
+            placements(vec![card(1e100, None)]).is_empty(),
+            "finite as read, infinite as kept"
+        );
+        assert!(placements(vec![card(2.0e6, Some(5_000.0))]).is_empty());
+        assert!(placements(vec![card(f64::NAN, Some(-1.0))]).is_empty());
+        let short = store::StoredCard {
+            height: Some(-82.0),
+            ..card(10.0, Some(f64::from(MIN_CARD_WIDTH)))
+        };
+        assert_eq!(
+            placements(vec![short])[&("public".into(), "orders".into())],
+            Placement {
+                origin: Some(Point::new(10.0, 1.0)),
+                width: Some(MIN_CARD_WIDTH),
+                height: None,
+            }
+        );
     }
 
     #[test]

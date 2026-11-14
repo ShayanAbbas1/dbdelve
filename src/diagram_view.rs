@@ -32,7 +32,7 @@ use crate::actions::{
 use crate::db::{KeyTarget, SchemaGraph};
 use crate::diagram::geometry::{
     self, CARD_WIDTH, Detail, Direction, Fit, HEADER_HEIGHT, Handle, MAX_CARD_WIDTH,
-    MIN_CARD_WIDTH, Point, Rect, Segment, Stroke, Transform,
+    MIN_CARD_WIDTH, Point, Rect, Segment, Stroke, Transform, WORLD_LIMIT,
 };
 use crate::diagram::index::{Placement, Scene};
 use crate::diagram::layout::{Layout, Subject};
@@ -965,7 +965,10 @@ impl DiagramView {
                     return;
                 }
                 let world = self.transform.to_world(at);
-                let origin = Point::new(world.x - grab.x, world.y - grab.y);
+                let origin = Point::new(
+                    (world.x - grab.x).clamp(-WORLD_LIMIT, WORLD_LIMIT),
+                    (world.y - grab.y).clamp(-WORLD_LIMIT, WORLD_LIMIT),
+                );
                 if let Load::Ready(ready) = &mut self.load {
                     if ready.view == View::Schema {
                         let table = ready.table(card);

@@ -9,6 +9,10 @@ use super::layout::Layout;
 
 /// Wider than a card, so a pointer looks in one or two cells.
 const CELL: f32 = 256.0;
+/// A rectangle over more cells than this is not filed in them but kept
+/// aside and offered to every query: only a card or edge stretched far past
+/// anything a layout makes is, and filing it would allocate a cell for each.
+const MAX_FILED_CELLS: i64 = 64 * 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Entry {
@@ -22,6 +26,8 @@ pub struct Scene {
     /// level of detail, so zooming never refiles it.
     envelopes: Vec<Vec<Rect>>,
     cells: HashMap<(i32, i32), Vec<Entry>>,
+    /// What spans too many cells to file ([`MAX_FILED_CELLS`]).
+    wide: Vec<Entry>,
     /// The cells that hold anything, so a query zoomed far out visits only
     /// those rather than every cell of the viewport.
     occupied: Option<(i32, i32, i32, i32)>,
@@ -60,6 +66,7 @@ impl Scene {
             layout,
             envelopes,
             cells: HashMap::new(),
+            wide: Vec::new(),
             occupied: None,
         };
         for card in 0..scene.layout.cards.len() as u32 {
@@ -244,6 +251,12 @@ impl Scene {
     fn file(&mut self, entry: Entry) {
         for rect in self.rects(entry) {
             let (left, top, right, bottom) = cells(rect);
+            if too_wide(left, top, right, bottom) {
+                if !self.wide.contains(&entry) {
+                    self.wide.push(entry);
+                }
+                continue;
+            }
             self.occupied = Some(match self.occupied {
                 None => (left, top, right, bottom),
                 Some((l, t, r, b)) => (l.min(left), t.min(top), r.max(right), b.max(bottom)),
@@ -260,8 +273,12 @@ impl Scene {
     }
 
     fn unfile(&mut self, entry: Entry) {
+        self.wide.retain(|filed| *filed != entry);
         for rect in self.rects(entry) {
             let (left, top, right, bottom) = cells(rect);
+            if too_wide(left, top, right, bottom) {
+                continue;
+            }
             for x in left..=right {
                 for y in top..=bottom {
                     if let Some(cell) = self.cells.get_mut(&(x, y)) {
@@ -283,8 +300,14 @@ impl Scene {
             .flat_map(move |x| (top..=bottom).map(move |y| (x, y)))
             .filter_map(|cell| self.cells.get(&cell))
             .flatten()
+            .chain(&self.wide)
             .copied()
     }
+}
+
+fn too_wide(left: i32, top: i32, right: i32, bottom: i32) -> bool {
+    let span = |from: i32, to: i32| (i64::from(to) - i64::from(from) + 1).max(0);
+    span(left, right) * span(top, bottom) > MAX_FILED_CELLS
 }
 
 fn cells(rect: Rect) -> (i32, i32, i32, i32) {
@@ -432,6 +455,28 @@ mod tests {
         assert_eq!(scene.handle_at(on_right_card, 40.0, 1.0), None);
         let in_gap = Point::new(left.right() + gap / 2.0, left.y + 10.0);
         assert_eq!(scene.handle_at(in_gap, 40.0, 1.0), Some((0, Handle::Right)));
+    }
+
+    #[test]
+    fn a_card_put_absurdly_far_away_is_kept_aside_rather_than_filed_in_every_cell() {
+        let mut scene = scene();
+        // The edge between the two now spans a trillion cells each way.
+        scene.move_card(1, Point::new(f32::MAX / 2.0, f32::MAX / 2.0));
+        assert!(scene.cells.values().map(Vec::len).sum::<usize>() < 64);
+        assert_eq!(
+            scene.visible(rect(-10.0, -10.0, 2000.0, 2000.0), 1.0),
+            Visible {
+                cards: vec![0],
+                edges: vec![0]
+            },
+            "the edge is still found where it passes"
+        );
+        scene.move_card(1, Point::new(600.0, 0.0));
+        assert!(scene.wide.is_empty(), "and is filed again once back");
+        assert_eq!(
+            scene.visible(rect(-10.0, -10.0, 2000.0, 2000.0), 1.0).cards,
+            vec![0, 1]
+        );
     }
 
     #[test]

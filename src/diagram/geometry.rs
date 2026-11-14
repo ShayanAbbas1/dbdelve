@@ -17,6 +17,10 @@ pub const NAME_BLOCK_HEIGHT: f32 = 26.0;
 pub const MIN_TEXT_SIZE: f32 = 11.0;
 pub const MIN_ZOOM: f32 = 0.05;
 pub const MAX_ZOOM: f32 = 4.0;
+/// How far from the origin a card may be put, either way on either axis:
+/// past any layout of a few thousand tables, and short of where `f32` loses
+/// the precision a pixel needs.
+pub const WORLD_LIMIT: f32 = 1.0e6;
 
 /// Between the levels the design names (100%, about 70%, 45% and below).
 const KEYS_BELOW: f32 = 0.85;
