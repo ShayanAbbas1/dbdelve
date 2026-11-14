@@ -37,7 +37,7 @@ use dbdelve_plugin_protocol::{
 
 use super::odbc_string::{self, Refusal};
 use super::plugin::Plugin;
-use super::ssh::Tunnel;
+use super::tunnel::Tunnel;
 use super::{
     CancelToken, Cancelling, Catalog, ColumnDefinition, DbError, Engine, Fetch, ForeignKey, Index,
     IndexKind, NamedDefinition, QueryResult, Reference, Relation, RelationKind, Schema, SshTunnel,
@@ -86,6 +86,7 @@ pub struct ExternalConfig {
     /// Seconds, 0 for none.
     pub statement_timeout: u32,
     pub ssh: Option<SshTunnel>,
+    pub ssm: Option<super::SsmTunnel>,
 }
 
 /// By hand, so no `{:?}` prints the password, nor the connection string, which
@@ -143,7 +144,7 @@ impl Connection {
                 config.speaks.label()
             )));
         }
-        let forward = match &config.ssh {
+        let forward = match super::tunnel::selected(config.ssh.as_ref(), config.ssm.as_ref())? {
             Some(ssh) => Some((
                 ssh,
                 odbc_string::endpoint(&config.connection).map_err(refused)?,
@@ -995,6 +996,7 @@ mod tests {
             user: "someone@example.com".to_owned(),
             password: String::new(),
             statement_timeout: 0,
+            ssm: None,
             ssh: None,
         }
     }
@@ -1547,6 +1549,7 @@ mod tests {
         let config = ExternalConfig {
             plugin,
             connection: "Db2Dev".into(),
+            ssm: None,
             ssh: Some(SshTunnel {
                 host: "unreachable.invalid".into(),
                 ..SshTunnel::default()

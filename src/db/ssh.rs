@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use super::{DbError, ServerConfig, SshTunnel, plain_error};
+use super::{DbError, SshTunnel, plain_error};
 
 mod askpass;
 
@@ -269,24 +269,6 @@ impl Said {
             .collect::<Vec<_>>()
             .join("\n")
     }
-}
-
-/// Opens `server`'s tunnel when it has one, then `connect` through it; an engine
-/// connection keeps the tunnel for as long as any clone of it lives.
-pub(super) fn tunnelled<C>(
-    server: &ServerConfig,
-    default_port: u16,
-    connect: impl FnOnce(Option<Arc<Tunnel>>) -> Result<C, DbError>,
-) -> Result<C, DbError> {
-    let Some(ssh) = &server.ssh else {
-        return connect(None);
-    };
-    let tunnel = Arc::new(Tunnel::open(
-        ssh,
-        &server.host,
-        server.port.unwrap_or(default_port),
-    )?);
-    connect(Some(tunnel.clone())).map_err(|error| tunnel.explain(error))
 }
 
 impl Drop for Tunnel {

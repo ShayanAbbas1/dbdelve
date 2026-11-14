@@ -38,6 +38,10 @@ mod snowflake;
 mod spec;
 mod sqlite;
 mod ssh;
+mod ssm;
+mod tunnel;
+pub use ssm::helper as ssm_helper;
+pub use ssm::{ConnectAttempt, ConnectGuard, SsmTunnel};
 mod target;
 mod turso;
 mod xlsx;
@@ -918,6 +922,7 @@ pub(super) fn server_from_url(url: &str, engine: &str) -> Result<ServerConfig, S
         // A URL has nowhere to say it; the form is where it is set.
         statement_timeout: 0,
         // Same reason: a URL has nowhere to say it either.
+        ssm: None,
         ssh: None,
         schema: None,
     })
@@ -1020,6 +1025,7 @@ pub struct ServerConfig {
     /// A local port forward to dial through instead of connecting to `host`
     /// directly. None is the ordinary direct connection.
     pub ssh: Option<SshTunnel>,
+    pub ssm: Option<SsmTunnel>,
     /// The schema unqualified names resolve in first, where
     /// [`Target::picks_schema`]. None leaves the server's
     /// `search_path` alone.
@@ -1027,6 +1033,10 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
+    pub fn has_tunnel(&self) -> bool {
+        self.ssh.is_some() || self.ssm.is_some()
+    }
+
     pub fn endpoint(&self) -> String {
         match self.port {
             Some(port) => format!("{}:{port}", self.host),
@@ -1163,6 +1173,23 @@ impl ConnectionConfig {
         match self {
             Self::External(external) => external.ssh.as_ref(),
             _ => self.server()?.ssh.as_ref(),
+        }
+    }
+
+    pub fn ssm(&self) -> Option<&SsmTunnel> {
+        match self {
+            Self::External(c) => c.ssm.as_ref(),
+            _ => self.server()?.ssm.as_ref(),
+        }
+    }
+
+    pub fn set_connect_attempt(&mut self, attempt: ConnectAttempt) {
+        let ssm = match self {
+            Self::External(c) => c.ssm.as_mut(),
+            _ => self.server_mut().and_then(|s| s.ssm.as_mut()),
+        };
+        if let Some(ssm) = ssm {
+            ssm.attempt = Some(attempt);
         }
     }
 
@@ -1426,6 +1453,7 @@ pub enum Connection {
 
 impl Connection {
     pub fn open(config: ConnectionConfig) -> Result<Self, DbError> {
+        tunnel::selected(config.ssh(), config.ssm())?;
         match config {
             ConnectionConfig::Postgres(postgres) => postgres
                 .resolved()
@@ -3979,6 +4007,7 @@ mod tests {
             ..SshTunnel::default()
         };
         let config = ConnectionConfig::MySql(ServerConfig {
+            ssm: None,
             ssh: Some(tunnel),
             ..ServerConfig::default()
         });
@@ -3993,6 +4022,7 @@ mod tests {
         let tunnelled = |passphrase: &str| {
             ConnectionConfig::MySql(ServerConfig {
                 host: "db.internal".into(),
+                ssm: None,
                 ssh: Some(SshTunnel {
                     host: "bastion".into(),
                     passphrase: passphrase.into(),

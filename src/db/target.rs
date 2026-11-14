@@ -107,6 +107,13 @@ impl Target {
 
     /// Whether a profile's SSH tunnel may end at a Unix socket on the SSH host,
     /// opened as another OS user: a Host starting with `/` is its directory.
+    pub fn takes_ssm_tunnel(self) -> bool {
+        matches!(
+            self.fields(),
+            super::Fields::Server | super::Fields::ConnectionString
+        ) && self.engine != Engine::MongoDb
+    }
+
     pub fn reaches_socket_over_ssh(self) -> bool {
         self.driver == Driver::BuiltIn && self.engine == Engine::Postgres
     }

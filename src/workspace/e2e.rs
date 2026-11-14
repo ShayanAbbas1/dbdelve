@@ -2533,6 +2533,7 @@ fn an_odbc_profile_saves_and_restores_as_it_was(cx: &mut TestAppContext) {
                 user: user.into(),
                 password: String::new(),
                 statement_timeout: timeout,
+                ssm: None,
                 ssh,
             })
         };
@@ -2819,8 +2820,14 @@ fn turning_the_tunnel_off_from_key_passphrase_hands_the_keyboard_to_password(
         });
         settle(cx);
         let toggle_tunnel = |cx: &mut VisualTestContext| {
+            let enabled =
+                workspace.read_with(cx, |workspace, _| workspace.form.as_ref().unwrap().ssh);
             let switch = cx
-                .debug_bounds("ssh-tunnel")
+                .debug_bounds(if enabled {
+                    "tunnel-kind-0"
+                } else {
+                    "ssh-tunnel"
+                })
                 .expect("the switch is drawn")
                 .center();
             cx.simulate_click(switch, gpui::Modifiers::default());
@@ -3992,6 +3999,82 @@ fn the_default_chip_puts_a_typed_then_emptied_insert_field_back_out_of_the_state
         let sql = statement(cx);
         assert!(sql.contains("NULL") && !sql.contains("robin"), "{sql}");
 
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn ssm_selection_preserves_fields_and_moves_focus(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch(cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.new_connection_in(None, window, cx)
+            })
+        });
+        settle(cx);
+        let select = |cx: &mut VisualTestContext, id: &'static str| {
+            let bounds = cx.debug_bounds(id).expect("tunnel option drawn");
+            cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+            settle(cx);
+        };
+        select(cx, "tunnel-kind-2");
+        let target =
+            cx.update(|_, cx| workspace.read(cx).form.as_ref().unwrap().ssm_target.clone());
+        assert!(cx.update(|window, cx| target.focus_handle(cx).is_focused(window)));
+        cx.simulate_input("i-0123456789abcdef0");
+        select(cx, "ssh-tunnel");
+        assert!(workspace.read_with(cx, |workspace, _| {
+            let form = workspace.form.as_ref().unwrap();
+            form.ssh && !form.ssm
+        }));
+        select(cx, "tunnel-kind-2");
+        assert_eq!(
+            cx.update(|_, cx| target.read(cx).value().to_string()),
+            "i-0123456789abcdef0"
+        );
+        select(cx, "tunnel-kind-0");
+        assert!(workspace.read_with(cx, |workspace, _| {
+            let form = workspace.form.as_ref().unwrap();
+            !form.ssh && !form.ssm
+        }));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn ssm_form_reopens_with_the_same_route(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch(cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |_, cx| {
+                let config = ConnectionConfig::Postgres(crate::db::PostgresConfig {
+                    server: crate::db::ServerConfig {
+                        host: "private.example.test".into(),
+                        user: "reader".into(),
+                        ssm: Some(crate::db::SsmTunnel {
+                            target: "i-0123456789abcdef0".into(),
+                            profile: Some("production".into()),
+                            region: Some("ap-northeast-1".into()),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                });
+                let mut form =
+                    crate::connection_form::ConnectionForm::new(Some(&config), window, cx);
+                assert!(form.ssm && !form.ssh);
+                let (_, reopened) = form.config(cx).unwrap();
+                assert_eq!(reopened.ssm(), config.ssm());
+                assert_eq!(reopened.server().unwrap().host, "private.example.test");
+                form.ssm_target
+                    .update(cx, |input, cx| input.set_value("", window, cx));
+                assert!(form.config(cx).is_err());
+                form.ssm = false;
+                assert!(form.config(cx).unwrap().1.ssm().is_none());
+            });
+        });
         quit(workspace, cx);
     });
 }

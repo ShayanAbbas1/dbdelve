@@ -32,7 +32,7 @@ use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 use tracing::instrument::WithSubscriber;
 use tracing::span;
 
-use super::ssh::{Tunnel, tunnelled};
+use super::tunnel::{Tunnel, tunnelled};
 use super::{
     Catalog, Cell, Column, DbError, EditTarget, Engine, Fetch, QueryResult, Reference,
     RelationKind, Row, ServerConfig, SslMode, Stopped, Structure, assemble_catalog,
@@ -2264,6 +2264,7 @@ mod tests {
         ServerConfig {
             host: "mssql".into(),
             port: Some(1433),
+            ssm: None,
             ssh: crate::db::ssh::live_bastion("dbdelve-bastion"),
             ..live_config()
         }
@@ -2319,6 +2320,7 @@ mod tests {
                 sslmode: SslMode::default(),
                 root_certificate: None,
                 statement_timeout: 0,
+                ssm: None,
                 ssh: None,
                 schema: None,
             }

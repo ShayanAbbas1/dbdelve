@@ -395,6 +395,7 @@ fn import(name: String, row: &Row) -> Result<Imported, String> {
                 user: row.user.clone(),
                 sslmode,
                 root_certificate: root_certificate(sslmode, ca, &mut notes),
+                ssm: None,
                 ssh: ssh(row, &mut notes),
                 ..ServerConfig::default()
             });

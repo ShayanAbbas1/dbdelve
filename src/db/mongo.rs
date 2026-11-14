@@ -39,7 +39,7 @@ use time::macros::format_description;
 use tokio::runtime::Runtime;
 use tokio::sync::oneshot;
 
-use super::ssh::{Tunnel, tunnelled};
+use super::tunnel::{Tunnel, tunnelled};
 use super::{
     CancelToken, Catalog, Cell, Column, ColumnDefinition, DbError, EditTarget, Fetch, Index,
     IndexKind, MISSING, NamedDefinition, QueryResult, Relation, RelationKind, Row, Schema,
@@ -218,6 +218,7 @@ pub fn config_from_url(url: &str) -> Result<MongoConfig, String> {
             root_certificate: root_certificate.filter(|_| sslmode.checks_certificate()),
             // A URL has nowhere to say either; the form is where they are set.
             statement_timeout: 0,
+            ssm: None,
             ssh: None,
             schema: None,
         },
@@ -368,7 +369,9 @@ fn tls_not_offered(error: &Error) -> bool {
 /// tunnel is the loopback, as on MySQL. `verify-ca` checks the name here too.
 fn unreachable_through_a_tunnel(config: &MongoConfig) -> Option<DbError> {
     let server = &config.server;
-    server.ssh.as_ref()?;
+    if !server.has_tunnel() {
+        return None;
+    }
     if config.srv || config.seed_list() {
         return Some(plain_error(
             "A seed list or an SRV name cannot be reached through an SSH tunnel: the tunnel \
@@ -378,10 +381,11 @@ fn unreachable_through_a_tunnel(config: &MongoConfig) -> Option<DbError> {
     }
     server.sslmode.checks_certificate().then(|| {
         plain_error(format!(
-            "sslmode={} cannot be honoured through an SSH tunnel on MongoDB: the driver checks \
+            "sslmode={} cannot be honoured through an {} tunnel on MongoDB: the driver checks \
              the certificate against the address it dials, which is the tunnel's loopback \
              address rather than {}.",
             server.sslmode.as_str(),
+            if server.ssm.is_some() { "SSM" } else { "SSH" },
             server.host
         ))
     })
@@ -425,8 +429,11 @@ pub struct Connection {
 
 impl Connection {
     pub fn open(config: &MongoConfig) -> Result<Self, DbError> {
+        if config.server.ssm.is_some() {
+            return Err(plain_error("SSM is not supported on MongoDB: its background connections cannot check tunnel liveness before opening sockets.".into()));
+        }
         let server = &config.server;
-        if let Some(error) = owned_option(&config.options, server.ssh.is_some()) {
+        if let Some(error) = owned_option(&config.options, server.has_tunnel()) {
             return Err(plain_error(error));
         }
         // Before the tunnel, which may have cost a hardware-key touch.
@@ -2566,6 +2573,22 @@ fn single_quoted(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ssm_is_refused_before_background_sockets_start() {
+        let mut config = mongo("db.example.test", None);
+        config.server.sslmode = SslMode::Disable;
+        config.server.ssm = Some(crate::db::SsmTunnel {
+            target: "i-0123456789abcdef0".into(),
+            aws_cli: Some(std::env::temp_dir().join("dbdelve-nonexistent-aws-cli")),
+            ..Default::default()
+        });
+        let error = Connection::open(&config).err().unwrap();
+        assert!(
+            error.message.contains("SSM is not supported on MongoDB"),
+            "{}",
+            error.message
+        );
+    }
     use super::*;
     use crate::db::{ConnectionConfig, Engine, SshTunnel};
 
@@ -2968,6 +2991,7 @@ mod tests {
                 sslmode,
                 // Nothing that resolves: starting ssh at all would fail
                 // differently.
+                ssm: None,
                 ssh: Some(SshTunnel {
                     host: "dbdelve-nowhere.invalid".into(),
                     ..SshTunnel::default()

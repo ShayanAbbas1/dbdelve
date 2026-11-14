@@ -517,6 +517,20 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn ssm_password_command_receives_the_remote_endpoint() {
+        let mut server = server("reader", "printf '%s:%s' %HOSTNAME% %PORT%", 0);
+        server.ssm = Some(super::super::SsmTunnel {
+            target: "i-0123456789abcdef0".into(),
+            ..Default::default()
+        });
+        assert_eq!(
+            server.login_password(Engine::Postgres).unwrap(),
+            "db.example.test:5432"
+        );
+    }
+
     #[test]
     fn without_a_command_the_typed_password_is_sent() {
         let server = ServerConfig {
