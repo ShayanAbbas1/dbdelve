@@ -812,7 +812,7 @@ impl DiagramView {
             && bounds.size.height > px(0.0)
             && let Some(ready) = self.ready()
         {
-            self.transform = Transform::fitting(ready.bounds, self.screen(), FIT_MARGIN);
+            self.transform = ready.scene.layout().fitting(self.screen(), FIT_MARGIN);
             self.fitted = true;
             stale = true;
         }
@@ -847,7 +847,7 @@ impl DiagramView {
         let Some(ready) = self.ready() else {
             return;
         };
-        self.transform = Transform::fitting(ready.bounds, self.screen(), FIT_MARGIN);
+        self.transform = ready.scene.layout().fitting(self.screen(), FIT_MARGIN);
         cx.emit(DiagramEvent::Viewed);
         cx.notify();
     }
@@ -1412,16 +1412,19 @@ impl DiagramView {
     }
 
     /// Every card as a block and the view as a frame over them, at the bottom
-    /// right; a press or a drag on it moves the view. Not shown while the
-    /// whole scene is in view, when there is nowhere to go.
+    /// right; a press or a drag on it moves the view. Not shown while every
+    /// card, as the zoom draws it, is in view, when there is nowhere to go.
     fn minimap(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let ready = self.ready()?;
         let world = ready.bounds;
         let seen = self.transform.world_rect(self.screen());
-        if seen.x <= world.x
-            && seen.y <= world.y
-            && seen.right() >= world.right()
-            && seen.bottom() >= world.bottom()
+        let layout = ready.scene.layout();
+        let zoom = self.transform.zoom;
+        let drawn = layout.cards_bounds(layout.detail(zoom), zoom);
+        if seen.x <= drawn.x
+            && seen.y <= drawn.y
+            && seen.right() >= drawn.right()
+            && seen.bottom() >= drawn.bottom()
         {
             return None;
         }

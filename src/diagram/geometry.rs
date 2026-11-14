@@ -482,6 +482,11 @@ impl Transform {
         let zoom = ((viewport.width - 2.0 * margin) / world.width.max(1.0))
             .min((viewport.height - 2.0 * margin) / world.height.max(1.0))
             .clamp(MIN_ZOOM, 1.0);
+        Self::fitting_at(world, viewport, zoom)
+    }
+
+    /// `world` centred in `viewport` at `zoom`.
+    pub fn fitting_at(world: Rect, viewport: Rect, zoom: f32) -> Self {
         let (from, to) = (world.centre(), viewport.centre());
         Self {
             zoom,
@@ -538,7 +543,6 @@ pub struct EdgePath {
 impl EdgePath {
     /// Every point and control point, and the marks: a curve lies inside the
     /// hull of its control points.
-    #[cfg(test)]
     pub fn bounds(&self) -> Rect {
         let mut points = self.segments.iter().flat_map(|segment| match *segment {
             Segment::Move(point) | Segment::Line(point) => vec![point],
@@ -868,6 +872,59 @@ impl Layout {
             .unwrap_or_default()
     }
 
+    /// The cards as a level of detail draws them at `zoom`.
+    pub fn cards_bounds(&self, detail: Detail, zoom: f32) -> Rect {
+        (0..self.cards.len() as u32)
+            .map(|card| self.card_rect(card, detail, zoom))
+            .reduce(|bounds, rect| bounds.union(&rect))
+            .unwrap_or_default()
+    }
+
+    /// What a level of detail draws at `zoom`: its cards and its edges.
+    fn drawn_bounds(&self, detail: Detail, zoom: f32) -> Rect {
+        (0..self.edges.len() as u32)
+            .map(|edge| self.edge_path(edge, detail, zoom).bounds())
+            .fold(self.cards_bounds(detail, zoom), |bounds, rect| {
+                bounds.union(&rect)
+            })
+    }
+
+    /// The view that shows the whole layout in `viewport`, never past 100%.
+    /// What has to fit is what the fitted zoom draws: one tall card can pull
+    /// a fit of every column down to a zoom that draws name blocks instead,
+    /// a sliver of the view, so each level is fitted at the zooms that draw
+    /// it.
+    pub fn fitting(&self, viewport: Rect, margin: f32) -> Transform {
+        let fit = |detail: Detail, zoom: f32| {
+            Transform::fitting(self.drawn_bounds(detail, zoom), viewport, margin)
+        };
+        let columns = fit(Detail::Columns, 1.0);
+        if self.detail(columns.zoom) == Detail::Columns {
+            return columns;
+        }
+        let keys = fit(Detail::Keys, 1.0);
+        if self.detail(keys.zoom) != Detail::Names {
+            let zoom = match self.keys_only {
+                true => keys.zoom,
+                false => keys.zoom.min(KEYS_BELOW - 0.01),
+            };
+            let drawn = self.drawn_bounds(Detail::Keys, zoom);
+            return Transform::fitting_at(drawn, viewport, zoom);
+        }
+        // A name block is the same height on screen at any zoom, so the
+        // block's world height, and with it what fits, changes with the zoom.
+        let (mut fits, mut over) = (MIN_ZOOM, NAMES_BELOW);
+        for _ in 0..16 {
+            let zoom = (fits + over) / 2.0;
+            if fit(Detail::Names, zoom).zoom >= zoom {
+                fits = zoom;
+            } else {
+                over = zoom;
+            }
+        }
+        Transform::fitting_at(self.drawn_bounds(Detail::Names, fits), viewport, fits)
+    }
+
     fn anchor_y(&self, card: u32, column: Option<u32>, detail: Detail, zoom: f32) -> f32 {
         let origin = self.cards[card as usize].origin.y;
         match detail {
@@ -1035,6 +1092,69 @@ mod tests {
             None,
             "a centre level with the card's is not below it"
         );
+    }
+
+    /// A table of 200 columns and no keys among short ones, which every-column bounds
+    /// would fit at a zoom that draws a sliver of name blocks.
+    #[test]
+    fn a_fit_fits_what_its_zoom_draws_and_a_tall_card_does_not_shrink_it() {
+        let mut tall = graph(
+            12,
+            &[
+                (1, 0),
+                (2, 1),
+                (3, 0),
+                (4, 3),
+                (5, 4),
+                (6, 0),
+                (7, 6),
+                (8, 7),
+                (9, 8),
+                (10, 9),
+            ],
+        );
+        tall.tables[11]
+            .columns
+            .extend((0..200).map(|column| GraphColumn {
+                name: format!("metric_{column}").into(),
+                type_label: 0,
+                nullable: true,
+                primary: false,
+                foreign: false,
+                unique: false,
+            }));
+        let viewport = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1200.0,
+            height: 800.0,
+        };
+        for keys_only in [false, true] {
+            let layout = schema(&tall, keys_only);
+            let fit = layout.fitting(viewport, 32.0);
+            let drawn = layout.drawn_bounds(layout.detail(fit.zoom), fit.zoom);
+            let (width, height) = (drawn.width * fit.zoom, drawn.height * fit.zoom);
+            assert!(width <= 1200.0 - 64.0 + 0.5, "{width} wide at {}", fit.zoom);
+            assert!(
+                height <= 800.0 - 64.0 + 0.5,
+                "{height} high at {}",
+                fit.zoom
+            );
+            let centre = drawn.centre();
+            let on_screen = Point::new(
+                centre.x * fit.zoom + fit.pan.x,
+                centre.y * fit.zoom + fit.pan.y,
+            );
+            assert!((on_screen.x - 600.0).abs() < 0.5 && (on_screen.y - 400.0).abs() < 0.5);
+            assert!(
+                width >= 1200.0 * 0.6 || height >= 800.0 * 0.6,
+                "{width} by {height} at {} leaves the view empty",
+                fit.zoom
+            );
+        }
+        let layout = schema(&tall, false);
+        let every_column = Transform::fitting(layout.bounds(), viewport, 32.0);
+        assert!(layout.fitting(viewport, 32.0).zoom > 2.0 * every_column.zoom);
     }
 
     #[test]
