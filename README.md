@@ -64,8 +64,7 @@ Any other database with an ODBC driver is reachable through the bundled ODBC
 bridge, with that driver installed: IBM Db2, Oracle, SAP HANA, SAP ASE
 (Sybase), Informix, Teradata, Vertica, Exasol, Firebird, Amazon Redshift,
 Google BigQuery, Databricks, Apache Hive, Trino and Presto, Dremio,
-InterSystems IRIS, Microsoft Access and more. Grid editing is off, and
-statements you type run under the connection's mode. See
+InterSystems IRIS, Microsoft Access and more. See
 [Connecting through ODBC](docs/odbc.md).
 
 
