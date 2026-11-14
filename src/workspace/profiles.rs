@@ -33,16 +33,25 @@ fn mark_objects_stale(profile: &mut Profile) {
 
 impl Workspace {
     pub(crate) fn remember_profiles(&mut self, cx: &mut Context<Self>) {
+        if let Err(message) = self.save_profiles(cx) {
+            self.note(message, cx);
+        }
+    }
+
+    /// Writes `profiles.toml` from what this session holds, as
+    /// [`Self::remember_profiles`] does, for a caller with nowhere to say
+    /// that it failed.
+    pub(crate) fn save_profiles(&self, cx: &App) -> Result<(), String> {
         // The file we could not read at startup is still the user's, and what
         // this session holds is not what they have -- so it must not flatten
         // it. The notice said nothing would be saved.
         if self.store_unreadable {
-            return;
+            return Ok(());
         }
         let profiles = self
             .profiles
             .iter()
-            .map(|profile| profile.stored())
+            .map(|profile| profile.stored(cx))
             .collect::<Vec<_>>();
         let active = self.profile().map(|profile| profile.id.clone());
         let picked = fonts(cx);
@@ -78,16 +87,14 @@ impl Workspace {
             custom_keybindings: Some(self.settings.custom_keybindings.clone()),
             theme_opacity: Some(self.settings.theme_opacity.clone()),
         };
-        if let Err(message) = store::save_profiles(&store::ProfileList {
+        store::save_profiles(&store::ProfileList {
             profiles,
             active,
             fonts: Some(fonts),
             settings: Some(settings),
             projects: self.projects.clone(),
             unavailable: self.unavailable.clone(),
-        }) {
-            self.note(message, cx);
-        }
+        })
     }
 
     pub(crate) fn restore_profile(
@@ -2486,6 +2493,7 @@ impl Workspace {
             store::delete_secrets(&id);
             let removed_queries = store::delete_queries(&id);
             let _ = store::delete_grids(&id);
+            let _ = store::delete_diagrams(&id);
             for project in &mut self.projects {
                 project.connections.retain(|member| member != &id);
             }
@@ -2525,6 +2533,7 @@ impl Workspace {
             store::delete_secrets(&removed.id);
             let removed_queries = store::delete_queries(&removed.id);
             let _ = store::delete_grids(&removed.id);
+            let _ = store::delete_diagrams(&removed.id);
             for project in &mut self.projects {
                 project.connections.retain(|member| member != &removed.id);
             }

@@ -504,6 +504,19 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   and is parsed again on restore: a typed `EXPLAIN`'s are the snapshot's own
   rows, the Explain command's are kept beside the grid's, which still hold the
   last real run. Whether the pane was showing it comes back too.
+- **A diagram tab comes back as it was left, and its arrangement lives
+  beside `profiles.toml`.** The tab is a `StoredObject` with `diagram = true`
+  and a `diagram_view` table (view, centre, Keys only, zoom and pan); the cards
+  the user moved or sized go to `diagrams/<profile>/d-<schema>.toml`
+  (`store::write_diagram`), written at the end of a drag, so that however many
+  there are they never grow the file that is moved aside when it breaks. Names
+  are values in it, never keys, and the file name escapes the schema as a grid
+  key does. It belongs to the schema, not the tab: closing the tab or
+  switching database keeps it, a dropped table leaves it on the next write, and
+  it goes with the profile. One that will not read is no arrangement. The
+  restored tab reads its graph again when shown and applies both then. Zoom
+  and pan change on every wheel event, too often to write each, so
+  `profiles.toml` is also written on quit and on window close.
 - **`clip` reads only the window a cell shows, not the whole value.**
   `ResultGrid::shown` clips a cell as it is drawn, on the frame thread, for
   every visible cell of every frame. Nothing clipped is kept: a stored second

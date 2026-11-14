@@ -4364,6 +4364,147 @@ fn a_diagram_card_resizes_from_its_corner_and_a_double_click_there_gives_its_siz
     });
 }
 
+/// A second launch over the same home, as `launch` builds it, beside the
+/// first window.
+fn relaunch(cx: &mut VisualTestContext) -> (Entity<Workspace>, &mut VisualTestContext) {
+    let mut relaunched = None;
+    let (_, cx) = cx.cx.add_window_view(|window, cx| {
+        let entity = cx.new(|cx| Workspace::new(Vec::new(), window, cx));
+        relaunched = Some(entity.clone());
+        Root::new(entity, window, cx)
+    });
+    settle(cx);
+    (relaunched.expect("the window builds the workspace"), cx)
+}
+
+/// The diagram in front, once it is read.
+fn front_diagram(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) -> Entity<crate::diagram_view::DiagramView> {
+    cx.update(|_, cx| {
+        match workspace
+            .read(cx)
+            .profile()
+            .and_then(|profile| profile.session.active_object())
+            .map(|tab| &tab.body)
+        {
+            Some(ObjectBody::Diagram { view, side, .. }) => {
+                assert!(side.is_none(), "the read landed");
+                view.clone()
+            }
+            _ => panic!("the diagram came back in front"),
+        }
+    })
+}
+
+#[gpui::test]
+fn a_diagram_tab_comes_back_after_a_relaunch_as_it_was_left(cx: &mut TestAppContext) {
+    // CI's live job sets `PG*`, whose profile would be put in front on launch.
+    crate::IGNORE_ENVIRONMENT.set(true);
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            &format!("{DIAGRAM_SCHEMA} create table weather (id integer primary key);"),
+        );
+        let view = show_diagram(&workspace, cx);
+        let left = gpui::MouseButton::Left;
+        let none = gpui::Modifiers::default();
+        let birds = cx
+            .update(|_, cx| view.read(cx).table_on_screen("birds"))
+            .expect("the diagram drew the birds");
+        let to = gpui::point(birds.x + gpui::px(40.0), birds.y + gpui::px(160.0));
+        cx.simulate_mouse_down(birds, left, none);
+        cx.simulate_mouse_move(to, left, none);
+        cx.simulate_mouse_up(to, left, none);
+        let corner = cx
+            .update(|_, cx| view.read(cx).table_corner_on_screen("sightings"))
+            .expect("the diagram drew the sightings");
+        let to = gpui::point(corner.x + gpui::px(60.0), corner.y - gpui::px(30.0));
+        cx.simulate_mouse_down(corner, left, none);
+        cx.simulate_mouse_move(to, left, none);
+        cx.simulate_mouse_up(to, left, none);
+        settle(cx);
+        cx.simulate_keystrokes("secondary-=");
+        settle(cx);
+        let state = |view: &Entity<crate::diagram_view::DiagramView>,
+                     cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                let view = view.read(cx);
+                (
+                    view.table_origin("birds").expect("the birds are drawn"),
+                    view.table_size("sightings")
+                        .expect("the sightings are drawn"),
+                    view.zoom(),
+                )
+            })
+        };
+        let (origin, size, zoom) = state(&view, cx);
+        let arranged = store::read_diagram("e2e", "main");
+        assert_eq!(
+            arranged
+                .iter()
+                .map(|card| card.name.as_str())
+                .collect::<Vec<_>>(),
+            ["birds", "sightings"],
+            "the moved and the sized card, in a file of their own"
+        );
+        let saved =
+            std::fs::read_to_string(store::dbdelve_directory().unwrap().join("profiles.toml"))
+                .unwrap();
+        assert!(saved.contains("diagram = true"), "{saved}");
+        assert!(
+            !saved.contains("birds"),
+            "no card in profiles.toml:\n{saved}"
+        );
+
+        drop(workspace);
+        let (workspace, cx) = relaunch(cx);
+        let view = front_diagram(&workspace, cx);
+        let (restored_origin, restored_size, restored_zoom) = state(&view, cx);
+        let near = |a: f32, b: f32| (a - b).abs() < 0.01;
+        assert!(
+            near(restored_origin.0, origin.0) && near(restored_origin.1, origin.1),
+            "{restored_origin:?} is where {origin:?} was left"
+        );
+        assert!(near(restored_size.0, size.0) && restored_size.1 == size.1);
+        assert!(near(restored_zoom, zoom), "{restored_zoom} was {zoom}");
+
+        let sightings = cx
+            .update(|_, cx| view.read(cx).table_on_screen("sightings"))
+            .expect("the diagram drew the sightings");
+        cx.simulate_click(sightings, none);
+        settle(cx);
+        view.update(cx, |view, cx| view.show_neighbourhood(true, cx));
+        settle(cx);
+
+        drop(workspace);
+        let (workspace, cx) = relaunch(cx);
+        let view = front_diagram(&workspace, cx);
+        let (mut names, _) = cx
+            .update(|_, cx| view.read(cx).laid_out())
+            .expect("the diagram is laid out");
+        names.sort();
+        assert_eq!(names, ["birds", "sightings"], "back in the neighbourhood");
+        assert_eq!(
+            cx.update(|_, cx| view.read(cx).focused_name()).as_deref(),
+            Some("sightings"),
+            "centred on its table"
+        );
+        view.update(cx, |view, cx| view.show_neighbourhood(false, cx));
+        settle(cx);
+        let origin_now = cx
+            .update(|_, cx| view.read(cx).table_origin("birds"))
+            .unwrap();
+        assert!(
+            near(origin_now.0, origin.0) && near(origin_now.1, origin.1),
+            "the schema view behind it kept the moved card"
+        );
+
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn secondary_f_finds_a_table_in_a_diagram_and_escape_puts_the_field_away(cx: &mut TestAppContext) {
     store::tests::with_home(|| {

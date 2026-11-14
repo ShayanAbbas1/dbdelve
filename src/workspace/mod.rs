@@ -763,14 +763,21 @@ impl Workspace {
 
         // Finish writes synchronously: the process is going, and nothing
         // would wait for background work to finish.
+        // The profiles too: a diagram's zoom and pan move with every wheel
+        // and pinch event, too often to write each, so the last of them is
+        // written here.
         cx.on_app_quit(|workspace: &mut Self, cx: &mut Context<Self>| {
             workspace.persist_buffers(cx);
+            let _ = workspace.save_profiles(cx);
             async {}
         })
         .detach();
         // Window release also persists when the window closes without Quit.
-        cx.on_release(|workspace, cx| workspace.persist_buffers(cx))
-            .detach();
+        cx.on_release(|workspace, cx| {
+            workspace.persist_buffers(cx);
+            let _ = workspace.save_profiles(cx);
+        })
+        .detach();
 
         workspace.connect_active(cx);
         workspace

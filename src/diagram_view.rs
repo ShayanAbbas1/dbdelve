@@ -37,6 +37,7 @@ use crate::diagram::index::{Placement, Scene};
 use crate::diagram::layout::{Layout, Subject};
 use crate::fuzzy::{Fuzzy, Query};
 use crate::icons::icon;
+use crate::store;
 use crate::theme::{Theme, fonts, layout, popup_theme, theme};
 use crate::ui::{self, Control, Tone};
 
@@ -97,7 +98,7 @@ pub enum Load {
 
 /// A table by its schema and name: what a card the user moved or sized is
 /// remembered by, since card numbers change with every layout.
-type TableKey = (SharedString, SharedString);
+pub type TableKey = (SharedString, SharedString);
 
 /// Which of the two views the scene is laid out as (design §2.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,7 +115,9 @@ pub struct Ready {
     view: View,
     /// The schema view and where it was looked at, kept while a neighbourhood
     /// is shown, so going back finds the cards where the user dragged them.
-    stash: Option<(Scene, Transform)>,
+    /// Without a transform when the diagram came back from disk in a
+    /// neighbourhood, and is fitted when it goes back.
+    stash: Option<(Scene, Option<Transform>)>,
     /// What the scene covers, in world units: worked out once per layout and
     /// grown as cards are dragged, since the minimap reads it every frame.
     bounds: Rect,
@@ -274,6 +277,12 @@ pub enum DiagramEvent {
         table: SharedString,
         structure: bool,
     },
+    /// The user moved or sized a card in the schema view, and the
+    /// arrangement ([`DiagramView::arranged`]) is worth keeping.
+    Arranged,
+    /// The view, Keys only, the zoom or the pan changed, at the end of a
+    /// gesture or on a command, and the tab is worth writing down.
+    Viewed,
 }
 
 /// A press in progress, and what it moves.
@@ -301,6 +310,7 @@ enum Gesture {
         /// The card as drawn then, in world units.
         width: f32,
         height: f32,
+        resized: bool,
     },
 }
 
@@ -440,6 +450,9 @@ pub struct DiagramView {
     /// Counts layouts asked for, so one that lands after a later one was
     /// asked for, or after a new read, is dropped.
     layouts: u64,
+    /// How the tab was being looked at when it was written to disk, until
+    /// its first read lands and it is applied.
+    restore: Option<store::StoredDiagram>,
 }
 
 impl EventEmitter<DiagramEvent> for DiagramView {}
@@ -465,6 +478,88 @@ impl DiagramView {
             find: None,
             minimap: None,
             layouts: 0,
+            restore: None,
+        }
+    }
+
+    /// A diagram coming back from disk, looked at as it was once read.
+    pub fn restoring(restore: store::StoredDiagram, cx: &mut Context<Self>) -> Self {
+        Self {
+            restore: Some(restore),
+            ..Self::new(cx)
+        }
+    }
+
+    /// How the tab is being looked at, for `profiles.toml`: as it came back
+    /// from disk until it has been read again, so a session that never got
+    /// that far loses nothing.
+    pub fn stored(&self) -> store::StoredDiagram {
+        if let Some(restore) = &self.restore {
+            return restore.clone();
+        }
+        let Some(ready) = self.ready() else {
+            return store::StoredDiagram::default();
+        };
+        let looked = self.fitted.then_some(self.transform);
+        let rounded = |value: f32, scale: f64| (f64::from(value) * scale).round() / scale;
+        store::StoredDiagram {
+            centre: match ready.view {
+                View::Neighbourhood(table) => {
+                    Some(ready.graph.tables[table as usize].name.to_string())
+                }
+                View::Schema => None,
+            },
+            keys_only: Some(self.keys_only),
+            zoom: looked.map(|looked| rounded(looked.zoom, 10_000.0)),
+            x: looked.map_or(0.0, |looked| rounded(looked.pan.x, 10.0)),
+            y: looked.map_or(0.0, |looked| rounded(looked.pan.y, 10.0)),
+        }
+    }
+
+    /// The keys-only setting a read should lay the diagram out at: the one
+    /// on screen, else the one it came back from disk with.
+    pub fn wanted_keys_only(&self) -> Option<bool> {
+        self.keys_only()
+            .or_else(|| self.restore.as_ref()?.keys_only)
+    }
+
+    /// Puts a diagram just read back as it was looked at when written down:
+    /// the neighbourhood it centred on, if that table is still there, and the
+    /// zoom and pan, or else a fit.
+    fn apply_restore(&mut self, restore: store::StoredDiagram) {
+        let Load::Ready(ready) = &mut self.load else {
+            return;
+        };
+        let centre = restore.centre.as_deref().map(|name| {
+            (ready.graph.tables.iter())
+                .position(|table| table.name.as_ref() == name)
+                .map(|table| table as u32)
+        });
+        if let Some(Some(table)) = centre {
+            let around = crate::diagram::layout::neighbourhood(&ready.graph, table, self.keys_only);
+            let schema = std::mem::replace(&mut ready.scene, Scene::new(around));
+            ready.stash = Some((schema, None));
+            ready.view = View::Neighbourhood(table);
+            ready.bounds = ready.scene.layout().bounds();
+            self.focus = card_of(ready.scene.layout(), Subject::Table(table));
+        }
+        // A neighbourhood whose table is gone was looked at somewhere this
+        // schema view has nothing.
+        let looked = match centre {
+            Some(None) => None,
+            _ => restore.zoom,
+        };
+        if let Some(zoom) = looked
+            && zoom.is_finite()
+            && zoom > 0.0
+            && restore.x.is_finite()
+            && restore.y.is_finite()
+        {
+            self.transform = Transform {
+                zoom: (zoom as f32).clamp(geometry::MIN_ZOOM, geometry::MAX_ZOOM),
+                pan: Point::new(restore.x as f32, restore.y as f32),
+            };
+            self.fitted = true;
         }
     }
 
@@ -495,6 +590,11 @@ impl DiagramView {
         self.hover = None;
         self.gesture = None;
         self.paths.clear();
+        if self.ready().is_some()
+            && let Some(restore) = self.restore.take()
+        {
+            self.apply_restore(restore);
+        }
         cx.notify();
     }
 
@@ -510,7 +610,10 @@ impl DiagramView {
             View::Neighbourhood(table) => Some(old.graph.tables[table as usize].name.clone()),
             View::Schema => None,
         };
-        let looked = old.stash.as_ref().map_or(self.transform, |(_, at)| *at);
+        let looked = old
+            .stash
+            .as_ref()
+            .map_or(Some(self.transform), |(_, at)| *at);
         fresh.adopt(std::mem::take(&mut old.placed));
         let centre = centre.and_then(|name| {
             (fresh.graph.tables.iter())
@@ -525,7 +628,10 @@ impl DiagramView {
                 fresh.stash = Some((schema, looked));
                 fresh.view = View::Neighbourhood(table);
             }
-            None => self.transform = looked,
+            None => match looked {
+                Some(looked) => self.transform = looked,
+                None => self.fitted = false,
+            },
         }
         fresh.bounds = fresh.scene.layout().bounds();
         self.focus = focus.and_then(|table| fresh.card_of_table(&table));
@@ -587,6 +693,7 @@ impl DiagramView {
     /// Zoomed to `zoom` about the middle of the view.
     fn zoom_to(&mut self, zoom: f32, cx: &mut Context<Self>) {
         self.transform = self.transform.zoomed_at(self.screen().centre(), zoom);
+        cx.emit(DiagramEvent::Viewed);
         cx.notify();
     }
 
@@ -600,6 +707,7 @@ impl DiagramView {
             return;
         };
         self.transform = Transform::fitting(ready.bounds, self.screen(), FIT_MARGIN);
+        cx.emit(DiagramEvent::Viewed);
         cx.notify();
     }
 
@@ -608,6 +716,7 @@ impl DiagramView {
             return;
         }
         self.keys_only = keys_only;
+        cx.emit(DiagramEvent::Viewed);
         let Some(view) = self.ready().map(|ready| ready.view) else {
             return;
         };
@@ -640,10 +749,14 @@ impl DiagramView {
         let Load::Ready(ready) = &mut self.load else {
             return;
         };
+        cx.emit(DiagramEvent::Viewed);
         if view == View::Schema
             && let Some((scene, transform)) = ready.stash.take()
         {
-            self.install(scene, view, Some(transform), cx);
+            self.install(scene, view, transform, cx);
+            if transform.is_none() {
+                self.fitted = false;
+            }
             return;
         }
         self.lay_out(view, cx);
@@ -716,7 +829,7 @@ impl DiagramView {
         }
         ready.bounds = ready.scene.layout().bounds();
         if ready.view == View::Schema && matches!(view, View::Neighbourhood(_)) {
-            ready.stash = Some((old, self.transform));
+            ready.stash = Some((old, Some(self.transform)));
         }
         ready.view = view;
         match (view, transform, focused.zip(focus)) {
@@ -764,6 +877,7 @@ impl DiagramView {
                         from: world,
                         width: rect.width,
                         height: rect.height,
+                        resized: false,
                     });
                 }
                 _ => self.unsize(card, handle, cx),
@@ -847,6 +961,7 @@ impl DiagramView {
                 from,
                 width,
                 height,
+                ..
             }) => {
                 let world = self.transform.to_world(at);
                 let zoom = self.transform.zoom;
@@ -865,6 +980,14 @@ impl DiagramView {
                     if (sized_width, sized_height) != ready.size_of(card) {
                         let edges = ready.resize(card, sized_width, sized_height);
                         self.paths.retain(|(edge, _), _| !edges.contains(edge));
+                        self.gesture = Some(Gesture::Resize {
+                            card,
+                            handle,
+                            from,
+                            width,
+                            height,
+                            resized: true,
+                        });
                         cx.notify();
                     }
                 }
@@ -926,13 +1049,33 @@ impl DiagramView {
             Some(Gesture::Pan { start, .. }) if distance(start, at) < CLICK_SLOP => {
                 self.set_focus(None, cx);
             }
+            Some(Gesture::Pan { .. } | Gesture::Minimap) => cx.emit(DiagramEvent::Viewed),
             Some(Gesture::Card {
                 card, moved: false, ..
             }) => self.set_focus(Some(card), cx),
-            // The cursor it held goes back.
-            Some(Gesture::Resize { .. }) => cx.notify(),
-            _ => {}
+            Some(Gesture::Card { moved: true, .. }) => self.arranged_now(cx),
+            Some(Gesture::Resize { resized, .. }) => {
+                // The cursor it held goes back.
+                cx.notify();
+                if resized {
+                    self.arranged_now(cx);
+                }
+            }
+            None => {}
         }
+    }
+
+    /// Says the schema view's cards were moved or sized; a neighbourhood's
+    /// are not kept.
+    fn arranged_now(&self, cx: &mut Context<Self>) {
+        if self.ready().is_some_and(|ready| ready.view == View::Schema) {
+            cx.emit(DiagramEvent::Arranged);
+        }
+    }
+
+    /// The cards the user moved or sized in the schema view, by table.
+    pub fn arranged(&self) -> impl Iterator<Item = (&TableKey, &Placement)> {
+        self.ready().into_iter().flat_map(|ready| &ready.placed)
     }
 
     /// Gives a card back the layout's size along the handle double-clicked:
@@ -950,6 +1093,7 @@ impl DiagramView {
         }
         let edges = ready.resize(card, width, height);
         self.paths.retain(|(edge, _), _| !edges.contains(edge));
+        self.arranged_now(cx);
         cx.notify();
     }
 
@@ -1420,6 +1564,7 @@ impl DiagramView {
     pub fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.find = None;
         self.focus_handle.focus(window, cx);
+        cx.emit(DiagramEvent::Viewed);
         cx.notify();
     }
 

@@ -277,7 +277,7 @@ impl Profile {
         }
     }
 
-    pub(crate) fn stored(&self) -> store::StoredProfile {
+    pub(crate) fn stored(&self, cx: &gpui::App) -> store::StoredProfile {
         let engine = self.config.engine();
         // Tabs read back from disk that the catalog has not named yet are still
         // the truth about this profile: writing the live list instead would
@@ -287,13 +287,9 @@ impl Profile {
             .session
             .objects
             .iter()
-            // ponytail: a diagram tab is not kept across a restart yet. Its
-            // view state and moved cards go to disk with the tab once
-            // `StoredObject` has room for them (design §3).
-            .filter(|tab| !matches!(tab.body, ObjectBody::Diagram { .. }))
             .map(|tab| store::StoredObject {
                 active: active == Tab::Object(tab.id),
-                ..tab.stored(engine)
+                ..tab.stored(engine, cx)
             })
             .collect::<Vec<_>>();
         // Both lists, because a restore now opens the relations first and
@@ -2465,7 +2461,13 @@ impl ObjectTab {
         }
     }
 
-    pub(crate) fn stored(&self, engine: Engine) -> store::StoredObject {
+    pub(crate) fn stored(&self, engine: Engine, cx: &gpui::App) -> store::StoredObject {
+        let diagram_view = match &self.body {
+            ObjectBody::Diagram { view, .. } => Some(view.read(cx).stored()),
+            ObjectBody::Relation { .. } | ObjectBody::Routine(_) | ObjectBody::Structure { .. } => {
+                None
+            }
+        };
         store::StoredObject {
             schema: self.schema.clone(),
             name: self.name.clone(),
@@ -2483,6 +2485,8 @@ impl ObjectTab {
             bars: self.filters(engine),
             routine: matches!(self.kind, Some(ObjectKind::Routine(_))),
             structure: matches!(self.body, ObjectBody::Structure { .. }),
+            diagram: diagram_view.is_some(),
+            diagram_view,
             kind: match self.kind {
                 Some(ObjectKind::Relation(kind)) => kind,
                 Some(ObjectKind::Routine(_)) | None => RelationKind::default(),

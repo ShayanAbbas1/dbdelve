@@ -1,11 +1,14 @@
 //! Opening a schema's ER diagram and reading what it draws.
 
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use super::*;
 
-use crate::diagram::{index::Scene, layout};
-use crate::diagram_view::{DiagramEvent, DiagramView, Load, Ready};
+use crate::diagram::geometry::Point;
+use crate::diagram::index::{Placement, Scene};
+use crate::diagram::layout;
+use crate::diagram_view::{DiagramEvent, DiagramView, Load, Ready, TableKey};
 
 /// Above this many tables a diagram opens with key columns only (design §6.5).
 const KEYS_ONLY_ABOVE: usize = 300;
@@ -40,49 +43,72 @@ impl Workspace {
         let Some(profile) = self.profile_mut() else {
             return;
         };
-        if !profile.config.target().draws_diagrams() {
-            return;
-        }
         let existing = profile
             .session
             .objects
             .iter()
             .find(|tab| matches!(tab.body, ObjectBody::Diagram { .. }) && tab.schema == schema)
             .map(|tab| tab.id);
-        let id = match existing {
-            Some(id) => id,
-            None => {
-                let id = profile.session.next_object_id;
-                profile.session.next_object_id += 1;
-                let view = cx.new(DiagramView::new);
-                cx.subscribe_in(
-                    &view,
-                    window,
-                    |workspace, _, event, window, cx| match event {
-                        DiagramEvent::Open {
-                            schema,
-                            table,
-                            structure,
-                        } => workspace.open_diagram_table(schema, table, *structure, window, cx),
-                    },
-                )
-                .detach();
-                profile.session.objects.push(ObjectTab {
-                    id,
-                    schema,
-                    name: String::new(),
-                    kind: None,
-                    body: ObjectBody::Diagram {
-                        view,
-                        side: None,
-                        stale: false,
-                    },
-                });
-                profile.session.place_last(session::TabKey::Object(id));
-                id
-            }
+        let Some(id) = existing.or_else(|| self.diagram_tab(schema, None, window, cx)) else {
+            return;
         };
         self.activate_tab(Tab::Object(id), window, cx);
+    }
+
+    /// Give a schema's diagram a tab, unread and not shown, looked at as
+    /// `restore` says once read when it comes back from disk. None where the
+    /// profile's target draws no diagrams.
+    pub(crate) fn diagram_tab(
+        &mut self,
+        schema: String,
+        restore: Option<store::StoredDiagram>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<u64> {
+        let profile = self.profile_mut()?;
+        if !profile.config.target().draws_diagrams() {
+            return None;
+        }
+        let id = profile.session.next_object_id;
+        profile.session.next_object_id += 1;
+        let view = cx.new(|cx| match restore {
+            Some(restore) => DiagramView::restoring(restore, cx),
+            None => DiagramView::new(cx),
+        });
+        let (profile_id, drawn) = (profile.id.clone(), schema.clone());
+        cx.subscribe_in(
+            &view,
+            window,
+            move |workspace, view, event, window, cx| match event {
+                DiagramEvent::Open {
+                    schema,
+                    table,
+                    structure,
+                } => workspace.open_diagram_table(schema, table, *structure, window, cx),
+                DiagramEvent::Arranged => {
+                    let cards = stored_cards(view.read(cx).arranged());
+                    if let Err(message) = store::write_diagram(&profile_id, &drawn, &cards) {
+                        workspace.note(message, cx);
+                    }
+                }
+                DiagramEvent::Viewed => workspace.remember_profiles(cx),
+            },
+        )
+        .detach();
+        let profile = self.profile_mut()?;
+        profile.session.objects.push(ObjectTab {
+            id,
+            schema,
+            name: String::new(),
+            kind: None,
+            body: ObjectBody::Diagram {
+                view,
+                side: None,
+                stale: false,
+            },
+        });
+        profile.session.place_last(session::TabKey::Object(id));
+        Some(id)
     }
 
     /// A table off a diagram, in the tab the explorer opens for it: its rows,
@@ -131,17 +157,24 @@ impl Workspace {
         if side.is_some() || (shown.is_some() && !*stale) {
             return;
         }
+        let wanted = view.read(cx).wanted_keys_only();
         *stale = false;
         let schema = tab.schema.clone();
         let reading = Arc::new(OnceLock::new());
         *side = Some(reading.clone());
         let issued = reading.clone();
+        let saved_under = profile_id.clone();
         let task = spawn_blocking(cx.background_executor(), move || {
             let own = connection.apart()?;
             let graph = reading.get_or_init(|| own).schema_graph(&schema)?;
-            let keys_only = shown.unwrap_or(graph.tables.len() > KEYS_ONLY_ABOVE);
+            let keys_only = wanted.unwrap_or(graph.tables.len() > KEYS_ONLY_ABOVE);
             let scene = Scene::new(layout::schema(&graph, keys_only));
-            Ok::<_, DbError>(Ready::new(graph, scene))
+            let mut ready = Ready::new(graph, scene);
+            // A diagram read again keeps the arrangement on screen instead.
+            if shown.is_none() {
+                ready.adopt(placements(store::read_diagram(&saved_under, &schema)));
+            }
+            Ok::<_, DbError>(ready)
         });
         cx.spawn(async move |workspace, cx| {
             let result = task.await;
@@ -227,5 +260,100 @@ impl Workspace {
             }
         })
         .detach();
+    }
+}
+
+/// The cards a diagram's file holds, by table. A value no card can take,
+/// which only a hand edit writes, is dropped with its card's other parts kept.
+fn placements(cards: Vec<store::StoredCard>) -> HashMap<TableKey, Placement> {
+    let finite = |value: Option<f64>| {
+        value
+            .filter(|value| value.is_finite())
+            .map(|value| value as f32)
+    };
+    cards
+        .into_iter()
+        .map(|card| {
+            let placement = Placement {
+                origin: finite(card.x)
+                    .zip(finite(card.y))
+                    .map(|(x, y)| Point::new(x, y)),
+                width: finite(card.width),
+                height: finite(card.height),
+            };
+            ((card.schema.into(), card.name.into()), placement)
+        })
+        .filter(|(_, placement)| !placement.is_empty())
+        .collect()
+}
+
+/// What a diagram's file holds for its arrangement: a card per table, in
+/// name order so the file reads the same however it was arrived at.
+fn stored_cards<'a>(
+    arranged: impl Iterator<Item = (&'a TableKey, &'a Placement)>,
+) -> Vec<store::StoredCard> {
+    let rounded = |value: f32| (f64::from(value) * 100.0).round() / 100.0;
+    let mut cards: Vec<store::StoredCard> = arranged
+        .map(|((schema, name), placement)| store::StoredCard {
+            schema: schema.to_string(),
+            name: name.to_string(),
+            x: placement.origin.map(|origin| rounded(origin.x)),
+            y: placement.origin.map(|origin| rounded(origin.y)),
+            width: placement.width.map(rounded),
+            height: placement.height.map(rounded),
+        })
+        .collect();
+    cards.sort_by(|a, b| (&a.schema, &a.name).cmp(&(&b.schema, &b.name)));
+    cards
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_arrangement_goes_to_its_file_and_back_as_it_was() {
+        let mut arranged: HashMap<TableKey, Placement> = HashMap::new();
+        arranged.insert(
+            ("public".into(), "orders".into()),
+            Placement {
+                origin: Some(Point::new(12.5, -40.0)),
+                width: None,
+                height: Some(82.0),
+            },
+        );
+        arranged.insert(
+            ("elsewhere".into(), "a \"b\".c".into()),
+            Placement {
+                origin: None,
+                width: Some(301.25),
+                height: None,
+            },
+        );
+        let cards = stored_cards(arranged.iter());
+        assert_eq!(cards[0].schema, "elsewhere", "in name order");
+        assert_eq!(placements(cards), arranged);
+    }
+
+    #[test]
+    fn a_card_value_no_card_can_take_is_dropped_alone() {
+        let card = |x: f64, width: Option<f64>| store::StoredCard {
+            schema: "public".into(),
+            name: "orders".into(),
+            x: Some(x),
+            y: Some(1.0),
+            width,
+            height: None,
+        };
+        let kept = placements(vec![card(f64::NAN, Some(300.0))]);
+        assert_eq!(
+            kept[&("public".into(), "orders".into())],
+            Placement {
+                origin: None,
+                width: Some(300.0),
+                height: None,
+            }
+        );
+        assert!(placements(vec![card(f64::INFINITY, None)]).is_empty());
     }
 }
