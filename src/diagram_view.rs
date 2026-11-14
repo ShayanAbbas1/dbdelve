@@ -619,6 +619,10 @@ impl DiagramView {
             .as_ref()
             .map_or(Some(self.transform), |(_, at)| *at);
         fresh.adopt(std::mem::take(&mut old.placed));
+        // Keys only switched while the read was out: its scene is at the
+        // setting it was asked with, and the switch's own layout was of the
+        // old graph.
+        let switched = fresh.scene.layout().keys_only != self.keys_only;
         let centre = centre.and_then(|name| {
             (fresh.graph.tables.iter())
                 .position(|table| table.name == name)
@@ -629,7 +633,7 @@ impl DiagramView {
                 let around =
                     crate::diagram::layout::neighbourhood(&fresh.graph, table, self.keys_only);
                 let schema = std::mem::replace(&mut fresh.scene, Scene::new(around));
-                fresh.stash = Some((schema, looked));
+                fresh.stash = (!switched).then_some((schema, looked));
                 fresh.view = View::Neighbourhood(table);
             }
             None => match looked {
@@ -639,6 +643,7 @@ impl DiagramView {
         }
         fresh.bounds = fresh.scene.layout().bounds();
         self.focus = focus.and_then(|table| fresh.card_of_table(&table));
+        let view = fresh.view;
         self.load = Load::Ready(Box::new(fresh));
         self.layouts += 1;
         self.hover = None;
@@ -646,6 +651,9 @@ impl DiagramView {
         self.paths.clear();
         if let Some(text) = self.find.as_ref().map(|find| find.input.read(cx).value()) {
             self.rank(&text);
+        }
+        if switched && view == View::Schema {
+            self.lay_out(view, cx);
         }
         cx.notify();
     }

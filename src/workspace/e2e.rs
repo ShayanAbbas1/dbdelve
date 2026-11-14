@@ -4386,6 +4386,68 @@ fn a_structure_tab_shows_its_tables_neighbourhood_and_a_double_click_there_opens
 }
 
 #[gpui::test]
+fn keys_only_switched_while_a_diagram_is_read_again_holds_once_the_read_lands(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, DIAGRAM_SCHEMA);
+        let view = show_diagram(&workspace, cx);
+        let read_again = |cx: &mut VisualTestContext| {
+            workspace.update(cx, |workspace, cx| {
+                let session = &mut workspace.profile_mut().unwrap().session;
+                let crate::session::Tab::Object(id) = session.active else {
+                    panic!("the diagram is in front");
+                };
+                let tab = session.objects.iter_mut().find(|tab| tab.id == id);
+                if let Some(ObjectBody::Diagram { stale, .. }) = tab.map(|tab| &mut tab.body) {
+                    *stale = true;
+                }
+                workspace.load_diagram(id, cx);
+            });
+        };
+        let shown = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                let view = view.read(cx);
+                (
+                    view.keys_only(),
+                    view.laid_out().map(|(_, keys_only)| keys_only),
+                )
+            })
+        };
+
+        read_again(cx);
+        view.update(cx, |view, cx| view.toggle_keys_only(cx));
+        settle(cx);
+        assert_eq!(
+            shown(cx),
+            (Some(true), Some(true)),
+            "the switch and the cards agree"
+        );
+
+        let birds = cx
+            .update(|_, cx| view.read(cx).table_on_screen("birds"))
+            .expect("the diagram drew the birds");
+        cx.simulate_click(birds, gpui::Modifiers::default());
+        settle(cx);
+        view.update(cx, |view, cx| view.show_neighbourhood(true, cx));
+        settle(cx);
+        read_again(cx);
+        view.update(cx, |view, cx| view.toggle_keys_only(cx));
+        settle(cx);
+        assert_eq!(shown(cx), (Some(false), Some(false)), "in a neighbourhood");
+        view.update(cx, |view, cx| view.show_neighbourhood(false, cx));
+        settle(cx);
+        assert_eq!(
+            shown(cx),
+            (Some(false), Some(false)),
+            "and in the schema view it goes back to"
+        );
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn a_refresh_reads_a_diagram_again_and_keeps_the_cards_the_user_moved(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite_holding(
