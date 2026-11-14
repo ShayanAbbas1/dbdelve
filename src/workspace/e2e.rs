@@ -4283,3 +4283,47 @@ fn secondary_f_finds_a_table_in_a_diagram_and_escape_puts_the_field_away(cx: &mu
         quit(workspace, cx);
     });
 }
+
+#[gpui::test]
+fn a_diagrams_minimap_shows_once_it_overflows_and_a_press_on_it_moves_the_view(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            &format!("{DIAGRAM_SCHEMA} create table weather (id integer primary key);"),
+        );
+        let view = show_diagram(&workspace, cx);
+        let middle = |cx: &mut VisualTestContext| cx.update(|_, cx| view.read(cx).minimap_middle());
+        assert_eq!(
+            middle(cx),
+            None,
+            "no minimap while the whole scene is in view"
+        );
+
+        for _ in 0..12 {
+            cx.simulate_keystrokes("secondary-=");
+        }
+        settle(cx);
+        // Off the middle of the scene, onto the birds.
+        cx.simulate_keystrokes("secondary-f");
+        cx.simulate_input("birds");
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        let at = middle(cx).expect("zoomed in, the minimap shows");
+        let before = cx.update(|_, cx| view.read(cx).off_middle());
+        cx.simulate_click(at, gpui::Modifiers::default());
+        settle(cx);
+        let after = cx.update(|_, cx| view.read(cx).off_middle());
+        assert!(
+            after < 1.0 && after < before,
+            "a press there centres the view on it: {before} -> {after}"
+        );
+        assert!(
+            cx.update(|_, cx| view.read(cx).has_focus()),
+            "and leaves the focus alone"
+        );
+
+        quit(workspace, cx);
+    });
+}

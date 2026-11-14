@@ -75,6 +75,12 @@ const FIND_WIDTH: f32 = 300.0;
 /// Matches listed under the find field; typing narrows the rest.
 const FIND_SHOWN: usize = 8;
 const FIND_ROW_HEIGHT: f32 = 28.0;
+const MINIMAP_WIDTH: f32 = 184.0;
+const MINIMAP_MIN_HEIGHT: f32 = 64.0;
+const MINIMAP_MAX_HEIGHT: f32 = 144.0;
+/// Room around the drawn world inside the minimap, in pixels.
+const MINIMAP_PAD: f32 = 8.0;
+const MINIMAP_CARD_ALPHA: f32 = 0.6;
 
 pub enum Load {
     Loading,
@@ -98,6 +104,9 @@ pub struct Ready {
     /// The schema view and where it was looked at, kept while a neighbourhood
     /// is shown, so going back finds the cards where the user dragged them.
     stash: Option<(Scene, Transform)>,
+    /// What the scene covers, in world units: worked out once per layout and
+    /// grown as cards are dragged, since the minimap reads it every frame.
+    bounds: Rect,
     /// Each type label with the `?` a nullable column's type wears, made once
     /// so a frame never formats one.
     nullable_types: Vec<SharedString>,
@@ -112,6 +121,7 @@ impl Ready {
             .collect();
         Self {
             graph: Arc::new(graph),
+            bounds: scene.layout().bounds(),
             scene,
             view: View::Schema,
             stash: None,
@@ -183,6 +193,38 @@ enum Gesture {
         start: Point,
         moved: bool,
     },
+    /// The minimap held down: the view follows the pointer over it.
+    Minimap,
+}
+
+/// Where the minimap drew the world, so a press on it finds the point meant.
+#[derive(Clone, Copy, Debug)]
+struct Minimap {
+    /// The window position of world `(0, 0)`.
+    origin: gpui::Point<Pixels>,
+    scale: f32,
+}
+
+impl Minimap {
+    fn to_world(self, position: gpui::Point<Pixels>) -> Point {
+        Point::new(
+            f32::from(position.x - self.origin.x) / self.scale,
+            f32::from(position.y - self.origin.y) / self.scale,
+        )
+    }
+
+    fn to_screen(self, world: Rect) -> Bounds<Pixels> {
+        Bounds {
+            origin: point(
+                self.origin.x + px(world.x * self.scale),
+                self.origin.y + px(world.y * self.scale),
+            ),
+            size: size(
+                px((world.width * self.scale).max(1.0)),
+                px((world.height * self.scale).max(1.0)),
+            ),
+        }
+    }
 }
 
 /// How an edge is drawn under the current focus and hover.
@@ -264,6 +306,7 @@ pub struct DiagramView {
     /// it asks for may still be on its way.
     keys_only: bool,
     find: Option<Find>,
+    minimap: Option<Minimap>,
     /// Counts layouts asked for, so one that lands after a later one was
     /// asked for, or after a new read, is dropped.
     layouts: u64,
@@ -288,6 +331,7 @@ impl DiagramView {
             paths_zoom: 0.0,
             keys_only: false,
             find: None,
+            minimap: None,
             layouts: 0,
         }
     }
@@ -329,17 +373,25 @@ impl DiagramView {
         )
     }
 
-    fn place(&mut self, bounds: Bounds<Pixels>) {
+    /// Takes the canvas's bounds as laid out. A fit or a new size changes
+    /// what the chrome, rendered before this, shows (the zoom readout, whether
+    /// the minimap is wanted), so either asks to render once more.
+    fn place(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let mut stale = bounds.size != self.viewport.size;
         self.viewport = bounds;
-        if self.fitted || bounds.size.width <= px(0.0) || bounds.size.height <= px(0.0) {
-            return;
+        if !self.fitted
+            && bounds.size.width > px(0.0)
+            && bounds.size.height > px(0.0)
+            && let Some(ready) = self.ready()
+        {
+            self.transform = Transform::fitting(ready.bounds, self.screen(), FIT_MARGIN);
+            self.fitted = true;
+            stale = true;
         }
-        let Some(ready) = self.ready() else {
-            return;
-        };
-        self.transform =
-            Transform::fitting(ready.scene.layout().bounds(), self.screen(), FIT_MARGIN);
-        self.fitted = true;
+        // A notify while this view draws is lost with the frame it is in.
+        if stale {
+            cx.on_next_frame(window, |_, _, cx| cx.notify());
+        }
     }
 
     fn screen(&self) -> Rect {
@@ -366,8 +418,7 @@ impl DiagramView {
         let Some(ready) = self.ready() else {
             return;
         };
-        self.transform =
-            Transform::fitting(ready.scene.layout().bounds(), self.screen(), FIT_MARGIN);
+        self.transform = Transform::fitting(ready.bounds, self.screen(), FIT_MARGIN);
         cx.notify();
     }
 
@@ -479,6 +530,7 @@ impl DiagramView {
             (View::Schema, None) => None,
         };
         let old = std::mem::replace(&mut ready.scene, scene);
+        ready.bounds = ready.scene.layout().bounds();
         if ready.view == View::Schema && matches!(view, View::Neighbourhood(_)) {
             ready.stash = Some((old, self.transform));
         }
@@ -545,6 +597,7 @@ impl DiagramView {
     fn drag(&mut self, position: gpui::Point<Pixels>, hovered: bool, cx: &mut Context<Self>) {
         let at = self.local(position);
         match self.gesture {
+            Some(Gesture::Minimap) => self.follow_minimap(position, cx),
             Some(Gesture::Pan { start, last }) => {
                 self.transform = self
                     .transform
@@ -565,6 +618,8 @@ impl DiagramView {
                 let origin = Point::new(world.x - grab.x, world.y - grab.y);
                 if let Load::Ready(ready) = &mut self.load {
                     let edges = ready.scene.move_card(card, origin).to_vec();
+                    let moved = ready.scene.layout().card_rect(card, Detail::Columns, 1.0);
+                    ready.bounds = ready.bounds.union(&moved);
                     self.paths.retain(|(edge, _), _| !edges.contains(edge));
                 }
                 self.gesture = Some(Gesture::Card {
@@ -593,6 +648,28 @@ impl DiagramView {
                 }
             }
         }
+    }
+
+    fn press_minimap(
+        &mut self,
+        position: gpui::Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus_handle.focus(window, cx);
+        self.gesture = Some(Gesture::Minimap);
+        self.follow_minimap(position, cx);
+    }
+
+    /// Centres the view on the world point under the pointer on the minimap.
+    fn follow_minimap(&mut self, position: gpui::Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(minimap) = self.minimap else {
+            return;
+        };
+        let world = minimap.to_world(position);
+        let (middle, zoom) = (self.screen().centre(), self.transform.zoom);
+        self.transform.pan = Point::new(middle.x - world.x * zoom, middle.y - world.y * zoom);
+        cx.notify();
     }
 
     fn release(&mut self, position: gpui::Point<Pixels>, cx: &mut Context<Self>) {
@@ -732,6 +809,115 @@ impl DiagramView {
                         .tooltip("Export comes in a later build"),
                 ),
         )
+    }
+
+    /// Every card as a block and the view as a frame over them, at the bottom
+    /// right; a press or a drag on it moves the view. Not shown while the
+    /// whole scene is in view, when there is nowhere to go.
+    fn minimap(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let ready = self.ready()?;
+        let world = ready.bounds;
+        let seen = self.transform.world_rect(self.screen());
+        if seen.x <= world.x
+            && seen.y <= world.y
+            && seen.right() >= world.right()
+            && seen.bottom() >= world.bottom()
+        {
+            return None;
+        }
+        let t = *theme(cx);
+        let width = layout::chrome(MINIMAP_WIDTH);
+        let height = (width * world.height / world.width.max(1.0)).clamp(
+            layout::chrome(MINIMAP_MIN_HEIGHT),
+            layout::chrome(MINIMAP_MAX_HEIGHT),
+        );
+        let view = cx.entity();
+        Some(
+            floating(t)
+                .right(px(layout::SPACE_MD))
+                .bottom(px(layout::SPACE_MD))
+                .w(px(width))
+                .h(px(height))
+                .overflow_hidden()
+                .child(
+                    canvas(
+                        |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+                        move |bounds, hitbox: Hitbox, window, cx| {
+                            view.update(cx, |diagram, cx| {
+                                diagram.paint_minimap(bounds, window, cx)
+                            });
+                            window.on_mouse_event({
+                                let view = view.clone();
+                                move |event: &MouseDownEvent, phase, window, cx| {
+                                    if phase == DispatchPhase::Bubble
+                                        && event.button == MouseButton::Left
+                                        && hitbox.is_hovered(window)
+                                    {
+                                        cx.stop_propagation();
+                                        view.update(cx, |view, cx| {
+                                            view.press_minimap(event.position, window, cx)
+                                        });
+                                    }
+                                }
+                            });
+                        },
+                    )
+                    .size_full(),
+                ),
+        )
+    }
+
+    fn paint_minimap(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let inks = popup_theme(cx);
+        let screen = self.screen();
+        let Some(ready) = self.ready() else {
+            return;
+        };
+        let world = ready.bounds;
+        let room = size(
+            f32::from(bounds.size.width) - 2.0 * MINIMAP_PAD,
+            f32::from(bounds.size.height) - 2.0 * MINIMAP_PAD,
+        );
+        let scale = (room.width / world.width.max(1.0)).min(room.height / world.height.max(1.0));
+        let drawn = size(world.width * scale, world.height * scale);
+        let minimap = Minimap {
+            origin: point(
+                bounds.origin.x
+                    + px(MINIMAP_PAD + (room.width - drawn.width) / 2.0 - world.x * scale),
+                bounds.origin.y
+                    + px(MINIMAP_PAD + (room.height - drawn.height) / 2.0 - world.y * scale),
+            ),
+            scale,
+        };
+        let layout = ready.scene.layout();
+        let card: Hsla = inks.text_faint.alpha(MINIMAP_CARD_ALPHA).into();
+        let focused: Hsla = inks.accent.into();
+        let seen = self.transform.world_rect(screen);
+        let focus = self.focus;
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            for index in 0..layout.cards.len() as u32 {
+                let rect = layout.card_rect(index, Detail::Columns, 1.0);
+                let fill = match focus == Some(index) {
+                    true => focused,
+                    false => card,
+                };
+                window.paint_quad(gpui::fill(minimap.to_screen(rect), fill));
+            }
+            window.paint_quad(quad(
+                minimap.to_screen(seen),
+                px(2.0),
+                Hsla::from(inks.accent.alpha(layout::ACCENT_WASH)),
+                px(1.0),
+                Hsla::from(inks.accent),
+                BorderStyle::Solid,
+            ));
+        });
+        self.minimap = Some(minimap);
     }
 
     /// The card in focus, its name and Open data and Structure, at the bottom
@@ -1069,6 +1255,24 @@ impl DiagramView {
     #[cfg(test)]
     pub fn focused_name(&self) -> Option<SharedString> {
         Some(self.ready()?.name(self.focus?))
+    }
+
+    /// Where the minimap drew the middle of the scene, while it is shown.
+    #[cfg(test)]
+    pub fn minimap_middle(&self) -> Option<gpui::Point<Pixels>> {
+        let (minimap, world) = (self.minimap?, self.ready()?.bounds);
+        Some(minimap.to_screen(world).center())
+    }
+
+    /// How far the middle of the view is from the middle of the scene, in
+    /// world units.
+    #[cfg(test)]
+    pub fn off_middle(&self) -> f32 {
+        let world = self.ready().map_or(Rect::default(), |ready| ready.bounds);
+        distance(
+            self.transform.to_world(self.screen().centre()),
+            world.centre(),
+        )
     }
 
     #[cfg(test)]
@@ -1419,7 +1623,7 @@ impl DiagramView {
         let placed = view.clone();
         canvas(
             move |bounds, window, cx| {
-                placed.update(cx, |view, _| view.place(bounds));
+                placed.update(cx, |view, cx| view.place(bounds, window, cx));
                 window.insert_hitbox(bounds, HitboxBehavior::Normal)
             },
             move |bounds, hitbox: Hitbox, window, cx| {
@@ -1519,12 +1723,19 @@ impl Render for DiagramView {
         match &self.load {
             Load::Loading => surface.child(note("Reading the schema…".into(), t.text_muted.into())),
             Load::Failed(message) => surface.child(note(message.clone(), t.danger.into())),
-            Load::Ready(_) => surface
-                .relative()
-                .child(self.canvas(cx))
-                .children(self.toolbar(cx))
-                .children(self.find_card(cx))
-                .children(self.focus_bar(cx)),
+            Load::Ready(_) => {
+                let minimap = self.minimap(cx);
+                if minimap.is_none() {
+                    self.minimap = None;
+                }
+                surface
+                    .relative()
+                    .child(self.canvas(cx))
+                    .children(self.toolbar(cx))
+                    .children(self.find_card(cx))
+                    .children(self.focus_bar(cx))
+                    .children(minimap)
+            }
         }
     }
 }
