@@ -112,6 +112,42 @@ accept a library default appearance; map it to our theme tokens.
   shown. A change that lands while a theme list is previewing goes into
   `theme_before_preview` and the palette's fallback, never over the preview.
 
+## Painting by hand: the ER diagram
+
+A thousand cards as divs would be a thousand layouts a frame, so the diagram
+(`diagram_view.rs`) is the one surface that paints itself, and the pattern is
+the model for any other that must.
+
+- **One `canvas()`**, whose paint closure draws everything in the pane: dots,
+  edges, cards, rows, text. Cards and rows are quads, edges are tessellated
+  `Path`s cached per edge and look, and zoom is our own transform over world
+  coordinates, never a scaled element.
+- **Cull through the scene.** `diagram::index::Scene` files every card and
+  edge segment in a uniform grid in world space; a frame asks it for
+  `visible(world, zoom)` and paints only that, and a mouse move looks in one or
+  two cells rather than scanning. Dragging or resizing refiles the one card.
+- **Shape text once.** `ShapedLine`s are cached by text, size step and ink
+  role, and the whole cache is dropped when the theme, opacity or font
+  changes (`Stamp`), since each line holds its colour and family. Sizes are
+  quantized to a few steps because gpui's glyph atlas never evicts a size.
+  Labels never go under 11 px.
+- **Nothing animates.** No timer, no repeating animation (`AGENTS.md`, GPUI
+  hazards): a frame is drawn when a gesture or a load notifies the view, and the
+  view is mounted cached so a redraw elsewhere reuses its last frame. Idle is
+  0% CPU.
+- **Chrome sits on top as ordinary elements**: the toolbar, find field,
+  minimap and focus bar are divs over the canvas, each through
+  `ui::frosted_card`, which `occlude`s so a press on one never reaches the
+  canvas. Colours come from `theme(cx)` and `popup_theme(cx)` only; the
+  diagram's pairings are held to contrast floors in
+  `the_diagrams_inks_hold_on_its_cards_and_canvas_in_every_theme`.
+- **What lives where.** `diagram/` (`layout`, `geometry`, `index`) is pure:
+  world units, no gpui, run on a background thread and tested without a window.
+  `diagram_view.rs` owns everything gpui: the transform, the pointer, the
+  caches, the paint. `workspace/diagrams.rs` reads the schema graph and
+  persists the arrangement. Put new geometry in `diagram/` with a test, and keep
+  the view to drawing it.
+
 ## Animation hazards
 
 The redraw hazard, the one that costs CPU, is in `AGENTS.md`, "GPUI hazards". The rest:
