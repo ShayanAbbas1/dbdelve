@@ -178,15 +178,21 @@ fn word(text: &str) -> String {
     out
 }
 
-/// Text inside a Mermaid string, which ends at the first `"`.
+/// Text inside a Mermaid string, which ends at the first `"`. Mermaid
+/// takes `%%` anywhere for a comment or a directive's bounds before it
+/// reads a string, so the second `%` of a pair is spelled `_`: a lone one
+/// is kept, as the real name holds it.
 fn quoted(text: &str) -> String {
-    text.chars()
-        .map(|c| match c {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        out.push(match c {
             '"' => '\'',
+            '%' if out.ends_with('%') => '_',
             c if c.is_control() => ' ',
             c => c,
-        })
-        .collect()
+        });
+    }
+    out
 }
 
 #[cfg(test)]
@@ -248,6 +254,21 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("    \"order items\" ||..o{ \"say 'hi' 100_/\" : \"1st col\"\n"));
+    }
+
+    /// Mermaid lifts `%%{...}%%` out of the text as a directive before it
+    /// parses, quotes or not, so a name could reconfigure the renderer.
+    #[test]
+    fn a_name_cannot_smuggle_a_directive_into_a_comment_or_a_label() {
+        let payload = "x%%{init:{'theme':'dark'}}%%";
+        let mut graph = graph(2, &[(1, 0)]);
+        graph.tables[1].columns[1].name = payload.into();
+        let text = mermaid(&graph, &schema(&graph, false));
+        assert!(!text.contains("%%"), "{text}");
+        assert!(
+            text.contains(" \"x%_{init:{'theme':'dark'}}%_\"\n"),
+            "{text}"
+        );
     }
 
     #[test]
