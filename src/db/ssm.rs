@@ -3,7 +3,6 @@
 use super::{DbError, plain_error};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::VecDeque,
     io::Read,
     net::{Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
@@ -242,7 +241,7 @@ fn command(config: &SsmTunnel, args: &[String]) -> Result<Command, DbError> {
 struct Output {
     port: Option<u16>,
     session: Option<String>,
-    lines: VecDeque<String>,
+    last_diagnostic: Option<String>,
     closed: bool,
 }
 impl Output {
@@ -277,15 +276,12 @@ impl Output {
             // CLI tracebacks can contain plugin argv, including session tokens.
             // Keep only classified messages; never surface arbitrary CLI output.
             if let Some(message) = diagnostic(&line) {
-                if self.lines.len() == 20 {
-                    self.lines.pop_front();
-                }
-                self.lines.push_back(message.into());
+                self.last_diagnostic = Some(message.into());
             }
         }
     }
     fn reason(&self) -> String {
-        self.lines.back().cloned().unwrap_or_else(|| {
+        self.last_diagnostic.clone().unwrap_or_else(|| {
             "Check the AWS profile, region, instance connectivity, and installed tools.".into()
         })
     }
@@ -481,7 +477,7 @@ impl Tunnel {
     }
     pub fn explain(&self, mut error: DbError) -> DbError {
         let output = self.output.lock().unwrap_or_else(|p| p.into_inner());
-        if !output.lines.is_empty() {
+        if output.last_diagnostic.is_some() {
             error
                 .message
                 .push_str(&format!("\nSSM: {}", output.reason()));
@@ -743,6 +739,15 @@ mod lifecycle_tests {
         config: SsmTunnel,
     }
     impl Fixture {
+        fn open(&self) -> Tunnel {
+            Tunnel::open(&self.config, "db.example", 5432).unwrap_or_else(|error| {
+                panic!(
+                    "{}; fake log: {:?}",
+                    error.message,
+                    fs::read_to_string(self.root.join("test.log"))
+                )
+            })
+        }
         fn new(behavior: &str) -> Self {
             static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let root = std::env::temp_dir().join(format!(
@@ -783,13 +788,7 @@ mod lifecycle_tests {
     #[test]
     fn ready_tunnel_dials_and_drop_releases_port() {
         let fixture = Fixture::new("ready");
-        let tunnel = Tunnel::open(&fixture.config, "db.example", 5432).unwrap_or_else(|e| {
-            panic!(
-                "{}; fake log: {:?}",
-                e.message,
-                fs::read_to_string(fixture.root.join("test.log"))
-            )
-        });
+        let tunnel = fixture.open();
         let address = tunnel.dial().unwrap();
         let mut stream = TcpStream::connect(address).unwrap();
         stream
@@ -815,13 +814,7 @@ mod lifecycle_tests {
     #[test]
     fn plugin_exit_is_not_a_live_tunnel() {
         let fixture = Fixture::new("exit");
-        let tunnel = Tunnel::open(&fixture.config, "db.example", 5432).unwrap_or_else(|e| {
-            panic!(
-                "{}; fake log: {:?}",
-                e.message,
-                fs::read_to_string(fixture.root.join("test.log"))
-            )
-        });
+        let tunnel = fixture.open();
         let deadline = Instant::now() + Duration::from_secs(3);
         while tunnel.dial().is_ok() {
             assert!(Instant::now() < deadline, "dead plugin reported live");
@@ -860,13 +853,7 @@ mod lifecycle_tests {
         let mut fixture = Fixture::new("ready");
         let attempt = ConnectAttempt::default();
         fixture.config.attempt = Some(attempt.clone());
-        let tunnel = Tunnel::open(&fixture.config, "db.example", 5432).unwrap_or_else(|e| {
-            panic!(
-                "{}; fake log: {:?}",
-                e.message,
-                fs::read_to_string(fixture.root.join("test.log"))
-            )
-        });
+        let tunnel = fixture.open();
         attempt.cancel();
         let deadline = Instant::now() + Duration::from_secs(3);
         while tunnel.dial().is_ok() {
@@ -880,13 +867,7 @@ mod lifecycle_tests {
         let attempt = ConnectAttempt::default();
         let guard = attempt.guard();
         fixture.config.attempt = Some(attempt.clone());
-        let tunnel = Tunnel::open(&fixture.config, "db.example", 5432).unwrap_or_else(|e| {
-            panic!(
-                "{}; fake log: {:?}",
-                e.message,
-                fs::read_to_string(fixture.root.join("test.log"))
-            )
-        });
+        let tunnel = fixture.open();
         attempt.finish().unwrap();
         drop(guard);
         assert!(!attempt.is_cancelled());

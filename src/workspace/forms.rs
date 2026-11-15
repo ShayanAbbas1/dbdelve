@@ -603,7 +603,7 @@ impl Workspace {
                                 Control::Compact,
                                 t,
                             )
-                            .px_0()
+                            .px(px(layout::SPACE_XS))
                             .debug_selector(|| "ssm-advanced".into())
                             .on_click(cx.listener(
                                 |workspace, _, _, cx| {
