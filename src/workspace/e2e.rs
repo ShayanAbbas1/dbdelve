@@ -4339,6 +4339,40 @@ fn the_zoom_chords_zoom_a_diagram_and_its_views_and_keys_only_lay_it_out_again(
     });
 }
 
+/// The schema's layout at the new setting is overtaken by the neighbourhood,
+/// so the schema laid out at the old one must not come back from the stash.
+#[gpui::test]
+fn keys_only_switched_just_before_a_neighbourhood_holds_back_on_the_schema(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            &format!("{DIAGRAM_SCHEMA} create table weather (id integer primary key);"),
+        );
+        let view = show_diagram(&workspace, cx);
+        let sightings = cx
+            .update(|_, cx| view.read(cx).table_on_screen("sightings"))
+            .expect("the diagram drew the sightings");
+        cx.simulate_click(sightings, gpui::Modifiers::default());
+        settle(cx);
+        view.update(cx, |view, cx| {
+            view.toggle_keys_only(cx);
+            view.show_neighbourhood(true, cx);
+        });
+        settle(cx);
+        view.update(cx, |view, cx| view.show_neighbourhood(false, cx));
+        settle(cx);
+        let (names, keys_only) = cx
+            .update(|_, cx| view.read(cx).laid_out())
+            .expect("the diagram is laid out");
+        assert_eq!(names.len(), 3, "the schema view is back");
+        assert!(keys_only, "laid out at the setting the switch shows");
+
+        quit(workspace, cx);
+    });
+}
+
 /// The diagram tab in front, once read, and how many diagram tabs are open.
 fn diagram_in_front(
     workspace: &Entity<Workspace>,

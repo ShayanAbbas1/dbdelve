@@ -1016,7 +1016,12 @@ impl DiagramView {
             ready.place_saved();
         }
         ready.bounds = ready.scene.layout().bounds();
-        if ready.view == View::Schema && matches!(view, View::Neighbourhood(_)) {
+        // A schema laid out before Keys only was switched, whose new layout
+        // this neighbourhood overtook, is laid out again when next shown.
+        if ready.view == View::Schema
+            && matches!(view, View::Neighbourhood(_))
+            && old.layout().keys_only == self.keys_only
+        {
             ready.stash = Some((old, Some(self.transform)));
         }
         ready.view = view;
