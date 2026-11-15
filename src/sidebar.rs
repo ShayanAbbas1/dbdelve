@@ -8,12 +8,17 @@
 //! reads a catalog nor sees a window, so what a row says is what the caller
 //! had already been told.
 
-use std::{collections::HashMap, ops::Range};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::Range,
+};
 
 use gpui_component::tree::TreeItem;
 
 use crate::db::{Levels, RelationKind, Target};
-use crate::explorer::{Builder, ExplorerLeaf, ExplorerTree, Shortcut, is_schema_row, saved_query};
+use crate::explorer::{
+    Builder, ExplorerLeaf, ExplorerTree, RELATION_CATEGORIES, Shortcut, is_schema_row, saved_query,
+};
 use crate::store::StoredProject;
 
 /// Which sidebar the window draws: today's tree for the connection in front,
@@ -376,6 +381,23 @@ pub(crate) enum NodeKind {
     Sequence,
 }
 
+impl NodeKind {
+    /// What a number of them are called, as the tree's categories call them.
+    fn plural(self) -> String {
+        match self {
+            NodeKind::Connection => "connections".into(),
+            NodeKind::Database => "databases".into(),
+            NodeKind::Schema => "schemas".into(),
+            NodeKind::Routine => "routines".into(),
+            NodeKind::Sequence => "sequences".into(),
+            NodeKind::Relation(kind) => RELATION_CATEGORIES
+                .iter()
+                .find(|(of, _)| *of == kind)
+                .map_or_else(|| "items".into(), |(_, label)| label.to_lowercase()),
+        }
+    }
+}
+
 /// One thing a node offers, from its menu and the palette alike.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum NodeAction {
@@ -434,6 +456,217 @@ pub(crate) struct SelectedNode {
     pub(crate) leaf: Option<ExplorerLeaf>,
 }
 
+/// The rows of the connections tree the user has selected, by row id, in the
+/// order they were picked. The tree selects one row of its own; this is the
+/// set a modifier click builds around it, and `anchor` is where a Shift-click
+/// range starts.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Selection {
+    pub(crate) rows: Vec<String>,
+    pub(crate) anchor: Option<String>,
+}
+
+impl Selection {
+    /// A plain click: the row is the whole selection.
+    pub(crate) fn click(&mut self, id: &str) {
+        self.rows = vec![id.to_string()];
+        self.anchor = Some(id.to_string());
+    }
+
+    /// A Cmd- or Ctrl-click: the row joins the selection, or leaves it.
+    pub(crate) fn toggle(&mut self, id: &str) {
+        match self.rows.iter().position(|row| row == id) {
+            Some(at) => _ = self.rows.remove(at),
+            None => self.rows.push(id.to_string()),
+        }
+        self.anchor = Some(id.to_string());
+    }
+
+    /// A Shift-click: every row of `visible` from the anchor to `id`, the
+    /// anchor staying where it is. With no anchor, or one that is not
+    /// showing, it is a plain click.
+    pub(crate) fn extend_to(&mut self, id: &str, visible: &[String]) {
+        let at = |wanted: &str| visible.iter().position(|row| row == wanted);
+        match self.anchor.as_deref().and_then(at).zip(at(id)) {
+            Some((from, to)) => self.rows = visible[from.min(to)..=from.max(to)].to_vec(),
+            None => self.click(id),
+        }
+    }
+
+    /// Forget the rows a rebuild no longer lists.
+    pub(crate) fn retain(&mut self, present: &HashSet<String>) {
+        self.rows.retain(|row| present.contains(row));
+        self.anchor = self.anchor.take().filter(|anchor| present.contains(anchor));
+    }
+}
+
+/// What a selection of several rows offers, from its menu and the palette.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SelectionAction {
+    OpenAll,
+    CopyNames,
+    CopyDdl,
+    ShowDdl,
+    Pin,
+    Refresh,
+}
+
+impl SelectionAction {
+    /// What a menu and the palette call it.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            SelectionAction::OpenAll => "Open All",
+            SelectionAction::CopyNames => "Copy Names",
+            SelectionAction::CopyDdl => "Copy DDL",
+            SelectionAction::ShowDdl => "Show DDL",
+            SelectionAction::Pin => "Pin",
+            SelectionAction::Refresh => "Refresh",
+        }
+    }
+}
+
+/// What every one of `items` offers, in the order the menu lists it: an action
+/// that does not apply to all of them is left out.
+pub(crate) fn selection_actions(items: &[(NodeKind, Target)]) -> Vec<SelectionAction> {
+    let all = |applies: &dyn Fn(NodeKind, Target) -> bool| {
+        !items.is_empty() && items.iter().all(|(kind, target)| applies(*kind, *target))
+    };
+    let offers = |kind, target, action: fn(&NodeAction) -> bool| {
+        node_actions(kind, "", target).iter().any(action)
+    };
+    // The text of a definition is shown for what has one to read: a routine's
+    // is its own tab, which a list of texts has no place for.
+    let definition = |kind, target| {
+        kind != NodeKind::Routine && offers(kind, target, |action| *action == NodeAction::ShowDdl)
+    };
+    [
+        (
+            SelectionAction::OpenAll,
+            all(&|kind, _| matches!(kind, NodeKind::Relation(_) | NodeKind::Routine)),
+        ),
+        (
+            SelectionAction::CopyNames,
+            all(&|kind, target| {
+                offers(kind, target, |action| {
+                    matches!(action, NodeAction::CopyName(_))
+                })
+            }),
+        ),
+        (SelectionAction::CopyDdl, all(&definition)),
+        (SelectionAction::ShowDdl, all(&definition)),
+        (
+            SelectionAction::Pin,
+            all(&|kind, _| {
+                matches!(
+                    kind,
+                    NodeKind::Relation(_) | NodeKind::Routine | NodeKind::Sequence
+                )
+            }),
+        ),
+        // Whatever a row is, it belongs to a connection or a database that
+        // can be read again.
+        (SelectionAction::Refresh, !items.is_empty()),
+    ]
+    .into_iter()
+    .filter_map(|(action, applies)| applies.then_some(action))
+    .collect()
+}
+
+/// What the selection's menu says it holds: `3 tables selected`, or `3 items
+/// selected` when the rows are not all one kind.
+pub(crate) fn selection_header(kinds: &[NodeKind]) -> String {
+    let count = kinds.len();
+    match kinds.split_first() {
+        Some((first, rest)) if rest.iter().all(|kind| kind == first) => {
+            format!("{count} {} selected", first.plural())
+        }
+        _ => format!("{count} items selected"),
+    }
+}
+
+/// How many open rows, and how many selected rows, one profile keeps for the
+/// next run. `profiles.toml` is a file a person edits: a list is read no
+/// further than this.
+///
+/// ponytail: the first rows in tree order are kept, so what is dropped past it
+/// is the deepest and latest opened; a profile with more open than this comes
+/// back with its outer folders open and its inner ones folded. The upgrade is
+/// a cap that counts folds at each depth.
+pub(crate) const OPEN_ROWS_CAP: usize = 500;
+
+/// The ids of the open folders under `profile`'s connection row, the row
+/// itself included, in tree order, at most [`OPEN_ROWS_CAP`]. A folder inside a
+/// folded one is as open as it was left: an item keeps its rows until the
+/// next build.
+pub(crate) fn open_rows_of(items: &[TreeItem], profile: &str) -> Vec<String> {
+    let id = connection_row(profile);
+    // A connection is a root, or a row of the group that is.
+    let connection = items
+        .iter()
+        .find(|item| item.id.as_str() == id)
+        .or_else(|| {
+            items
+                .iter()
+                .flat_map(|group| &group.children)
+                .find(|item| item.id.as_str() == id)
+        });
+    let mut rows = Vec::new();
+    if let Some(connection) = connection {
+        collect_open(connection, &mut rows);
+    }
+    rows
+}
+
+fn collect_open(item: &TreeItem, rows: &mut Vec<String>) {
+    if rows.len() >= OPEN_ROWS_CAP {
+        return;
+    }
+    if item.is_folder() && item.is_expanded() {
+        rows.push(item.id.to_string());
+    }
+    for child in &item.children {
+        collect_open(child, rows);
+    }
+}
+
+/// Whether each folder of `items` is open, by row id, for the folds a rebuild
+/// is made with: [`crate::explorer::folds`] less the rows the last build
+/// closed because nothing had loaded under them (`unloaded`), which nobody
+/// chose to fold. A row the user opened since is the user's, and stays.
+pub(crate) fn held_folds(items: &[TreeItem], unloaded: &HashSet<String>) -> HashMap<String, bool> {
+    let mut folds = crate::explorer::folds(items);
+    folds.retain(|row, open| *open || !unloaded.contains(row));
+    folds
+}
+
+/// The rows to keep for a profile: those `open` in its tree, then the ones
+/// already `stored` that the tree has no say over (`held` is what it has a say
+/// over). A stored row the tree does not hold yet is waiting for its subtree
+/// to load; one it holds is as the tree has it. Rows that name something that
+/// no longer exists stay until the cap pushes them out, since a row that is not
+/// there cannot be told from one that is not loaded.
+pub(crate) fn remembered_rows(
+    open: Vec<String>,
+    stored: &[String],
+    held: &HashMap<String, bool>,
+) -> Vec<String> {
+    open.into_iter()
+        .chain(
+            stored
+                .iter()
+                .filter(|row| !held.contains_key(row.as_str()))
+                .cloned(),
+        )
+        .take(OPEN_ROWS_CAP)
+        .collect()
+}
+
+/// The id of the profile a connections-tree row is under or is, for a
+/// connection's row, a database's and every row scoped to one.
+pub(crate) fn profile_of_row(id: &str) -> Option<&str> {
+    length_prefixed(id.strip_prefix("connection:")?).map(|(profile, _)| profile)
+}
+
 /// The rows, and what each stands for, by row id.
 #[derive(Default)]
 pub(crate) struct SidebarTree {
@@ -450,6 +683,16 @@ pub(crate) struct SidebarTree {
     /// filter, and a tree that dropped them without a word would read as
     /// having searched them.
     pub(crate) unsearched: usize,
+    /// The connection and database rows built folded because nothing had
+    /// loaded under them. Their closed state is the build's, not a fold anyone
+    /// chose, so a stored open row is not overruled by it.
+    pub(crate) unloaded: HashSet<String>,
+    /// The loaded rows built folded, each holding one inert row where its
+    /// rows would be: opening one asks for a rebuild that builds them.
+    pub(crate) pruned: HashSet<String>,
+    /// The row each row left out under a pruned one hangs from. A row's
+    /// ancestors cannot be read from its id, and a reveal has to open them.
+    pub(crate) hidden: HashMap<String, String>,
 }
 
 /// What a loaded schema or database with nothing in it says in its one row.
@@ -605,10 +848,13 @@ fn connection_item(
         // Nothing has asked it to load, and nothing will until this row is
         // opened: an open row here would show a `Loading…` that no answer is
         // coming to replace.
-        Content::Unloaded => (
-            false,
-            vec![notice(tree, connection.id, None, "loading", LOADING)],
-        ),
+        Content::Unloaded => {
+            tree.unloaded.insert(id.clone());
+            (
+                false,
+                vec![notice(tree, connection.id, None, "loading", LOADING)],
+            )
+        }
         Content::Loading => (
             followed,
             vec![notice(tree, connection.id, None, "loading", LOADING)],
@@ -682,9 +928,10 @@ fn connection_item(
                         tree.counts.insert(row.clone(), under.len());
                         let open = search.filtering || folds.get(&row).copied().unwrap_or(false);
                         let mut item = TreeItem::new(row.clone(), database.to_string());
-                        item = match under.is_empty() {
-                            true => item.children(vec![empty_row(tree, &row)]),
-                            false => item.children(under),
+                        item = match (under.is_empty(), open) {
+                            (true, _) => item.children(vec![empty_row(tree, &row)]),
+                            (false, true) => item.children(under),
+                            (false, false) => item.children(prune(tree, &row, under)),
                         };
                         children.push(item.expanded(open));
                         count = Some(1);
@@ -718,6 +965,10 @@ fn connection_item(
     if let Some(count) = count {
         tree.counts.insert(id.clone(), count);
     }
+    let children = match open || search.filtering {
+        true => children,
+        false => prune(tree, &id, children),
+    };
     Some(
         TreeItem::new(id, connection.name.to_string())
             .expanded(open)
@@ -746,11 +997,14 @@ fn others_items(
         let (open, children, count) = match content {
             // Nothing will load it until its row is opened, as for a
             // connection: an open row here would wait on no answer.
-            Content::Unloaded => (
-                false,
-                vec![notice(tree, profile, Some(&database), "loading", LOADING)],
-                None,
-            ),
+            Content::Unloaded => {
+                tree.unloaded.insert(row.clone());
+                (
+                    false,
+                    vec![notice(tree, profile, Some(&database), "loading", LOADING)],
+                    None,
+                )
+            }
             Content::Loading => (
                 followed,
                 vec![notice(tree, profile, Some(&database), "loading", LOADING)],
@@ -818,6 +1072,10 @@ fn others_items(
         if let Some(count) = count {
             tree.counts.insert(row.clone(), count);
         }
+        let children = match open || search.filtering {
+            true => children,
+            false => prune(tree, &row, children),
+        };
         items.push(
             TreeItem::new(row, database)
                 .expanded(open)
@@ -825,6 +1083,41 @@ fn others_items(
         );
     }
     items
+}
+
+/// The one row a folded loaded row holds in place of its rows, so that it is
+/// a folder, can be opened, and fires the event that builds them. Its id names
+/// `parent` and starts where no other row's does.
+fn folded_row(tree: &mut SidebarTree, parent: &str) -> TreeItem {
+    let id = format!("{parent}/folded");
+    tree.nodes.insert(id.clone(), Node::Notice);
+    TreeItem::new(id, String::new()).disabled(true)
+}
+
+/// What a folded row holds: `children`, or one inert row when there are rows
+/// among them to leave out. Counts are taken from the whole content before
+/// this, and every row left out stays in `tree.nodes`, so a selection or a
+/// stored row can still name it; only the items, which the tree flattens and
+/// clones per drawn row, stay small. A search builds everything open and never
+/// asks.
+///
+/// ponytail: the rows are built, then left out; the catalog is still walked
+/// whole on every rebuild. The upgrade is to hand the builder the folds and
+/// walk only what is open, which the counts would then need from the catalog.
+fn prune(tree: &mut SidebarTree, parent: &str, children: Vec<TreeItem>) -> Vec<TreeItem> {
+    if children.iter().all(TreeItem::is_disabled) {
+        return children;
+    }
+    hide(tree, parent, &children);
+    tree.pruned.insert(parent.to_string());
+    vec![folded_row(tree, parent)]
+}
+
+fn hide(tree: &mut SidebarTree, parent: &str, children: &[TreeItem]) {
+    for child in children {
+        tree.hidden.insert(child.id.to_string(), parent.to_string());
+        hide(tree, &child.id, &child.children);
+    }
 }
 
 /// The one row a loaded folder with nothing in it holds, so that it can be
@@ -914,6 +1207,10 @@ fn scoped_item(
     }
     let open =
         !children.is_empty() && (rows.filtering || rows.folds.get(&id).copied().unwrap_or(false));
+    let children = match open || rows.filtering {
+        true => children,
+        false => prune(tree, &id, children),
+    };
     TreeItem::new(id, label)
         .expanded(open)
         .disabled(disabled)
@@ -1025,6 +1322,21 @@ mod tests {
         search(items, id).unwrap_or_else(|| panic!("{id} is not a row"))
     }
 
+    /// Folds that open `rows`: a folded loaded row is built as one inert row,
+    /// so a test that looks inside one opens it first.
+    fn opened(rows: impl IntoIterator<Item = String>) -> HashMap<String, bool> {
+        rows.into_iter().map(|row| (row, true)).collect()
+    }
+
+    /// The rows `birds()` is under, under `profile`, down to its category.
+    fn above_birds(profile: &str) -> Vec<String> {
+        vec![
+            connection_row(profile),
+            scoped_row(profile, None, "schema-main"),
+            scoped_row(profile, None, "category-Tables-main"),
+        ]
+    }
+
     /// Every project listed, with nothing in front: what most tests mean.
     fn build(
         projects: &[StoredProject],
@@ -1099,7 +1411,7 @@ mod tests {
                 listed("x", "Same", Content::Loaded(birds())),
                 listed("y", "Same", Content::Loaded(birds())),
             ],
-            &HashMap::new(),
+            &opened(["x", "y"].into_iter().flat_map(above_birds)),
         );
 
         let ids = all_ids(&tree.items);
@@ -1214,7 +1526,12 @@ mod tests {
                 Levels::DatabaseThenSchema,
                 "d",
             )],
-            &HashMap::new(),
+            &opened([
+                connection_row("a"),
+                database_row("a", "d"),
+                scoped_row("a", Some("d"), "schema-main"),
+                scoped_row("a", Some("d"), "category-Tables-main"),
+            ]),
         );
 
         let connection = find(&tree.items, &connection_row("a"));
@@ -1267,7 +1584,7 @@ mod tests {
                 ..listed
             })
             .collect(),
-            &HashMap::new(),
+            &opened([connection_row("a")]),
         );
 
         let connection = find(&tree.items, &connection_row("a"));
@@ -1385,7 +1702,7 @@ mod tests {
                 Levels::DatabaseHoldsObjects,
                 "shop",
             )],
-            &HashMap::new(),
+            &opened([connection_row("a")]),
         );
 
         let connection = find(&tree.items, &connection_row("a"));
@@ -1439,7 +1756,7 @@ mod tests {
         let other = database_row("a", "other");
         // The fold is the user's, and says open: an unloaded database is
         // folded whatever it says, since nothing here has asked it to load.
-        let open = HashMap::from([(other.clone(), true)]);
+        let open = opened([other.clone(), connection_row("a")]);
         let build_with = |content| {
             build(
                 &[],
@@ -1523,7 +1840,7 @@ mod tests {
                         .map(|name| (name.to_string(), Content::Unloaded))
                         .collect(),
                 )],
-                &HashMap::new(),
+                &opened([connection_row("a")]),
             );
             let databases = tree
                 .nodes
@@ -1576,7 +1893,11 @@ mod tests {
                     "other",
                 )
             }],
-            &HashMap::new(),
+            &opened([
+                connection_row("a"),
+                database_row("a", "shop"),
+                scoped_row("a", Some("shop"), "category-Tables-shop"),
+            ]),
         );
 
         let row = find(&tree.items, &database_row("a", "shop"));
@@ -1752,11 +2073,15 @@ mod tests {
 
     #[test]
     fn a_loaded_empty_schema_counts_zero_and_says_so() {
-        let tree = built(vec![listed(
-            "a",
-            "a",
-            Content::Loaded(content_of(vec![schema("empty", Vec::new())])),
-        )]);
+        let tree = build(
+            &[],
+            vec![listed(
+                "a",
+                "a",
+                Content::Loaded(content_of(vec![schema("empty", Vec::new())])),
+            )],
+            &opened([connection_row("a")]),
+        );
 
         let id = scoped_row("a", None, "schema-empty");
         assert_eq!(count_of(&tree, &id), Some(0));
@@ -2149,17 +2474,26 @@ mod tests {
     fn rows_under_a_connection_start_folded_and_keep_the_folds_they_are_given() {
         let schema = scoped_row("a", None, "schema-main");
         let category = scoped_row("a", None, "category-Tables-main");
-        let build_with = |folds: &HashMap<String, bool>| {
-            build(&[], vec![listed("a", "a", Content::Loaded(birds()))], folds)
+        let build_with = |rows: &[&String]| {
+            let folds = opened(rows.iter().map(|row| row.to_string()));
+            build(
+                &[],
+                vec![listed("a", "a", Content::Loaded(birds()))],
+                &folds,
+            )
         };
+        let connection = connection_row("a");
 
-        let folded = build_with(&HashMap::new());
+        let folded = build_with(&[&connection]);
         assert!(!find(&folded.items, &schema).is_expanded());
-        assert!(!find(&folded.items, &category).is_expanded());
+        assert!(
+            search(&folded.items, &category).is_none(),
+            "a folded schema is built without its rows"
+        );
 
-        let opened = build_with(&HashMap::from([(schema.clone(), true)]));
-        assert!(find(&opened.items, &schema).is_expanded());
-        assert!(!find(&opened.items, &category).is_expanded());
+        let schema_open = build_with(&[&connection, &schema]);
+        assert!(find(&schema_open.items, &schema).is_expanded());
+        assert!(!find(&schema_open.items, &category).is_expanded());
     }
 
     #[test]
@@ -2320,6 +2654,319 @@ mod tests {
             node_actions(NodeKind::Sequence, "s", Target::built_in(Engine::Redis)),
             [NodeAction::CopyName("s".into())],
             "a target with no definition to write offers none to show"
+        );
+    }
+
+    #[test]
+    fn a_plain_click_selects_one_a_modifier_click_toggles_and_shift_extends() {
+        let ids = |rows: &[&str]| rows.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+        let mut selection = Selection::default();
+        selection.click("x");
+        assert_eq!(selection.rows, ids(&["x"]));
+        selection.toggle("y");
+        assert_eq!(selection.rows, ids(&["x", "y"]), "a toggle adds a row");
+        selection.toggle("x");
+        assert_eq!(selection.rows, ids(&["y"]), "and takes one away again");
+        selection.click("z");
+        assert_eq!(
+            selection.rows,
+            ids(&["z"]),
+            "a plain click is the whole selection"
+        );
+
+        let visible = ids(&["r1", "r2", "r3", "r4"]);
+        selection.click("r1");
+        selection.extend_to("r3", &visible);
+        assert_eq!(selection.rows, ids(&["r1", "r2", "r3"]));
+        selection.extend_to("r2", &visible);
+        assert_eq!(
+            selection.rows,
+            ids(&["r1", "r2"]),
+            "a range is always from the anchor, which a Shift-click does not move"
+        );
+        let mut backwards = Selection::default();
+        backwards.click("r4");
+        backwards.extend_to("r2", &visible);
+        assert_eq!(backwards.rows, ids(&["r2", "r3", "r4"]));
+
+        let mut lost = Selection::default();
+        lost.extend_to("r2", &visible);
+        assert_eq!(lost.rows, ids(&["r2"]), "no anchor: a plain click");
+        lost.click("gone");
+        lost.extend_to("r3", &visible);
+        assert_eq!(
+            lost.rows,
+            ids(&["r3"]),
+            "an anchor that is not showing: a plain click"
+        );
+
+        let mut kept = Selection::default();
+        kept.click("r1");
+        kept.toggle("r2");
+        kept.toggle("r3");
+        let present: HashSet<String> = ids(&["r2", "r3", "r4"]).into_iter().collect();
+        kept.retain(&present);
+        assert_eq!(
+            kept.rows,
+            ids(&["r2", "r3"]),
+            "a row that is gone drops out"
+        );
+    }
+
+    #[test]
+    fn a_mixed_selection_offers_only_what_applies_to_every_row() {
+        use crate::db::Engine;
+        use SelectionAction::*;
+        let pg = Target::built_in(Engine::Postgres);
+        let table = (NodeKind::Relation(RelationKind::Table), pg);
+        let view = NodeKind::Relation(RelationKind::View);
+        assert_eq!(
+            selection_actions(&[table, table]),
+            [OpenAll, CopyNames, CopyDdl, ShowDdl, Pin, Refresh]
+        );
+        assert_eq!(
+            selection_actions(&[table, (NodeKind::Schema, pg)]),
+            [CopyNames, Refresh],
+            "a schema opens nothing, has no definition and is no object to pin"
+        );
+        assert_eq!(
+            selection_actions(&[
+                table,
+                (
+                    NodeKind::Relation(RelationKind::Table),
+                    Target::built_in(Engine::Redis)
+                )
+            ]),
+            [OpenAll, CopyNames, Pin, Refresh],
+            "a target with no definition to write drops both DDL actions"
+        );
+        assert_eq!(
+            selection_actions(&[table, (NodeKind::Routine, pg)]),
+            [OpenAll, CopyNames, Pin, Refresh],
+            "a routine's definition is its own tab, not a text to list"
+        );
+        assert_eq!(
+            selection_actions(&[table, (NodeKind::Sequence, pg)]),
+            [CopyNames, CopyDdl, ShowDdl, Pin, Refresh],
+            "a sequence opens no tab"
+        );
+        assert_eq!(
+            selection_actions(&[(NodeKind::Connection, pg), (NodeKind::Database, pg)]),
+            [CopyNames, Refresh]
+        );
+        assert_eq!(selection_header(&[table.0, table.0]), "2 tables selected");
+        assert_eq!(selection_header(&[table.0, view]), "2 items selected");
+        assert_eq!(selection_header(&[view, view, view]), "3 views selected");
+        assert_eq!(
+            selection_header(&[NodeKind::Schema, NodeKind::Schema]),
+            "2 schemas selected"
+        );
+    }
+
+    #[test]
+    fn a_stored_open_row_applies_only_once_its_row_exists() {
+        let schema = scoped_row("a", None, "schema-main");
+        let stored = opened([
+            connection_row("a"),
+            schema.clone(),
+            scoped_row("a", Some("gone"), "schema-main"),
+        ]);
+        let before = build(&[], vec![unloaded("a")], &stored);
+        assert_eq!(
+            all_ids(&before.items),
+            [connection_row("a"), scoped_row("a", None, "loading")],
+            "an idle connection stays folded and gains no row from what was stored"
+        );
+        assert!(!find(&before.items, &connection_row("a")).is_expanded());
+
+        let loaded = build(
+            &[],
+            vec![listed("a", "a", Content::Loaded(birds()))],
+            &stored,
+        );
+        assert!(
+            find(&loaded.items, &schema).is_expanded(),
+            "once its subtree has loaded the row opens as it was left"
+        );
+        assert_eq!(
+            all_ids(&loaded.items),
+            all_ids(
+                &build(
+                    &[],
+                    vec![listed("a", "a", Content::Loaded(birds()))],
+                    &opened([connection_row("a"), schema])
+                )
+                .items
+            ),
+            "a stored id naming a database that is not listed changes nothing"
+        );
+    }
+
+    #[test]
+    fn open_rows_of_lists_a_profiles_open_folders_capped() {
+        let (schema, category) = (
+            scoped_row("a", None, "schema-main"),
+            scoped_row("a", None, "category-Tables-main"),
+        );
+        let folds = HashMap::from([
+            (connection_row("a"), true),
+            (schema.clone(), true),
+            (category.clone(), true),
+            (connection_row("b"), true),
+            (scoped_row("b", None, "schema-main"), true),
+        ]);
+        let tree = build(
+            &[],
+            vec![
+                listed("a", "a", Content::Loaded(birds())),
+                listed("b", "b", Content::Loaded(birds())),
+            ],
+            &folds,
+        );
+        assert_eq!(
+            open_rows_of(&tree.items, "a"),
+            [connection_row("a"), schema, category],
+            "open folders under that connection, its own row first, in tree order"
+        );
+        assert_eq!(
+            open_rows_of(&tree.items, "b"),
+            [connection_row("b"), scoped_row("b", None, "schema-main")],
+            "and none of another's"
+        );
+        assert!(
+            open_rows_of(&tree.items, "missing").is_empty(),
+            "a profile the tree does not list has no rows"
+        );
+
+        let many: Vec<TreeItem> = (0..OPEN_ROWS_CAP + 20)
+            .map(|at| {
+                TreeItem::new(format!("folder-{at}"), "f")
+                    .expanded(true)
+                    .child(TreeItem::new(format!("leaf-{at}"), "l"))
+            })
+            .collect();
+        let items = vec![
+            TreeItem::new(connection_row("c"), "c")
+                .expanded(true)
+                .children(many),
+        ];
+        let rows = open_rows_of(&items, "c");
+        assert_eq!(rows.len(), OPEN_ROWS_CAP);
+        assert_eq!(rows[0], connection_row("c"));
+        assert_eq!(rows[1], "folder-0", "what is dropped is the latest");
+    }
+
+    #[test]
+    fn a_folded_loaded_row_carries_one_inert_row_and_no_descendants() {
+        let listed = || {
+            vec![database_listed(
+                "a",
+                content_with_shortcuts("d", ""),
+                Levels::DatabaseThenSchema,
+                "d",
+            )]
+        };
+        let (database, schema) = (
+            database_row("a", "d"),
+            scoped_row("a", Some("d"), "schema-main"),
+        );
+        let mut folds = HashMap::from([(connection_row("a"), true)]);
+        let folded = build(&[], listed(), &folds);
+
+        let row = find(&folded.items, &database);
+        assert!(!row.is_expanded());
+        let inert = format!("{database}/folded");
+        assert_eq!(row_ids(&row.children), [inert.as_str()]);
+        assert!(row.children[0].is_disabled());
+        assert!(matches!(folded.nodes.get(&inert), Some(Node::Notice)));
+        assert!(
+            search(&folded.items, &schema).is_none(),
+            "what is under a folded row is not built as rows"
+        );
+        assert!(
+            folded.nodes.contains_key(&schema),
+            "though it is still a row a selection or a reveal can name"
+        );
+        assert_eq!(
+            count_of(&folded, &database),
+            Some(1),
+            "and it is counted from the whole content, not from what is drawn"
+        );
+
+        folds.insert(database.clone(), true);
+        let opened = build(&[], listed(), &folds);
+        assert_eq!(
+            row_ids(&find(&opened.items, &database).children),
+            [schema.as_str()],
+            "opened, it is built with its rows, folded in their turn"
+        );
+        assert!(!find(&opened.items, &schema).is_expanded());
+        assert_eq!(
+            row_ids(&find(&opened.items, &schema).children),
+            [format!("{schema}/folded")]
+        );
+    }
+
+    #[test]
+    fn ten_folded_connections_of_five_thousand_relations_build_one_row_each() {
+        let names: Vec<String> = (0..5000).map(|at| format!("t{at}")).collect();
+        let listed: Vec<Listed<'_>> = ["c0", "c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9"]
+            .into_iter()
+            .map(|id| {
+                let relations = names
+                    .iter()
+                    .map(|name| relation(name, RelationKind::Table, None))
+                    .collect();
+                listed(
+                    id,
+                    id,
+                    Content::Loaded(content_of(vec![schema("main", relations)])),
+                )
+            })
+            .collect();
+        let tree = built(listed);
+
+        assert_eq!(tree.items.len(), 10);
+        for item in &tree.items {
+            assert_eq!(item.children.len(), 1, "{} holds one inert row", item.id);
+            assert!(item.children[0].is_disabled());
+        }
+        assert!(
+            all_ids(&tree.items).len() < 100,
+            "ten folded connections are twenty rows, not fifty thousand"
+        );
+        assert_eq!(
+            count_of(&tree, &connection_row("c0")),
+            None,
+            "a flat connection counts nothing, as it did"
+        );
+    }
+
+    #[test]
+    fn a_typed_filter_builds_every_matching_row_open_whatever_was_folded() {
+        let listed = vec![listed(
+            "a",
+            "a",
+            Content::Loaded(tables(&["birds", "flocks"], "bir")),
+        )];
+        let tree = filtered(&[], listed, "bir");
+        let (schema, category) = (
+            scoped_row("a", None, "schema-main"),
+            scoped_row("a", None, "category-Tables-main"),
+        );
+        let birds = scoped_row("a", None, &explorer::relation_row("main", "birds"));
+        for row in [connection_row("a"), schema, category] {
+            assert!(find(&tree.items, &row).is_expanded(), "{row} is open");
+        }
+        assert!(
+            search(&tree.items, &birds).is_some(),
+            "the match is built, not folded away"
+        );
+        assert!(
+            all_ids(&tree.items)
+                .iter()
+                .all(|id| !id.ends_with("/folded")),
+            "nothing is pruned while text is typed"
         );
     }
 }

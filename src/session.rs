@@ -45,6 +45,7 @@ use crate::{
     },
     import_rows, result_grid,
     result_grid::{InsertTarget, NewValue, ResultGrid},
+    sidebar::OPEN_ROWS_CAP,
     sql::{self, Destructive, Mode, SortKey, Verdict},
     store,
     structure_grid::StructureGrid,
@@ -109,6 +110,12 @@ pub(crate) struct Profile {
     /// Whether the user left each of the explorer's top-level rows open, by
     /// row id (`store::StoredProfile::folds`).
     pub(crate) folds: BTreeMap<String, bool>,
+    /// The rows of the connections tree this profile has open, and the rows
+    /// of it that are selected, by row id: what `profiles.toml` holds between
+    /// runs. Complex mode only. A row listed here whose subtree has not
+    /// loaded waits for it; the tree owns a row once it holds it.
+    pub(crate) open_rows: Vec<String>,
+    pub(crate) selected_rows: Vec<String>,
     pub(crate) session: Session,
 }
 
@@ -505,6 +512,13 @@ impl Profile {
             // profile written by an older build still loads with its buffer.
             open_query: None,
             ssm: self.config.ssm().cloned(),
+            open_rows: self.open_rows.iter().take(OPEN_ROWS_CAP).cloned().collect(),
+            selected_rows: self
+                .selected_rows
+                .iter()
+                .take(OPEN_ROWS_CAP)
+                .cloned()
+                .collect(),
             ssh: self.config.ssh().cloned(),
             open_queries: self
                 .session

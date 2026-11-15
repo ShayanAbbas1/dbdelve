@@ -12,6 +12,7 @@ use crate::db::{ExternalConfig, PasswordCommand, Plugin};
 use crate::explorer::Shortcuts;
 use crate::import::{self, Source};
 use crate::session::{BoundSession, STALE_ROWS, restored_shortcuts};
+use crate::sidebar::OPEN_ROWS_CAP;
 use crate::sql::{Destructive, Mode};
 
 use std::collections::BTreeMap;
@@ -295,6 +296,14 @@ impl Workspace {
             left_database: false,
             shortcuts: restored_shortcuts(&stored.folders, &stored.pins),
             folds: stored.folds,
+            // A file is a person's to edit: no more is read than a profile
+            // would write.
+            open_rows: stored.open_rows.into_iter().take(OPEN_ROWS_CAP).collect(),
+            selected_rows: stored
+                .selected_rows
+                .into_iter()
+                .take(OPEN_ROWS_CAP)
+                .collect(),
             session,
         });
         // The saved queries are listed before anything has connected.
@@ -358,6 +367,8 @@ impl Workspace {
             left_database: false,
             shortcuts: Shortcuts::default(),
             folds: BTreeMap::new(),
+            open_rows: Vec::new(),
+            selected_rows: Vec::new(),
             session,
         });
         if let Some(password) = password

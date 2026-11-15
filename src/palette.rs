@@ -55,7 +55,10 @@ use crate::{
         CatalogState, ObjectBody, Profile, QueryState, RowCount, Session, StructureState, Tab,
         routine_name,
     },
-    sidebar::{ListingScope, NodeAction, SelectedNode, ViewMode, node_actions},
+    sidebar::{
+        ListingScope, NodeAction, SelectedNode, SelectionAction, ViewMode, node_actions,
+        selection_header,
+    },
     sql,
     store::{HistoryEntry, StoredProject},
     structure_grid::Section,
@@ -470,6 +473,10 @@ pub enum Command {
     /// of [`crate::sidebar::node_actions`], acting on that node and not on
     /// whatever is selected when it is confirmed.
     NodeAction(SelectedNode, NodeAction),
+    /// What the connections tree's menu offers on several selected rows, one
+    /// of [`crate::sidebar::selection_actions`], acting on the rows selected
+    /// when it is confirmed.
+    SelectionAction(SelectionAction),
     CopyRows(RowsAs),
     FollowForeignKey,
     /// Add a filter bar and put the cursor in it.
@@ -1507,6 +1514,15 @@ impl Palette {
     #[cfg(test)]
     pub fn labels(&self) -> Vec<&str> {
         self.items.iter().map(|item| item.label.as_str()).collect()
+    }
+
+    /// Each row's label with the detail drawn beside it.
+    #[cfg(test)]
+    pub fn labels_with_details(&self) -> Vec<(&str, Option<&str>)> {
+        self.items
+            .iter()
+            .map(|item| (item.label.as_str(), item.detail.as_deref()))
+            .collect()
     }
 
     #[cfg(test)]
@@ -3942,7 +3958,34 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
 
     // What the sidebar's menu offers on the node selected there, from the
     // same list; each row carries the node it was built for.
-    if let Some(node) = workspace.selected_node(cx)
+    let selection = match workspace.view_mode() {
+        ViewMode::Complex => workspace.selected_nodes(cx),
+        ViewMode::Simple => Vec::new(),
+    };
+    if selection.len() > 1 {
+        let header = selection_header(&selection.iter().map(|node| node.kind).collect::<Vec<_>>());
+        items.extend(
+            workspace
+                .selection_offers(&selection)
+                .into_iter()
+                .map(|action| {
+                    let icon = match action {
+                        SelectionAction::OpenAll => icon::BROWSE,
+                        SelectionAction::CopyNames | SelectionAction::CopyDdl => icon::COPY,
+                        SelectionAction::ShowDdl => icon::STRUCTURE,
+                        SelectionAction::Pin => icon::PIN,
+                        SelectionAction::Refresh => icon::REFRESH,
+                    };
+                    command(
+                        action.label(),
+                        icon,
+                        Command::SelectionAction(action),
+                        SIDEBAR,
+                    )
+                    .detail(header.clone())
+                }),
+        );
+    } else if let Some(node) = workspace.selected_node(cx)
         && let Some(target) = workspace
             .profiles
             .iter()

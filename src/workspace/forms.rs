@@ -25,7 +25,7 @@ use crate::explorer::{
 use crate::icons::{queries_group_icon, saved_query_icon};
 use crate::scroller::{SmoothScrollable, smooth_scoped};
 use crate::session::PendingDelete;
-use crate::sidebar::{NodeAction, NodeKind, SelectedNode, node_actions};
+use crate::sidebar::{NodeAction, NodeKind, SelectedNode, SelectionAction, node_actions};
 use crate::sql::{Destructive, Stop};
 use crate::ui::{Status, code_lines, dot, raised_card, row_icon_tinted};
 
@@ -1804,38 +1804,114 @@ impl Workspace {
         let code = fonts(cx).editor.clone();
         let syntax = self.engine().syntax();
         let text_size = px(layout::chrome(layout::TEXT_SM));
-        let copyable = matches!(&view.text, DdlText::Ready(text) if !text.is_empty());
-        let body = match &view.text {
-            DdlText::Loading => div()
-                .debug_selector(|| "show-ddl-loading".into())
-                .text_color(t.text_muted)
-                .child("Reading the definition…")
-                .into_any_element(),
-            DdlText::Failed(message) => div()
-                .debug_selector(|| "show-ddl-failed".into())
-                .text_color(t.danger)
-                .child(message.clone())
-                .into_any_element(),
-            DdlText::Ready(text) if text.is_empty() => div()
-                .debug_selector(|| "show-ddl-empty".into())
-                .text_color(t.text_muted)
-                .child(format!(
-                    "The server returned no definition for {}.",
-                    view.name
-                ))
-                .into_any_element(),
-            // Nothing moves in it, so it takes no smooth-scroll modifier.
-            DdlText::Ready(text) => div()
-                .id("show-ddl-text")
-                .debug_selector(|| "show-ddl-text".into())
+        let copyable = view
+            .sections
+            .iter()
+            .any(|section| matches!(&section.text, DdlText::Ready(text) if !text.is_empty()));
+        let highlight = cx.theme().highlight_theme.clone();
+        // One definition as the dialog draws it. `suffix` tells the sections
+        // of several apart; `scrolls` is whether this block scrolls itself,
+        // which several leave to the list that holds them.
+        let block = |text: &DdlText, name: &str, suffix: String, scrolls: bool| -> AnyElement {
+            match text {
+                DdlText::Loading => div()
+                    .debug_selector({
+                        let suffix = suffix.clone();
+                        move || format!("show-ddl-loading{suffix}")
+                    })
+                    .text_color(t.text_muted)
+                    .child("Reading the definition…")
+                    .into_any_element(),
+                DdlText::Failed(message) => div()
+                    .debug_selector({
+                        let suffix = suffix.clone();
+                        move || format!("show-ddl-failed{suffix}")
+                    })
+                    .text_color(t.danger)
+                    .child(message.clone())
+                    .into_any_element(),
+                DdlText::Ready(text) if text.is_empty() => div()
+                    .debug_selector({
+                        let suffix = suffix.clone();
+                        move || format!("show-ddl-empty{suffix}")
+                    })
+                    .text_color(t.text_muted)
+                    .child(format!("The server returned no definition for {name}."))
+                    .into_any_element(),
+                // Nothing moves in it, so it takes no smooth-scroll modifier.
+                DdlText::Ready(text) => div()
+                    .id(format!("show-ddl-text{suffix}"))
+                    .debug_selector(move || format!("show-ddl-text{suffix}"))
+                    .when(scrolls, |block| {
+                        block
+                            .max_h(px(layout::DIALOG_TEXT_MAX_HEIGHT))
+                            .overflow_y_scroll()
+                    })
+                    .font_family(code.clone())
+                    .children(
+                        code_lines(text, syntax, &highlight)
+                            .into_iter()
+                            .map(|line| div().child(line)),
+                    )
+                    .into_any_element(),
+            }
+        };
+        let body = match view.sections.as_slice() {
+            [only] => block(&only.text, &view.name, String::new(), true),
+            sections => div()
+                .id("show-ddl-sections")
+                .debug_selector(|| "show-ddl-sections".into())
                 .max_h(px(layout::DIALOG_TEXT_MAX_HEIGHT))
                 .overflow_y_scroll()
-                .font_family(code)
-                .children(
-                    code_lines(text, syntax, &cx.theme().highlight_theme)
-                        .into_iter()
-                        .map(|line| div().child(line)),
-                )
+                .flex()
+                .flex_col()
+                .gap(px(layout::SPACE_MD))
+                .children(sections.iter().enumerate().map(|(at, section)| {
+                    let copy_workspace = cx.entity().downgrade();
+                    let ready = matches!(&section.text, DdlText::Ready(text) if !text.is_empty());
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(layout::SPACE_XS))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap(px(layout::SPACE_MD))
+                                .child(section_label(t, &section.title))
+                                .child(
+                                    div()
+                                        .debug_selector(move || format!("show-ddl-copy-{at}"))
+                                        .child(
+                                            button(
+                                                format!("show-ddl-copy-{at}"),
+                                                "Copy",
+                                                Tone::Quiet,
+                                                Control::Compact,
+                                                t,
+                                            )
+                                            .disabled(!ready)
+                                            .on_click(
+                                                move |_, _, cx| {
+                                                    _ = copy_workspace.update(
+                                                        cx,
+                                                        |workspace, cx| {
+                                                            workspace.copy_ddl_section(at, cx);
+                                                        },
+                                                    );
+                                                },
+                                            ),
+                                        ),
+                                ),
+                        )
+                        .child(block(
+                            &section.text,
+                            &section.title,
+                            format!("-{at}"),
+                            false,
+                        ))
+                }))
                 .into_any_element(),
         };
         let close_workspace = cx.entity().downgrade();
@@ -1851,7 +1927,7 @@ impl Workspace {
                 .justify_center()
                 .child(
                     dialog(t)
-                        .child(section_label(t, &view.title))
+                        .child(section_label(t, &view.heading()))
                         .child(div().text_size(text_size).child(body))
                         .child(
                             div()
@@ -3881,6 +3957,29 @@ pub(super) fn node_items(
             }
         }))
     })
+}
+
+/// The menu of a selection of several rows: how many, then what applies to
+/// all of them.
+pub(super) fn selection_menu(
+    menu: PopupMenu,
+    header: String,
+    actions: Vec<SelectionAction>,
+    workspace: &gpui::WeakEntity<Workspace>,
+) -> PopupMenu {
+    actions.into_iter().fold(
+        menu.item(PopupMenuItem::label(header)).separator(),
+        |menu, action| {
+            let workspace = workspace.clone();
+            menu.item(
+                PopupMenuItem::new(action.label()).on_click(move |_, window, cx| {
+                    _ = workspace.update(cx, |workspace, cx| {
+                        workspace.run_selection_action(action, window, cx)
+                    });
+                }),
+            )
+        },
+    )
 }
 
 /// Run `act` with the connection `profile` in front. A row of another

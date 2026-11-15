@@ -21,7 +21,7 @@ pub const PREVIEW_ROW_LIMIT: usize = ROW_LIMITS[1];
 /// `LIMIT`, and Postgres reads that as a `bigint`.
 pub const MAX_ROW_LIMIT: usize = i64::MAX as usize;
 
-const RELATION_CATEGORIES: [(RelationKind, &str); 6] = [
+pub(crate) const RELATION_CATEGORIES: [(RelationKind, &str); 6] = [
     (RelationKind::Table, "Tables"),
     (RelationKind::PartitionedTable, "Partitioned Tables"),
     (RelationKind::View, "Views"),

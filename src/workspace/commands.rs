@@ -864,6 +864,7 @@ impl Workspace {
             }
             Command::CopyText(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
             Command::NodeAction(node, action) => self.run_node_action(&node, action, window, cx),
+            Command::SelectionAction(action) => self.run_selection_action(action, window, cx),
             Command::SetViewSorting(client) => self.set_view_sorting(client, window, cx),
             Command::FollowForeignKey => self.follow_foreign_key(&FollowForeignKey, window, cx),
             // The button only adds the bar, and the pointer that pressed it

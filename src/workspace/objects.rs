@@ -7,12 +7,22 @@ use super::*;
 
 use super::sidebar::new_query_binding;
 use crate::db::{ColumnDefinition, Structure};
-use crate::session::{Binding, Explained, Finished, Queue, Routed, TabKey};
-use crate::sidebar::{NodeAction, NodeKind, SelectedNode, schema_row_is_a_database};
+use crate::explorer::Pin;
+use crate::session::{Binding, BoundSession, Explained, Finished, Queue, Routed, TabKey};
+use crate::sidebar::{
+    NodeAction, NodeKind, SelectedNode, SelectionAction, schema_row_is_a_database,
+};
 
 /// A definition being read: the connection it was asked of, by id and
 /// generation, and the read itself.
 type DdlRead = (String, u64, gpui::Task<Result<String, DbError>>);
+
+/// What the `Show DDL` dialog calls the object it lists: its kind, then its
+/// qualified name.
+fn ddl_title(kind: ObjectKind, schema: &str, name: &str) -> String {
+    let kind = crate::palette::kind_label(kind);
+    format!("{}{} {schema}.{name}", kind[..1].to_uppercase(), &kind[1..])
+}
 
 impl Workspace {
     pub(crate) fn open_explorer_target(
@@ -673,12 +683,7 @@ impl Workspace {
                         ObjectKind::Sequence,
                         cx,
                     ),
-                    (NodeKind::Routine, _, Some(leaf)) => match node.database.clone() {
-                        Some(database) => {
-                            self.open_object_on(&node.profile, database, leaf.target, window, cx)
-                        }
-                        None => self.open_explorer_target(leaf.target, window, cx),
-                    },
+                    (NodeKind::Routine, _, Some(_)) => self.open_node(node, window, cx),
                     _ => {}
                 }
             }
@@ -723,6 +728,118 @@ impl Workspace {
         }
     }
 
+    /// What `action` does to every row the connections tree has selected. An
+    /// action the rows do not all offer does nothing. Nothing here sends a
+    /// statement dbdelve writes: a definition is the driver's own read, and a
+    /// refresh its own catalog read.
+    pub(crate) fn run_selection_action(
+        &mut self,
+        action: SelectionAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let nodes = self.selected_nodes(cx);
+        if !self.selection_offers(&nodes).contains(&action) {
+            return;
+        }
+        match action {
+            SelectionAction::OpenAll => {
+                for node in &nodes {
+                    self.open_node(node, window, cx);
+                }
+            }
+            SelectionAction::CopyNames => {
+                let names: Vec<&str> = nodes.iter().map(|node| node.name.as_str()).collect();
+                cx.write_to_clipboard(ClipboardItem::new_string(names.join("\n")));
+            }
+            SelectionAction::CopyDdl => self.copy_definitions(nodes, cx),
+            SelectionAction::ShowDdl => match nodes.as_slice() {
+                [only] => self.run_node_action(only, NodeAction::ShowDdl, window, cx),
+                _ => self.show_definitions(nodes, cx),
+            },
+            SelectionAction::Pin => self.pin_all(&nodes, cx),
+            SelectionAction::Refresh => self.refresh_all(&nodes, cx),
+        }
+    }
+
+    /// Pin every object of `nodes` that is not pinned yet, each on its own
+    /// connection. A row of another database names an object the shortcuts
+    /// cannot hold, which is why it is not offered the pin either.
+    fn pin_all(&mut self, nodes: &[SelectedNode], cx: &mut Context<Self>) {
+        for node in nodes {
+            let Some(leaf) = node.leaf else {
+                continue;
+            };
+            if !self.make_front(&node.profile, cx)
+                || self.elsewhere(node.database.clone()).is_some()
+            {
+                continue;
+            }
+            let Some(member) = self.member_in(&node.profile, leaf.target) else {
+                continue;
+            };
+            let pin = Pin::Member(member);
+            if self
+                .profile()
+                .is_some_and(|profile| profile.shortcuts.pinned(&pin))
+            {
+                continue;
+            }
+            self.toggle_pin(pin, cx);
+        }
+    }
+
+    /// Read again each connection or database `nodes` belong to, once. A
+    /// connection's own refresh reads every database of it that is open as
+    /// well, so those are not asked for twice.
+    fn refresh_all(&mut self, nodes: &[SelectedNode], cx: &mut Context<Self>) {
+        // Which database a row is in depends on the connection being in
+        // front, so each is brought there to be asked.
+        let mut targets: Vec<(String, Option<String>)> = Vec::new();
+        for node in nodes {
+            if self.make_front(&node.profile, cx) {
+                let target = (node.profile.clone(), self.elsewhere(node.database.clone()));
+                if !targets.contains(&target) {
+                    targets.push(target);
+                }
+            }
+        }
+        // A connection's own first: it reads the open databases after it.
+        for (profile, _) in targets.iter().filter(|(_, database)| database.is_none()) {
+            if self.make_front(profile, cx) {
+                self.refresh_schema(cx);
+            }
+        }
+        for (profile, database) in &targets {
+            let Some(database) = database else {
+                continue;
+            };
+            let covered = targets.contains(&(profile.clone(), None))
+                && self.profiles.iter().any(|found| {
+                    found.id == *profile
+                        && matches!(found.bound.get(database), Some(BoundSession::Open(_)))
+                });
+            if !covered {
+                self.reload_database(profile, database.clone(), cx);
+            }
+        }
+    }
+
+    /// Open the object `node` is on its own connection, which comes to the
+    /// front first, as a click on its row does.
+    fn open_node(&mut self, node: &SelectedNode, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(leaf) = node.leaf else {
+            return;
+        };
+        if !self.make_front(&node.profile, cx) {
+            return;
+        }
+        match node.database.clone() {
+            Some(database) => self.open_object_on(&node.profile, database, leaf.target, window, cx),
+            None => self.open_explorer_target(leaf.target, window, cx),
+        }
+    }
+
     /// Move the connection in front onto the schema row `name`, which is a
     /// database where `is_database`. Whether it is there now: a refusal is the
     /// notice it set, and nothing moved.
@@ -761,6 +878,23 @@ impl Workspace {
         database.filter(|database| own.as_ref() != Some(database))
     }
 
+    /// The connection of `database` (`None` for its own) of the connection
+    /// `id`, in front or not, by id and generation, with how to reach it.
+    /// Another database's is its session, which a read with none open opens
+    /// first.
+    fn route_in(&self, id: &str, database: Option<String>) -> Option<(String, u64, Routed)> {
+        let profile = self.profiles.iter().find(|found| found.id == id)?;
+        let own = profile.active_database();
+        let database = database.filter(|database| own.as_ref() != Some(database));
+        let routed = profile.route(database.map(|database| Binding {
+            database,
+            schema: None,
+        }));
+        routed
+            .is_available()
+            .then(|| (profile.id.clone(), profile.generation, routed))
+    }
+
     /// Ask for `schema.name`'s definition over the connection of its
     /// database, `None` for the profile's own: another database's is read over
     /// that database's session, which a read with none open opens first.
@@ -773,19 +907,21 @@ impl Workspace {
         kind: ObjectKind,
         cx: &mut Context<Self>,
     ) -> Option<DdlRead> {
-        let profile = self.profile()?;
-        // The own database is the profile's own connection, not a session of
-        // its own: asking it for itself by name would open a second one.
-        let database =
-            database.filter(|database| profile.active_database().as_ref() != Some(database));
-        let routed = profile.route(database.map(|database| Binding {
-            database,
-            schema: None,
-        }));
-        if !routed.is_available() {
-            return None;
-        }
-        let (profile_id, generation) = (profile.id.clone(), profile.generation);
+        let id = self.profile()?.id.clone();
+        self.read_ddl_on(&id, database, schema, name, kind, cx)
+    }
+
+    /// [`Self::read_ddl`] of an object of the connection `id`, in front or not.
+    fn read_ddl_on(
+        &mut self,
+        id: &str,
+        database: Option<String>,
+        schema: String,
+        name: String,
+        kind: ObjectKind,
+        cx: &mut Context<Self>,
+    ) -> Option<DdlRead> {
+        let (profile_id, generation, routed) = self.route_in(id, database)?;
         let task = self.run_routed(
             &profile_id,
             generation,
@@ -803,6 +939,168 @@ impl Workspace {
             cx,
         );
         Some((profile_id, generation, task))
+    }
+
+    /// Read the definition of each of `nodes` in turn, one at a time, over
+    /// the connection and database it is in. `each` is told as every one
+    /// lands, and says whether to go on; `done` is given them all. A read
+    /// that fails is its own answer, and the rest are still read.
+    fn read_definitions(
+        &mut self,
+        nodes: Vec<SelectedNode>,
+        mut each: impl FnMut(&mut Self, usize, &Result<String, String>, &mut Context<Self>) -> bool
+        + 'static,
+        done: impl FnOnce(&mut Self, Vec<Result<String, String>>, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |workspace, cx| {
+            let mut results = Vec::new();
+            for (index, node) in nodes.iter().enumerate() {
+                let Ok(read) = workspace.update(cx, |workspace, cx| {
+                    let kind = match node.kind {
+                        NodeKind::Relation(kind) => ObjectKind::Relation(kind),
+                        NodeKind::Sequence => ObjectKind::Sequence,
+                        _ => return None,
+                    };
+                    workspace.read_ddl_on(
+                        &node.profile,
+                        node.database.clone(),
+                        node.schema.clone()?,
+                        node.name.clone(),
+                        kind,
+                        cx,
+                    )
+                }) else {
+                    return;
+                };
+                let result = match read {
+                    Some((profile, generation, task)) => {
+                        let answer = task.await;
+                        let current = workspace
+                            .update(cx, |workspace, _| {
+                                workspace.issued_to(&profile, generation).is_some()
+                            })
+                            .unwrap_or(false);
+                        match answer {
+                            _ if !current => {
+                                Err("The connection was closed before the definition arrived."
+                                    .to_string())
+                            }
+                            Ok(ddl) => Ok(ddl),
+                            Err(error) => Err(format!("Could not read the definition: {error}")),
+                        }
+                    }
+                    None => Err("The connection is not open.".to_string()),
+                };
+                match workspace.update(cx, |workspace, cx| each(workspace, index, &result, cx)) {
+                    Ok(true) => results.push(result),
+                    _ => return,
+                }
+            }
+            _ = workspace.update(cx, |workspace, cx| done(workspace, results, cx));
+        })
+        .detach();
+    }
+
+    /// Put every definition of `nodes` on the clipboard, a blank line between
+    /// them. A definition that could not be read is said so and left out.
+    fn copy_definitions(&mut self, nodes: Vec<SelectedNode>, cx: &mut Context<Self>) {
+        self.clear_notice();
+        let names: Vec<String> = nodes.iter().map(|node| node.name.clone()).collect();
+        self.read_definitions(
+            nodes,
+            |_, _, _, _| true,
+            move |workspace, results, cx| {
+                let mut texts = Vec::new();
+                let mut refusals = Vec::new();
+                for (name, result) in names.iter().zip(results) {
+                    match result {
+                        Ok(text) if !text.is_empty() => texts.push(text),
+                        Ok(_) => {}
+                        Err(error) => refusals.push(format!("{name}: {error}")),
+                    }
+                }
+                let copied = texts.len();
+                if copied > 0 {
+                    cx.write_to_clipboard(ClipboardItem::new_string(texts.join("\n\n")));
+                }
+                match (refusals.is_empty(), copied) {
+                    (true, _) => workspace.confirm(
+                        match copied {
+                            1 => "Copied the CREATE statement.".to_string(),
+                            n => format!("Copied {n} CREATE statements."),
+                        },
+                        cx,
+                    ),
+                    (false, _) => workspace.note(refusals.join(" "), cx),
+                }
+            },
+            cx,
+        );
+    }
+
+    /// The `Show DDL` dialog over several objects: each definition under its
+    /// name, read one after the other and drawn as it lands. The connection
+    /// of the last is in front, which is the one whose dialog is drawn.
+    fn show_definitions(&mut self, nodes: Vec<SelectedNode>, cx: &mut Context<Self>) {
+        let Some(last) = nodes.last() else {
+            return;
+        };
+        self.clear_notice();
+        if !self.make_front(&last.profile.clone(), cx) {
+            return;
+        }
+        let across = nodes.iter().any(|node| node.profile != nodes[0].profile);
+        let sections: Vec<DdlSection> = nodes
+            .iter()
+            .map(|node| {
+                let kind = match node.kind {
+                    NodeKind::Relation(kind) => ObjectKind::Relation(kind),
+                    _ => ObjectKind::Sequence,
+                };
+                let mut title = ddl_title(kind, node.schema.as_deref().unwrap_or(""), &node.name);
+                // Two connections can hold the same `main.birds`.
+                if across && let Some(profile) = self.profiles.iter().find(|p| p.id == node.profile)
+                {
+                    title = format!("{title} ({})", profile.name);
+                }
+                DdlSection {
+                    title,
+                    text: DdlText::Loading,
+                }
+            })
+            .collect();
+        self.last_ddl_request += 1;
+        let request = self.last_ddl_request;
+        self.ddl_view = Some(DdlView {
+            profile: nodes[nodes.len() - 1].profile.clone(),
+            name: String::new(),
+            sections,
+            request,
+        });
+        cx.notify();
+        self.read_definitions(
+            nodes,
+            move |workspace, index, result, cx| {
+                // Closed, or put up for another object, since: that answer is
+                // not this dialog's, nor are the ones to come.
+                let Some(view) = workspace
+                    .ddl_view
+                    .as_mut()
+                    .filter(|view| view.request == request)
+                else {
+                    return false;
+                };
+                view.sections[index].text = match result {
+                    Ok(ddl) => DdlText::Ready(ddl.clone()),
+                    Err(error) => DdlText::Failed(error.clone()),
+                };
+                cx.notify();
+                true
+            },
+            |_, _, _| {},
+            cx,
+        );
     }
 
     pub(crate) fn copy_ddl(
@@ -856,12 +1154,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.clear_notice();
-        let kind_name = crate::palette::kind_label(kind);
-        let title = format!(
-            "{}{} {schema}.{relation}",
-            kind_name[..1].to_uppercase(),
-            &kind_name[1..]
-        );
+        let title = ddl_title(kind, &schema, &relation);
         let shown = relation.clone();
         let Some((profile_id, generation, task)) =
             self.read_ddl(database, schema, relation, kind, cx)
@@ -873,8 +1166,10 @@ impl Workspace {
         self.ddl_view = Some(DdlView {
             profile: profile_id.clone(),
             name: shown,
-            title,
-            text: DdlText::Loading,
+            sections: vec![DdlSection {
+                title,
+                text: DdlText::Loading,
+            }],
             request,
         });
         cx.notify();
@@ -895,7 +1190,7 @@ impl Workspace {
                     else {
                         return;
                     };
-                    view.text = match result {
+                    view.sections[0].text = match result {
                         Ok(ddl) => DdlText::Ready(ddl),
                         Err(error) => {
                             DdlText::Failed(format!("Could not read the definition: {error}"))
@@ -930,13 +1225,34 @@ impl Workspace {
         true
     }
 
-    /// Put the shown definition on the clipboard. Nothing when there is none
-    /// to put there: still loading, failed, or empty.
+    /// Put the shown definitions on the clipboard, a blank line between them.
+    /// Nothing when there is none to put there: still loading, failed, or
+    /// empty.
     pub(crate) fn copy_shown_ddl(&mut self, cx: &mut Context<Self>) {
-        let Some(DdlView {
-            text: DdlText::Ready(text),
-            ..
-        }) = self.ddl_view_in_front()
+        let Some(view) = self.ddl_view_in_front() else {
+            return;
+        };
+        let ready: Vec<&str> = view
+            .sections
+            .iter()
+            .filter_map(|section| match &section.text {
+                DdlText::Ready(text) if !text.is_empty() => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        if ready.is_empty() {
+            return;
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(ready.join("\n\n")));
+        self.confirm("Copied the CREATE statement.".into(), cx);
+    }
+
+    /// Put one of the listed definitions on the clipboard.
+    pub(crate) fn copy_ddl_section(&mut self, at: usize, cx: &mut Context<Self>) {
+        let Some(DdlText::Ready(text)) = self
+            .ddl_view_in_front()
+            .and_then(|view| view.sections.get(at))
+            .map(|section| &section.text)
         else {
             return;
         };
