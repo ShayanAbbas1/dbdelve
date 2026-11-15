@@ -95,7 +95,8 @@ passes first. It admits exactly four shapes:
   bytes (`Engine::binary_literal`): `E'\\x…'` on Postgres, `X'…'` on MySQL,
   MariaDB and SQLite, `0x…` on SQL Server, hex digits in pairs and nothing
   else between the quotes, read off the text because the grammar reads
-  `X'00' 'aa'` as one literal. No number, column, function call,
+  `X'00' 'aa'` as one literal, with no comment anywhere in the batch (the
+  grammar reads MySQL's `#` as an operator, so a `#` counts). No number, column, function call,
   concatenation or subquery is a value DBDelve sets. The predicate is not
   read on this arm (ClickHouse's, which names rows by every value, is);
   the bytes literal is admitted only as a set value, never in a key, a

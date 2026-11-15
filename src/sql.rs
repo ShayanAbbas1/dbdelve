@@ -867,10 +867,11 @@ pub(crate) fn generated_write(spec: &SqlSpec, sql: &str) -> bool {
 
     // One insert alone, or a batch of updates. A batch of inserts is a shape
     // nothing generates, so admitting it would widen the gate for nobody.
-    // A comment anywhere in an insert refuses it: MySQL runs `/*! … */` as
-    // SQL, and the grammar hides one inside a name or between tokens the shape
-    // checks below read only by kind.
-    ((kinds == ["insert"] && literal_insert(statements[0], sql) && !commented(root)) || updates)
+    // A comment anywhere refuses either: MySQL runs `/*! … */` as SQL, and
+    // the grammar hides one inside a name or between tokens the shape checks
+    // read only by kind, beside a set value or in a predicate never read.
+    ((kinds == ["insert"] && literal_insert(statements[0], sql)) || updates)
+        && !commented(root, sql)
         && !deletes_anything(root)
 }
 
@@ -1660,9 +1661,18 @@ fn bytes_literal(spec: &SqlSpec, node: Node, sql: &str) -> bool {
         })
 }
 
-fn commented(node: Node) -> bool {
+/// A comment anywhere under `node`. The grammar reads MySQL's `#` comment as
+/// an operator running to the end of the line, so that counts too.
+fn commented(node: Node, sql: &str) -> bool {
     let mut cursor = node.walk();
-    matches!(node.kind(), "comment" | "marginalia") || node.children(&mut cursor).any(commented)
+    matches!(node.kind(), "comment" | "marginalia")
+        || (node.kind() == "op_other"
+            && sql
+                .get(node.byte_range())
+                .is_some_and(|text| text.starts_with('#')))
+        || node
+            .children(&mut cursor)
+            .any(|child| commented(child, sql))
 }
 
 /// [`parse`] for the write gate, refusing on an engine where a backslash
@@ -6918,6 +6928,35 @@ mod tests {
         assert!(odd.ends_with(r#""hash" = N'0x1 OR 1=1'"#), "{odd}");
         assert!(!is_generated_write(r#"DELETE FROM t WHERE "id" = 7"#));
         assert!(!is_generated_write(r#"DELETE FROM t WHERE "id" = 0x"#));
+    }
+
+    #[test]
+    fn a_comment_anywhere_in_an_update_refuses_it() {
+        // MySQL and MariaDB run a `/*! … */` body; Oracle and others read
+        // `/*+ … */` as hints. Nothing dbdelve generates carries a comment.
+        for engine in [
+            Engine::MySql,
+            Engine::MariaDb,
+            Engine::Postgres,
+            Engine::SqlServer,
+        ] {
+            let plain = r#"UPDATE "s"."t" SET "a" = '0' WHERE "id" = '7'"#;
+            assert!(is_generated_write_on(engine, plain), "{engine:?}");
+            for sql in [
+                r#"UPDATE "s"."t" SET "a" = '0' /*! + SLEEP(1) */ WHERE "id" = '7'"#,
+                r#"UPDATE "s"."t" SET "a" = /*+ x */ '0' WHERE "id" = '7'"#,
+                "UPDATE \"s\".\"t\" SET \"a\" = '0' -- x\n WHERE \"id\" = '7'",
+                "UPDATE \"s\".\"t\" SET \"a\" = '0' # x\n WHERE \"id\" = '7'",
+                r#"UPDATE "s"."t" SET "a" = '0' WHERE "id" = '7' /*! OR 1=1 */"#,
+                r#"UPDATE "s"."t" SET "a" = '0' WHERE /*+ x */ "id" = '7'"#,
+                "UPDATE \"s\".\"t\" SET \"a\" = '0' WHERE \"id\" = '7' -- x",
+                "UPDATE \"s\".\"t\" SET \"a\" = '0' WHERE \"id\" = '7' # x",
+                "UPDATE \"s\".\"t\" SET \"a\" = '0' WHERE \"id\" = '7' # x\n OR 1=1",
+                r#"BEGIN; UPDATE "s"."t" SET "a" = '0' WHERE "id" = /*! 7 OR */ '7'; COMMIT"#,
+            ] {
+                assert!(!is_generated_write_on(engine, sql), "{engine:?} {sql}");
+            }
+        }
     }
 
     #[test]
