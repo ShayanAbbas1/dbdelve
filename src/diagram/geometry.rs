@@ -27,8 +27,10 @@ pub const MAX_ZOOM: f32 = 4.0;
 /// the precision a pixel needs.
 pub const WORLD_LIMIT: f32 = 1.0e6;
 
-/// Between the levels the design names (100%, about 70%, 45% and below).
-const KEYS_BELOW: f32 = 0.85;
+/// Under this a row is shorter on screen (24 px at 100%, 13 here) than the
+/// [`MIN_TEXT_SIZE`] text it holds, so a card is drawn as a name block. Every
+/// zoom above it draws text at that floor until 100%, so columns are as
+/// legible here as keys: there is no level between.
 pub const NAMES_BELOW: f32 = 0.55;
 
 /// The text sizes a zoom may pick, as multiples of the user's base size. gpui
@@ -132,8 +134,8 @@ impl Rect {
 pub enum Detail {
     /// Every column with its type, and the marks.
     Columns,
-    /// The name and the key columns, without types. Keys-only is this at
-    /// every zoom that shows rows at all.
+    /// The name and the key columns, without types: Keys only, at every zoom
+    /// that shows rows at all.
     Keys,
     /// A name block. Edges meet its sides, with no marks.
     Names,
@@ -141,12 +143,10 @@ pub enum Detail {
 
 impl Detail {
     pub fn at(zoom: f32, keys_only: bool) -> Self {
-        if zoom < NAMES_BELOW {
-            Self::Names
-        } else if keys_only || zoom < KEYS_BELOW {
-            Self::Keys
-        } else {
-            Self::Columns
+        match (zoom < NAMES_BELOW, keys_only) {
+            (true, _) => Self::Names,
+            (false, true) => Self::Keys,
+            (false, false) => Self::Columns,
         }
     }
 
@@ -951,23 +951,11 @@ impl Layout {
             let cards = self.cards_bounds(detail, 1.0);
             Transform::fitting(cards, viewport, margin).zoom
         };
-        if self.detail(cards_fit(Detail::Columns)) == Detail::Columns {
-            let columns = self.drawn_bounds(Detail::Columns, 1.0);
-            let fit = Transform::fitting(columns, viewport, margin);
-            if self.detail(fit.zoom) == Detail::Columns {
+        let rows = self.detail(1.0);
+        if self.detail(cards_fit(rows)) == rows {
+            let fit = Transform::fitting(self.drawn_bounds(rows, 1.0), viewport, margin);
+            if self.detail(fit.zoom) == rows {
                 return fit;
-            }
-        }
-        // Keys draw the same at every zoom.
-        if self.detail(cards_fit(Detail::Keys)) != Detail::Names {
-            let keys = self.drawn_bounds(Detail::Keys, 1.0);
-            let fit = Transform::fitting(keys, viewport, margin);
-            if self.detail(fit.zoom) != Detail::Names {
-                let zoom = match self.keys_only {
-                    true => fit.zoom,
-                    false => fit.zoom.min(KEYS_BELOW - 0.01),
-                };
-                return Transform::fitting_at(keys, viewport, zoom);
             }
         }
         // A name block is the same height on screen at any zoom, so its
@@ -1233,6 +1221,38 @@ mod tests {
         }
     }
 
+    /// A `users` table of 41 columns drew its four key rows and nothing else
+    /// at every zoom under 85%, the zooms a fit lands on, with Keys only off,
+    /// and its bottom edge could not make it taller there.
+    #[test]
+    fn with_keys_only_off_every_zoom_that_draws_rows_draws_columns_a_drag_can_open() {
+        let mut users = graph(3, &[(0, 1), (0, 2)]);
+        let columns = &mut users.tables[0].columns;
+        columns.extend((0..38).map(|column| note(format!("note_{column}"))));
+        columns[3].unique = true;
+        let layout = schema(&users, false);
+        assert_eq!(layout.cards[0].key_rows, [0, 1, 2, 3]);
+        for zoom in [NAMES_BELOW, 0.6, 0.67, 0.75, 0.84, 1.0, 2.0] {
+            let detail = layout.detail(zoom);
+            assert_eq!(detail, Detail::Columns, "at {zoom}");
+            assert_eq!(layout.rows(0, detail).count(), AUTO_ROWS - 1, "at {zoom}");
+            assert_eq!(
+                layout.more(0, detail).map(|more| more.hidden),
+                Some(41 - (AUTO_ROWS - 1))
+            );
+            assert!(layout.heightens(0, detail));
+            assert_eq!(
+                layout.dragged_height(0, AUTO_ROWS + 3, detail),
+                Some(card_height(AUTO_ROWS + 3)),
+                "a drag down past the cap opens it at {zoom}"
+            );
+        }
+        assert_eq!(layout.detail(NAMES_BELOW - 0.01), Detail::Names);
+        let keys = schema(&users, true);
+        assert_eq!(keys.detail(0.7), Detail::Keys);
+        assert_eq!(keys.rows(0, Detail::Keys).count(), 4);
+    }
+
     #[test]
     fn a_tall_card_is_laid_out_at_thirty_rows_keys_first_and_a_drag_opens_it() {
         // Table 1: `id`, 100 notes, then its key into table 0.
@@ -1303,12 +1323,6 @@ mod tests {
             keys.more(1, Detail::Keys).map(|more| more.hidden),
             Some(42 - (AUTO_ROWS - 1))
         );
-        let full = schema(&tall, false);
-        assert_eq!(
-            full.rows(1, Detail::Keys).count(),
-            AUTO_ROWS - 1,
-            "and the key rows drawn zoomed out of every column"
-        );
     }
 
     #[test]
@@ -1327,8 +1341,8 @@ mod tests {
         let small = graph(3, &[(1, 0), (2, 1)]);
         assert_eq!(level(&small, false), (Detail::Columns, 1.0));
         assert_eq!(level(&small, true), (Detail::Keys, 1.0));
-        // Five layers of cards too wide for every column at a zoom that
-        // draws them.
+        // Five layers of cards too wide for 100%, which a fit still draws
+        // every column of.
         let mut wide = graph(5, &[(1, 0), (2, 1), (3, 2), (4, 3)]);
         for table in &mut wide.tables {
             table
@@ -1336,8 +1350,8 @@ mod tests {
                 .extend((0..40).map(|column| note(format!("c{column}"))));
         }
         let (detail, zoom) = level(&wide, false);
-        assert_eq!(detail, Detail::Keys);
-        assert!(zoom < KEYS_BELOW, "{zoom} would draw every column");
+        assert_eq!(detail, Detail::Columns);
+        assert!((NAMES_BELOW..1.0).contains(&zoom), "{zoom}");
         let many = graph(400, &[]);
         let (detail, zoom) = level(&many, false);
         assert_eq!(detail, Detail::Names);
@@ -1350,7 +1364,8 @@ mod tests {
     fn the_level_of_detail_follows_the_zoom_and_keys_only_caps_it() {
         assert_eq!(Detail::at(1.0, false), Detail::Columns);
         assert_eq!(Detail::at(MAX_ZOOM, false), Detail::Columns);
-        assert_eq!(Detail::at(0.7, false), Detail::Keys);
+        assert_eq!(Detail::at(0.7, false), Detail::Columns);
+        assert_eq!(Detail::at(NAMES_BELOW, false), Detail::Columns);
         assert_eq!(Detail::at(0.45, false), Detail::Names);
         assert_eq!(Detail::at(MIN_ZOOM, false), Detail::Names);
         assert_eq!(Detail::at(2.0, true), Detail::Keys);
