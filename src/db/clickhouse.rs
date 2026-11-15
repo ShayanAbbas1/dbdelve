@@ -5630,9 +5630,8 @@ mod live {
             ran(&connection, &format!("TRUNCATE TABLE dbdelve_dev.{table}"));
         }
         ran(&connection, &format!("DROP TABLE dbdelve_dev.{table}"));
-        // A NUL the gate refuses, Nested's dotted subcolumns it cannot name,
-        // and a state the server cannot parse from text.
-        assert_eq!(refused, ["fixed", "nested.k", "nested.v", "state"]);
+        // A NUL the gate refuses and a state the server cannot parse from text.
+        assert_eq!(refused, ["fixed", "state"]);
     }
 
     #[test]
