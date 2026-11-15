@@ -943,6 +943,7 @@ impl Workspace {
             );
             return;
         }
+        self.cancel_diagram_reads(index, cx);
         let Some(profile) = self.profiles.get_mut(index) else {
             return;
         };
@@ -1280,6 +1281,9 @@ impl Workspace {
         for object in objects {
             self.stop_run(Tab::Object(object), cx);
             self.cancel_count(object, cx);
+        }
+        if let Some(index) = self.active {
+            self.cancel_diagram_reads(index, cx);
         }
         // A connect still on its way, and every answer issued to this one,
         // land on a generation that is no longer the profile's and are dropped.

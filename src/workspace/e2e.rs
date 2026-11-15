@@ -4215,6 +4215,35 @@ fn a_diagram_read_outlived_by_a_reconnect_is_read_again_for_the_tab_in_front(
     });
 }
 
+/// A reconnect lets go of a read still out from the connection it replaces,
+/// which could stall there and hold the slot the new connection's read needs.
+#[gpui::test]
+fn a_reconnect_cancels_a_diagram_read_still_out_and_reads_again(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, DIAGRAM_SCHEMA);
+        let held = workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_diagram("main".into(), None, window, cx);
+            let index = workspace.active.unwrap();
+            workspace.reconnect(index, cx);
+            let tab = workspace
+                .profile()
+                .unwrap()
+                .session
+                .active_object()
+                .unwrap();
+            matches!(tab.body, ObjectBody::Diagram { side: Some(_), .. })
+        });
+        assert!(!held, "the old read let its slot go");
+        settle(cx);
+        let view = diagram_in_front(&workspace, cx).0;
+        assert!(
+            cx.update(|_, cx| view.read(cx).laid_out()).is_some(),
+            "and the diagram was read on the new connection"
+        );
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn a_double_click_opens_a_diagram_cards_table_and_the_keyboard_the_focused_ones(
     cx: &mut TestAppContext,

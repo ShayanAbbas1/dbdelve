@@ -442,13 +442,34 @@ impl Workspace {
         }) else {
             return;
         };
-        spawn_cancel(cx.background_executor(), move || {
-            if let Some(connection) = side.cancel() {
-                let _ = connection.cancel(&CancelToken::default());
-            }
-        })
-        .detach();
+        stop_side_read(side, cx);
     }
+
+    /// Stops every diagram read still out from the connection a profile is
+    /// letting go, as a closed tab's is: one stalled there would otherwise
+    /// hold its tab's slot, and keep the next connection's read from
+    /// starting, until it answered.
+    pub(crate) fn cancel_diagram_reads(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(profile) = self.profiles.get_mut(index) else {
+            return;
+        };
+        let sides = (profile.session.objects.iter_mut()).filter_map(|tab| match &mut tab.body {
+            ObjectBody::Diagram { side, .. } => side.take(),
+            _ => None,
+        });
+        for side in sides {
+            stop_side_read(side, cx);
+        }
+    }
+}
+
+fn stop_side_read(side: Arc<SideRead<Connection>>, cx: &mut Context<Workspace>) {
+    spawn_cancel(cx.background_executor(), move || {
+        if let Some(connection) = side.cancel() {
+            let _ = connection.cancel(&CancelToken::default());
+        }
+    })
+    .detach();
 }
 
 /// The connection a diagram's read runs on, shared by the tab and the read so
