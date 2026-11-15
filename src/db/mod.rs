@@ -4316,11 +4316,15 @@ mod tests {
                 );
             }
         }
-        // A plugin speaking Postgres writes bytes as any plugin does.
-        assert_eq!(
-            Engine::Postgres.bytes_of("0xDEADBEEF", 64),
-            Some(dead.clone())
-        );
+        // A plugin writes bytes as any plugin does, whatever dialect it
+        // speaks, bare hex's among them.
+        for engine in [Engine::Postgres, Engine::DuckDb, Engine::Snowflake] {
+            assert_eq!(
+                engine.bytes_of("0x6869", 64),
+                Some(b"hi".to_vec()),
+                "{engine:?}"
+            );
+        }
         assert_eq!(Engine::Sqlite.bytes_of("x'", 64), None);
 
         assert!(Engine::Postgres.shows_bytes_as_hex());

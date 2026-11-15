@@ -153,11 +153,13 @@ impl EngineSpec {
 
     /// [`Engine::bytes_of`](super::Engine::bytes_of).
     pub fn bytes_of(&self, value: &str, most: usize) -> Option<Vec<u8>> {
-        self.binary_text
-            .and_then(|text| text.payload(value))
-            // A plugin writes bytes this way whatever dialect it speaks
-            // (`external::rows`), and what asks knows only the dialect.
-            .or_else(|| BinaryText::ZeroX.payload(value))?
+        // A plugin writes bytes this way whatever dialect it speaks
+        // (`external::rows`), and what asks knows only the dialect. Tried
+        // first, since bare hex takes anything; no engine's own spelling
+        // starts with `0x`, `x` being no hex digit.
+        BinaryText::ZeroX
+            .payload(value)
+            .or_else(|| self.binary_text?.payload(value))?
             .decode(most)
     }
 
