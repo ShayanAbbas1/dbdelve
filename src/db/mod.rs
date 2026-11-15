@@ -625,6 +625,36 @@ impl Engine {
         }
     }
 
+    /// Whether a `BEGIN` sent inside an open transaction commits it first.
+    ///
+    /// MySQL and MariaDB do: `START TRANSACTION` implicitly commits the
+    /// current transaction. Postgres warns and keeps the open one, Snowflake
+    /// ignores the second, SQL Server only raises its nesting count, and
+    /// SQLite, Turso and DuckDB refuse the `BEGIN`. Answering `false` where
+    /// unsure keeps statements listed rather than dropping them, which is the
+    /// safe side for the list of what the next `COMMIT` ends.
+    pub fn begin_ends_open_transaction(self) -> bool {
+        matches!(self, Self::MySql | Self::MariaDb)
+    }
+
+    /// Whether a `COMMIT` or `ROLLBACK` that failed with `message` left the
+    /// transaction open on the session, so a profile that read it as ended
+    /// should read it as open again.
+    ///
+    /// Only SQLite is known to: a `COMMIT` that meets `SQLITE_BUSY` or a
+    /// deferred foreign key keeps the transaction for a retry, unless the
+    /// failure is that none was active. Postgres, MySQL and DuckDB roll back
+    /// a transaction whose `COMMIT` fails, and for the others it is not
+    /// known. `false` is the safe answer: a profile reading "open" over a
+    /// session that is not offers a Roll Back for work already committed, and
+    /// cannot be cleared by a `COMMIT` that has nothing to end.
+    pub fn failed_end_keeps_transaction(self, message: &str) -> bool {
+        self == Self::Sqlite
+            && !message
+                .to_ascii_lowercase()
+                .contains("no transaction is active")
+    }
+
     /// Whether `SET column = DEFAULT` is an assignment this engine accepts.
     ///
     /// Where it is not, the gesture has to be withheld rather than attempted.
@@ -5019,6 +5049,49 @@ pub(crate) fn spawn(command: &mut std::process::Command) -> std::io::Result<std:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_mysql_and_mariadb_commit_an_open_transaction_at_a_begin() {
+        for engine in [Engine::MySql, Engine::MariaDb] {
+            assert!(engine.begin_ends_open_transaction(), "{engine:?}");
+        }
+        for engine in [
+            Engine::Postgres,
+            Engine::Sqlite,
+            Engine::Turso,
+            Engine::DuckDb,
+            Engine::SqlServer,
+        ] {
+            assert!(!engine.begin_ends_open_transaction(), "{engine:?}");
+        }
+    }
+
+    #[test]
+    fn only_sqlite_keeps_a_transaction_whose_end_failed_and_not_when_none_was_active() {
+        assert!(Engine::Sqlite.failed_end_keeps_transaction("database is locked"));
+        assert!(
+            !Engine::Sqlite
+                .failed_end_keeps_transaction("cannot commit - no transaction is active")
+        );
+        assert!(
+            !Engine::Sqlite
+                .failed_end_keeps_transaction("cannot rollback - no transaction is active")
+        );
+        for engine in [
+            Engine::Postgres,
+            Engine::MySql,
+            Engine::MariaDb,
+            Engine::Turso,
+            Engine::DuckDb,
+            Engine::SqlServer,
+            Engine::Snowflake,
+        ] {
+            assert!(
+                !engine.failed_end_keeps_transaction("could not commit"),
+                "{engine:?}"
+            );
+        }
+    }
 
     #[test]
     fn a_cancel_before_or_between_a_graph_reads_statements_holds_back_the_rest() {

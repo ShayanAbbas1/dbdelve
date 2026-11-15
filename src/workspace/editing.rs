@@ -2512,7 +2512,14 @@ impl Workspace {
         let pending = results.read(cx).delegate().pending_updates();
         // Nothing partial runs: a batch missing one of its rows is not the
         // change the user made.
-        let batch = match update_batch(self.engine(), &pending) {
+        // Inside the user's open transaction the edit joins it, as a single
+        // row's does, rather than bracketing itself and ending it.
+        let joining = self.profile().is_some_and(|profile| profile.in_transaction);
+        let written = match joining {
+            true => sql::update_batch_joining(self.engine(), &pending),
+            false => update_batch(self.engine(), &pending),
+        };
+        let batch = match written {
             Ok(batch) => batch,
             Err(message) => {
                 self.note(message, cx);

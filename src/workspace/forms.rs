@@ -1221,9 +1221,12 @@ impl Workspace {
             self.focus_before_dialog.replace(window.focused(cx));
         }
         if raised {
-            // Every dialog opens on its primary button, as a native one does.
-            // The ring is drawn by the dialogs above, before this ran.
-            self.dialog_choice.set(0);
+            // Every dialog opens on its primary button, as a native one does,
+            // except the one that ends the user's transaction: it opens on
+            // Cancel, so an `enter` held or repeated from the click that
+            // raised it cancels rather than commits or discards. The ring is
+            // drawn by the dialogs above, before this ran.
+            self.dialog_choice.set(first_choice(front));
             cx.on_next_frame(window, |_, _, cx| cx.notify());
         }
         // The palette is stacked over the dialogs and holds the keyboard
@@ -1315,6 +1318,7 @@ impl Workspace {
             // keyboard through and whose buttons act through their own handlers.
             Some("import-rows" | "schema-export" | "filter-picker" | "role-form") | None => 0,
             Some("show-grants") => 1,
+            Some("end-transaction") => 3,
             Some(_) => 2 + checkbox,
         }
     }
@@ -1451,6 +1455,9 @@ impl Workspace {
             ("discard", _) => _ = self.cancel_discard_close(cx),
             ("forget-file", 0) => self.confirm_forget_file(cx),
             ("forget-file", _) => _ = self.cancel_forget_file(cx),
+            ("end-transaction", 0) => self.end_transaction_for_auto("COMMIT", window, cx),
+            ("end-transaction", 1) => self.end_transaction_for_auto("ROLLBACK", window, cx),
+            ("end-transaction", _) => _ = self.cancel_auto_commit_prompt(cx),
             ("delete", 0) => match deleting {
                 Some(PendingDelete::Query(name)) => self.delete_saved_query(name, window, cx),
                 Some(PendingDelete::Folder(name, _)) => self.delete_folder(name, cx),
@@ -2073,6 +2080,180 @@ impl Workspace {
                                             move |_, _, cx| {
                                                 _ = close_workspace.update(cx, |workspace, cx| {
                                                     workspace.close_ddl_view(cx);
+                                                });
+                                            },
+                                        ),
+                                        t,
+                                    ),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// What turning auto-commit back on asks while a transaction is open:
+    /// commit it, roll it back, or leave it, with the statements it has run
+    /// behind a toggle. Drawn only while the transaction is still open under
+    /// a switch still reading Manual, so one that ended under the prompt
+    /// draws nothing.
+    pub(crate) fn render_end_transaction(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = popup_theme(cx);
+        let profile = self.profile()?;
+        let prompt = profile.session.auto_commit_prompt.as_ref()?;
+        if !profile.in_transaction || profile.auto_commit {
+            return None;
+        }
+        let syntax = profile.config.engine().syntax();
+        let statements = &profile.transaction_statements;
+        let shown = prompt.statements_shown;
+        let highlight = cx.theme().highlight_theme.clone();
+        let code = fonts(cx).editor.clone();
+        let cancel = cx.entity().downgrade();
+        let rollback = cancel.clone();
+        let commit = cancel.clone();
+        let toggle = cancel.clone();
+
+        let list = shown.then(|| {
+            div()
+                .id("end-transaction-statement-list")
+                .max_h(px(layout::DIALOG_TEXT_MAX_HEIGHT))
+                .overflow_y_scroll()
+                .p(px(layout::SPACE_SM))
+                .flex()
+                .flex_col()
+                .gap(px(layout::SPACE_SM))
+                .rounded(px(layout::RADIUS_CONTROL))
+                .bg(t.surface)
+                .font_family(code)
+                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                .text_color(t.text)
+                .children(statements.iter().enumerate().map(|(i, statement)| {
+                    div()
+                        .debug_selector(move || format!("end-transaction-statement-{i}"))
+                        .children(
+                            code_lines(statement, syntax, &highlight)
+                                .into_iter()
+                                .map(|line| div().child(line)),
+                        )
+                }))
+        });
+
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .occlude()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    dialog(t)
+                        .child(section_label(t, "Auto-commit"))
+                        .child(
+                            div()
+                                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                                .text_color(t.text_muted)
+                                .child(
+                                    "A transaction is open on this connection's own session. \
+                                     Turning auto-commit on ends it: commit what it ran, or \
+                                     roll it back.",
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("end-transaction-statements")
+                                .debug_selector(|| "end-transaction-statements".into())
+                                .flex()
+                                .items_center()
+                                .gap(px(layout::SPACE_XS))
+                                .cursor_pointer()
+                                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                                .text_color(t.text_muted)
+                                .child(row_icon(
+                                    t,
+                                    match shown {
+                                        true => icon::CHEVRON_DOWN,
+                                        false => icon::CHEVRON_RIGHT,
+                                    },
+                                ))
+                                .child(format!(
+                                    "Statements in this transaction ({})",
+                                    statements.len()
+                                ))
+                                .on_click(move |_, _, cx| {
+                                    _ = toggle.update(cx, |workspace, cx| {
+                                        workspace.toggle_auto_commit_statements(cx);
+                                    });
+                                }),
+                        )
+                        .children(list)
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap(px(layout::SPACE_SM))
+                                .child(
+                                    self.choice(
+                                        "end-transaction",
+                                        2,
+                                        button(
+                                            "cancel-end-transaction",
+                                            "Cancel",
+                                            Tone::Quiet,
+                                            Control::Standard,
+                                            t,
+                                        )
+                                        .on_click(
+                                            move |_, _, cx| {
+                                                _ = cancel.update(cx, |workspace, cx| {
+                                                    workspace.cancel_auto_commit_prompt(cx);
+                                                });
+                                            },
+                                        ),
+                                        t,
+                                    ),
+                                )
+                                .child(
+                                    self.choice(
+                                        "end-transaction",
+                                        1,
+                                        button(
+                                            "rollback-end-transaction",
+                                            "Roll back",
+                                            Tone::Danger,
+                                            Control::Standard,
+                                            t,
+                                        )
+                                        .on_click(
+                                            move |_, window, cx| {
+                                                _ = rollback.update(cx, |workspace, cx| {
+                                                    workspace.end_transaction_for_auto(
+                                                        "ROLLBACK", window, cx,
+                                                    );
+                                                });
+                                            },
+                                        ),
+                                        t,
+                                    ),
+                                )
+                                .child(
+                                    self.choice(
+                                        "end-transaction",
+                                        0,
+                                        button(
+                                            "commit-end-transaction",
+                                            "Commit",
+                                            Tone::Primary,
+                                            Control::Standard,
+                                            t,
+                                        )
+                                        .on_click(
+                                            move |_, window, cx| {
+                                                _ = commit.update(cx, |workspace, cx| {
+                                                    workspace.end_transaction_for_auto(
+                                                        "COMMIT", window, cx,
+                                                    );
                                                 });
                                             },
                                         ),
@@ -4675,6 +4856,18 @@ fn footer_status(
 
 /// What a dialog button does when pressed.
 type DialogAnswer = fn(&mut Workspace, &mut Window, &mut Context<Workspace>);
+
+/// The button the ring starts on when `dialog` goes up, counted from the right:
+/// Cancel for the one that ends the user's transaction, the primary for every
+/// other.
+fn first_choice(dialog: Option<&str>) -> usize {
+    match dialog {
+        // Commit and Roll back cannot be undone, so an `enter` held or
+        // repeated from the click that raised it opens nothing it should not.
+        Some("end-transaction") => 2,
+        _ => 0,
+    }
+}
 
 #[cfg(test)]
 mod tests {

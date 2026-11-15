@@ -2977,6 +2977,7 @@ impl Render for Workspace {
                     ("discard", self.render_discard_confirmation(cx)),
                     ("forget-file", self.render_forget_file(cx)),
                     ("schema-export", self.render_schema_export(cx)),
+                    ("end-transaction", self.render_end_transaction(cx)),
                     ("pending-export", self.render_pending_export(cx)),
                     ("pending-run", self.render_pending_run(cx)),
                     ("queue-failure", self.render_queue_failure(cx)),

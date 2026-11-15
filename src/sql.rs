@@ -2921,12 +2921,32 @@ pub(crate) fn update_batch(engine: Engine, rows: &[PendingRow]) -> Result<String
     }
 }
 
+/// [`update_batch`] for a session that already has a transaction of the
+/// user's open: no brackets of its own, so the batch runs inside that
+/// transaction and is committed or rolled back with it. Bracketed, its
+/// `COMMIT` would end the user's transaction, and on MySQL and MariaDB its
+/// `START TRANSACTION` would commit it first.
+pub(crate) fn update_batch_joining(engine: Engine, rows: &[PendingRow]) -> Result<String, String> {
+    match engine.syntax() {
+        Syntax::Sql => sql_statements(engine.spec(), rows, false),
+        _ => update_batch(engine, rows),
+    }
+}
+
 pub(crate) fn sql_update_batch(spec: &EngineSpec, rows: &[PendingRow]) -> Result<String, String> {
+    sql_statements(spec, rows, true)
+}
+
+fn sql_statements(spec: &EngineSpec, rows: &[PendingRow], bracket: bool) -> Result<String, String> {
     if rows.is_empty() {
         return Err(NO_EDITS.into());
     }
     let statements = update_statements(spec, rows).ok_or(NO_KEY)?;
-    Ok(bracketed(spec, statements.join("\n"), statements.len()))
+    let batch = statements.join("\n");
+    Ok(match bracket {
+        true => bracketed(spec, batch, statements.len()),
+        false => batch,
+    })
 }
 
 const NO_EDITS: &str = "There are no edits to apply.";
@@ -5168,6 +5188,48 @@ pub(crate) fn transaction_uncertain(engine: Engine, sql: &str) -> bool {
             Keyword::START => keywords.get(at + 1) == Some(&Keyword::TRANSACTION),
             _ => false,
         })
+}
+
+/// Whether `sql` ends a transaction somewhere in it. A submission can end the
+/// open transaction and open the next in one go (`COMMIT;` then `BEGIN;`), and
+/// [`Leaves`] only says where it lands.
+pub(crate) fn ends_transaction(engine: Engine, sql: &str) -> bool {
+    let Some(dialect) = dialect(engine).filter(|_| !engine.spec().sql.stateless_requests) else {
+        return false;
+    };
+    SqlParser::parse_sql(dialect.as_ref(), sql).is_ok_and(|statements| {
+        statements.iter().any(|statement| {
+            matches!(
+                statement,
+                Statement::Commit { .. }
+                    | Statement::Rollback {
+                        savepoint: None,
+                        ..
+                    }
+            )
+        })
+    })
+}
+
+/// What `sql` runs after the last statement that ends a transaction: all of
+/// it when none does or the text cannot be read, nothing when it ends on the
+/// end. What a submission leaves inside the transaction it opens, for a
+/// `COMMIT;` and `BEGIN;` sent as one is not part of the transaction after it.
+///
+/// Cut by [`Buffer::for_engine`], the same boundaries a run is cut at, with
+/// each piece read as [`ends_transaction`] reads a submission.
+pub(crate) fn after_last_end(engine: Engine, sql: &str) -> &str {
+    let buffer = Buffer::for_engine(engine, sql);
+    let statements = buffer.statements();
+    match statements
+        .iter()
+        .rposition(|range| ends_transaction(engine, &sql[range.clone()]))
+    {
+        Some(last) => statements
+            .get(last + 1)
+            .map_or("", |next| sql[next.start..].trim()),
+        None => sql,
+    }
 }
 
 impl Leaves {
@@ -9005,6 +9067,26 @@ mod tests {
     }
 
     #[test]
+    fn only_a_batch_that_brackets_itself_ends_the_transaction_it_runs_in() {
+        let rows = vec![
+            pending_row(&[("name", set("a"))], &[("id", "1")]),
+            pending_row(&[("name", set("b"))], &[("id", "2")]),
+        ];
+        for (engine, brackets) in [
+            (Engine::MySql, true),
+            (Engine::MariaDb, true),
+            (Engine::Sqlite, true),
+            (Engine::SqlServer, true),
+            (Engine::Postgres, false),
+        ] {
+            let batch = update_batch(engine, &rows).unwrap();
+            assert_eq!(ends_transaction(engine, &batch), brackets, "{engine:?}");
+            let lone = update_batch(engine, &rows[..1]).unwrap();
+            assert!(!ends_transaction(engine, &lone), "{engine:?}: one row");
+        }
+    }
+
+    #[test]
     fn several_pending_rows_become_one_semicolon_joined_batch() {
         let rows = vec![
             pending_row(&[("name", set("Ada"))], &[("id", "1")]),
@@ -9048,6 +9130,30 @@ mod tests {
 
         let postgres = update_batch(Engine::Postgres, &rows).unwrap();
         assert!(!postgres.contains("BEGIN"), "{postgres}");
+    }
+
+    #[test]
+    fn a_batch_joining_an_open_transaction_carries_no_brackets_and_passes_the_gate() {
+        // Its own COMMIT would end the user's transaction, and MySQL's
+        // START TRANSACTION would commit it first.
+        let rows = vec![
+            pending_row(&[("name", set("Ada"))], &[("id", "1")]),
+            pending_row(&[("name", set("Bo"))], &[("id", "2")]),
+        ];
+        for engine in [
+            Engine::MySql,
+            Engine::MariaDb,
+            Engine::Sqlite,
+            Engine::SqlServer,
+            Engine::Postgres,
+        ] {
+            let batch = update_batch_joining(engine, &rows).unwrap();
+            assert_eq!(batch.matches("UPDATE").count(), 2, "{engine:?} {batch}");
+            assert!(!ends_transaction(engine, &batch), "{engine:?} {batch}");
+            assert!(!batch.contains("BEGIN"), "{engine:?} {batch}");
+            assert!(!batch.contains("START TRANSACTION"), "{engine:?} {batch}");
+            assert!(is_generated_write_on(engine, &batch), "{engine:?} {batch}");
+        }
     }
 
     #[test]
@@ -11613,6 +11719,62 @@ mod tests {
                 !transaction_uncertain(Engine::Postgres, statement),
                 "{statement}"
             );
+        }
+    }
+
+    #[test]
+    fn a_commit_or_rollback_anywhere_in_a_submission_ends_its_transaction() {
+        for (engine, statement) in [
+            (Engine::Postgres, "COMMIT"),
+            (Engine::Postgres, "ROLLBACK"),
+            (Engine::Postgres, "COMMIT;\n\nBEGIN;"),
+            (Engine::Postgres, "ROLLBACK;\n\nBEGIN;"),
+            (Engine::MySql, "COMMIT;\n\nBEGIN;"),
+            (Engine::SqlServer, "COMMIT TRANSACTION"),
+        ] {
+            assert!(ends_transaction(engine, statement), "{statement}");
+        }
+        for (engine, statement) in [
+            (Engine::Postgres, "BEGIN"),
+            (Engine::Postgres, "ROLLBACK TO SAVEPOINT a"),
+            (Engine::Postgres, "SELECT 1"),
+            (Engine::Postgres, "COMMIT\nselec 1"),
+            (Engine::Redis, "EXEC"),
+            (Engine::Snowflake, "COMMIT"),
+        ] {
+            let ended = ends_transaction(engine, statement);
+            // Snowflake's requests are stateless: no session holds a
+            // transaction there for a submission to end.
+            assert!(!ended, "{statement}");
+        }
+    }
+
+    #[test]
+    fn only_what_follows_the_last_end_belongs_to_the_next_transaction() {
+        for (engine, sql, rest) in [
+            (Engine::Postgres, "COMMIT;\n\nBEGIN;", "BEGIN;"),
+            (Engine::Postgres, "ROLLBACK;\n\nBEGIN;", "BEGIN;"),
+            (Engine::MySql, "COMMIT;\n\nBEGIN;", "BEGIN;"),
+            (Engine::MariaDb, "COMMIT;\n\nBEGIN;", "BEGIN;"),
+            (Engine::Sqlite, "COMMIT;\n\nBEGIN;", "BEGIN;"),
+            (Engine::DuckDb, "COMMIT;\n\nBEGIN;", "BEGIN;"),
+            (
+                Engine::SqlServer,
+                "COMMIT;\n\nBEGIN TRANSACTION;",
+                "BEGIN TRANSACTION;",
+            ),
+            (
+                Engine::Postgres,
+                "INSERT INTO t VALUES (1); COMMIT; BEGIN; INSERT INTO t VALUES (2);",
+                "BEGIN; INSERT INTO t VALUES (2);",
+            ),
+            (Engine::Postgres, "COMMIT", ""),
+            (Engine::Postgres, "INSERT INTO t VALUES (1); COMMIT;", ""),
+            (Engine::Postgres, "BEGIN", "BEGIN"),
+            (Engine::Postgres, "SELECT 1; SELECT 2", "SELECT 1; SELECT 2"),
+            (Engine::Postgres, "selec 1", "selec 1"),
+        ] {
+            assert_eq!(after_last_end(engine, sql), rest, "{engine:?}: {sql}");
         }
     }
 
