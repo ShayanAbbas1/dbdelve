@@ -258,6 +258,9 @@ fn graph_from(
     // An index whose column is not one of the table's is on an expression
     // (the driver names the expression, or nothing), so it makes no column
     // unique and is left out whole, as is one with a `FILTER_CONDITION`.
+    // ponytail: psqlODBC and Db2 leave that NULL even for a partial index,
+    // which then reads as a whole one; telling it apart would take per-driver
+    // SQL against the system catalog (plugins.md).
     let mut indexes = Groups::default();
     for row in statistics {
         let Some(table) = mine(row, 0) else {

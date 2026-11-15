@@ -449,14 +449,19 @@ driver printing to stdout would corrupt them (`ponytail:` not on Windows).
   a call held on the server ends at the host's cancel deadline, the side
   plugin killed. A unique index counts only with `NON_UNIQUE` 0, no
   `FILTER_CONDITION`, and every column one of the table's: an expression
-  index names its expression, or nothing, in `COLUMN_NAME`. psqlODBC and Db2
-  leave `FILTER_CONDITION` NULL, so through them a partial unique index flags
-  its column. A foreign key into another catalog (`PKTABLE_CAT` set and not
-  `FKTABLE_CAT`, on a driver with schemas) is left out, as Snowflake's into
-  another database is: the graph names a key's schema and table only, and
-  would draw it into this catalog. A NULL or blank catalog on either side
-  counts as the same one. ODBC has no word for a partition, so one a driver
-  lists as a `TABLE` is drawn as a card of its own (not checked live).
+  index names its expression, or nothing, in `COLUMN_NAME`. Known limit:
+  psqlODBC and Db2 leave `FILTER_CONDITION` NULL, so through them a partial
+  unique index reads as a whole one, unlike on the built-in Postgres and SQL
+  Server, which leave it out: its column is flagged unique, and a foreign key
+  on that column alone is drawn one-to-one. ODBC has no other way to tell a
+  partial index, and asking each driver's system catalog would mean SQL the
+  bridge spells per driver; partial unique indexes are rare. A foreign key
+  into another catalog (`PKTABLE_CAT` set and not `FKTABLE_CAT`, on a driver
+  with schemas) is left out, as Snowflake's into another database is: the
+  graph names a key's schema and table only, and would draw it into this
+  catalog. A NULL or blank catalog on either side counts as the same one. ODBC
+  has no word for a partition, so one a driver lists as a `TABLE` is drawn as
+  a card of its own (not checked live).
 
 ### The driver manager, per platform
 
