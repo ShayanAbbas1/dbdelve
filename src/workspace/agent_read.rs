@@ -2472,7 +2472,10 @@ mod tests {
             &CancelToken::default(),
             Engine::Sqlite,
         );
-        let Ran::Done { result, .. } = ran else {
+        let Ran::Done {
+            result, connection, ..
+        } = ran
+        else {
             panic!("the statement ran");
         };
         let shaped = result.expect("the statement answered");
@@ -2487,6 +2490,8 @@ mod tests {
         );
         assert!(shaped.text.contains("[clipped from 6000 characters]"));
         assert_eq!(shaped.rows, (1, Total::Exact(1)));
+        // Let go of the file first: Windows will not remove one held open.
+        drop(connection);
         std::fs::remove_dir_all(&dir).expect("the directory goes");
     }
 
@@ -2541,6 +2546,7 @@ mod tests {
             .unwrap();
         assert!(qualified.text.contains(r#"["main","customers","table"]"#));
         assert_eq!(search(&connection, "zzz", None).unwrap().unwrap().rows, 0);
+        drop(connection);
         std::fs::remove_dir_all(&dir).expect("the directory goes");
     }
 
@@ -2566,6 +2572,7 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+        drop(connection);
         std::fs::remove_dir_all(&dir).expect("the directory goes");
     }
 
@@ -2578,6 +2585,7 @@ mod tests {
         assert_eq!(listing.rows, 0);
         assert!(routines(&connection, "main", Some("f")).unwrap().is_none());
         assert!(routines(&connection, "nope", None).unwrap().is_none());
+        drop(connection);
         std::fs::remove_dir_all(&dir).expect("the directory goes");
     }
 

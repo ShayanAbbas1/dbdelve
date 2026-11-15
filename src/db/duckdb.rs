@@ -3751,6 +3751,9 @@ mod tests {
         );
     }
 
+    // Unix only: DuckDB locks its file per handle on Windows, so a second
+    // instance in the same process cannot open it; on Unix the lock is per process.
+    #[cfg(unix)]
     #[test]
     fn an_agent_open_reads_committed_rows_and_refuses_a_write() {
         let dir = std::env::temp_dir().join(format!("dbdelve-duckdb-agent-{}", std::process::id()));
