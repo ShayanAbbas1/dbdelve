@@ -4,7 +4,9 @@
 //! impl live in as many modules as it has concerns; they moved out whole.
 
 use super::*;
-use crate::session::{ReviewSlot, StaleEdit, StaleResume, insert_placeholder, refreshing};
+use crate::session::{
+    AfterEdits, ReviewSlot, StaleEdit, StaleResume, insert_placeholder, refreshing,
+};
 
 impl Workspace {
     /// Open the "Insert" form over the preview in front, one field per column
@@ -275,6 +277,8 @@ impl Workspace {
                 title: "Insert",
                 notes,
                 sql: statement,
+                error: None,
+                edits: false,
             });
         }
         cx.notify();
@@ -491,13 +495,29 @@ impl Workspace {
             .and_then(Sorting::client_keys)
             .is_some()
         {
+            // A Row view's edited row is saved before the rows move under it,
+            // as a sort on the server would (`requery_relation`); a Draft view
+            // keeps its edits through a sort in memory.
+            if profile.session.edit_mode(tab) == EditMode::Row
+                && self.held_for_edits(tab, AfterEdits::Sort(column), cx)
+            {
+                return;
+            }
             self.sort_held_rows(tab, column, cx);
             return;
         }
 
         match tab {
+            // Already guarded inside `requery_relation`, which asks of copies.
             Tab::Object(id) => self.relation_sort(id, column, cx),
-            Tab::Query(_) => self.query_sort(column, window, cx),
+            Tab::Query(_) => {
+                // Before `query_sort` rewrites the buffer: a prompt asked after
+                // it would leave a cancelled sort written into the user's SQL.
+                if self.held_for_edits(tab, AfterEdits::Sort(column), cx) {
+                    return;
+                }
+                self.query_sort(column, window, cx)
+            }
         }
     }
 
@@ -542,7 +562,7 @@ impl Workspace {
     ) {
         self.clear_notice();
         let engine = self.engine();
-        let Some(profile) = self.profile_mut() else {
+        let Some(profile) = self.profile() else {
             return;
         };
         let tab = profile.session.active;
@@ -564,6 +584,23 @@ impl Workspace {
                 })
                 .collect();
             (grid.sort().to_vec(), shown)
+        };
+        // Only a switch that runs the statement again can lose a draft: into
+        // memory nothing runs, and out of it with no sort on screen there is
+        // nothing to ask the server for. Before `switch` moves the sorting.
+        let leaves_memory = !client
+            && profile
+                .session
+                .sorting(tab)
+                .is_some_and(|sorting| sorting.client_keys().is_some());
+        if leaves_memory
+            && !shown.is_empty()
+            && self.held_for_edits(tab, AfterEdits::ViewSorting(client), cx)
+        {
+            return;
+        }
+        let Some(profile) = self.profile_mut() else {
+            return;
         };
         let Some(sorting) = profile.session.sorting_mut(tab) else {
             return;
@@ -1377,6 +1414,8 @@ impl Workspace {
                 title: "Delete row",
                 notes: target.review_notes(&statement),
                 sql: statement,
+                error: None,
+                edits: false,
             });
         }
         cx.notify();
@@ -1651,6 +1690,351 @@ impl Workspace {
         .detach();
     }
 
+    /// Puts the table in front into `mode`, when its target offers it
+    /// (`EditMode::on`). Nothing changes, and nothing is said, for a mode the
+    /// view already has or a tab that has none to choose.
+    ///
+    /// Switching into Row is refused while the grid holds staged edits: they
+    /// are a batch for one review, and one switch must not turn them into
+    /// sends, one row at a time, that nobody reviewed. Cell edits carry
+    /// between Classic and Draft with no prompt, since both review the same
+    /// `UPDATE`s. Leaving Row over edited rows sends them first, as any action
+    /// that leaves them would (`held_for_edits`), and does not switch if one is
+    /// refused.
+    pub(crate) fn pick_edit_mode(
+        &mut self,
+        action: &crate::actions::SetEditMode,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_edit_mode(action.mode, cx);
+    }
+
+    pub(crate) fn set_edit_mode(&mut self, mode: EditMode, cx: &mut Context<Self>) {
+        let mode = mode.on(self.target());
+        let Some(profile) = self.profile() else {
+            return;
+        };
+        let tab = profile.session.active;
+        let Some(results) = profile.session.results(tab) else {
+            return;
+        };
+        let current = profile.session.edit_mode(tab);
+        if !matches!(tab, Tab::Object(_)) || current == mode {
+            return;
+        }
+        let staged = results.read(cx).delegate().pending_count();
+        // Leaving Row sends the dirty row first and switches when it lands.
+        if current == EditMode::Row && self.held_for_edits(tab, AfterEdits::EditMode(mode), cx) {
+            return;
+        }
+        if mode == EditMode::Row && staged > 0 {
+            let edits = match staged {
+                1 => "1 edit".to_string(),
+                count => format!("{count} edits"),
+            };
+            self.note(format!("The draft has {edits}{}", Self::DRAFT_REFUSAL), cx);
+            return;
+        }
+        if let Some(slot) = self
+            .profile_mut()
+            .and_then(|profile| profile.session.edit_mode_mut(tab))
+        {
+            *slot = mode;
+            self.clear_draft_refusal();
+            cx.notify();
+        }
+    }
+
+    /// What the notice says after how many edits the draft holds, when a
+    /// switch to Row is refused over them.
+    const DRAFT_REFUSAL: &str = ", so the view was not switched to Row mode.";
+
+    /// Takes the draft's refusal down once what it reported is over: the draft
+    /// is gone or the view is in Row mode. Only that notice goes; whatever else
+    /// the bar says, such as the row a Row send just wrote, is not this call's.
+    fn clear_draft_refusal(&mut self) {
+        let Some(profile) = self.profile_mut() else {
+            return;
+        };
+        if profile.session.notice.as_deref().is_some_and(|notice| {
+            notice.starts_with("The draft has ") && notice.ends_with(Self::DRAFT_REFUSAL)
+        }) {
+            profile.session.notice = None;
+        }
+    }
+
+    /// Sends the staged edits of `row` of relation tab `tab` as the one
+    /// `UPDATE` of a Row-mode view, with no review. True when the statement was
+    /// handed to [`Self::execute_and_then`], which judges it under the mode in
+    /// force as it is sent; false when nothing was sent.
+    ///
+    /// The one writer of a Row send: the statement is written as a draft's
+    /// batch is, over one row, and passes the same gate before anything runs
+    /// (`AGENTS.md` rule 2). It carries the read of the row by its key, which
+    /// is cut from the gated statement (`sql::row_read`), so what the grid shows
+    /// afterwards is what the server holds. A tab already sending sends nothing
+    /// more: a second Save while the first is out would be the same `UPDATE`
+    /// twice.
+    ///
+    /// `to` is the row the ring moved to when a row leave started the send, and
+    /// `None` for Save, which does not move it. A send that fails, or is stopped
+    /// by the mode, puts the ring back from `to` onto `row`.
+    ///
+    /// `then` is the action the user asked for that the row had to be saved
+    /// before (`held_for_edits`): carried out when the send lands, dropped on
+    /// every other outcome, which puts back what it had changed
+    /// (`Session::put_back`).
+    pub(crate) fn save_row(
+        &mut self,
+        tab: u64,
+        row: usize,
+        to: Option<usize>,
+        then: Option<AfterEdits>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let tab = Tab::Object(tab);
+        let Some(profile) = self.profile() else {
+            return false;
+        };
+        let Some(results) = profile.session.results(tab).cloned() else {
+            return false;
+        };
+        if profile.session.running(tab) {
+            return false;
+        }
+        // A statement waiting in review is the user's to run or close first:
+        // this send's outcome would be written into it, and a success would
+        // drop it unread.
+        if profile.session.apply_review_covers(tab) {
+            self.note(
+                "The row was not sent: a statement is waiting in review.".into(),
+                cx,
+            );
+            return false;
+        }
+        let target = self.target();
+        if let Some(reason) = target.unwritable() {
+            self.note(reason, cx);
+            return false;
+        }
+        let (pending, rows_id, sent) = {
+            let grid = results.read(cx).delegate();
+            (
+                grid.pending_row(row),
+                grid.rows_id(),
+                grid.pending_cells(row),
+            )
+        };
+        let Some(pending) = pending else {
+            return false;
+        };
+        let update = match update_batch(self.engine(), &[pending]) {
+            Ok(update) => update,
+            Err(message) => {
+                self.note(message, cx);
+                return false;
+            }
+        };
+        if !sql::is_generated_write_on(self.engine(), &update) {
+            self.note(
+                "dbdelve refused to run a statement it wrote itself: it is not an UPDATE.".into(),
+                cx,
+            );
+            return false;
+        }
+        let Some(read) = sql::row_read(self.engine(), &update) else {
+            self.note(
+                "dbdelve refused to run a statement it wrote itself: it is not the read of one \
+                 row."
+                    .into(),
+                cx,
+            );
+            return false;
+        };
+        let out = sent.clone();
+        self.execute_and_then(
+            update,
+            tab,
+            Some(Refresh::Row {
+                row,
+                rows_id,
+                read,
+                sent,
+                to,
+                then,
+            }),
+            false,
+            None,
+            cx,
+        );
+        let running = self
+            .profile()
+            .is_some_and(|profile| profile.session.running(tab));
+        // The grid knows the cells are out until the send lands, so that one
+        // put back to its fetched value meanwhile stays staged, and Esc leaves
+        // the row alone.
+        if running {
+            results.update(cx, |table, _| table.delegate_mut().begin_send(row, &out));
+        }
+        // Not sent: the mode stopped it and raised its prompt, or the
+        // connection was gone. Nothing went, the row is still dirty, and the
+        // ring the user moved off it goes back (`to` is where it moved to).
+        if to.is_some() && !running {
+            self.snap_back_to(tab, row, to, cx);
+        }
+        true
+    }
+
+    /// Esc on a Row view's grid: puts the ring's row back as it was fetched,
+    /// its staged values and the mark of a refused send gone, the other rows'
+    /// edits kept. True when it reverted something; false leaves the key to
+    /// whatever it did before.
+    ///
+    /// Only while the grid itself holds the keyboard, so never while a cell's
+    /// input does: that Esc cancels the input. Never on a row whose send is
+    /// out, which keeps its values until the server answers.
+    pub(crate) fn revert_active_row(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
+        let Some(profile) = self.profile() else {
+            return false;
+        };
+        let tab = profile.session.active;
+        if !matches!(tab, Tab::Object(_)) || profile.session.edit_mode(tab) != EditMode::Row {
+            return false;
+        }
+        let Some(results) = profile.session.results(tab).cloned() else {
+            return false;
+        };
+        if !results.focus_handle(cx).is_focused(window) {
+            return false;
+        }
+        let row = {
+            let grid = results.read(cx).delegate();
+            // The server is writing a row whose send is out, so dropping its
+            // values would show it as fetched over what the landing reads back.
+            grid.active().map(|(row, _)| row).filter(|row| {
+                grid.sending_row() != Some(*row)
+                    && (grid.row_has_pending(*row)
+                        || grid
+                            .send_failure()
+                            .is_some_and(|(refused, _)| refused == *row))
+            })
+        };
+        let Some(row) = row else {
+            return false;
+        };
+        results.update(cx, |table, cx| {
+            table.delegate_mut().discard_row(row);
+            table.refresh(cx);
+        });
+        if let Some(profile) = self.profile_mut() {
+            profile
+                .session
+                .tab_notice
+                .take_if(|(noticed, _)| *noticed == tab);
+        }
+        cx.notify();
+        true
+    }
+
+    /// Puts the ring of relation tab `tab` back on `row` when it is still on
+    /// `to`, the row it moved to as `row` was left, and `to` holds no edits: a
+    /// ring the user has moved on, or into a row of edits, is theirs. Hands the
+    /// keyboard back to the grid when an input of `to`'s went with the move.
+    pub(crate) fn snap_back_to(
+        &mut self,
+        tab: Tab,
+        row: usize,
+        to: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(to) = to else {
+            return;
+        };
+        let Some(results) = self
+            .profile()
+            .and_then(|profile| profile.session.results(tab))
+            .cloned()
+        else {
+            return;
+        };
+        let stays = results.read(cx).delegate().active().map(|(at, _)| at) == Some(to)
+            && !results.read(cx).delegate().row_has_pending(to);
+        if stays && results.update(cx, |table, cx| result_grid::snap_back(table, row, cx)) {
+            self.refocus_front();
+        }
+        cx.notify();
+    }
+
+    /// What a ring move off an edited row does, called after every move the
+    /// grid made ([`ResultGrid::take_left_row`]): in a Row view the row left is
+    /// sent, in a Draft view the mark is dropped and nothing is said. The one
+    /// caller of [`Self::save_row`] besides Save.
+    ///
+    /// A grid that is not a relation tab's of the profile in front (a query
+    /// tab's, or one of a profile behind) has no mode to ask and drops the mark.
+    pub(crate) fn flush_left_row(
+        &mut self,
+        grid: &Entity<gpui_component::table::TableState<ResultGrid>>,
+        cx: &mut Context<Self>,
+    ) {
+        // Both taken first and whatever comes of them, so a grid with no Row
+        // view to ask does not hold either for a later move.
+        let (left, closed, ring) = grid.update(cx, |table, cx| {
+            let grid = table.delegate_mut();
+            (
+                grid.take_left_row(),
+                grid.take_closed_input(cx),
+                grid.active().map(|(row, _)| row),
+            )
+        });
+        let Some(row) = left.filter(|row| Some(*row) != ring) else {
+            return;
+        };
+        let Some((tab, mode)) = self.profile().and_then(|profile| {
+            profile
+                .session
+                .objects
+                .iter()
+                .find_map(|tab| match &tab.body {
+                    ObjectBody::Relation {
+                        results, edit_mode, ..
+                    } if results == grid => Some((tab.id, *edit_mode)),
+                    _ => None,
+                })
+        }) else {
+            return;
+        };
+        if mode != EditMode::Row {
+            return;
+        }
+        // What was typed in a cell the ring was moved off the row of is staged
+        // with the row's other edits. A mode that refuses the write leaves it
+        // unstaged.
+        if let Some((closed_row, col, text)) = closed
+            && closed_row == row
+        {
+            grid.update(cx, |table, _| {
+                table
+                    .delegate_mut()
+                    .set_pending(row, col, NewValue::Value(text))
+            });
+        }
+        if !grid.read(cx).delegate().row_has_pending(row) {
+            return;
+        }
+        // One send a tab at a time: this row stays staged, which is as visible
+        // as it was, and is sent by the next leave or by Save.
+        if self
+            .profile()
+            .is_some_and(|profile| profile.session.running(Tab::Object(tab)))
+        {
+            self.note("The previous row is still being saved.".into(), cx);
+            return;
+        }
+        self.save_row(tab, row, ring, None, cx);
+    }
+
     /// Turn the grid's pending edits into SQL and put it where the user can read
     /// it: the query tab's buffer, or the review modal on a relation tab and on
     /// a query tab whose target reviews them (`Target::reviews_query_edits`).
@@ -1680,6 +2064,17 @@ impl Workspace {
         let target = self.target();
         if let Some(reason) = target.unwritable() {
             self.note(reason, cx);
+            return;
+        }
+        // A Row view sends one row's edits as they are saved, with no review.
+        // Whichever row Save sends, the ring's first, and none at all when
+        // nothing is staged.
+        if let Tab::Object(object) = tab
+            && profile.session.edit_mode(tab) == EditMode::Row
+        {
+            if let Some(row) = results.read(cx).delegate().row_to_send() {
+                self.save_row(object, row, None, None, cx);
+            }
             return;
         }
         let own_review = profile.session.apply_review_covers(tab);
@@ -1720,6 +2115,8 @@ impl Workspace {
                         title: "Apply edits",
                         notes,
                         sql: batch,
+                        error: None,
+                        edits: true,
                     });
                     cx.notify();
                 }
@@ -1730,9 +2127,10 @@ impl Workspace {
     /// The query tab: the batch is appended to the user's buffer, runs from
     /// there, and the `SELECT` that produced the grid runs after it.
     ///
-    /// The append is what keeps a failure readable. `execute_sql` clears the
-    /// grid as it starts, so the pending edits are gone either way — but the
-    /// statement that was attempted is still in the buffer.
+    /// The append is what keeps a failure readable: the statement that was
+    /// attempted is still in the buffer. On a target that answers
+    /// `Target::row_edits` a failure leaves the edits staged as well; elsewhere
+    /// `execute_sql` clears the grid as it starts and they go with it.
     pub(crate) fn apply_in_buffer(
         &mut self,
         batch: String,
@@ -1791,6 +2189,12 @@ impl Workspace {
                 }
             },
         };
+        // A second Run starts clean: what the first came to is not this one's.
+        if let Some(profile) = self.profile_mut()
+            && let Some(review) = &mut profile.session.apply_review
+        {
+            review.error = None;
+        }
         self.execute_and_then(sql, tab, Some(refresh), false, None, cx);
     }
 
@@ -1873,6 +2277,7 @@ impl Workspace {
         if let Some(profile) = self.profile_mut() {
             profile.session.drop_apply_review_of(tab);
         }
+        self.clear_draft_refusal();
         cx.notify();
     }
 

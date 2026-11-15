@@ -23,6 +23,7 @@ use crate::{
     keybindings::{self, KeybindingSpec},
     palette::Mode as PaletteMode,
     scroller::{SmoothScrollable, smooth},
+    session::EditMode,
     theme::{
         Appearance, FontSlot, OPACITY_MAX, OPACITY_MIN, OPACITY_STEP, Theme, fonts, layout,
         popup_theme,
@@ -108,6 +109,7 @@ impl SettingsTab {
 enum SettingId {
     RowLimit,
     DefaultSorting,
+    DefaultEditMode,
     QualifyCompletions,
     AliasCompletions,
     RunUnreadable,
@@ -173,6 +175,20 @@ fn setting_rows() -> Vec<SettingRow> {
              loaded, so a table sorts only the page on screen. Tabs already \
              open keep theirs; each can be switched from its status bar.",
             &["sort", "order", "server", "client"],
+        ),
+        row(
+            SettingId::DefaultEditMode,
+            SettingsTab::General,
+            "Results",
+            "Default edit mode",
+            "When a new table tab sends its edits. Classic holds cell edits \
+             until Save, which shows the UPDATE statements first; New row \
+             opens a form and Delete row shows the one DELETE. Draft holds \
+             every edit until Apply, which shows the statements first. Row \
+             sends a row's UPDATE when the row is left or saved, with no \
+             dialog. Tabs already open keep theirs; each can be switched from \
+             its status bar.",
+            &["edit", "row", "draft", "classic", "save"],
         ),
         row(
             SettingId::QualifyCompletions,
@@ -824,6 +840,25 @@ fn render_control(
                 )
                 .into_any_element()
         }
+        SettingId::DefaultEditMode => {
+            let edit_mode = settings.edit_mode;
+            segmented(t)
+                .children(EditMode::ALL.map(|mode| {
+                    segmented_choice(
+                        ("default-edit-mode", mode as usize),
+                        mode.label(),
+                        mode == edit_mode,
+                        true,
+                        t,
+                    )
+                    .on_click(cx.listener(
+                        move |workspace, _: &ClickEvent, _, cx| {
+                            workspace.set_default_edit_mode(mode, cx);
+                        },
+                    ))
+                }))
+                .into_any_element()
+        }
         SettingId::CheckForUpdates => switch("check-for-updates", settings.check_for_updates, t)
             .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
                 let check = !workspace.settings.check_for_updates;
@@ -1136,6 +1171,14 @@ mod tests {
     }
 
     #[test]
+    fn the_default_edit_mode_is_found_by_row_and_draft() {
+        assert!(found("draft").contains(&SettingId::DefaultEditMode));
+        assert!(found("edit mode").contains(&SettingId::DefaultEditMode));
+        assert!(found("row").contains(&SettingId::DefaultEditMode));
+        assert!(found("classic").contains(&SettingId::DefaultEditMode));
+    }
+
+    #[test]
     fn a_binding_is_found_by_its_label_and_by_its_chord() {
         assert!(found("palette next row").contains(&SettingId::Keybinding("palette_next")));
         let chord = keycap_text("secondary-shift-p");
@@ -1180,7 +1223,7 @@ mod tests {
                 SettingId::Keybinding("sort_active_column"),
             ]
         );
-        assert_eq!(found("!keyboard").len(), 16);
+        assert_eq!(found("!keyboard").len(), 17);
     }
 
     #[test]

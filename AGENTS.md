@@ -27,8 +27,9 @@ require it, stop and raise it instead.
    says when a result was capped. A `LIMIT` is written only into
    DBDelve-generated preview queries.
 
-   DBDelve _does_ write SQL when the user asks it to, and only then, always
-   where the user can read it: on a view the server sorts, a header sort
+   DBDelve _does_ write SQL when the user asks it to, and only then; outside
+   Row mode, always where the user can read it before it runs: on a view the
+   server sorts, a header sort
    splices its `ORDER BY` into the buffer (one sorted in memory reorders its
    rows and writes nothing); grid edits are appended to the buffer (`sql::appended_statement`),
    or shown in a review dialog on an object tab, which has no buffer, and on
@@ -38,7 +39,15 @@ require it, stop and raise it instead.
    Rows shows every statement before any runs; Explain prefixes a copy, never
    the buffer; Format Query rewrites on command only, at the token level
    (`sqlformat`, or `mql::format` on MongoDB), never an AST round-trip, which
-   drops every comment the user wrote.
+   drops every comment the user wrote. Row mode is the one exception: on a
+   relation tab whose view the user has put in Row mode, a row's `UPDATE` is
+   sent when the user leaves the row, presses Save, or takes an action that
+   saves it first, with no buffer and no dialog, and nothing else sends it (a
+   read after a send never sends another row). That send is the user's own
+   act; it still passes `sql::is_generated_write_on` and the connection-mode
+   check as it is sent, is written to the query history, and the last one is
+   shown in the status line. Classic, the default, and Draft send nothing
+   unread.
 
    It never writes `DROP` or `TRUNCATE` into a buffer or onto the wire. It
    writes `DELETE` only as the explicit deletion of one named row, by primary

@@ -1507,7 +1507,7 @@ fn foreign_keys(imported: &QueryResult, relation: &str, database: &str) -> Vec<F
 }
 
 #[cfg(test)]
-mod mock;
+pub(crate) mod mock;
 
 #[cfg(test)]
 mod tests {

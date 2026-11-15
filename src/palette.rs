@@ -455,6 +455,8 @@ pub enum Command {
     SortActiveColumn,
     /// The status bar's Client (`true`) or Server.
     SetViewSorting(bool),
+    /// The status bar's Classic, Draft or Row, on the table in front.
+    SetEditMode(crate::session::EditMode),
     /// The explorer menu's Copy DDL, for the relation in front.
     CopyDdl,
     /// The explorer menu's other copies: put this on the clipboard, and
@@ -4136,6 +4138,20 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             RESULTS,
         ));
     }
+    // The status bar's edit modes: one row for each the view is not in.
+    let edit_mode = crate::views::view_edit_mode(profile);
+    if let Some(mode) = edit_mode {
+        for other in crate::session::EditMode::offered(profile.config.target())
+            .filter(|other| *other != mode)
+        {
+            items.push(command(
+                &format!("Edit in {} mode", other.label()),
+                icon::RENAME,
+                Command::SetEditMode(other),
+                RESULTS,
+            ));
+        }
+    }
     // Not the active cell's: the columns come back whichever cell is ringed.
     if let Some(hidden) = shown_grid
         .map(|grid| grid.hidden_columns())
@@ -4179,7 +4195,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
     // pair of buttons is conditional too.
     if workspace.has_pending_edits(cx) {
         items.push(command(
-            "Apply edits",
+            crate::views::apply_label(edit_mode),
             icon::SAVE,
             Command::ApplyEdits,
             EDITS,

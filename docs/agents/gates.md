@@ -44,8 +44,8 @@ it. Anything unsure is refused with its reason, leaving the rows shown. Rows
 go from the feed to a sibling `.partial` file renamed onto the chosen path
 only once whole, so a cancel or a failure leaves whatever was there.
 
-DBDelve _does_ write SQL when the user asks it to, and only then, always
-where the user can read it:
+DBDelve _does_ write SQL when the user asks it to, and only then; outside Row
+mode, always where the user can read it before it runs:
 
 - On a view the server sorts, a header click asking for a sort splices the
   `ORDER BY` into the statement in the buffer, where it can be read, edited
@@ -57,6 +57,13 @@ where the user can read it:
   has no buffer, the statement is shown in a review dialog before it runs,
   as it is on a query tab of an engine without unique keys
   (`Engine::reviews_query_edits`), whose writes run only behind the guard.
+  The exception is a relation tab's view in Row mode, which has no buffer and
+  no dialog: the row's `UPDATE` is sent as the row is left or saved
+  (`Workspace::save_row`), and that is the user's own act. It is gated by
+  `sql::is_generated_write_on`, mode-checked in `execute_and_then` as it is
+  sent, read back by `sql::row_read` under `sql::is_generated_select`, written
+  to history, and the last one is shown in the status line. A Classic or
+  Draft view sends nothing unread.
 - Import Rows shows every statement it will send in its dialog's SQL view
   before any runs.
 - **Explain** puts the engine's `EXPLAIN` prefix on a copy of the
