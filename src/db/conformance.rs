@@ -6,6 +6,15 @@
 //! takes in [`suite!`]. Engines are asked only through `Engine` and
 //! `db::Connection`, so a scenario that fails is a finding about the engine,
 //! not something to bend the scenario around.
+//!
+//! The scenarios expect a connection with privilege enough to create and drop
+//! roles, sequences, tables and large objects, which on the compose Postgres
+//! means a superuser, so a failure on a less privileged account is about the
+//! account and not the engine. The database is shared and several scenarios
+//! may run against it at once, which is why every object a scenario creates is
+//! named for that scenario. Each scenario removes its own objects once before
+//! it starts as well as when it ends, so a run stopped by a signal costs a
+//! re-run and not a manual cleanup.
 
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -507,6 +516,1044 @@ pub(super) fn read_only_session_refuses_a_write(subject: &Subject) {
         error.message
     );
     subject.run(scenario, &insert, Fetch::default());
+}
+
+/// The classifier's new verdicts against what the server does, as a pair per
+/// case: the statement is rated above a read, and the server really does what
+/// that rating claims. Each is matched by a control that must not move, a
+/// statement whose effect on the hold is none, which is rated a read and
+/// leaves the canary write refused in the same session -- without it a server
+/// that refused everything would pass.
+pub(super) fn denied_functions_agree_with_the_server(subject: &Subject) {
+    let scenario = "denied_functions_agree_with_the_server";
+    let at = format!("{scenario} on {:?}", subject.target.engine);
+    let engine = subject.target.engine;
+    let schema = subject.schema;
+    // Row 970, one lock key, one large object and one sequence, all named for
+    // this scenario: CI runs four scenarios at a time against one server.
+    let canary = 970;
+    let sequence = engine.qualified(schema, "dbdelve_denied_970");
+    let insert = sql_insert(engine, schema, canary, "denied function");
+    let rated = |sql: &str| sql::classify(engine, sql).mode;
+    let above_a_read = |sql: &str| {
+        assert!(
+            rated(sql) > sql::Mode::ReadOnly,
+            "{at}: `{sql}` is rated {:?}, which a Read-only profile would run",
+            rated(sql)
+        );
+    };
+    let hold = |on: bool| {
+        subject
+            .connection
+            .set_read_only(on)
+            .unwrap_or_else(|error| panic!("{at}: {error}"));
+    };
+    let cell = |result: &QueryResult| {
+        result
+            .rows
+            .first()
+            .and_then(|row| row.get(0))
+            .unwrap_or_else(|| panic!("{at}: no value came back"))
+            .to_string()
+    };
+
+    let mut unwind = vec![
+        sql_delete(engine, schema, canary),
+        format!("DROP SEQUENCE IF EXISTS {sequence}"),
+    ];
+    let (held_calls, control, advance, current): (Vec<(&str, &str)>, &str, String, String) =
+        match engine {
+            Engine::Postgres => {
+                unwind.push("SELECT pg_advisory_unlock_all()".to_string());
+                unwind.push("SELECT lo_unlink(970970)".to_string());
+                // Queued before anything creates it, so a panic part-way
+                // through the write cases still removes it.
+                unwind.push("SELECT lo_unlink(970971)".to_string());
+                unwind.push("SELECT lo_unlink(970972)".to_string());
+                unwind.push("SELECT lo_unlink(970974)".to_string());
+                (
+                    vec![
+                        ("an advisory lock", "SELECT pg_advisory_lock(970970)"),
+                        (
+                            "a notification",
+                            "SELECT pg_notify('dbdelve_denied_970', 'x')",
+                        ),
+                        ("a large object", "SELECT lo_create(970970)"),
+                    ],
+                    "SELECT current_setting('search_path')",
+                    format!("SELECT nextval('{schema}.dbdelve_denied_970')"),
+                    format!("SELECT currval('{schema}.dbdelve_denied_970')"),
+                )
+            }
+            Engine::MySql | Engine::MariaDb => {
+                unwind.push("SELECT RELEASE_ALL_LOCKS()".to_string());
+                (
+                    vec![("a named lock", "SELECT GET_LOCK('dbdelve_denied_970', 0)")],
+                    "SELECT version()",
+                    format!("SELECT NEXTVAL({sequence})"),
+                    format!("SELECT LASTVAL({sequence})"),
+                )
+            }
+            _ => (
+                Vec::new(),
+                "SELECT version()",
+                format!("SELECT nextval('{schema}.dbdelve_denied_970')"),
+                format!("SELECT currval('{schema}.dbdelve_denied_970')"),
+            ),
+        };
+    // `Cleanup` runs on a panic but not on a kill, so a run stopped by a
+    // signal, an out-of-memory kill or a CI timeout leaves the sequence, the
+    // large objects and the canary row behind, and the first create below then
+    // fails as though the classifier were wrong. Run the unwind list once
+    // before anything is created: it is the scenario's own list rather than a
+    // second one, so an entry added to the cleanup is pre-cleaned without
+    // anyone remembering to. Errors are the normal case here, since on a clean
+    // server every one of these statements has nothing to remove, so they go
+    // through `query` and not `subject.run`, which panics.
+    for statement in &unwind {
+        let _ = subject
+            .connection
+            .query(statement, &CancelToken::default(), Fetch::default());
+    }
+    let _cleanup = Cleanup {
+        connection: &subject.connection,
+        statements: unwind,
+        rollback: false,
+        read_write: engine.holds_read_only(),
+    };
+
+    // An engine with no hold has nothing to differ on here: both directions
+    // of the switch must still be accepted, and the sequence case below runs.
+    if !engine.holds_read_only() {
+        hold(true);
+        hold(false);
+    } else {
+        let refused = || {
+            let error = subject
+                .connection
+                .query(&insert, &CancelToken::default(), Fetch::default())
+                .expect_err(&format!("{at}: the hold took a write it should refuse"));
+            assert!(
+                error.message.contains(subject.read_only_refusal),
+                "{at}: refused for another reason: {}",
+                error.message
+            );
+        };
+        // The control: rated a read, runs on the held session, and the hold
+        // is still armed after it.
+        let controlled = || {
+            assert_eq!(
+                rated(control),
+                sql::Mode::ReadOnly,
+                "{at}: control `{control}`"
+            );
+            hold(true);
+            subject.run(scenario, control, Fetch::default());
+            refused();
+            hold(false);
+        };
+
+        for (case, call) in &held_calls {
+            above_a_read(call);
+            hold(true);
+            // The call itself succeeds with the hold armed, which is why the
+            // verdict has to be the one to stop it.
+            subject.run(&format!("{scenario}: {case}"), call, Fetch::default());
+            hold(false);
+            controlled();
+        }
+
+        if engine == Engine::Postgres {
+            // The server decodes `\006f` to an `o` where the lexer reports the
+            // raw text, so the second spelling is the same call the first is.
+            for disarm in [
+                "SELECT set_config('default_transaction_read_only', 'off', false)",
+                r#"SELECT U&"set_c\006fnfig"('default_transaction_read_only', 'off', false)"#,
+                // The denied call is inside a string, so the name scan sees
+                // the carrier and never the payload.
+                "SELECT query_to_xml('select set_config(''default_transaction_read_only'', ''off'', false)', true, false, '')",
+                // Table position and a dollar-quoted payload: the rule does
+                // not depend on the scalar position or the single-quoted
+                // spelling.
+                "SELECT count(*) FROM ts_stat($q$select to_tsvector(set_config('default_transaction_read_only', 'off', false))$q$)",
+                // This carrier's text argument has no name in the catalog,
+                // which is why the shape probe below cannot find it.
+                "SELECT ts_rewrite('a & b'::tsquery, 'select set_config(''default_transaction_read_only'', ''off'', false)::tsquery, ''c''::tsquery')",
+            ] {
+                above_a_read(disarm);
+                hold(true);
+                refused();
+                subject.run(scenario, disarm, Fetch::default());
+                // The write that was refused a moment ago now goes through.
+                subject.run(scenario, &insert, Fetch::default());
+                hold(false);
+                controlled();
+                // The canary is the same row for every spelling.
+                subject.run(
+                    scenario,
+                    &sql_delete(engine, schema, canary),
+                    Fetch::default(),
+                );
+            }
+
+            // The three calls that wrote under the hold when the family was
+            // reviewed, in order, each rated above a read first. `lo_creat`,
+            // `lowrite` and `lo_truncate64` take the same path and would need
+            // their own oid bookkeeping for no new evidence; the corpus covers
+            // their classification.
+            let object = "970971";
+            let read_back = format!("SELECT convert_from(lo_get({object}), 'UTF8')");
+            assert_eq!(
+                rated(&read_back),
+                sql::Mode::ReadOnly,
+                "{at}: `{read_back}`"
+            );
+            hold(true);
+            for write in [
+                format!("SELECT lo_from_bytea({object}, 'abc'::bytea)"),
+                format!("SELECT lo_put({object}, 0, 'xyz'::bytea)"),
+                format!("SELECT lo_truncate(lo_open({object}, 131072), 1)"),
+            ] {
+                above_a_read(&write);
+                subject.run(scenario, &write, Fetch::default());
+            }
+            // The server wrote while the hold was armed: that is the evidence.
+            assert_eq!(
+                cell(&subject.run(scenario, &read_back, Fetch::default())),
+                "x",
+                "{at}: the object was not rewritten and truncated under the hold"
+            );
+            hold(false);
+            controlled();
+
+            // The same evidence reached through a string literal: the server
+            // took a write while the hold was armed, and the only thing the
+            // classifier can see is the carrier's name. This is the wider half
+            // of the exposure, since nothing was released to do it.
+            let carried = "970972";
+            let carried_write = format!(
+                "SELECT query_to_xml('select lo_from_bytea({carried}, ''abc''::bytea)', true, false, '')"
+            );
+            let carried_read = format!("SELECT convert_from(lo_get({carried}), 'UTF8')");
+            above_a_read(&carried_write);
+            hold(true);
+            subject.run(scenario, &carried_write, Fetch::default());
+            assert_eq!(
+                cell(&subject.run(scenario, &carried_read, Fetch::default())),
+                "abc",
+                "{at}: the object was not created through the carrier under the hold"
+            );
+            hold(false);
+            controlled();
+
+            // The same write through a carrier whose text argument the catalog
+            // does not name: the verdict is the only thing between the
+            // statement and the server here too.
+            let unnamed = "970974";
+            let unnamed_write = format!(
+                "SELECT ts_rewrite('a & b'::tsquery, 'select lo_from_bytea({unnamed}, ''abc''::bytea)::text::tsquery, ''c''::tsquery')"
+            );
+            let unnamed_read = format!("SELECT convert_from(lo_get({unnamed}), 'UTF8')");
+            above_a_read(&unnamed_write);
+            hold(true);
+            subject.run(scenario, &unnamed_write, Fetch::default());
+            assert_eq!(
+                cell(&subject.run(scenario, &unnamed_read, Fetch::default())),
+                "abc",
+                "{at}: the object was not created through `ts_rewrite` under the hold"
+            );
+            hold(false);
+            controlled();
+
+            // The catalog is the authority on the family. A name neither list
+            // knows fails here by name, which is the point rather than a
+            // flake: a later server version added a function, and what it does
+            // is a decision. The namespace keeps an extension's function out,
+            // and the escaped underscore keeps the prefix from widening to
+            // every name that begins with `lo`.
+            let reads = [
+                "lo_get",
+                "loread",
+                "lo_open",
+                "lo_close",
+                "lo_lseek",
+                "lo_lseek64",
+                "lo_tell",
+                "lo_tell64",
+            ];
+            let family = subject.run(
+                scenario,
+                "SELECT DISTINCT p.proname FROM pg_catalog.pg_proc p \
+                 JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+                 WHERE n.nspname = 'pg_catalog' \
+                 AND (p.proname LIKE 'lo\\_%' OR p.proname IN ('loread', 'lowrite')) \
+                 ORDER BY 1",
+                Fetch::default(),
+            );
+            let listed = engine.spec().sql.denied_functions;
+            let unlisted: Vec<_> = family
+                .rows
+                .iter()
+                .filter_map(|row| row.get(0))
+                .filter(|name| !listed.contains(name) && !reads.contains(name))
+                .collect();
+            assert!(
+                unlisted.is_empty(),
+                "{at}: large-object functions on neither the deny-list nor the reads: {unlisted:?}"
+            );
+
+            // The executors found so far are found by shape, not by name: what
+            // they share is an argument that is SQL text, which the server
+            // records as one named `query` or `sqlquery`. A carrier whose text
+            // argument the catalog does not name has no such shape, so this
+            // probe cannot see it; the pin below holds those by name. Measured
+            // against Postgres 15.13 (Debian 15.13-1.pgdg110+1): this query
+            // returns 5 distinct names, one of them carved out below, while
+            // widening it to every `pg_catalog` function taking a `text`
+            // argument the catalog leaves unnamed returns 222. The rule was to
+            // widen only when that population is no larger than the deny-list
+            // (47 entries then), and 222 is not: a carve-out that size would
+            // be a second deny-list with no evidence behind its entries. The
+            // lists were checked against that version, so a later version's
+            // addition fails here by name only when the probe server is that
+            // later version. Extension carriers, such as `tablefunc.crosstab`
+            // and `xml2.xpath_table`, live outside `pg_catalog` and so outside
+            // this probe; they are listed, and pinned against their own
+            // extension's catalog by
+            // `live_extension_carriers_agree_with_the_server` in
+            // `src/db/postgres.rs`. A name here neither list knows is
+            // a function a later version added, and whether it runs its text
+            // is a decision: one that does goes on the deny-list, one that
+            // does not goes in the array below with what its `query` actually
+            // is.
+            let not_run = [
+                // `query` is an OUT column here, the text of the statement a
+                // backend is running; nothing takes it as an argument.
+                "pg_stat_get_activity",
+            ];
+            let executors = subject.run(
+                scenario,
+                "SELECT DISTINCT p.proname FROM pg_catalog.pg_proc p \
+                 JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+                 WHERE n.nspname = 'pg_catalog' \
+                 AND (p.proargnames @> ARRAY['query'] OR p.proargnames @> ARRAY['sqlquery']) \
+                 ORDER BY 1",
+                Fetch::default(),
+            );
+            let found: Vec<_> = executors.rows.iter().filter_map(|row| row.get(0)).collect();
+            let unknown: Vec<_> = found
+                .iter()
+                .filter(|name| !listed.contains(name) && !not_run.contains(name))
+                .collect();
+            assert!(
+                unknown.is_empty(),
+                "{at}: functions taking SQL text on neither the deny-list nor the carve-out: {unknown:?}"
+            );
+            // An empty answer is a failed probe: a server built without these
+            // functions has not been checked, and would otherwise pass here.
+            for executor in [
+                "query_to_xml",
+                "query_to_xml_and_xmlschema",
+                "query_to_xmlschema",
+                "ts_stat",
+            ] {
+                assert!(
+                    found.contains(&executor),
+                    "{at}: `{executor}` is missing from the server's catalog, so the executors were not probed (found {found:?})"
+                );
+            }
+
+            // Carriers the catalog gives no argument names. The probe above
+            // finds carriers by the shape the catalog records, and one whose
+            // arguments the catalog does not name has no shape to find, so it
+            // is held by name instead: removing one from the deny-list fails
+            // here.
+            let unnamed_carriers = ["ts_rewrite"];
+            for unnamed in unnamed_carriers {
+                assert!(
+                    listed.contains(&unnamed),
+                    "{at}: `{unnamed}` takes SQL text the catalog does not name, and is not on the deny-list"
+                );
+            }
+        }
+    }
+
+    if engine.spec().sql.denied_functions.contains(&"nextval") {
+        subject.run(
+            scenario,
+            &format!("CREATE SEQUENCE {sequence}"),
+            Fetch::default(),
+        );
+        above_a_read(&advance);
+        assert_eq!(rated(&current), sql::Mode::ReadOnly, "{at}: `{current}`");
+        let first: i64 = cell(&subject.run(scenario, &advance, Fetch::default()))
+            .parse()
+            .unwrap_or_else(|_| panic!("{at}: the sequence did not answer a number"));
+        let second: i64 = cell(&subject.run(scenario, &advance, Fetch::default()))
+            .parse()
+            .unwrap_or_else(|_| panic!("{at}: the sequence did not answer a number"));
+        assert_eq!(
+            second,
+            first + 1,
+            "{at}: the call did not advance the sequence"
+        );
+        // The control reads where the sequence stands and leaves it there.
+        let read: i64 = cell(&subject.run(scenario, &current, Fetch::default()))
+            .parse()
+            .unwrap_or_else(|_| panic!("{at}: the sequence did not answer a number"));
+        assert_eq!(
+            read, second,
+            "{at}: the read-only spelling moved the sequence"
+        );
+        let third: i64 = cell(&subject.run(scenario, &advance, Fetch::default()))
+            .parse()
+            .unwrap_or_else(|_| panic!("{at}: the sequence did not answer a number"));
+        assert_eq!(
+            third,
+            second + 1,
+            "{at}: the control disturbed the sequence"
+        );
+
+        // DuckDB holds no session read-only, so the verdict is the whole
+        // boundary there and the counter is the canary. Observed on the
+        // embedded `v2.0.0-dev88614`: `query` and `json_execute_serialized_sql`
+        // run the text they are handed, `query_table` resolves a table name and
+        // runs none. Asserted as that answer, not as whatever the server says,
+        // so a DuckDB that changes it fails here by name.
+        if engine == Engine::DuckDb {
+            let inner = format!("select nextval(''{schema}.dbdelve_denied_970'')");
+            let counter = || -> i64 {
+                cell(&subject.run(scenario, &current, Fetch::default()))
+                    .parse()
+                    .unwrap_or_else(|_| panic!("{at}: the sequence did not answer a number"))
+            };
+            for carrier in [
+                format!("SELECT * FROM query('{inner}')"),
+                format!("SELECT * FROM json_execute_serialized_sql(json_serialize_sql('{inner}'))"),
+            ] {
+                above_a_read(&carrier);
+                let before = counter();
+                subject.run(scenario, &carrier, Fetch::default());
+                assert_eq!(
+                    counter(),
+                    before + 1,
+                    "{at}: `{carrier}` did not run its text, so it is not a carrier and should not be listed"
+                );
+            }
+            let by_name = format!("SELECT * FROM query_table('{inner}')");
+            assert_eq!(
+                rated(&by_name),
+                sql::Mode::ReadOnly,
+                "{at}: `{by_name}` is rated above a read, but query_table runs no text"
+            );
+            let before = counter();
+            let refused = subject
+                .connection
+                .query(&by_name, &CancelToken::default(), Fetch::default())
+                .expect_err(&format!(
+                    "{at}: query_table ran `{by_name}`, so it is a carrier and should be listed"
+                ));
+            assert!(
+                refused.message.contains("does not exist"),
+                "{at}: query_table refused `{by_name}` for another reason: {}",
+                refused.message
+            );
+            assert_eq!(
+                counter(),
+                before,
+                "{at}: query_table moved the sequence through `{by_name}`"
+            );
+        }
+    }
+}
+
+/// The classifier's verdicts on the statements that undo a Read-only hold,
+/// against what the server does with them. Each statement is rated above a
+/// read, and with the hold armed the canary write the server refused a moment
+/// ago goes through after it. The one statement that is not a disarm is the
+/// identity change: the hold stays armed, so that case asserts on the session's
+/// reported user instead, and on the hold still being on.
+///
+/// Every positive is matched by a control from `plain_settings`, rated a read,
+/// that leaves the same canary write refused in the same session. Without the
+/// controls a server that refused everything would pass.
+pub(super) fn session_settings_agree_with_the_server(subject: &Subject) {
+    let scenario = "session_settings_agree_with_the_server";
+    let at = format!("{scenario} on {:?}", subject.target.engine);
+    let engine = subject.target.engine;
+    let schema = subject.schema;
+    let rated = |sql: &str| sql::classify(engine, sql).mode;
+    let above_a_read = |sql: &str| {
+        assert!(
+            rated(sql) > sql::Mode::ReadOnly,
+            "{at}: `{sql}` is rated {:?}, which a Read-only profile would run",
+            rated(sql)
+        );
+    };
+
+    // The statement an engine sends to release its own hold is the one the
+    // classifier must never let a Read-only profile run. Pure, so it covers
+    // every engine and not only the live one.
+    for each in Engine::ALL {
+        if let Some(release) = super::read_only_statement(each, false) {
+            assert!(
+                sql::classify(each, release).mode > sql::Mode::ReadOnly,
+                "{at}: the statement {each:?} sends to release its hold, `{release}`, is rated {:?}",
+                sql::classify(each, release).mode
+            );
+        }
+    }
+    if !engine.holds_read_only() {
+        return;
+    }
+
+    // Row 971, named for this scenario: CI runs four scenarios at a time
+    // against one server.
+    let canary = 971;
+    let insert = sql_insert(engine, schema, canary, "session setting");
+    let delete = sql_delete(engine, schema, canary);
+    let postgres = engine == Engine::Postgres;
+    // Named for this scenario like the canary row. Queued for removal here,
+    // before the identity-change case creates it, so an interrupted run
+    // removes it and the pre-clean below removes a leftover one.
+    let identity = "dbdelve_session_971";
+    let unwind = if postgres {
+        vec![
+            "RESET ROLE".to_string(),
+            "RESET SESSION AUTHORIZATION".to_string(),
+            delete.clone(),
+            format!("DROP ROLE IF EXISTS {identity}"),
+        ]
+    } else {
+        vec![delete.clone()]
+    };
+    // `Cleanup` runs on a panic but not on a kill, so a stopped run leaves the
+    // canary row behind and the insert below then fails on a duplicate key as
+    // though the classifier were wrong. The unwind list is the cleanup's own,
+    // read once here before anything is written; errors are ignored because
+    // on a clean server there is nothing to remove.
+    for statement in &unwind {
+        let _ = subject
+            .connection
+            .query(statement, &CancelToken::default(), Fetch::default());
+    }
+    let _cleanup = Cleanup {
+        connection: &subject.connection,
+        statements: unwind,
+        rollback: true,
+        read_write: true,
+    };
+    let hold = |on: bool| {
+        subject
+            .connection
+            .set_read_only(on)
+            .unwrap_or_else(|error| panic!("{at}: {error}"));
+    };
+    let run = |sql: &str| subject.run(scenario, sql, Fetch::default());
+    let cell = |sql: &str| {
+        run(sql)
+            .rows
+            .first()
+            .and_then(|row| row.get(0))
+            .unwrap_or_else(|| panic!("{at}: `{sql}` answered nothing"))
+            .to_string()
+    };
+    let refused = || {
+        let error = subject
+            .connection
+            .query(&insert, &CancelToken::default(), Fetch::default())
+            .expect_err(&format!("{at}: the hold took a write it should refuse"));
+        assert!(
+            error.message.contains(subject.read_only_refusal),
+            "{at}: refused for another reason: {}",
+            error.message
+        );
+    };
+    // Back to a clean session: nothing open, the hold lifted, no canary row.
+    let reset = || {
+        run("ROLLBACK");
+        hold(false);
+        run(&delete);
+    };
+    // Rated above a read, and the write refused with the hold armed goes
+    // through after it, with the hold still nominally on.
+    let disarms = |case: &str, before: &[&str], statement: &str| {
+        above_a_read(statement);
+        hold(true);
+        refused();
+        for sql in before {
+            run(sql);
+        }
+        subject.run(&format!("{scenario}: {case}"), statement, Fetch::default());
+        subject.run(&format!("{scenario}: {case}"), &insert, Fetch::default());
+        reset();
+    };
+    // Rated a read, and the same write is still refused afterwards.
+    let leaves_the_hold = |case: &str, before: &[&str], statement: &str| {
+        assert_eq!(
+            rated(statement),
+            sql::Mode::ReadOnly,
+            "{at}: control `{statement}`"
+        );
+        hold(true);
+        for sql in before {
+            run(sql);
+        }
+        subject.run(&format!("{scenario}: {case}"), statement, Fetch::default());
+        refused();
+        reset();
+    };
+
+    let release = super::read_only_statement(engine, false)
+        .unwrap_or_else(|| panic!("{at}: a holding engine has a statement that releases it"));
+    disarms("the hold's own release", &[], release);
+
+    if postgres {
+        disarms("a write transaction", &[], "BEGIN READ WRITE");
+        disarms(
+            "a session write access mode",
+            &[],
+            "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE",
+        );
+        disarms(
+            "a transaction write access mode",
+            &["BEGIN"],
+            "SET TRANSACTION READ WRITE",
+        );
+        disarms(
+            "the transaction read-only setting",
+            &["BEGIN"],
+            "SET transaction_read_only = off",
+        );
+        disarms(
+            "the function form of the setting",
+            &[],
+            "SELECT set_config('default_transaction_read_only', 'off', false)",
+        );
+
+        // An identity change leaves the hold armed, so there is no canary to
+        // ask: the session's own answer to who it is has to move instead. The
+        // identity is created rather than found: the server's own catalog
+        // answers with whichever role sorts first, typically a built-in one
+        // that needs superuser or membership to assume, so the case was
+        // asserting the classifier's verdict against an identity nobody
+        // chose. `NOLOGIN` and granted nothing: it exists to be switched to.
+        let other = engine.quote_identifier(identity);
+        run(&format!("CREATE ROLE {other} NOLOGIN"));
+        for (case, statement, undo) in [
+            ("a role change", format!("SET ROLE {other}"), "RESET ROLE"),
+            (
+                "an authorization change",
+                format!("SET SESSION AUTHORIZATION {other}"),
+                "RESET SESSION AUTHORIZATION",
+            ),
+        ] {
+            above_a_read(&statement);
+            hold(true);
+            let who = cell("SELECT current_user");
+            subject.run(&format!("{scenario}: {case}"), &statement, Fetch::default());
+            assert_ne!(
+                cell("SELECT current_user"),
+                who,
+                "{at}: {case} did not change the session's user"
+            );
+            assert_eq!(
+                cell("SELECT current_setting('default_transaction_read_only')"),
+                "on",
+                "{at}: {case} disarmed the hold, which it is rated for not doing"
+            );
+            run(undo);
+            reset();
+        }
+
+        leaves_the_hold(
+            "a search-path change",
+            &[],
+            &format!("SET search_path TO {schema}"),
+        );
+        leaves_the_hold(
+            "a read access mode",
+            &["BEGIN"],
+            "SET TRANSACTION READ ONLY",
+        );
+    } else {
+        disarms("a write transaction", &[], "START TRANSACTION READ WRITE");
+        disarms(
+            "a write access mode for the next transaction",
+            &[],
+            "SET TRANSACTION READ WRITE",
+        );
+        disarms(
+            "the transaction read-only setting",
+            &[],
+            "SET SESSION transaction_read_only = 0",
+        );
+        disarms(
+            "the transaction read-only setting, doubled-at",
+            &[],
+            "SET @@session.transaction_read_only = OFF",
+        );
+        if engine == Engine::MariaDb {
+            disarms("its older spelling", &[], "SET tx_read_only = 0");
+        } else {
+            // Removed in 8.0.3, so the server refuses the name outright. It is
+            // still rated above a read, and the hold is still armed.
+            above_a_read("SET tx_read_only = 0");
+            hold(true);
+            let error = subject
+                .connection
+                .query(
+                    "SET tx_read_only = 0",
+                    &CancelToken::default(),
+                    Fetch::default(),
+                )
+                .expect_err(&format!("{at}: the server accepted a removed variable"));
+            assert!(
+                error.message.contains("Unknown system variable"),
+                "{at}: refused for another reason: {}",
+                error.message
+            );
+            refused();
+            reset();
+        }
+
+        leaves_the_hold("a comfort setting", &[], "SET SESSION wait_timeout = 28800");
+        leaves_the_hold("a read access mode", &[], "SET TRANSACTION READ ONLY");
+
+        // The server-wide scope of a transaction setting, which the parser reads
+        // as no scope at all. The access-mode spelling is rated and never sent:
+        // it would change the default for every later session on a server these
+        // scenarios share. The isolation-level spelling is sent set to the value
+        // already in force, so a server that accepts it is left as it was, and
+        // one that refuses it for want of the privilege has said it is not a
+        // read. Either answer is asserted, so neither is a skip.
+        above_a_read("SET GLOBAL TRANSACTION READ ONLY");
+        let level = cell("SELECT @@global.transaction_isolation");
+        let spelled = level.replace('-', " ");
+        let server_wide = format!("SET GLOBAL TRANSACTION ISOLATION LEVEL {spelled}");
+        above_a_read(&server_wide);
+        hold(true);
+        match subject
+            .connection
+            .query(&server_wide, &CancelToken::default(), Fetch::default())
+        {
+            Err(error) => assert!(
+                error.message.contains("SUPER"),
+                "{at}: refused for another reason: {}",
+                error.message
+            ),
+            Ok(_) => assert_eq!(
+                cell("SELECT @@global.transaction_isolation"),
+                level,
+                "{at}: the server-wide isolation level moved"
+            ),
+        }
+        refused();
+        reset();
+        // The same level for this session alone is a read and leaves the same
+        // canary refused.
+        leaves_the_hold(
+            "a session isolation level",
+            &[],
+            &format!("SET SESSION TRANSACTION ISOLATION LEVEL {spelled}"),
+        );
+    }
+
+    // The fixture is as it was found.
+    assert_eq!(
+        subject.read(scenario).rows.len(),
+        EXPECTED.len(),
+        "{at}: the fixture does not hold its original rows"
+    );
+}
+
+/// The two servers of the MySQL dialect disagree about a MariaDB-only
+/// executable comment (`/*M!100100 … */`): one runs what it holds, the other
+/// reads a comment. The classifier cannot know which it is talking to, so it
+/// rates what the executing one would run, and on MySQL also calls the
+/// statement unreadable. This scenario pins both halves: the executing server
+/// really does the destructive thing and really does disarm the hold, and the
+/// other really does neither.
+///
+/// Which one this is is asked of the server, not of the engine: `SELECT 2
+/// /*M!100100 +1 */` answers 3 from one and 2 from the other. Every positive
+/// has a control spelled as a plain comment that leaves the same object, or the
+/// same refused write, untouched on both; it is rated a read on MariaDB and
+/// unreadable on MySQL.
+pub(super) fn executable_comments_agree_with_the_server(subject: &Subject) {
+    let scenario = "executable_comments_agree_with_the_server";
+    let at = format!("{scenario} on {:?}", subject.target.engine);
+    let engine = subject.target.engine;
+    let schema = subject.schema;
+    // Row 972 and one helper table, both named for this scenario: CI runs four
+    // scenarios at a time against one server. The shared fixture table is never
+    // the target of a statement that drops anything.
+    let canary = 972;
+    let table = engine.qualified(schema, "dbdelve_comments_972");
+    let create = format!("CREATE TABLE {table} (id INT)");
+    let delete = sql_delete(engine, schema, canary);
+    let insert = sql_insert(engine, schema, canary, "executable comment");
+    let unwind = vec![delete.clone(), format!("DROP TABLE IF EXISTS {table}")];
+    // `Cleanup` runs on a panic but not on a kill, so a stopped run leaves the
+    // helper table and the canary row behind, and the `CREATE TABLE` below
+    // then fails on a duplicate name as though the classifier were wrong. The
+    // unwind list is the cleanup's own, read once here before anything is
+    // created; errors are ignored because on a clean server there is nothing
+    // to remove.
+    for statement in &unwind {
+        let _ = subject
+            .connection
+            .query(statement, &CancelToken::default(), Fetch::default());
+    }
+    let _cleanup = Cleanup {
+        connection: &subject.connection,
+        statements: unwind,
+        rollback: true,
+        read_write: true,
+    };
+    let run = |sql: &str| subject.run(scenario, sql, Fetch::default());
+    // The effect is what is asserted on, and a server that ignores a comment
+    // answers a submission of nothing else with an error of its own.
+    let send = |sql: &str| {
+        let _ = subject
+            .connection
+            .query(sql, &CancelToken::default(), Fetch::default());
+    };
+    let hold = |on: bool| {
+        subject
+            .connection
+            .set_read_only(on)
+            .unwrap_or_else(|error| panic!("{at}: {error}"));
+    };
+    let cell = |sql: &str| {
+        run(sql)
+            .rows
+            .first()
+            .and_then(|row| row.get(0))
+            .unwrap_or_else(|| panic!("{at}: `{sql}` answered nothing"))
+            .to_string()
+    };
+    let table_exists = || {
+        let found = cell(&format!(
+            "SELECT COUNT(*) FROM information_schema.tables \
+             WHERE table_schema = {} AND table_name = 'dbdelve_comments_972'",
+            engine.quote_literal(schema)
+        ));
+        found == "1"
+    };
+    let refused = || {
+        let error = subject
+            .connection
+            .query(&insert, &CancelToken::default(), Fetch::default())
+            .expect_err(&format!("{at}: the hold took a write it should refuse"));
+        assert!(
+            error.message.contains(subject.read_only_refusal),
+            "{at}: refused for another reason: {}",
+            error.message
+        );
+    };
+    let executes = match cell("SELECT 2 /*M!100100 +1 */").as_str() {
+        "3" => true,
+        "2" => false,
+        other => panic!("{at}: the probe answered {other}, which neither server gives"),
+    };
+
+    // On MySQL, which never runs the marker, the classifier also rates every
+    // `/*M!` statement unreadable: what it holds and what MySQL runs without it
+    // differ, so the human sees the statement before it goes.
+    let unreadable = sql::Destructive::Unreadable;
+    let verdict = |sql: &str| sql::classify(engine, sql);
+    let stopped = |sql: &str| {
+        let rated = verdict(sql);
+        assert!(
+            rated.mode > sql::Mode::ReadOnly && rated.destructive.contains(&unreadable) != executes,
+            "{at}: `{sql}` is rated {rated:?}, which a Read-only profile would run"
+        );
+    };
+    let a_read = |sql: &str| {
+        let rated = verdict(sql);
+        if executes {
+            assert_eq!(
+                rated,
+                sql::Verdict::READ,
+                "{at}: control `{sql}` is not rated a plain read"
+            );
+        } else {
+            assert!(
+                rated.destructive == [unreadable],
+                "{at}: control `{sql}` is rated {rated:?}, not unreadable"
+            );
+        }
+    };
+
+    // The destructive form: rated by the kind it holds on both servers, and the
+    // object is gone afterwards on the one that runs it and still there on the
+    // other.
+    let drop = format!("/*M!100100 DROP TABLE {table} */");
+    let held = if executes {
+        vec![sql::Destructive::Drop]
+    } else {
+        vec![sql::Destructive::Drop, unreadable]
+    };
+    assert_eq!(verdict(&drop).destructive, held, "{at}: `{drop}`");
+    run(&create);
+    send(&drop);
+    assert_eq!(
+        table_exists(),
+        !executes,
+        "{at}: the server that {} the marker {} the canary",
+        if executes { "runs" } else { "ignores" },
+        if executes { "left" } else { "dropped" }
+    );
+    if executes {
+        run(&create);
+    }
+    // The control: four digits are no version, a plain comment to both.
+    let plain = format!("/*M!1234 DROP TABLE {table} */");
+    a_read(&plain);
+    send(&plain);
+    assert!(table_exists(), "{at}: a plain comment dropped the canary");
+    run(&format!("DROP TABLE {table}"));
+
+    // The hole this closes: with the hold armed, a comment holding the release
+    // is a write the server has refused until now.
+    let release = super::read_only_statement(engine, false)
+        .unwrap_or_else(|| panic!("{at}: a holding engine has a statement that releases it"));
+    let disarm = format!("/*M!100100 {release} */");
+    stopped(&disarm);
+    stopped(&format!("SELECT 1; {disarm}"));
+    hold(true);
+    refused();
+    send(&disarm);
+    if executes {
+        // The write that was refused a moment ago now goes through.
+        run(&insert);
+    } else {
+        refused();
+    }
+    run("ROLLBACK");
+    hold(false);
+    run(&delete);
+
+    let plain = format!("/*M!1234 {release} */");
+    a_read(&plain);
+    hold(true);
+    send(&plain);
+    refused();
+    run("ROLLBACK");
+    hold(false);
+
+    // The fixture is as it was found.
+    assert_eq!(
+        subject.read(scenario).rows.len(),
+        EXPECTED.len(),
+        "{at}: the fixture does not hold its original rows"
+    );
+}
+
+/// The audit D-11 asks for: for each comment form, does the classifier ever
+/// skip as a comment what the server runs? The one direction that matters is
+/// asserted, and only it: **if the server ran a write, a Read-only profile's
+/// gate must have stopped the submission.** The reverse is harmless. A
+/// classifier that stops a submission the server ignores has over-classified,
+/// which is the safe side, and the flat reading of a nested block comment is
+/// expected to do exactly that.
+///
+/// Each form is submitted two ways, with a write to a table this scenario
+/// creates for itself: the write *inside* the comment, which only a server that
+/// reads the form as code will run, and the write *after* a comment that holds
+/// nothing, which every server runs and so shows the classifier reads past the
+/// comment to the statement. A form that is no comment on an engine, such as a
+/// hash on Postgres, is a syntax error there and asserts nothing.
+///
+/// RESULT (2026-10-26, against the compose Postgres 15, MySQL 8.4, MariaDB 11.4
+/// and SQL Server): no exploitable gap beyond the executable comment plan 01-04
+/// closed. Every submission the server ran was stopped by a Read-only gate. The
+/// only writes the server ran from inside a comment were the executable
+/// comments, `/*!50000 ... */` on MySQL and MariaDB and `/*M!100100 ... */` on
+/// MariaDB, and the classifier rates both by what they hold. With that fix
+/// reverted this scenario fails on MariaDB at `/*M!100100 INSERT ... */`, so it
+/// finds the one real hole. Where the server reads a form as no comment at all,
+/// the classifier stops it though the server ran nothing: a `--` with no space
+/// and a nested block comment on MySQL and MariaDB, and a hash on Postgres and
+/// SQL Server. That is the over-classification the research predicted. The
+/// batch splitter and the grammar pins are untouched on this evidence.
+pub(super) fn comment_forms_agree_with_the_server(subject: &Subject) {
+    let scenario = "comment_forms_agree_with_the_server";
+    let at = format!("{scenario} on {:?}", subject.target.engine);
+    let engine = subject.target.engine;
+    // One helper table named for this scenario: CI runs four scenarios at a
+    // time against one server, and the shared fixture is never written.
+    let table = engine.qualified(subject.schema, "dbdelve_forms_973");
+    let _cleanup = Cleanup {
+        connection: &subject.connection,
+        statements: vec![format!("DROP TABLE IF EXISTS {table}")],
+        rollback: false,
+        read_write: false,
+    };
+    let run = |sql: &str| subject.run(scenario, sql, Fetch::default());
+    // A form the server does not read as a comment answers with an error of its
+    // own; the effect on the table is what is asserted on.
+    let send = |sql: &str| {
+        let _ = subject
+            .connection
+            .query(sql, &CancelToken::default(), Fetch::default());
+    };
+    let rows = || -> u32 {
+        run(&format!("SELECT COUNT(*) FROM {table}"))
+            .rows
+            .first()
+            .and_then(|row| row.get(0))
+            .and_then(|count| count.parse().ok())
+            .unwrap_or_else(|| panic!("{at}: the canary table answered no count"))
+    };
+    run(&format!("DROP TABLE IF EXISTS {table}"));
+    run(&format!("CREATE TABLE {table} (id INT)"));
+    let write = format!("INSERT INTO {table} VALUES (1)");
+
+    // How a form carries a body: the text of the comment around it.
+    type Comment = fn(&str) -> String;
+    let forms: [(&str, Comment); 8] = [
+        ("a line comment with a space", |body| format!("-- {body}\n")),
+        ("a line comment without one", |body| format!("--{body}\n")),
+        ("a hash line comment", |body| format!("# {body}\n")),
+        ("a block comment", |body| format!("/* {body} */")),
+        ("a nested block comment", |body| {
+            format!("/* /* {body} */ */")
+        }),
+        ("a comment both servers execute", |body| {
+            format!("/*!50000 {body} */")
+        }),
+        ("a comment only MariaDB executes", |body| {
+            format!("/*M!100100 {body} */")
+        }),
+        ("a comment with a version too short to run", |body| {
+            format!("/*M!1234 {body} */")
+        }),
+    ];
+    let mut observed_a_run = false;
+    for (name, comment) in forms {
+        for (shape, sql) in [
+            ("write inside", comment(&write)),
+            ("write after", format!("{}{write}", comment("a note"))),
+        ] {
+            send(&sql);
+            let ran = rows() > 0;
+            run(&format!("DELETE FROM {table}"));
+            if !ran {
+                continue;
+            }
+            observed_a_run = true;
+            let verdict = sql::classify(engine, &sql);
+            assert!(
+                sql::gate(&verdict, sql::Mode::ReadOnly, &[]).is_some(),
+                "{at}: the server ran `{sql}` ({name}, {shape}), and a Read-only profile \
+                 would have run it too: rated {verdict:?}"
+            );
+        }
+    }
+    // A scenario in which nothing ever ran asserted nothing.
+    assert!(observed_a_run, "{at}: no submission wrote to the canary");
 }
 
 pub(super) fn generated_writes_round_trip(subject: &Subject) {

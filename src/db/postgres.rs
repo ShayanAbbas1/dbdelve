@@ -676,6 +676,7 @@ pub fn config_from_url(url: &str) -> Result<PostgresConfig, String> {
             schema: None,
             time_zone: None,
             properties: Properties::default(),
+            read_only: false,
         },
         service,
     })
@@ -718,20 +719,26 @@ fn connection_string(server: &ServerConfig) -> String {
     if let Some(name) = &server.properties.application_name {
         parts.push(format!("application_name={}", quote(name)));
     }
+    // A session default set once, here, rather than a `SET` prepended to the
+    // user's submission -- see `ServerConfig::statement_timeout`. It rides in
+    // as a startup option because `options` is the only channel libpq has for
+    // one, and nothing collides with it: dbdelve's URL parser has no `options`
+    // field, so a user-supplied one never reaches here. `statement_timeout`
+    // counts milliseconds when given a bare number. The read-only hold shares
+    // the one `options` parameter, so an agent's sessions add no startup
+    // parameter beyond what the timeout already sends a pooler.
+    let mut options = Vec::new();
     if server.statement_timeout > 0 {
-        // A session default set once, here, rather than a `SET` prepended to
-        // the user's submission -- see `ServerConfig::statement_timeout`. It
-        // rides in as a startup option because `options` is the only channel
-        // libpq has for one, and nothing collides with it: dbdelve's URL parser
-        // has no `options` field, so a user-supplied one never reaches here.
-        // `statement_timeout` counts milliseconds when given a bare number.
-        parts.push(format!(
-            "options={}",
-            quote(&format!(
-                "-c statement_timeout={}",
-                u64::from(server.statement_timeout) * 1_000
-            ))
+        options.push(format!(
+            "-c statement_timeout={}",
+            u64::from(server.statement_timeout) * 1_000
         ));
+    }
+    if server.read_only {
+        options.push("-c default_transaction_read_only=on".to_string());
+    }
+    if !options.is_empty() {
+        parts.push(format!("options={}", quote(&options.join(" "))));
     }
     parts.join(" ")
 }
@@ -2051,13 +2058,19 @@ impl Connection {
     /// waiting on a relation's lock never holds the mutex a user's query waits
     /// on. The side connection is dropped on return.
     pub fn sizes(&self) -> Result<Sizes, DbError> {
-        let side = Self::connect(
+        assemble_sizes(self.side_session()?.internal_query(SIZES_SQL)?)
+    }
+
+    /// A session of its own, built from this connection's config, so it
+    /// carries whatever that config holds -- the read-only hold of an agent's
+    /// connection included -- from its first statement.
+    fn side_session(&self) -> Result<Self, DbError> {
+        Self::connect(
             &self.server(),
             self.route.clone(),
             &self.startup,
             self.held(),
-        )?;
-        assemble_sizes(side.internal_query(SIZES_SQL)?)
+        )
     }
 
     pub fn references(&self, schema: &str, relation: &str) -> Result<Vec<Reference>, DbError> {
@@ -3382,6 +3395,7 @@ mod tests {
             schema: None,
             time_zone: None,
             properties: Properties::default(),
+            read_only: false,
         }
     }
 
@@ -3427,6 +3441,7 @@ mod tests {
             schema: None,
             time_zone: None,
             properties: Properties::default(),
+            read_only: false,
         }
     }
 
@@ -3857,6 +3872,42 @@ mod tests {
             connection_string(&config).contains("options='-c statement_timeout=30000'"),
             "{}",
             connection_string(&config)
+        );
+    }
+
+    #[test]
+    fn a_read_only_hold_rides_in_the_startup_options() {
+        let held = |statement_timeout| {
+            connection_string(&ServerConfig {
+                statement_timeout,
+                read_only: true,
+                ..config()
+            })
+        };
+        let string = held(30);
+        assert!(
+            string.contains(
+                "options='-c statement_timeout=30000 -c default_transaction_read_only=on'"
+            ),
+            "{string}"
+        );
+        assert_eq!(string.matches("options=").count(), 1, "{string}");
+        let string = held(0);
+        assert!(
+            string.contains("options='-c default_transaction_read_only=on'"),
+            "{string}"
+        );
+        let string = connection_string(&ServerConfig {
+            statement_timeout: 30,
+            ..config()
+        });
+        assert!(
+            !string.contains("default_transaction_read_only"),
+            "{string}"
+        );
+        assert!(
+            !connection_string(&config()).contains("default_transaction_read_only"),
+            "an unheld config sends no hold"
         );
     }
 
@@ -4303,6 +4354,117 @@ mod tests {
             .alongside()
             .expect("a second session should sign in with it too");
         assert!(Connection::open(&printing("not-the-password")).is_err());
+    }
+
+    /// The Generic File Access functions are pinned by shape against the
+    /// server's own catalog, so one a later release adds fails here by name
+    /// rather than reading a file for an agent unasked.
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_every_file_access_function_is_on_the_egress_list() {
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        let found = connection
+            .internal_query(
+                "SELECT DISTINCT p.proname FROM pg_catalog.pg_proc p \
+                 JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+                 WHERE n.nspname = 'pg_catalog' \
+                 AND p.proname ~ '^pg_(read_file|read_binary_file|stat_file|ls_)' \
+                 ORDER BY 1",
+            )
+            .expect("the catalog should answer");
+        let listed = Engine::Postgres.spec().sql.egress_functions;
+        let names: Vec<&str> = found.rows.iter().filter_map(|row| row.get(0)).collect();
+        assert!(
+            names.contains(&"pg_read_file"),
+            "the catalog answered {names:?}"
+        );
+        for name in names {
+            assert!(
+                listed.contains(&name),
+                "{name} is on the server and not on egress_functions"
+            );
+        }
+    }
+
+    /// Volatile names on the built-in list that change nothing, added by hand:
+    /// they are volatile in `pg_proc` only because they read the clock, the
+    /// random source or the sequence a session already holds, or the size of
+    /// a relation. A name another run finds volatile either leaves the list or
+    /// joins this one with a reason.
+    const HARMLESS_VOLATILE: &[&str] = &[
+        "random",
+        "random_normal",
+        "clock_timestamp",
+        "timeofday",
+        "gen_random_uuid",
+        "uuidv4",
+        "uuidv7",
+        "currval",
+        "lastval",
+        "pg_database_size",
+        "pg_relation_size",
+        "pg_total_relation_size",
+        "pg_table_size",
+        "pg_indexes_size",
+        "pg_tablespace_size",
+        "pg_is_in_recovery",
+    ];
+
+    /// The built-in list is pinned against the server's own catalog: a listed
+    /// name the server has must be no volatile function, which is how a
+    /// function that writes shows itself. A name the server lacks only fails
+    /// on a server as new as the list, because a user function could take it.
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_every_listed_built_in_changes_nothing() {
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        let names = |sql: &str| -> std::collections::HashSet<String> {
+            connection
+                .internal_query(sql)
+                .expect("the catalog should answer")
+                .rows
+                .iter()
+                .filter_map(|row| row.get(0).map(str::to_owned))
+                .collect()
+        };
+        let catalog = names(
+            "SELECT DISTINCT proname::text FROM pg_catalog.pg_proc \
+             WHERE pronamespace = 'pg_catalog'::regnamespace",
+        );
+        let volatile = names(
+            "SELECT DISTINCT proname::text FROM pg_catalog.pg_proc \
+             WHERE pronamespace = 'pg_catalog'::regnamespace AND provolatile = 'v'",
+        );
+        let keywords = names("SELECT word FROM pg_catalog.pg_get_keywords()");
+        let version: u32 = names("SELECT current_setting('server_version_num')")
+            .into_iter()
+            .next()
+            .and_then(|number| number.parse().ok())
+            .expect("the server reports its version");
+        assert!(
+            catalog.contains("lower"),
+            "the catalog answered {} names",
+            catalog.len()
+        );
+        for name in Engine::Postgres
+            .spec()
+            .sql
+            .builtin_functions
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+        {
+            if catalog.contains(name) {
+                assert!(
+                    !volatile.contains(name) || HARMLESS_VOLATILE.contains(&name),
+                    "{name} is on the built-in list and has a volatile overload"
+                );
+            } else if version >= 180000 {
+                assert!(
+                    keywords.contains(name) || crate::db::spec::GRAMMAR_FUNCTIONS.contains(&name),
+                    "{name} is on the built-in list and in no catalog of this server"
+                );
+            }
+        }
     }
 
     #[test]
@@ -4869,6 +5031,7 @@ mod tests {
                     schema: None,
                     time_zone: None,
                     properties: Properties::default(),
+                    read_only: false,
                 },
                 service: None,
             }
@@ -5168,6 +5331,18 @@ mod tests {
         let sql = structure_sql("x = {relation}", "public", r"x\' OR public.pwn() --");
 
         assert_eq!(sql, r"x = E'x\\'' OR public.pwn() --'");
+    }
+
+    #[test]
+    fn a_schema_named_like_a_placeholder_is_not_substituted_into() {
+        assert_eq!(
+            structure_sql(
+                "WHERE namespace.nspname = {schema} AND class.relname = {relation}",
+                "{relation}",
+                "a'b",
+            ),
+            "WHERE namespace.nspname = '{relation}' AND class.relname = 'a''b'"
+        );
     }
 
     #[test]
@@ -5582,6 +5757,59 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_the_side_session_sizes_opens_is_read_only() {
+        let plain = Connection::open(&live_config()).expect("connection should open");
+        plain
+            .query(
+                "DROP TABLE IF EXISTS dbdelve_side_probe; \
+                 CREATE TABLE dbdelve_side_probe (x integer); \
+                 INSERT INTO dbdelve_side_probe SELECT generate_series(1, 5); \
+                 ANALYZE dbdelve_side_probe",
+                Fetch::default(),
+            )
+            .expect("the probe table should be created");
+
+        let held = Connection::open(&ServerConfig {
+            read_only: true,
+            ..live_config()
+        })
+        .expect("a held connection should open");
+        let side = held.side_session().expect("the side session should open");
+        let setting = side
+            .query("SHOW transaction_read_only", Fetch::default())
+            .expect("the setting should read");
+        assert_eq!(setting.rows, vec![vec![Some("on".to_string())]]);
+        let refusal = side
+            .query(
+                "INSERT INTO dbdelve_side_probe VALUES (1)",
+                Fetch::default(),
+            )
+            .expect_err("a held side session must refuse a write");
+        assert!(
+            refusal.message.contains("read-only"),
+            "the server's own words: {}",
+            refusal.message
+        );
+        let sizes = held
+            .sizes()
+            .expect("sizes should load on a held connection");
+        assert!(
+            sizes["public"].contains_key("dbdelve_side_probe"),
+            "the hold must not empty the estimates"
+        );
+
+        // The seeded rows are all there is: the refused write did not land.
+        let count = plain
+            .query("SELECT count(*) FROM dbdelve_side_probe", Fetch::default())
+            .expect("the plain connection should read");
+        assert_eq!(count.rows, vec![vec![Some("5".to_string())]]);
+        plain
+            .query("DROP TABLE dbdelve_side_probe", Fetch::default())
+            .expect("the probe table should drop");
+    }
+
+    #[test]
     #[ignore = "requires a local Postgres server configured through PG*"]
     fn live_a_runs_notices_come_back_with_it_and_only_with_it() {
         let connection = Connection::open(&live_config()).expect("connection should open");
@@ -5675,6 +5903,9 @@ mod tests {
         row_limit_drains_an_ineligible_read,
         capped_read_keeps_the_users_transaction,
         read_only_session_refuses_a_write,
+        denied_functions_agree_with_the_server,
+        session_settings_agree_with_the_server,
+        comment_forms_agree_with_the_server,
         generated_writes_round_trip,
         generated_draft_round_trip,
         verified_draft_round_trip,
@@ -7133,6 +7364,474 @@ mod tests {
         .expect("databases should list");
 
         assert_eq!(databases.current.as_deref(), Some("postgres"));
+    }
+
+    /// Drops the scratch database when the test ends, panicking or not.
+    /// The result is ignored: the test's own failure is the one worth
+    /// reading.
+    struct Scratch<'a>(&'a crate::db::Connection, String);
+    impl Drop for Scratch<'_> {
+        fn drop(&mut self) {
+            let _ = self.0.query(
+                &self.1,
+                &crate::db::CancelToken::default(),
+                Fetch::default(),
+            );
+        }
+    }
+
+    /// The extension carriers the Postgres deny-list names, run against the
+    /// server with the Read-only hold armed. It works in a database of its own
+    /// because the dev database is shared and an extension is database-wide,
+    /// and it needs a role that can create a database and install an
+    /// untrusted extension, which is a superuser on the compose server. The
+    /// database is dropped before it is created and again when the test ends,
+    /// so a run stopped by a signal costs a re-run and not a manual cleanup.
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_extension_carriers_agree_with_the_server() {
+        use crate::db::{CancelToken as Cancel, Connection as Any};
+        use crate::sql;
+
+        // Named for this test alone, and large objects live per database, so
+        // nothing another scenario writes can collide with the oids below.
+        const SCRATCH: &str = "dbdelve_carriers_975";
+        let at = "live_extension_carriers_agree_with_the_server";
+        let drop_scratch = format!("DROP DATABASE IF EXISTS {SCRATCH} WITH (FORCE)");
+
+        let maintenance = live_profile();
+        for statement in [
+            drop_scratch.clone(),
+            format!("CREATE DATABASE {SCRATCH} TEMPLATE template0"),
+        ] {
+            maintenance
+                .query(&statement, &Cancel::default(), Fetch::default())
+                .unwrap_or_else(|error| panic!("{at}: `{statement}` failed: {error}"));
+        }
+        // Declared after `maintenance` and before the scratch connection, so
+        // it drops between them: the drop's FORCE ends the scratch session.
+        let _scratch = Scratch(&maintenance, drop_scratch);
+        let scratch = Any::Postgres(
+            Connection::open(&ServerConfig {
+                database: SCRATCH.into(),
+                ..live_config()
+            })
+            .expect("the scratch database should open"),
+        );
+
+        let run = |sql: &str| {
+            scratch
+                .query(sql, &Cancel::default(), Fetch::default())
+                .unwrap_or_else(|error| panic!("{at}: `{sql}` failed: {error}"))
+        };
+        let install = |statement: &str| {
+            scratch
+                .query(statement, &Cancel::default(), Fetch::default())
+                .unwrap_or_else(|error| {
+                    panic!("{at}: `{statement}` failed, so its probe did not run: {error}")
+                });
+        };
+        let rated = |sql: &str| sql::classify(Engine::Postgres, sql).mode;
+        let above_a_read = |sql: &str| {
+            assert!(
+                rated(sql) > sql::Mode::ReadOnly,
+                "{at}: `{sql}` is rated {:?}, which a Read-only profile would run",
+                rated(sql)
+            );
+        };
+        let hold = |on: bool| {
+            scratch
+                .set_read_only(on)
+                .unwrap_or_else(|error| panic!("{at}: {error}"));
+        };
+        let canary = format!("INSERT INTO {SCRATCH} (id) VALUES (975)");
+        let refused = || {
+            let error = scratch
+                .query(&canary, &Cancel::default(), Fetch::default())
+                .expect_err(&format!("{at}: the hold took a write it should refuse"));
+            assert!(
+                error.message.contains("read-only transaction"),
+                "{at}: refused for another reason: {}",
+                error.message
+            );
+        };
+        // The control: rated a read, runs on the held session, and the hold
+        // is still armed after it. Without it a server that refused
+        // everything would pass.
+        let controlled = || {
+            let control = "SELECT current_setting('search_path')";
+            assert_eq!(
+                rated(control),
+                sql::Mode::ReadOnly,
+                "{at}: control `{control}`"
+            );
+            hold(true);
+            run(control);
+            refused();
+            hold(false);
+        };
+        let cell = |result: &QueryResult| {
+            result
+                .rows
+                .first()
+                .and_then(|row| row.get(0))
+                .unwrap_or_else(|| panic!("{at}: no value came back"))
+                .to_string()
+        };
+
+        install("CREATE EXTENSION tablefunc");
+        install("CREATE EXTENSION xml2");
+        install("CREATE EXTENSION dblink");
+        install("CREATE EXTENSION postgis");
+        run(&format!("CREATE TABLE {SCRATCH} (id int)"));
+
+        // `crosstab` releasing the hold: the canary write is refused, the
+        // carrier runs, and the same write then goes through.
+        let disarm = "SELECT * FROM crosstab('select set_config(''default_transaction_read_only'', ''off'', false), ''a'', ''b''') AS t(r text, c text)";
+        above_a_read(disarm);
+        hold(true);
+        refused();
+        run(disarm);
+        run(&canary);
+        hold(false);
+        controlled();
+        run(&format!("DELETE FROM {SCRATCH} WHERE id = 975"));
+
+        // Every case arms the hold, runs, asserts, lowers the hold and runs
+        // the control before the next begins, so the order of the cases
+        // decides nothing. The objects live in the scratch database and go
+        // with it, so there is no `lo_unlink`.
+        let carried_write = |case: &str, write: &str, oid: u32| {
+            let read_back = format!("SELECT convert_from(lo_get({oid}), 'UTF8')");
+            above_a_read(write);
+            hold(true);
+            run(write);
+            assert_eq!(
+                cell(&run(&read_back)),
+                "abc",
+                "{at}: the object was not created through {case} under the hold: `{write}`"
+            );
+            hold(false);
+            controlled();
+        };
+
+        // `crosstab` writing with nothing released.
+        carried_write(
+            "`crosstab`",
+            "SELECT * FROM crosstab('select 1::text, ''a''::text, lo_from_bytea(975001, ''abc''::bytea)::text') AS t(r text, c text)",
+            975001,
+        );
+        // `connectby` splices its relation argument into the query it runs.
+        // The start value finds no child row, so the carried call runs once:
+        // a second run would fail on the oid the first had just created.
+        carried_write(
+            "`connectby`",
+            "SELECT * FROM connectby('(select 1 as k, 0 as p, lo_from_bytea(975002, ''abc''::bytea) as o) q', 'k', 'p', '0', 0) AS t(k int, p int, level int)",
+            975002,
+        );
+        // `xpath_table` splices its relation and criteria the same way.
+        carried_write(
+            "`xpath_table`",
+            "SELECT * FROM xpath_table('id', 'doc', '(select 1 as id, (select lo_from_bytea(975003, ''abc''::bytea))::text as doc) s', '/r/a', 'true') AS t(id int, a text)",
+            975003,
+        );
+        // PostGIS's `st_findextent` concatenates its column argument inside
+        // double quotes with no escaping, so a quote in the argument closes
+        // the identifier and what follows is SQL. It is declared STABLE, so
+        // its `EXECUTE` runs in SPI's read-only mode, which refuses DML and
+        // none of the listed functions. Listed only because this write read
+        // back as `abc` with the hold armed.
+        carried_write(
+            "`st_findextent`",
+            "SELECT st_findextent('t', 'a\") AS extent FROM (select lo_from_bytea(975004, ''abc''::bytea), null::geometry AS a) AS q --')",
+            975004,
+        );
+
+        // The catalog is the authority on what an extension owns. A name that
+        // neither list knows fails here by name, which is the point rather
+        // than a flake: a later version added a function, and what it does is
+        // a decision. An empty answer or one missing a carrier fails too, so
+        // a server without the extension cannot satisfy the pin. The names are
+        // inlined because `query` binds nothing.
+        let owned = |extension: &str, shape: &str| -> Vec<String> {
+            run(&format!(
+                "SELECT DISTINCT p.proname FROM pg_catalog.pg_proc p \
+                 JOIN pg_catalog.pg_depend d ON d.classid = 'pg_catalog.pg_proc'::regclass \
+                 AND d.objid = p.oid AND d.deptype = 'e' \
+                 JOIN pg_catalog.pg_extension e ON e.oid = d.refobjid \
+                 JOIN pg_catalog.pg_language l ON l.oid = p.prolang \
+                 WHERE e.extname = '{extension}' AND ({shape}) ORDER BY 1"
+            ))
+            .rows
+            .iter()
+            .filter_map(|row| row.get(0).map(str::to_string))
+            .collect()
+        };
+        let listed = Engine::Postgres.spec().sql.denied_functions;
+        let pin = |extension: &str, shape: &str, carriers: &[&str], carved_out: &[&str]| {
+            let members = owned(extension, shape);
+            assert!(
+                !members.is_empty(),
+                "{at}: the catalog lists no function owned by {extension}"
+            );
+            for carrier in carriers {
+                assert!(
+                    members.iter().any(|name| name == carrier),
+                    "{at}: {extension} does not own `{carrier}`: {members:?}"
+                );
+                assert!(
+                    listed.contains(carrier),
+                    "{at}: `{carrier}` is a carrier owned by {extension} and is not on the deny-list"
+                );
+            }
+            let unknown: Vec<_> = members
+                .iter()
+                .filter(|name| {
+                    !listed.contains(&name.as_str()) && !carved_out.contains(&name.as_str())
+                })
+                .collect();
+            assert!(
+                unknown.is_empty(),
+                "{at}: functions owned by {extension} on neither the deny-list nor the carve-out: {unknown:?}"
+            );
+        };
+
+        // Measured against Postgres 15.13 (Debian 15.13-1.pgdg110+1) with
+        // `tablefunc` 1.0: 6 distinct names, 5 of them carriers above. A
+        // member a later version adds fails here by name, provided the server
+        // tested is that later version.
+        pin(
+            "tablefunc",
+            "TRUE",
+            &[
+                "crosstab",
+                "crosstab2",
+                "crosstab3",
+                "crosstab4",
+                "connectby",
+            ],
+            &[
+                // Returns rows of normally distributed random numbers from
+                // its numeric arguments and runs no SQL text.
+                "normal_rand",
+            ],
+        );
+        // Measured against the same server with `xml2` 1.1: 9 distinct
+        // names, one a carrier. Every other member takes a document and an
+        // XPath expression or stylesheet as strings and returns a value
+        // computed from them. None runs SQL text.
+        pin(
+            "xml2",
+            "TRUE",
+            &["xpath_table"],
+            &[
+                // Checks that a string is well-formed XML.
+                "xml_valid",
+                // Escapes the characters XML reserves in a string.
+                "xml_encode_special_chars",
+                // Evaluate an XPath expression against a document string and
+                // return the result as text, a node set, a number, a boolean
+                // or a list.
+                "xpath_string",
+                "xpath_nodeset",
+                "xpath_number",
+                "xpath_bool",
+                "xpath_list",
+                // Applies a stylesheet to a document string and runs no SQL
+                // text.
+                "xslt_process",
+            ],
+        );
+        // Measured against the same server with `dblink` 1.2: 21 distinct
+        // names, six of them carriers. No live case: what these run, they run
+        // in a second session the local hold never covered, so a differential
+        // against the hold would prove nothing about them. Their listing
+        // rests on the catalog and the install script. The carve-outs either
+        // act only on a connection or cursor that a listed call opened, which
+        // may have been opened before the profile was lowered to Read-only,
+        // or build or report text and run none.
+        pin(
+            "dblink",
+            "TRUE",
+            &[
+                "dblink",
+                "dblink_exec",
+                "dblink_connect",
+                "dblink_connect_u",
+                "dblink_send_query",
+                "dblink_open",
+            ],
+            &[
+                // Return statement text built from a relation's key columns
+                // and values. They run nothing.
+                "dblink_build_sql_delete",
+                "dblink_build_sql_insert",
+                "dblink_build_sql_update",
+                // Act on a named connection or cursor that a listed call
+                // opened: cancel its running query, close its cursor, fetch
+                // from its cursor, collect the result of its sent query.
+                "dblink_cancel_query",
+                "dblink_close",
+                "dblink_fetch",
+                "dblink_get_result",
+                "dblink_disconnect",
+                // Report on a connection: its state, its last error, its
+                // pending notifications, and which connections are open.
+                "dblink_is_busy",
+                "dblink_error_message",
+                "dblink_get_notify",
+                "dblink_get_connections",
+                // Returns the text of the session's own current query.
+                "dblink_current_query",
+                // Reads a local relation's primary-key columns from the
+                // catalog.
+                "dblink_get_pkey",
+                // Checks the options of a foreign server definition when the
+                // server is created.
+                "dblink_fdw_validator",
+            ],
+        );
+        // PostGIS 3.5.2 (`pg_extension.extversion`) owns 563 distinct
+        // function names. The probe asks for the ones written in SQL or
+        // PL/pgSQL whose source runs `EXECUTE`, and returned 7: `st_findextent`
+        // above and the six carved out below. Its boundary is that shape: a C
+        // member that runs text is outside it, and the PostGIS extensions the
+        // dev server does not install (`postgis_raster`, `postgis_topology`,
+        // `postgis_tiger_geocoder`, `postgis_sfcgal`) were neither installed
+        // nor surveyed here, so this is not a closure of PostGIS. A member a
+        // later version adds in this shape fails here by name.
+        pin(
+            "postgis",
+            "l.lanname IN ('plpgsql', 'sql') AND p.prosrc ~* 'execute'",
+            &["st_findextent"],
+            &[
+                // Each of these splices its arguments through `quote_ident`,
+                // `quote_literal` or `format`'s `%I`, so a quote in an
+                // argument stays inside the identifier or literal, and each
+                // runs DDL or a catalog lookup that the hold refuses.
+                "addgeometrycolumn",
+                "dropgeometrycolumn",
+                "dropgeometrytable",
+                "populate_geometry_columns",
+                // Runs `CREATE EXTENSION` and `ALTER EXTENSION` for the
+                // installed PostGIS extensions, with each name through `%I`.
+                "postgis_extensions_upgrade",
+                // Alters a constraint and updates a column through
+                // `quote_ident`; its new SRID is an integer.
+                "updategeometrysrid",
+            ],
+        );
+    }
+
+    /// Every function `adminpack` owns, pinned against the Postgres deny and
+    /// egress lists with no carve-outs. It works in a database of its own
+    /// because the dev database is shared and an extension is installed per
+    /// database, and it needs the same kind of role as
+    /// [`live_extension_carriers_agree_with_the_server`], one that can create a
+    /// database and install an extension. The expected names come from the
+    /// PostgreSQL 16 documentation for `adminpack`, not from a run against a
+    /// server. A member a later version adds fails here by name. The extension
+    /// was removed in PostgreSQL 17, so on that server and later the test
+    /// asserts it is not offered.
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_every_function_adminpack_owns_is_on_the_deny_or_egress_list() {
+        use crate::db::{CancelToken as Cancel, Connection as Any};
+
+        const SCRATCH: &str = "dbdelve_adminpack";
+        let at = "live_every_function_adminpack_owns_is_on_the_deny_or_egress_list";
+        let maintenance = live_profile();
+        let ask = |connection: &Any, sql: &str| {
+            connection
+                .query(sql, &Cancel::default(), Fetch::default())
+                .unwrap_or_else(|error| panic!("{at}: `{sql}` failed: {error}"))
+        };
+        let first_cell = |result: &QueryResult| {
+            result
+                .rows
+                .first()
+                .and_then(|row| row.get(0))
+                .map(str::to_string)
+        };
+
+        let version = first_cell(&ask(
+            &maintenance,
+            "SELECT current_setting('server_version_num')",
+        ))
+        .and_then(|text| text.parse::<u32>().ok())
+        .unwrap_or_else(|| panic!("{at}: the server did not report a version number"));
+        if version >= 170000 {
+            let offered = ask(
+                &maintenance,
+                "SELECT name FROM pg_catalog.pg_available_extensions WHERE name = 'adminpack'",
+            );
+            assert!(
+                offered.rows.is_empty(),
+                "{at}: a server of version {version} offers adminpack, which 17 removed"
+            );
+            return;
+        }
+
+        let drop_scratch = format!("DROP DATABASE IF EXISTS {SCRATCH} WITH (FORCE)");
+        for statement in [
+            drop_scratch.clone(),
+            format!("CREATE DATABASE {SCRATCH} TEMPLATE template0"),
+        ] {
+            ask(&maintenance, &statement);
+        }
+        // Declared after `maintenance` and before the scratch connection, so
+        // it drops between them: the drop's FORCE ends the scratch session.
+        let _scratch = Scratch(&maintenance, drop_scratch);
+        let scratch = Any::Postgres(
+            Connection::open(&ServerConfig {
+                database: SCRATCH.into(),
+                ..live_config()
+            })
+            .expect("the scratch database should open"),
+        );
+
+        ask(&scratch, "CREATE EXTENSION adminpack");
+        let members: Vec<String> = ask(
+            &scratch,
+            "SELECT DISTINCT p.proname FROM pg_catalog.pg_proc p \
+             JOIN pg_catalog.pg_depend d ON d.classid = 'pg_catalog.pg_proc'::regclass \
+             AND d.objid = p.oid AND d.deptype = 'e' \
+             JOIN pg_catalog.pg_extension e ON e.oid = d.refobjid \
+             WHERE e.extname = 'adminpack' ORDER BY 1",
+        )
+        .rows
+        .iter()
+        .filter_map(|row| row.get(0).map(str::to_string))
+        .collect();
+
+        assert!(
+            !members.is_empty(),
+            "{at}: the catalog lists no function owned by adminpack"
+        );
+        for expected in [
+            "pg_file_write",
+            "pg_file_rename",
+            "pg_file_unlink",
+            "pg_file_sync",
+            "pg_logdir_ls",
+        ] {
+            assert!(
+                members.iter().any(|name| name == expected),
+                "{at}: adminpack does not own `{expected}`: {members:?}"
+            );
+        }
+        let sql = &Engine::Postgres.spec().sql;
+        let unlisted: Vec<_> = members
+            .iter()
+            .filter(|name| {
+                !sql.denied_functions.contains(&name.as_str())
+                    && !sql.egress_functions.contains(&name.as_str())
+            })
+            .collect();
+        assert!(
+            unlisted.is_empty(),
+            "{at}: functions owned by adminpack on neither the deny-list nor the egress list: {unlisted:?}"
+        );
     }
 
     #[test]

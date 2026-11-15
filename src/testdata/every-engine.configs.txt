@@ -20,6 +20,7 @@ legacy Postgres(
                 application_name: None,
                 connect_timeout: None,
             },
+            read_only: false,
         },
         service: None,
     },
@@ -63,6 +64,7 @@ pg Postgres(
                 application_name: None,
                 connect_timeout: None,
             },
+            read_only: false,
         },
         service: None,
     },
@@ -87,6 +89,7 @@ alias Postgres(
                 application_name: None,
                 connect_timeout: None,
             },
+            read_only: false,
         },
         service: Some(
             "reports",
@@ -114,6 +117,7 @@ mysql MySql(
             application_name: None,
             connect_timeout: None,
         },
+        read_only: false,
     },
 )
 maria MariaDb(
@@ -137,6 +141,7 @@ maria MariaDb(
             application_name: None,
             connect_timeout: None,
         },
+        read_only: false,
     },
 )
 lite Sqlite {
@@ -199,6 +204,7 @@ mssql SqlServer(
             application_name: None,
             connect_timeout: None,
         },
+        read_only: false,
     },
 )
 mongo MongoDb(
@@ -221,6 +227,7 @@ mongo MongoDb(
                 application_name: None,
                 connect_timeout: None,
             },
+            read_only: false,
         },
         srv: true,
         options: "retryWrites=true&w=majority",
@@ -250,6 +257,7 @@ redis Redis(
             application_name: None,
             connect_timeout: None,
         },
+        read_only: false,
     },
 )
 clk ClickHouse(
@@ -284,5 +292,6 @@ clk ClickHouse(
             application_name: None,
             connect_timeout: None,
         },
+        read_only: false,
     },
 )

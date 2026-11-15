@@ -11,14 +11,17 @@ use gpui_component::button::Button;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::Textarea;
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
+use gpui_component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_component::spinner::Spinner;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{ActiveTheme, Sizable};
 
+use super::agent::{approval_facts, visibility_facts};
 use super::folders::{DragLabel, DragShortcut};
 use super::welcome::{self, Part, Pose};
 use super::*;
 use crate::actions::{ConfirmDialog, NextDialogButton, PreviousDialogButton, TickDialogBox};
+use crate::agent::result::Total;
 use crate::connection_form::{ConnectionTest, Reported, dialects, suggested_dialect};
 use crate::explorer::{
     ExplorerLeaf, FILES_GROUP, FilesOrder, Landing, Member, PINNED_GROUP, Pin, Shortcut,
@@ -29,7 +32,10 @@ use crate::scroller::{SmoothScrollable, smooth_scoped};
 use crate::session::{Depth, PendingDelete};
 use crate::sidebar::{NodeAction, NodeKind, SelectedNode, SelectionAction, node_actions};
 use crate::sql::{Destructive, Stop};
-use crate::ui::{Status, code_lines, dot, raised_card, row_icon_tinted};
+use crate::ui::{
+    Status, button_inked, code_lines, code_lines_visible, dot, raised_card, row_icon_tinted,
+    size_fact,
+};
 
 impl Workspace {
     pub(crate) fn render_connection_form(
@@ -1364,12 +1370,59 @@ impl Workspace {
         if behind.is_none() && !self.dialog_focus.contains_focused(window, cx) {
             self.focus_before_dialog.replace(window.focused(cx));
         }
+        // The palette is drawn over every dialog without changing which one is
+        // in front, so an approval under it is not being shown either.
+        let covered = self.palette.is_some();
+        // An approval's Approve counts its wait from when the person can see the
+        // dialog: raised to the front, a different call come to the front, or
+        // the palette over it gone.
+        if front == Some("agent-approval")
+            && let Some(id) = self.front_approval_id()
+        {
+            if covered {
+                // Forgotten, so it is revealed afresh once the palette goes;
+                // the window still asks for attention once, as it may be
+                // behind another application.
+                if self.agent.revealed.is_some() || self.agent.attended != Some(id) {
+                    cx.on_next_frame(window, move |workspace, window, cx| {
+                        if workspace.agent.attended != Some(id) {
+                            workspace.reveal_approval(window, cx);
+                        }
+                        workspace.agent.revealed = None;
+                    });
+                }
+            } else if raised || self.agent.revealed != Some(id) {
+                cx.on_next_frame(window, |workspace, window, cx| {
+                    workspace.reveal_approval(window, cx)
+                });
+            }
+        }
+        // An Approve is live only while its own dialog is the one in front and
+        // nothing covers it: a dialog or the palette raised over it, or another
+        // call in front of it, ends the arm, so what is shown again is armed
+        // afresh.
+        if self.agent.armed.is_some()
+            && (covered
+                || front != Some("agent-approval")
+                || self.front_approval_id() != self.agent.armed)
+        {
+            cx.on_next_frame(window, |workspace, _, cx| {
+                if workspace.palette.is_some()
+                    || workspace.dialog_in_front.get() != Some("agent-approval")
+                    || workspace.front_approval_id() != workspace.agent.armed
+                {
+                    workspace.agent.armed = None;
+                    cx.notify();
+                }
+            });
+        }
         if raised {
             // Every dialog opens on its primary button, as a native one does,
-            // except the one that ends the user's transaction: it opens on
-            // Cancel, so an `enter` held or repeated from the click that
-            // raised it cancels rather than commits or discards. The ring is
-            // drawn by the dialogs above, before this ran.
+            // except the one that ends the user's transaction and the one that
+            // widens what an agent may reach: they open on Cancel, so an `enter`
+            // held or repeated from the click that raised them cancels rather
+            // than commits, discards or grants. The ring is drawn by the dialogs
+            // above, before this ran.
             let first = match front {
                 // Cancel, wherever a failed transaction's missing Commit puts it.
                 Some("end-transaction") => self.dialog_buttons().saturating_sub(1),
@@ -1467,6 +1520,9 @@ impl Workspace {
             // keyboard through and whose buttons act through their own handlers.
             Some("import-rows" | "schema-export" | "filter-picker" | "role-form") | None => 0,
             Some("show-grants") => 1,
+            // Deny alone: Approve is click-only and never a stop.
+            Some("agent-approval") => 1,
+            Some("agent-audit") => 1,
             // Commit is not offered over a failed transaction.
             Some("end-transaction") => match self
                 .profile()
@@ -1607,6 +1663,11 @@ impl Workspace {
             ("pending-export", _) => _ = self.cancel_pending_export(cx),
             ("pending-run", 0) => self.approve_pending_run(cx),
             ("pending-run", _) => self.cancel_pending_run(cx),
+            ("agent-visibility", 0) => self.confirm_agent_visibility(cx),
+            ("agent-visibility", _) => _ = self.cancel_agent_visibility(cx),
+            // Every index denies: no key approves an agent's call.
+            ("agent-approval", _) => _ = self.deny_front_approval(cx),
+            ("agent-audit", _) => _ = self.close_agent_audit(cx),
             ("discard", 0) => self.confirm_discard_close(window, cx),
             ("discard", _) => _ = self.cancel_discard_close(cx),
             ("quit", 0) => self.confirm_quit(cx),
@@ -2484,6 +2545,480 @@ impl Workspace {
         )
     }
 
+    /// What making a connection visible to agents asks first: which hold the
+    /// engine has while the profile is Read-only, and that rows an agent reads
+    /// leave this machine. Nothing here asks a server; the facts are static.
+    /// Nothing is drawn unless the prompt's profile is still in the list.
+    pub(crate) fn render_agent_visibility(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = popup_theme(cx);
+        let id = self.agent_visibility_prompt.as_deref()?;
+        let profile = self.profiles.iter().find(|profile| profile.id == id)?;
+        let facts = visibility_facts(
+            profile.config.engine(),
+            profile.mode,
+            self.agent_visibility_blocks_commits,
+        );
+        let cancel_workspace = cx.entity().downgrade();
+        let confirm_workspace = cancel_workspace.clone();
+
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .occlude()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    dialog(t)
+                        .child(section_label(t, "Agent access"))
+                        // Not in the label: it is upper-cased there, and a
+                        // connection's name is spelt the way its owner wrote it.
+                        .child(
+                            div()
+                                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                                .text_color(t.text)
+                                .child(format!("Make {} visible to agents", profile.name)),
+                        )
+                        .children(facts.into_iter().map(|fact| {
+                            div()
+                                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                                .text_color(t.text_muted)
+                                .child(fact)
+                        }))
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap(px(layout::SPACE_SM))
+                                .child(
+                                    self.choice(
+                                        "agent-visibility",
+                                        1,
+                                        button(
+                                            "cancel-agent-visibility",
+                                            "Cancel",
+                                            Tone::Quiet,
+                                            Control::Standard,
+                                            t,
+                                        )
+                                        .on_click(
+                                            move |_, _, cx| {
+                                                _ = cancel_workspace.update(cx, |workspace, cx| {
+                                                    workspace.cancel_agent_visibility(cx);
+                                                });
+                                            },
+                                        ),
+                                        t,
+                                    ),
+                                )
+                                .child(
+                                    self.choice(
+                                        "agent-visibility",
+                                        0,
+                                        button(
+                                            "confirm-agent-visibility",
+                                            "Make visible",
+                                            Tone::Primary,
+                                            Control::Standard,
+                                            t,
+                                        )
+                                        .on_click(
+                                            move |_, _, cx| {
+                                                _ = confirm_workspace.update(
+                                                    cx,
+                                                    |workspace, cx| {
+                                                        workspace.confirm_agent_visibility(cx);
+                                                    },
+                                                );
+                                            },
+                                        ),
+                                        t,
+                                    ),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// What agents did this session, newest first: one block per call with its
+    /// tool, connection, verdict, row counts, time and statement, and the full
+    /// error of a call that failed. Never a row. Drawn below the titlebar, as
+    /// an approval is, so the mark stays reachable.
+    ///
+    /// ponytail: every entry is laid out while the dialog is open. The upgrade
+    /// is a virtual list, if five hundred entries ever prove slow.
+    pub(crate) fn render_agent_audit(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.agent_audit_open {
+            return None;
+        }
+        let t = popup_theme(cx);
+        let code = fonts(cx).editor.clone();
+        let now = agent::unix_millis();
+        let text_size = px(layout::chrome(layout::TEXT_SM));
+        let close_workspace = cx.entity().downgrade();
+        let entries: Vec<Div> = self
+            .agent
+            .log
+            .iter()
+            .map(|entry| {
+                let mut lines = vec![
+                    div()
+                        .text_color(t.text)
+                        .child(super::agent_log_label(entry, now)),
+                ];
+                if let Some(verdict) = &entry.verdict {
+                    lines.push(div().text_color(t.text_muted).child(verdict.line()));
+                }
+                if let (Some(shown), Some(total)) = (entry.shown, entry.total) {
+                    let of = match total {
+                        Total::Exact(total) => total.to_string(),
+                        Total::AtLeast(total) => format!("at least {total}"),
+                    };
+                    let capped = if entry.capped() { ", capped" } else { "" };
+                    lines.push(div().text_color(t.text_muted).child(format!(
+                        "{shown} rows shown of {of}{capped}, {} ms",
+                        entry.elapsed_ms
+                    )));
+                } else {
+                    lines.push(
+                        div()
+                            .text_color(t.text_muted)
+                            .child(format!("{} ms", entry.elapsed_ms)),
+                    );
+                }
+                if let Some(sql) = &entry.sql {
+                    lines.push(
+                        div()
+                            .debug_selector(|| "agent-audit-sql".into())
+                            .font_family(code.clone())
+                            .text_color(t.text_muted)
+                            .child(sql.clone()),
+                    );
+                }
+                if let Some(error) = &entry.error {
+                    lines.push(div().text_color(t.text_muted).child(error.clone()));
+                }
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(layout::SPACE_XS))
+                    .children(lines)
+            })
+            .collect();
+
+        Some(
+            div()
+                .absolute()
+                .top(px(layout::TITLEBAR_HEIGHT))
+                .left_0()
+                .right_0()
+                .bottom_0()
+                .occlude()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    dialog(t)
+                        .child(section_label(t, "Agent activity"))
+                        .child(
+                            div()
+                                .id("agent-audit-list")
+                                .max_h(px(layout::DIALOG_TEXT_MAX_HEIGHT))
+                                .overflow_y_scroll()
+                                .flex()
+                                .flex_col()
+                                .gap(px(layout::SPACE_MD))
+                                .text_size(text_size)
+                                .when(entries.is_empty(), |list| {
+                                    list.child(
+                                        div()
+                                            .debug_selector(|| "agent-audit-empty".into())
+                                            .text_color(t.text_muted)
+                                            .child("No agent calls in this session."),
+                                    )
+                                })
+                                .children(entries),
+                        )
+                        .child(
+                            div().flex().justify_end().child(
+                                self.choice(
+                                    "agent-audit",
+                                    0,
+                                    button(
+                                        "close-agent-audit",
+                                        "Close",
+                                        Tone::Quiet,
+                                        Control::Standard,
+                                        t,
+                                    )
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            _ = close_workspace.update(cx, |workspace, cx| {
+                                                workspace.close_agent_audit(cx);
+                                            });
+                                        },
+                                    ),
+                                    t,
+                                ),
+                            ),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// What an agent asks to run: the connection by the profile's own name, the
+    /// facts the gate and the profile give, and the statement exactly as the
+    /// agent sent it, in a block that scrolls. Deny is the ring's only stop;
+    /// Approve is a click, off until [`agent::ARM_DELAY`] has passed since this
+    /// was drawn, and never a stop for a key. The profile is read by id, never
+    /// by anything the agent sent. Nothing is drawn unless the oldest waiting
+    /// call still has its profile.
+    pub(crate) fn render_agent_approval(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = popup_theme(cx);
+        let call = self.front_approval()?;
+        let id = call.id;
+        let approval = &call.approval;
+        let profile = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == call.profile_id)?;
+        let engine = profile.config.engine();
+        // What Approve will compare the pending statement with: the source
+        // string, never the marked text drawn from it. Written only on a
+        // change, so a frame costs one comparison.
+        {
+            let mut shown = self.approval_shown.borrow_mut();
+            if shown
+                .as_ref()
+                .is_none_or(|(shown_id, sql)| *shown_id != id || *sql != approval.sql)
+            {
+                *shown = Some((id, approval.sql.clone()));
+            }
+        }
+        // The block's scroll offset, fresh for each call.
+        let scroll = {
+            let mut kept = self.approval_scroll.borrow_mut();
+            match kept.as_ref() {
+                Some((kept_id, handle)) if *kept_id == id => handle.clone(),
+                _ => {
+                    let handle = gpui::ScrollHandle::new();
+                    *kept = Some((id, handle.clone()));
+                    handle
+                }
+            }
+        };
+        let code = fonts(cx).editor.clone();
+        let marker = approval_marker(t);
+        let lines = code_lines_visible(
+            &approval.sql,
+            engine.syntax(),
+            &cx.theme().highlight_theme,
+            marker,
+        );
+        let size = size_fact(&approval.sql);
+        // The size sits under the statement it counts, so it is not said twice.
+        let facts = approval_facts(
+            engine,
+            profile.mode,
+            &approval.verdict,
+            &approval.sql,
+            approval.locks_the_file,
+            approval.config.agent_reads_are_held(),
+        )
+        .into_iter()
+        .filter(|fact| *fact != size)
+        .map(|fact| div().child(fact));
+        // Everything on the card keeps its height but the statement block,
+        // which gives up its own down to nothing before the buttons leave a
+        // short window: they are the only way to answer.
+        let fixed = || div().flex_shrink_0();
+        let waiting = self.agent.calls.len().saturating_sub(1);
+        let deny_workspace = cx.entity().downgrade();
+        let approve_workspace = deny_workspace.clone();
+        let armed = self.agent.armed == Some(id);
+
+        Some(
+            div()
+                // Below the titlebar rather than over it: the agent mark's
+                // waiting count and its turn-off item must stay clickable
+                // while an approval waits, and the window controls live in
+                // that strip too.
+                .absolute()
+                .top(px(layout::TITLEBAR_HEIGHT))
+                .left_0()
+                .right_0()
+                .bottom_0()
+                .occlude()
+                .flex()
+                .items_center()
+                .justify_center()
+                .py(px(layout::SPACE_LG))
+                .child(
+                    dialog(t)
+                        .w(px(layout::APPROVAL_DIALOG_WIDTH))
+                        .max_w(gpui::relative(0.9))
+                        .max_h_full()
+                        .child(fixed().child(section_label(t, "Agent")))
+                        .child(
+                            fixed()
+                                .flex()
+                                .gap(px(layout::SPACE_SM))
+                                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                                .child(div().text_color(t.text).child(profile.name.clone()))
+                                .child(div().text_color(t.text_muted).child(engine.label())),
+                        )
+                        .child(
+                            fixed()
+                                .debug_selector(|| "agent-approval-facts".into())
+                                .flex()
+                                .flex_col()
+                                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                                .text_color(t.text_muted)
+                                .children(facts),
+                        )
+                        .child(
+                            fixed()
+                                .debug_selector(|| "agent-approval-label".into())
+                                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                                .text_color(t.text_muted)
+                                .child("Statement from the agent, exactly as sent"),
+                        )
+                        // Nothing on this surface moves on its own, so the block
+                        // has no smooth-scroll modifier and its scrollbar is
+                        // always drawn rather than faded in: a statement that
+                        // goes on below the fold shows that it does. One
+                        // element per line, so none is left out of a long
+                        // statement.
+                        .child(
+                            div()
+                                .relative()
+                                .flex()
+                                .flex_col()
+                                .min_h(px(0.))
+                                .max_h(px(layout::APPROVAL_TEXT_MAX_HEIGHT))
+                                .child(
+                                    div()
+                                        .id("agent-approval-sql")
+                                        .debug_selector(|| "agent-approval-sql".into())
+                                        .track_scroll(&scroll)
+                                        .overflow_y_scroll()
+                                        .min_h(px(0.))
+                                        // Framed as every other statement on
+                                        // a modal is, so the agent's text is
+                                        // set apart from DBDelve's facts by
+                                        // more than its font.
+                                        .p(px(layout::SPACE_SM))
+                                        .rounded(px(layout::RADIUS_CONTROL))
+                                        .bg(t.surface)
+                                        .font_family(code)
+                                        .text_size(px(layout::chrome(layout::TEXT_SM)))
+                                        .text_color(t.text)
+                                        .children(lines.into_iter().enumerate().map(
+                                            |(index, line)| {
+                                                div()
+                                                    .debug_selector(move || {
+                                                        format!("agent-approval-line-{index}")
+                                                    })
+                                                    .child(line)
+                                            },
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .inset_0()
+                                        .debug_selector(|| "agent-approval-scrollbar".into())
+                                        .child(
+                                            Scrollbar::vertical(&scroll)
+                                                .id(("agent-approval-scrollbar", id.0))
+                                                .mode(ScrollbarMode::Always),
+                                        ),
+                                ),
+                        )
+                        .child(
+                            fixed()
+                                .debug_selector(|| "agent-approval-size".into())
+                                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                                .text_color(t.text_muted)
+                                .child(size),
+                        )
+                        .when(waiting > 0, |card| {
+                            card.child(
+                                fixed()
+                                    .debug_selector(|| "agent-approval-waiting".into())
+                                    .text_size(px(layout::chrome(layout::TEXT_SM)))
+                                    .text_color(t.text_muted)
+                                    .child(format!("{waiting} more waiting")),
+                            )
+                        })
+                        .child(
+                            fixed()
+                                .flex()
+                                .justify_end()
+                                .gap(px(layout::SPACE_SM))
+                                .child(
+                                    self.choice(
+                                        "agent-approval",
+                                        0,
+                                        button(
+                                            "deny-agent-approval",
+                                            "Deny",
+                                            Tone::Quiet,
+                                            Control::Standard,
+                                            t,
+                                        )
+                                        .on_click(
+                                            move |_, _, cx| {
+                                                _ = deny_workspace.update(cx, |workspace, cx| {
+                                                    workspace.deny_call(id, cx);
+                                                });
+                                            },
+                                        ),
+                                        t,
+                                    ),
+                                )
+                                // Outside the ring, and with an id of this call
+                                // alone: a press that began on one call's button
+                                // cannot finish on the next call's.
+                                .child(
+                                    div()
+                                        .debug_selector(|| "agent-approval-approve".into())
+                                        .child(
+                                            button_inked(
+                                                format!("approve-write-{}", id.0),
+                                                "Approve",
+                                                Tone::Quiet,
+                                                Control::Standard,
+                                                approve_ink(t, armed),
+                                            )
+                                            // A key cannot move onto it, so a key
+                                            // cannot press it.
+                                            .tab_stop(false)
+                                            .disabled(!armed)
+                                            .on_click(
+                                                move |event, _, cx| {
+                                                    if !approves(event) {
+                                                        return;
+                                                    }
+                                                    _ = approve_workspace.update(
+                                                        cx,
+                                                        |workspace, cx| {
+                                                            workspace.approve_call(id, cx);
+                                                        },
+                                                    );
+                                                },
+                                            ),
+                                        ),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// What Delete asks before a saved query's file goes, since nothing
     /// brings it back, or before a folder holding anything goes.
     pub(crate) fn render_delete_confirmation(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -3278,6 +3813,18 @@ impl Workspace {
                 engine_logo(t, profile.config.target(), &[behind_logo]).into_any_element()
             }
             None => row_icon(t, icon::DATABASE).into_any_element(),
+        };
+        // A hidden connection is drawn exactly as it always was; only a visible
+        // one gains the marker, beside the logo that leads its name.
+        let active_logo = match self.profile() {
+            Some(profile) if profile.agent_visible => div()
+                .flex()
+                .items_center()
+                .gap(px(layout::SPACE_XS))
+                .child(active_logo)
+                .child(row_icon(t, icon::AGENT_VISIBLE))
+                .into_any_element(),
+            _ => active_logo,
         };
         let project_name = self.current_group().map(str::to_string);
         let open_from_project = cx.listener(|workspace, _, window, cx| {
@@ -5134,10 +5681,13 @@ fn footer_status(
 type DialogAnswer = fn(&mut Workspace, &mut Window, &mut Context<Workspace>);
 
 /// The button the ring starts on when `dialog` goes up, counted from the right:
-/// Cancel for the one that ends the user's transaction, the primary for every
-/// other.
+/// Cancel for the one that ends the user's transaction and the one that widens
+/// what an agent may reach, the primary for every other.
 fn first_choice(dialog: Option<&str>) -> usize {
     match dialog {
+        // Cancel, so an `enter` held or repeated from the palette row that
+        // raised it cancels rather than grants.
+        Some("agent-visibility") => 1,
         // Commit and Roll back cannot be undone, so an `enter` held or
         // repeated from the click that raised it opens nothing it should not.
         Some("end-transaction") => 2,
@@ -5147,9 +5697,89 @@ fn first_choice(dialog: Option<&str>) -> usize {
     }
 }
 
+/// How a `[U+XXXX]` marker in the approval's statement is drawn: DBDelve's own,
+/// on the accent so it cannot pass for the statement's text, in the ink every
+/// other label on the accent wears.
+fn approval_marker(t: Theme) -> gpui::HighlightStyle {
+    gpui::HighlightStyle {
+        color: Some(t.on_accent.into()),
+        background_color: Some(t.accent.into()),
+        ..Default::default()
+    }
+}
+
+/// The ink of Approve's label: the faint one until it arms, so the one redraw
+/// the arm causes is a change the person can see, and the quiet tone's once it
+/// has. A change of state, never a countdown (D-09).
+fn approve_ink(t: Theme, armed: bool) -> theme::color::Srgb {
+    if armed {
+        Tone::Quiet.ink(t)
+    } else {
+        t.text_faint
+    }
+}
+
+/// Whether a click is one Approve answers: a single mouse click that is not the
+/// one that brought the window forward. Refused, each for its own reason:
+/// - a double click, whose second press may land on a button that appeared
+///   under the pointer after the first;
+/// - the activating click, which was aimed at the window and not at Approve;
+/// - a key, which must never approve (the button is not a tab stop, and
+///   `enter` on the dialog is Deny);
+/// - a touch, which has no place on a desktop dialog.
+fn approves(event: &gpui::ClickEvent) -> bool {
+    matches!(event, gpui::ClickEvent::Mouse(_)) && event.click_count() == 1 && !event.first_focus()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_marker_wears_the_ink_drawn_on_the_accent() {
+        for theme in theme::Theme::built_in() {
+            let t = theme.for_popup();
+            let marker = approval_marker(t);
+            assert_eq!(marker.color, Some(t.on_accent.into()));
+            assert_eq!(marker.background_color, Some(t.accent.into()));
+        }
+    }
+
+    #[test]
+    fn approve_is_drawn_dimmer_until_it_arms_on_every_theme() {
+        for theme in theme::Theme::built_in() {
+            let t = theme.for_popup();
+            assert_eq!(approve_ink(t, true), Tone::Quiet.ink(t));
+            assert_ne!(approve_ink(t, false), approve_ink(t, true));
+        }
+    }
+
+    #[test]
+    fn approve_takes_only_a_single_ordinary_mouse_click() {
+        use gpui::{ClickEvent, MouseClickEvent, MouseDownEvent, MouseUpEvent};
+
+        let mouse = |count, first_mouse| {
+            ClickEvent::Mouse(MouseClickEvent {
+                down: MouseDownEvent {
+                    click_count: count,
+                    first_mouse,
+                    ..Default::default()
+                },
+                up: MouseUpEvent {
+                    click_count: count,
+                    ..Default::default()
+                },
+            })
+        };
+        assert!(approves(&mouse(1, false)), "a plain click");
+        assert!(!approves(&mouse(2, false)), "a double click");
+        assert!(!approves(&mouse(1, true)), "the click that woke the window");
+        assert!(
+            !approves(&ClickEvent::Keyboard(Default::default())),
+            "a key"
+        );
+        assert!(!approves(&ClickEvent::Touch(Default::default())), "a touch");
+    }
 
     #[test]
     fn a_help_notice_covers_the_form_status_without_replacing_it() {

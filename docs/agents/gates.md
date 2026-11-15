@@ -465,6 +465,167 @@ PRIVILEGES`, which the matrix has no cell for.
 
 Show Grants and everything else the tab reads are catalog reads on a side
 connection (`Connection::apart`), never a statement of the user's.
+## Agent statements
+
+**`sql::agent_gate(engine, sql, mode)` is the one answer for a statement an
+agent originates, and nothing else answers for one.** It returns `Run`,
+`Approve(verdict, expiry)` or `Refuse(reason)`, reads no profile, no silenced
+confirmation and no earlier approval, and decides about the text as written. The
+`mode` is the profile's, and it is the ceiling: a `Run` or an `Approve` always
+passes `gate` with that mode and nothing silenced. The ladder, in the order it
+is asked (the header of `src/sql/agent.rs` is its source):
+
+1. An unreadable statement is `Refuse(Unreadable)`, `Refuse(Delete)` where it is
+   seen to remove data, or `Refuse(Disclosure)` where it is seen to disclose, in
+   that order.
+2. No statement is `Refuse(NoStatement)`, two or more `Refuse(MoreThanOne)`.
+3. A Redis command the editor never sends is `Refuse(NotSent)`.
+4. `DROP`, `TRUNCATE`, any `DELETE` and an `ALTER TABLE` that is not `ADD
+   COLUMN` are refused by name. On MongoDB and Redis a command seen to remove
+   data is `Refuse(Delete)`, a Redis expiry whose timeout is not a plain
+   positive number among them.
+5. A server-side script is `Refuse(Script)`, a Redis or MongoDB command
+   returning credentials, password hashes, privileges or other clients' details
+   `Refuse(Disclosure)`.
+6. A statement that changes the session is `Refuse(Session)`.
+7. A verdict needing Full is `Refuse(NeedsFull)`: a Full profile grants an agent
+   nothing a Read-write one does not.
+8. A statement the mode stops is `Refuse(NeedsMode)`.
+9. A write the mode allows is `Approve`. A Redis command that schedules a
+   removal is approved as an expiry: the `Approve` carries an `Expiry` whose
+   text is what the approval surface states beside the statement. It says the
+   key, or for the hash commands the named fields, is removed when the time
+   passes, and at once for a time already past. A write that schedules nothing
+   carries none.
+10. A read that calls an egress function, or on DuckDB holds a path, is
+    `Approve` with a Read-only verdict, in every mode.
+11. A read that calls a function its engine's built-in list does not name is
+    `Approve` with a Read-only verdict at Read-write and Full; at Read-only it
+    `Run`s.
+12. Anything else is a read and `Run`s.
+
+Steps 1 to 6 do not depend on the mode, so a refusal's reason is the same on
+every profile. A `Run` is therefore a lone `sql::rerunnable` read that changes no
+session state, calls nothing on the engine's `denied_functions` or
+`egress_functions` and, at Read-write and Full, calls only functions on its
+engine's built-in list.
+
+**An `Approve` waits for the human, and runs the statement the dialog was
+drawn from.** The call is held until the person approves, denies or lets it
+expire, and nothing stands in for that act. At Approve the gate runs again, on
+the exact string the dialog was drawn from, against the profile's current mode:
+a different verdict, a profile whose connection has changed since, a dialog
+never drawn for this call, or a byte of difference between the statement and
+the source the dialog was last drawn from cancels the call as `refused_by_gate`
+and sends nothing. The check compares source strings: what the dialog draws is
+the marked text `ui::visible` makes of that source, which is display only. An approved statement whose verdict is Read-only runs on the profile's
+agent read lane, which the database holds to reads only where the engine has a
+hold (`ConnectionConfig::agent_reads_are_held`: a file opened read-only, or a
+session setting); on SQL Server, Snowflake, MongoDB and Redis nothing on the
+server does, and the approval says so. A Read-write one runs on a connection
+opened for that call and closed with it, so a session change the statement
+makes dies with the connection. A write aimed at a DuckDB database is refused (`DUCKDB_WRITE_REFUSED`), because a write
+from a second connection to the file is lost. `explain_query` still refuses a
+statement that needs approval and never waits for one.
+
+**The disclosure line is drawn per engine.** On Redis it is `CONFIG GET`,
+`CLIENT LIST`, `ACL LIST` and `ACL GETUSER`: plaintext secrets, every client's
+address and name, and every user's password hashes. On MongoDB it is `currentOp`
+as the first key of a `runCommand` or `adminCommand`, written as a document or
+as a string and under `explain` too, the `$currentOp` stage at any depth of a
+statement DBDelve parses, and the `db.currentOp()` helper, together with
+`connectionStatus` whose `showPrivileges` is anything but `false`. A
+database-level `aggregate` carrying the stage is not a method DBDelve reads, so
+it is `Refuse(Unreadable)` and never runs. Only the agent path reads this line.
+The human path keeps its verdicts: `CONFIG GET` and `CLIENT LIST` are writes,
+and the rest are reads. Redis `ACL LOG` and `SLOWLOG GET` (the client fields of
+logged entries), MongoDB `getParameter` and the `$listSessions` and
+`$listLocalSessions` stages stay reads on both paths on purpose.
+
+**On Redis a removal and an expiry are told apart by the statement alone.**
+`Refuse(Delete)` is a command that removes now: a name in `REMOVES`, `MIGRATE`,
+`XGROUP DESTROY`, an `XADD` that trims, `EXPIRE` or `HEXPIRE` with a timeout
+that is not a plain positive number, and `HSETEX` or `HGETEX` with such an `EX`
+or `PX`. An expiry (`redis_cmd::expiry`) is a command that schedules a removal:
+`EXPIRE`, `PEXPIRE`, `SETEX` and `PSETEX` with a positive timeout, `EXPIREAT`
+and `PEXPIREAT` at any time, `SET` and `GETEX` with a positive `EX` or `PX` or
+any `EXAT` or `PXAT`, and the `H` forms of the same for the fields of a hash.
+The gate has no clock, so a time already past, which removes at once, is
+approved with the same text as a time to come. An expiry is refused at Read-only
+like any write. `RESTORE` with a `ttl` also schedules a removal; it is approved
+as a plain write that names none, and that stays a residual. The option words
+are matched anywhere after the name, so a key or value spelled like one is named
+an expiry too, which is the safe direction. Only the agent path reads either:
+the human path rates all of these as writes.
+
+**Egress is its own list.** `SqlSpec::egress_functions` names the functions that
+read a file, a URL, a program or another server, or run text that may
+(`pg_read_file`, MySQL's `load_file`, DuckDB's `read_csv` and `read_xlsx`,
+ClickHouse's `url`, `s3`, `file`, `remote`, `executable` and `eval`). An agent
+that reads one chooses where rows come from and carries them off the machine, so
+it waits for the human. It is not on `denied_functions` because that list raises
+the human path's verdict: a user's own read of a file, and DBDelve's own CSV,
+Excel, Parquet and JSON opens, which are these calls, would stop being reads.
+Only the agent path reads the egress list, which is why it narrows what a mode
+lets run and never widens it. Each list is pinned against its engine's own
+catalog (`pg_catalog`, `duckdb_functions()`, `system.table_functions`) so a
+function a later version adds fails a test by name; SQLite, Turso and Snowflake
+list none, and SQL Server's list is from the documentation.
+
+**Built-in lists.** `SqlSpec::builtin_functions` is a data file in
+`src/db/functions/`, matched against a bare, unquoted, single-part call name.
+Matching folds case, except on ClickHouse (`case_sensitive_functions`), where a
+user's `todate` can sit beside the built-in `toDate`. A call to a name the list
+does not hold asks at Read-write and Full, in any clause, in `FROM` and under
+`EXPLAIN`, because it may be a user-defined function that writes and no engine
+holds one back there. How each list was built:
+
+- Postgres from `pg_proc` volatility, with the volatile names that change
+  nothing added by hand.
+- MySQL from its help tables, and MariaDB from `information_schema.sql_functions`,
+  each minus the lock, sleep, benchmark, file and replication-wait functions.
+- ClickHouse from `system.functions` minus its excluded categories, plus the
+  local table functions.
+- DuckDB from `duckdb_functions()` and SQLite from `pragma_function_list`, both
+  generated from the bundled builds by an ignored writer test. Turso reads
+  SQLite's list.
+- SQL Server and Snowflake from the vendor's documentation, because no catalog
+  lists their built-ins.
+
+Every list leaves out its engine's deny and egress names. DuckDB's and SQLite's
+are pinned by ordinary tests that compare the file to a fresh generation, and
+Postgres's and ClickHouse's by `live_` tests that need the compose databases;
+MySQL, MariaDB, SQL Server and Snowflake have no pin. A stale list costs one
+approval, and a wrongly listed name is the breach.
+
+At Read-only an unlisted call runs. Where the engine has a hold the server stops
+what the call writes. Where it has none (SQLite, Turso, DuckDB, Snowflake, SQL
+Server) that rests on the premise that a function there cannot write.
+
+What the text cannot show is accepted:
+
+- Postgres field notation (`SELECT t.f FROM t` calls `f(t)` with no
+  parenthesis). Telling it from a column needs the catalog.
+- A view, row-level policy, rule, user-defined cast or operator that calls a
+  writing function.
+- A user overload of a listed name with other argument types.
+- A `search_path` the owner set ahead of `pg_catalog`.
+- A listed name the connected server does not have, because the list came from a
+  newer release or the name belongs to the grammar. A user function can take
+  that name and run unasked.
+- A ClickHouse executable UDF. It reaches outside the database, so the Read-only
+  hold does not stop it, and at Read-only it runs.
+
+**DuckDB reads a quoted string in a table position as a file or a URL**
+(`FROM 'data.csv'`), so no function name marks the read. On an engine that sets
+`SqlSpec::bare_path_reads`, a string literal or `"`-quoted word holding a `.`,
+`/` or `\` asks first wherever it sits in the statement. That is a superset of
+the table positions, which is the safe direction, and its accepted cost is that
+any dotted literal asks (`WHERE v = '1.2'`); reading table positions off the
+parse would be a second reading of DuckDB's grammar kept in step by hand. A
+table the administrator set up that reads outside the database (a Postgres
+foreign table, a ClickHouse dictionary) carries no signal in the statement and
+is not covered here.
 
 ## Connection modes, per engine
 
@@ -509,11 +670,13 @@ The core of the mode check is in `AGENTS.md`, "Connection modes". The detail:
   rest of `HOLD_IGNORING_CALLS`) needs Full.
 - **On Generic, a function call is a read only if it is a known built-in.**
   A function writes whatever its body does, and with no hold behind
-  Generic's Read-only, a call to anything outside `SIDE_EFFECT_FREE_FUNCTIONS`
-  (a bare, unquoted name of an aggregate, window, string, number, date or cast
-  built-in), in any clause or in `FROM`, needs Read-write
-  (`calls_unknown_function`). Built-in engines keep reading such a call as a
-  read: their hold stops what it writes. The list matches names, not
+  Generic's Read-only, a call to anything outside Generic's built-in list
+  (`src/db/functions/generic.txt`: a bare, unquoted name of an aggregate,
+  window, string, number, date or cast built-in), in any clause or in `FROM`,
+  needs Read-write (`calls_unlisted_function`). Built-in engines keep reading
+  such a call as a read on the human path: their hold stops what it writes. An
+  agent's such call asks at Read-write and Full (see Agent statements). The
+  list matches names, not
   overloads, so a user's own overload of a listed name (Postgres's
   `public.abs(text)` whose body inserts) reads as a read; this is accepted,
   since SQL alone cannot resolve an overload and Read-only guards against the

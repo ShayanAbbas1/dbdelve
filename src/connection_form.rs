@@ -1111,6 +1111,7 @@ impl ConnectionForm {
             schema: None,
             time_zone: typed_time_zone(self.target(), &read(&self.time_zone))?,
             properties: typed_driver_properties(self.target(), &self.properties.read(cx).value())?,
+            read_only: false,
         };
         // A blank Host beside a service is whatever the service names, which
         // may be a socket directory; connect checks the Host it resolves to.
@@ -2269,6 +2270,7 @@ mod tests {
             schema: None,
             time_zone: None,
             properties: Properties::default(),
+            read_only: false,
         };
         let typed = ConnectionConfig::postgres(server("hunter2"));
         assert_eq!(password_to_persist(&typed, Origin::Form), Some("hunter2"));

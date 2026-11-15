@@ -1898,6 +1898,18 @@ ORDER BY database, name"#;
         assert!(CATALOG_DATABASES_SQL.contains("SELECT DISTINCT database"));
         assert!(!CATALOG_DATABASES_SQL.contains("DISTINCT database AS"));
     }
+    #[test]
+    fn a_schema_named_like_a_placeholder_is_not_substituted_into() {
+        assert_eq!(
+            structure_sql(
+                "WHERE database = {schema} AND table = {relation}",
+                "{relation}",
+                "a'b",
+            ),
+            "WHERE database = '{relation}' AND table = 'a''b'"
+        );
+    }
+
     const FACTS_COLUMNS: [(&str, &str); 4] = [
         ("version", "String"),
         ("name", "String"),
@@ -1971,6 +1983,168 @@ ORDER BY database, name"#;
 
     fn run(connection: &Connection, sql: &str) -> Result<QueryResult, DbError> {
         connection.query(sql, &CancelToken::default(), Fetch::default())
+    }
+
+    /// The table functions of the dev server that read nothing outside it:
+    /// generators, the server's own tables and the ones that read a source the
+    /// administrator configured, which a statement does not name. Every other
+    /// name in `system.table_functions` must be on `egress_functions`, so a
+    /// table function a later server adds fails the test by name.
+    const LOCAL: &[&str] = &[
+        "numbers",
+        "numbers_mt",
+        "zeros",
+        "zeros_mt",
+        "primes",
+        "null",
+        "values",
+        "sqlstandardvalues",
+        "view",
+        "viewexplain",
+        "viewifpermitted",
+        "merge",
+        "loop",
+        "cluster",
+        "clusterallreplicas",
+        "dictionary",
+        "format",
+        "input",
+        "generaterandom",
+        "generateseries",
+        "generate_series",
+        "fuzzjson",
+        "fuzzquery",
+        "mergetreeanalyzeindexes",
+        "mergetreeanalyzeindexesuuid",
+        "mergetreecodecblockcounts",
+        "mergetreeindex",
+        "mergetreeprojection",
+        "mergetreetextindex",
+        "prometheusquery",
+        "prometheusqueryrange",
+        "timeseriesdata",
+        "timeseriesmetrics",
+        "timeseriessamples",
+        "timeseriesselector",
+        "timeseriestags",
+    ];
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_every_table_function_is_egress_or_local() {
+        let connection =
+            Connection::open(&super::live::live_config()).expect("connection should open");
+        let result = run(&connection, "SELECT name FROM system.table_functions")
+            .expect("the catalog should answer");
+        let names: Vec<String> = result
+            .rows
+            .iter()
+            .filter_map(|row| row.get(0).map(str::to_lowercase))
+            .collect();
+        for expected in ["url", "numbers"] {
+            assert!(
+                names.iter().any(|name| name == expected),
+                "the catalog answered {names:?}"
+            );
+        }
+        let egress = Engine::ClickHouse.spec().sql.egress_functions;
+        for name in &names {
+            assert!(
+                egress.contains(&name.as_str()) || LOCAL.contains(&name.as_str()),
+                "{name} is on the server and neither on egress_functions nor local"
+            );
+        }
+    }
+
+    /// The categories whose functions the built-in list leaves out: they reach
+    /// outside the database, run a model or text, or look at the server.
+    const EXCLUDED_CATEGORIES: &[&str] = &[
+        "Other",
+        "Internal",
+        "Introspection",
+        "Machine Learning",
+        "AI",
+        "Dictionary",
+        "Embedded Dictionary",
+        "Natural Language Processing",
+    ];
+
+    /// The built-in list is pinned against the server's own catalog: a listed
+    /// name the server has must be a system function outside the excluded
+    /// categories, or a local table function. A name the server lacks only
+    /// fails on a server as new as the list (26.10), because a user function
+    /// could take it.
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_every_listed_built_in_is_a_system_function_or_a_local_table_function() {
+        let connection =
+            Connection::open(&super::live::live_config()).expect("connection should open");
+        let rows = |sql: &str| -> Vec<Vec<String>> {
+            run(&connection, sql)
+                .expect("the catalog should answer")
+                .rows
+                .iter()
+                .map(|row| {
+                    (0..row.len())
+                        .map(|at| row.get(at).unwrap_or_default().to_owned())
+                        .collect()
+                })
+                .collect()
+        };
+        let mut known = std::collections::HashSet::new();
+        let mut allowed = std::collections::HashSet::new();
+        for row in rows("SELECT name, case_insensitive, origin, categories FROM system.functions") {
+            let spellings = if row[1] == "1" {
+                vec![row[0].clone(), row[0].to_lowercase(), row[0].to_uppercase()]
+            } else {
+                vec![row[0].clone()]
+            };
+            let excluded = EXCLUDED_CATEGORIES
+                .iter()
+                .any(|category| row[3].split(',').any(|word| word.trim() == *category));
+            for spelling in spellings {
+                if row[2] == "System" && !excluded {
+                    allowed.insert(spelling.clone());
+                }
+                known.insert(spelling);
+            }
+        }
+        let tables: std::collections::HashSet<String> =
+            rows("SELECT name FROM system.table_functions")
+                .into_iter()
+                .map(|row| row[0].to_lowercase())
+                .collect();
+        let version = rows("SELECT version()")[0][0].clone();
+        let mut numbers = version
+            .split('.')
+            .map(|part| part.parse::<u32>().unwrap_or(0));
+        let at_least_the_lists = (numbers.next(), numbers.next()) >= (Some(26), Some(10));
+        assert!(
+            allowed.contains("lower") && tables.contains("numbers"),
+            "the catalog answered {} functions",
+            known.len()
+        );
+        for name in Engine::ClickHouse
+            .spec()
+            .sql
+            .builtin_functions
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+        {
+            let lower = name.to_lowercase();
+            if known.contains(name) || tables.contains(&lower) {
+                assert!(
+                    allowed.contains(name)
+                        || (tables.contains(&lower) && LOCAL.contains(&lower.as_str())),
+                    "{name} is on the built-in list and is neither a system function outside the excluded categories nor a local table function"
+                );
+            } else if at_least_the_lists {
+                assert!(
+                    crate::db::spec::GRAMMAR_FUNCTIONS.contains(&lower.as_str()),
+                    "{name} is on the built-in list and in no catalog of this server"
+                );
+            }
+        }
     }
 
     /// The requests that carried `statement`, in order.

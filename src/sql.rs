@@ -20,10 +20,11 @@ use serde::Deserialize;
 // Aliased: `tree_sitter::Parser` already owns the name `Parser` in this file,
 // and the two parsers are never interchangeable -- see `classify`'s doc.
 use sqlparser::ast::{
-    AlterTableOperation, ConditionalStatementBlock, CopySource, CopyTarget, CreateTableOptions,
-    Delete, Expr, Insert, Merge, ObjectName, ObjectNamePart, Query, Set, SetExpr, SqlOption,
-    Statement, TableFactor, TableObject, TransactionAccessMode, TransactionMode, Update,
-    UtilityOption, Visit, Visitor, visit_statements,
+    AlterTableOperation, ConditionalStatementBlock, ContextModifier, CopySource, CopyTarget,
+    CreateTableOptions, Delete, Expr, Insert, Merge, ObjectName, ObjectNamePart, Query, Set,
+    SetExpr, SetSessionParamKind, SqlOption, Statement, TableFactor, TableObject,
+    TransactionAccessMode, TransactionMode, Update, UtilityOption, Visit, Visitor,
+    visit_statements,
 };
 use sqlparser::dialect::{
     ClickHouseDialect, Dialect, DuckDbDialect, GenericDialect, MsSqlDialect, MySqlDialect,
@@ -31,7 +32,7 @@ use sqlparser::dialect::{
 };
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::Parser as SqlParser;
-use sqlparser::tokenizer::{Location, Token, Tokenizer, Whitespace};
+use sqlparser::tokenizer::{Location, Token, Tokenizer, TokenizerError, Whitespace, Word};
 use tree_sitter::{Node, Parser, Tree};
 
 use crate::db::{
@@ -41,6 +42,18 @@ use crate::db::{
 };
 use crate::import_rows::Value;
 use crate::result_grid::{NewValue, PendingRow};
+
+mod agent;
+
+#[cfg_attr(
+    not(test),
+    expect(
+        unused_imports,
+        reason = "the agent tools (Phase 4) are the first caller"
+    )
+)]
+pub(crate) use agent::{AgentVerdict, Expiry, Refusal, agent_gate};
+pub(crate) use agent::{ApprovalKind, approval_kind, counts_rows, creates_index_concurrently};
 
 /// The runnable statements of a query buffer, as byte ranges into it.
 pub struct Buffer {
@@ -3588,78 +3601,451 @@ pub(crate) fn typed_explain(engine: Engine, sql: &str) -> Option<ExplainMode> {
 /// finds statement boundaries in a buffer someone is still typing into;
 /// this needs a typed statement, and would rather refuse than guess.
 pub(crate) fn classify(engine: Engine, sql: &str) -> Verdict {
+    parsed(engine, sql).verdict
+}
+
+/// What one parse of a submission says: the verdict [`classify`] returns, and
+/// what the same parse knows that a `Verdict` drops. Read once, so the human's
+/// gate and the agent's cannot judge two different readings of one text.
+struct Parsed {
+    verdict: Verdict,
+    /// How many statements the parse that was judged produced, MariaDB's
+    /// executable comments expanded, so a statement a comment carries is
+    /// counted.
+    statements: usize,
+    /// Whether any statement the walk reached is a `DELETE`, whatever its
+    /// shape: top level, a CTE's body, under `EXPLAIN ANALYZE`, in an `IF` or a
+    /// scripting block, a ClickHouse mutation that amounts to one. On MongoDB
+    /// and Redis it is whether any statement or command removes data, which
+    /// those engines' own readers decide.
+    removes: bool,
+    /// Whether any `ALTER TABLE` the walk reached carries an operation other
+    /// than `ADD COLUMN`.
+    alters: bool,
+    /// Whether any statement the parse judged leaves its session changed: a
+    /// transaction bracket, a `SET`, a `USE`, a temporary table, a temporary
+    /// view, a variable target, a savepoint. Read off the statements themselves, never off
+    /// [`leaves`], which says nothing on an engine that keeps no session and
+    /// also flags plain reads of what the session holds.
+    session: bool,
+    /// Whether any statement is one a server-side script runs from: a Redis
+    /// `EVAL` or `FCALL` (the read-only forms too), `SCRIPT LOAD`, `FUNCTION
+    /// LOAD`, a MongoDB `$where`, `$function` or `$accumulator`. SQL leaves it
+    /// false: its functions are the deny-list's.
+    scripts: bool,
+    /// Whether any statement is one that returns credentials, password hashes,
+    /// the user's privileges or other clients' details (D-27): the Redis
+    /// commands `CONFIG GET`, `CLIENT LIST`, `ACL LIST` and `ACL GETUSER`, a
+    /// MongoDB `currentOp` in any spelling (the command, the `$currentOp` stage
+    /// and the `db.currentOp()` helper) and `connectionStatus` asked for its
+    /// privileges. SQL leaves it false.
+    discloses: bool,
+    /// Whether a Redis line splits but is a command the editor never sends
+    /// (`MONITOR`, `SELECT`): [`classify`] rates it a read because it is never
+    /// sent, so only this tells it from a read that is.
+    unsent: bool,
+    /// Whether any statement the judged parse holds calls a function the
+    /// engine's built-in list does not name, in any clause, in `FROM` or under
+    /// `EXPLAIN`. The agent path reads it; the human path never does, except
+    /// through Generic's raise in [`parsed`].
+    unlisted_call: bool,
+    /// What a Redis command schedules beyond itself, read by
+    /// [`crate::redis_cmd::expiry`]. Other engines leave it `None`. Only the
+    /// agent path reads it.
+    expiry: Option<Expiry>,
+}
+
+impl Parsed {
+    /// A verdict and a count, for the readings that look at no tree.
+    fn counted(verdict: Verdict, statements: usize) -> Self {
+        Self {
+            verdict,
+            statements,
+            removes: false,
+            alters: false,
+            session: false,
+            scripts: false,
+            discloses: false,
+            unsent: false,
+            unlisted_call: false,
+            expiry: None,
+        }
+    }
+
+    fn read(reading: Reading, statements: &[Statement], unlisted_call: bool) -> Self {
+        Self {
+            verdict: reading.verdict,
+            statements: statements.len(),
+            removes: reading.removes,
+            alters: reading.alters,
+            session: statements.iter().any(changes_session),
+            scripts: false,
+            discloses: false,
+            unsent: false,
+            unlisted_call,
+            expiry: None,
+        }
+    }
+}
+
+/// Whether `statement`, or a statement it holds in an `IF` branch or a
+/// scripting block, leaves its session changed. [`Leaves::add`] answers for
+/// every kind it knows; it is not changed, because the queue of the user's
+/// own statements reads it. This adds what an agent cannot be allowed to do
+/// unseen and the queue does not care about: a savepoint, which brackets a
+/// transaction an agent has no way to end, and a session change inside a
+/// branch, and a `SELECT ... INTO` a temporary table or variable that sits
+/// under a set operation or in parentheses, where [`Leaves::add`] looks only at
+/// a bare `SELECT`.
+///
+/// A temporary view is added for a reason of its own. It is searched ahead of
+/// the permanent schema (Postgres's `pg_temp`, SQLite's `temp`), so it shadows
+/// a table of the same name for every later statement on the session, and a
+/// write approved after it would hit the view, not the table the human read.
+fn changes_session(statement: &Statement) -> bool {
+    match statement {
+        Statement::Savepoint { .. }
+        | Statement::ReleaseSavepoint { .. }
+        | Statement::Rollback {
+            savepoint: Some(_), ..
+        } => true,
+        Statement::If(branching) => std::iter::once(&branching.if_block)
+            .chain(&branching.elseif_blocks)
+            .chain(&branching.else_block)
+            .flat_map(ConditionalStatementBlock::statements)
+            .any(changes_session),
+        Statement::StartTransaction { statements, .. } if !statements.is_empty() => {
+            statements.iter().any(changes_session)
+        }
+        Statement::CreateView(view) if view.temporary => true,
+        Statement::Query(query) if selects_into_session(&query.body) => true,
+        _ => {
+            let mut leaves = Leaves::default();
+            leaves.add(statement);
+            leaves != Leaves::default()
+        }
+    }
+}
+
+/// Whether a `SELECT ... INTO` anywhere in `body` makes a temporary table or
+/// a variable that lasts the session. It restates the predicate [`Leaves::add`]
+/// applies to a bare `SELECT`: [`Leaves::add`] reads only that one shape and is
+/// left as it is because the user's queue reads it, so a set operation or
+/// parentheses would otherwise hide the target from the agent's gate.
+fn selects_into_session(body: &SetExpr) -> bool {
+    match body {
+        SetExpr::Select(select) => select.into.as_ref().is_some_and(|into| {
+            into.temporary
+                || into
+                    .targets
+                    .iter()
+                    .any(|target| target.to_string().starts_with(['#', '@']))
+        }),
+        SetExpr::Query(query) => selects_into_session(&query.body),
+        SetExpr::SetOperation { left, right, .. } => {
+            selects_into_session(left) || selects_into_session(right)
+        }
+        _ => false,
+    }
+}
+
+/// A [`Verdict`] and what the walk that reached it saw that a verdict drops.
+/// One walk answers for the human's gate and the agent's, so what the agent is
+/// refused for comes from the tree the verdict was read off, never from the
+/// text: `classify` keeps only the verdict, and every record of it is unmoved.
+#[derive(Debug)]
+struct Reading {
+    verdict: Verdict,
+    removes: bool,
+    alters: bool,
+}
+
+impl Reading {
+    const READ: Self = Self {
+        verdict: Verdict::READ,
+        removes: false,
+        alters: false,
+    };
+
+    /// The more restrictive of two readings: [`Verdict::max`] of the verdicts,
+    /// and either flag set by either.
+    fn max(self, other: Self) -> Self {
+        Self {
+            verdict: self.verdict.max(other.verdict),
+            removes: self.removes || other.removes,
+            alters: self.alters || other.alters,
+        }
+    }
+}
+
+impl From<Verdict> for Reading {
+    fn from(verdict: Verdict) -> Self {
+        Self {
+            verdict,
+            removes: false,
+            alters: false,
+        }
+    }
+}
+
+/// [`classify`]'s reading of `sql`, with everything the parse knew.
+fn parsed(engine: Engine, sql: &str) -> Parsed {
     if engine.syntax() == Syntax::Redis {
-        return crate::redis_cmd::classify(sql);
+        return Parsed {
+            session: crate::redis_cmd::leaves(sql) != Leaves::default(),
+            removes: crate::redis_cmd::removes(sql),
+            scripts: crate::redis_cmd::runs_script(sql),
+            discloses: crate::redis_cmd::discloses(sql),
+            // Where a line does not split, `classify` has already said
+            // `Unreadable`, which the agent path asks first.
+            unsent: crate::redis_cmd::parse(sql).is_err(),
+            expiry: crate::redis_cmd::expiry(sql),
+            ..Parsed::counted(
+                crate::redis_cmd::classify(sql),
+                crate::redis_cmd::statements(sql).len(),
+            )
+        };
     }
     let Some(dialect) = dialect(engine) else {
-        return crate::mql::classify(sql);
+        return Parsed {
+            removes: crate::mql::removes(sql),
+            scripts: crate::mql::runs_script(sql),
+            discloses: crate::mql::discloses(sql),
+            ..Parsed::counted(crate::mql::classify(sql), crate::mql::statements(sql).len())
+        };
     };
 
     if engine.spec().sql.explain_analyze == Some(ExplainPrefix::Analyze)
         && let Some(explain) = mariadb_analyze_as_explain(dialect.as_ref(), sql)
     {
-        return classify(engine, &explain);
+        return parsed(engine, &explain);
     }
 
     if let Some(american) = analyse_as_analyze(dialect.as_ref(), sql) {
-        return classify(engine, &american);
+        return parsed(engine, &american);
     }
 
     let spec = engine.spec();
-    let calls = calls_verdict(dialect.as_ref(), spec.sql.parser_dialect, sql);
+    let calls = calls_verdict(engine, dialect.as_ref(), sql);
     if spec.sql.unreadable_floor == UnreadableFloor::FirstKeyword {
-        return by_statement(spec, dialect.as_ref(), sql).max(calls);
+        let read = by_statement(engine, dialect.as_ref(), sql);
+        return Parsed {
+            verdict: raised(engine, sql, read.verdict).max(calls),
+            ..read
+        };
     }
 
     // All or nothing: one statement it cannot read makes the whole submission
     // one it cannot vouch for.
-    // An unreadable verdict's mode is the lowest one it may be run once in.
-    // Any, where the server holds Read-only to reads; otherwise nothing stops
-    // what it turns out to write, so Read-only may not run it at all.
-    let unreadable = || {
-        Verdict {
-            mode: if engine.holds_read_only() {
-                Mode::ReadOnly
-            } else {
-                Mode::ReadWrite
-            },
-            destructive: vec![Destructive::Unreadable],
-        }
-        .max(calls.clone())
-    };
     let parser_dialect = spec.sql.parser_dialect;
+    // MySQL ignores a `/*M! … */` that MariaDB runs, and a MySQL profile may
+    // point at either server, so on MySQL the submission is read both ways --
+    // expanded below ([`executed_tokens`]), and here as MySQL runs it, with the
+    // comment ignored -- and held unreadable as well. MariaDB reads it expanded
+    // only, which is what it runs.
+    let calls = match engine == Engine::MySql && runs_mariadb_comment(dialect.as_ref(), sql) {
+        true => {
+            let ignored =
+                SqlParser::parse_sql(dialect.as_ref(), sql).map_or(Verdict::READ, |statements| {
+                    statements
+                        .iter()
+                        .map(|statement| spec_verdict(spec, statement).verdict)
+                        .fold(Verdict::READ, Verdict::max)
+                });
+            calls.max(unreadable_verdict(engine)).max(ignored)
+        }
+        false => calls,
+    };
+    // An unreadable verdict carries what the calls in it need as well.
+    let unreadable = || Parsed::counted(unreadable_verdict(engine).max(calls.clone()), 0);
     if parser_dialect == ParserDialect::Generic && lexes_apart(dialect.as_ref(), sql)
-        || parser_dialect == ParserDialect::MySql && runs_mariadb_comment(dialect.as_ref(), sql)
         || !ends_line_comments_as_sqlparser_does(parser_dialect)
             && line_comment_past_carriage_return(dialect.as_ref(), sql)
     {
         return unreadable();
     }
-    let parsed = SqlParser::parse_sql(dialect.as_ref(), sql).or_else(|error| {
-        match db2_spelled(dialect.as_ref(), sql)
-            .filter(|_| parser_dialect == ParserDialect::Generic)
-        {
-            Some(respelled) => SqlParser::parse_sql(dialect.as_ref(), &respelled),
-            None => Err(error),
-        }
-    });
-    let Ok(statements) = parsed else {
+    let parsed = match executed_tokens(engine, dialect.as_ref(), sql) {
+        // The derived stream is read here and goes no further: the driver is
+        // handed `sql`, exactly as typed.
+        Some(tokens) => tokens.ok().and_then(|tokens| {
+            SqlParser::new(dialect.as_ref())
+                .with_tokens(tokens)
+                .parse_statements()
+                .ok()
+        }),
+        None => SqlParser::parse_sql(dialect.as_ref(), sql)
+            .or_else(|error| {
+                match db2_spelled(dialect.as_ref(), sql)
+                    .filter(|_| parser_dialect == ParserDialect::Generic)
+                {
+                    Some(respelled) => SqlParser::parse_sql(dialect.as_ref(), &respelled),
+                    None => Err(error),
+                }
+            })
+            .ok(),
+    };
+    let Some(statements) = parsed else {
         return unreadable();
     };
 
-    let calls = match parser_dialect == ParserDialect::Generic
-        && statements.iter().any(calls_unknown_function)
-    {
+    // An empty or comment-only string parses to no statements at all. There is
+    // nothing there to be dangerous, and a dialog over nothing is noise -- but
+    // only when the grammar agrees there is nothing, so a range it finds that
+    // the typed parser skipped is refused rather than run silently.
+    if statements.is_empty() && grammar_finds_more_than_comments(engine, dialect.as_ref(), sql) {
+        return unreadable();
+    }
+
+    let unlisted_call = statements
+        .iter()
+        .any(|statement| calls_unlisted_function(engine, statement));
+    let calls = match engine.reads_only_listed_calls() && unlisted_call {
         true => calls.max(Verdict::WRITE),
         false => calls,
     };
 
-    // An empty or comment-only string parses to no statements at all. There is
-    // nothing there to be dangerous, and a dialog over nothing is noise.
-    statements
+    let reading = statements
         .iter()
-        .map(|statement| spec_verdict(spec, statement))
-        .fold(calls, Verdict::max)
+        .map(|statement| spec_verdict(engine.spec(), statement))
+        .fold(Reading::READ, Reading::max);
+    let read = Parsed::read(reading, &statements, unlisted_call);
+    Parsed {
+        verdict: raised(engine, sql, read.verdict).max(calls),
+        ..read
+    }
+}
+
+/// `verdict`, raised by what the whole text says on its own, whichever of
+/// [`classify`]'s two readings produced it: a call to a function the engine
+/// denies, or a server-wide `SET`. Both paths go through here, so an engine
+/// read statement by statement is held to the same rule as one read as a whole.
+fn raised(engine: Engine, sql: &str, verdict: Verdict) -> Verdict {
+    // Raised, never replaced: the statements above may already need more.
+    if calls_denied_function(engine, sql) || sets_server_wide(engine, sql) {
+        verdict.max(Verdict::WRITE)
+    } else {
+        verdict
+    }
+}
+
+/// What a submission `classify` cannot vouch for is: unreadable, and runnable
+/// once. The mode is the lowest one it may be run once in -- Read-only where the
+/// server holds Read-only to reads, otherwise nothing stops what it turns out
+/// to write, so Read-only may not run it at all. One construction, so a parse
+/// error and the zero-statement cross-check cannot drift apart.
+fn unreadable_verdict(engine: Engine) -> Verdict {
+    Verdict {
+        mode: if engine.holds_read_only() {
+            Mode::ReadOnly
+        } else {
+            Mode::ReadWrite
+        },
+        destructive: vec![Destructive::Unreadable],
+    }
+}
+
+/// Whether the grammar finds a statement range in `sql` that holds more than
+/// whitespace, semicolons and comments *to `sqlparser`'s own lexer*, for a
+/// submission `sqlparser` read as no statement at all.
+///
+/// The two parsers disagree on comment-only text, and nearly always because the
+/// grammar is one standard dialect: it reads a MySQL or Snowflake `#` line
+/// comment as a statement, and an inner `*/` of a nested comment as a leftover.
+/// A range is divergent only when the lexer of the engine's own dialect finds a
+/// real token in it, which is what clears every line comment a dialect has
+/// without a comment stripper of ours. Leftovers of a nested block comment on
+/// the two dialects that nest (`*/` lexes as operators) stay refused: rare, and
+/// the conservative side. A range the lexer cannot read counts as divergent.
+fn grammar_finds_more_than_comments(engine: Engine, dialect: &dyn Dialect, sql: &str) -> bool {
+    Buffer::for_engine(engine, sql)
+        .statements()
+        .iter()
+        .any(|range| holds_a_token(dialect, &sql[range.clone()]))
+}
+
+/// Whether `text` holds a token to the dialect's own lexer that is neither
+/// whitespace, a comment nor a `;`. A range it cannot read counts as holding
+/// one.
+fn holds_a_token(dialect: &dyn Dialect, text: &str) -> bool {
+    Tokenizer::new(dialect, text)
+        .tokenize()
+        .map_or(true, |tokens| {
+            tokens
+                .iter()
+                .any(|token| !matches!(token, Token::Whitespace(_) | Token::SemiColon))
+        })
+}
+
+/// `sql` as the server will read it, for a dialect whose server runs the text
+/// of a MariaDB-only executable comment (`/*M!100100 … */`): the tokens, with
+/// each such comment replaced by the tokens of what it holds. `None` where
+/// there is nothing to expand, so every other submission is read as it always
+/// was.
+///
+/// The server inlines the comment's text into its neighbours rather than
+/// running it as a statement of its own, so a fragment (`INTO @y`) belongs to
+/// the statement around it and a comment followed by a bare statement fuses
+/// with it into one the server rejects. Expanding in the token stream and
+/// parsing once reads exactly that, names the destructive kind the inner
+/// statement carries, and cannot recurse. The one space after each expansion
+/// keeps two words from fusing into one that neither text holds.
+///
+/// MySQL ignores the marker, and a MySQL profile may point at a MariaDB server
+/// that runs it, so on MySQL [`parsed`] also reads the submission with the
+/// comment ignored and holds it unreadable: the expansion alone would take
+/// `DELETE FROM t /*M! WHERE 1 = 0 */` for a filtered delete when MySQL
+/// deletes every row. The `/*!` form needs no help here, the pinned tokenizer
+/// expands it itself.
+///
+/// Never returned beyond [`classify`] and [`calls_denied_function`]: the
+/// statement DBDelve sends is the statement the user typed.
+fn executed_tokens(
+    engine: Engine,
+    dialect: &dyn Dialect,
+    sql: &str,
+) -> Option<Result<Vec<Token>, TokenizerError>> {
+    if engine.spec().sql.parser_dialect != ParserDialect::MySql {
+        return None;
+    }
+    let tokens = Tokenizer::new(dialect, sql).tokenize().ok()?;
+    if !tokens.iter().any(|token| executable_body(token).is_some()) {
+        return None;
+    }
+    let mut expanded = Vec::with_capacity(tokens.len());
+    for token in tokens {
+        match executable_body(&token) {
+            Some(body) => match Tokenizer::new(dialect, body).tokenize() {
+                Ok(inner) => {
+                    expanded.extend(inner);
+                    expanded.push(Token::Whitespace(Whitespace::Space));
+                }
+                Err(error) => return Some(Err(error)),
+            },
+            None => expanded.push(token),
+        }
+    }
+    Some(Ok(expanded))
+}
+
+/// The text the server runs out of a comment token, when it is a MariaDB-only
+/// executable comment: `M!`, then a version of no digits or of five or more,
+/// then the code. One to four digits are not a version, and the server reads
+/// them as part of a comment it then rejects, so they stay a comment here.
+///
+/// Matched on bytes, as ASCII, because the comment is arbitrary user text: a
+/// multi-byte character straight after the marker or where the digits end must
+/// not be split, and a full-width digit is not a version digit.
+fn executable_body(token: &Token) -> Option<&str> {
+    let Token::Whitespace(Whitespace::MultiLineComment(comment)) = token else {
+        return None;
+    };
+    let rest = comment
+        .get(..2)
+        .filter(|marker| marker.eq_ignore_ascii_case("M!"))
+        .map(|_| &comment[2..])?;
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    // Every byte counted is one ASCII digit, so `digits` is a character boundary.
+    (!(1..=4).contains(&digits)).then(|| &rest[digits..])
 }
 
 /// `sql` with what Db2 reads and sqlparser's Generic dialect does not spelled
@@ -3706,11 +4092,13 @@ fn db2_spelled(dialect: &dyn Dialect, sql: &str) -> Option<String> {
     changed.then_some(respelled)
 }
 
-/// Whether `statement` calls, anywhere in it, a function that is not one of
-/// [`SIDE_EFFECT_FREE_FUNCTIONS`]: a scalar or aggregate call, or a function
-/// in `FROM`. A function can write whatever its body does, and nothing in the
-/// call says, so on a server that holds nothing ([`Engine::holds_read_only`])
-/// only a known built-in reads.
+/// Whether `statement` calls, anywhere in it, a function that is not on
+/// `engine`'s [`SqlSpec::builtin_functions`]: a scalar or aggregate call, or a
+/// function in `FROM`. A function can write whatever its body does, and nothing
+/// in the call says. Two readers act on that: on Generic, which holds nothing
+/// ([`Engine::holds_read_only`]), the human path raises an unlisted call to a
+/// write; on every engine the agent path asks before one runs at Read-write
+/// and Full.
 ///
 /// Only a bare, unquoted name is matched against the list: `s.upper(x)` and
 /// `"UPPER"(x)` may name a function of the user's. An overload of a listed
@@ -3719,13 +4107,20 @@ fn db2_spelled(dialect: &dyn Dialect, sql: &str) -> Option<String> {
 /// it by its arguments' types, which SQL alone cannot resolve. That is
 /// accepted: Read-only guards against the user's mistakes, not a schema built
 /// to trap it.
-fn calls_unknown_function(statement: &Statement) -> bool {
-    struct Calls;
+///
+/// ponytail: the ceiling is what the text does not show. Postgres field
+/// notation (`t.f` calls `f(t)` with no parenthesis, and telling it from a
+/// column takes the catalog), a view, policy, rule, cast or operator that
+/// calls a function, and a listed name the connected server's version lacks,
+/// which a user function can take. The upgrade path is a catalog lookup on the
+/// live connection.
+fn calls_unlisted_function(engine: Engine, statement: &Statement) -> bool {
+    struct Calls(Engine);
     impl Visitor for Calls {
         type Break = ();
         fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
             match expr {
-                Expr::Function(function) if !side_effect_free(&function.name) => {
+                Expr::Function(function) if !listed(self.0, &function.name) => {
                     ControlFlow::Break(())
                 }
                 _ => ControlFlow::Continue(()),
@@ -3739,7 +4134,7 @@ fn calls_unknown_function(statement: &Statement) -> bool {
                     ..
                 }
                 | TableFactor::Function { name, .. }
-                    if !side_effect_free(name) =>
+                    if !listed(self.0, name) =>
                 {
                     ControlFlow::Break(())
                 }
@@ -3747,236 +4142,27 @@ fn calls_unknown_function(statement: &Statement) -> bool {
             }
         }
     }
-    statement.visit(&mut Calls).is_break()
+    statement.visit(&mut Calls(engine)).is_break()
 }
 
-fn side_effect_free(name: &ObjectName) -> bool {
-    matches!(
-        name.0.as_slice(),
-        [ObjectNamePart::Identifier(ident)]
-            if ident.quote_style.is_none()
-                && SIDE_EFFECT_FREE_FUNCTIONS
-                    .contains(&ident.value.to_ascii_lowercase().as_str())
-    )
+/// Whether `name` is one bare, unquoted word on `engine`'s built-in list.
+/// Case is folded unless the server tells names apart by it.
+fn listed(engine: Engine, name: &ObjectName) -> bool {
+    let sql = &engine.spec().sql;
+    let [ObjectNamePart::Identifier(ident)] = name.0.as_slice() else {
+        return false;
+    };
+    if ident.quote_style.is_some() {
+        return false;
+    }
+    let folded = match sql.case_sensitive_functions {
+        true => ident.value.clone(),
+        false => ident.value.to_ascii_lowercase(),
+    };
+    sql.builtin_functions
+        .lines()
+        .any(|line| !line.starts_with('#') && line == folded)
 }
-
-/// The functions a Generic Read-only connection may call: built-ins of
-/// Postgres, Db2 and ANSI SQL that compute a value and change nothing, so a
-/// call to one is a read wherever it stands. Anything not listed needs
-/// Read-write there ([`calls_unknown_function`]). Keep it to functions whose
-/// every spelling across those servers is side-effect free.
-const SIDE_EFFECT_FREE_FUNCTIONS: &[&str] = &[
-    // Aggregates.
-    "count",
-    "sum",
-    "avg",
-    "min",
-    "max",
-    "every",
-    "any_value",
-    "bool_and",
-    "bool_or",
-    "bit_and",
-    "bit_or",
-    "array_agg",
-    "string_agg",
-    "listagg",
-    "median",
-    "mode",
-    "percentile_cont",
-    "percentile_disc",
-    "stddev",
-    "stddev_pop",
-    "stddev_samp",
-    "variance",
-    "var_pop",
-    "var_samp",
-    "corr",
-    "covar_pop",
-    "covar_samp",
-    "covariance",
-    "regr_slope",
-    "regr_intercept",
-    "regr_count",
-    "regr_r2",
-    "regr_avgx",
-    "regr_avgy",
-    "regr_sxx",
-    "regr_syy",
-    "regr_sxy",
-    "grouping",
-    // Window functions.
-    "row_number",
-    "rank",
-    "dense_rank",
-    "percent_rank",
-    "cume_dist",
-    "ntile",
-    "lag",
-    "lead",
-    "first_value",
-    "last_value",
-    "nth_value",
-    // Nulls and choices.
-    "coalesce",
-    "nullif",
-    "ifnull",
-    "nvl",
-    "nvl2",
-    "value",
-    "greatest",
-    "least",
-    "decode",
-    // Numbers.
-    "abs",
-    "ceil",
-    "ceiling",
-    "floor",
-    "round",
-    "trunc",
-    "truncate",
-    "mod",
-    "power",
-    "pow",
-    "sqrt",
-    "exp",
-    "ln",
-    "log",
-    "log10",
-    "sign",
-    "pi",
-    "degrees",
-    "radians",
-    "sin",
-    "cos",
-    "tan",
-    "asin",
-    "acos",
-    "atan",
-    "atan2",
-    "random",
-    "rand",
-    // Strings.
-    "upper",
-    "lower",
-    "ucase",
-    "lcase",
-    "initcap",
-    "length",
-    "char_length",
-    "character_length",
-    "octet_length",
-    "bit_length",
-    "substr",
-    "substring",
-    "trim",
-    "ltrim",
-    "rtrim",
-    "btrim",
-    "replace",
-    "translate",
-    "concat",
-    "concat_ws",
-    "left",
-    "right",
-    "lpad",
-    "rpad",
-    "repeat",
-    "reverse",
-    "position",
-    "strpos",
-    "locate",
-    "instr",
-    "posstr",
-    "split_part",
-    "starts_with",
-    "regexp_replace",
-    "regexp_substr",
-    "regexp_like",
-    "regexp_instr",
-    "regexp_count",
-    "chr",
-    "ascii",
-    "md5",
-    "hex",
-    "to_hex",
-    "digits",
-    "space",
-    "format",
-    // Dates and times.
-    "current_date",
-    "current_time",
-    "current_timestamp",
-    "localtime",
-    "localtimestamp",
-    "now",
-    "date_trunc",
-    "date_part",
-    "extract",
-    "year",
-    "month",
-    "day",
-    "hour",
-    "minute",
-    "second",
-    "microsecond",
-    "dayofweek",
-    "dayofyear",
-    "dayofmonth",
-    "week",
-    "quarter",
-    "days",
-    "julian_day",
-    "monthname",
-    "dayname",
-    "age",
-    "make_date",
-    "make_timestamp",
-    "last_day",
-    "next_day",
-    "add_months",
-    "months_between",
-    "timestampdiff",
-    "timestamp_format",
-    "varchar_format",
-    "to_char",
-    "to_date",
-    "to_timestamp",
-    "to_number",
-    // Casts.
-    "cast",
-    "try_cast",
-    "int",
-    "integer",
-    "bigint",
-    "smallint",
-    "decimal",
-    "dec",
-    "numeric",
-    "double",
-    "real",
-    "float",
-    "char",
-    "varchar",
-    "date",
-    "time",
-    "timestamp",
-    // The session's own names.
-    "current_user",
-    "session_user",
-    "user",
-    "current_schema",
-    "current_database",
-    "current_catalog",
-    "current_setting",
-    "version",
-    // A sequence's value as this session last advanced it.
-    "currval",
-    "lastval",
-    // Rows from values.
-    "generate_series",
-    "unnest",
-];
 
 /// What a submission's calls do that its tree does not show, read off its
 /// tokens wherever they stand, so a call in a statement sqlparser cannot read
@@ -3990,11 +4176,20 @@ const SIDE_EFFECT_FREE_FUNCTIONS: &[&str] = &[
 /// - a `set_config` that may lift the read-only hold ([`READ_ONLY_SETTINGS`])
 ///   is a write. One naming another setting by a plain literal is left alone;
 ///   any other first argument might name the hold.
-fn calls_verdict(dialect: &dyn Dialect, parser_dialect: ParserDialect, sql: &str) -> Verdict {
-    let (tokens, _) = located_prefix(dialect, sql);
+fn calls_verdict(engine: Engine, dialect: &dyn Dialect, sql: &str) -> Verdict {
+    let parser_dialect = engine.spec().sql.parser_dialect;
+    // The calls the server will run, so one inside an executable comment
+    // counts, as it does for [`calls_denied_function`].
+    let tokens: Vec<Token> = match executed_tokens(engine, dialect, sql) {
+        Some(Ok(tokens)) => tokens,
+        _ => located_prefix(dialect, sql)
+            .0
+            .into_iter()
+            .map(|(token, _)| token)
+            .collect(),
+    };
     let tokens: Vec<&Token> = tokens
         .iter()
-        .map(|(token, _)| token)
         .filter(|token| !matches!(token, Token::Whitespace(_)))
         .collect();
     let bare = |at: usize, name: &str| matches!(tokens.get(at), Some(Token::Word(word)) if word.quote_style.is_none() && word.value.eq_ignore_ascii_case(name));
@@ -4101,16 +4296,9 @@ fn set_lifts_hold(set: &Set) -> bool {
         Set::MultipleAssignments { assignments } => assignments
             .iter()
             .any(|assignment| lifts(&assignment.name, std::slice::from_ref(&assignment.value))),
-        Set::SetTransaction { modes, .. } => opens_read_write(modes),
+        Set::SetTransaction { modes, .. } => grants_write(modes),
         _ => false,
     }
-}
-
-/// Whether a transaction's characteristics include `READ WRITE`.
-fn opens_read_write(modes: &[TransactionMode]) -> bool {
-    modes.contains(&TransactionMode::AccessMode(
-        TransactionAccessMode::ReadWrite,
-    ))
 }
 
 /// Whether a server whose lexer is not known, as Generic's is not, could
@@ -4153,13 +4341,15 @@ fn lexes_apart(dialect: &dyn Dialect, sql: &str) -> bool {
 
 /// Whether `sql` holds MariaDB's `/*M! … */`, which MariaDB runs and
 /// sqlparser's MySQL tokenizer keeps as a comment, unlike the `/*! … */` it
-/// reads the inside of. Nothing in the dialect tells MariaDB from MySQL, which
-/// ignores it, so it is unreadable to both.
+/// reads the inside of. MySQL ignores it, and a MySQL profile may well point
+/// at a MariaDB server, so on MySQL it is unreadable. Either spelling of the
+/// marker counts, whatever follows it.
 fn runs_mariadb_comment(dialect: &dyn Dialect, sql: &str) -> bool {
     located_prefix(dialect, sql).0.iter().any(|(token, _)| {
         matches!(
             token,
-            Token::Whitespace(Whitespace::MultiLineComment(comment)) if comment.starts_with("M!")
+            Token::Whitespace(Whitespace::MultiLineComment(comment))
+                if comment.get(..2).is_some_and(|marker| marker.eq_ignore_ascii_case("M!"))
         )
     })
 }
@@ -4206,7 +4396,8 @@ fn carriage_return_inside(comment: &str) -> bool {
 /// ([`misread`]), a word the server runs may be one the tokenizer never saw,
 /// so the submission needs Full. A tokenizer error is placed by the words it
 /// read before the error, and at Read-write at least.
-fn by_statement(spec: &EngineSpec, dialect: &dyn Dialect, sql: &str) -> Verdict {
+fn by_statement(engine: Engine, dialect: &dyn Dialect, sql: &str) -> Parsed {
+    let spec = engine.spec();
     let (tokens, whole) = located_prefix(dialect, sql);
     // What the tokenizer stopped at is unread, so anything there [`misread`]
     // might have caught counts as caught.
@@ -4218,7 +4409,10 @@ fn by_statement(spec: &EngineSpec, dialect: &dyn Dialect, sql: &str) -> Verdict 
     let trusted = whole && !misread;
 
     let mut unreadable = !trusted;
-    let verdict = between_semicolons(&tokens)
+    let mut counted = 0;
+    let mut session = false;
+    let mut unlisted_call = false;
+    let reading = between_semicolons(&tokens)
         .into_iter()
         .map(|range| {
             // A character the tokenizer does not know may be a space to the
@@ -4239,31 +4433,48 @@ fn by_statement(spec: &EngineSpec, dialect: &dyn Dialect, sql: &str) -> Verdict 
                     None => SqlParser::parse_sql(dialect, text).ok(),
                 },
             };
-            let verdict = match parsed {
-                Some(statements) => statements
-                    .iter()
-                    .map(|statement| spec_verdict(spec, statement))
-                    .fold(Verdict::READ, Verdict::max),
+            let reading = match parsed {
+                Some(statements) => {
+                    counted += statements.len();
+                    session |= statements.iter().any(changes_session);
+                    unlisted_call |= statements
+                        .iter()
+                        .any(|statement| calls_unlisted_function(engine, statement));
+                    statements
+                        .iter()
+                        .map(|statement| spec_verdict(spec, statement))
+                        .fold(Reading::READ, Reading::max)
+                }
                 None => {
+                    // A range it could not read is still a statement.
+                    counted += 1;
                     unreadable = true;
-                    first_keyword_verdict(&words)
+                    first_keyword_verdict(&words).into()
                 }
             };
-            verdict.max(words_verdict(&words))
+            reading.max(words_verdict(&words).into())
         })
-        .fold(Verdict::READ, Verdict::max);
+        .fold(Reading::READ, Reading::max);
 
     let floor = match (misread, whole) {
         (true, _) => Mode::Full,
         (false, false) => Mode::ReadWrite,
-        (false, true) => Mode::ReadOnly,
+        (false, true) => unreadable_verdict(engine).mode,
     };
-    match unreadable {
+    let verdict = match unreadable {
         true => Verdict {
-            mode: verdict.mode.max(floor),
+            mode: reading.verdict.mode.max(floor),
             destructive: vec![Destructive::Unreadable],
         },
-        false => verdict,
+        false => reading.verdict,
+    };
+    Parsed {
+        verdict,
+        removes: reading.removes,
+        alters: reading.alters,
+        session,
+        unlisted_call,
+        ..Parsed::counted(Verdict::READ, counted)
     }
 }
 
@@ -4392,11 +4603,11 @@ fn words_verdict(words: &[&Token]) -> Verdict {
 /// `CREATE TABLE` on a table engine outside the spec's `local_table_engines`
 /// keeps its rows somewhere else, a URL, a file or another server, so it needs
 /// Full.
-fn spec_verdict(spec: &EngineSpec, statement: &Statement) -> Verdict {
-    let verdict = statement_verdict(statement);
+fn spec_verdict(spec: &EngineSpec, statement: &Statement) -> Reading {
+    let reading = statement_verdict(&spec.sql, statement);
     let (Some(local), Statement::CreateTable(create)) = (spec.sql.local_table_engines, statement)
     else {
-        return verdict;
+        return reading;
     };
     let options = match &create.table_options {
         CreateTableOptions::None => &[][..],
@@ -4416,8 +4627,8 @@ fn spec_verdict(spec: &EngineSpec, statement: &Statement) -> Verdict {
         _ => false,
     });
     match elsewhere {
-        true => verdict.max(Verdict::FULL),
-        false => verdict,
+        true => reading.max(Verdict::FULL.into()),
+        false => reading,
     }
 }
 
@@ -5196,6 +5407,194 @@ fn touches_session(engine: Engine, sql: &str) -> bool {
     false
 }
 
+/// Names an engine can spell as a member with no call at all, which the period
+/// arm of [`calls_denied_function`] reads as the call it stands for. A call is
+/// always followed by a parenthesis, so the arm is needed only for such a
+/// spelling, and the project knows one: Snowflake's sequence pseudo-column,
+/// `seq.nextval`. Any other listed name after a period is an ordinary column
+/// reference and stays a read. The list is one long because that is how many
+/// such spellings are known; another goes here, with a corpus case beside the
+/// `member form` one in `hardening.rs`.
+const MEMBER_FORMS: &[&str] = &["nextval"];
+
+/// Whether a query calls one of the engine's `denied_functions`, wherever the
+/// call sits: the parser puts one in four different nodes (scalar, table,
+/// `LATERAL` table and `TABLE(..)` position), so the tokens are read instead.
+/// Only the last word before the parenthesis is compared, so a schema-qualified
+/// call counts, and a word on [`MEMBER_FORMS`] straight after a period counts
+/// without one. A column that merely shares a listed name is a read unless the
+/// name is on that list or is followed by a parenthesis, which is how a
+/// column called `query` on DuckDB is a read and `FROM query(..)` is not.
+///
+/// Separate from [`SESSION_FUNCTIONS`], which answers what the session keeps;
+/// this answers whether Read-only may run the call. A name may be on both.
+///
+/// A call the list does not name stays a read: a user-defined function keeps
+/// its statement. A denied call carried as text inside another function is
+/// seen only because that other function is itself listed, since the scan
+/// compares names and never reads what a string says. The list is therefore
+/// best-effort inside a `SELECT`, and a name missing from it is not a small
+/// matter. Where an engine holds Read-only on the server, the hold refuses a
+/// write that goes through the executor, but not a large-object write, a file
+/// the server writes outside the database, or a call carried inside a carrier's
+/// text: the conformance scenarios run the first and last with the hold armed,
+/// so the list is what stops those. Where an engine has no hold, the list is
+/// the whole boundary. The same root cause reached the list six times: a
+/// spelling of a name, a sibling family of names, the functions that execute
+/// their text argument, one of those whose text argument the catalog does not
+/// name, so a shape probe over the catalog could not find it, the functions in
+/// an extension outside `pg_catalog` that run text they are handed, and the file
+/// functions a contrib extension (`adminpack`) installs into `pg_catalog`.
+fn calls_denied_function(engine: Engine, sql: &str) -> bool {
+    calls_listed(
+        engine,
+        sql,
+        engine.spec().sql.denied_functions,
+        MEMBER_FORMS,
+    )
+}
+
+/// Whether `sql` calls any function on `listed`, by the scan
+/// [`calls_denied_function`] describes. One scan answers both lists, so the
+/// deny-list and the agent's egress list cannot read a call two ways.
+/// `member_forms` is the deny-list's period arm only: an egress name straight
+/// after a period is a column reference and stays a read.
+fn calls_listed(engine: Engine, sql: &str, listed: &[&str], member_forms: &[&str]) -> bool {
+    // An engine that lists nothing is judged by the parse alone, as it was
+    // before the list existed.
+    if listed.is_empty() {
+        return false;
+    }
+    let Some(dialect) = dialect(engine) else {
+        return false;
+    };
+    // The calls the server will run, so one inside an executable comment counts.
+    let tokens = executed_tokens(engine, dialect.as_ref(), sql)
+        .unwrap_or_else(|| Tokenizer::new(dialect.as_ref(), sql).tokenize());
+    let Ok(tokens) = tokens else {
+        return true;
+    };
+    // Read before the whitespace is dropped: the whitespace is what separates a
+    // bit-and from the escape form.
+    if escapes_an_identifier(&tokens) {
+        return true;
+    }
+    let mut tokens = tokens
+        .iter()
+        .filter(|token| !matches!(token, Token::Whitespace(_)))
+        .peekable();
+    let mut previous = None;
+    while let Some(token) = tokens.next() {
+        if let Token::Word(word) = token {
+            let name = word.value.to_lowercase();
+            // Snowflake reads a sequence as `seq.nextval`, no call at all, so
+            // that spelling and only that one is stopped without a
+            // parenthesis. What the narrowing leaves: a listed name used as a
+            // CTE name or a derived-table alias with a column list is still
+            // followed by one and still stopped. Deciding a word's position
+            // from the tokens would be a second parser kept in step with six
+            // dialects by hand, so those are recorded in the corpus instead.
+            if listed.contains(&name.as_str())
+                && (tokens.peek() == Some(&&Token::LParen)
+                    || (previous == Some(&Token::Period) && member_forms.contains(&name.as_str())))
+            {
+                return true;
+            }
+        }
+        previous = Some(token);
+    }
+    false
+}
+
+/// Whether `sql` has `SET` followed straight away by a server-wide or
+/// persistent scope word: `GLOBAL`, `PERSIST` or `PERSIST_ONLY`.
+///
+/// Read from the tokens because the parser has already dropped the scope of
+/// `SET GLOBAL TRANSACTION ...` into the `session` flag of `SetTransaction`,
+/// and [`set_verdict`] rates a transaction that asks for no write access a
+/// read, so a server-wide change to the default access mode or isolation level
+/// would pass as one. Only the word straight after `SET` counts, so `SET @global`
+/// (a user variable), `SET @@global.x` (which [`setting_verdict`] already
+/// stops) and `SET LOCAL TRANSACTION` are untouched. The pair is looked for
+/// anywhere rather than at the start of a statement, because the parser also
+/// accepts a `SET` inside an `IF ... THEN` block, where the statement opens
+/// with something else; and it is a pair, so the order of two statements does
+/// not matter.
+///
+/// What it moves, read from the corpus rather than from the intent: the
+/// transaction spelling whose scope the parser discarded, and two shapes that
+/// are not a `SET` statement. A `SELECT` of a column `set` aliased `global`,
+/// written with no `AS` ("ordinary identifiers spelling the scope pair, no SET
+/// statement"), is two adjacent unquoted words and so is raised from a read to
+/// a write. So is a scope word under a plain `EXPLAIN` ("server-wide
+/// transaction under a plain explain"), where `EXPLAIN SET ROLE other` stays a
+/// read because the parser sees the explained statement. Both fail towards a
+/// prompt, never towards a refusal or a run. The cost is accepted: telling an
+/// identifier from a keyword, or looking under an `EXPLAIN`, would mean reading
+/// statement structure from tokens the parser has already discarded. Both
+/// records are in `hardening_settings`.
+///
+/// A tokenizer failure answers `false`, unlike [`calls_denied_function`]. That
+/// one is only asked on an engine that lists a function; this is asked on every
+/// SQL engine, and a submission the tokenizer cannot read is already refused by
+/// name as unreadable. Raising here would fold a write into that verdict and
+/// move every record that says so.
+fn sets_server_wide(engine: Engine, sql: &str) -> bool {
+    let Some(dialect) = dialect(engine) else {
+        return false;
+    };
+    // The statements the server will run, so a scope inside an executable
+    // comment counts the way a denied call does.
+    let tokens = executed_tokens(engine, dialect.as_ref(), sql)
+        .unwrap_or_else(|| Tokenizer::new(dialect.as_ref(), sql).tokenize());
+    let Ok(tokens) = tokens else {
+        return false;
+    };
+    let words: Vec<Option<&Word>> = tokens
+        .iter()
+        .filter(|token| !matches!(token, Token::Whitespace(_)))
+        .map(|token| match token {
+            Token::Word(word) if word.quote_style.is_none() => Some(word),
+            _ => None,
+        })
+        .collect();
+    words.windows(2).any(|pair| {
+        matches!(
+            pair,
+            [Some(set), Some(scope)]
+                if set.value.eq_ignore_ascii_case("set")
+                    && ["global", "persist", "persist_only"]
+                        .iter()
+                        .any(|name| scope.value.eq_ignore_ascii_case(name))
+        )
+    })
+}
+
+/// Whether the tokens spell an identifier as a unicode escape, `U&"..."`: an
+/// unquoted `U`, an ampersand and a double-quoted word, written with nothing
+/// between them.
+///
+/// Postgres decodes the escape and the lexer reports the raw text, so the name
+/// the server calls is not the name [`calls_denied_function`] would compare.
+/// The form is the answer rather than the name: the escape character is
+/// changeable by a `UESCAPE` clause, so a decoder would be a second lexer kept
+/// in step with the server by hand, and a decoded name can itself be escaped.
+///
+/// One false positive, on an engine that lists any function: a bit-and of a
+/// double-quoted column written with no whitespace. It fails towards a prompt,
+/// and a space makes it a read again.
+fn escapes_an_identifier(tokens: &[Token]) -> bool {
+    tokens.windows(3).any(|window| {
+        matches!(
+            window,
+            [Token::Word(prefix), Token::Ampersand, Token::Word(name)]
+                if prefix.quote_style.is_none()
+                    && prefix.value.eq_ignore_ascii_case("u")
+                    && name.quote_style == Some('"')
+        )
+    })
+}
+
 /// Whether `sql` runs statements it does not show, so what they did to the
 /// transaction cannot be read off it: a procedure call (`CALL`, `EXEC`,
 /// `EXECUTE`), anywhere in it, or anything sqlparser cannot read, which
@@ -5697,11 +6096,11 @@ fn transaction_by_setting(set: &str) -> Option<bool> {
 /// data-modifying CTE, so
 /// `COPY (WITH x AS (DELETE FROM t RETURNING a) SELECT a FROM x) TO STDOUT`
 /// empties a table under a variant that reads as `COPY TO`.
-fn statement_verdict(statement: &Statement) -> Verdict {
-    let verdict = variant_verdict(statement);
+fn statement_verdict(spec: &SqlSpec, statement: &Statement) -> Reading {
+    let reading = variant_verdict(spec, statement);
     match owned_query(statement) {
-        Some(query) => verdict.max(query_verdict(query)),
-        None => verdict,
+        Some(query) => reading.max(query_verdict(spec, query)),
+        None => reading,
     }
 }
 
@@ -5727,11 +6126,11 @@ fn owned_query(statement: &Statement) -> Option<&Query> {
 
 /// What a statement's variant alone says. Never called directly: the fold in
 /// `statement_verdict` is the half that reads what the variant is carrying.
-fn variant_verdict(statement: &Statement) -> Verdict {
+fn variant_verdict(spec: &SqlSpec, statement: &Statement) -> Reading {
     match statement {
         // Read only as a variant. Everything dangerous a query can hold is
         // inside it, and `statement_verdict` folds that in.
-        Statement::Query(_) => Verdict::READ,
+        Statement::Query(_) => Reading::READ,
 
         // `EXPLAIN ANALYZE DELETE FROM t` runs the delete -- documented in
         // Postgres, and in MySQL since 8.0.18. dbdelve never sends it to SQLite:
@@ -5748,12 +6147,12 @@ fn variant_verdict(statement: &Statement) -> Verdict {
                     .flatten()
                     .any(analyze_option_is_on);
             if analyze {
-                statement_verdict(statement)
+                statement_verdict(spec, statement)
             } else {
-                Verdict::READ
+                Reading::READ
             }
         }
-        Statement::ExplainTable { .. } => Verdict::READ,
+        Statement::ExplainTable { .. } => Reading::READ,
 
         // A Snowflake Scripting block, `BEGIN DELETE FROM t; END`, parses as the
         // same variant as a bare `BEGIN` with its body inside. Any exception
@@ -5764,14 +6163,22 @@ fn variant_verdict(statement: &Statement) -> Verdict {
             ..
         } if !statements.is_empty() || exception.is_some() => {
             if exception.is_some() {
-                Verdict::FULL
+                Verdict::FULL.into()
             } else {
                 statements
                     .iter()
-                    .map(statement_verdict)
-                    .fold(Verdict::READ, Verdict::max)
+                    .map(|statement| statement_verdict(spec, statement))
+                    .fold(Reading::READ, Reading::max)
             }
         }
+
+        // A transaction opened read-write overrides the session's Read-only hold
+        // for that transaction, with no `SET` at all (Postgres spells it `BEGIN
+        // READ WRITE`). Below the scripting-block guard so a block keeps being
+        // read by what it holds.
+        Statement::StartTransaction { modes, .. } if grants_write(modes) => Verdict::WRITE.into(),
+
+        Statement::Set(set) => set_verdict(spec, set).into(),
 
         // `IF … ELSE` (T-SQL's, and the `IF … END IF` Postgres, MySQL and
         // Snowflake parse to the same variant) is as dangerous as what it holds.
@@ -5784,17 +6191,14 @@ fn variant_verdict(statement: &Statement) -> Verdict {
             blocks
                 .clone()
                 .filter_map(|block| block.condition.as_ref())
-                .map(condition_verdict)
+                .map(|condition| condition_verdict(spec, condition))
                 .chain(
                     blocks
                         .flat_map(ConditionalStatementBlock::statements)
-                        .map(statement_verdict),
+                        .map(|statement| statement_verdict(spec, statement)),
                 )
-                .fold(Verdict::READ, Verdict::max)
+                .fold(Reading::READ, Reading::max)
         }
-
-        Statement::Set(set) if set_lifts_hold(set) => Verdict::WRITE,
-        Statement::StartTransaction { modes, .. } if opens_read_write(modes) => Verdict::WRITE,
 
         Statement::ShowTables { .. }
         | Statement::ShowCatalogs { .. }
@@ -5815,13 +6219,14 @@ fn variant_verdict(statement: &Statement) -> Verdict {
         // and touches no data, so refusing it in Read-only would refuse
         // navigation, not damage.
         | Statement::Use { .. }
-        | Statement::Set { .. }
+        // A plain opening is a bracket, and the one that asks for write access
+        // is the arm above this list.
         | Statement::StartTransaction { .. }
         | Statement::Commit { .. }
         | Statement::Rollback { .. }
         // Savepoints touch no data, and `ROLLBACK TO` above is already a read.
         | Statement::Savepoint { .. }
-        | Statement::ReleaseSavepoint { .. } => Verdict::READ,
+        | Statement::ReleaseSavepoint { .. } => Reading::READ,
 
         // COPY TO reads a table out to a file; COPY FROM loads rows in. Either
         // direction against a `PROGRAM` or a file runs on the *server*: a shell
@@ -5831,14 +6236,15 @@ fn variant_verdict(statement: &Statement) -> Verdict {
             CopyTarget::File { .. } | CopyTarget::Program { .. } => Verdict::FULL,
             _ if *to => Verdict::READ,
             _ => Verdict::WRITE,
-        },
+        }
+        .into(),
 
         // Replacing an object that holds data drops that data first: `CREATE OR
         // REPLACE SCHEMA s` empties every table in `s`, and `INSERT OVERWRITE`
         // truncates before it inserts. A replaced view, function or procedure
         // holds no rows, so those stay with the object they create.
         Statement::CreateTable(create) if create.or_replace => {
-            Verdict::destroys(Destructive::Drop)
+            Verdict::destroys(Destructive::Drop).into()
         }
         Statement::CreateSchema {
             or_replace: true, ..
@@ -5849,15 +6255,15 @@ fn variant_verdict(statement: &Statement) -> Verdict {
         // An internal stage holds the files put into it.
         | Statement::CreateStage {
             or_replace: true, ..
-        } => Verdict::destroys(Destructive::Drop),
+        } => Verdict::destroys(Destructive::Drop).into(),
         // `INSERT INTO FUNCTION url(…)`, `s3(…)`, `file(…)`, `remote(…)` and
         // the rest write outside the database, as a `COPY … TO` file does.
         // Only ClickHouse's dialect parses one.
         Statement::Insert(insert) if matches!(insert.table, TableObject::TableFunction(_)) => {
-            Verdict::FULL
+            Verdict::FULL.into()
         }
         Statement::Insert(insert) if insert.overwrite => {
-            Verdict::destroys(Destructive::Truncate)
+            Verdict::destroys(Destructive::Truncate).into()
         }
 
         Statement::Insert { .. }
@@ -5868,33 +6274,195 @@ fn variant_verdict(statement: &Statement) -> Verdict {
         | Statement::CreateSchema { .. }
         | Statement::Comment { .. }
         | Statement::Analyze { .. }
-        | Statement::Vacuum { .. } => Verdict::WRITE,
+        | Statement::Vacuum { .. } => Verdict::WRITE.into(),
 
-        Statement::Delete(delete) => {
-            if delete.selection.is_some() {
+        // Every `DELETE` is flagged, filtered or not: the agent is refused all
+        // of them, and the flag is read off the statement the walk reached,
+        // wherever it sits.
+        Statement::Delete(delete) => Reading {
+            verdict: if delete.selection.is_some() {
                 Verdict::WRITE
             } else {
                 Verdict::destroys(Destructive::UnfilteredDelete)
-            }
-        }
+            },
+            removes: true,
+            alters: false,
+        },
 
-        Statement::Drop { .. } => Verdict::destroys(Destructive::Drop),
-        Statement::Truncate { .. } => Verdict::destroys(Destructive::Truncate),
+        Statement::Drop { .. } => Verdict::destroys(Destructive::Drop).into(),
+        Statement::Truncate { .. } => Verdict::destroys(Destructive::Truncate).into(),
 
         // One ALTER can carry several operations, so the verdict is the maximum
         // over them and not the first.
-        Statement::AlterTable(alter) => alter
-            .operations
-            .iter()
-            .map(alter_verdict)
-            .fold(Verdict::WRITE, Verdict::max),
+        Statement::AlterTable(alter) => Reading {
+            verdict: alter
+                .operations
+                .iter()
+                .map(alter_verdict)
+                .fold(Verdict::WRITE, Verdict::max),
+            removes: false,
+            alters: alter
+                .operations
+                .iter()
+                .any(|operation| !matches!(operation, AlterTableOperation::AddColumn { .. })),
+        },
 
         // Everything else needs Full: a statement this function has not been
         // taught about is one nobody has decided is safe. A statement type added
         // by a later crate version lands here silently, so the arm has to be the
         // conservative one -- `Statement` is not `#[non_exhaustive]`, and the
         // build will not break to ask.
-        _ => Verdict::FULL,
+        _ => Verdict::FULL.into(),
+    }
+}
+
+/// Whether a transaction's modes ask for write access. Read on its own, not
+/// through the `session` flag of `SET TRANSACTION`: the parser drops the
+/// `SESSION` keyword from `SET SESSION TRANSACTION READ WRITE`, which is the
+/// spelling that disarms a Read-only hold for the rest of the session.
+fn grants_write(modes: &[TransactionMode]) -> bool {
+    modes.iter().any(|mode| {
+        matches!(
+            mode,
+            TransactionMode::AccessMode(TransactionAccessMode::ReadWrite)
+        )
+    })
+}
+
+/// The client charsets a statement can still be lexed in: the unicode family,
+/// Latin-1, ASCII and binary. A multibyte-trail charset such as `gbk` can have
+/// a trail byte that is a backslash, which moves a quote under a reader that
+/// still assumes `SqlSpec::backslash_escapes`, the same way the strictness mode
+/// does, so any other charset is stopped.
+const SINGLE_BYTE_CHARSETS: &[&str] = &["utf8", "utf8mb3", "utf8mb4", "latin1", "ascii", "binary"];
+
+/// What a user's own `SET` may do on a Read-only profile.
+///
+/// Decided by what the parser says the statement is, not by a name, wherever a
+/// name does not have to decide it. A role or authorization change changes who
+/// the session is, and a transaction mode list granting write access defeats
+/// the server's hold. A setting is a read only when `spec.plain_settings` names
+/// it: the hold's whole value is being hard to remove, so a name nobody listed
+/// is stopped rather than assumed harmless. Every assignment of a multi-part
+/// `SET` has to pass, so the verdict does not depend on their order.
+fn set_verdict(spec: &SqlSpec, set: &Set) -> Verdict {
+    if set_lifts_hold(set) {
+        return Verdict::WRITE;
+    }
+    match set {
+        Set::SetRole { .. } | Set::SetSessionAuthorization(_) => Verdict::WRITE,
+        Set::SetTransaction { modes, .. } if grants_write(modes) => Verdict::WRITE,
+        Set::SetTransaction { .. } | Set::SetTimeZone { .. } => Verdict::READ,
+        Set::SingleAssignment {
+            scope,
+            variable,
+            values,
+            ..
+        } => {
+            // T-SQL has no list of assignments, so the parser reads `SET @x = 1,
+            // @@session.transaction_read_only = 0` as one variable with two
+            // values, the second a comparison. A variable followed by more than
+            // one value is not read past: the carve-out below covers a plain
+            // assignment, not whatever was folded into it.
+            setting_verdict(spec, *scope, variable, values.len() == 1)
+        }
+        Set::ParenthesizedAssignments { variables, .. } => settings_verdict(
+            variables
+                .iter()
+                .map(|name| setting_verdict(spec, None, name, true)),
+        ),
+        Set::MultipleAssignments { assignments } => settings_verdict(
+            assignments
+                .iter()
+                .map(|assignment| setting_verdict(spec, assignment.scope, &assignment.name, true)),
+        ),
+        Set::SetSessionParam(SetSessionParamKind::Generic(param)) => settings_verdict(
+            param
+                .names
+                .iter()
+                .map(|name| plain_setting_verdict(spec, &[name.as_str()], true)),
+        ),
+        Set::SetSessionParam(SetSessionParamKind::Statistics(_)) => Verdict::READ,
+        Set::SetNames { charset_name, .. }
+            if SINGLE_BYTE_CHARSETS.contains(&charset_name.value.to_ascii_lowercase().as_str()) =>
+        {
+            Verdict::READ
+        }
+        // Everything else the parser still accepts names no setting to look up,
+        // so nothing can have vouched for it.
+        _ => Verdict::WRITE,
+    }
+}
+
+/// The maximum over a `SET`'s assignments, and stopped when it has none.
+fn settings_verdict(verdicts: impl Iterator<Item = Verdict>) -> Verdict {
+    verdicts
+        .fold(None, |most: Option<Verdict>, verdict| {
+            Some(match most {
+                Some(most) => most.max(verdict),
+                None => verdict,
+            })
+        })
+        .unwrap_or(Verdict::WRITE)
+}
+
+/// One assigned name: a user variable is session scratch space and cannot
+/// disarm a hold, so it stays a read; a server-wide scope never does, whatever
+/// the name. `variable_ok` is whether a user variable may be read as one.
+fn setting_verdict(
+    spec: &SqlSpec,
+    scope: Option<ContextModifier>,
+    name: &ObjectName,
+    variable_ok: bool,
+) -> Verdict {
+    if scope == Some(ContextModifier::Global) {
+        return Verdict::WRITE;
+    }
+    let parts: Option<Vec<&str>> = name
+        .0
+        .iter()
+        .map(|part| match part {
+            ObjectNamePart::Identifier(ident) => Some(ident.value.as_str()),
+            // A name computed by a function is not a name anyone listed.
+            ObjectNamePart::Function(_) => None,
+        })
+        .collect();
+    match parts {
+        Some(parts) => plain_setting_verdict(spec, &parts, variable_ok),
+        None => Verdict::WRITE,
+    }
+}
+
+/// The name's parts as written: `["@@session", "time_zone"]`, `["TIMEZONE"]`.
+fn plain_setting_verdict(spec: &SqlSpec, parts: &[&str], variable_ok: bool) -> Verdict {
+    // One leading `@` is a user variable. Two is a system variable, which is
+    // exactly what this rule exists to look at.
+    if variable_ok
+        && let [only] = parts
+        && only.starts_with('@')
+        && !only.starts_with("@@")
+    {
+        return Verdict::READ;
+    }
+    let (scope, name) = match parts {
+        [name] => (None, *name),
+        [scope, name] => (Some(*scope), *name),
+        // A qualified name that is not a scope prefix names a setting an
+        // extension defined, which no list here can have vouched for.
+        _ => return Verdict::WRITE,
+    };
+    let scope = scope.map(|scope| scope.trim_start_matches("@@").to_ascii_lowercase());
+    // The scope keywords that make a setting server-wide or persistent, and
+    // the two that leave it session-local. Any other first part is not a scope.
+    match scope.as_deref() {
+        None | Some("session" | "local") => {}
+        Some(_) => return Verdict::WRITE,
+    }
+    let name = name.trim_start_matches("@@").to_ascii_lowercase();
+    if spec.plain_settings.contains(&name.as_str()) {
+        Verdict::READ
+    } else {
+        Verdict::WRITE
     }
 }
 
@@ -5924,30 +6492,30 @@ fn analyze_option_is_on(option: &UtilityOption) -> bool {
 /// A CTE body can be a `DELETE`. `WITH x AS (DELETE FROM t RETURNING *) SELECT *
 /// FROM x` parses as `Statement::Query`, so reading only the top-level variant
 /// calls a statement that empties a table a read.
-fn query_verdict(query: &Query) -> Verdict {
-    let mut verdict = set_expr_verdict(&query.body);
+fn query_verdict(spec: &SqlSpec, query: &Query) -> Reading {
+    let mut reading = set_expr_verdict(spec, &query.body);
     if let Some(with) = &query.with {
         for cte in &with.cte_tables {
-            verdict = verdict.max(query_verdict(&cte.query));
+            reading = reading.max(query_verdict(spec, &cte.query));
         }
     }
-    verdict
+    reading
 }
 
-fn set_expr_verdict(body: &SetExpr) -> Verdict {
+fn set_expr_verdict(spec: &SqlSpec, body: &SetExpr) -> Reading {
     match body {
         // `SELECT * INTO newt FROM t` is DDL wearing a select's clothes: same
         // variant as a read, one field apart, and it creates a table.
-        SetExpr::Select(select) if select.into.is_some() => Verdict::WRITE,
-        SetExpr::Select(_) | SetExpr::Values(_) | SetExpr::Table(_) => Verdict::READ,
-        SetExpr::Query(query) => query_verdict(query),
+        SetExpr::Select(select) if select.into.is_some() => Verdict::WRITE.into(),
+        SetExpr::Select(_) | SetExpr::Values(_) | SetExpr::Table(_) => Reading::READ,
+        SetExpr::Query(query) => query_verdict(spec, query),
         SetExpr::SetOperation { left, right, .. } => {
-            set_expr_verdict(left).max(set_expr_verdict(right))
+            set_expr_verdict(spec, left).max(set_expr_verdict(spec, right))
         }
         SetExpr::Insert(statement)
         | SetExpr::Update(statement)
         | SetExpr::Delete(statement)
-        | SetExpr::Merge(statement) => statement_verdict(statement),
+        | SetExpr::Merge(statement) => statement_verdict(spec, statement),
     }
 }
 
@@ -5956,9 +6524,9 @@ fn set_expr_verdict(body: &SetExpr) -> Verdict {
 /// write anything a Postgres or Snowflake function can, so everything but
 /// operators over names, values and subqueries keeps that verdict. A subquery
 /// is read like any other query.
-fn condition_verdict(condition: &Expr) -> Verdict {
+fn condition_verdict(spec: &SqlSpec, condition: &Expr) -> Reading {
     match condition {
-        Expr::Identifier(_) | Expr::CompoundIdentifier(_) | Expr::Value(_) => Verdict::READ,
+        Expr::Identifier(_) | Expr::CompoundIdentifier(_) | Expr::Value(_) => Reading::READ,
         Expr::IsNull(expr)
         | Expr::IsNotNull(expr)
         | Expr::IsTrue(expr)
@@ -5968,7 +6536,7 @@ fn condition_verdict(condition: &Expr) -> Verdict {
         | Expr::IsUnknown(expr)
         | Expr::IsNotUnknown(expr)
         | Expr::Nested(expr)
-        | Expr::UnaryOp { expr, .. } => condition_verdict(expr),
+        | Expr::UnaryOp { expr, .. } => condition_verdict(spec, expr),
         Expr::BinaryOp { left, right, .. }
         | Expr::Like {
             expr: left,
@@ -5981,21 +6549,21 @@ fn condition_verdict(condition: &Expr) -> Verdict {
             pattern: right,
             escape_char: None,
             ..
-        } => condition_verdict(left).max(condition_verdict(right)),
+        } => condition_verdict(spec, left).max(condition_verdict(spec, right)),
         Expr::Between {
             expr, low, high, ..
-        } => condition_verdict(expr)
-            .max(condition_verdict(low))
-            .max(condition_verdict(high)),
+        } => condition_verdict(spec, expr)
+            .max(condition_verdict(spec, low))
+            .max(condition_verdict(spec, high)),
         Expr::InList { expr, list, .. } => list
             .iter()
-            .map(condition_verdict)
-            .fold(condition_verdict(expr), Verdict::max),
-        Expr::Exists { subquery, .. } | Expr::Subquery(subquery) => query_verdict(subquery),
+            .map(|item| condition_verdict(spec, item))
+            .fold(condition_verdict(spec, expr), Reading::max),
+        Expr::Exists { subquery, .. } | Expr::Subquery(subquery) => query_verdict(spec, subquery),
         Expr::InSubquery { expr, subquery, .. } => {
-            condition_verdict(expr).max(query_verdict(subquery))
+            condition_verdict(spec, expr).max(query_verdict(spec, subquery))
         }
-        _ => Verdict::FULL,
+        _ => Verdict::FULL.into(),
     }
 }
 
@@ -6779,6 +7347,31 @@ mod tests {
             }
         }
         assert_eq!(Engine::Snowflake.begins_transaction(), None);
+    }
+
+    #[test]
+    fn every_engine_that_opens_a_transaction_spells_one_the_gate_reads() {
+        use crate::db::Engine;
+
+        for engine in Engine::ALL {
+            let Some(begin) = engine.begins_transaction() else {
+                continue;
+            };
+            // The buffer gets this text and the user may run it again, so it
+            // has to read back as a bracket rather than as a statement the
+            // gate cannot place.
+            assert!(is_transaction_bracket(begin), "{engine:?}: {begin}");
+            assert!(
+                is_transaction_bracket(&format!("{begin};")),
+                "{engine:?}: {begin};"
+            );
+            // Transaction control runs in every mode: asking for Read-write
+            // to end a transaction would teach people to live in Full.
+            assert_eq!(classify(engine, begin).mode, Mode::ReadOnly, "{engine:?}");
+            for verb in ["COMMIT", "ROLLBACK"] {
+                assert_eq!(classify(engine, verb).mode, Mode::ReadOnly, "{engine:?}");
+            }
+        }
     }
 
     #[test]
@@ -11046,18 +11639,47 @@ mod tests {
 
     #[test]
     fn mysql_dialect_reads_as_unreadable_a_comment_mariadb_runs() {
-        for engine in [Engine::MariaDb, Engine::MySql] {
-            for sql in [
-                "SELECT 1 /*M! ; DELETE FROM t */",
-                "SELECT 1 /*M!100100 INTO OUTFILE '/tmp/x' */",
-                "DELETE FROM t /*M! WHERE 1 = 0 */",
-            ] {
-                assert_eq!(
-                    classify(engine, sql),
-                    unreadable_at(Mode::ReadOnly),
-                    "{engine:?} {sql:?}"
-                );
+        // MySQL ignores the comment, but the server behind the profile may be
+        // a MariaDB that runs it: read both ways, and unreadable.
+        assert_eq!(
+            classify(
+                Engine::MySql,
+                "SELECT 1 /*M!100100 INTO OUTFILE '/tmp/x' */"
+            ),
+            unreadable_at(Mode::ReadOnly)
+        );
+        // What MySQL runs is the unfiltered delete, what MariaDB runs the
+        // filtered one; the delete is named either way.
+        for sql in [
+            "DELETE FROM t /*M! WHERE 1 = 0 */",
+            "DELETE FROM t /*M!100100 WHERE */",
+            "SELECT 1 /*M! ; DELETE FROM t */",
+        ] {
+            let verdict = classify(Engine::MySql, sql);
+            assert_eq!(verdict.mode, Mode::Full, "{sql:?}");
+            for kind in [Destructive::UnfilteredDelete, Destructive::Unreadable] {
+                assert!(verdict.destructive.contains(&kind), "{sql:?}: {verdict:?}");
             }
+            assert_eq!(verdict.destructive.len(), 2, "{sql:?}: {verdict:?}");
+        }
+        // MariaDB runs what the comment holds, so it is read with it.
+        assert_eq!(
+            classify(Engine::MariaDb, "SELECT 1 /*M! ; DELETE FROM t */"),
+            Verdict::destroys(Destructive::UnfilteredDelete)
+        );
+        // sqlparser cannot read `INTO OUTFILE`, with or without the comment.
+        assert_eq!(
+            classify(
+                Engine::MariaDb,
+                "SELECT 1 /*M!100100 INTO OUTFILE '/tmp/x' */"
+            ),
+            unreadable_at(Mode::ReadOnly)
+        );
+        assert_eq!(
+            classify(Engine::MariaDb, "DELETE FROM t /*M! WHERE 1 = 0 */"),
+            Verdict::WRITE
+        );
+        for engine in [Engine::MariaDb, Engine::MySql] {
             assert_eq!(classify(engine, "SELECT 1 /* M! */"), Verdict::READ);
         }
     }
@@ -11209,9 +11831,6 @@ mod tests {
 
         for engine in [Engine::Postgres, Engine::MySql, Engine::MariaDb] {
             for sql in [
-                "SET search_path = x",
-                "SET default_transaction_read_only = on",
-                "SET transaction_read_only = 1",
                 "BEGIN",
                 "START TRANSACTION READ ONLY",
                 "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE",
@@ -11219,14 +11838,41 @@ mod tests {
             ] {
                 assert_eq!(classify(engine, sql), Verdict::READ, "{engine:?} {sql}");
             }
+            // Setting a read-only setting on is not a lift, but a setting the
+            // engine's `plain_settings` does not list is a write whatever it
+            // is set to ([`set_verdict`]), which is stricter.
+            for sql in [
+                "SET default_transaction_read_only = on",
+                "SET transaction_read_only = 1",
+            ] {
+                assert_eq!(classify(engine, sql), Verdict::WRITE, "{engine:?} {sql}");
+            }
+        }
+        assert_eq!(
+            classify(Engine::Postgres, "SET search_path = x"),
+            Verdict::READ
+        );
+        for engine in [Engine::MySql, Engine::MariaDb] {
+            assert_eq!(
+                classify(engine, "SET search_path = x"),
+                Verdict::WRITE,
+                "{engine:?}: not a setting this engine lists as plain"
+            );
         }
         for sql in [
             "BEGIN READ ONLY",
             "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY",
-            "SELECT set_config('search_path', 'x', false)",
         ] {
             assert_eq!(classify(Engine::Postgres, sql), Verdict::READ, "{sql}");
         }
+        // Postgres's deny-list names `set_config` whatever it sets.
+        assert_eq!(
+            classify(
+                Engine::Postgres,
+                "SELECT set_config('search_path', 'x', false)"
+            ),
+            Verdict::WRITE
+        );
     }
 
     /// Advancing a sequence writes, and no engine's read-only hold stops it
@@ -11273,15 +11919,21 @@ mod tests {
             }
         }
         for (engine, sql) in [
-            (Engine::Postgres, "SELECT t.nextval FROM t"),
-            (Engine::Postgres, "SELECT t.\"nextval\" FROM t"),
             (Engine::MySql, "SELECT t.nextval FROM t"),
             (Engine::SqlServer, "SELECT t.nextval FROM t"),
-            (Engine::DuckDb, "SELECT t.nextval FROM t"),
             (Engine::Generic, "SELECT t.\"NEXTVAL\" FROM t"),
-            (Engine::Snowflake, "SELECT t.\"NEXTVAL\" FROM t"),
         ] {
             assert_eq!(classify(engine, sql), Verdict::READ, "{engine:?} {sql}");
+        }
+        // Where the deny-list names `nextval`, its member form after a period
+        // is read as the advance, quoted or not ([`MEMBER_FORMS`]): stricter.
+        for (engine, sql) in [
+            (Engine::Postgres, "SELECT t.nextval FROM t"),
+            (Engine::Postgres, "SELECT t.\"nextval\" FROM t"),
+            (Engine::DuckDb, "SELECT t.nextval FROM t"),
+            (Engine::Snowflake, "SELECT t.\"NEXTVAL\" FROM t"),
+        ] {
+            assert_eq!(classify(engine, sql), Verdict::WRITE, "{engine:?} {sql}");
         }
         for engine in [Engine::Postgres, Engine::Generic] {
             assert_eq!(
@@ -11463,7 +12115,6 @@ mod tests {
             "DESC t",
             "USE analytics",
             "SET max_threads = 1",
-            "SET readonly = 0",
             "SELECT number FROM system.numbers",
             "SELECT * FROM url('http://example.test/x.csv', CSV)",
         ] {
@@ -11484,6 +12135,10 @@ mod tests {
             assert_eq!(verdict, unreadable_at(Mode::ReadOnly), "{sql}");
             assert_eq!(gate(&verdict, Mode::ReadOnly, &[]), Some(Stop::RunOnce));
         }
+        // Phase 1's `SET` rule: a setting not on `plain_settings` is stopped
+        // in Read-only, though the server's `readonly=2` would refuse this one
+        // on its own, because the verdict does not lean on the hold.
+        assert_eq!(classify(ch, "SET readonly = 0"), Verdict::WRITE);
         assert_eq!(
             classify(ch, "CREATE TEMPORARY TABLE t (a Int32) ENGINE = Memory"),
             Verdict::WRITE
@@ -11757,7 +12412,9 @@ mod tests {
             Verdict::READ
         );
         // `SET DEFAULT ROLE` stores a user's roles; the other `SET`s change
-        // the session, and the server's `readonly=2` refuses any `readonly`.
+        // the session. Phase 1's `SET` rule rates a role change, and a setting
+        // not on `plain_settings`, above Read-only whatever the server's
+        // `readonly=2` would refuse; `max_threads` is listed and stays a read.
         for sql in [
             "SET DEFAULT ROLE NONE TO CURRENT_USER",
             "SET DEFAULT ROLE r TO u",
@@ -11766,9 +12423,10 @@ mod tests {
         ] {
             assert_eq!(classify(ch, sql).mode, Mode::Full, "{sql}");
         }
-        for sql in ["SET readonly = 0", "SET max_threads = 1", "SET ROLE r"] {
-            assert_eq!(classify(ch, sql).mode, Mode::ReadOnly, "{sql}");
+        for sql in ["SET readonly = 0", "SET ROLE r"] {
+            assert_eq!(classify(ch, sql).mode, Mode::ReadWrite, "{sql}");
         }
+        assert_eq!(classify(ch, "SET max_threads = 1").mode, Mode::ReadOnly);
         assert_eq!(
             classify(ch, "CREATE TABLE t2 ENGINE = File(CSV) AS SELECT 1"),
             Verdict::FULL
@@ -13066,5 +13724,1544 @@ mod tests {
         let counted = startup_statements(Engine::SqlServer, Mode::Full, &[], "SELECT 1;\nGO 2")
             .expect_err("a counted GO repeats its batch");
         assert!(counted.starts_with("The startup script"), "{counted}");
+    }
+
+    #[test]
+    fn a_function_the_engine_lists_stops_being_a_read() {
+        use crate::db::Engine;
+
+        let sql = "SELECT set_config('default_transaction_read_only', 'off', false)";
+        assert!(classify(Engine::Postgres, sql).mode > Mode::ReadOnly);
+        assert_eq!(
+            gate(&classify(Engine::Postgres, sql), Mode::ReadOnly, &[]),
+            Some(Stop::Upgrade(Mode::ReadWrite))
+        );
+        assert_eq!(
+            gate(&classify(Engine::Postgres, sql), Mode::ReadWrite, &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn a_function_stays_a_read_on_an_engine_that_does_not_list_it() {
+        use crate::db::{Engine, Syntax};
+
+        // Generic is left out: only a call to a function on its built-in list
+        // (`src/db/functions/generic.txt`) is a read there, so any call it
+        // does not know is a write.
+        for engine in Engine::ALL.into_iter().filter(|engine| {
+            engine.syntax() == Syntax::Sql
+                && *engine != Engine::Postgres
+                && *engine != Engine::Generic
+        }) {
+            assert_eq!(
+                classify(engine, "SELECT pg_stat_reset()").mode,
+                Mode::ReadOnly,
+                "{engine:?}"
+            );
+            // A `set_config` that may lift the read-only hold is a write on
+            // every engine ([`calls_verdict`]), whether or not it lists it.
+            let lift = "SELECT set_config('default_transaction_read_only', 'off', false)";
+            assert!(classify(engine, lift).mode >= Mode::ReadWrite, "{engine:?}");
+        }
+    }
+
+    #[test]
+    fn a_listed_call_is_found_wherever_the_parser_can_put_one() {
+        use crate::db::Engine;
+
+        for sql in [
+            "SELECT nextval('s')",
+            "SELECT * FROM nextval('s')",
+            "SELECT * FROM t, LATERAL nextval('s') x",
+            "SELECT * FROM t WHERE id = (SELECT nextval('s'))",
+            "WITH n AS (SELECT nextval('s') AS v) SELECT v FROM n",
+            "SELECT nextval /* c */ ('s')",
+        ] {
+            assert!(
+                classify(Engine::Postgres, sql).mode > Mode::ReadOnly,
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_schema_qualified_listed_call_reads_like_the_bare_one() {
+        use crate::db::Engine;
+
+        let bare = classify(Engine::Postgres, "SELECT set_config('a', 'b', false)");
+        let qualified = classify(
+            Engine::Postgres,
+            "SELECT pg_catalog.set_config('a', 'b', false)",
+        );
+        assert!(bare.mode > Mode::ReadOnly);
+        assert_eq!(bare.mode, qualified.mode);
+    }
+
+    #[test]
+    fn a_listed_name_inside_a_literal_or_a_comment_is_not_a_call() {
+        use crate::db::Engine;
+
+        for sql in [
+            "SELECT 'set_config(1)'",
+            "SELECT 1 -- set_config('a', 'b', false)",
+            "SELECT 1 /* nextval('s') */",
+            "SELECT set_config FROM t",
+        ] {
+            assert_eq!(
+                classify(Engine::Postgres, sql).mode,
+                Mode::ReadOnly,
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_function_nobody_listed_stays_a_read_on_every_engine() {
+        use crate::db::{Engine, Syntax};
+
+        for engine in Engine::ALL
+            .into_iter()
+            .filter(|engine| engine.syntax() == Syntax::Sql)
+        {
+            for sql in ["SELECT my_function(1)", "SELECT * FROM my_function(1)"] {
+                // Generic SQL reads only a call to a function on its built-in
+                // list (`src/db/functions/generic.txt`) as a read: nothing on
+                // that server holds a function of the user's to reads.
+                let expected = match engine {
+                    Engine::Generic => Mode::ReadWrite,
+                    _ => Mode::ReadOnly,
+                };
+                assert_eq!(classify(engine, sql).mode, expected, "{engine:?}: {sql}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_listed_function_stops_being_a_read_on_the_engine_that_lists_it() {
+        use crate::db::Engine;
+
+        for engine in Engine::ALL {
+            for name in engine.spec().sql.denied_functions {
+                let sql = format!("SELECT {name}()");
+                assert!(
+                    classify(engine, &sql).mode > Mode::ReadOnly,
+                    "{engine:?}: {sql}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn two_listed_calls_classify_the_same_whichever_comes_first() {
+        use crate::db::Engine;
+
+        let one = classify(
+            Engine::Postgres,
+            "SELECT nextval('s'), set_config('a', 'b', false)",
+        );
+        let other = classify(
+            Engine::Postgres,
+            "SELECT set_config('a', 'b', false), nextval('s')",
+        );
+        assert!(one.mode > Mode::ReadOnly);
+        assert_eq!(one.mode, other.mode);
+        assert_eq!(one.destructive, other.destructive);
+    }
+
+    #[test]
+    fn a_lock_call_needs_more_than_read_only_on_both_mysql_engines() {
+        use crate::db::Engine;
+
+        for engine in [Engine::MySql, Engine::MariaDb] {
+            for sql in [
+                "SELECT get_lock('k', 1)",
+                "SELECT release_lock('k')",
+                "SELECT release_all_locks()",
+            ] {
+                assert!(
+                    classify(engine, sql).mode > Mode::ReadOnly,
+                    "{engine:?}: {sql}"
+                );
+            }
+            for sql in ["SELECT lastval()", "SELECT last_insert_id()"] {
+                assert_eq!(
+                    classify(engine, sql).mode,
+                    Mode::ReadOnly,
+                    "{engine:?}: {sql}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_sequence_advance_needs_more_than_read_only_only_where_sequences_exist() {
+        use crate::db::Engine;
+
+        for engine in [Engine::MariaDb, Engine::DuckDb] {
+            for sql in ["SELECT nextval('s')", "SELECT setval('s', 1)"] {
+                assert!(
+                    classify(engine, sql).mode > Mode::ReadOnly,
+                    "{engine:?}: {sql}"
+                );
+            }
+        }
+        // MySQL has no sequences, but a call spelled as an advance is a write
+        // on every engine ([`calls_verdict`]): the stricter of the two rules.
+        assert_eq!(
+            classify(Engine::MySql, "SELECT nextval('s')").mode,
+            Mode::ReadWrite
+        );
+    }
+
+    #[test]
+    fn a_pass_through_table_function_needs_more_than_read_only_on_sql_server() {
+        use crate::db::Engine;
+
+        for sql in [
+            "SELECT * FROM OPENQUERY(srv, 'SELECT 1')",
+            "SELECT * FROM OPENROWSET('SQLNCLI', 'x', 'DELETE FROM t')",
+            "SELECT * FROM OPENDATASOURCE('SQLNCLI', 'x')",
+        ] {
+            assert!(
+                classify(Engine::SqlServer, sql).mode > Mode::ReadOnly,
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_session_control_call_and_a_bare_sequence_read_need_more_than_read_only_on_snowflake() {
+        use crate::db::Engine;
+
+        for sql in [
+            "SELECT system$cancel_all_queries(1)",
+            "SELECT system$cancel_query('q')",
+            "SELECT system$abort_session(1)",
+            "SELECT * FROM TABLE(GETNEXTVAL(seq1))",
+            "SELECT s.nextval",
+            "SELECT db.s.nextval FROM t",
+        ] {
+            assert!(
+                classify(Engine::Snowflake, sql).mode > Mode::ReadOnly,
+                "{sql}"
+            );
+        }
+        for sql in ["SELECT t.id FROM t", "SELECT t.nextvalue FROM t"] {
+            assert_eq!(
+                classify(Engine::Snowflake, sql).mode,
+                Mode::ReadOnly,
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_extension_loader_needs_more_than_read_only_on_both_sqlite_engines() {
+        use crate::db::Engine;
+
+        for engine in [Engine::Sqlite, Engine::Turso] {
+            assert!(
+                classify(engine, "SELECT load_extension('x')").mode > Mode::ReadOnly,
+                "{engine:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_or_url_reader_stays_a_read_on_every_engine() {
+        use crate::db::{Engine, Syntax};
+
+        for engine in Engine::ALL
+            .into_iter()
+            .filter(|engine| engine.syntax() == Syntax::Sql)
+        {
+            for name in ["read_csv", "read_text", "pg_read_file", "load_file", "glob"] {
+                assert!(
+                    !engine.spec().sql.denied_functions.contains(&name),
+                    "{engine:?}: {name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_engine_not_read_as_sql_lists_no_function() {
+        use crate::db::{Engine, Syntax};
+
+        for engine in Engine::ALL
+            .into_iter()
+            .filter(|engine| engine.syntax() != Syntax::Sql)
+        {
+            assert!(engine.spec().sql.denied_functions.is_empty(), "{engine:?}");
+        }
+    }
+
+    #[test]
+    fn a_name_another_engine_lists_does_not_raise_this_engines_verdict() {
+        use crate::db::{Engine, Syntax};
+
+        let sql_engines = || {
+            Engine::ALL
+                .into_iter()
+                .filter(|engine| engine.syntax() == Syntax::Sql)
+        };
+        for lister in sql_engines() {
+            for name in lister.spec().sql.denied_functions {
+                for engine in sql_engines() {
+                    // Generic reads any call it does not know as a write.
+                    if engine.spec().sql.denied_functions.contains(name)
+                        || engine == Engine::Generic
+                    {
+                        continue;
+                    }
+                    let sql = format!("SELECT {name}()");
+                    // A sequence advance, a `set_config` and a call no hold
+                    // stops are read on every engine ([`calls_verdict`]).
+                    let everywhere = dialect(engine).is_some_and(|dialect| {
+                        calls_verdict(engine, dialect.as_ref(), &sql) != Verdict::READ
+                    });
+                    if everywhere {
+                        assert!(classify(engine, &sql).mode >= Mode::ReadWrite);
+                        continue;
+                    }
+                    let verdict = classify(engine, &sql);
+                    // A dialect that cannot read the name at all is refused
+                    // for that, which is not what is under test.
+                    if verdict.destructive.is_empty() {
+                        assert_eq!(verdict.mode, Mode::ReadOnly, "{engine:?}: {name}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_name_spelled_as_a_unicode_escape_is_read_as_a_denied_call() {
+        use crate::db::Engine;
+
+        for sql in [
+            // The verifier's own repro: the server decodes `\006f` to an `o`.
+            r#"SELECT U&"set_c\006fnfig"('default_transaction_read_only', 'off', false)"#,
+            // The same form spelling the name plainly stops on the name alone.
+            r#"SELECT U&"set_config"('default_transaction_read_only', 'off', false)"#,
+            r#"SELECT pg_catalog.U&"set_c\006fnfig"('a', 'b', false)"#,
+            // The lower-case prefix is the same escape to the server.
+            r#"SELECT u&"set_c\006fnfig"('a', 'b', false)"#,
+        ] {
+            assert!(is_stopped(Engine::Postgres, sql), "{sql}");
+        }
+    }
+
+    #[test]
+    fn a_large_object_writer_is_stopped_and_a_large_object_reader_is_not() {
+        use crate::db::Engine;
+
+        for sql in [
+            "SELECT lo_from_bytea(1, 'abc'::bytea)",
+            "SELECT lo_put(1, 0, 'abc'::bytea)",
+            "SELECT lo_creat(-1)",
+            "SELECT lowrite(0, 'abc'::bytea)",
+            "SELECT lo_truncate(0, 1)",
+            "SELECT lo_truncate64(0, 1)",
+        ] {
+            assert!(is_stopped(Engine::Postgres, sql), "{sql}");
+        }
+        for sql in ["SELECT lo_get(1)", "SELECT loread(0, 10)"] {
+            // Generic reads only a known side-effect-free built-in as a read.
+            for engine in sql_engines().filter(|engine| *engine != Engine::Generic) {
+                assert!(is_plain_read(engine, sql), "{engine:?}: {sql}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_stat_reset_call_is_stopped_on_postgres() {
+        use crate::db::Engine;
+
+        for sql in [
+            "SELECT pg_stat_reset()",
+            "SELECT pg_stat_reset_shared('bgwriter')",
+            "SELECT pg_stat_reset_single_table_counters(1)",
+            "SELECT pg_stat_reset_single_function_counters(1)",
+            "SELECT pg_stat_reset_slru('CommitTs')",
+            "SELECT pg_stat_reset_replication_slot('s')",
+        ] {
+            assert!(is_stopped(Engine::Postgres, sql), "{sql}");
+        }
+    }
+
+    #[test]
+    fn a_spaced_bit_and_of_a_quoted_column_is_still_a_read() {
+        for engine in sql_engines() {
+            for sql in [
+                r#"SELECT U & "x" FROM t"#,
+                "SELECT U\n&\t\"x\" FROM t",
+                r#"SELECT U/**/&"x" FROM t"#,
+                "SELECT U&x FROM t",
+            ] {
+                assert!(is_plain_read(engine, sql), "{engine:?}: {sql}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_engine_that_lists_no_function_never_reads_the_escaped_spelling_as_a_call() {
+        use crate::db::Engine;
+
+        let sql = r#"SELECT U&"set_c\006fnfig"('a', 'b', false)"#;
+        let listing_nothing: Vec<_> = Engine::ALL
+            .into_iter()
+            .filter(|engine| engine.spec().sql.denied_functions.is_empty())
+            .collect();
+        // Every SQL engine lists something, so the engines asked are the two
+        // whose requests are not SQL. The assertion fails if that changes,
+        // rather than letting the loop below pass over nothing.
+        assert!(!listing_nothing.is_empty());
+        for engine in listing_nothing {
+            assert!(!calls_denied_function(engine, sql), "{engine:?}");
+        }
+    }
+
+    #[test]
+    fn an_empty_or_comment_only_submission_is_unmoved_by_the_escaped_spelling_rule() {
+        for engine in sql_engines() {
+            for sql in ["", "   ", "-- U&\"x\"", "/* U&\"x\" */"] {
+                assert!(is_plain_read(engine, sql), "{engine:?}: {sql:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_escaped_call_and_a_plain_denied_call_classify_the_same_whichever_comes_first() {
+        use crate::db::Engine;
+
+        let one = classify(
+            Engine::Postgres,
+            r#"SELECT U&"set_c\006fnfig"('a', 'b', false), nextval('s')"#,
+        );
+        let other = classify(
+            Engine::Postgres,
+            r#"SELECT nextval('s'), U&"set_c\006fnfig"('a', 'b', false)"#,
+        );
+        assert!(one.mode > Mode::ReadOnly);
+        assert_eq!(one.mode, other.mode);
+        assert_eq!(one.destructive, other.destructive);
+    }
+
+    /// The eight engines whose requests are SQL, which is where a `SET` means
+    /// something to `classify`.
+    fn sql_engines() -> impl Iterator<Item = crate::db::Engine> {
+        use crate::db::Syntax;
+
+        crate::db::Engine::ALL
+            .into_iter()
+            .filter(|engine| engine.syntax() == Syntax::Sql)
+    }
+
+    /// Needs more than Read-only, and for a reason other than the parser
+    /// having refused it: an unreadable statement says nothing about the rule.
+    fn is_stopped(engine: crate::db::Engine, sql: &str) -> bool {
+        let verdict = classify(engine, sql);
+        verdict.mode > Mode::ReadOnly && !verdict.destructive.contains(&Destructive::Unreadable)
+    }
+
+    fn is_plain_read(engine: crate::db::Engine, sql: &str) -> bool {
+        let verdict = classify(engine, sql);
+        verdict.mode == Mode::ReadOnly && verdict.destructive.is_empty()
+    }
+
+    /// What `classify` would say for `sql` on an engine whose spec is `spec`,
+    /// without the engine: the way to give a spec a list no engine carries.
+    fn verdict_under(spec: &crate::db::SqlSpec, sql: &str) -> Verdict {
+        let dialect = parser(spec.parser_dialect);
+        SqlParser::parse_sql(dialect.as_ref(), sql)
+            .expect("the statement parses in this dialect")
+            .iter()
+            .map(|statement| statement_verdict(spec, statement).verdict)
+            .fold(Verdict::READ, Verdict::max)
+    }
+
+    fn with_plain_settings(
+        parser_dialect: ParserDialect,
+        plain_settings: &'static [&'static str],
+    ) -> crate::db::SqlSpec {
+        crate::db::SqlSpec {
+            parser_dialect,
+            plain_settings,
+            ..crate::db::SqlSpec::ANSI
+        }
+    }
+
+    #[test]
+    fn a_role_change_and_an_authorization_change_need_more_than_read_only() {
+        for engine in sql_engines() {
+            for sql in [
+                "SET ROLE other",
+                "SET LOCAL ROLE other",
+                "SET SESSION AUTHORIZATION other",
+            ] {
+                assert!(is_stopped(engine, sql), "{engine:?}: {sql}");
+                assert_eq!(
+                    gate(&classify(engine, sql), Mode::ReadOnly, &[]),
+                    Some(Stop::Upgrade(Mode::ReadWrite)),
+                    "{engine:?}: {sql}"
+                );
+                assert_eq!(
+                    gate(&classify(engine, sql), Mode::ReadWrite, &[]),
+                    None,
+                    "{engine:?}: {sql}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_write_access_mode_needs_more_than_read_only_in_every_spelling() {
+        use crate::db::Engine;
+
+        for engine in sql_engines() {
+            for sql in [
+                "SET TRANSACTION READ WRITE",
+                "SET SESSION TRANSACTION READ WRITE",
+                "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE",
+                "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE, READ WRITE",
+                "START TRANSACTION READ WRITE",
+                "BEGIN TRANSACTION READ WRITE",
+            ] {
+                assert!(is_stopped(engine, sql), "{engine:?}: {sql}");
+            }
+        }
+        // The two dialects whose `BEGIN` opens a scripting block do not read
+        // the bare spelling as a transaction at all.
+        for engine in sql_engines().filter(|e| !matches!(e, Engine::Snowflake | Engine::SqlServer))
+        {
+            assert!(is_stopped(engine, "BEGIN READ WRITE"), "{engine:?}");
+        }
+    }
+
+    #[test]
+    fn a_read_access_mode_and_an_isolation_level_stay_reads() {
+        for engine in sql_engines() {
+            for sql in [
+                "SET TRANSACTION READ ONLY",
+                "SET SESSION TRANSACTION READ ONLY",
+                "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+                "START TRANSACTION READ ONLY",
+            ] {
+                assert!(is_plain_read(engine, sql), "{engine:?}: {sql}");
+            }
+        }
+    }
+
+    #[test]
+    fn transaction_brackets_stay_reads() {
+        for engine in sql_engines() {
+            for sql in [
+                "BEGIN",
+                "START TRANSACTION",
+                "COMMIT",
+                "ROLLBACK",
+                "SAVEPOINT a",
+                "RELEASE SAVEPOINT a",
+                "BEGIN; SELECT 1; COMMIT",
+            ] {
+                assert!(is_plain_read(engine, sql), "{engine:?}: {sql}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_server_wide_scope_needs_more_than_read_only_whatever_the_name() {
+        use crate::db::Engine;
+
+        for engine in sql_engines() {
+            assert!(
+                is_stopped(engine, "SET GLOBAL time_zone = 'UTC'"),
+                "{engine:?}"
+            );
+        }
+        for engine in [Engine::MySql, Engine::MariaDb, Engine::SqlServer] {
+            assert!(
+                is_stopped(engine, "SET @@global.time_zone = 'UTC'"),
+                "{engine:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_server_wide_transaction_scope_is_stopped_whatever_the_parser_dropped() {
+        use crate::db::Engine;
+
+        // The parser reads these as a transaction with no scope, and a
+        // transaction that asks for no write access is a read, so the scope has
+        // to come from the tokens.
+        for engine in [Engine::MySql, Engine::MariaDb] {
+            for sql in [
+                "SET GLOBAL TRANSACTION READ ONLY",
+                "set global transaction read only",
+                "SET GLOBAL TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+                "SET /* scope */ GLOBAL TRANSACTION READ ONLY",
+            ] {
+                assert!(is_stopped(engine, sql), "{engine:?}: {sql}");
+            }
+        }
+        // Wherever a dialect parses the persistent scopes they are raised the
+        // same way; one that cannot is refused for that, as it was.
+        for engine in sql_engines() {
+            for sql in [
+                "SET PERSIST TRANSACTION READ ONLY",
+                "SET PERSIST_ONLY TRANSACTION READ ONLY",
+            ] {
+                let verdict = classify(engine, sql);
+                if !verdict.destructive.contains(&Destructive::Unreadable) {
+                    assert!(verdict.mode > Mode::ReadOnly, "{engine:?}: {sql}");
+                }
+            }
+        }
+        // Per statement, so the order of two does not matter.
+        for engine in sql_engines() {
+            assert_eq!(
+                classify(engine, "SELECT 1; SET GLOBAL TRANSACTION READ ONLY"),
+                classify(engine, "SET GLOBAL TRANSACTION READ ONLY; SELECT 1"),
+                "{engine:?}"
+            );
+        }
+        for engine in [Engine::MySql, Engine::MariaDb] {
+            assert!(
+                is_stopped(engine, "SELECT 1; SET GLOBAL TRANSACTION READ ONLY"),
+                "{engine:?}"
+            );
+        }
+        // The parser also accepts the statement inside a block, where it does
+        // not open the statement.
+        for engine in [Engine::MySql, Engine::MariaDb, Engine::Postgres] {
+            assert!(
+                is_stopped(
+                    engine,
+                    "IF 1 = 1 THEN SET GLOBAL TRANSACTION READ ONLY; END IF"
+                ),
+                "{engine:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_session_scope_and_a_variable_that_begins_with_the_scope_word_stay_reads() {
+        use crate::db::Engine;
+
+        for engine in [Engine::MySql, Engine::MariaDb] {
+            for sql in [
+                "SET SESSION TRANSACTION READ ONLY",
+                "SET TRANSACTION READ ONLY",
+                "SET LOCAL TRANSACTION READ ONLY",
+                "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+                "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+                "SET @global = 1",
+                "SET @globally = 1",
+            ] {
+                assert!(is_plain_read(engine, sql), "{engine:?}: {sql}");
+            }
+            // The two spellings that already named the scope keep their verdict.
+            for sql in [
+                "SET GLOBAL max_execution_time = 1",
+                "SET @@global.time_zone = 'UTC'",
+            ] {
+                assert!(is_stopped(engine, sql), "{engine:?}: {sql}");
+            }
+        }
+        for engine in sql_engines() {
+            for sql in ["BEGIN", "START TRANSACTION", "SELECT 1 AS global"] {
+                assert!(is_plain_read(engine, sql), "{engine:?}: {sql}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_submission_the_tokenizer_cannot_read_is_not_raised_by_the_scope_rule() {
+        for engine in sql_engines() {
+            // Refused by name already; raising it would fold a write into the
+            // unreadable verdict.
+            assert_eq!(
+                classify(engine, "SET GLOBAL TRANSACTION READ ONLY; SELECT 'x"),
+                classify(engine, "SELECT 'x"),
+                "{engine:?}"
+            );
+            for sql in ["", "-- nothing here", "/* nor here */"] {
+                assert!(is_plain_read(engine, sql), "{engine:?}: {sql:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_user_variable_stays_a_read_and_a_doubled_at_session_setting_does_not() {
+        use crate::db::Engine;
+
+        for engine in [Engine::MySql, Engine::MariaDb, Engine::SqlServer] {
+            assert!(is_plain_read(engine, "SET @x = 1"), "{engine:?}");
+            assert!(
+                is_stopped(engine, "SET @@session.transaction_read_only = 0"),
+                "{engine:?}"
+            );
+            assert!(
+                is_stopped(engine, "SET @@transaction_read_only = OFF"),
+                "{engine:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn reordering_the_assignments_of_one_set_does_not_change_its_verdict() {
+        use crate::db::Engine;
+
+        for engine in [Engine::MySql, Engine::MariaDb, Engine::SqlServer] {
+            let hold_last = classify(engine, "SET @x = 1, @@session.transaction_read_only = 0");
+            let hold_first = classify(engine, "SET @@session.transaction_read_only = 0, @x = 1");
+            assert!(
+                is_stopped(engine, "SET @x = 1, @@session.transaction_read_only = 0"),
+                "{engine:?}"
+            );
+            assert_eq!(hold_last, hold_first, "{engine:?}");
+
+            let unknown_last = classify(engine, "SET @x = 1, y = 2");
+            let unknown_first = classify(engine, "SET y = 2, @x = 1");
+            assert!(is_stopped(engine, "SET y = 2, @x = 1"), "{engine:?}");
+            assert_eq!(unknown_last, unknown_first, "{engine:?}");
+        }
+        // T-SQL has no list of assignments, and its parse folds the second one
+        // into the first as a value, so only the MySQL family reads this one.
+        for engine in [Engine::MySql, Engine::MariaDb] {
+            assert!(is_plain_read(engine, "SET @x = 1, @y = 2"), "{engine:?}");
+        }
+    }
+
+    #[test]
+    fn a_setting_on_no_list_needs_more_than_read_only_on_every_engine() {
+        for engine in sql_engines() {
+            assert!(is_stopped(engine, "SET x = 1"), "{engine:?}");
+            assert!(is_stopped(engine, "SET x = 1, y = 2"), "{engine:?}");
+        }
+    }
+
+    #[test]
+    fn a_set_nested_in_a_block_reaches_the_verdict_it_has_alone() {
+        use crate::db::Engine;
+
+        for engine in sql_engines() {
+            // A plain EXPLAIN runs nothing, so only the analysing one carries
+            // the verdict of what it explains.
+            assert!(
+                is_stopped(engine, "EXPLAIN ANALYZE SET ROLE other"),
+                "{engine:?}"
+            );
+            assert!(
+                is_plain_read(engine, "EXPLAIN SET ROLE other"),
+                "{engine:?}"
+            );
+
+            let (conditional, scripting) = match engine {
+                Engine::SqlServer => (
+                    Some("IF 1 = 1 SET ROLE other"),
+                    Some("BEGIN SET ROLE other; END"),
+                ),
+                Engine::Snowflake => (
+                    Some("IF 1 = 1 THEN SET ROLE other; END IF"),
+                    Some("BEGIN SET ROLE other; END"),
+                ),
+                // No conditional block to nest a statement in: the `IF` is the
+                // first word of a statement `sqlparser` cannot read, rated
+                // Read-write and unreadable, so it is no verdict to compare.
+                // Below, it is held above Read-only by that rating instead.
+                Engine::ClickHouse => (None, None),
+                _ => (Some("IF 1 = 1 THEN SET ROLE other; END IF"), None),
+            };
+            for sql in conditional.into_iter().chain(scripting) {
+                assert_eq!(
+                    classify(engine, sql),
+                    classify(engine, "SET ROLE other"),
+                    "{engine:?}: {sql}"
+                );
+                assert!(is_stopped(engine, sql), "{engine:?}: {sql}");
+            }
+        }
+        for engine in sql_engines().filter(|e| {
+            !matches!(
+                e,
+                Engine::Snowflake | Engine::SqlServer | Engine::ClickHouse
+            )
+        }) {
+            assert!(
+                is_stopped(engine, "IF 1 = 1 THEN SET x = 1; END IF"),
+                "{engine:?}"
+            );
+        }
+        assert_eq!(
+            classify(Engine::ClickHouse, "IF 1 = 1 THEN SET x = 1; END IF"),
+            unreadable_at(Mode::ReadWrite)
+        );
+        assert!(is_stopped(
+            Engine::Snowflake,
+            "BEGIN START TRANSACTION READ WRITE; END"
+        ));
+        assert!(is_plain_read(Engine::Snowflake, "BEGIN COMMIT; END"));
+    }
+
+    #[test]
+    fn a_setting_on_the_allow_list_is_found_at_any_nesting_depth() {
+        let postgres = with_plain_settings(ParserDialect::PostgreSql, &["search_path"]);
+        let snowflake = with_plain_settings(ParserDialect::Snowflake, &["search_path"]);
+
+        for sql in [
+            "SET search_path TO other",
+            "IF 1 = 1 THEN SET search_path TO other; END IF",
+            "EXPLAIN ANALYZE SET search_path TO other",
+        ] {
+            assert_eq!(verdict_under(&postgres, sql), Verdict::READ, "{sql}");
+        }
+        assert_eq!(
+            verdict_under(&snowflake, "BEGIN SET search_path TO other; END"),
+            Verdict::READ
+        );
+
+        for sql in [
+            "SET x = 1",
+            "IF 1 = 1 THEN SET x = 1; END IF",
+            "EXPLAIN ANALYZE SET x = 1",
+        ] {
+            assert_eq!(verdict_under(&postgres, sql), Verdict::WRITE, "{sql}");
+        }
+        assert_eq!(
+            verdict_under(&snowflake, "BEGIN SET x = 1; END"),
+            Verdict::WRITE
+        );
+    }
+
+    #[test]
+    fn a_setting_name_is_normalised_before_the_allow_list_is_asked() {
+        let mysql = with_plain_settings(ParserDialect::MySql, &["time_zone"]);
+
+        for sql in [
+            "SET time_zone = 'UTC'",
+            "SET TIME_ZONE = 'UTC'",
+            "SET SESSION time_zone = 'UTC'",
+            "SET @@time_zone = 'UTC'",
+            "SET @@session.time_zone = 'UTC'",
+            "SET @@SESSION.Time_Zone = 'UTC'",
+            "SET LOCAL time_zone = 'UTC'",
+        ] {
+            assert_eq!(verdict_under(&mysql, sql), Verdict::READ, "{sql}");
+        }
+        // The server-wide scope wins over an allow-list hit, however it is
+        // spelled.
+        for sql in [
+            "SET GLOBAL time_zone = 'UTC'",
+            "SET @@global.time_zone = 'UTC'",
+            "SET @@GLOBAL.time_zone = 'UTC'",
+        ] {
+            assert_eq!(verdict_under(&mysql, sql), Verdict::WRITE, "{sql}");
+        }
+        // One name off the list stops the whole statement, in either order.
+        for sql in [
+            "SET time_zone = 'UTC', y = 2",
+            "SET y = 2, time_zone = 'UTC'",
+        ] {
+            assert_eq!(verdict_under(&mysql, sql), Verdict::WRITE, "{sql}");
+        }
+        assert_eq!(
+            verdict_under(&mysql, "SET time_zone = 'UTC', @x = 1"),
+            Verdict::READ
+        );
+    }
+
+    #[test]
+    fn an_allow_listed_name_on_an_engine_with_an_empty_list_is_stopped() {
+        let listed = with_plain_settings(ParserDialect::PostgreSql, &["search_path"]);
+        let empty = with_plain_settings(ParserDialect::PostgreSql, &[]);
+        let sql = "SET search_path TO other";
+        assert_eq!(verdict_under(&listed, sql), Verdict::READ);
+        assert_eq!(verdict_under(&empty, sql), Verdict::WRITE);
+    }
+
+    #[test]
+    fn a_set_the_parser_accepts_without_an_assignment_is_stopped() {
+        use crate::db::Engine;
+
+        // Accepted by the pinned parser, and carries no setting name to look
+        // up, so the allow-list has nothing to say and the default decides.
+        assert!(is_stopped(Engine::MySql, "SET NAMES DEFAULT"));
+        assert!(is_stopped(Engine::Postgres, "SET NAMES DEFAULT"));
+    }
+
+    #[test]
+    fn an_engine_with_a_session_to_set_lists_its_settings_and_the_rest_list_none() {
+        use crate::db::Engine;
+
+        for engine in [
+            Engine::Postgres,
+            Engine::MySql,
+            Engine::MariaDb,
+            Engine::DuckDb,
+            Engine::SqlServer,
+            Engine::ClickHouse,
+        ] {
+            assert!(!engine.spec().sql.plain_settings.is_empty(), "{engine:?}");
+        }
+        // SQLite and Turso configure through `PRAGMA`, which is already Full,
+        // and Snowflake's requests keep no session for a `SET` to change.
+        for engine in [Engine::Sqlite, Engine::Turso, Engine::Snowflake] {
+            assert!(engine.spec().sql.plain_settings.is_empty(), "{engine:?}");
+            for sql in [
+                "SET search_path TO other",
+                "SET timezone = 'UTC'",
+                "SET x = 1",
+            ] {
+                assert!(is_stopped(engine, sql), "{engine:?}: {sql}");
+            }
+        }
+    }
+
+    #[test]
+    fn clickhouse_reads_its_listed_settings_and_stops_the_rest() {
+        use crate::sql_snapshots::hardening::set_statement;
+
+        let ch = Engine::ClickHouse;
+        assert_eq!(classify(ch, "SET max_threads = 1").mode, Mode::ReadOnly);
+        // `readonly` is what the driver's per-request hold is made of, and `x`
+        // is on no list: neither is left for the server's `readonly=2` to
+        // refuse.
+        for sql in ["SET readonly = 0", "SET x = 1"] {
+            assert!(is_stopped(ch, sql), "{sql}");
+        }
+        for name in ch.spec().sql.plain_settings {
+            let sql = set_statement(ch, name);
+            assert!(is_plain_read(ch, &sql), "{sql}");
+        }
+    }
+
+    #[test]
+    fn the_raise_reaches_a_statement_read_by_its_first_keyword() {
+        let ch = Engine::ClickHouse;
+        // ClickHouse is read statement by statement, a path that once returned
+        // before the raise: a scope pair the text spells, here as identifiers,
+        // is rated above Read-only on every SQL engine, this one included.
+        assert!(classify(ch, "SELECT t.set global FROM t").mode >= Mode::ReadWrite);
+        // A statement `sqlparser` cannot read keeps its first keyword's rating
+        // and stays unreadable, at the mode the one construction gives.
+        let verdict = classify(ch, "SELECT garbage ) (");
+        assert!(verdict.destructive.contains(&Destructive::Unreadable));
+        assert_eq!(verdict.mode, unreadable_verdict(ch).mode);
+    }
+
+    #[test]
+    fn every_allow_listed_setting_stays_a_read_on_its_engine_unless_server_wide() {
+        use crate::sql_snapshots::hardening::set_statement;
+
+        for engine in sql_engines() {
+            for name in engine.spec().sql.plain_settings {
+                let sql = set_statement(engine, name);
+                assert!(is_plain_read(engine, &sql), "{engine:?}: {sql}");
+                let global = format!("SET GLOBAL {name} = 1");
+                assert!(is_stopped(engine, &global), "{engine:?}: {global}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_setting_left_off_every_list_is_stopped_on_the_engine_that_has_it() {
+        use crate::sql_snapshots::hardening::{EXCLUDED_SETTINGS, set_statement};
+
+        for (engine, names) in EXCLUDED_SETTINGS {
+            for name in *names {
+                let sql = set_statement(*engine, name);
+                assert!(is_stopped(*engine, &sql), "{engine:?}: {sql}");
+                // The name is stopped because nothing listed it, so a list
+                // that gained it would be the regression.
+                assert!(
+                    !engine
+                        .spec()
+                        .sql
+                        .plain_settings
+                        .contains(&name.to_ascii_lowercase().as_str()),
+                    "{engine:?}: {name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn navigation_and_comfort_settings_stay_reads_where_the_engine_has_them() {
+        use crate::db::Engine;
+
+        for (engine, sql) in [
+            (Engine::Postgres, "SET search_path TO other"),
+            (Engine::Postgres, "SET SESSION search_path = other"),
+            (Engine::Postgres, "SET LOCAL statement_timeout = 1000"),
+            (Engine::Postgres, "SET timezone = 'UTC'"),
+            (Engine::Postgres, "SET TIMEZONE TO 'UTC'"),
+            (Engine::MySql, "SET autocommit = 0"),
+            (Engine::MySql, "SET time_zone = 'UTC'"),
+            (Engine::MySql, "SET @@session.time_zone = 'UTC'"),
+            (Engine::MySql, "SET SESSION max_execution_time = 1000"),
+            (Engine::MariaDb, "SET autocommit = 0"),
+            (Engine::DuckDb, "SET threads = 2"),
+            (Engine::DuckDb, "SET search_path = 'main'"),
+            (Engine::SqlServer, "SET NOCOUNT ON"),
+            (Engine::SqlServer, "SET ROWCOUNT 10"),
+            (Engine::SqlServer, "SET STATISTICS IO ON"),
+        ] {
+            assert!(is_plain_read(engine, sql), "{engine:?}: {sql}");
+        }
+    }
+
+    #[test]
+    fn the_two_mysql_family_servers_name_their_timeout_and_isolation_differently() {
+        use crate::db::Engine;
+
+        assert!(is_plain_read(Engine::MySql, "SET max_execution_time = 1"));
+        assert!(is_stopped(Engine::MySql, "SET max_statement_time = 1"));
+        assert!(is_plain_read(Engine::MariaDb, "SET max_statement_time = 1"));
+        assert!(is_stopped(Engine::MariaDb, "SET max_execution_time = 1"));
+        // MariaDB still answers to the older isolation-level spelling.
+        assert!(is_plain_read(Engine::MariaDb, "SET tx_isolation = 'x'"));
+        assert!(is_stopped(Engine::MySql, "SET tx_isolation = 'x'"));
+        assert!(is_plain_read(
+            Engine::MySql,
+            "SET transaction_isolation = 'x'"
+        ));
+        assert!(is_plain_read(
+            Engine::MariaDb,
+            "SET transaction_isolation = 'x'"
+        ));
+    }
+
+    #[test]
+    fn the_one_way_configuration_ratchets_on_the_embedded_analytics_engine_are_stopped() {
+        use crate::db::Engine;
+
+        // Once off, DBDelve's own CSV, Parquet and Excel opening stays off for
+        // the rest of the session, and a locked configuration refuses every
+        // later `SET`.
+        for sql in [
+            "SET enable_external_access = false",
+            "SET lock_configuration = true",
+        ] {
+            assert!(is_stopped(Engine::DuckDb, sql), "{sql}");
+        }
+    }
+
+    #[test]
+    fn a_charset_that_cannot_swallow_a_backslash_stays_a_read() {
+        use crate::db::Engine;
+
+        for engine in [Engine::MySql, Engine::MariaDb] {
+            for charset in [
+                "utf8mb4", "UTF8MB4", "utf8mb3", "utf8", "latin1", "ascii", "binary",
+            ] {
+                let sql = format!("SET NAMES {charset}");
+                assert!(is_plain_read(engine, &sql), "{engine:?}: {sql}");
+            }
+            assert!(
+                is_plain_read(engine, "SET NAMES utf8mb4 COLLATE utf8mb4_bin"),
+                "{engine:?}"
+            );
+            for charset in ["gbk", "big5", "sjis", "cp932", "gb18030", "ucs2", "utf16"] {
+                let sql = format!("SET NAMES {charset}");
+                assert!(is_stopped(engine, &sql), "{engine:?}: {sql}");
+            }
+            assert!(is_stopped(engine, "SET NAMES DEFAULT"), "{engine:?}");
+        }
+    }
+
+    /// The engines whose server runs the marker, so `classify` expands it:
+    /// MariaDB alone. MySQL shares the dialect and ignores the marker, and is
+    /// pinned by [`on_mysql_an_executable_comment_is_ignored_and_unreadable`].
+    fn marker_engines() -> impl Iterator<Item = crate::db::Engine> {
+        [crate::db::Engine::MariaDb].into_iter()
+    }
+
+    /// Every input the MariaDB tests above read, on MySQL: MySQL ignores the
+    /// comment and a MySQL profile may point at a MariaDB server that runs it,
+    /// so the verdict holds both readings and is unreadable on top. It is never
+    /// looser than MariaDB's, so nothing MariaDB would run escapes on MySQL.
+    #[test]
+    fn on_mysql_an_executable_comment_is_ignored_and_unreadable() {
+        use crate::db::Engine;
+
+        for sql in [
+            "/*M!100100 DROP TABLE t */",
+            "/*M!DROP TABLE t */",
+            "/*M!100100DROP TABLE t */",
+            "/*m!100100 DROP TABLE t */",
+            "/*M!100100 TRUNCATE TABLE t */",
+            "/*M!100100 DELETE FROM t */",
+            "/*M!100100 INSERT INTO t VALUES (1) */",
+            "/*M!100100 SELECT 1 */",
+            "SELECT 1; /*M!100100 DROP TABLE t */",
+            "/*M!100100 SET SESSION TRANSACTION READ WRITE */",
+            "/*M!100100 SET SESSION transaction_read_only = 0 */",
+            "/*M!100100 SET GLOBAL read_only = 0 */",
+            "SELECT 1 /*M!100100 INTO @y */ FROM t",
+            "SELECT 2 /*M!100100 +1 */",
+            "/*M!100100 SELECT get_lock('k', 1) */",
+            "/*M!100100 DROP TABLE t */ SELECT 1",
+            "/*M!1234 DROP TABLE t */",
+            "/*M!*/",
+            "DELETE FROM t /*M! WHERE 1 = 0 */",
+            "INSERT INTO t VALUES (1) /*M!100100 , (2) */",
+        ] {
+            let mysql = classify(Engine::MySql, sql);
+            let mariadb = classify(Engine::MariaDb, sql);
+            assert!(
+                mysql.destructive.contains(&Destructive::Unreadable),
+                "{sql}: {mysql:?}"
+            );
+            assert!(mysql.mode >= mariadb.mode, "{sql}: {mysql:?} {mariadb:?}");
+            for kind in &mariadb.destructive {
+                assert!(mysql.destructive.contains(kind), "{sql}: {mysql:?}");
+            }
+        }
+        // A marker that is not a comment token is no marker.
+        for sql in [
+            "SELECT '/*M!100100 DROP TABLE t */'",
+            "-- /*M!100100 DROP TABLE t */\nSELECT 1",
+            "# /*M!100100 DROP TABLE t */\nSELECT 1",
+        ] {
+            assert!(is_plain_read(Engine::MySql, sql), "{sql}");
+        }
+    }
+
+    fn destroys_as(engine: crate::db::Engine, sql: &str, kind: Destructive) -> bool {
+        classify(engine, sql) == Verdict::destroys(kind)
+    }
+
+    fn is_unreadable(engine: crate::db::Engine, sql: &str) -> bool {
+        classify(engine, sql).destructive == [Destructive::Unreadable]
+    }
+
+    #[test]
+    fn a_comment_the_server_executes_is_judged_by_the_statement_it_holds() {
+        for engine in marker_engines() {
+            for sql in [
+                "/*M!100100 DROP TABLE t */",
+                "/*M!DROP TABLE t */",
+                "/*M!100100DROP TABLE t */",
+                "/*M!10010 DROP TABLE t */",
+                "/*M!100100\nDROP TABLE t */",
+            ] {
+                assert!(
+                    destroys_as(engine, sql, Destructive::Drop),
+                    "{engine:?}: {sql}"
+                );
+            }
+            assert!(
+                destroys_as(
+                    engine,
+                    "/*M!100100 TRUNCATE TABLE t */",
+                    Destructive::Truncate
+                ),
+                "{engine:?}"
+            );
+            assert!(
+                destroys_as(
+                    engine,
+                    "/*M!100100 DELETE FROM t */",
+                    Destructive::UnfilteredDelete
+                ),
+                "{engine:?}"
+            );
+            assert!(
+                is_stopped(engine, "/*M!100100 INSERT INTO t VALUES (1) */"),
+                "{engine:?}"
+            );
+            assert!(
+                is_plain_read(engine, "/*M!100100 SELECT 1 */"),
+                "{engine:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_comment_the_server_executes_after_a_statement_is_judged_the_same_way() {
+        for engine in marker_engines() {
+            for sql in [
+                "SELECT 1; /*M!100100 DROP TABLE t */",
+                "SELECT 1;\n/*M!100100 DROP TABLE t */",
+            ] {
+                assert!(
+                    destroys_as(engine, sql, Destructive::Drop),
+                    "{engine:?}: {sql}"
+                );
+            }
+            assert!(
+                is_stopped(
+                    engine,
+                    "SELECT 1; /*M!100100 SET SESSION TRANSACTION READ WRITE */"
+                ),
+                "{engine:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_comment_the_server_executes_cannot_disarm_the_read_only_hold() {
+        for engine in marker_engines() {
+            for sql in [
+                "/*M!100100 SET SESSION TRANSACTION READ WRITE */",
+                "/*M!100100 SET SESSION transaction_read_only = 0 */",
+                "/*M!100100 SET GLOBAL read_only = 0 */",
+            ] {
+                assert!(is_stopped(engine, sql), "{engine:?}: {sql}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_fragment_in_a_comment_the_server_executes_belongs_to_the_statement_around_it() {
+        for engine in marker_engines() {
+            assert!(
+                is_stopped(engine, "SELECT 1 /*M!100100 INTO @y */ FROM t"),
+                "{engine:?}"
+            );
+            assert!(
+                is_plain_read(engine, "SELECT 2 /*M!100100 +1 */"),
+                "{engine:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_comment_the_server_executes_fused_with_a_bare_statement_is_unreadable() {
+        // The server inlines the comment into its neighbours, so the two run as
+        // one statement it rejects.
+        for engine in marker_engines() {
+            assert!(
+                is_unreadable(engine, "/*M!100100 DROP TABLE t */ SELECT 1"),
+                "{engine:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_denied_call_in_a_comment_the_server_executes_is_stopped() {
+        for engine in marker_engines() {
+            assert!(
+                is_stopped(engine, "/*M!100100 SELECT get_lock('k', 1) */"),
+                "{engine:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_version_the_server_reads_as_part_of_a_plain_comment_stays_one() {
+        for engine in marker_engines() {
+            assert!(
+                is_plain_read(engine, "/*M!1234 DROP TABLE t */"),
+                "{engine:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_marker_that_is_not_a_comment_token_is_left_alone() {
+        for engine in marker_engines() {
+            for sql in [
+                "SELECT '/*M!100100 DROP TABLE t */'",
+                "-- /*M!100100 DROP TABLE t */\nSELECT 1",
+                "# /*M!100100 DROP TABLE t */\nSELECT 1",
+            ] {
+                assert!(is_plain_read(engine, sql), "{engine:?}: {sql}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_dialect_that_does_not_expand_the_marker_is_not_affected_by_it() {
+        use crate::db::Engine;
+
+        // MySQL holds the marker unreadable (see the test above). Generic
+        // cannot tell which server runs it, so any `/*M!` makes the submission
+        // one it may lex otherwise (`lexes_apart`).
+        for engine in sql_engines().filter(|engine| {
+            !marker_engines().any(|marker| marker == *engine)
+                && *engine != Engine::MySql
+                && *engine != Engine::Generic
+        }) {
+            assert!(
+                is_plain_read(engine, "/*M!100100 DROP TABLE t */"),
+                "{engine:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_executable_comment_that_cannot_be_read_is_unreadable() {
+        for engine in marker_engines() {
+            for sql in [
+                "/*M!100100 DROP TABLE t",
+                "/*M!100100 /*M!100100 SELECT 7 */ */",
+                // The version no server reaches, which opens every dump file.
+                "/*M!999999\\- enable the sandbox mode */",
+            ] {
+                assert!(is_unreadable(engine, sql), "{engine:?}: {sql}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_multi_byte_character_in_an_executable_comment_cannot_split_it() {
+        for engine in marker_engines() {
+            assert!(
+                is_plain_read(engine, "/*M!100100 SELECT 'é' */"),
+                "{engine:?}"
+            );
+            for sql in [
+                "/*M!100100é DROP TABLE t */",
+                "/*M!é DROP TABLE t */",
+                "/*M!１００１００ DROP TABLE t */",
+            ] {
+                assert!(is_unreadable(engine, sql), "{engine:?}: {sql}");
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_and_a_lone_empty_executable_comment_are_silent_reads() {
+        use crate::db::Engine;
+
+        for engine in sql_engines() {
+            for sql in ["", "   \n\t"] {
+                assert!(is_plain_read(engine, sql), "{engine:?}: {sql:?}");
+            }
+            // MySQL holds any marker unreadable, and Generic any comment that
+            // opens with one, since neither knows the server runs nothing.
+            match engine {
+                Engine::MySql | Engine::Generic => {
+                    assert!(is_unreadable(engine, "/*M!*/"), "{engine:?}")
+                }
+                _ => assert!(is_plain_read(engine, "/*M!*/"), "{engine:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_hash_line_comment_stays_a_silent_read_where_the_dialect_lexes_it_as_a_comment() {
+        use crate::db::Engine;
+
+        for engine in [Engine::MySql, Engine::MariaDb, Engine::Snowflake] {
+            for sql in ["# a note", "# a note\n", "/* a */ # a note"] {
+                assert!(is_plain_read(engine, sql), "{engine:?}: {sql:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_nested_block_comment_leaves_residue_the_tokenizer_reads_as_code() {
+        use crate::db::Engine;
+
+        // Both dialects nest, and the grammar does not, so what follows the
+        // inner close is a range the lexer reads as operators. Rare, and the
+        // conservative side.
+        for engine in [Engine::Postgres, Engine::SqlServer] {
+            for sql in ["/* /* n */ */", "/* /* n */ DROP TABLE t */"] {
+                assert!(is_unreadable(engine, sql), "{engine:?}: {sql}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_cross_check_and_a_parse_error_refuse_with_one_verdict() {
+        use crate::db::Engine;
+
+        // One engine that holds Read-only on the server and one that does not,
+        // since the mode an unreadable verdict may run in depends on it.
+        for engine in [Engine::Postgres, Engine::SqlServer] {
+            assert_eq!(
+                classify(engine, "/* /* n */ */"),
+                classify(engine, "SELECT FROM WHERE ("),
+                "{engine:?}"
+            );
+        }
+        assert_ne!(
+            classify(Engine::Postgres, "SELECT FROM WHERE (").mode,
+            classify(Engine::SqlServer, "SELECT FROM WHERE (").mode
+        );
+    }
+
+    /// What the Run action submits for a non-empty selection: the branch of
+    /// `Workspace::sql_to_run` that reads the selection. That method needs a
+    /// GPUI `Entity<EditorState>`, so this composes the same three pure
+    /// pieces it does, and a change there has to be mirrored here.
+    ///
+    /// `None` is "there is no statement to run".
+    fn submitted_for_selection(
+        engine: crate::db::Engine,
+        buffer: &str,
+        selection: Range<usize>,
+    ) -> Option<Result<String, String>> {
+        assert!(!selection.is_empty());
+        // The editor's selection is a byte range into the buffer. Slicing off a
+        // character boundary would panic, which is what the offsets named in
+        // the tests below rule out.
+        assert!(
+            buffer.is_char_boundary(selection.start) && buffer.is_char_boundary(selection.end),
+            "{engine:?}: {selection:?}"
+        );
+        match one_batch(engine, &buffer[selection]) {
+            Ok(batch) if batch.trim().is_empty() => None,
+            Ok(batch) => Some(Ok(batch.to_string())),
+            Err(message) => Some(Err(message)),
+        }
+    }
+
+    /// The answer to `HARD-07`, "does a shipped route submit text that reaches
+    /// the executable-comment shapes?": **yes**, and it is established rather
+    /// than unknown.
+    ///
+    /// Run on a non-empty editor selection that holds one statement or none
+    /// sends the selection to the driver verbatim, on every engine but SQL
+    /// Server, where only the `GO` lines around the batch are removed
+    /// (`sql_to_run`, through `one_batch`). Two shapes reach the classifier
+    /// through it, both on a Read-only profile against a MariaDB server:
+    ///
+    /// 1. the user selects `/*M!100100 ... */` alone, and the splitter finds
+    ///    no statement in it, so nothing cuts it down;
+    /// 2. the user selects one statement with an executable comment inside it,
+    ///    and the comment rides in the statement's range, since a token
+    ///    follows it.
+    ///
+    /// Before plan 01-04 the typed parser read both as a comment, and
+    /// `classify` called the first a plain read. On a live MariaDB 11.4 that
+    /// text, `SET SESSION TRANSACTION READ WRITE`, disarmed the server's own
+    /// read-only hold, after which an `INSERT` succeeded. This test pins the
+    /// closed hole through the route rather than through `classify` alone.
+    ///
+    /// The buffer is `"-- café\n/*M!100100 SET SESSION TRANSACTION READ WRITE
+    /// */\nSELECT 1;\n"`. The `é` is two bytes, so byte offsets and character
+    /// offsets differ, and the selection is bytes `9..57`: byte 9 follows the
+    /// newline that ends the first line and byte 57 is the end of `*/`. Both
+    /// fall on character boundaries, so the slice cannot panic.
+    #[test]
+    fn a_selection_of_only_an_executable_comment_reaches_the_classifier_whole() {
+        let buffer = "-- café\n/*M!100100 SET SESSION TRANSACTION READ WRITE */\nSELECT 1;\n";
+        let selection = 9..57;
+        let comment = "/*M!100100 SET SESSION TRANSACTION READ WRITE */";
+        assert_eq!(&buffer[selection.clone()], comment);
+
+        for engine in sql_engines() {
+            let found = queued_statements(engine, buffer, Some(selection.clone()));
+            assert!(found.len() <= 1, "{engine:?}: {found:?}");
+
+            // SQL Server reads its buffer a batch at a time and trims the one
+            // it sends, so what it submits is not the selection byte for byte.
+            if batches_on(engine) {
+                continue;
+            }
+            let submitted = submitted_for_selection(engine, buffer, selection.clone())
+                .unwrap_or_else(|| panic!("{engine:?}: a selection that holds text submits it"))
+                .unwrap_or_else(|message| panic!("{engine:?}: {message}"));
+            assert_eq!(submitted, comment, "{engine:?}");
+        }
+
+        for engine in marker_engines() {
+            let verdict = classify(engine, comment);
+            assert!(is_stopped(engine, comment), "{engine:?}");
+            assert!(
+                gate(&verdict, Mode::ReadOnly, &[]).is_some(),
+                "{engine:?}: a Read-only profile lets the release through"
+            );
+        }
+        // MySQL ignores the comment, and the human confirms it all the same.
+        let verdict = classify(crate::db::Engine::MySql, comment);
+        assert!(verdict.destructive.contains(&Destructive::Unreadable));
+        assert!(gate(&verdict, Mode::ReadOnly, &[]).is_some());
+    }
+
+    /// The second reachable shape: one selected statement with the comment
+    /// inside it. The buffer is `"SELECT 'é' /*M!100100 INTO @y */ FROM t;\n"`
+    /// and the selection is bytes `0..41`, the statement and its `;`. Byte 41
+    /// is the end of the `;`, a character boundary, and the `é` makes the
+    /// range one byte longer than the 40 characters in it.
+    #[test]
+    fn a_selection_with_an_executable_comment_inside_a_statement_carries_it_to_the_classifier() {
+        let buffer = "SELECT 'é' /*M!100100 INTO @y */ FROM t;\n";
+        let selection = 0..41;
+        assert_eq!(
+            &buffer[selection.clone()],
+            "SELECT 'é' /*M!100100 INTO @y */ FROM t;"
+        );
+
+        for engine in sql_engines() {
+            let found = queued_statements(engine, buffer, Some(selection.clone()));
+            assert_eq!(found.len(), 1, "{engine:?}: {found:?}");
+            assert!(
+                buffer[found[0].clone()].contains("/*M!100100 INTO @y */"),
+                "{engine:?}: the comment travels inside the statement's range"
+            );
+
+            if batches_on(engine) {
+                continue;
+            }
+            let submitted = submitted_for_selection(engine, buffer, selection.clone())
+                .unwrap_or_else(|| panic!("{engine:?}: a selection that holds text submits it"))
+                .unwrap_or_else(|message| panic!("{engine:?}: {message}"));
+            assert_eq!(submitted, &buffer[selection.clone()], "{engine:?}");
+        }
+
+        let submitted = &buffer[selection.clone()];
+        for engine in marker_engines() {
+            assert!(is_stopped(engine, submitted), "{engine:?}");
+            assert!(
+                gate(&classify(engine, submitted), Mode::ReadOnly, &[]).is_some(),
+                "{engine:?}"
+            );
+        }
+        // MySQL ignores the comment, and the human confirms it all the same.
+        let verdict = classify(crate::db::Engine::MySql, submitted);
+        assert!(verdict.destructive.contains(&Destructive::Unreadable));
+        assert!(gate(&verdict, Mode::ReadOnly, &[]).is_some());
+    }
+
+    /// An empty selection does not take the selection branch: `sql_to_run`
+    /// falls through to the statement under the cursor, so the whole-selection
+    /// answer above says nothing about it. Here the cursor sits inside the
+    /// comment, byte 20, and the statement it runs is `SELECT 1`, not the
+    /// comment: the splitter has no statement for a comment on its own.
+    #[test]
+    fn an_empty_selection_runs_the_statement_at_the_cursor_and_not_the_selection() {
+        let buffer = "-- café\n/*M!100100 SET SESSION TRANSACTION READ WRITE */\nSELECT 1;\n";
+
+        for engine in sql_engines() {
+            // An empty selection is no selection to `queued_statements`.
+            assert_eq!(
+                queued_statements(engine, buffer, Some(20..20)),
+                queued_statements(engine, buffer, None),
+                "{engine:?}"
+            );
+            if batches_on(engine) {
+                continue;
+            }
+            let range = Buffer::for_engine(engine, buffer)
+                .statement_at(20)
+                .unwrap_or_else(|| panic!("{engine:?}: the buffer holds a statement"));
+            assert_eq!(&buffer[range], "SELECT 1", "{engine:?}");
+        }
+    }
+
+    /// A selection of only whitespace holds nothing to run: `sql_to_run`
+    /// returns no statement and the Run action says so.
+    #[test]
+    fn a_selection_of_only_whitespace_submits_nothing() {
+        let buffer = "SELECT 1;\n \t\n";
+        // Bytes 10..13 are the space, the tab and the newline after the first
+        // line, all one byte wide.
+        let selection = 10..13;
+        assert_eq!(&buffer[selection.clone()], " \t\n");
+
+        for engine in sql_engines() {
+            assert!(
+                submitted_for_selection(engine, buffer, selection.clone()).is_none(),
+                "{engine:?}"
+            );
+        }
     }
 }

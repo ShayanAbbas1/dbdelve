@@ -10,8 +10,8 @@
 use std::ops::Range;
 
 use super::{
-    Call, CursorMethod, Method, Statement, Target, Value, classify, integer, is_generated_write,
-    parse, quoted, writable_field,
+    Call, CursorMethod, JS_OPERATORS, Method, Statement, Target, Value, classify, integer,
+    is_generated_write, parse, quoted, writable_field,
 };
 use crate::filter::{Conjunction, Operator};
 use crate::sql::{SortKey, Verdict};
@@ -453,7 +453,7 @@ fn runs_code(value: &Value) -> bool {
                 value,
                 Value::Array(items) if items.iter().all(|item| matches!(item, Value::Document(_)))
             );
-            matches!(key.as_str(), "$where" | "$function" | "$accumulator")
+            JS_OPERATORS.contains(&key.as_str())
                 || (matches!(key.as_str(), "$and" | "$or" | "$nor") && !documents)
                 || runs_code(value)
         }),
@@ -695,6 +695,41 @@ mod tests {
             "not a statement".to_owned(),
         ] {
             assert_eq!(row_reread(&refused), None, "{refused}");
+        }
+    }
+
+    #[test]
+    fn every_javascript_operator_is_full_to_the_classifier_and_refused_by_the_filter_bar() {
+        for operator in JS_OPERATORS {
+            for text in [
+                format!("db.c.find({{{operator}: '1'}})"),
+                format!("db.c.aggregate([{{$group: {{_id: 1, x: {{{operator}: {{}}}}}}}}])"),
+                format!("db.runCommand({{find: 'c', filter: {{{operator}: '1'}}}})"),
+            ] {
+                assert_eq!(classify(&text), Verdict::FULL, "{text}");
+            }
+            // Read straight from the filter-bar rule: `is_generated_read` also
+            // asks `classify`, so it would refuse an operator the classifier
+            // rates Full even if this rule had lost it.
+            let filter = |field: &str| {
+                let text = format!("db.c.find({{{field}: '1'}})");
+                match parse(&text).as_deref() {
+                    Ok(
+                        [
+                            Statement {
+                                target: Target::Collection { call, .. },
+                                ..
+                            },
+                        ],
+                    ) => call.args[0].value.clone(),
+                    other => panic!("{text}: {other:?}"),
+                }
+            };
+            assert!(!runs_code(&filter("a")), "the control filter was refused");
+            assert!(
+                runs_code(&filter(operator)),
+                "{operator} passed the filter bar"
+            );
         }
     }
 

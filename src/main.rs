@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod actions;
+mod agent;
 mod channel;
 mod completion;
 mod connection_form;
@@ -210,6 +211,7 @@ fn connection_config_from(
         schema: None,
         time_zone: None,
         properties: Properties::default(),
+        read_only: false,
     })))
 }
 
@@ -221,6 +223,11 @@ fn main() {
     // which must answer and exit before anything else starts.
     if let Some(status) = db::askpass(std::env::args_os().nth(1).as_deref()) {
         std::process::exit(status);
+    }
+    // The agent shim speaks MCP on stdio and must never open a window or reach
+    // GPUI, on any OS, so it is decided before anything else starts.
+    if std::env::args_os().nth(1).is_some_and(|arg| arg == "mcp") {
+        std::process::exit(agent::shim::run());
     }
     logging::install_panic_log();
     logging::install();
