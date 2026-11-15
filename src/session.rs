@@ -2846,11 +2846,11 @@ pub(crate) fn show_snapshot(
     results: &Entity<TableState<ResultGrid>>,
     grid: &store::StoredGrid,
     mode: Mode,
-    engine: Engine,
+    target: Target,
     cx: &mut Context<Workspace>,
 ) {
     results.update(cx, |table, cx| {
-        *table.delegate_mut() = ResultGrid::restored(grid, mode).with_engine(engine);
+        *table.delegate_mut() = ResultGrid::restored(grid, mode).with_target(target);
         table.refresh(cx);
     });
 }

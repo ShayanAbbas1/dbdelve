@@ -2939,6 +2939,28 @@ mod tests {
         generated_writes_round_trip,
     );
 
+    #[test]
+    #[ignore = "requires a local MySQL server configured through dbdelve_MYSQL_URL"]
+    fn live_binary_edits_round_trip_on_mysql() {
+        crate::db::conformance::binary_edits_round_trip(
+            &live_profile(Engine::MySql),
+            crate::db::Target::built_in(Engine::MySql),
+            "dbdelve_dev",
+            "varbinary(16)",
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a local MariaDB server configured through dbdelve_MARIADB_URL"]
+    fn live_binary_edits_round_trip_on_mariadb() {
+        crate::db::conformance::binary_edits_round_trip(
+            &live_profile(Engine::MariaDb),
+            crate::db::Target::built_in(Engine::MariaDb),
+            "dbdelve_dev",
+            "blob",
+        );
+    }
+
     on_both_servers!(
         live_a_password_command_signs_in_the_session_and_its_cancel,
         live_reads_run_at_once_take_the_time_of_one,

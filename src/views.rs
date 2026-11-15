@@ -148,6 +148,10 @@ pub struct RowInput {
     /// staged, and a cell changed elsewhere refills an input nobody is typing
     /// in.
     pub seed: SharedString,
+    /// [`ResultGrid::binary_seed_key`] as `seed` was made: a binary cell's
+    /// seed is decoded again only when it changes, and a draft typed in one
+    /// form is never read in another.
+    pub binary: Option<(Option<result_grid::BinaryForm>, Option<NewValue>)>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1641,6 +1645,7 @@ fn render_results(
                 .on_action(cx.listener(Workspace::set_empty))
                 .on_action(cx.listener(Workspace::set_default))
                 .on_action(cx.listener(Workspace::request_write_mode))
+                .on_action(cx.listener(Workspace::refuse_edit))
                 .on_action(cx.listener(Workspace::delete_row))
                 .on_action(cx.listener(Workspace::follow_foreign_key))
                 .on_action(cx.listener(Workspace::open_reference))
@@ -2475,6 +2480,9 @@ fn render_row_inspector(
                                                         ),
                                                     ),
                                                 )
+                                            }
+                                            Some(text) if field.unparsed => {
+                                                value.text_color(t.text_muted).child(text)
                                             }
                                             Some(text) => value.text_color(t.text).child(text),
                                             None if field.missing => value,

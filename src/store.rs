@@ -540,6 +540,10 @@ pub struct StoredGrid {
     /// Pinned columns in pinned order, keyed like [`Self::hidden`].
     #[serde(default)]
     pub pinned: Vec<(String, usize)>,
+    /// Binary columns drawn as something other than the server's spelling,
+    /// keyed like [`Self::hidden`], with `result_grid::BinaryForm::slug`.
+    #[serde(default)]
+    pub parsed: Vec<(String, usize, String)>,
     #[serde(default)]
     pub active: Option<(usize, usize)>,
     #[serde(default)]
@@ -1765,6 +1769,7 @@ pub fn write_grid(profile_id: &str, key: &str, grid: &StoredGrid) -> Result<(), 
             dragged: grid.dragged.clone(),
             hidden: grid.hidden.clone(),
             pinned: grid.pinned.clone(),
+            parsed: grid.parsed.clone(),
             active: grid.active,
             last_query: grid.last_query.clone(),
             limit: grid.limit,
@@ -5231,6 +5236,7 @@ open_objects = []
                 dragged: Vec::new(),
                 hidden: Vec::new(),
                 pinned: Vec::new(),
+                parsed: Vec::new(),
                 active: None,
                 last_query: None,
                 limit: None,
@@ -5284,6 +5290,7 @@ open_objects = []
                 dragged: Vec::new(),
                 hidden: vec![("name".into(), 1)],
                 pinned: vec![("id".into(), 0)],
+                parsed: Vec::new(),
                 active: Some((0, 1)),
                 last_query: Some("select * from accounts".into()),
                 limit: Some(1_000),
@@ -5327,6 +5334,7 @@ open_objects = []
                 dragged: Vec::new(),
                 hidden: Vec::new(),
                 pinned: Vec::new(),
+                parsed: Vec::new(),
                 active: None,
                 last_query: None,
                 limit: None,
@@ -5381,6 +5389,7 @@ open_objects = []
                 dragged: Vec::new(),
                 hidden: Vec::new(),
                 pinned: Vec::new(),
+                parsed: Vec::new(),
                 active: None,
                 last_query: None,
                 limit: Some(1_000),

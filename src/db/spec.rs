@@ -41,6 +41,9 @@ pub struct EngineSpec {
     pub system_databases: &'static [&'static str],
     /// Exact type names read as bytes beyond the families every engine shares.
     pub binary_types: &'static [&'static str],
+    /// How the driver writes a value of one of those types as text, `None`
+    /// where no column is ever typed as one.
+    pub binary_text: Option<BinaryText>,
     /// Exact lower-cased type names that are numbers beyond the families every
     /// engine shares, without their precision.
     pub numeric_types: &'static [&'static str],
@@ -148,6 +151,28 @@ impl EngineSpec {
             || self.binary_types.contains(&name.as_str())
     }
 
+    /// [`Engine::bytes_of`](super::Engine::bytes_of).
+    pub fn bytes_of(&self, value: &str, most: usize) -> Option<Vec<u8>> {
+        // A plugin writes bytes this way whatever dialect it speaks
+        // (`external::rows`), and what asks knows only the dialect. Tried
+        // first, since bare hex takes anything; no engine's own spelling
+        // starts with `0x`, `x` being no hex digit.
+        BinaryText::ZeroX
+            .payload(value)
+            .or_else(|| self.binary_text?.payload(value))?
+            .decode(most)
+    }
+
+    /// [`Engine::bytes_text`](super::Engine::bytes_text).
+    pub fn bytes_text(&self, bytes: &[u8]) -> Option<String> {
+        Some(self.binary_text?.spell(bytes))
+    }
+
+    /// [`Engine::binary_literal`](super::Engine::binary_literal).
+    pub fn binary_literal(&self, bytes: &[u8]) -> Option<String> {
+        self.sql.binary_literal?.spell(bytes)
+    }
+
     /// [`Engine::is_numeric_type`](super::Engine::is_numeric_type). Wrappers
     /// come off first, so `Nullable(UInt64)` answers as `UInt64` does.
     pub fn is_numeric_type(&self, data_type: &str) -> bool {
@@ -210,6 +235,111 @@ fn unwrap_type_wrapper<'a>(name: &'a str, wrapper: &str) -> Option<&'a str> {
         .map(str::trim)
 }
 
+/// How a driver writes bytes as text, which is all the grid holds of them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BinaryText {
+    /// `0xDEADBEEF`, the T-SQL and MySQL literal.
+    ZeroX,
+    /// `\xdeadbeef`, Postgres' `bytea_output = hex`, the server's default.
+    BackslashX,
+    /// `x'DEADBEEF'`, SQLite's literal.
+    QuotedX,
+    /// `deadbeef`, as Arrow prints a blob and Snowflake sends one.
+    Bare,
+    /// `BinData(0, '3q2+7w==')`, the shell's spelling.
+    BinData,
+}
+
+/// The digits of bytes written as text, before they are decoded.
+enum Payload<'a> {
+    Hex(&'a str),
+    Base64(&'a str),
+}
+
+impl BinaryText {
+    fn payload(self, value: &str) -> Option<Payload<'_>> {
+        match self {
+            Self::ZeroX => value.strip_prefix("0x").map(Payload::Hex),
+            Self::BackslashX => value.strip_prefix("\\x").map(Payload::Hex),
+            Self::QuotedX => value
+                .strip_prefix("x'")?
+                .strip_suffix('\'')
+                .map(Payload::Hex),
+            Self::Bare => Some(Payload::Hex(value)),
+            Self::BinData => {
+                let (subtype, rest) = value.strip_prefix("BinData(")?.split_once(", '")?;
+                subtype.parse::<u8>().ok()?;
+                rest.strip_suffix("')").map(Payload::Base64)
+            }
+        }
+    }
+
+    /// `bytes` as the driver writes them, which `payload` reads back.
+    fn spell(self, bytes: &[u8]) -> String {
+        match self {
+            Self::ZeroX => format!("0x{}", hex::encode_upper(bytes)),
+            Self::BackslashX => format!("\\x{}", hex::encode(bytes)),
+            Self::QuotedX => format!("x'{}'", hex::encode_upper(bytes)),
+            Self::Bare => hex::encode_upper(bytes),
+            Self::BinData => {
+                use base64::Engine as _;
+                let digits = base64::engine::general_purpose::STANDARD.encode(bytes);
+                format!("BinData(0, '{digits}')")
+            }
+        }
+    }
+}
+
+impl BinaryLiteral {
+    /// `None` for what has no spelling the write gate reads.
+    fn spell(self, bytes: &[u8]) -> Option<String> {
+        let digits = hex::encode_upper(bytes);
+        match self {
+            Self::EscapeString => Some(format!("E'\\\\x{digits}'")),
+            Self::XQuoted => Some(format!("X'{digits}'")),
+            Self::ZeroX => (!bytes.is_empty()).then(|| format!("0x{digits}")),
+        }
+    }
+}
+
+impl Payload<'_> {
+    /// Only the front of the digits is read: a blob can run to megabytes,
+    /// and its cell is drawn every frame. Whatever lies past `most` bytes is
+    /// checked for its length alone, as `payload` checks its closing quote.
+    ///
+    /// ponytail: a character that is no digit past the part read goes
+    /// unseen, so a cell can show bytes that the row panel, reading further,
+    /// refuses. Only text imitating the engine's own spelling of bytes (a
+    /// SQLite BLOB-affinity column holding text) can do that: a driver
+    /// renders real bytes whole. If it matters, validate each value once per
+    /// result, off the draw path, and keep the answer beside the rows.
+    fn decode(self, most: usize) -> Option<Vec<u8>> {
+        match self {
+            Self::Hex(digits) => {
+                let digits = digits.as_bytes();
+                if digits.len() % 2 != 0 {
+                    return None;
+                }
+                let read = digits.len().min(most.saturating_mul(2));
+                hex::decode(&digits[..read]).ok()
+            }
+            Self::Base64(digits) => {
+                use base64::Engine as _;
+                let digits = digits.as_bytes();
+                if digits.len() % 4 != 0 {
+                    return None;
+                }
+                let read = digits.len().min(most.div_ceil(3).saturating_mul(4));
+                let mut bytes = base64::engine::general_purpose::STANDARD
+                    .decode(&digits[..read])
+                    .ok()?;
+                bytes.truncate(most);
+                Some(bytes)
+            }
+        }
+    }
+}
+
 /// What the connection form says a blank field means.
 #[derive(Clone, Copy, Debug)]
 pub struct Hints {
@@ -245,6 +375,19 @@ pub enum NulText {
     PipedChr,
     /// `CAST(N'a' AS nvarchar(max)) + NCHAR(0) + N'b'`
     AddedNchar,
+}
+
+/// How a value of bytes is written into a statement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BinaryLiteral {
+    /// `E'\\x6869'`. An escape string reads the same whatever
+    /// `standard_conforming_strings` says, where a plain `'\x6869'` with it
+    /// off reads `\x68` as `h` and stores the bytes of `h69`.
+    EscapeString,
+    /// `X'6869'`, empty as `X''`.
+    XQuoted,
+    /// `0x6869`. Empty, it is `0x`, which the gate's grammar cannot read.
+    ZeroX,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -319,6 +462,8 @@ pub struct SqlSpec {
     /// Whether the write gate reads the terms a row named by every value
     /// carries: `toString(c) = '…'` and `c IS NULL`.
     pub row_terms: bool,
+    /// How a grid edit writes bytes, `None` where it writes none.
+    pub binary_literal: Option<BinaryLiteral>,
     /// What completion offers beside the catalog: the functions and value
     /// expressions the dialect has built in.
     pub builtins: &'static [Builtin],
@@ -362,6 +507,7 @@ impl SqlSpec {
         stateless_requests: false,
         transactions: true,
         row_terms: false,
+        binary_literal: None,
         builtins: &[],
     };
 
@@ -726,6 +872,7 @@ pub(crate) const POSTGRES: EngineSpec = EngineSpec {
     // `postgres` is an ordinary database people work in.
     system_databases: &[],
     binary_types: &[],
+    binary_text: Some(BinaryText::BackslashX),
     numeric_types: &[],
     type_wrappers: &[],
     hints: Hints {
@@ -749,6 +896,7 @@ pub(crate) const POSTGRES: EngineSpec = EngineSpec {
         regex: RegexMatch::Tilde,
         read_only_session: ReadOnlySession::DefaultTransaction,
         builtins: builtins::postgres::BUILTINS,
+        binary_literal: Some(BinaryLiteral::EscapeString),
         ..SqlSpec::ANSI
     },
     abilities: Abilities {
@@ -784,6 +932,7 @@ pub(crate) const MYSQL: EngineSpec = EngineSpec {
     resolves_srv: false,
     system_databases: &["information_schema", "mysql", "performance_schema", "sys"],
     binary_types: &[],
+    binary_text: Some(BinaryText::ZeroX),
     numeric_types: &[],
     type_wrappers: &[],
     hints: Hints::DEFAULT,
@@ -809,6 +958,7 @@ pub(crate) const MYSQL: EngineSpec = EngineSpec {
         regex: RegexMatch::RegexpLike,
         read_only_session: ReadOnlySession::SessionTransaction,
         builtins: builtins::mysql::BUILTINS,
+        binary_literal: Some(BinaryLiteral::XQuoted),
         ..SqlSpec::ANSI
     },
     abilities: Abilities {
@@ -848,6 +998,7 @@ pub(crate) const MARIADB: EngineSpec = EngineSpec {
     resolves_srv: false,
     system_databases: &["information_schema", "mysql", "performance_schema", "sys"],
     binary_types: &[],
+    binary_text: Some(BinaryText::ZeroX),
     numeric_types: &[],
     type_wrappers: &[],
     hints: Hints::DEFAULT,
@@ -872,6 +1023,7 @@ pub(crate) const MARIADB: EngineSpec = EngineSpec {
         regex: RegexMatch::RegexpInstr,
         read_only_session: ReadOnlySession::SessionTransaction,
         builtins: builtins::mysql::BUILTINS,
+        binary_literal: Some(BinaryLiteral::XQuoted),
         ..SqlSpec::ANSI
     },
     abilities: Abilities {
@@ -917,6 +1069,7 @@ pub(crate) const SQLITE: EngineSpec = EngineSpec {
     resolves_srv: false,
     system_databases: &[],
     binary_types: &[],
+    binary_text: Some(BinaryText::QuotedX),
     numeric_types: &[],
     type_wrappers: &[],
     hints: Hints::DEFAULT,
@@ -937,6 +1090,7 @@ pub(crate) const SQLITE: EngineSpec = EngineSpec {
         substring: SubstringMatch::Instr,
         generated_defaults: SQLITE_GENERATED,
         builtins: builtins::sqlite::BUILTINS,
+        binary_literal: Some(BinaryLiteral::XQuoted),
         ..SqlSpec::ANSI
     },
     abilities: Abilities {
@@ -970,6 +1124,7 @@ pub(crate) const TURSO: EngineSpec = EngineSpec {
     resolves_srv: false,
     system_databases: &[],
     binary_types: &[],
+    binary_text: Some(BinaryText::QuotedX),
     numeric_types: &[],
     type_wrappers: &[],
     hints: Hints::DEFAULT,
@@ -984,6 +1139,7 @@ pub(crate) const TURSO: EngineSpec = EngineSpec {
         substring: SubstringMatch::Instr,
         generated_defaults: SQLITE_GENERATED,
         builtins: builtins::sqlite::BUILTINS,
+        binary_literal: Some(BinaryLiteral::XQuoted),
         ..SqlSpec::ANSI
     },
     abilities: Abilities {
@@ -1015,6 +1171,7 @@ pub(crate) const DUCKDB: EngineSpec = EngineSpec {
     resolves_srv: false,
     system_databases: &[],
     binary_types: &[],
+    binary_text: Some(BinaryText::Bare),
     numeric_types: &[],
     type_wrappers: &[],
     hints: Hints {
@@ -1078,6 +1235,7 @@ pub(crate) const SNOWFLAKE: EngineSpec = EngineSpec {
     // share too, but one people query.
     system_databases: &["SNOWFLAKE"],
     binary_types: &[],
+    binary_text: Some(BinaryText::Bare),
     numeric_types: &[],
     type_wrappers: &[],
     hints: Hints {
@@ -1146,6 +1304,7 @@ pub(crate) const SQL_SERVER: EngineSpec = EngineSpec {
     // `image` is the legacy binary type here; elsewhere it is a name anyone
     // may give a column or a domain, and a SQLite `image` column holds text.
     binary_types: &["image", "rowversion", "timestamp"],
+    binary_text: Some(BinaryText::ZeroX),
     numeric_types: &[],
     type_wrappers: &[],
     hints: Hints::DEFAULT,
@@ -1181,6 +1340,7 @@ pub(crate) const SQL_SERVER: EngineSpec = EngineSpec {
         // `ApplicationIntent=ReadOnly` routes a login to a readable replica
         // and is ignored by a primary.
         builtins: builtins::sqlserver::BUILTINS,
+        binary_literal: Some(BinaryLiteral::ZeroX),
         ..SqlSpec::ANSI
     },
     abilities: Abilities {
@@ -1219,6 +1379,7 @@ pub(crate) const MONGODB: EngineSpec = EngineSpec {
     resolves_srv: true,
     system_databases: &["admin", "local", "config"],
     binary_types: &["bindata"],
+    binary_text: Some(BinaryText::BinData),
     numeric_types: &[],
     type_wrappers: &[],
     hints: Hints {
@@ -1259,6 +1420,7 @@ pub(crate) const REDIS: EngineSpec = EngineSpec {
     resolves_srv: false,
     system_databases: &[],
     binary_types: &[],
+    binary_text: None,
     numeric_types: &[],
     type_wrappers: &[],
     hints: Hints {
@@ -1301,6 +1463,7 @@ pub(crate) const CLICKHOUSE: EngineSpec = EngineSpec {
     resolves_srv: false,
     system_databases: &["system", "INFORMATION_SCHEMA", "information_schema"],
     binary_types: &[],
+    binary_text: None,
     numeric_types: &[
         "int8",
         "int16",
@@ -1427,6 +1590,7 @@ pub(crate) const GENERIC: EngineSpec = EngineSpec {
     resolves_srv: false,
     system_databases: &[],
     binary_types: &[],
+    binary_text: Some(BinaryText::ZeroX),
     // Db2's decimal float, which right-aligns like any number.
     numeric_types: &["decfloat"],
     type_wrappers: &[],

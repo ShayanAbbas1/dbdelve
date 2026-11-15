@@ -2694,7 +2694,7 @@ impl Workspace {
                                     let (carried_names, carried_widths) =
                                         carried_layout(table.delegate(), names, widths);
                                     *table.delegate_mut() = ResultGrid::new(result, mode)
-                                        .with_engine(engine)
+                                        .with_target(target)
                                         .with_sort(sort, sortable)
                                         .with_client_sort(client_keys.as_deref())
                                         .with_layout(&carried_names, &carried_widths)

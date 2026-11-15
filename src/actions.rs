@@ -18,6 +18,14 @@ pub(crate) struct SortColumn {
     pub(crate) column: usize,
 }
 
+/// A grid's refusal of what was typed into a cell, which the grid has
+/// nowhere to say.
+#[derive(Clone, PartialEq, Eq, Deserialize, Action)]
+#[action(namespace = dbdelve, no_json)]
+pub(crate) struct RefuseEdit {
+    pub(crate) reason: String,
+}
+
 /// The column a filter bar narrows on, picked from the bar's dropdown. The bar
 /// is named by position in the stack, which is how every one of these reaches
 /// it: the stack is what the user is pointing at.

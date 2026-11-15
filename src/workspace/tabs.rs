@@ -314,7 +314,8 @@ impl Workspace {
             });
         // Only the cells that need an input made or refilled are copied out,
         // since this runs every frame and a value can be a whole document.
-        let changed: Vec<(usize, Option<gpui::SharedString>)> = {
+        type Binary = Option<(Option<result_grid::BinaryForm>, Option<NewValue>)>;
+        let changed: Vec<(usize, Option<(gpui::SharedString, Binary)>)> = {
             let grid = results.read(cx).delegate();
             inputs.fields.resize_with(grid.columns().len(), || None);
             inputs
@@ -325,14 +326,39 @@ impl Workspace {
                     if !grid.editable(row, col) {
                         return field.is_some().then_some((col, None));
                     }
+                    let binary = grid.binary_seed_key(row, col);
+                    // A binary seed decodes the whole value, so it is made
+                    // again only when what it is made from changed.
+                    if binary.is_some()
+                        && field.as_ref().is_some_and(|field| {
+                            field
+                                .binary
+                                .as_ref()
+                                .map(|(form, pending)| (*form, pending.as_ref()))
+                                == binary
+                        })
+                    {
+                        return None;
+                    }
                     let seed = grid.edit_seed(row, col);
-                    (field.as_ref().map(|field| field.seed.as_ref()) != Some(seed))
-                        .then(|| (col, Some(gpui::SharedString::from(seed.to_string()))))
+                    let binary = binary.map(|(form, pending)| (form, pending.cloned()));
+                    (field
+                        .as_ref()
+                        .map(|field| (field.seed.as_ref(), &field.binary))
+                        != Some((seed.as_ref(), &binary)))
+                    .then(|| {
+                        let seed = gpui::SharedString::from(seed.into_owned());
+                        (col, Some((seed, binary)))
+                    })
                 })
                 .collect()
         };
         for (col, seed) in changed {
             let slot = &mut inputs.fields[col];
+            let (seed, binary) = match seed {
+                Some((seed, binary)) => (Some(seed), binary),
+                None => (None, None),
+            };
             match (slot.as_mut(), seed) {
                 (_, None) => {
                     if slot
@@ -345,9 +371,16 @@ impl Workspace {
                 }
                 (Some(field), Some(seed)) => {
                     // Text typed and not staged yet is kept over a change made
-                    // elsewhere; anything else follows the cell.
+                    // elsewhere; anything else follows the cell. Bytes typed
+                    // in another form would be read in this one, so a new
+                    // form refills the input whatever it holds.
                     let typed = field.input.read(cx).value();
-                    if typed != field.seed && typed != seed {
+                    let reformed = field
+                        .binary
+                        .as_ref()
+                        .zip(binary.as_ref())
+                        .is_some_and(|((was, _), (now, _))| was != now);
+                    if typed != field.seed && typed != seed && !reformed {
                         continue;
                     }
                     if typed != seed {
@@ -356,6 +389,7 @@ impl Workspace {
                             .update(cx, |input, cx| input.set_value(seed.clone(), window, cx));
                     }
                     field.seed = seed;
+                    field.binary = binary;
                 }
                 (None, Some(seed)) => {
                     let input = cx.new(|cx| {
@@ -374,7 +408,11 @@ impl Workspace {
                         }
                     })
                     .detach();
-                    *slot = Some(views::RowInput { input, seed });
+                    *slot = Some(views::RowInput {
+                        input,
+                        seed,
+                        binary,
+                    });
                 }
             }
         }

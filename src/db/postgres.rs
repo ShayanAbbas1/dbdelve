@@ -3345,6 +3345,17 @@ mod tests {
 
     #[test]
     #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_binary_edits_round_trip() {
+        crate::db::conformance::binary_edits_round_trip(
+            &live_profile(),
+            crate::db::Target::built_in(Engine::Postgres),
+            "public",
+            "bytea",
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
     fn live_reads_run_at_once_take_the_time_of_one() {
         super::super::at_once::reads_overlap(
             &live_profile(),

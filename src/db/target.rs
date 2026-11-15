@@ -152,6 +152,15 @@ impl Target {
         self.abilities().edits
     }
 
+    /// Whether a grid's binary cells are written back, as bytes in the
+    /// engine's own literal ([`Engine::binary_literal`]): only through a
+    /// built-in driver, the one each literal is proven against.
+    pub fn edits_bytes(self) -> bool {
+        self.driver == Driver::BuiltIn
+            && self.edits_rows()
+            && self.engine.spec().sql.binary_literal.is_some()
+    }
+
     /// Why no grid's rows are written back on this target, when none are,
     /// said when an edit is asked of one anyway.
     pub fn unwritable(self) -> Option<String> {
@@ -383,6 +392,27 @@ mod tests {
             version: "1".into(),
             executable: "dbdelve-odbc".into(),
         }))
+    }
+
+    #[test]
+    fn bytes_are_written_back_only_through_a_built_in_driver_that_spells_them() {
+        let writes = [
+            Engine::Postgres,
+            Engine::MySql,
+            Engine::MariaDb,
+            Engine::Sqlite,
+            Engine::Turso,
+            Engine::SqlServer,
+        ];
+        for engine in Engine::ALL {
+            let built_in = Target::built_in(engine).edits_bytes();
+            assert_eq!(built_in, writes.contains(&engine), "{engine:?}");
+            let plugged = Target {
+                engine,
+                driver: Driver::Plugin(odbc()),
+            };
+            assert!(!plugged.edits_bytes(), "{engine:?}");
+        }
     }
 
     #[test]

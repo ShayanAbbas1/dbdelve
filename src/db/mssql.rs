@@ -5087,4 +5087,16 @@ mod tests {
         read_only_session_refuses_a_write,
         generated_writes_round_trip,
     );
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_binary_edits_round_trip() {
+        crate::db::conformance::binary_edits_round_trip(
+            &crate::db::Connection::open(crate::db::ConnectionConfig::SqlServer(live_config()))
+                .expect("connection should open"),
+            crate::db::Target::built_in(Engine::SqlServer),
+            "dbo",
+            "varbinary(16)",
+        );
+    }
 }

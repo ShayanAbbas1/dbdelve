@@ -35,7 +35,7 @@ use sqlparser::tokenizer::{Location, Token, Tokenizer, Whitespace};
 use tree_sitter::{Node, Parser, Tree};
 
 use crate::db::{
-    ColumnDefinition, Engine, EngineSpec, ExplainMode, ExplainPrefix, FormatDialect,
+    BinaryLiteral, ColumnDefinition, Engine, EngineSpec, ExplainMode, ExplainPrefix, FormatDialect,
     IdentifierQuote, Paging, Params, ParserDialect, SkipDuplicates, SqlSpec, StatementSplit,
     Syntax, TypedExplain, UnreadableFloor, UpdateSpelling,
 };
@@ -546,7 +546,8 @@ pub(crate) fn sql_insert_row(
                 type_of(types, column),
             )
         })
-        .collect();
+        .collect::<Option<_>>()
+        .ok_or(UNSPELLED)?;
     Ok(format!(
         "INSERT INTO {} ({}) VALUES ({})",
         spec.qualified(schema, table),
@@ -608,7 +609,7 @@ pub(crate) fn sql_insert_rows(
                     NewValue::Value(text.clone().into())
                 }
             };
-            values.push(sql_literal(spec, &new, Some(data_type)));
+            values.push(sql_literal(spec, &new, Some(data_type)).ok_or(UNSPELLED)?);
         }
         tuples.push(format!("({})", values.join(", ")));
     }
@@ -762,7 +763,7 @@ fn sql_match(spec: &EngineSpec, row: Match, types: &[(String, String)]) -> Optio
             .collect();
         let mut terms = Vec::new();
         if !keys.is_empty() {
-            terms.push(sql_assignments(spec, &keys, types, " AND "));
+            terms.push(sql_assignments(spec, &keys, types, " AND ")?);
         }
         terms.extend(
             row.nulls
@@ -865,17 +866,18 @@ pub(crate) fn generated_write(spec: &SqlSpec, sql: &str) -> bool {
     // exactly-one guard can count, so each update must be that shape too.
     let updates = !kinds.is_empty()
         && kinds.iter().all(|kind| *kind == "update")
-        && (!spec.row_terms
-            || statements
-                .iter()
-                .all(|statement| one_row_update(spec, *statement, sql).is_some()));
+        && statements.iter().all(|statement| match spec.row_terms {
+            true => one_row_update(spec, *statement, sql).is_some(),
+            false => literal_sets(spec, *statement, sql),
+        });
 
     // One insert alone, or a batch of updates. A batch of inserts is a shape
     // nothing generates, so admitting it would widen the gate for nobody.
-    // A comment anywhere in an insert refuses it: MySQL runs `/*! … */` as
-    // SQL, and the grammar hides one inside a name or between tokens the shape
-    // checks below read only by kind.
-    ((kinds == ["insert"] && literal_insert(statements[0], sql) && !commented(root)) || updates)
+    // A comment anywhere refuses either: MySQL runs `/*! … */` as SQL, and
+    // the grammar hides one inside a name or between tokens the shape checks
+    // read only by kind, beside a set value or in a predicate never read.
+    ((kinds == ["insert"] && literal_insert(statements[0], sql)) || updates)
+        && !commented(root, sql)
         && !deletes_anything(root)
 }
 
@@ -1289,18 +1291,15 @@ fn sql_assignments(
     columns: &[(&str, NewValue)],
     types: &[(String, String)],
     separator: &str,
-) -> String {
+) -> Option<String> {
     columns
         .iter()
         .map(|(column, value)| {
-            format!(
-                "{} = {}",
-                spec.quote_identifier(column),
-                sql_literal(spec, value, type_of(types, column))
-            )
+            let literal = sql_literal(spec, value, type_of(types, column))?;
+            Some(format!("{} = {literal}", spec.quote_identifier(column)))
         })
-        .collect::<Vec<_>>()
-        .join(separator)
+        .collect::<Option<Vec<_>>>()
+        .map(|terms| terms.join(separator))
 }
 
 fn type_of<'a>(types: &'a [(String, String)], column: &str) -> Option<&'a str> {
@@ -1316,18 +1315,24 @@ fn literal(engine: Engine, value: &NewValue, data_type: Option<&str>) -> String 
         NewValue::Value(value) => engine.quote_value(value, data_type),
         NewValue::Null => "NULL".to_string(),
         NewValue::Default => "DEFAULT".to_string(),
+        NewValue::Bytes(bytes) => engine.binary_literal(bytes).unwrap_or_default(),
     }
 }
+
+/// What a value with no literal on the engine is refused with.
+const UNSPELLED: &str = "A value has no literal on this engine.";
 
 /// A value as it goes into a statement: quoted, or one of the two keywords that
 /// stand for there being no value to quote. Unquoted is the only way to write
 /// either — `'NULL'` and `'DEFAULT'` are the words, and a user who typed one of
-/// them into a cell meant the word.
-fn sql_literal(spec: &EngineSpec, value: &NewValue, data_type: Option<&str>) -> String {
+/// them into a cell meant the word. Bytes are the engine's literal of them,
+/// `None` where it has none.
+fn sql_literal(spec: &EngineSpec, value: &NewValue, data_type: Option<&str>) -> Option<String> {
     match value {
-        NewValue::Value(value) => spec.quote_value(value, data_type),
-        NewValue::Null => "NULL".to_string(),
-        NewValue::Default => "DEFAULT".to_string(),
+        NewValue::Value(value) => Some(spec.quote_value(value, data_type)),
+        NewValue::Null => Some("NULL".to_string()),
+        NewValue::Default => Some("DEFAULT".to_string()),
+        NewValue::Bytes(bytes) => spec.binary_literal(bytes),
     }
 }
 
@@ -1606,9 +1611,74 @@ fn literal_value(node: Node, sql: &str) -> bool {
     node.kind() == "literal" && (quoted || hex)
 }
 
-fn commented(node: Node) -> bool {
+/// Whether every value an `UPDATE` sets is one dbdelve writes: a literal
+/// [`literal_value`] reads, `NULL`, `DEFAULT`, or the engine's own literal of
+/// bytes. A function call, a concatenation, a subquery or another column is a
+/// value dbdelve did not write. The predicate is not read here.
+fn literal_sets(spec: &SqlSpec, statement: Node, sql: &str) -> bool {
+    let Some(update) = statement.named_child(0) else {
+        return false;
+    };
+    let mut cursor = update.walk();
+    let assignments: Vec<_> = update
+        .named_children(&mut cursor)
+        .filter(|node| node.kind() == "assignment")
+        .collect();
+    !assignments.is_empty()
+        && assignments.iter().all(|assignment| {
+            assignment
+                .child_by_field_name("right")
+                .is_some_and(|value| {
+                    literal_value(value, sql)
+                        || null_literal(value, sql)
+                        || default_keyword(value, sql)
+                        || bytes_literal(spec, value, sql)
+                })
+        })
+}
+
+/// `DEFAULT`, which this grammar reads as a column of that name.
+fn default_keyword(node: Node, sql: &str) -> bool {
+    node.kind() == "field" && sql.get(node.byte_range()) == Some("DEFAULT")
+}
+
+/// The engine's literal of bytes ([`BinaryLiteral`]), as a set value only,
+/// so never a deleted row's key or an inserted value. Hex digits in pairs between the quotes and
+/// nothing else, so nothing in it can end it early, and in an escape string
+/// no backslash but the one that opens `\x`. The grammar reads `X'00' 'aa'`
+/// as one literal, which is why the text and not the node is checked.
+fn bytes_literal(spec: &SqlSpec, node: Node, sql: &str) -> bool {
+    let Some(text) = sql
+        .get(node.byte_range())
+        .filter(|_| node.kind() == "literal")
+    else {
+        return false;
+    };
+    let digits = match spec.binary_literal {
+        Some(BinaryLiteral::EscapeString) => text.strip_prefix(r"E'\\x"),
+        Some(BinaryLiteral::XQuoted) => text.strip_prefix("X'"),
+        // Read by `literal_value`, which admits it as a binary key too.
+        Some(BinaryLiteral::ZeroX) | None => None,
+    };
+    digits
+        .and_then(|rest| rest.strip_suffix('\''))
+        .is_some_and(|digits| {
+            digits.len() % 2 == 0 && digits.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+}
+
+/// A comment anywhere under `node`. The grammar reads MySQL's `#` comment as
+/// an operator running to the end of the line, so that counts too.
+fn commented(node: Node, sql: &str) -> bool {
     let mut cursor = node.walk();
-    matches!(node.kind(), "comment" | "marginalia") || node.children(&mut cursor).any(commented)
+    matches!(node.kind(), "comment" | "marginalia")
+        || (node.kind() == "op_other"
+            && sql
+                .get(node.byte_range())
+                .is_some_and(|text| text.starts_with('#')))
+        || node
+            .children(&mut cursor)
+            .any(|child| commented(child, sql))
 }
 
 /// [`parse`] for a gate, refusing a statement holding a string or a quoted
@@ -2293,9 +2363,10 @@ pub(crate) fn sql_update_batch(spec: &EngineSpec, rows: &[PendingRow]) -> Result
 /// column's assignment cast, so `'123'` lands in an `int4` exactly as `123`
 /// would, and SQLite applies the column's type affinity to the same effect. A
 /// cast dbdelve chose for itself could only ever be the wrong one. A cleared cell
-/// is therefore the empty string, and [`NewValue`]'s other two arms are the
-/// keywords: three different writes, which is the whole point of spelling two
-/// of them as something other than a value.
+/// is therefore the empty string, and the keywords are [`NewValue`]'s arms of
+/// their own: three different writes, which is the whole point of spelling two
+/// of them as something other than a value. Bytes are the engine's literal of
+/// them, and `None` where it has none.
 ///
 /// `keys` carries plain values, because a row identified by a `NULL` is a row
 /// `=` does not find; the caller drops such a row before it gets here.
@@ -2322,7 +2393,7 @@ fn sql_update_statement(
     }
 
     let table = spec.qualified(schema, table);
-    let assignments = sql_assignments(spec, sets, types, ", ");
+    let assignments = sql_assignments(spec, sets, types, ", ")?;
     let predicate = sql_match(spec, row, types)?;
     Some(match update {
         UpdateSpelling::Update => format!("UPDATE {table} SET {assignments} WHERE {predicate}"),
@@ -6906,6 +6977,136 @@ mod tests {
         assert!(odd.ends_with(r#""hash" = N'0x1 OR 1=1'"#), "{odd}");
         assert!(!is_generated_write(r#"DELETE FROM t WHERE "id" = 7"#));
         assert!(!is_generated_write(r#"DELETE FROM t WHERE "id" = 0x"#));
+    }
+
+    #[test]
+    fn a_backticked_name_is_a_column_or_table_and_never_a_value_set() {
+        for engine in [Engine::MySql, Engine::MariaDb] {
+            let bytes = "UPDATE `client-test`.`alerts` SET `payload` = X'00FF' WHERE `id` = '7'";
+            assert!(is_generated_write_on(engine, bytes), "{engine:?}");
+            for value in [
+                "`payload`",
+                "`client-test`.`alerts`.`id`",
+                "`0x00`",
+                "`X'00'`",
+            ] {
+                let sql = format!(
+                    "UPDATE `client-test`.`alerts` SET `payload` = {value} WHERE `id` = '7'"
+                );
+                assert!(!is_generated_write_on(engine, &sql), "{engine:?} {sql}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_comment_anywhere_in_an_update_refuses_it() {
+        // MySQL and MariaDB run a `/*! … */` body; Oracle and others read
+        // `/*+ … */` as hints. Nothing dbdelve generates carries a comment.
+        for engine in [
+            Engine::MySql,
+            Engine::MariaDb,
+            Engine::Postgres,
+            Engine::SqlServer,
+        ] {
+            let plain = r#"UPDATE "s"."t" SET "a" = '0' WHERE "id" = '7'"#;
+            assert!(is_generated_write_on(engine, plain), "{engine:?}");
+            for sql in [
+                r#"UPDATE "s"."t" SET "a" = '0' /*! + SLEEP(1) */ WHERE "id" = '7'"#,
+                r#"UPDATE "s"."t" SET "a" = /*+ x */ '0' WHERE "id" = '7'"#,
+                "UPDATE \"s\".\"t\" SET \"a\" = '0' -- x\n WHERE \"id\" = '7'",
+                "UPDATE \"s\".\"t\" SET \"a\" = '0' # x\n WHERE \"id\" = '7'",
+                r#"UPDATE "s"."t" SET "a" = '0' WHERE "id" = '7' /*! OR 1=1 */"#,
+                r#"UPDATE "s"."t" SET "a" = '0' WHERE /*+ x */ "id" = '7'"#,
+                "UPDATE \"s\".\"t\" SET \"a\" = '0' WHERE \"id\" = '7' -- x",
+                "UPDATE \"s\".\"t\" SET \"a\" = '0' WHERE \"id\" = '7' # x",
+                "UPDATE \"s\".\"t\" SET \"a\" = '0' WHERE \"id\" = '7' # x\n OR 1=1",
+                r#"BEGIN; UPDATE "s"."t" SET "a" = '0' WHERE "id" = /*! 7 OR */ '7'; COMMIT"#,
+            ] {
+                assert!(!is_generated_write_on(engine, sql), "{engine:?} {sql}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_update_sets_only_values_dbdelve_writes_and_bytes_in_the_engines_own_literal() {
+        let update = |value: &str| format!(r#"UPDATE "s"."t" SET "b" = {value} WHERE "id" = '7'"#);
+        let bytes = [
+            (Engine::Postgres, r"E'\\x6869'", r"E'\\x'"),
+            (Engine::MySql, "X'6869'", "X''"),
+            (Engine::MariaDb, "X'6869'", "X''"),
+            (Engine::Sqlite, "X'6869'", "X''"),
+            (Engine::Turso, "X'6869'", "X''"),
+            (Engine::SqlServer, "0x6869", "0x00"),
+        ];
+        for (engine, hi, short) in bytes {
+            for value in [hi, short, "'x'", "NULL", "DEFAULT"] {
+                assert!(
+                    is_generated_write_on(engine, &update(value)),
+                    "{engine:?} {value}"
+                );
+            }
+            let set = format!(r#"UPDATE "s"."t" SET "a" = 'x', "b" = {hi} WHERE "id" = '7'"#);
+            assert!(is_generated_write_on(engine, &set), "{engine:?} {set}");
+            // A value that computes, whatever it computes from.
+            for value in [
+                "now()",
+                "'a' || 'b'",
+                "(SELECT 1)",
+                "1 + 1",
+                "1",
+                "'a' 'b'",
+                "$$x$$",
+                r#""a""#,
+                "default",
+                &format!("{hi} || {hi}"),
+                &format!("({hi})"),
+                &format!("{hi}::bytea"),
+                &format!("{hi} 'aa'"),
+                &format!("upper({hi})"),
+                &format!("(SELECT {hi})"),
+            ] {
+                assert!(
+                    !is_generated_write_on(engine, &update(value)),
+                    "{engine:?} {value}"
+                );
+            }
+            // A value set, never a deleted row's key nor an inserted value.
+            if engine != Engine::SqlServer {
+                for sql in [
+                    format!(r#"DELETE FROM "s"."t" WHERE "id" = {hi}"#),
+                    format!(r#"INSERT INTO "s"."t" ("b") VALUES ({hi})"#),
+                ] {
+                    assert!(!is_generated_write_on(engine, &sql), "{engine:?} {sql}");
+                }
+            }
+        }
+        // Each engine's own spelling, and nothing that only looks like one.
+        for (engine, value) in [
+            (Engine::Postgres, "X'6869'"),
+            (Engine::Postgres, r"E'\x6869'"),
+            (Engine::Postgres, r"e'\\x6869'"),
+            (Engine::Postgres, r"E'\\x686'"),
+            (Engine::Postgres, r"E'\\x68\\'"),
+            (Engine::Postgres, r"E'\\x68' || '\\'"),
+            (Engine::Postgres, r"E'\\x6869''; DROP TABLE t; --'"),
+            (Engine::MySql, r"E'\\x6869'"),
+            (Engine::MySql, "x'6869'"),
+            (Engine::MySql, "X'686'"),
+            (Engine::MySql, "X'68 69'"),
+            (Engine::MySql, "X'6G'"),
+            (Engine::Sqlite, "X'6869' 'aa'"),
+            (Engine::SqlServer, "X'6869'"),
+            (Engine::SqlServer, "0x"),
+            (Engine::DuckDb, "X'6869'"),
+            (Engine::DuckDb, r"E'\\x6869'"),
+            (Engine::Snowflake, "X'6869'"),
+            (Engine::Generic, r"E'\\x6869'"),
+        ] {
+            assert!(
+                !is_generated_write_on(engine, &update(value)),
+                "{engine:?} {value}"
+            );
+        }
     }
 
     #[test]

@@ -27,6 +27,7 @@ const FAKE: EngineSpec = EngineSpec {
     resolves_srv: false,
     system_databases: &[],
     binary_types: &[],
+    binary_text: None,
     numeric_types: &[],
     type_wrappers: &[],
     hints: Hints::DEFAULT,

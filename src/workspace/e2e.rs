@@ -3873,6 +3873,127 @@ fn disconnect_is_refused_while_a_grid_holds_unapplied_edits(cx: &mut TestAppCont
 }
 
 #[gpui::test]
+fn enter_on_text_that_spells_no_bytes_keeps_the_input_open_and_says_why(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            "create table blobs (id integer primary key, b blob); \
+             insert into blobs values (1, x'6869');",
+        );
+        cx.simulate_input("select * from blobs");
+        cx.simulate_keystrokes("secondary-enter");
+        settle(cx);
+        cx.simulate_keystrokes("secondary-k r");
+        settle(cx);
+        press(cx, "right");
+        press(cx, "enter");
+        assert!(!grid_has_keyboard(&workspace, cx), "the input has it");
+
+        cx.simulate_input("zz");
+        press(cx, "enter");
+        assert!(
+            !grid_has_keyboard(&workspace, cx),
+            "the input is still open"
+        );
+        workspace.read_with(cx, |workspace, cx| {
+            let session = &workspace.profile().expect("a connection in front").session;
+            assert_eq!(
+                session.shown_notice(),
+                Some("This is not hex: pairs of digits 0-9 and A-F, so it was not staged.")
+            );
+            // A refusal of the text, not of the mode.
+            assert!(session.pending_run.is_none());
+            let grid = session.active_results().expect("rows on screen");
+            assert!(!grid.read(cx).delegate().has_pending());
+        });
+
+        press(cx, "escape");
+        assert!(grid_has_keyboard(&workspace, cx));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_new_parse_as_form_closes_the_input_on_its_column_and_gives_the_grid_the_keyboard(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            "create table blobs (id integer primary key, b blob); \
+             insert into blobs values (1, x'6869');",
+        );
+        cx.simulate_input("select * from blobs");
+        cx.simulate_keystrokes("secondary-enter");
+        settle(cx);
+        cx.simulate_keystrokes("secondary-k r");
+        settle(cx);
+        press(cx, "right");
+        press(cx, "enter");
+        assert!(!grid_has_keyboard(&workspace, cx), "the input has it");
+
+        let grid = workspace.read_with(cx, |workspace, _| {
+            let session = &workspace.profile().expect("a connection in front").session;
+            session.active_results().expect("rows on screen").clone()
+        });
+        grid.update_in(cx, |table, window, cx| {
+            crate::result_grid::parse_as(table, 1, crate::result_grid::BinaryForm::Text, window, cx)
+        });
+        settle(cx);
+        assert!(grid_has_keyboard(&workspace, cx));
+        assert!(!grid.read_with(cx, |grid, _| grid.delegate().has_pending()));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_new_parse_as_form_refills_a_row_panel_draft_typed_in_the_old_one(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            "create table blobs (id integer primary key, b blob); \
+             insert into blobs values (1, x'4142');",
+        );
+        cx.simulate_input("select * from blobs");
+        cx.simulate_keystrokes("secondary-enter");
+        settle(cx);
+        cx.simulate_keystrokes("secondary-k r");
+        settle(cx);
+        press(cx, "right");
+        press(cx, "secondary-shift-e");
+        let field = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, cx| {
+                let inputs = workspace.row_panel.inputs.as_ref().expect("Edit mode");
+                let field = inputs.fields[1].as_ref().expect("an input on the blob");
+                (
+                    field.input.clone(),
+                    field.input.read(cx).value().to_string(),
+                )
+            })
+        };
+        let (input, seeded) = field(&workspace, cx);
+        assert_eq!(seeded, "x'4142'");
+
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| input.set_value("4142!", window, cx));
+        });
+        settle(cx);
+        assert_eq!(field(&workspace, cx).1, "4142!", "a draft is kept");
+
+        let grid = workspace.read_with(cx, |workspace, _| {
+            let session = &workspace.profile().expect("a connection in front").session;
+            session.active_results().expect("rows on screen").clone()
+        });
+        grid.update_in(cx, |table, window, cx| {
+            crate::result_grid::parse_as(table, 1, crate::result_grid::BinaryForm::Text, window, cx)
+        });
+        settle(cx);
+        assert_eq!(field(&workspace, cx).1, "AB");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn disconnect_is_refused_while_an_export_runs(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");

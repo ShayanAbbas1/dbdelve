@@ -1995,6 +1995,9 @@ pub(crate) fn update_batch(rows: &[PendingRow]) -> Result<String, String> {
                         "{field}: MongoDB has no default for a field to take."
                     ));
                 }
+                NewValue::Bytes(_) => {
+                    return Err(format!("{field}: binary values cannot be edited here."));
+                }
             };
             sets.push((field.clone(), value));
         }

@@ -65,13 +65,14 @@ use actions::{
     MenuImportRowsFromClipboard, Minimize, MoveTabLeft, MoveTabRight, NewConnection, NewProject,
     NewQuery, NewRow, NextEdit, NextPage, NextProfile, NextResult, NextTab, OpenLogsFolder,
     OpenReference, OpenSettings, PreviousEdit, PreviousPage, PreviousProfile, PreviousResult,
-    PreviousTab, Quit, RefreshConnection, RefreshRelation, RemoveFilter, RequestWriteMode,
-    ResetConfirmations, ResetEditorZoom, RunQuery, SaveQuery, SearchEverything, SelectDatabase,
-    SelectTheme, SetDefault, SetDefaultRowLimit, SetEmpty, SetFilterColumn, SetFilterOperator,
-    SetFilterRaw, SetMode, SetNull, SetQueryLimit, SetRowLimit, ShowAllColumns, ShowEditor,
-    ShowMessages, ShowReferences, SortActiveColumn, SortColumn, SubmitConnection, SwitchConnection,
-    ToggleComment, ToggleFilterJoin, ToggleNextJoin, TogglePinColumn, ToggleResults, ToggleRowEdit,
-    ToggleRowPanel, ToggleSidebar, ToggleStructure, ZoomEditorIn, ZoomEditorOut,
+    PreviousTab, Quit, RefreshConnection, RefreshRelation, RefuseEdit, RemoveFilter,
+    RequestWriteMode, ResetConfirmations, ResetEditorZoom, RunQuery, SaveQuery, SearchEverything,
+    SelectDatabase, SelectTheme, SetDefault, SetDefaultRowLimit, SetEmpty, SetFilterColumn,
+    SetFilterOperator, SetFilterRaw, SetMode, SetNull, SetQueryLimit, SetRowLimit, ShowAllColumns,
+    ShowEditor, ShowMessages, ShowReferences, SortActiveColumn, SortColumn, SubmitConnection,
+    SwitchConnection, ToggleComment, ToggleFilterJoin, ToggleNextJoin, TogglePinColumn,
+    ToggleResults, ToggleRowEdit, ToggleRowPanel, ToggleSidebar, ToggleStructure, ZoomEditorIn,
+    ZoomEditorOut,
 };
 use completion::SchemaCompletions;
 use connection_form::{ConnectionForm, default_profile_name};
