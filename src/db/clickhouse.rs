@@ -703,6 +703,28 @@ impl Connection {
         }
     }
 
+    /// A session on `database`, for the (connection, database) pair: this
+    /// connection's live config -- its resolved password, over the agent that
+    /// holds its tunnel -- with the database replaced, which the session's
+    /// first request enters with a `USE` as [`Self::enter`] does for the
+    /// profile's. Unlike [`Self::apart`] it shares nothing mutable: its hold,
+    /// running requests and described tables are its own, since a table
+    /// described in one database says nothing of another's. It starts under
+    /// the hold this connection has, and the caller applies every later one.
+    pub fn on_database(&self, database: &str) -> Result<Self, DbError> {
+        Ok(Self {
+            config: Arc::new(ServerConfig {
+                database: database.to_string(),
+                ..(*self.config).clone()
+            }),
+            read_only: Arc::new(AtomicBool::new(self.read_only.load(Ordering::SeqCst))),
+            session: Arc::default(),
+            running: Arc::default(),
+            described: Arc::default(),
+            ..self.clone()
+        })
+    }
+
     pub fn catalog(&self) -> Result<Catalog, DbError> {
         assemble_catalog(self.internal_query(RELATIONS_SQL)?, QueryResult::default())
     }
@@ -3829,6 +3851,28 @@ mod live {
             .iter()
             .map(|c: &Column| c.data_type.as_deref())
             .collect()
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_a_session_on_another_database_is_on_it() {
+        let profile = live();
+        let session = profile
+            .on_database("system")
+            .expect("a session on another database should open");
+        let named = |connection: &Connection| {
+            ran(connection, "SELECT currentDatabase()").rows[0]
+                .iter()
+                .next()
+                .flatten()
+                .map(str::to_string)
+        };
+        assert_eq!(named(&session).as_deref(), Some("system"));
+        assert_eq!(
+            named(&profile).as_deref(),
+            Some("dbdelve_dev"),
+            "the profile's own connection is where it was"
+        );
     }
 
     #[test]

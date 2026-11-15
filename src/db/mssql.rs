@@ -588,6 +588,10 @@ enum Lost {
     /// The `SET ROWCOUNT` a capped read went out under could not be taken
     /// back, and every statement after it would be capped too.
     Capped,
+    /// A batch moved the session to another database and the `USE` back
+    /// failed: what was said, and the session left there would run the next
+    /// statement, an edit's among them, on that database.
+    Unmoved(String),
 }
 
 impl Session {
@@ -902,6 +906,36 @@ impl Connection {
         }
     }
 
+    /// A session on `database`, for the (connection, database) pair: a login
+    /// from this connection's live server config -- its resolved password,
+    /// over the tunnel it already holds -- with the database replaced, so the
+    /// login itself lands there and no `USE` is written. Its `server` names
+    /// that database, which is what [`held_to_database`] restores after a
+    /// batch moves the session. It shares no session or stop state with this
+    /// connection, and carries no read-only hold of its own; the caller
+    /// applies it.
+    pub fn on_database(&self, database: &str) -> Result<Self, DbError> {
+        let mut connection = Self {
+            session: Arc::new(Mutex::new(None)),
+            in_flight: Arc::default(),
+            server: ServerConfig {
+                database: database.to_string(),
+                ..self.server.clone()
+            },
+            alongside: false,
+            // Its own: a Cancel on this session would otherwise drop the next
+            // statement of a diagram read on the first.
+            graph: GraphCancel::default(),
+            ..self.clone()
+        };
+        let mut session = connection.connect()?;
+        // The server's spelling, as `open` asks for it: a restore after a
+        // `USE` and a reconnect then name it as the server does.
+        connection.server.database = current_database(&mut session)?;
+        *connection.session.lock().expect("unshared until returned") = Some(session);
+        Ok(connection)
+    }
+
     fn in_flight(&self) -> std::sync::MutexGuard<'_, InFlight> {
         // Nothing panics while holding it, and it holds plain flags.
         self.in_flight
@@ -1022,6 +1056,7 @@ impl Connection {
                 ),
                 (None, Some(Lost::Panicked(message))) => message,
                 (None, Some(Lost::Capped)) => UNCAPPED.into(),
+                (None, Some(Lost::Unmoved(message))) => format!("The statement ran, but {message}"),
                 (None, None) => CANCELLED.into(),
                 // What dbdelve asks after the statement is what was stopped,
                 // and the statement's own work stands.
@@ -1033,6 +1068,7 @@ impl Connection {
                         ),
                         Some(Lost::Panicked(message)) => format!("then {message}"),
                         Some(Lost::Capped) => UNCAPPED.into(),
+                        Some(Lost::Unmoved(message)) => message,
                         None => "Cancel arrived after that.".into(),
                     };
                     match ran.result {
@@ -2277,7 +2313,17 @@ fn held_to_database(session: &mut Session, database: &str) -> Result<(), DbError
     if current.eq_ignore_ascii_case(database) {
         return Ok(());
     }
-    ask(session, &format!("USE [{}]", database.replace(']', "]]")))?;
+    if let Err(error) = ask(session, &format!("USE [{}]", database.replace(']', "]]"))) {
+        // Lost, so the run closes it and logs in again on `database`.
+        if session.lost.is_none() {
+            session.lost = Some(Lost::Unmoved(format!(
+                "it moved the session to database {current}, and moving it back to {database} \
+                 failed: {}",
+                error.message
+            )));
+        }
+        return Err(error);
+    }
     Err(plain_error(format!(
         "The statement moved the session to database {current}, and dbdelve moved it back to \
          {database}: this connection's explorer, and every statement dbdelve writes, name \
@@ -2939,6 +2985,37 @@ mod tests {
         .expect("a database name is read in any case");
 
         assert_eq!(connection.current_database(), named);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_session_on_another_database_is_on_it() {
+        let profile = live();
+        let named = |connection: &Connection| {
+            let here = connection
+                .query("SELECT DB_NAME()", Fetch::default())
+                .unwrap();
+            first(&here).first().copied().flatten().map(str::to_string)
+        };
+        let session = profile
+            .on_database("master")
+            .expect("a session on another database should open");
+        assert_eq!(named(&session).as_deref(), Some("master"));
+
+        let error = session
+            .query("USE dbdelve_dev; SELECT 1", Fetch::default())
+            .expect_err("leaving the session's database is reported");
+        assert!(error.message.contains("moved it back"), "{}", error.message);
+        assert_eq!(
+            named(&session).as_deref(),
+            Some("master"),
+            "the hold restores the session's own database, not the profile's"
+        );
+        assert_eq!(
+            named(&profile).as_deref(),
+            Some("dbdelve_dev"),
+            "the profile's own connection is where it was"
+        );
     }
 
     #[test]

@@ -395,6 +395,36 @@ Decided, and not to be re-litigated:
     account.
   - MariaDB: `information_schema.TABLES` where `TABLE_TYPE = 'SEQUENCE'`; a
     server before 10.3 answers no rows. MySQL has none and sends no statement.
+- **Sessions on other databases.** A database of a server other than the
+  profile's gets one session per (profile, database), opened lazily the first
+  time it is expanded by `Connection::on_database` and sharing nothing mutable
+  with the profile's own session, so moving one never moves the other. Each is
+  built from the live connection -- its resolved password and its tunnel --
+  and never from `profile.config`, which holds neither. It moves by the
+  driver's own call, and `on_database` writes no SQL the user could see or the
+  gates would judge:
+  - Postgres: `connect` with the database replaced and no schema picked (the
+    profile's schema may not exist there), over the same route, with a server
+    config and a side session of its own; it is not `alongside`, which shares
+    both. Not warmed, so its side session opens when a sizes read asks.
+  - SQL Server: a login whose default database is the one named, over the
+    tunnel the connection holds; `held_to_database` then restores that
+    database, not the profile's, after a batch of the user's moves it.
+  - ClickHouse: the config with the database replaced, a session, hold,
+    running requests and described tables of its own; the first request enters
+    the database as it does for the profile's.
+  - MySQL and MariaDB: a connection whose handshake names the database.
+  - DuckDB: a `go` to the attached database on a pick of its own. Redis:
+    `SELECT` of the number the name carries, refused before dialling when the
+    name is none. Snowflake: the config with the database set and no schema.
+    MongoDB: the same client reading the database, with its own statements in
+    flight.
+  Every one is held to reads when the profile is Read-only, inside the open
+  before it is stored and again on every mode change (`Profile::sessions_to_hold`).
+  The cost is one server connection per database in use -- about two on
+  Postgres while its catalog reads, the second being the side session sizes
+  use -- counted against a tunnel's or a pooler's limits like any other, and
+  all end when the profile's connection does.
 - **Snowflake's catalog needs a running warehouse.** It is read through
   `INFORMATION_SCHEMA`, so connecting resumes a suspended warehouse and so does
   opening a Structure tab. That view has nothing naming the columns of a key,

@@ -92,6 +92,13 @@ pub(crate) struct Profile {
     pub(crate) schema_refresh: Option<u64>,
     /// What the server listed the last time Select Database asked.
     pub(crate) databases: Databases,
+    /// The session opened for each other database of the server, by name,
+    /// for the connections tree to read its catalog over. Never the profile's
+    /// own connection, and dropped with it.
+    pub(crate) bound: HashMap<String, BoundSession>,
+    /// What each other database's catalog has got to, by name. A database
+    /// with no entry has not been asked for.
+    pub(crate) database_catalogs: HashMap<String, CatalogState>,
     /// Whether the connection opened on another database than the one the
     /// tabs were opened on, because the picked one was no longer there. What
     /// is left of that database goes on the next frame, which has the window
@@ -281,6 +288,50 @@ impl Profile {
             ProfileState::Connected(connection) => connection.draws_diagrams(target),
             _ => target.draws_diagrams(),
         }
+    }
+
+    /// Every session open for another database, which a read-only hold has
+    /// to reach as well as the profile's own connection. A session still
+    /// opening is not here; its landing applies the hold itself.
+    pub(crate) fn sessions_to_hold(&self) -> Vec<Arc<Bound>> {
+        self.bound
+            .values()
+            .filter_map(|session| match session {
+                BoundSession::Open(bound) => Some(bound.clone()),
+                BoundSession::Opening => None,
+            })
+            .collect()
+    }
+
+    /// Whether `session` is still the one registered for `database`. One
+    /// that was lost and replaced since has nothing left to say about it.
+    pub(crate) fn is_registered(&self, database: &str, session: &Arc<Bound>) -> bool {
+        matches!(
+            self.bound.get(database),
+            Some(BoundSession::Open(open)) if Arc::ptr_eq(open, session)
+        )
+    }
+
+    /// Take out `session`, found lost, while it is still the one registered
+    /// for `database`, so the next read or run opens another. A replacement
+    /// registered since is left alone.
+    pub(crate) fn lose_session(&mut self, database: &str, session: &Arc<Bound>) {
+        if self.is_registered(database, session) {
+            self.bound.remove(database);
+        }
+    }
+
+    /// Let go of every session opened for another database, and what was read
+    /// over them: the connection they were opened from has ended or been
+    /// replaced, and a landing issued to it is dropped by its generation.
+    ///
+    /// ponytail: a session lives as long as its connection and ends with
+    /// nothing else, so a server with many databases expanded holds one
+    /// session each until it disconnects. The upgrade is to close one when
+    /// the last tab bound to it is gone and its row is folded.
+    pub(crate) fn drop_sessions(&mut self) {
+        self.bound.clear();
+        self.database_catalogs.clear();
     }
 
     pub(crate) fn connection(&self) -> Option<Connection> {
@@ -1539,6 +1590,37 @@ pub(crate) enum CatalogState {
     /// The relations, and how far the routines behind them have got.
     Loaded(Catalog, Routines),
     Failed(String),
+}
+
+/// A session for one (profile, database) pair other than the profile's own.
+pub(crate) enum BoundSession {
+    /// Being opened on the blocking pool. Holds the database's place, so a
+    /// second expand does not open a second session.
+    Opening,
+    /// Shared by every read and run that goes to the database. The `Arc` is
+    /// the session's identity: what was read or run over one that has since
+    /// been lost and replaced lands on none of the replacement's state
+    /// ([`Profile::is_registered`]).
+    Open(Arc<Bound>),
+}
+
+/// A session open for another database of a profile's server, and what is
+/// kept with it.
+pub(crate) struct Bound {
+    pub(crate) connection: Connection,
+    /// Orders `set_mode`'s holds on this session as [`Profile::holds`] does
+    /// on the profile's own connection. A line of its own, so a hold here
+    /// waits behind nothing running on another session.
+    pub(crate) holds: HoldLine,
+}
+
+impl Bound {
+    pub(crate) fn new(connection: Connection) -> Arc<Self> {
+        Arc::new(Self {
+            connection,
+            holds: HoldLine::default(),
+        })
+    }
 }
 
 /// The second half of a loaded catalog. A catalog whose routines are not

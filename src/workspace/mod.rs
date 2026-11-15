@@ -235,6 +235,15 @@ pub(crate) struct PendingImport {
 
 pub(crate) struct Workspace {
     pub(crate) profiles: Vec<Profile>,
+    /// How many connections each mode change's read-only hold was handed to,
+    /// in order: what the tests ask of the fan-out, which runs on the
+    /// blocking pool where nothing can be counted.
+    #[cfg(test)]
+    pub(crate) held: Vec<usize>,
+    /// The database each session opened for another database was issued for,
+    /// in order: a landing that opens again is a second entry.
+    #[cfg(test)]
+    pub(crate) opened: Vec<String>,
     /// Profiles on an engine this build cannot open, held as they were read
     /// and written back by `remember_profiles`; never restored.
     pub(crate) unavailable: Vec<store::UnavailableProfile>,
@@ -555,6 +564,10 @@ impl Workspace {
             collapsed_projects: HashSet::new(),
             theme_before_preview: None,
             opacity_input,
+            #[cfg(test)]
+            held: Vec::new(),
+            #[cfg(test)]
+            opened: Vec::new(),
             focus: cx.focus_handle(),
             explorer_focus: cx.focus_handle(),
             connections: sidebar::ConnectionsSidebar::new(window, cx),

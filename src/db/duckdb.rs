@@ -216,6 +216,31 @@ impl Connection {
         })
     }
 
+    /// A session on `database` of this instance, for the (connection,
+    /// database) pair: opened from the instance as [`Self::alongside`] is,
+    /// but with a `pick` of its own, which `alongside` shares with the
+    /// connection it came from, so moving either never moves the other. It
+    /// starts on the database with no schema picked, through the same `USE`
+    /// every move makes. It carries no read-only hold; there is none to take
+    /// on DuckDB, whose gate is the boundary.
+    pub fn on_database(&self, database: &str) -> Result<Self, DbError> {
+        let connection = lock(&self.origin)?
+            .try_clone()
+            .map_err(|error| plain_error(error.to_string()))?;
+        let pick = Pick {
+            database: Some(database.to_string()),
+            schema: None,
+        };
+        self.go(&connection, &pick)?;
+        Ok(Self {
+            interrupt: connection.interrupt_handle(),
+            connection: Arc::new(Mutex::new(connection)),
+            pick: Arc::new(Mutex::new(pick)),
+            unpicked: None,
+            ..self.clone()
+        })
+    }
+
     fn pick(&self) -> std::sync::MutexGuard<'_, Pick> {
         self.pick
             .lock()
@@ -2507,6 +2532,26 @@ mod tests {
         // it sees one made on another.
         let beside = connection.alongside().unwrap();
         assert_eq!(beside.databases().unwrap().names, ["memory", "other"]);
+    }
+
+    #[test]
+    fn a_session_on_another_database_leaves_the_first_where_it_was() {
+        let connection = memory("ATTACH ':memory:' AS other");
+        let session = connection.on_database("other").unwrap();
+        assert_eq!(at(&session), on("other", "main"));
+        assert_eq!(at(&connection), on("memory", "main"));
+        // The pick is the session's own: a schema picked on the first would
+        // otherwise land on the second when it is next applied.
+        connection.set_schema(Some("x"));
+        session.apply_pick().unwrap();
+        assert_eq!(at(&session), on("other", "main"));
+        // And the other way: moving the session's pick leaves the first's.
+        session.set_database(Some("memory"));
+        connection.set_schema(None);
+        connection.apply_pick().unwrap();
+        assert_eq!(at(&connection), on("memory", "main"));
+        // The database it names has to be there.
+        assert!(connection.on_database("gone").is_err());
     }
 
     #[test]

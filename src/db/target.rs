@@ -33,6 +33,15 @@ pub enum Levels {
     DatabaseHoldsObjects,
 }
 
+impl Levels {
+    /// Whether the databases of the server other than the connection's own
+    /// are rows of the tree, each opened over a session of its own. Where the
+    /// catalog lists them as schemas it already holds them.
+    pub fn lists_other_databases(self) -> bool {
+        matches!(self, Self::DatabaseThenSchema | Self::DatabaseHoldsObjects)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Target {
     pub engine: Engine,
