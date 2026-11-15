@@ -1631,7 +1631,10 @@ impl ResultGrid {
                     Some(Some(parsed)) => Some(parsed.as_str()),
                     _ => cell,
                 };
-                let json = cell.and_then(indented_json);
+                let unparsed = matches!(parsed, Some(None));
+                // The server's own spelling, shown as such rather than read as
+                // a document because it happens to parse as one.
+                let json = cell.filter(|_| !unparsed).and_then(indented_json);
                 Field {
                     name: column.name.clone().into(),
                     // The cell's own type where it has one: the column's is `mixed`
@@ -1664,7 +1667,7 @@ impl ResultGrid {
                         .into()
                     }),
                     json: json.is_some(),
-                    unparsed: matches!(parsed, Some(None)),
+                    unparsed,
                     edit,
                 }
             })
@@ -4847,6 +4850,23 @@ mod tests {
             ResultGrid::restored(&grid.stored(), Mode::ReadWrite).with_engine(db::Engine::Postgres);
         assert_eq!(restored.binary_form(1), Some(BinaryForm::Text));
         assert_eq!(restored.shown(0, 1).as_deref(), Some("hello"));
+
+        let mut document = ResultGrid::new(
+            QueryResult {
+                columns: vec![typed("payload", "bytea")],
+                rows: rows(vec![vec![Some("[1, 2]".into())]]),
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        )
+        .with_engine(db::Engine::Postgres);
+        document.set_binary_form(0, BinaryForm::Base64);
+        let field = document.fields(0).remove(0);
+        assert!(
+            field.unparsed && !field.json,
+            "not bytes, and not a document either"
+        );
+        assert_eq!(field.value.as_deref(), Some("[1, 2]"));
 
         // A menu opened on a wider result than the one now held.
         grid.set_binary_form(9, BinaryForm::Base64);
