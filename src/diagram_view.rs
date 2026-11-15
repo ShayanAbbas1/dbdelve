@@ -3013,27 +3013,35 @@ fn paint_dots(bounds: Bounds<Pixels>, transform: Transform, t: Theme, window: &m
         width: f32::from(bounds.size.width),
         height: f32::from(bounds.size.height),
     };
-    let world = transform.world_rect(screen);
     let colour: Hsla = t.border.into();
-    let mut y = (world.y / step).floor() * step;
-    while y <= world.bottom() {
-        let mut x = (world.x / step).floor() * step;
-        while x <= world.right() {
-            let at = transform.to_screen(Point::new(x, y));
-            window.paint_quad(gpui::fill(
-                Bounds {
-                    origin: point(
-                        bounds.origin.x + px(at.x - DOT_SIZE / 2.0),
-                        bounds.origin.y + px(at.y - DOT_SIZE / 2.0),
-                    ),
-                    size: size(px(DOT_SIZE), px(DOT_SIZE)),
-                },
-                colour,
-            ));
-            x += step;
-        }
-        y += step;
+    for dot in dot_grid(transform.world_rect(screen), step) {
+        let at = transform.to_screen(dot);
+        window.paint_quad(gpui::fill(
+            Bounds {
+                origin: point(
+                    bounds.origin.x + px(at.x - DOT_SIZE / 2.0),
+                    bounds.origin.y + px(at.y - DOT_SIZE / 2.0),
+                ),
+                size: size(px(DOT_SIZE), px(DOT_SIZE)),
+            },
+            colour,
+        ));
     }
+}
+
+/// The grid's points over `world`, counted rather than added up: far enough
+/// out, and a restored pan can be anything finite, adding a step to an `f32`
+/// changes nothing, and a loop waiting to pass the edge would never end.
+fn dot_grid(world: Rect, step: f32) -> impl Iterator<Item = Point> {
+    let along = move |from: f32, length: f32, end: f32| {
+        let first = (from / step).floor() * step;
+        (0..=(length / step).ceil() as u32 + 1)
+            .map(move |n| first + n as f32 * step)
+            .take_while(move |at| *at <= end)
+    };
+    along(world.y, world.height, world.bottom()).flat_map(move |y| {
+        along(world.x, world.width, world.right()).map(move |x| Point::new(x, y))
+    })
 }
 
 #[cfg(test)]
@@ -3126,6 +3134,21 @@ mod tests {
             !fresh.placed.contains_key(&gone),
             "a dropped table is forgotten"
         );
+    }
+
+    #[test]
+    fn the_dot_grid_ends_however_far_out_it_is_looked_at() {
+        let at = |x: f32| Rect {
+            x,
+            y: x,
+            width: 640.0,
+            height: 480.0,
+        };
+        assert_eq!(dot_grid(at(0.0), 32.0).count(), 21 * 16);
+        assert_eq!(dot_grid(at(-16.0), 32.0).count(), 21 * 16);
+        for far in [1e12, f32::MAX, f32::INFINITY] {
+            assert!(dot_grid(at(far), 32.0).count() <= 22 * 17, "{far}");
+        }
     }
 
     #[test]
