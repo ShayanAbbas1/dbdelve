@@ -538,7 +538,8 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   UTF-8 bytes, Base64 decodes, Hex takes the driver's spelling or bare hex.
   The bytes are staged (`NewValue::Bytes`), never the text, and written as
   the engine's literal; text that reads as no bytes keeps the input open
-  and says why (`RefuseEdit`). A binary cell is editable only where
+  and says why (`RefuseEdit`), and a new form closes an input open on the
+  column, whose text was typed in the old one (`result_grid::parse_as`). A binary cell is editable only where
   `Target::edits_bytes` holds (a built-in driver on an engine with a bytes
   literal: Postgres, MySQL, MariaDB, SQLite, SQL Server), its row is not
   named by a binary value (a binary key, or an engine naming rows by every

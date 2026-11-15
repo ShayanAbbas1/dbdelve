@@ -1600,11 +1600,21 @@ impl ResultGrid {
             .or_else(|| self.engine.shows_bytes_as_hex().then_some(BinaryForm::Hex))
     }
 
-    pub fn set_binary_form(&mut self, col: usize, form: BinaryForm) {
+    /// `true` when it closed an input open on the column, whose text was
+    /// typed in the old form and would be read in the new one, as hiding or
+    /// sorting closes one. The caller hands the keyboard back.
+    pub fn set_binary_form(&mut self, col: usize, form: BinaryForm) -> bool {
         // The menu holds the index it opened on, and a result streamed in
         // since may have fewer columns, as the header's other entries allow.
         if col >= self.result.columns.len() {
-            return;
+            return false;
+        }
+        let closed = self
+            .editing
+            .as_ref()
+            .is_some_and(|editing| editing.col == col);
+        if closed {
+            self.editing = None;
         }
         self.binary_forms.retain(|(parsed, _)| *parsed != col);
         if form != BinaryForm::Hex || !self.engine.shows_bytes_as_hex() {
@@ -1624,6 +1634,7 @@ impl ResultGrid {
             edit.shown = shown;
         }
         self.refit_from_the_top();
+        closed
     }
 
     /// Whether a column holds bytes: what offers to parse them. A binary type
@@ -2781,14 +2792,26 @@ fn binary_forms(
         menu.item(
             PopupMenuItem::new(form.label())
                 .checked(current == Some(form))
-                .on_click(move |_, _, cx| {
-                    table.update(cx, |table, cx| {
-                        table.delegate_mut().set_binary_form(col, form);
-                        cx.notify();
-                    });
+                .on_click(move |_, window, cx| {
+                    table.update(cx, |table, cx| parse_as(table, col, form, window, cx));
                 }),
         )
     })
+}
+
+/// A Parse As pick. Focus is moved before the menu dismisses, which would
+/// otherwise hand it back to the input just closed and leave nothing focused.
+pub(crate) fn parse_as(
+    table: &mut TableState<ResultGrid>,
+    col: usize,
+    form: BinaryForm,
+    window: &mut Window,
+    cx: &mut Context<TableState<ResultGrid>>,
+) {
+    if table.delegate_mut().set_binary_form(col, form) {
+        table.focus_handle(cx).focus(window, cx);
+    }
+    cx.notify();
 }
 
 /// Have the table rebuild its columns after the grid changed which are drawn
@@ -5122,6 +5145,20 @@ mod tests {
             Mode::ReadWrite,
         )
         .with_target(db::Target::built_in(engine))
+    }
+
+    #[test]
+    fn a_new_form_closes_an_input_open_on_its_column_and_no_other() {
+        let mut grid = bytes_grid(db::Engine::Sqlite, "blob", &["x'6869'"], vec![0]);
+        assert!(grid.begin_edit(0, 2));
+        assert!(!grid.set_binary_form(1, BinaryForm::Text));
+        assert!(grid.editing.is_some());
+
+        // `x'6869'` typed in Hex would otherwise stage as seven characters.
+        assert!(grid.begin_edit(0, 1));
+        assert!(grid.set_binary_form(1, BinaryForm::Hex));
+        assert!(grid.editing.is_none());
+        assert!(!grid.has_pending());
     }
 
     #[test]
