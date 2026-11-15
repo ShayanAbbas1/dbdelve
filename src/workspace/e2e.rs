@@ -4085,6 +4085,266 @@ fn filtering_a_connection_that_is_not_open_says_so_and_opens_nothing(cx: &mut Te
 }
 
 #[gpui::test]
+fn a_profile_saved_with_relations_depth_reads_only_its_relations(cx: &mut TestAppContext) {
+    use crate::session::{Depth, Routines};
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_duckdb_seeded(
+            cx,
+            "sidebar_show_sizes = true",
+            "introspection_depth = \"routines\"",
+            "CREATE TABLE t (id INTEGER); CREATE SEQUENCE s;",
+            "CREATE TABLE u (id INTEGER);",
+        );
+        let reads = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                (workspace.routine_reads, workspace.size_reads)
+            })
+        };
+        let held = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                let profile = workspace.profile().expect("the connection is in front");
+                let CatalogState::Loaded(catalog, routines) = &profile.catalog else {
+                    panic!("the catalog has loaded");
+                };
+                let schemas = || catalog.schemas.iter();
+                (
+                    *routines,
+                    schemas().any(|s| s.relations.iter().any(|r| r.name == "t")),
+                    schemas().any(|s| s.sequences.iter().any(|name| name == "s")),
+                )
+            })
+        };
+        let (index, before) = workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the connection is in front");
+            assert_eq!(profile.behaviour.depth, Depth::Routines);
+            let index = workspace
+                .profiles
+                .iter()
+                .position(|candidate| candidate.id == profile.id)
+                .expect("it is listed");
+            (index, (profile.generation, profile.config.clone()))
+        });
+        let (routine_reads, size_reads) = reads(&workspace, cx);
+        assert!(routine_reads >= 1, "Routines reads the routines");
+        assert_eq!(size_reads, 0, "Routines reads no sizes, Show sizes or not");
+        assert_eq!(held(&workspace, cx), (Routines::Loaded, true, true));
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.edit_profile(index, window, cx);
+            let form = workspace.form.as_mut().expect("the edit form is open");
+            assert_eq!(form.depth, Depth::Routines, "the form opens on the depth");
+            form.depth = Depth::Relations;
+            workspace.submit_connection(&SubmitConnection, window, cx);
+        });
+        settle(cx);
+
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(workspace.form.is_none(), "the form saved");
+            let profile = workspace.profile().expect("the connection is in front");
+            assert_eq!(profile.behaviour.depth, Depth::Relations);
+            assert_eq!(
+                (profile.generation, profile.config.clone()),
+                before,
+                "nothing reconnects"
+            );
+            assert!(matches!(profile.state, ProfileState::Connected(..)));
+            // The refresh's own confirmation, which a skip counts as
+            // complete for; the skip itself writes none.
+            assert_eq!(
+                profile.session.notice.as_deref(),
+                Some("Schema refreshed."),
+                "a skip is no failure"
+            );
+            assert_eq!(
+                profile.stored(cx).introspection_depth.as_deref(),
+                Some("relations")
+            );
+        });
+        assert_eq!(reads(&workspace, cx), (routine_reads, size_reads));
+        assert_eq!(held(&workspace, cx), (Routines::Skipped, true, false));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn each_depth_level_reads_only_its_loads(cx: &mut TestAppContext) {
+    use crate::session::{Behaviour, Depth, Routines};
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_duckdb_with(
+            cx,
+            "sidebar_show_sizes = true",
+            "mode = \"full\"\nintrospection_depth = \"relations\"",
+        );
+        let reads = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                (workspace.routine_reads, workspace.size_reads)
+            })
+        };
+        let other_routines = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                match workspace
+                    .profile()
+                    .expect("the connection is in front")
+                    .database_catalogs
+                    .get("other")
+                {
+                    Some(CatalogState::Loaded(_, routines)) => *routines,
+                    _ => panic!("the other database has not loaded"),
+                }
+            })
+        };
+        let at = connections_row(&workspace, cx, &connection_row("e2e")).expect("it shows");
+        click_connections_row(cx, at);
+        attach_other(&workspace, cx);
+        let at = connections_row(&workspace, cx, &database_row("e2e", "other"))
+            .expect("the attached database shows");
+        click_connections_row(cx, at);
+        let generation = workspace.read_with(cx, |workspace, _| {
+            workspace
+                .profile()
+                .expect("the connection is in front")
+                .generation
+        });
+        let set = |depth: Depth, workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.set_behaviour("e2e", Behaviour { depth }, cx);
+            });
+            settle(cx);
+        };
+
+        assert_eq!(reads(&workspace, cx), (0, 0), "Relations reads neither");
+        assert_eq!(other_routines(&workspace, cx), Routines::Skipped);
+
+        // The connection's own routines and the loaded database's are read again.
+        set(Depth::Routines, &workspace, cx);
+        assert_eq!(reads(&workspace, cx), (2, 0), "Routines reads no sizes");
+        assert_eq!(other_routines(&workspace, cx), Routines::Loaded);
+
+        set(Depth::Sizes, &workspace, cx);
+        assert_eq!(
+            reads(&workspace, cx),
+            (4, 2),
+            "Sizes reads both, twice over"
+        );
+
+        // Show sizes keeps the last word on sizes.
+        workspace.update(cx, |workspace, cx| workspace.set_show_sizes(false, cx));
+        settle(cx);
+        workspace.update(cx, |workspace, cx| workspace.refresh_schema(cx));
+        settle(cx);
+        assert_eq!(reads(&workspace, cx), (6, 2), "no size with Show sizes off");
+
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the connection is in front");
+            assert_eq!(profile.generation, generation, "nothing reconnected");
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_depth_saved_while_the_catalog_loads_is_read_once_it_lands(cx: &mut TestAppContext) {
+    use crate::session::{Behaviour, Depth, Routines};
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_duckdb(cx, "");
+        let (generation, before) = workspace.read_with(cx, |workspace, _| {
+            (
+                workspace
+                    .profile()
+                    .expect("the connection is in front")
+                    .generation,
+                workspace.routine_reads,
+            )
+        });
+
+        // The routines of the catalog are on their way when the depth is saved.
+        workspace.update(cx, |workspace, cx| {
+            let profile = workspace.profile_mut().expect("the connection is in front");
+            let id = profile.id.clone();
+            let CatalogState::Loaded(_, routines) = &mut profile.catalog else {
+                panic!("the catalog has loaded");
+            };
+            *routines = Routines::Loading;
+            workspace.load_routines(&id, generation, cx);
+            workspace.set_behaviour(
+                &id,
+                Behaviour {
+                    depth: Depth::Relations,
+                },
+                cx,
+            );
+            assert_eq!(
+                workspace.routine_reads,
+                before + 1,
+                "the save starts no read"
+            );
+            let profile = workspace.profile().expect("the connection is in front");
+            assert_eq!(
+                profile.behaviour.depth,
+                Depth::Relations,
+                "it is not dropped"
+            );
+            assert!(profile.reread_after_load, "it waits for the read under way");
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the connection is in front");
+            assert!(!profile.reread_after_load, "the landing took it");
+            assert_eq!(profile.generation, generation, "no reconnect");
+            assert_eq!(
+                workspace.routine_reads,
+                before + 1,
+                "and read at the saved depth"
+            );
+            let CatalogState::Loaded(_, routines) = &profile.catalog else {
+                panic!("the catalog has loaded");
+            };
+            assert_eq!(*routines, Routines::Skipped);
+            assert!(
+                profile
+                    .session
+                    .notice
+                    .as_deref()
+                    .is_none_or(|notice| notice == "Schema refreshed."),
+                "a skip is no failure"
+            );
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_duplicate_starts_with_the_copied_depth(cx: &mut TestAppContext) {
+    use crate::session::Depth;
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_duckdb(cx, "introspection_depth = \"relations\"");
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.duplicate_profile(0, window, cx);
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let form = workspace.form.as_ref().expect("the duplicate form is open");
+            assert_eq!(form.depth, Depth::Relations);
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.submit_connection(&SubmitConnection, window, cx);
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(workspace.profiles.len(), 2);
+            let copy = workspace.profiles.last().expect("the copy is listed");
+            assert_ne!(copy.id, "e2e");
+            assert_eq!(copy.behaviour.depth, Depth::Relations);
+            assert_eq!(
+                copy.stored(cx).introspection_depth.as_deref(),
+                Some("relations")
+            );
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn every_mode_change_reaches_the_sessions_opened_for_other_databases(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = duckdb_with_other_attached(cx);

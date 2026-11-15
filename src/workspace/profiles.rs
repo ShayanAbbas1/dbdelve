@@ -14,7 +14,9 @@ use crate::db::{ExternalConfig, Include, PasswordCommand, Plugin};
 use crate::explorer::Shortcuts;
 use crate::import::{self, Source};
 use crate::palette::SchemaPick;
-use crate::session::{Bound, BoundSession, EditMode, STALE_ROWS, restored_shortcuts};
+use crate::session::{
+    Behaviour, Bound, BoundSession, Depth, EditMode, STALE_ROWS, restored_shortcuts,
+};
 use crate::sidebar::OPEN_ROWS_CAP;
 use crate::sql::{Destructive, Mode};
 
@@ -345,6 +347,14 @@ impl Workspace {
             // A file is a person's to edit: blanks are dropped and each list is
             // capped, as `open_rows` is.
             include: Include::from_stored(stored.include_databases, stored.include_schemas),
+            // A slug this build cannot read costs this one field: every load.
+            behaviour: Behaviour {
+                depth: stored
+                    .introspection_depth
+                    .as_deref()
+                    .and_then(Depth::from_slug)
+                    .unwrap_or_default(),
+            },
             confirmed: stored
                 .confirmed
                 .iter()
@@ -433,6 +443,8 @@ impl Workspace {
             // Every way a profile is made starts unfiltered, for the same
             // reason it starts hidden: the lists are the owner's to write.
             include: Include::default(),
+            // The form's value is applied by `save_form` once this returns.
+            behaviour: Behaviour::default(),
             confirmed: Vec::new(),
             confirmed_stale: false,
             generation: 0,
@@ -902,6 +914,16 @@ impl Workspace {
                 return;
             }
         };
+        let behaviour = match form.behaviour(cx) {
+            Ok(behaviour) => behaviour,
+            Err(error) => {
+                if let Some(form) = &mut self.form {
+                    form.error = Some(error);
+                }
+                cx.notify();
+                return;
+            }
+        };
         if let Some(editing) = editing.as_deref()
             && let Some(profile) = self.profiles.iter().find(|profile| profile.id == editing)
         {
@@ -930,6 +952,7 @@ impl Workspace {
         match editing {
             Some(id) => {
                 self.save_profile(&id, name, config, color, window, cx);
+                self.set_behaviour(&id, behaviour, cx);
                 if self.group_of(&id) != project.as_deref()
                     && let Some(index) = self.profiles.iter().position(|profile| profile.id == id)
                 {
@@ -939,6 +962,10 @@ impl Workspace {
             None => {
                 let index =
                     self.create_profile(name, config, color, mode, Origin::Form, window, cx);
+                // Before `activate`, which starts the first connect: that
+                // connect has to read with the form's settings.
+                let id = self.profiles[index].id.clone();
+                self.set_behaviour(&id, behaviour, cx);
                 if shortcuts != Shortcuts::default() || !folds.is_empty() {
                     self.profiles[index].shortcuts = shortcuts;
                     self.profiles[index].folds = folds;
@@ -951,6 +978,38 @@ impl Workspace {
                 }
                 self.activate(index, cx);
             }
+        }
+    }
+
+    /// The one writer of a profile's [`Behaviour`], which is not part of its
+    /// connection: changing it re-reads over the session already open and
+    /// never reconnects, so no tab closes. A profile with no session only
+    /// stores the value, which its next connect reads.
+    pub(crate) fn set_behaviour(&mut self, id: &str, behaviour: Behaviour, cx: &mut Context<Self>) {
+        let Some(index) = self.profiles.iter().position(|profile| profile.id == id) else {
+            return;
+        };
+        let profile = &mut self.profiles[index];
+        if profile.behaviour == behaviour {
+            return;
+        }
+        let depth_changed = profile.behaviour.depth != behaviour.depth;
+        profile.behaviour = behaviour;
+        self.remember_profiles(cx);
+        let profile = &mut self.profiles[index];
+        if !depth_changed || profile.connection().is_none() {
+            return;
+        }
+        // A refresh declines to start while a read is under way, so the one
+        // that lands reads again with the saved depth.
+        let under_way = profile.refreshing_schema()
+            || matches!(
+                profile.catalog,
+                CatalogState::Loading | CatalogState::Loaded(_, Routines::Loading)
+            );
+        profile.reread_after_load = under_way;
+        if !under_way {
+            self.refresh_schema_of(index, cx);
         }
     }
 
@@ -1219,7 +1278,8 @@ impl Workspace {
     }
 
     /// [`Self::refresh_schema`] for the profile at `index`, which is the front
-    /// one except when a read that was under way when a filter was saved comes
+    /// one except when a read that was under way when a filter or depth was
+    /// saved comes
     /// back after the user moved on.
     fn refresh_schema_of(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(profile) = self.profiles.get_mut(index) else {
@@ -1243,6 +1303,11 @@ impl Workspace {
         let (id, generation) = (profile.id.clone(), profile.generation);
         let in_transaction = profile.in_transaction;
         let shown = profile.shown();
+        let depth = profile.behaviour.depth;
+        #[cfg(test)]
+        if depth >= Depth::Routines {
+            self.routine_reads += 1;
+        }
         cx.notify();
 
         let refresh_task = spawn_blocking(cx.background_executor(), move || {
@@ -1255,7 +1320,8 @@ impl Workspace {
                 false => connection.clone(),
             };
             let catalog = reader.catalog(&shown).map_err(lost)?;
-            Ok::<_, (DbError, bool)>((catalog, reader.routines(&shown)))
+            let routines = (depth >= Depth::Routines).then(|| reader.routines(&shown));
+            Ok::<_, (DbError, bool)>((catalog, routines))
         });
 
         cx.spawn(async move |workspace, cx| {
@@ -1272,7 +1338,7 @@ impl Workspace {
                         // A session that is gone has no transaction left to
                         // keep, and a new one is the only way to get an answer.
                         Err((_, true)) => {
-                            // The new session reads with the saved filter.
+                            // The new session reads with the saved filter and depth.
                             profile.reread_after_load = false;
                             let index = workspace
                                 .profiles
@@ -1293,23 +1359,28 @@ impl Workspace {
                         }
                     };
                     let routines = match routines {
-                        Ok(routines) => {
+                        Some(Ok(routines)) => {
                             catalog.merge(routines);
                             Routines::Loaded
                         }
-                        Err(error) => {
+                        Some(Err(error)) => {
                             profile.session.notice = Some(error.message);
                             Routines::Failed
                         }
+                        // The depth's choice, not a failure: no notice.
+                        None => Routines::Skipped,
                     };
-                    let complete = matches!(routines, Routines::Loaded);
+                    let complete = matches!(routines, Routines::Loaded | Routines::Skipped);
                     // Worn until `load_sizes` answers, which a lock can hold up
                     // for as long as the transaction holding it stays open.
                     // What the catalog itself carries stays on top: on some
                     // engines these are its numbers and `load_sizes` has none.
+                    // Below `Sizes` nothing reads them, so the old ones go.
                     if let CatalogState::Loaded(old, _) = &profile.catalog {
                         let fresh = catalog.sizes();
-                        catalog.set_sizes(&old.sizes());
+                        if depth == Depth::Sizes {
+                            catalog.set_sizes(&old.sizes());
+                        }
                         catalog.set_sizes(&fresh);
                     }
                     profile.catalog = CatalogState::Loaded(catalog, routines);
@@ -1329,8 +1400,8 @@ impl Workspace {
         .detach();
     }
 
-    /// A filter was saved while the read that has just landed was under way:
-    /// read again, which now starts, so the saved filter applies.
+    /// A filter or depth was saved while the read that has just landed was
+    /// under way: read again, which now starts, so what was saved applies.
     fn reread_if_saved(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(index) = self.profiles.iter().position(|profile| profile.id == id) else {
             return;
@@ -2330,8 +2401,9 @@ impl Workspace {
                         Ok(catalog) => CatalogState::Loaded(catalog, Routines::Loading),
                         Err(error) => {
                             // A failed read stored nothing drawn with the old filter, and every
-                            // read takes `shown()` as it starts, so the next one applies the
-                            // saved filter; reading again here would be a retry nobody asked for.
+                            // read takes `shown()` and the depth as it starts, so the next one
+                            // applies what was saved; reading again here would be a retry nobody
+                            // asked for.
                             profile.reread_after_load = false;
                             CatalogState::Failed(error.message)
                         }
@@ -2670,13 +2742,27 @@ impl Workspace {
         let Some(session) = self.session_for(id, database, generation) else {
             return;
         };
-        // The active schema is kept in the connection's own database only.
-        let Some(shown) = self
-            .issued_to(id, generation)
-            .map(|profile| profile.shown().in_another_database())
-        else {
+        // The profile's depth, as `load_routines` reads it: a skipped read
+        // lands `Skipped` so nothing waits on `Loading`.
+        let Some(profile) = self.issued_to(id, generation) else {
             return;
         };
+        if profile.behaviour.depth < Depth::Routines {
+            if let Some(CatalogState::Loaded(_, routines)) =
+                profile.database_catalogs.get_mut(database)
+            {
+                *routines = Routines::Skipped;
+            }
+            self.rebuild_connections(cx);
+            cx.notify();
+            return;
+        }
+        // The active schema is kept in the connection's own database only.
+        let shown = profile.shown().in_another_database();
+        #[cfg(test)]
+        {
+            self.routine_reads += 1;
+        }
         let task = spawn_blocking(cx.background_executor(), {
             let session = session.clone();
             move || session.metadata(|connection| connection.routines(&shown))
@@ -2755,6 +2841,13 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if !self.settings.show_sizes {
+            return;
+        }
+        // Sizes load only when the profile's depth allows them too.
+        if self
+            .issued_to(id, generation)
+            .is_none_or(|profile| profile.behaviour.depth < Depth::Sizes)
+        {
             return;
         }
         let Some(session) = self.session_for(id, database, generation) else {
@@ -2842,10 +2935,14 @@ impl Workspace {
     /// A failure here leaves the relations alone and is said once in the status
     /// bar. Replacing a working explorer with an error because the functions
     /// could not be listed would cost more than it reports.
-    pub(super) fn load_routines(&mut self, id: &str, generation: u64, cx: &mut Context<Self>) {
+    pub(crate) fn load_routines(&mut self, id: &str, generation: u64, cx: &mut Context<Self>) {
         let Some(profile) = self.issued_to(id, generation) else {
             return;
         };
+        if profile.behaviour.depth < Depth::Routines {
+            self.skip_routines(id, generation, cx);
+            return;
+        }
         let Some(connection) = profile.connection() else {
             if let CatalogState::Loaded(_, routines) = &mut profile.catalog {
                 *routines = Routines::Failed;
@@ -2853,6 +2950,10 @@ impl Workspace {
             return;
         };
         let shown = profile.shown();
+        #[cfg(test)]
+        {
+            self.routine_reads += 1;
+        }
         let routines_task = spawn_blocking(cx.background_executor(), move || {
             connection.routines(&shown)
         });
@@ -2894,6 +2995,26 @@ impl Workspace {
         .detach();
     }
 
+    /// The profile's depth chose not to read the routines: land them as
+    /// `Skipped` and run what their landing runs, so nothing waits on
+    /// `Routines::Loading` (a restored routine tab stays pending, as it does
+    /// for a read that failed).
+    fn skip_routines(&mut self, id: &str, generation: u64, cx: &mut Context<Self>) {
+        let Some(profile) = self.issued_to(id, generation) else {
+            return;
+        };
+        // Only onto a catalog that loaded, as a read's landing is.
+        let CatalogState::Loaded(_, routines) = &mut profile.catalog else {
+            return;
+        };
+        *routines = Routines::Skipped;
+        self.install_completions(id, cx);
+        self.refresh_explorer(id, cx);
+        self.catalog_landed(id, cx);
+        self.reread_if_saved(id, cx);
+        cx.notify();
+    }
+
     /// Fill table sizes in behind the relations, alongside the routines and in
     /// whichever order the two land.
     ///
@@ -2902,13 +3023,15 @@ impl Workspace {
     /// connect about something the user never asked for.
     ///
     /// With Show sizes off nothing is asked: a role whose statistics read takes
-    /// locks or opens every table is never sent it.
+    /// locks or opens every table is never sent it. Nor is it below the
+    /// profile's `Sizes` depth: sizes load only when both allow it.
     fn load_sizes(&mut self, id: &str, generation: u64, cx: &mut Context<Self>) {
         if !self.settings.show_sizes {
             return;
         }
         let Some((connection, shown)) = self
             .issued_to(id, generation)
+            .filter(|profile| profile.behaviour.depth == Depth::Sizes)
             .and_then(|profile| Some((profile.connection()?, profile.shown())))
         else {
             return;
