@@ -348,13 +348,11 @@ impl<'a> Builder<'a> {
         };
         let columns = &graph.tables[key.table as usize].columns;
         let in_key = |column: &u32| &columns[*column as usize];
-        let one_to_one = match key.columns[..] {
-            [column] => columns[column as usize].unique,
-            _ => {
-                key.columns.iter().all(|column| in_key(column).primary)
-                    && columns.iter().filter(|column| column.primary).count() == key.columns.len()
-            }
-        };
+        // Its columns are unique when they hold a unique key whole: one
+        // column unique on its own, or every column of the primary key.
+        let mut primary = (0..columns.len() as u32).filter(|&at| columns[at as usize].primary);
+        let one_to_one = key.columns.iter().any(|column| in_key(column).unique)
+            || primary.clone().next().is_some() && primary.all(|at| key.columns.contains(&at));
         self.layout.edges.push(Edge {
             key: index,
             child,
@@ -1051,6 +1049,51 @@ mod tests {
         assert_eq!(layout.edges[0].parent_mark, ParentMark::ExactlyOne);
         assert_eq!(layout.edges[1].child_mark, ChildMark::Many);
         assert_eq!(layout.edges[1].parent_mark, ParentMark::ZeroOrOne);
+    }
+
+    /// A key holding a unique key whole is unique, whatever else it holds.
+    #[test]
+    fn a_composite_key_is_one_to_one_when_it_holds_a_unique_key() {
+        let mut graph = graph(4, &[]);
+        let plain = graph.tables[0].columns[0].clone();
+        let column = |name: &str, primary| GraphColumn {
+            name: name.into(),
+            primary,
+            unique: false,
+            ..plain.clone()
+        };
+        graph.tables[1].columns.push(column("tenant", false));
+        for table in [0, 2, 3] {
+            let columns = &mut graph.tables[table].columns;
+            columns[0].unique = false;
+            columns.push(column("part", true));
+            columns.push(column("tenant", false));
+        }
+        let key = |table: u32, columns: Vec<u32>| GraphKey {
+            name: format!("fk_{table}").into(),
+            table,
+            referenced: KeyTarget::Table {
+                table: 0,
+                columns: (0..columns.len() as u32).collect(),
+            },
+            columns,
+        };
+        graph.keys = vec![
+            // `id` is t1's primary key on its own.
+            key(1, vec![0, 1]),
+            // t2's primary key is `(id, part)`, all of it in the key.
+            key(2, vec![0, 1, 2]),
+            // t3's `part` is left out.
+            key(3, vec![0, 2]),
+        ];
+        let layout = schema(&graph, false);
+        let marks: Vec<ChildMark> = (0..3)
+            .map(|key| {
+                let edge = layout.edges.iter().find(|edge| edge.key == key).unwrap();
+                edge.child_mark
+            })
+            .collect();
+        assert_eq!(marks, [ChildMark::One, ChildMark::One, ChildMark::Many]);
     }
 
     #[test]

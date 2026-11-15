@@ -43,8 +43,8 @@ pub struct GraphColumn {
     pub foreign: bool,
     /// Unique on its own: the whole of a primary key, unique constraint or
     /// unique index. A column in a composite unique key is not, because only a
-    /// key whose columns are exactly unique makes a reference one-to-one, and
-    /// a single column is the case a flag can say.
+    /// key holding a whole unique key makes a reference one-to-one, and a
+    /// single column is the case a flag can say.
     pub unique: bool,
 }
 
