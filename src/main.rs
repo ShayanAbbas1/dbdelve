@@ -68,7 +68,7 @@ use actions::{
     SelectTheme, SetDefault, SetDefaultRowLimit, SetEmpty, SetFilterColumn, SetFilterOperator,
     SetFilterRaw, SetMode, SetNull, SetQueryLimit, SetRowLimit, ShowAllColumns, ShowEditor,
     ShowMessages, ShowReferences, SortActiveColumn, SortColumn, SubmitConnection, SwitchConnection,
-    ToggleComment, ToggleFilterJoin, ToggleNextJoin, TogglePinColumn, ToggleRowEdit,
+    ToggleComment, ToggleFilterJoin, ToggleNextJoin, TogglePinColumn, ToggleResults, ToggleRowEdit,
     ToggleRowPanel, ToggleSidebar, ToggleStructure, ZoomEditorIn, ZoomEditorOut,
 };
 use completion::SchemaCompletions;
@@ -401,6 +401,7 @@ pub(crate) fn app_menus(imports_rows: bool) -> Vec<Menu> {
             disabled: false,
             items: vec![
                 MenuItem::action("Toggle Sidebar", ToggleSidebar),
+                MenuItem::action("Toggle Results", ToggleResults),
                 MenuItem::action("Toggle Row Panel", ToggleRowPanel),
                 MenuItem::action("Toggle Row Panel Edit Mode", ToggleRowEdit),
                 MenuItem::action("Toggle Data / Structure", ToggleStructure),

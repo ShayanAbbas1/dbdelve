@@ -225,6 +225,7 @@ actions!(
         CycleMode,
         CloseTab,
         ToggleSidebar,
+        ToggleResults,
         ToggleRowPanel,
         ToggleRowEdit,
         ToggleStructure,

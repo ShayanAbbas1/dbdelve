@@ -4,7 +4,9 @@
 //! impl live in as many modules as it has concerns; they moved out whole.
 
 use super::*;
-use crate::actions::{CopyDiagnostics, FocusSidebar, OpenLogsFolder, ToggleResultsFocus};
+use crate::actions::{
+    CopyDiagnostics, FocusSidebar, OpenLogsFolder, ToggleResults, ToggleResultsFocus,
+};
 use crate::keybindings;
 use crate::ui::Status;
 
@@ -125,6 +127,11 @@ impl Workspace {
         else {
             return;
         };
+        // A grid that is not drawn cannot hold the keyboard: the window would
+        // be left focused on nothing, with no path for the chord back.
+        if let Some(session) = self.profile_mut().map(|profile| &mut profile.session) {
+            session.reveal_results(session.active);
+        }
         let focused = results.update(cx, |table, cx| {
             crate::result_grid::reveal_column(table, col, window, cx)
         });
@@ -807,6 +814,7 @@ impl Workspace {
             Command::ToggleResultsFocus => {
                 self.toggle_results_focus(&ToggleResultsFocus, window, cx)
             }
+            Command::ToggleResults => self.toggle_results(&ToggleResults, window, cx),
             Command::ToggleRowPanel => self.toggle_row_panel(&ToggleRowPanel, window, cx),
             Command::ToggleRowEdit => self.toggle_row_edit(&ToggleRowEdit, window, cx),
             // Explicit, because the palette still holds focus here and would

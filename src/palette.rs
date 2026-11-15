@@ -417,6 +417,7 @@ pub enum Command {
     CollapseAllSchemas,
     ExpandAllSchemas,
     ToggleResultsFocus,
+    ToggleResults,
     ToggleRowPanel,
     ToggleRowEdit,
     ResetEditorZoom,
@@ -4368,6 +4369,17 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
                 WINDOW,
             ),
             "toggle_results_focus",
+        ));
+    }
+    if matches!(session.active, Tab::Query(_)) {
+        items.push(bound(
+            command(
+                "Toggle results",
+                icon::RESULTS,
+                Command::ToggleResults,
+                WINDOW,
+            ),
+            "toggle_results",
         ));
     }
     items.push(bound(
