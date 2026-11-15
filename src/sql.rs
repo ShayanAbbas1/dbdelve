@@ -6980,6 +6980,25 @@ mod tests {
     }
 
     #[test]
+    fn a_backticked_name_is_a_column_or_table_and_never_a_value_set() {
+        for engine in [Engine::MySql, Engine::MariaDb] {
+            let bytes = "UPDATE `client-test`.`alerts` SET `payload` = X'00FF' WHERE `id` = '7'";
+            assert!(is_generated_write_on(engine, bytes), "{engine:?}");
+            for value in [
+                "`payload`",
+                "`client-test`.`alerts`.`id`",
+                "`0x00`",
+                "`X'00'`",
+            ] {
+                let sql = format!(
+                    "UPDATE `client-test`.`alerts` SET `payload` = {value} WHERE `id` = '7'"
+                );
+                assert!(!is_generated_write_on(engine, &sql), "{engine:?} {sql}");
+            }
+        }
+    }
+
+    #[test]
     fn a_comment_anywhere_in_an_update_refuses_it() {
         // MySQL and MariaDB run a `/*! … */` body; Oracle and others read
         // `/*+ … */` as hints. Nothing dbdelve generates carries a comment.
