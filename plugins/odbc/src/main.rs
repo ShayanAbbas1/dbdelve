@@ -23,8 +23,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
 use dbdelve_plugin_protocol::{
-    ErrorKind, Kind, MAX_PAYLOAD, PROTOCOL, REFERENCES, Request, Response, Tls, Violation, WRITE,
-    read_frame,
+    ErrorKind, GRAPH, Kind, MAX_PAYLOAD, PROTOCOL, REFERENCES, Request, Response, Tls, Violation,
+    WRITE, read_frame,
 };
 use odbc_api::handles;
 
@@ -132,6 +132,7 @@ fn serve(input: &mut impl Read, jobs: &Sender<Job>, control: &Control) -> Result
                             | Request::Structure { .. }
                             | Request::References { .. }
                             | Request::Write { .. }
+                            | Request::Graph { .. }
                     ) {
                         control.start(id);
                     }
@@ -191,7 +192,7 @@ impl<W: Write> Bridge<W> {
             Request::Hello { .. } => Response::Hello {
                 protocol: PROTOCOL,
                 implementation: format!("dbdelve-odbc {}", env!("CARGO_PKG_VERSION")),
-                optional: vec![REFERENCES.to_string(), WRITE.to_string()],
+                optional: vec![REFERENCES.to_string(), WRITE.to_string(), GRAPH.to_string()],
             },
             // The driver verifies whatever host the string names, and the
             // bridge has no way to give it another name to check.
@@ -224,6 +225,9 @@ impl<W: Write> Bridge<W> {
             Request::References { schema, relation } => self.catalog(|session, control| {
                 catalog::references(session, control, &schema, &relation)
             }),
+            Request::Graph { schema } => {
+                self.catalog(|session, control| catalog::graph(session, control, &schema))
+            }
             _ => refusal(
                 ErrorKind::Unsupported,
                 "The ODBC bridge does not answer this request.".to_string(),
@@ -352,7 +356,10 @@ mod tests {
             panic!("a hello, got {responses:?}");
         };
         assert_eq!(*protocol, PROTOCOL);
-        assert_eq!(optional, &[REFERENCES.to_string(), WRITE.to_string()]);
+        assert_eq!(
+            optional,
+            &[REFERENCES.to_string(), WRITE.to_string(), GRAPH.to_string()]
+        );
     }
 
     #[test]

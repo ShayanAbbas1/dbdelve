@@ -2486,7 +2486,9 @@ impl WgpuRendererCore {
         paths: &[Path<ScaledPixels>],
         instance_offset: &mut u64,
     ) -> Result<bool> {
-        let mut vertices = Vec::new();
+        // dbdelve patch: reserved at its size. Grown by doubling, a frame of
+        // millions of vertices left a fresh realloc'd block behind every frame.
+        let mut vertices = Vec::with_capacity(paths.iter().map(|path| path.vertices.len()).sum());
         for path in paths {
             let bounds = path.clipped_bounds();
             vertices.extend(path.vertices.iter().map(|v| PathRasterizationVertex {

@@ -510,6 +510,9 @@ const OVERLAY_ALPHA_FLOOR: f32 = 0.15;
 /// rather than body.
 const POPUP_TEXT_CONTRAST: f32 = 4.5;
 const POPUP_MUTED_CONTRAST: f32 = 3.0;
+/// A diagram's edges against its canvas: the floor for a line that has to be
+/// followed, not read.
+const EDGE_CONTRAST: f32 = 3.0;
 /// Muted and faint text on a glass card, as shares of the body text: Zeron's.
 const POPUP_MUTED_INK: f32 = 0.64;
 const POPUP_FAINT_INK: f32 = 0.48;
@@ -1008,9 +1011,22 @@ impl Theme {
             text_muted: legible(muted, POPUP_MUTED_CONTRAST),
             text_faint: legible(faint, POPUP_MUTED_CONTRAST),
             accent: legible(self.accent, POPUP_MUTED_CONTRAST),
+            syntax_type: legible(self.syntax_type, POPUP_MUTED_CONTRAST),
             danger: legible(self.danger, POPUP_TEXT_CONTRAST),
             popup_card: Some(fill),
             ..self
+        }
+    }
+
+    /// The ink a diagram's relationship lines are drawn in: the faint text
+    /// tone, or the muted one on a canvas the faint one sinks into.
+    pub fn edge_ink(self) -> Srgb {
+        let held = [self.bg, self.panel]
+            .into_iter()
+            .all(|canvas| contrast_ratio(self.text_faint, canvas) >= EDGE_CONTRAST);
+        match held {
+            true => self.text_faint,
+            false => self.text_muted,
         }
     }
 
@@ -2046,6 +2062,10 @@ mod tests {
     const AAA_TEXT: f32 = 7.0;
     const AA_TEXT: f32 = 4.5;
     const AA_LARGE: f32 = 3.0;
+    /// A glass card's text is held to its floor over the worst desktop, so a
+    /// tint over it can only take that down: a joined row is a passing highlight.
+    const WASHED_TEXT: f32 = 4.0;
+    const WASHED_MUTED: f32 = 2.5;
 
     fn check(theme: Theme, name: &str, fg: Srgb, bg: Srgb, minimum: f32) {
         let ratio = contrast_ratio(fg, bg);
@@ -2654,6 +2674,93 @@ mod tests {
                         "{} at {:.2}: {name} on a floating card at {on_card:.2}, the theme's own at {own:.2}",
                         t.name,
                         t.opacity
+                    );
+                }
+            }
+        }
+    }
+
+    /// A theme's diagram inks over its card, as they are drawn: the card over
+    /// the worst backdrop it can float on, and an imported or glass theme's
+    /// accent and muted inks as `for_popup` moves them.
+    #[test]
+    fn the_diagrams_inks_hold_on_its_cards_and_canvas_in_every_theme() {
+        for base in Theme::all() {
+            let themes: Vec<Theme> = match base.is_glass {
+                true => opacities()
+                    .map(|opacity| base.with_opacity(opacity))
+                    .collect(),
+                false => vec![base],
+            };
+            for t in themes {
+                let inks = t.for_popup();
+                let card = t.overlay_glass().flatten(t.popup_backdrop());
+                let (text, muted) = match t.is_glass {
+                    true => (POPUP_TEXT_CONTRAST, POPUP_MUTED_CONTRAST),
+                    false => (AAA_TEXT, AA_TEXT),
+                };
+                check(t, "a column name on a card", inks.text, card, text);
+                check(t, "a column type on a card", inks.text_muted, card, muted);
+                check(t, "the +N more row on a card", inks.text_muted, card, muted);
+                check(
+                    t,
+                    "a primary key icon on a card",
+                    inks.accent,
+                    card,
+                    AA_LARGE,
+                );
+                check(
+                    t,
+                    "a foreign key icon on a card",
+                    inks.syntax_type,
+                    card,
+                    AA_LARGE,
+                );
+
+                let wash = inks
+                    .accent
+                    .alpha(crate::diagram_view::JOINED_ROW_WASH)
+                    .flatten(card);
+                check(
+                    t,
+                    "a name over a joined row's wash",
+                    inks.text,
+                    wash,
+                    WASHED_TEXT,
+                );
+                check(
+                    t,
+                    "a type over a joined row's wash",
+                    inks.text_muted,
+                    wash,
+                    WASHED_MUTED,
+                );
+                check(
+                    t,
+                    "the +N more row over a wash",
+                    inks.text_muted,
+                    wash,
+                    WASHED_MUTED,
+                );
+
+                let minimap = inks.text_faint.alpha(0.6).flatten(card);
+                check(t, "a minimap card on its frame", minimap, card, 1.5);
+                check(t, "the minimap's focused card", inks.accent, card, AA_LARGE);
+
+                for (name, canvas) in [("bg", t.bg), ("panel", t.panel)] {
+                    check(
+                        t,
+                        &format!("an edge on the {name}"),
+                        t.edge_ink(),
+                        canvas,
+                        AA_LARGE,
+                    );
+                    check(
+                        t,
+                        &format!("a lit edge on the {name}"),
+                        t.accent,
+                        canvas,
+                        AA_LARGE,
                     );
                 }
             }

@@ -40,7 +40,7 @@ use crate::{
         ExplainQuery, FormatQuery, ImportRows, ImportRowsFromClipboard, LimitTarget, NewQuery,
         NewRow, NextPage, PreviousPage, RemoveFilter, RunQuery, SaveQuery, SetDefaultRowLimit,
         SetFilterColumn, SetFilterOperator, SetFilterRaw, SetQueryLimit, SetRowLimit,
-        ToggleComment, ToggleFilterJoin, ToggleNextJoin, ToggleRowPanel,
+        ToggleComment, ToggleFilterJoin, ToggleNextJoin, ToggleResults, ToggleRowPanel,
     },
     db,
     db::{Engine, ExplainMode, RoutineKind, Target},
@@ -61,8 +61,8 @@ use crate::{
     tab_drag::{DragTab, TabStrip},
     theme::{Theme, fonts, layout, theme},
     ui::{
-        Code, Control, Tone, button, button_label, choice_button, chord_hint, code_highlights,
-        compact_count, control, group_thousands, icon_button, key_hint, keycap_text, kind_color,
+        Code, Control, Tone, button, choice_button, chord_hint, code_highlights, compact_count,
+        group_thousands, icon_button, icon_label_button, key_hint, keycap_text, kind_color,
         object_icon, reconnect_button, row_icon, section_label,
     },
     workspace::error_in_buffer,
@@ -171,6 +171,7 @@ pub fn render_main_content(
             tab,
             &profile.id,
             profile.config.target(),
+            profile.draws_diagrams(),
             matches!(profile.state, ProfileState::Failed(_)),
             row_panel,
             profile
@@ -230,14 +231,15 @@ fn completion_target(editor: &Entity<EditorState>) -> Div {
 
 /// The editor over the rows it produces. Every runnable surface is this:
 /// the query buffer and an opened relation differ in where their SQL came
-/// from, not in what they are.
+/// from, not in what they are. With no `bottom` -- results the user hid --
+/// the editor and its toolbar take the whole height.
 fn render_editor_surface(
     split: gpui::ElementId,
     editor: &Entity<EditorState>,
     font_size: f32,
     query: &QueryState,
     toolbar: AnyElement,
-    bottom: AnyElement,
+    bottom: Option<AnyElement>,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     let t = *theme(cx);
@@ -285,6 +287,9 @@ fn render_editor_surface(
         .flex_col()
         .child(buffer)
         .child(toolbar);
+    let Some(bottom) = bottom else {
+        return top.into_any_element();
+    };
 
     let expanded = result_pane_is_expanded(query);
     let (editor_height, results_height) = if expanded {
@@ -345,7 +350,9 @@ fn render_query_surface(
     // answer about the buffer above it, and two scrolling regions in a split
     // that is already a split leaves neither enough room to read.
     let (shown_state, shown_grid) = tab.shown();
-    let bottom = match tab.plan_shown() {
+    // Not built at all while hidden, so the row panel is off screen too and
+    // its toggle has nothing to fold.
+    let bottom = (!tab.results_hidden).then(|| match tab.plan_shown() {
         // Under the same switcher as the rows, or a typed `EXPLAIN`, which has
         // no Data to flip to, would hide what its statement raised.
         Some(explained) => {
@@ -381,7 +388,7 @@ fn render_query_surface(
             &scope,
             cx,
         ),
-    };
+    });
     render_editor_surface(
         // Keyed by the buffer rather than the profile: two query tabs are two
         // splits, and sharing one id would carry the first one's drag position
@@ -765,6 +772,7 @@ fn render_object(
     tab: &ObjectTab,
     profile_id: &str,
     target: Target,
+    draws_diagrams: bool,
     disconnected: bool,
     row_panel: &RowPanel,
     form: Option<&InsertForm>,
@@ -776,6 +784,12 @@ fn render_object(
     // Scopes this tab's scroll state to its own id -- see the same line in
     // `render_query_surface`.
     let scope = Tab::Object(tab.id).scroll_scope(profile_id);
+    if let ObjectBody::Diagram { view, .. } = &tab.body {
+        return view
+            .clone()
+            .cached(gpui::StyleRefinement::default().size_full())
+            .into_any_element();
+    }
     if let ObjectBody::Structure {
         structure, grid, ..
     } = &tab.body
@@ -790,6 +804,7 @@ fn render_object(
                     .border_b_1()
                     .border_color(t.border)
                     .child(div().flex_1())
+                    .children(diagram_button(tab, draws_diagrams, cx))
                     .child(relation_controls(true, false, cx)),
             )
             .child(
@@ -3302,10 +3317,11 @@ fn render_tab_strip(
                 t,
                 match object.body {
                     ObjectBody::Structure { .. } => icon::STRUCTURE,
-                    _ => object_icon(object.kind),
+                    ObjectBody::Diagram { .. } => icon::DIAGRAM,
+                    _ => object.kind.map_or(icon::TABLE, object_icon),
                 },
             ))
-            .child(name_label(object.name.clone()))
+            .child(name_label(object.label().to_string()))
             // One relation can have as many tabs as it has filters (spec §6.3),
             // so a strip that labelled them all `customers` would cost a click
             // each to tell apart. Bounded and ellipsized: a filter can be long.
@@ -3508,9 +3524,10 @@ fn render_query_toolbar(
 
     // Drawn only once there is a plan to turn to. Before that the pair would be
     // a control with one working half, which is the same as no control at all.
+    // Nor while the pane it flips is hidden.
     let plan_toggle = session
         .active_query_tab()
-        .filter(|tab| tab.flips_to_plan())
+        .filter(|tab| tab.flips_to_plan() && !tab.results_hidden)
         .map(|tab| {
             div()
                 .flex_shrink_0()
@@ -3540,6 +3557,25 @@ fn render_query_toolbar(
         .flatten()
         .map(|(_, table, _)| insert_button("new-row", format!("Insert in {table}"), t));
 
+    // First on the bar that is the editor/results boundary, and on every query
+    // tab: an empty pane is exactly the room someone writing DDL wants back.
+    let results_toggle = session.active_query_tab().map(|tab| {
+        let label = if tab.results_hidden {
+            "Show results"
+        } else {
+            "Hide results"
+        };
+        icon_button(
+            "toggle-results",
+            icon::RESULTS,
+            Tone::Quiet,
+            Control::Compact,
+            t,
+        )
+        .tooltip_with_action(label, &ToggleResults, None)
+        .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleResults), cx))
+    });
+
     let named = session.open_query().is_some();
     let save_workspace = workspace.clone();
     let rename_workspace = workspace.clone();
@@ -3551,6 +3587,7 @@ fn render_query_toolbar(
         .border_t_1()
         .border_color(t.border)
         .text_size(px(layout::chrome(layout::TEXT_SM)))
+        .children(results_toggle)
         .children(plan_toggle)
         .child(div().flex_1())
         .children(naming)
@@ -3685,26 +3722,49 @@ fn relation_controls(
         .children(takes_inserts.then(|| insert_button("new-row", "Insert".into(), t)))
 }
 
+/// A table's neighbourhood in its schema's diagram, where the profile draws
+/// one and the table is a card in it.
+fn diagram_button(
+    tab: &ObjectTab,
+    draws_diagrams: bool,
+    cx: &mut Context<Workspace>,
+) -> Option<Button> {
+    let Some(crate::explorer::ObjectKind::Relation(kind)) = tab.kind else {
+        return None;
+    };
+    if !draws_diagrams || !crate::workspace::drawn_in_diagrams(kind) {
+        return None;
+    }
+    let command = Command::ShowDiagram {
+        schema: tab.schema.clone(),
+        centre: Some(tab.name.clone()),
+    };
+    let t = *theme(cx);
+    Some(
+        icon_label_button(
+            "show-diagram",
+            icon::DIAGRAM,
+            "Diagram",
+            Tone::Quiet,
+            Control::Compact,
+            t,
+        )
+        .debug_selector(|| "show-diagram".into())
+        .tooltip("Show this table among its parents and children")
+        .on_click(cx.listener(move |workspace, _: &ClickEvent, window, cx| {
+            workspace.run_command(command.clone(), window, cx);
+        })),
+    )
+}
+
 /// Insert reads as an action, not a third view beside Data and Plan: a plus
 /// leads it and it takes the same button box as the controls around it.
 fn insert_button(id: &'static str, label: String, t: Theme) -> Button {
-    control(id, Tone::Quiet, Control::Compact)
-        .px(px(Control::Compact.padding()))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(layout::SPACE_XS))
-                .child(
-                    icon(icon::PLUS)
-                        .size(px(layout::chrome(layout::ICON_SIZE)))
-                        .text_color(Tone::Quiet.ink(t)),
-                )
-                .child(button_label(label, Tone::Quiet, Control::Compact, t)),
-        )
-        .on_click(|_, window, cx| {
+    icon_label_button(id, icon::PLUS, label, Tone::Quiet, Control::Compact, t).on_click(
+        |_, window, cx| {
             window.dispatch_action(Box::new(NewRow), cx);
-        })
+        },
+    )
 }
 
 /// One choice of a handful, in the row-limit chips' clothes: all of them on

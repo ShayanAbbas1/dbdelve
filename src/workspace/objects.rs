@@ -159,7 +159,7 @@ impl Workspace {
             id,
             schema,
             name,
-            kind,
+            kind: Some(kind),
             body,
         });
         // See `new_query`'s own `place_last`. A session restored at launch
@@ -201,6 +201,10 @@ impl Workspace {
                 if !asked || matches!(structure, StructureState::Failed(_)) {
                     self.load_structure(id, schema, relation, cx);
                 }
+                return;
+            }
+            ObjectBody::Diagram { .. } => {
+                self.load_diagram(id, cx);
                 return;
             }
             ObjectBody::Routine(_) => return,
@@ -659,7 +663,7 @@ impl Workspace {
                             }
                             *structure = loaded(result);
                         }
-                        ObjectBody::Routine(_) => {}
+                        ObjectBody::Routine(_) | ObjectBody::Diagram { .. } => {}
                     }
                     cx.notify();
                     // The rows and the structure are two requests and either can
@@ -1151,7 +1155,7 @@ impl Workspace {
         else {
             return;
         };
-        let ObjectKind::Relation(kind) = tab.kind else {
+        let Some(ObjectKind::Relation(kind)) = tab.kind else {
             return;
         };
         let origin = match &tab.body {
@@ -1578,6 +1582,7 @@ impl Workspace {
         // A count outliving its tab would hold the connection for an answer
         // nothing is left to show.
         self.cancel_count(id, cx);
+        self.cancel_diagram(id, cx);
         let mut in_front = None;
         if let Some(profile) = self.profile_mut() {
             if profile.session.active == Tab::Object(id) {
@@ -1626,6 +1631,7 @@ impl Workspace {
         }
         let (opened, still_pending) = restorable(
             profile.config.engine(),
+            profile.draws_diagrams(),
             &profile.catalog,
             &profile.session.pending_objects,
         );
@@ -1640,7 +1646,10 @@ impl Workspace {
         }
         let mut restored_active = None;
         for (opened, active) in opened {
-            let id = self.open_object(opened, window, cx);
+            let id = match opened {
+                Reopened::Object(opened) => self.open_object(opened, window, cx),
+                Reopened::Diagram(schema, view) => self.diagram_tab(schema, Some(view), window, cx),
+            };
             if active {
                 restored_active = id;
             }
@@ -1661,7 +1670,20 @@ impl Workspace {
     }
 }
 
+/// A stored tab that can open: an object the explorer lists, or a schema's
+/// diagram and how it was looked at.
+enum Reopened {
+    Object(OpenedObject),
+    Diagram(String, store::StoredDiagram),
+}
+
 /// Split the stored tabs into those that can open now and those still waiting.
+///
+/// A diagram opens at once, as a relation does, and is read when shown: a
+/// schema since dropped says so in its tab. That is once `draws` says the
+/// profile draws diagrams, which a plugin's answers only once connected, so
+/// until then it waits; on a connection that does not draw it waits on, kept
+/// on disk with how it was looked at for a plugin that comes to offer `graph`.
 ///
 /// A routine waits for the routines, not just the catalog: resolved against
 /// relations alone it would find nothing and be dropped for good. One whose
@@ -1669,9 +1691,10 @@ impl Workspace {
 /// about whether the routine still exists.
 fn restorable(
     engine: Engine,
+    draws: bool,
     catalog: &CatalogState,
     pending: &[store::StoredObject],
-) -> (Vec<(OpenedObject, bool)>, Vec<store::StoredObject>) {
+) -> (Vec<(Reopened, bool)>, Vec<store::StoredObject>) {
     let (catalog, routines) = match catalog {
         CatalogState::Loaded(catalog, routines) => (Some(catalog), *routines),
         _ => (None, Routines::Loading),
@@ -1680,30 +1703,40 @@ fn restorable(
     let mut opened = Vec::new();
     let mut still_pending = Vec::new();
     for stored in pending {
-        if stored.routine {
+        if stored.diagram && !draws {
+            still_pending.push(stored.clone());
+        } else if stored.diagram {
+            opened.push((
+                Reopened::Diagram(
+                    stored.schema.clone(),
+                    stored.diagram_view.clone().unwrap_or_default(),
+                ),
+                stored.active,
+            ));
+        } else if stored.routine {
             match catalog {
                 Some(catalog) if routines == Routines::Loaded => opened.extend(
                     OpenedObject::resolve(engine, catalog, stored)
-                        .map(|object| (object, stored.active)),
+                        .map(|object| (Reopened::Object(object), stored.active)),
                 ),
                 _ => still_pending.push(stored.clone()),
             }
         } else if stored.structure {
             opened.push((
-                OpenedObject::Structure {
+                Reopened::Object(OpenedObject::Structure {
                     schema: stored.schema.clone(),
                     name: stored.name.clone(),
                     kind: catalog
                         .and_then(|catalog| relation_kind(catalog, &stored.schema, &stored.name))
                         .unwrap_or(stored.kind),
                     origin: stored.origin.clone(),
-                },
+                }),
                 stored.active,
             ));
         } else {
             let (filter, filters) = restored_filter(engine, stored);
             opened.push((
-                OpenedObject::Relation {
+                Reopened::Object(OpenedObject::Relation {
                     schema: stored.schema.clone(),
                     name: stored.name.clone(),
                     // The catalog when it is here, because `stored.kind` can
@@ -1714,7 +1747,7 @@ fn restorable(
                         .unwrap_or(stored.kind),
                     filter,
                     filters,
-                },
+                }),
                 stored.active,
             ));
         }
@@ -1790,6 +1823,8 @@ mod tests {
             name: name.into(),
             routine,
             structure: false,
+            diagram: false,
+            diagram_view: None,
             kind: RelationKind::Table,
             filter: String::new(),
             filter_engine: None,
@@ -1798,6 +1833,79 @@ mod tests {
             active: false,
             bars: Vec::new(),
         }
+    }
+
+    fn name(opened: &Reopened) -> String {
+        match opened {
+            Reopened::Object(object) => object.name(),
+            Reopened::Diagram(..) => String::new(),
+        }
+    }
+
+    #[test]
+    fn a_stored_diagram_comes_back_in_its_place_with_how_it_was_looked_at() {
+        let view = store::StoredDiagram {
+            centre: Some("accounts".into()),
+            keys_only: Some(true),
+            zoom: Some(0.5),
+            x: 10.0,
+            y: -20.0,
+        };
+        let pending = [
+            stored("accounts", false),
+            store::StoredObject {
+                diagram: true,
+                diagram_view: Some(view.clone()),
+                active: true,
+                ..stored("", false)
+            },
+            stored("digest()", true),
+        ];
+
+        let (opened, waiting) =
+            restorable(Engine::Postgres, true, &CatalogState::Loading, &pending);
+
+        assert_eq!(opened.len(), 2, "before the catalog, as a relation");
+        assert_eq!(name(&opened[0].0), "accounts");
+        match &opened[1] {
+            (Reopened::Diagram(schema, restored), true) => {
+                assert_eq!((schema.as_str(), restored), ("public", &view));
+            }
+            _ => panic!("the diagram comes back second, in front"),
+        }
+        assert_eq!(waiting.len(), 1);
+    }
+
+    /// A plugin's profile says it draws only once connected, after the
+    /// restore first runs: a diagram dropped then, as a tab that could not
+    /// open, would be gone from disk at the next save.
+    #[test]
+    fn a_stored_diagram_waits_while_the_profile_cannot_say_it_draws() {
+        let diagram = store::StoredObject {
+            diagram: true,
+            diagram_view: Some(store::StoredDiagram {
+                zoom: Some(0.5),
+                ..store::StoredDiagram::default()
+            }),
+            active: true,
+            ..stored("", false)
+        };
+        let pending = [stored("accounts", false), diagram.clone()];
+
+        let (opened, waiting) =
+            restorable(Engine::Postgres, false, &CatalogState::Loading, &pending);
+        assert_eq!(opened.len(), 1);
+        assert_eq!(name(&opened[0].0), "accounts");
+        assert_eq!(
+            waiting,
+            std::slice::from_ref(&diagram),
+            "kept whole, view and all"
+        );
+
+        let (opened, waiting) =
+            restorable(Engine::Postgres, true, &CatalogState::Loading, &waiting);
+        assert!(matches!(opened[..], [(Reopened::Diagram(..), true)]));
+        assert!(waiting.is_empty());
     }
 
     fn catalog_with(routines: Routines) -> CatalogState {
@@ -1832,14 +1940,19 @@ mod tests {
         // Relations are in, routines are not: the relation opens, and the
         // routine is neither resolved against a catalog without it nor dropped.
         for routines in [Routines::Loading, Routines::Failed] {
-            let (opened, waiting) = restorable(Engine::Postgres, &catalog_with(routines), &pending);
+            let (opened, waiting) =
+                restorable(Engine::Postgres, true, &catalog_with(routines), &pending);
             assert_eq!(opened.len(), 1);
-            assert_eq!(opened[0].0.name(), "accounts");
+            assert_eq!(name(&opened[0].0), "accounts");
             assert_eq!(waiting, [stored("digest()", true)]);
         }
 
-        let (opened, waiting) =
-            restorable(Engine::Postgres, &catalog_with(Routines::Loaded), &pending);
+        let (opened, waiting) = restorable(
+            Engine::Postgres,
+            true,
+            &catalog_with(Routines::Loaded),
+            &pending,
+        );
         assert_eq!(opened.len(), 2);
         assert!(waiting.is_empty());
     }
@@ -1854,10 +1967,16 @@ mod tests {
             stored("accounts", false),
         ];
 
-        let (opened, _) = restorable(Engine::Postgres, &CatalogState::Loading, &pending);
+        let (opened, _) = restorable(Engine::Postgres, true, &CatalogState::Loading, &pending);
 
-        assert!(matches!(opened[0].0, OpenedObject::Structure { .. }));
-        assert!(matches!(opened[1].0, OpenedObject::Relation { .. }));
+        assert!(matches!(
+            opened[0].0,
+            Reopened::Object(OpenedObject::Structure { .. })
+        ));
+        assert!(matches!(
+            opened[1].0,
+            Reopened::Object(OpenedObject::Relation { .. })
+        ));
     }
 
     #[test]
@@ -1867,10 +1986,11 @@ mod tests {
             ..stored("accounts", false)
         }];
 
-        let (opened, waiting) = restorable(Engine::Postgres, &CatalogState::Loading, &pending);
+        let (opened, waiting) =
+            restorable(Engine::Postgres, true, &CatalogState::Loading, &pending);
 
         assert_eq!(opened.len(), 1);
-        assert_eq!(opened[0].0.name(), "accounts");
+        assert_eq!(name(&opened[0].0), "accounts");
         assert!(opened[0].1, "the tab that was in front comes back in front");
         assert!(waiting.is_empty());
     }

@@ -34,10 +34,10 @@ use tracing::span;
 
 use super::tunnel::{Tunnel, tunnelled};
 use super::{
-    Catalog, Cell, Column, DbError, EditTarget, Engine, Fetch, QueryResult, Reference,
-    RelationKind, Row, ServerConfig, SslMode, Stopped, Structure, assemble_catalog,
-    assemble_databases, assemble_foreign_keys, assemble_references, assemble_structure,
-    create_table, plain_error, required_cell, terminated,
+    Catalog, Cell, Column, DbError, EditTarget, Engine, Fetch, GraphCancel, QueryResult, Reference,
+    RelationKind, Row, SchemaGraph, ServerConfig, SslMode, Stopped, Structure, assemble_catalog,
+    assemble_databases, assemble_foreign_keys, assemble_references, assemble_schema_graph,
+    assemble_structure, create_table, plain_error, required_cell, terminated,
 };
 
 const DATABASES_SQL: &str = "
@@ -327,6 +327,71 @@ JOIN sys.columns AS referenced_column
     AND referenced_column.column_id = fc.referenced_column_id
 WHERE fc.parent_object_id = {object}
 ORDER BY f.name, fc.constraint_column_id
+";
+
+// The ER diagram's three reads, each over a whole schema. A table with no
+// columns still comes back, as one row of NULLs, so it is drawn.
+const GRAPH_COLUMNS_SQL: &str = "
+SELECT
+    t.name AS table_name,
+    p.name AS column_name,
+    {type} AS data_type,
+    CASE WHEN p.is_nullable = 1 THEN 'yes' ELSE 'no' END AS nullable
+FROM sys.tables AS t
+JOIN sys.schemas AS s ON s.schema_id = t.schema_id
+LEFT JOIN sys.columns AS p ON p.object_id = t.object_id
+WHERE s.name = {schema} AND t.is_ms_shipped = 0
+ORDER BY t.name, p.column_id
+";
+
+// From the indexes rather than `sys.key_constraints`, because a unique index
+// makes a column as unique as a constraint does. A filtered or disabled index
+// does not.
+const GRAPH_UNIQUE_KEYS_SQL: &str = "
+SELECT
+    t.name AS table_name,
+    i.name AS constraint_name,
+    c.name AS column_name,
+    CASE WHEN i.is_primary_key = 1 THEN 'primary' ELSE 'unique' END AS key_kind
+FROM sys.indexes AS i
+JOIN sys.tables AS t ON t.object_id = i.object_id
+JOIN sys.schemas AS s ON s.schema_id = t.schema_id
+JOIN sys.index_columns AS ic
+    ON ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.is_included_column = 0
+JOIN sys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+WHERE s.name = {schema}
+    AND t.is_ms_shipped = 0
+    AND i.is_unique = 1
+    AND i.has_filter = 0
+    AND i.is_disabled = 0
+    AND i.is_hypothetical = 0
+ORDER BY t.name, i.name, ic.key_ordinal
+";
+
+// The referenced table is joined rather than named by `OBJECT_NAME`, which is
+// NULL for an object the login cannot see.
+const GRAPH_FOREIGN_KEYS_SQL: &str = "
+SELECT
+    t.name AS table_name,
+    f.name AS constraint_name,
+    source_column.name AS column_name,
+    referenced_schema.name AS referenced_schema,
+    referenced_table.name AS referenced_table,
+    referenced_column.name AS referenced_column
+FROM sys.foreign_key_columns AS fc
+JOIN sys.foreign_keys AS f ON f.object_id = fc.constraint_object_id
+JOIN sys.tables AS t ON t.object_id = fc.parent_object_id
+JOIN sys.schemas AS s ON s.schema_id = t.schema_id
+JOIN sys.columns AS source_column
+    ON source_column.object_id = fc.parent_object_id
+    AND source_column.column_id = fc.parent_column_id
+JOIN sys.tables AS referenced_table ON referenced_table.object_id = fc.referenced_object_id
+JOIN sys.schemas AS referenced_schema ON referenced_schema.schema_id = referenced_table.schema_id
+JOIN sys.columns AS referenced_column
+    ON referenced_column.object_id = fc.referenced_object_id
+    AND referenced_column.column_id = fc.referenced_column_id
+WHERE s.name = {schema} AND t.is_ms_shipped = 0
+ORDER BY t.name, f.name, fc.constraint_column_id
 ";
 
 // The same catalog read from the referenced side: who points at this relation.
@@ -682,7 +747,8 @@ enum Origin {
     /// edit: run under [`SESSION_OPTIONS`], and cancellable.
     Generated,
     /// dbdelve's catalog and structure queries: under [`SESSION_OPTIONS`],
-    /// never editable, and not what Cancel is for.
+    /// never editable, and not what Cancel is for, but for a diagram's read on
+    /// a connection of its own ([`Connection::schema_graph`]).
     Internal,
 }
 
@@ -696,7 +762,8 @@ struct InFlight {
     /// does not have.
     socket: Option<std::net::TcpStream>,
     /// A statement Cancel is for holds the session. A catalog load does not
-    /// count: Cancel stops the user's statement, never the explorer's.
+    /// count: Cancel stops the user's statement, never the explorer's. A
+    /// diagram's read on a connection of its own does.
     running: bool,
     stopped: bool,
     /// Statements Cancel is for, waiting for the session.
@@ -729,6 +796,9 @@ pub struct Connection {
     /// good rather than reconnecting, and has no session of the user's to
     /// report lost.
     alongside: bool,
+    /// A Cancel for this session's schema graph read ([`Self::schema_graph`]),
+    /// asked and taken under [`Self::in_flight`]'s lock.
+    graph: GraphCancel,
 }
 
 impl Connection {
@@ -740,6 +810,7 @@ impl Connection {
                 server: server.clone(),
                 tunnel,
                 alongside: false,
+                graph: GraphCancel::default(),
             };
             let mut session = connection.connect()?;
             // Asked even when the profile names one, for the server's spelling
@@ -816,6 +887,7 @@ impl Connection {
             session: Arc::new(Mutex::new(None)),
             in_flight: Arc::default(),
             alongside: true,
+            graph: GraphCancel::default(),
             ..self.clone()
         }
     }
@@ -834,6 +906,7 @@ impl Connection {
     /// says so and reconnects.
     pub fn cancel(&self) -> Result<(), DbError> {
         let mut in_flight = self.in_flight();
+        self.graph.ask();
         if !in_flight.running {
             // Waiting behind a catalog load: stopping the load would let the
             // statement run anyway.
@@ -860,23 +933,30 @@ impl Connection {
     /// connection, which takes the user's transaction and temporary tables
     /// with it.
     pub fn query(&self, sql: &str, fetch: Fetch) -> Result<QueryResult, DbError> {
-        self.run(sql, Origin::User, fetch)
+        self.run(sql, Origin::User, fetch, true)
     }
 
     /// A statement dbdelve wrote at the user's ask, run under the session
     /// options it was written for.
     pub fn generated(&self, sql: &str, fetch: Fetch) -> Result<QueryResult, DbError> {
-        self.run(sql, Origin::Generated, fetch)
+        self.run(sql, Origin::Generated, fetch, true)
     }
 
     /// dbdelve's own SQL. Its rows are never editable, so it does not pay for
     /// the describe that would say where they came from.
     fn internal_query(&self, sql: &str) -> Result<QueryResult, DbError> {
-        self.run(sql, Origin::Internal, Fetch::default())
+        self.run(sql, Origin::Internal, Fetch::default(), false)
     }
 
-    fn run(&self, sql: &str, origin: Origin, fetch: Fetch) -> Result<QueryResult, DbError> {
-        let cancellable = origin != Origin::Internal;
+    /// `cancellable` is apart from `origin` because only the bookkeeping Cancel
+    /// reads depends on it: what runs around the statement is the origin's.
+    fn run(
+        &self,
+        sql: &str,
+        origin: Origin,
+        fetch: Fetch,
+        cancellable: bool,
+    ) -> Result<QueryResult, DbError> {
         if cancellable {
             self.in_flight().queued += 1;
         }
@@ -906,7 +986,10 @@ impl Connection {
         let session = guard.as_mut().expect("connected above");
 
         if cancellable {
+            // Under the lock Cancel takes, so a Cancel either finds the
+            // statement running or keeps it from being sent.
             let mut in_flight = self.in_flight();
+            fetch.hold()?;
             in_flight.running = true;
             in_flight.stopped = false;
         }
@@ -1212,6 +1295,32 @@ impl Connection {
 
     pub fn structure(&self, schema: &str, relation: &str) -> Result<Structure, DbError> {
         self.structure_for(schema, relation, false)
+    }
+
+    /// Cancel stops it only on a connection of its own ([`Self::alongside`]):
+    /// there the reset takes no session of the user's with it, while on the
+    /// profile's connection it is a catalog load like any other. There it
+    /// stops it between its statements too, where nothing is running to stop.
+    pub fn schema_graph(&self, schema: &str) -> Result<SchemaGraph, DbError> {
+        self.graph.read(|held| {
+            let query = |template: &str| {
+                self.run(
+                    &template
+                        .replace("{type}", TYPE_SQL)
+                        .replace("{schema}", &Engine::SqlServer.quote_literal(schema)),
+                    Origin::Internal,
+                    Fetch {
+                        held: Some(held),
+                        ..Fetch::default()
+                    },
+                    self.alongside,
+                )
+            };
+            let columns = query(GRAPH_COLUMNS_SQL)?;
+            let unique_keys = query(GRAPH_UNIQUE_KEYS_SQL)?;
+            let foreign_keys = query(GRAPH_FOREIGN_KEYS_SQL)?;
+            assemble_schema_graph(schema, &columns, &unique_keys, &foreign_keys)
+        })
     }
 
     fn structure_for(&self, schema: &str, relation: &str, ddl: bool) -> Result<Structure, DbError> {
@@ -2729,6 +2838,32 @@ mod tests {
             )
             .expect("query should succeed");
         assert_eq!(first(&result), vec![Some("5000")]);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_schema_graph_reads_the_seeds_keys_back() {
+        use crate::db::graph::seed;
+
+        let graph = live().schema_graph("dbo").expect("the graph should read");
+
+        assert!(
+            graph
+                .tables
+                .iter()
+                .all(|table| table.name.as_ref() != "account_overview"),
+            "a view is not drawn"
+        );
+        seed::assert_keys_read_back(&graph);
+        assert_eq!(
+            graph.types[seed::column(&graph, "orders", "total").type_label as usize].as_ref(),
+            "decimal(14,2)"
+        );
+
+        let archive = live()
+            .schema_graph("archive")
+            .expect("the graph should read");
+        seed::assert_archive_points_at_accounts(&archive, "dbo");
     }
 
     #[test]
@@ -4747,6 +4882,96 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a local SQL Server configured through dbdelve_MSSQL_URL"]
+    fn live_a_cancel_on_its_own_connection_stops_a_schema_graph_read() {
+        // A table created in a transaction left open holds its catalog rows,
+        // which the read's scan of `sys.tables` waits on. The timeout is the
+        // floor under a Cancel that fails to land, so the test fails rather
+        // than hanging.
+        let locker = live();
+        let side = Connection::open(&ServerConfig {
+            statement_timeout: 30,
+            ..live_config()
+        })
+        .expect("connection should open")
+        .alongside();
+        // Signed in first, so the Cancel cannot land on the login.
+        side.query("SELECT 1", Fetch::default()).unwrap();
+        locker.query("BEGIN TRANSACTION", Fetch::default()).unwrap();
+        locker
+            .query(
+                "CREATE TABLE dbo.graph_cancel_hold (id int)",
+                Fetch::default(),
+            )
+            .unwrap();
+        let reader = side.clone();
+        let read = std::thread::spawn(move || reader.schema_graph("dbo"));
+        while side.session.try_lock().is_ok() && !read.is_finished() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        side.cancel().unwrap();
+
+        let error = read
+            .join()
+            .unwrap()
+            .expect_err("the read should be cancelled");
+        locker.query("ROLLBACK", Fetch::default()).unwrap();
+        assert!(error.message.starts_with(CANCELLED), "{}", error.message);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_cancel_before_a_schema_graph_read_drops_it_unsent() {
+        // Between its statements nothing is running for Cancel to close, so a
+        // Cancel then, or before the first, is kept for the next.
+        let side = live().alongside();
+        side.query("SELECT 1", Fetch::default()).unwrap();
+        side.cancel().unwrap();
+        let error = side
+            .schema_graph("dbo")
+            .expect_err("the read should be dropped");
+        assert_eq!(error.message, "Cancelled before it was sent.");
+        assert!(side.schema_graph("dbo").is_ok(), "kept for one read");
+
+        let profile = live();
+        profile.cancel().unwrap();
+        assert!(
+            profile.schema_graph("dbo").is_ok(),
+            "on the profile's connection it is a catalog load Cancel leaves alone"
+        );
+    }
+
+    #[test]
+    fn a_cancel_while_a_side_connection_signs_in_stops_its_schema_graph_read() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let side = Connection {
+            session: Arc::new(Mutex::new(None)),
+            in_flight: Arc::default(),
+            server: config_from_url(&format!(
+                "mssql://someone@127.0.0.1:{port}/db?sslmode=require"
+            ))
+            .unwrap(),
+            tunnel: None,
+            alongside: true,
+            graph: GraphCancel::default(),
+        };
+        let reader = side.clone();
+        let read = std::thread::spawn(move || reader.schema_graph("dbo"));
+        let (socket, _) = listener.accept().unwrap();
+        side.cancel().unwrap();
+        drop((socket, listener));
+
+        let error = read.join().unwrap().expect_err("the read was cancelled");
+        assert!(
+            error.message.starts_with("Cancelled before it started"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
     fn a_cancel_while_reconnecting_stops_the_statement_before_it_is_sent() {
         // A server that accepts the connection and never answers the login.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -4760,6 +4985,7 @@ mod tests {
             .unwrap(),
             tunnel: None,
             alongside: false,
+            graph: GraphCancel::default(),
         };
         let user = connection.clone();
         let run = std::thread::spawn(move || user.query("SELECT 1", Fetch::default()));

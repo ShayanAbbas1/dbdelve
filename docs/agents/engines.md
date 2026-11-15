@@ -188,9 +188,19 @@ Decided, and not to be re-litigated:
   cancellable on SQL Server, and the other engines' `cancel` stops only the
   handle their one connection is running, which a catalog load does not
   register): `live_a_cancel_while_queued_behind_a_catalog_load_stops_the_statement_not_the_load`
-  is the proof for SQL Server. A statement still waiting for the connection
-  mutex behind one that is running, or for SQL Server's reconnect, is cancelled
-  before it is ever sent (`InFlight::cancel_queued`, checked in
+  is the proof for SQL Server. A diagram's read on a connection of its own
+  (`Connection::apart`) is the exception there: `schema_graph` registers it
+  with Cancel, while it stays `Origin::Internal` for everything else, because
+  closing that connection takes no session of the user's
+  (`live_a_cancel_on_its_own_connection_stops_a_schema_graph_read`). Its
+  several statements leave the session idle before and between them, where a
+  Postgres cancel request or a MySQL `KILL QUERY` stops nothing and SQL Server
+  has nothing running to close, so on those three a Cancel is also kept
+  (`db::GraphCancel`) and the read's next statement is dropped unsent
+  (`live_a_cancel_before_a_schema_graph_read_drops_it_unsent`). A
+  statement still waiting for the connection mutex behind one that is
+  running, or for SQL Server's reconnect, is cancelled before it is ever sent
+  (`InFlight::cancel_queued`, checked in
   `Connection::run` once the mutex is taken and the session reconnected), and a Cancel that lands after the statement already finished is
   answered "Cancel arrived after that." rather than left to look like it did
   nothing. On SQL Server that Cancel still closes the connection, so the

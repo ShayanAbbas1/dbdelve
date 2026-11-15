@@ -4,7 +4,7 @@
 //! impl live in as many modules as it has concerns; they moved out whole.
 
 use super::*;
-use crate::actions::{FocusSidebar, OpenSidebarItem, ToggleResultsFocus};
+use crate::actions::{FocusSidebar, OpenSidebarItem, ToggleResults, ToggleResultsFocus};
 use crate::explorer::Shortcut;
 use crate::session::PendingDiscard;
 use crate::tab_drag::{self, Drag, Slot};
@@ -151,6 +151,34 @@ impl Workspace {
                 cx,
             );
         }
+    }
+
+    /// Hide the query tab's results pane, giving the editor the whole height,
+    /// or bring it back. Only a query tab has one to hide: an opened relation's
+    /// rows are what the tab is for.
+    pub(crate) fn toggle_results(
+        &mut self,
+        _: &ToggleResults,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.profile_mut().map(|profile| &mut profile.session) else {
+            return;
+        };
+        let Tab::Query(id) = session.active else {
+            return;
+        };
+        let Some(tab) = session.query_tab_mut(id) else {
+            return;
+        };
+        tab.results_hidden = !tab.results_hidden;
+        // The grid and the new-row form beside it are about to be unmounted,
+        // and a window focused on either has no path left for the chord that
+        // would bring them back.
+        if tab.results_hidden {
+            self.refocus_front();
+        }
+        cx.notify();
     }
 
     pub(crate) fn toggle_row_panel(
@@ -966,6 +994,22 @@ impl Workspace {
             cx.notify();
             return;
         }
+        // The find field first, then the focus: each `escape` puts one away.
+        if let Some(ObjectBody::Diagram { view, .. }) = self
+            .profile()
+            .and_then(|profile| profile.session.active_object())
+            .map(|tab| &tab.body)
+        {
+            let (finding, focused) = (view.read(cx).finding(), view.read(cx).has_focus());
+            if finding || focused {
+                let view = view.clone();
+                view.update(cx, |view, cx| match finding {
+                    true => view.close_find(window, cx),
+                    false => view.clear_focus(cx),
+                });
+                return;
+            }
+        }
         // Nothing of dbdelve's is stacked over the tab, so the keystroke is not
         // ours. Handing it on is what lets the completion popup close and a
         // grid cell's input cancel its edit; this binding is unscoped and would
@@ -975,7 +1019,7 @@ impl Workspace {
     }
 
     /// Between the buffer and the rows it ran: to whichever the keyboard is
-    /// not in. On an object tab, which has no buffer, to its grid.
+    /// not in. On an object tab, which has no buffer, to its grid or canvas.
     pub(crate) fn toggle_results_focus(
         &mut self,
         _: &ToggleResultsFocus,
@@ -1005,6 +1049,7 @@ impl Workspace {
                 crate::result_grid::take_keyboard(table, window, cx)
             }),
             Focus::Structure(grid) => grid.focus_handle(cx).focus(window, cx),
+            Focus::Diagram(handle) => handle.focus(window, cx),
             Focus::Buffer(editor) => editor.focus_handle(cx).focus(window, cx),
             Focus::Field(_) | Focus::Window => return,
         }
@@ -1026,7 +1071,8 @@ impl Workspace {
         let Some(tab) = session.active_object() else {
             let tab = session.active_query_tab()?;
             let (state, grid) = tab.shown();
-            let drawn = tab.plan_shown().is_none()
+            let drawn = !tab.results_hidden
+                && tab.plan_shown().is_none()
                 && !tab.messages_shown()
                 && matches!(
                     state,
@@ -1040,6 +1086,9 @@ impl Workspace {
                     .then(|| Focus::Grid(results.clone()))
             }
             ObjectBody::Structure { grid, .. } => Some(Focus::Structure(grid.clone())),
+            ObjectBody::Diagram { view, .. } => {
+                Some(Focus::Diagram(view.read(cx).focus_handle().clone()))
+            }
             ObjectBody::Routine(_) => None,
         }
     }

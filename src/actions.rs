@@ -233,6 +233,7 @@ actions!(
         CycleMode,
         CloseTab,
         ToggleSidebar,
+        ToggleResults,
         ToggleRowPanel,
         ToggleRowEdit,
         ToggleStructure,
@@ -249,5 +250,15 @@ actions!(
         SubmitConnection,
         Quit,
         Minimize,
+        OpenDiagramTable,
+        OpenDiagramStructure,
+        FindInDiagram,
+        DiagramFindNext,
+        DiagramFindPrevious,
+        DiagramFindPick,
+        DiagramFocusLeft,
+        DiagramFocusRight,
+        DiagramFocusUp,
+        DiagramFocusDown,
     ]
 );

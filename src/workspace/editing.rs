@@ -45,6 +45,11 @@ impl Workspace {
             if let Some(field) = form.fields.first() {
                 field.input.focus_handle(cx).focus(window, cx);
             }
+            // The form is drawn in the results pane, so asking for one brings
+            // a hidden pane back rather than filling in a form nobody can see.
+            if let Some(profile) = self.profile_mut() {
+                profile.session.reveal_results(active);
+            }
             return;
         }
         let (schema, table, columns) = match active {
@@ -54,7 +59,9 @@ impl Workspace {
                 };
                 let structure = match &tab.body {
                     ObjectBody::Relation { structure, .. } => structure,
-                    ObjectBody::Structure { .. } | ObjectBody::Routine(_) => return,
+                    ObjectBody::Structure { .. }
+                    | ObjectBody::Routine(_)
+                    | ObjectBody::Diagram { .. } => return,
                 };
                 if !tab.takes_inserts(self.target()) {
                     self.note("This view takes no inserts.".into(), cx);
@@ -126,6 +133,7 @@ impl Workspace {
                 table,
                 fields,
             });
+            profile.session.reveal_results(active);
         }
         cx.notify();
     }

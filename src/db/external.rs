@@ -22,7 +22,7 @@ use std::net::SocketAddr;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
-use std::sync::{Arc, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use arrow_schema::SchemaRef;
@@ -31,17 +31,17 @@ use dbdelve_plugin_protocol::limits::{
     CANCEL_DEADLINE, HELLO_DEADLINE, OPEN_DEADLINE, credit_cost,
 };
 use dbdelve_plugin_protocol::{
-    ErrorKind, PROTOCOL, Password, REFERENCES, RelationKind as WireKind, Request, Response,
-    Structure as WireStructure, WRITE,
+    ErrorKind, GRAPH, Graph as WireGraph, PROTOCOL, Password, REFERENCES, RelationKind as WireKind,
+    Request, Response, Structure as WireStructure, WRITE,
 };
 
 use super::odbc_string::{self, Refusal};
 use super::plugin::Plugin;
 use super::tunnel::Tunnel;
 use super::{
-    CancelToken, Cancelling, Catalog, ColumnDefinition, DbError, Engine, Fetch, ForeignKey, Index,
-    IndexKind, NamedDefinition, QueryResult, Reference, Relation, RelationKind, Schema, SshTunnel,
-    Stopped, Structure,
+    CancelToken, Cancelling, Catalog, Column, ColumnDefinition, DbError, Engine, Fetch, ForeignKey,
+    Index, IndexKind, NamedDefinition, QueryResult, Reference, Relation, RelationKind, Row, Schema,
+    SchemaGraph, SshTunnel, Stopped, Structure, assemble_schema_graph,
 };
 use crate::sql;
 use host::{Host, Routed, failure};
@@ -123,6 +123,20 @@ pub struct Connection {
     config: Arc<ExternalConfig>,
     /// Lives while any clone does; [`Self::apart`] dials it again.
     tunnel: Option<Arc<Tunnel>>,
+    /// The `graph` request in flight, which any Cancel on this connection
+    /// stops ([`Self::schema_graph`]).
+    graph: Arc<Mutex<GraphRead>>,
+}
+
+/// Where a connection's `graph` read is, for a Cancel to find.
+#[derive(Default)]
+enum GraphRead {
+    #[default]
+    Idle,
+    Sent(u64),
+    /// A Cancel came with nothing sent: the read that follows is refused
+    /// unsent, as a run's query asked to stop before it went out is.
+    Cancelled,
 }
 
 impl Connection {
@@ -265,6 +279,7 @@ impl Connection {
             opened: Arc::new(opened),
             config: Arc::new(config.clone()),
             tunnel,
+            graph: Arc::default(),
         })
     }
 
@@ -324,7 +339,69 @@ impl Connection {
     /// Whether the plugin runs DBDelve's writes, all or none, through its
     /// driver's own transaction: only then are its rows offered for editing.
     fn writes(&self) -> bool {
-        self.opened.optional.iter().any(|name| name == WRITE)
+        self.offers(WRITE)
+    }
+
+    fn offers(&self, message: &str) -> bool {
+        self.opened.optional.iter().any(|name| name == message)
+    }
+
+    /// Whether [`Self::schema_graph`] is answered here: only once the plugin
+    /// offered `graph`, whatever dialect the profile speaks, since the read
+    /// is the driver's catalog and not SQL.
+    pub fn draws_diagrams(&self) -> bool {
+        self.offers(GRAPH)
+    }
+
+    /// One schema's tables and keys, in one `graph` request the plugin
+    /// answers with as many driver calls as it needs. Refused unsent when the
+    /// plugin did not offer `graph`.
+    ///
+    /// Read as a query is, not as a catalog request: no deadline, since a
+    /// driver that reads keys a table at a time takes as long as the schema
+    /// is large, and any Cancel on this connection stops it with the query's
+    /// own deadline behind it. The read is no run's, and runs alone on a
+    /// connection of its own ([`Self::apart`]), so a Cancel here is for it,
+    /// even one that comes before the request goes out, which refuses it
+    /// unsent.
+    pub fn schema_graph(&self, schema: &str) -> Result<SchemaGraph, DbError> {
+        if !self.draws_diagrams() {
+            return Err(failure(format!(
+                "This version of the {} plugin cannot draw diagrams, so nothing was sent.",
+                self.host.plugin.name
+            )));
+        }
+        let _session = self.host.session();
+        let request = Request::Graph {
+            schema: schema.to_owned(),
+        };
+        let (in_flight, answers) = {
+            let mut graph = self.graph.lock().unwrap_or_else(PoisonError::into_inner);
+            if matches!(*graph, GraphRead::Cancelled) {
+                *graph = GraphRead::Idle;
+                return Err(failure("Cancelled before it was sent.".into()));
+            }
+            let sent = self.host.request(request)?;
+            *graph = GraphRead::Sent(sent.0.id);
+            sent
+        };
+        let answer = answers.recv();
+        *self.graph.lock().unwrap_or_else(PoisonError::into_inner) = GraphRead::Idle;
+        drop(in_flight);
+        match answer {
+            Ok(Routed::Control(Response::Graph(wire))) => graph_from(schema, wire),
+            Ok(Routed::Control(Response::Error {
+                kind,
+                message,
+                position,
+                lost,
+                ..
+            })) => Err(self.plugin_error(kind, message, position, lost)),
+            Ok(Routed::Control(_) | Routed::Data(_)) => Err(self
+                .host
+                .violated("an answer to `graph` that is not `graph`", false)),
+            Ok(Routed::Reset(_)) | Err(_) => Err(self.host.reset_error(false)),
+        }
     }
 
     /// `statements` as one transaction of the driver's, committed only if
@@ -468,13 +545,19 @@ impl Connection {
 
     /// The user's Cancel, which may abort an open transaction, as cancelling
     /// a built-in's statement does. It stops only the statements `cancel`
-    /// sent; one still waiting for the session is dropped when its turn
-    /// comes. A catalog request is no run's, so no Cancel reaches it.
+    /// sent, and a `graph` read; one still waiting for the session is dropped
+    /// when its turn comes. A catalog request is no run's, so no Cancel
+    /// reaches it.
     pub fn cancel(&self, cancel: &CancelToken) -> Result<(), DbError> {
         let mut run = claims(cancel);
         run.asked = true;
         for id in run.handles.iter().filter_map(|handle| handle.parse().ok()) {
             self.host.cancel(id);
+        }
+        let mut graph = self.graph.lock().unwrap_or_else(PoisonError::into_inner);
+        match *graph {
+            GraphRead::Sent(id) => self.host.cancel(id),
+            GraphRead::Idle | GraphRead::Cancelled => *graph = GraphRead::Cancelled,
         }
         Ok(())
     }
@@ -698,6 +781,102 @@ impl Connection {
             }
         }
     }
+}
+
+/// The plugin's graph through the same assembly every built-in's catalog rows
+/// go through, in the shapes [`assemble_schema_graph`] names.
+fn graph_from(schema: &str, wire: WireGraph) -> Result<SchemaGraph, DbError> {
+    let mut columns = Vec::new();
+    for table in &wire.tables {
+        let name = Some(table.name.as_str());
+        if table.columns.is_empty() {
+            columns.push(vec![name, None, None, None]);
+        }
+        for column in &table.columns {
+            let nullable = match column.nullable {
+                true => "yes",
+                false => "no",
+            };
+            columns.push(vec![
+                name,
+                Some(column.name.as_str()),
+                Some(column.data_type.as_str()),
+                Some(nullable),
+            ]);
+        }
+    }
+    // Grouped by position, not name: a driver may name a constraint and an
+    // index alike (Db2 names a primary key after another column's unique
+    // index), and only the flags a key sets are kept.
+    let positions: Vec<String> = (0..wire.unique_keys.len())
+        .map(|at| at.to_string())
+        .collect();
+    let unique_keys = wire
+        .unique_keys
+        .iter()
+        .zip(&positions)
+        .flat_map(|(key, at)| {
+            let kind = match key.primary {
+                true => "primary",
+                false => "unique",
+            };
+            key.columns
+                .iter()
+                .map(move |column| [&key.table, at, column, kind].map(Some).to_vec())
+        });
+    let foreign_keys = wire.foreign_keys.iter().flat_map(|key| {
+        let pairs = key.columns.iter().zip(&key.referenced_columns);
+        pairs.map(|(column, referenced)| {
+            let row = [
+                &key.table,
+                &key.name,
+                column,
+                &key.referenced_schema,
+                &key.referenced_table,
+                referenced,
+            ];
+            row.map(|cell| Some(cell.as_str())).to_vec()
+        })
+    });
+    assemble_schema_graph(
+        schema,
+        &named(
+            &["table_name", "column_name", "data_type", "nullable"],
+            columns,
+        )?,
+        &named(
+            &["table_name", "constraint_name", "column_name", "key_kind"],
+            unique_keys,
+        )?,
+        &named(
+            &[
+                "table_name",
+                "constraint_name",
+                "column_name",
+                "referenced_schema",
+                "referenced_table",
+                "referenced_column",
+            ],
+            foreign_keys,
+        )?,
+    )
+}
+
+fn named<'a>(
+    names: &[&str],
+    rows: impl IntoIterator<Item = Vec<Option<&'a str>>>,
+) -> Result<QueryResult, DbError> {
+    Ok(QueryResult {
+        columns: names
+            .iter()
+            .map(|name| Column {
+                name: (*name).to_owned(),
+                ..Column::default()
+            })
+            .collect(),
+        rows: rows.into_iter().map(Row::new).collect::<Result<_, _>>()?,
+        ..QueryResult::default()
+    })
 }
 
 /// The string the plugin is to dial: the user's own without a tunnel, and with
@@ -1033,7 +1212,11 @@ mod tests {
                 dbms_version: env!("CARGO_PKG_VERSION").to_owned(),
                 driver: "dbdelve-echo".to_owned(),
                 stops_early: true,
-                optional: vec!["references".to_owned(), "write".to_owned()],
+                optional: vec![
+                    "references".to_owned(),
+                    "write".to_owned(),
+                    "graph".to_owned()
+                ],
             }
         );
         let pid = connection.host.pid().unwrap();
@@ -2277,6 +2460,133 @@ mod tests {
         assert_eq!(references[0].table, "main.accounts");
         let plain = open_with(&[("DBDELVE_ECHO_PLAIN", "1")]).unwrap();
         assert!(plain.references("main", "accounts").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_graph_reads_through_the_shared_assembly() {
+        let connection = open_with(&[]).unwrap();
+        assert!(connection.draws_diagrams());
+        let graph = connection.schema_graph("main").unwrap();
+        crate::db::graph::seed::assert_keys_read_back(&graph);
+        let names: Vec<_> = graph
+            .tables
+            .iter()
+            .map(|table| table.name.as_ref())
+            .collect();
+        assert_eq!(names, ["accounts", "orders", "order_items", "empty"]);
+        assert!(graph.tables[3].columns.is_empty());
+        let owner = graph.keys.last().unwrap();
+        assert_eq!(
+            owner.referenced,
+            crate::db::KeyTarget::Elsewhere {
+                schema: "elsewhere".into(),
+                table: "owners".into(),
+            }
+        );
+        assert_eq!(
+            connection.schema_graph("fail").unwrap_err().message,
+            "no such schema"
+        );
+    }
+
+    /// Db2 names a primary key after another column's unique index; read as
+    /// one key, neither column would be unique.
+    #[test]
+    fn unique_keys_named_alike_stay_apart() {
+        use dbdelve_plugin_protocol::{Column, GraphTable, UniqueKey};
+
+        let column = |name: &str| Column {
+            name: name.to_string(),
+            data_type: "BIGINT".to_string(),
+            nullable: false,
+            default: None,
+        };
+        let key = |column: &str, primary| UniqueKey {
+            table: "accounts".to_string(),
+            name: "SQL960".to_string(),
+            columns: vec![column.to_string()],
+            primary,
+        };
+        let wire = WireGraph {
+            tables: vec![GraphTable {
+                name: "accounts".to_string(),
+                columns: vec![column("id"), column("external_id")],
+            }],
+            unique_keys: vec![key("id", true), key("external_id", false)],
+            foreign_keys: Vec::new(),
+        };
+        let graph = graph_from("S", wire).unwrap();
+        let [id, external_id] = &graph.tables[0].columns[..] else {
+            panic!("two columns");
+        };
+        assert!(id.primary && id.unique);
+        assert!(!external_id.primary && external_id.unique);
+    }
+
+    /// A plugin from before `graph` draws nothing, and is never sent one.
+    #[test]
+    fn a_plugin_that_did_not_offer_graph_draws_no_diagram_and_is_sent_none() {
+        let plain = open_with(&[("DBDELVE_ECHO_PLAIN", "1")]).unwrap();
+        assert!(!plain.draws_diagrams());
+        let profile = crate::db::Connection::External(plain.clone());
+        let target = crate::db::Target {
+            engine: Engine::Postgres,
+            driver: crate::db::Driver::Plugin(echo::plugin()),
+        };
+        assert!(!profile.draws_diagrams(target));
+        let error = plain.schema_graph("main").unwrap_err();
+        assert_eq!(
+            error.message,
+            "This version of the Echo plugin cannot draw diagrams, so nothing was sent."
+        );
+        assert!(
+            plain
+                .query("last", &CancelToken::default(), Fetch::default())
+                .is_ok()
+        );
+        let offered = crate::db::Connection::External(open_with(&[]).unwrap());
+        assert!(offered.draws_diagrams(target));
+    }
+
+    /// The read is no run's, so a Cancel under any token on its connection
+    /// stops it, and the session runs on.
+    #[test]
+    fn a_cancel_on_its_connection_stops_a_graph_read() {
+        let connection = open_with(&[]).unwrap();
+        let canceller = connection.clone();
+        let started = Instant::now();
+        std::thread::spawn(move || {
+            // Once it is out: a Cancel before then refuses it unsent instead.
+            while !matches!(*canceller.graph.lock().unwrap(), GraphRead::Sent(_)) {
+                assert!(started.elapsed() < CANCEL_DEADLINE, "never sent");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            canceller.cancel(&CancelToken::default()).unwrap();
+        });
+        let error = connection.schema_graph("sleep").unwrap_err();
+        assert_eq!(error.message, CANCELLED);
+        assert!(
+            started.elapsed() < CANCEL_DEADLINE,
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(!connection.is_lost());
+        assert!(connection.schema_graph("main").is_ok());
+    }
+
+    /// The window between a diagram's connection opening and its read going
+    /// out: a Cancel there is kept, and the read never sent, so it cannot run
+    /// on with no deadline behind it.
+    #[test]
+    fn a_cancel_before_a_graph_read_is_sent_refuses_it_unsent() {
+        let connection = open_with(&[]).unwrap();
+        connection.cancel(&CancelToken::default()).unwrap();
+        let started = Instant::now();
+        let error = connection.schema_graph("sleep").unwrap_err();
+        assert_eq!(error.message, "Cancelled before it was sent.");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(!connection.is_lost());
+        assert!(connection.schema_graph("main").is_ok(), "kept for one read");
     }
 
     #[test]

@@ -43,8 +43,8 @@ pub const QUERIES_GROUP: &str = "queries";
 /// file names, so no other row's id can take this shape.
 const QUERY_ROW: &str = "query:";
 
-/// Whether a row is a schema's own: the only row "Set as Active Schema"
-/// means anything on. Asked by id, since a schema's label can be anything,
+/// Whether a row is a schema's own: the only row "Set as Active Schema" and
+/// "Show Diagram" mean anything on. Asked by id, since a schema's label can be anything,
 /// "Queries" included.
 pub fn is_schema_row(id: &str) -> bool {
     id.starts_with(SCHEMA_ROW)

@@ -256,6 +256,7 @@ chore(release): bump version to 0.3.8
 | `grid`        | Result grid, row panel, structure grid, filters, sorting                |
 | `editing`     | Row edits and the write gate                                            |
 | `explain`     | The plan pane                                                           |
+| `diagram`     | The ER diagram: its layout, canvas and export                           |
 | `tabs`        | Tabs, sessions, restore at startup                                      |
 | `palette`     | Command palette, actions, keybindings                                   |
 | `theme`       | Themes and theme import                                                 |
@@ -285,6 +286,8 @@ discussed in, if there was one.
 For any UI change, include screenshots. For a big feature or support for a
 new engine, add a screen recording of it working in the app too. It's a
 desktop UI; reviewers need to see the change, not just read the diff.
+
+If a review finds that a PR needs some changes, instead of sending the PR back the maintainer will sometimes just add the commits themselves on top of your commits to save time. If you want to handle everything yourself, say so in the PR and no commits will be made on top of yours and changes will be requested.
 
 ## License
 

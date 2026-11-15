@@ -266,6 +266,14 @@ impl Target {
     pub fn exact_row_estimates(self) -> bool {
         self.abilities().exact_row_estimates
     }
+
+    /// Whether a schema can be drawn as an ER diagram, through
+    /// [`super::Connection::schema_graph`], on a built-in driver. Never for a
+    /// plugin: whether one draws depends on what it offered when it opened,
+    /// so that is asked of the connection ([`super::Connection::draws_diagrams`]).
+    pub fn draws_diagrams(self) -> bool {
+        self.abilities().draws_diagrams
+    }
 }
 
 /// Whether `error` is the user's Cancel landing, in the words each engine's
@@ -435,6 +443,7 @@ mod tests {
                 target.catalog_is_per_database(),
                 target.exact_row_estimates(),
                 target.takes_service(),
+                target.draws_diagrams(),
             ]
             .into_iter()
             .chain(

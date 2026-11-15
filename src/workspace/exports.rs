@@ -39,7 +39,7 @@ const FINISH_CHUNK: usize = 1_000;
 
 /// How an export that wrote nothing ended.
 #[derive(Debug, PartialEq)]
-enum Ended {
+pub(super) enum Ended {
     Cancelled,
     Failed(String),
 }
@@ -255,7 +255,7 @@ impl Workspace {
         let engine = profile.config.engine();
         let connection = profile.connection();
         let rows = result.rows.len();
-        let chosen = choose_path(&stem, format, cx);
+        let chosen = choose_path(&stem, format.extension(), cx);
 
         cx.spawn(async move |workspace, cx| {
             let Some(path) = chosen.await else {
@@ -379,7 +379,7 @@ impl Workspace {
             return;
         };
         let (id, generation) = (profile.id.clone(), profile.generation);
-        let chosen = choose_path(&stem, format, cx);
+        let chosen = choose_path(&stem, format.extension(), cx);
         cx.spawn(async move |workspace, cx| {
             let Some(path) = chosen.await else {
                 return;
@@ -691,12 +691,12 @@ thread_local! {
 }
 
 /// The save panel, opened on the home directory with `stem` named in it.
-fn choose_path(
+pub(super) fn choose_path(
     stem: &str,
-    format: FileAs,
+    extension: &str,
     cx: &mut Context<Workspace>,
 ) -> impl Future<Output = Option<PathBuf>> + use<> {
-    let suggested = format!("{stem}.{}", format.extension());
+    let suggested = format!("{stem}.{extension}");
     let directory = crate::store::home().unwrap_or_else(|_| PathBuf::from("/"));
     #[cfg(test)]
     SUGGESTED_NAMES.with_borrow_mut(|names| names.push(suggested.clone()));
@@ -794,7 +794,7 @@ fn exported(rows: usize, format: FileAs, path: &Path) -> String {
 }
 
 impl Ended {
-    fn notice(&self, path: &Path) -> String {
+    pub(super) fn notice(&self, path: &Path) -> String {
         match self {
             Ended::Cancelled => format!(
                 "The export was cancelled. Nothing was written to {}.",
@@ -805,7 +805,7 @@ impl Ended {
     }
 }
 
-fn could_not_write(path: &Path) -> impl Fn(io::Error) -> Ended + '_ {
+pub(super) fn could_not_write(path: &Path) -> impl Fn(io::Error) -> Ended + '_ {
     move |error| Ended::Failed(format!("Could not write {}: {error}", path.display()))
 }
 
@@ -813,7 +813,7 @@ fn could_not_write(path: &Path) -> impl Fn(io::Error) -> Ended + '_ {
 /// `write` has written it whole. A failed or cancelled export never leaves a
 /// truncated file under the name the user chose, nor clobbers a file already
 /// there until its replacement is complete.
-fn write_replacing<T>(
+pub(super) fn write_replacing<T>(
     path: &Path,
     write: impl FnOnce(&mut BufWriter<File>) -> Result<T, Ended>,
 ) -> Result<T, Ended> {

@@ -433,3 +433,58 @@ fn live_db2_through_a_tunnel() {
     let result = run(&connection, "SELECT 7 FROM SYSIBM.SYSDUMMY1");
     assert_eq!(cell(&result), Some("7"));
 }
+
+/// The seed's keys as every engine's graph test reads them, in schemas of
+/// the test's own: Db2 keeps the quoted lower-case names as written. The
+/// composite key is declared against its columns' order, a view is not drawn,
+/// and a key from another schema is a stub.
+#[test]
+#[ignore = "needs a Db2 and IBM's driver: set dbdelve_ODBC_DB2, _USER and _PASSWORD"]
+fn live_db2_a_schema_graph_reads_the_seeds_keys_back() {
+    use crate::db::graph::seed;
+
+    let connection = open();
+    for sql in [
+        r#"DROP TABLE IF EXISTS "DBDELVE_GRAPH_ARCHIVE"."closed_accounts""#,
+        r#"DROP TABLE IF EXISTS "DBDELVE_GRAPH"."order_items""#,
+        r#"DROP TABLE IF EXISTS "DBDELVE_GRAPH"."orders""#,
+        r#"DROP TABLE IF EXISTS "DBDELVE_GRAPH"."accounts""#,
+        r#"CREATE TABLE "DBDELVE_GRAPH"."accounts" ("id" BIGINT NOT NULL PRIMARY KEY,
+           "external_id" VARCHAR(36) NOT NULL UNIQUE)"#,
+        r#"CREATE TABLE "DBDELVE_GRAPH"."orders" (
+           "account_id" BIGINT NOT NULL REFERENCES "DBDELVE_GRAPH"."accounts" ("id"),
+           "number" INTEGER NOT NULL, "total" DECIMAL(14,2),
+           PRIMARY KEY ("account_id", "number"))"#,
+        r#"CREATE TABLE "DBDELVE_GRAPH"."order_items" ("id" INTEGER NOT NULL PRIMARY KEY,
+           "order_number" INTEGER NOT NULL, "order_account_id" BIGINT NOT NULL,
+           FOREIGN KEY ("order_account_id", "order_number")
+           REFERENCES "DBDELVE_GRAPH"."orders" ("account_id", "number"))"#,
+        r#"CREATE OR REPLACE VIEW "DBDELVE_GRAPH"."account_overview" AS
+           SELECT "id" FROM "DBDELVE_GRAPH"."accounts""#,
+        r#"CREATE TABLE "DBDELVE_GRAPH_ARCHIVE"."closed_accounts" (
+           "id" INTEGER NOT NULL PRIMARY KEY,
+           "account_id" BIGINT NOT NULL REFERENCES "DBDELVE_GRAPH"."accounts" ("id"))"#,
+    ] {
+        run(&connection, sql);
+    }
+    assert!(connection.draws_diagrams(target()));
+
+    let graph = connection
+        .schema_graph("DBDELVE_GRAPH")
+        .expect("the graph should read");
+    let names: Vec<_> = graph
+        .tables
+        .iter()
+        .map(|table| table.name.as_ref())
+        .collect();
+    assert_eq!(names.len(), 3, "a view is not drawn: {names:?}");
+    seed::assert_keys_read_back(&graph);
+    assert_eq!(
+        graph.types[seed::column(&graph, "orders", "total").type_label as usize].as_ref(),
+        "DECIMAL(14,2)"
+    );
+    let archive = connection
+        .schema_graph("DBDELVE_GRAPH_ARCHIVE")
+        .expect("the graph should read");
+    seed::assert_archive_points_at_accounts(&archive, "DBDELVE_GRAPH");
+}

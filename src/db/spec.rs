@@ -794,6 +794,9 @@ pub struct Abilities {
     pub picks_schema: bool,
     pub exact_row_estimates: bool,
     pub schema_switch_waits_for_transaction: bool,
+    /// The catalog declares foreign keys that
+    /// [`Connection::schema_graph`](super::Connection::schema_graph) reads.
+    pub draws_diagrams: bool,
     /// Why no transaction spans an import's chunks.
     pub chunk_refusal: Option<&'static str>,
 }
@@ -813,6 +816,7 @@ impl Abilities {
         picks_schema: false,
         exact_row_estimates: false,
         schema_switch_waits_for_transaction: false,
+        draws_diagrams: false,
         chunk_refusal: None,
     };
 
@@ -905,6 +909,7 @@ pub(crate) const POSTGRES: EngineSpec = EngineSpec {
         switches_database: true,
         picks_schema: true,
         schema_switch_waits_for_transaction: true,
+        draws_diagrams: true,
         ..Abilities::NONE
     },
     hooks: Hooks::NONE,
@@ -966,6 +971,7 @@ pub(crate) const MYSQL: EngineSpec = EngineSpec {
         switches_database: true,
         // No `picks_schema`: the database is the schema.
         catalog_lists_databases: true,
+        draws_diagrams: true,
         ..Abilities::NONE
     },
     hooks: Hooks {
@@ -1029,6 +1035,7 @@ pub(crate) const MARIADB: EngineSpec = EngineSpec {
         copies_ddl: true,
         switches_database: true,
         catalog_lists_databases: true,
+        draws_diagrams: true,
         ..Abilities::NONE
     },
     hooks: Hooks {
@@ -1094,6 +1101,7 @@ pub(crate) const SQLITE: EngineSpec = EngineSpec {
         copies_ddl: true,
         // No `assigns_default`: `UPDATE` takes an expression on the right and
         // `DEFAULT` is not one there.
+        draws_diagrams: true,
         ..Abilities::NONE
     },
     hooks: Hooks::NONE,
@@ -1140,6 +1148,7 @@ pub(crate) const TURSO: EngineSpec = EngineSpec {
         inserts_into_views: true,
         imports: true,
         copies_ddl: true,
+        draws_diagrams: true,
         ..Abilities::NONE
     },
     hooks: Hooks::NONE,
@@ -1198,6 +1207,7 @@ pub(crate) const DUCKDB: EngineSpec = EngineSpec {
         // in-memory database opened again is a new, empty one.
         switches_database_in_session: true,
         picks_schema: true,
+        draws_diagrams: true,
         ..Abilities::NONE
     },
     hooks: Hooks {
@@ -1268,6 +1278,7 @@ pub(crate) const SNOWFLAKE: EngineSpec = EngineSpec {
         chunk_refusal: Some(
             "Snowflake runs each request on its own, so no transaction can span the chunks.",
         ),
+        draws_diagrams: true,
         ..Abilities::NONE
     },
     hooks: Hooks::NONE,
@@ -1341,6 +1352,7 @@ pub(crate) const SQL_SERVER: EngineSpec = EngineSpec {
         copies_ddl: true,
         switches_database: true,
         // No `picks_schema`: the default schema is the login's.
+        draws_diagrams: true,
         ..Abilities::NONE
     },
     hooks: Hooks {

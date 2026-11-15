@@ -673,7 +673,9 @@ impl DirectXRenderer {
         }
 
         // Collect all vertices and sprites for a single draw call
-        let mut vertices = Vec::new();
+        // dbdelve patch: reserved at its size. Grown by doubling, a frame of
+        // millions of vertices left a fresh realloc'd block behind every frame.
+        let mut vertices = Vec::with_capacity(paths.iter().map(|path| path.vertices.len()).sum());
 
         for path in paths {
             vertices.extend(path.vertices.iter().map(|v| PathRasterizationSprite {

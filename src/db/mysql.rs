@@ -29,10 +29,11 @@ use ::mysql::{Conn, OptsBuilder, SslOpts, Value};
 
 use super::tunnel::{Tunnel, tunnelled};
 use super::{
-    Catalog, Column, DbError, EditTarget, Engine, Fetch, Index, IndexKind, QueryResult, Reference,
-    RowBuilder, Schema, ServerConfig, Sizes, SslMode, Stopped, Structure, assemble_catalog,
-    assemble_databases, assemble_foreign_keys, assemble_references, assemble_sizes,
-    assemble_structure, non_utf8_error, optional_cell, plain_error, required_cell,
+    Catalog, Column, DbError, EditTarget, Engine, Fetch, GraphCancel, Index, IndexKind,
+    QueryResult, Reference, RowBuilder, Schema, SchemaGraph, ServerConfig, Sizes, SslMode, Stopped,
+    Structure, assemble_catalog, assemble_databases, assemble_foreign_keys, assemble_references,
+    assemble_schema_graph, assemble_sizes, assemble_structure, non_utf8_error, optional_cell,
+    plain_error, required_cell,
 };
 
 /// Without this the driver waits out the OS SYN retry budget, so a host that
@@ -267,6 +268,57 @@ const CONSTRAINT_COLUMNS_SQL: &str = "COALESCE((
       AND key_column.CONSTRAINT_NAME = table_constraint.CONSTRAINT_NAME
       AND key_column.TABLE_NAME = table_constraint.TABLE_NAME
 ), '')";
+
+// The ER diagram's three reads, each over a whole database. A table with no
+// columns still comes back, as one row of NULLs, so it is drawn.
+const GRAPH_COLUMNS_SQL: &str = "
+SELECT base_table.TABLE_NAME AS table_name,
+       column_entry.COLUMN_NAME AS column_name,
+       column_entry.COLUMN_TYPE AS data_type,
+       CASE column_entry.IS_NULLABLE WHEN 'YES' THEN 'yes' ELSE 'no' END AS nullable
+FROM information_schema.TABLES AS base_table
+LEFT JOIN information_schema.COLUMNS AS column_entry
+    ON column_entry.TABLE_SCHEMA = base_table.TABLE_SCHEMA
+    AND column_entry.TABLE_NAME = base_table.TABLE_NAME
+WHERE base_table.TABLE_SCHEMA = {schema}
+  AND base_table.TABLE_TYPE IN {stored}
+ORDER BY base_table.TABLE_NAME, column_entry.ORDINAL_POSITION
+";
+
+// A functional part (no `COLUMN_NAME`) leaves the columns not unique in
+// themselves. A prefix part (`SUB_PART`) does not: equal values have equal
+// prefixes, so the full columns are unique too.
+const GRAPH_UNIQUE_KEYS_SQL: &str = "
+SELECT statistic.TABLE_NAME AS table_name,
+       statistic.INDEX_NAME AS constraint_name,
+       statistic.COLUMN_NAME AS column_name,
+       CASE WHEN statistic.INDEX_NAME = 'PRIMARY' THEN 'primary' ELSE 'unique' END AS key_kind
+FROM information_schema.STATISTICS AS statistic
+WHERE statistic.TABLE_SCHEMA = {schema}
+  AND statistic.NON_UNIQUE = 0
+  AND NOT EXISTS (
+      SELECT 1
+      FROM information_schema.STATISTICS AS part
+      WHERE part.TABLE_SCHEMA = statistic.TABLE_SCHEMA
+        AND part.TABLE_NAME = statistic.TABLE_NAME
+        AND part.INDEX_NAME = statistic.INDEX_NAME
+        AND part.COLUMN_NAME IS NULL
+  )
+ORDER BY statistic.TABLE_NAME, statistic.INDEX_NAME, statistic.SEQ_IN_INDEX
+";
+
+const GRAPH_FOREIGN_KEYS_SQL: &str = "
+SELECT TABLE_NAME AS table_name,
+       CONSTRAINT_NAME AS constraint_name,
+       COLUMN_NAME AS column_name,
+       REFERENCED_TABLE_SCHEMA AS referenced_schema,
+       REFERENCED_TABLE_NAME AS referenced_table,
+       REFERENCED_COLUMN_NAME AS referenced_column
+FROM information_schema.KEY_COLUMN_USAGE
+WHERE TABLE_SCHEMA = {schema}
+  AND REFERENCED_TABLE_NAME IS NOT NULL
+ORDER BY TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION
+";
 
 const PRIMARY_KEY_SQL: &str = "
 SELECT COLUMN_NAME AS column_name
@@ -551,6 +603,8 @@ pub struct Connection {
     /// this one is busy reading its rows. Opened the first time it is needed
     /// and kept, so a run does not pay for a connect.
     side: Arc<Mutex<Option<Conn>>>,
+    /// A Cancel for this session's schema graph read ([`Self::schema_graph`]).
+    graph: GraphCancel,
 }
 
 impl Connection {
@@ -572,6 +626,7 @@ impl Connection {
                 tunnel,
                 address,
                 side: Arc::default(),
+                graph: GraphCancel::default(),
             })
         })
     }
@@ -587,6 +642,7 @@ impl Connection {
         Ok(Self {
             connection_id: connection.connection_id(),
             connection: Arc::new(Mutex::new(connection)),
+            graph: GraphCancel::default(),
             ..self.clone()
         })
     }
@@ -615,6 +671,7 @@ impl Connection {
     /// regardless of whether this socket is still open. Leaving it unbounded
     /// only trades that for a background thread hung forever with no report.
     pub fn cancel(&self) -> Result<(), DbError> {
+        self.graph.ask();
         let server = &self.server;
         let dial = self.dial()?;
         let (mut connection, _) = open(server, self.engine, dial, false, |dial| {
@@ -913,6 +970,7 @@ impl Connection {
             tunnel: self.tunnel.clone(),
             address: self.address,
             side: Arc::default(),
+            graph: GraphCancel::default(),
         };
         assemble_sizes(
             side.internal_query(
@@ -948,6 +1006,25 @@ impl Connection {
         structure.indexes = assemble_indexes(&indexes)?;
         structure.foreign_keys = assemble_foreign_keys(&keys)?;
         Ok(structure)
+    }
+
+    /// A Cancel stops it before any of its statements as well as during one:
+    /// a `KILL QUERY` that reaches the session while it is idle between them
+    /// stops nothing, and would let the rest run.
+    pub fn schema_graph(&self, schema: &str) -> Result<SchemaGraph, DbError> {
+        self.graph.read(|held| {
+            let query = |template| {
+                let held = Fetch {
+                    held: Some(held),
+                    ..Fetch::default()
+                };
+                self.run(&graph_sql(template, schema), false, held)
+            };
+            let columns = query(GRAPH_COLUMNS_SQL)?;
+            let unique_keys = query(GRAPH_UNIQUE_KEYS_SQL)?;
+            let foreign_keys = query(GRAPH_FOREIGN_KEYS_SQL)?;
+            assemble_schema_graph(schema, &columns, &unique_keys, &foreign_keys)
+        })
     }
 
     /// `SHOW CREATE TABLE` answers for a view too, with its `CREATE VIEW` in
@@ -1179,6 +1256,13 @@ fn resolve_edit_target(
         keys,
         ..Default::default()
     })
+}
+
+fn graph_sql(template: &str, schema: &str) -> String {
+    // The quoted name goes in last: a database may be called `{stored}`.
+    template
+        .replace("{stored}", STORED_TABLES)
+        .replace("{schema}", &Engine::MySql.quote_literal(schema))
 }
 
 fn structure_sql(template: &str, schema: &str, relation: &str) -> String {
@@ -1874,6 +1958,100 @@ mod tests {
         );
         // `KILL QUERY` ends the statement, not the session.
         assert!(connection.query("SELECT 1", Fetch::default()).is_ok());
+    }
+
+    fn live_a_schema_graph_reads_the_seeds_keys_back(engine: Engine) {
+        use crate::db::graph::seed;
+
+        let graph = live_profile(engine)
+            .schema_graph("dbdelve_dev")
+            .expect("the graph should read");
+
+        assert!(
+            graph
+                .tables
+                .iter()
+                .all(|table| table.name.as_ref() != "account_overview"),
+            "a view is not drawn"
+        );
+        seed::assert_keys_read_back(&graph);
+        assert_eq!(
+            graph.types[seed::column(&graph, "orders", "total").type_label as usize].as_ref(),
+            "decimal(14,2)"
+        );
+
+        let archive = live_profile(engine)
+            .schema_graph("dbdelve_archive")
+            .expect("the graph should read");
+        seed::assert_archive_points_at_accounts(&archive, "dbdelve_dev");
+    }
+
+    fn live_a_unique_index_on_a_prefix_makes_its_column_unique(engine: Engine) {
+        let connection = live(engine);
+        connection
+            .query(
+                "DROP TABLE IF EXISTS dbdelve_test_prefix; \
+                 CREATE TABLE dbdelve_test_prefix (id INT PRIMARY KEY, email VARCHAR(80), \
+                     UNIQUE KEY by_email (email(10)))",
+                Fetch::default(),
+            )
+            .expect("the fixture table should be created");
+        let graph = connection.schema_graph("dbdelve_dev");
+        connection
+            .query("DROP TABLE dbdelve_test_prefix", Fetch::default())
+            .expect("the fixture table should be cleaned up");
+        let graph = graph.expect("the graph should read");
+        assert!(crate::db::graph::seed::column(&graph, "dbdelve_test_prefix", "email").unique);
+    }
+
+    #[test]
+    fn a_schema_named_like_a_placeholder_keeps_its_name_in_the_graph_sql() {
+        let sql = graph_sql(GRAPH_COLUMNS_SQL, "tenant{stored}");
+        assert!(sql.contains("'tenant{stored}'"), "{sql}");
+        assert!(
+            sql.contains("IN ('BASE TABLE', 'SYSTEM VERSIONED')"),
+            "{sql}"
+        );
+    }
+
+    fn live_a_cancel_on_its_own_connection_stops_a_catalog_statement(engine: Engine) {
+        // The catalog reads of a diagram take no lock a second session could
+        // hold, so a sleeping statement stands in for a slow one. `schema_graph`
+        // is nothing but three of these on the side connection.
+        let side = live(engine)
+            .alongside()
+            .expect("a side connection should open");
+        let canceller = super::super::Connection::MySql(side.clone());
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            canceller
+                .cancel(&crate::db::CancelToken::default())
+                .expect("the KILL QUERY should send");
+        });
+
+        let started = Instant::now();
+        let error = side
+            .internal_query(LIVE_SLOW_SELECT)
+            .expect_err("the statement should be cancelled");
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(error.message.contains("interrupt"), "{}", error.message);
+    }
+
+    fn live_a_cancel_before_a_schema_graph_read_drops_it_unsent(engine: Engine) {
+        // A `KILL QUERY` on an idle session stops nothing, so a Cancel that
+        // came before the read, or between its statements, is kept for it.
+        let side = live(engine)
+            .alongside()
+            .expect("a side connection should open");
+        side.cancel().expect("the KILL QUERY should send");
+        let error = side
+            .schema_graph("dbdelve_dev")
+            .expect_err("the read should be dropped");
+        assert_eq!(error.message, "Cancelled before it was sent.");
+        assert!(
+            side.schema_graph("dbdelve_dev").is_ok(),
+            "kept for one read"
+        );
     }
 
     fn live_a_statement_timeout_bounds_a_select_and_a_write_only_on_mariadb(engine: Engine) {
@@ -2817,5 +2995,9 @@ mod tests {
         live_a_table_referencing_nothing_reports_no_foreign_keys,
         live_the_rendered_foreign_key_ddl_survives_beside_the_structured_form,
         live_the_ddl_of_a_table_and_a_view_is_the_servers_own,
+        live_a_schema_graph_reads_the_seeds_keys_back,
+        live_a_unique_index_on_a_prefix_makes_its_column_unique,
+        live_a_cancel_on_its_own_connection_stops_a_catalog_statement,
+        live_a_cancel_before_a_schema_graph_read_drops_it_unsent,
     );
 }

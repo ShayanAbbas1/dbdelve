@@ -5,6 +5,7 @@
 //! inherent impl rather than types of their own.
 
 mod commands;
+mod diagrams;
 #[cfg(test)]
 mod e2e;
 mod editing;
@@ -29,6 +30,7 @@ use std::collections::{HashMap, HashSet};
 use crate::export::ClipboardFormat;
 use gpui_component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
 
+pub(crate) use diagrams::{SideRead, drawn_in_diagrams};
 pub(crate) use import_dialog::PreviewGrid;
 pub(crate) use profiles::unavailable_reason;
 pub(crate) use projects::project_name_refusal;
@@ -233,6 +235,9 @@ pub(crate) struct Workspace {
     pub(crate) form: Option<ConnectionForm>,
     /// Whether the menu bar last set lists Import Rows.
     menu_imports_rows: bool,
+    /// The diagram in front at the last render, told to let its render caches
+    /// go once it is not.
+    shown_diagram: Option<gpui::WeakEntity<crate::diagram_view::DiagramView>>,
     /// Bumped by every import asked for, so a paste still being read when
     /// another is asked for opens nothing when it lands.
     import_requests: u64,
@@ -381,6 +386,11 @@ pub(crate) struct Workspace {
     pub(crate) update: Option<update::Update>,
     /// The launch check and the ones after it; dropped, they stop.
     update_checks: Option<gpui::Task<()>>,
+    /// Something `profiles.toml` holds changed and is waiting on
+    /// [`Self::remember_profiles_soon`]'s timer, so quitting writes it.
+    pub(crate) profiles_unsaved: bool,
+    /// That timer; replaced, the one before it stops.
+    profiles_save: Option<gpui::Task<()>>,
 }
 
 impl Workspace {
@@ -463,6 +473,7 @@ impl Workspace {
             active: None,
             form: None,
             menu_imports_rows: false,
+            shown_diagram: None,
             import_requests: 0,
             projects: Vec::new(),
             project_name: None,
@@ -531,6 +542,8 @@ impl Workspace {
             welcome_project_focus: std::cell::RefCell::default(),
             update: None,
             update_checks: None,
+            profiles_unsaved: false,
+            profiles_save: None,
         };
 
         let mut load_failure = None;
@@ -761,15 +774,25 @@ impl Workspace {
         .detach();
 
         // Finish writes synchronously: the process is going, and nothing
-        // would wait for background work to finish.
+        // would wait for background work to finish. The profiles only when a
+        // write is pending: written unasked, they would put this session's
+        // copy over one another instance saved since.
         cx.on_app_quit(|workspace: &mut Self, cx: &mut Context<Self>| {
             workspace.persist_buffers(cx);
+            if workspace.profiles_unsaved {
+                let _ = workspace.save_profiles(cx);
+            }
             async {}
         })
         .detach();
         // Window release also persists when the window closes without Quit.
-        cx.on_release(|workspace, cx| workspace.persist_buffers(cx))
-            .detach();
+        cx.on_release(|workspace, cx| {
+            workspace.persist_buffers(cx);
+            if workspace.profiles_unsaved {
+                let _ = workspace.save_profiles(cx);
+            }
+        })
+        .detach();
 
         workspace.connect_active(cx);
         workspace
@@ -1408,6 +1431,7 @@ impl Render for Workspace {
             self.menu_imports_rows = imports_rows;
             cx.set_menus(crate::app_menus(imports_rows));
         }
+        self.track_shown_diagram(cx);
         self.settle_sidebar(window, cx);
         self.reveal_landed_column(window, cx);
         if !self.row_panel.on_screen.get() {
@@ -1514,6 +1538,9 @@ impl Render for Workspace {
                 {
                     Some(ObjectBody::Relation { results, .. }) => Focus::Grid(results.clone()),
                     Some(ObjectBody::Structure { grid, .. }) => Focus::Structure(grid.clone()),
+                    Some(ObjectBody::Diagram { view, .. }) => {
+                        Focus::Diagram(view.read(cx).focus_handle().clone())
+                    }
                     // A routine's tab is read: nothing in it takes a
                     // keystroke. The window still has to hold focus, or the
                     // bindings that leave this tab go with it -- as it does
@@ -1555,6 +1582,7 @@ impl Render for Workspace {
             Some(Focus::Field(input)) => input.focus_handle(cx).focus(window, cx),
             Some(Focus::Grid(grid)) => grid.focus_handle(cx).focus(window, cx),
             Some(Focus::Structure(grid)) => grid.focus_handle(cx).focus(window, cx),
+            Some(Focus::Diagram(handle)) => handle.focus(window, cx),
             Some(Focus::Window) => self.focus.focus(window, cx),
             None => {}
         }
@@ -1974,7 +2002,7 @@ impl Render for Workspace {
             else {
                 return None;
             };
-            let ObjectKind::Relation(kind) = tab.kind else {
+            let Some(ObjectKind::Relation(kind)) = tab.kind else {
                 return None;
             };
             let connected = matches!(profile.state, ProfileState::Connected(_));
@@ -2410,6 +2438,7 @@ impl Render for Workspace {
                     .on_action(cx.listener(Self::save_query))
                     .on_action(cx.listener(Self::close_tab))
                     .on_action(cx.listener(Self::go_to_column))
+                    .on_action(cx.listener(Self::toggle_results))
                     .on_action(cx.listener(Self::toggle_row_panel))
                     .on_action(cx.listener(Self::toggle_row_edit))
                     .on_action(cx.listener(Self::toggle_structure))

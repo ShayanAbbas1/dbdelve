@@ -6,6 +6,10 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # A compromised release is usually taken down within days, so hold updates
+    # for a week. Seven days is zizmor's minimum.
+    cooldown:
+      default-days: 7
     groups:
       actions:
         patterns: ["*"]

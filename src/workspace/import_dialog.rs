@@ -698,7 +698,7 @@ fn segments<T: Copy + PartialEq + 'static>(
         .gap(px(layout::SPACE_XS))
         .children(choices.iter().enumerate().map(|(index, &(value, label))| {
             let profile = editing.profile.clone();
-            segmented_choice((id, index), label, value == selected, t).when(
+            segmented_choice((id, index), label, value == selected, true, t).when(
                 value != selected,
                 |segment| {
                     segment.on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
@@ -1179,7 +1179,7 @@ fn import_preview(editing: &Editing, cx: &mut Context<Workspace>) -> AnyElement 
     let dialog = editing.dialog;
     let view = |id: &'static str, label: &'static str, sql: bool| {
         let profile = editing.profile.clone();
-        segmented_choice(id, label, dialog.showing_sql == sql, t).on_click(cx.listener(
+        segmented_choice(id, label, dialog.showing_sql == sql, true, t).on_click(cx.listener(
             move |workspace, _: &ClickEvent, _, cx| {
                 workspace.show_import_sql(&profile, sql, cx);
             },

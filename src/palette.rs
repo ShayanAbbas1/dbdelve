@@ -44,6 +44,7 @@ use crate::{
         PalettePreviousScope, PaletteRowActions, PaletteScopeLeft, PaletteScopeRight,
     },
     db::{ConnectionConfig, ExplainMode, RelationKind, RoutineKind, Syntax},
+    diagram_view::DiagramFile,
     explorer::ROW_LIMITS,
     explorer::{ExplorerTarget, ObjectKind},
     export::{ClipboardFormat, FileAs, Format, RowsAs},
@@ -292,6 +293,12 @@ impl Mode {
 #[derive(Clone)]
 pub enum Command {
     OpenObject(ExplorerTarget),
+    /// A schema's ER diagram, by name, showing the neighbourhood of `centre`
+    /// where one is named.
+    ShowDiagram {
+        schema: String,
+        centre: Option<String>,
+    },
     OpenQuery(String),
     SetTarget(crate::db::Target),
     OpenScratch,
@@ -351,6 +358,9 @@ pub enum Command {
     /// the file is written as is read back off the path the user confirmed, so
     /// these rows are one code path — see `export::FileAs::for_path`.
     ExportResults(FileAs),
+    /// Write the diagram in front to a file, as its toolbar's Export menu does.
+    ExportDiagram(DiagramFile),
+    CopyDiagramMermaid,
     /// Stop the export of every row this connection is running.
     CancelExport,
     CopyRow,
@@ -417,6 +427,7 @@ pub enum Command {
     CollapseAllSchemas,
     ExpandAllSchemas,
     ToggleResultsFocus,
+    ToggleResults,
     ToggleRowPanel,
     ToggleRowEdit,
     ResetEditorZoom,
@@ -3657,6 +3668,25 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
     }
 
     if let Some(tab) = session.active_object() {
+        // Once read: before that there is nothing drawn to write out.
+        if let ObjectBody::Diagram { view, .. } = &tab.body
+            && view.read(cx).keys_only().is_some()
+        {
+            items.push(command(
+                "Copy diagram as Mermaid",
+                icon::COPY,
+                Command::CopyDiagramMermaid,
+                TAB,
+            ));
+            items.extend(DiagramFile::ALL.into_iter().map(|file| {
+                command(
+                    &format!("Export diagram as {}…", file.label()),
+                    icon::EXPORT,
+                    Command::ExportDiagram(file),
+                    TAB,
+                )
+            }));
+        }
         if let ObjectBody::Structure {
             structure, grid, ..
         } = &tab.body
@@ -3812,8 +3842,27 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
                 ));
             }
         }
+        if let Some(ObjectKind::Relation(kind)) = tab.kind
+            && matches!(
+                tab.body,
+                ObjectBody::Relation { .. } | ObjectBody::Structure { .. }
+            )
+            && crate::workspace::drawn_in_diagrams(kind)
+            && profile.draws_diagrams()
+            && profile.connection().is_some()
+        {
+            items.push(command(
+                &format!("Show {} in diagram", tab.name),
+                icon::DIAGRAM,
+                Command::ShowDiagram {
+                    schema: tab.schema.clone(),
+                    centre: Some(tab.name.clone()),
+                },
+                TAB,
+            ));
+        }
         // The explorer's menu for this relation, clipboard and all.
-        if let ObjectKind::Relation(kind) = tab.kind {
+        if let Some(ObjectKind::Relation(kind)) = tab.kind {
             items.extend(
                 crate::explorer::relation_copies(
                     profile.config.target(),
@@ -4309,6 +4358,23 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             "select_database",
         ));
     }
+    if profile.draws_diagrams() && profile.connection().is_some() {
+        items.extend(
+            Workspace::diagram_schemas(profile)
+                .into_iter()
+                .map(|schema| {
+                    command(
+                        &format!("Show diagram of {schema}"),
+                        icon::DIAGRAM,
+                        Command::ShowDiagram {
+                            schema,
+                            centre: None,
+                        },
+                        CONNECTION,
+                    )
+                }),
+        );
+    }
     if profile.config.target().picks_schema() {
         items.push(command(
             "Select schema…",
@@ -4368,6 +4434,17 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
                 WINDOW,
             ),
             "toggle_results_focus",
+        ));
+    }
+    if matches!(session.active, Tab::Query(_)) {
+        items.push(bound(
+            command(
+                "Toggle results",
+                icon::RESULTS,
+                Command::ToggleResults,
+                WINDOW,
+            ),
+            "toggle_results",
         ));
     }
     items.push(bound(

@@ -13,6 +13,7 @@
 //! engine's catalog SQL aliases its columns to names chosen here rather than to
 //! its own.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -26,6 +27,8 @@ mod clickhouse;
 mod conformance;
 mod duckdb;
 mod external;
+mod graph;
+use graph::assemble_schema_graph;
 mod mongo;
 mod mssql;
 mod mysql;
@@ -51,6 +54,9 @@ pub use duckdb::IN_MEMORY as DUCKDB_IN_MEMORY;
 pub use external::ExternalConfig;
 #[cfg(test)]
 pub(crate) use external::echo;
+pub use graph::{GraphColumn, KeyTarget, SchemaGraph};
+#[cfg(test)]
+pub use graph::{GraphKey, GraphTable};
 pub use password_command::{PasswordCommand, loggable_error};
 pub use plugin::Plugin;
 pub use ssh::askpass;
@@ -122,6 +128,28 @@ impl CancelToken {
             .collect();
         running.asked = true;
         Some(connections)
+    }
+}
+
+/// A Cancel kept for a schema graph read on Postgres, MySQL and SQL Server,
+/// whose several statements leave the session idle before and between them:
+/// a Cancel that lands there stops nothing, so the read's next statement
+/// takes it from here and is dropped unsent ([`Fetch::held`]). One with no
+/// read under way is kept for the next, as a plugin keeps one.
+#[derive(Clone, Default)]
+struct GraphCancel(Arc<AtomicBool>);
+
+impl GraphCancel {
+    fn ask(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    /// Runs a graph read whose statements are each held by `held`. A Cancel
+    /// that came while it ran was for it, so none outlives it.
+    fn read<T>(&self, read: impl FnOnce(&dyn Fn() -> bool) -> T) -> T {
+        let read = read(&|| !self.0.load(Ordering::SeqCst));
+        self.0.store(false, Ordering::SeqCst);
+        read
     }
 }
 
@@ -1960,6 +1988,40 @@ impl Connection {
         }
     }
 
+    /// One schema's tables and foreign keys in bulk, for the ER diagram: a
+    /// few catalog statements for the whole schema rather than
+    /// [`Connection::structure`]'s several per relation. Run it on a
+    /// connection from [`Connection::apart`], so it never queues behind the
+    /// profile's statements, and so a [`Connection::cancel`] on that
+    /// connection stops nothing but this read.
+    ///
+    /// Asked only where [`Target::draws_diagrams`].
+    pub fn schema_graph(&self, schema: &str) -> Result<SchemaGraph, DbError> {
+        match self {
+            Self::Postgres(connection) => connection.schema_graph(schema),
+            Self::MySql(connection) => connection.schema_graph(schema),
+            Self::SqlServer(connection) => connection.schema_graph(schema),
+            Self::Sqlite(connection) => connection.schema_graph(schema),
+            Self::Turso(connection) => connection.schema_graph(schema),
+            Self::DuckDb(connection) => connection.schema_graph(schema),
+            Self::Snowflake(connection) => connection.schema_graph(schema),
+            Self::ClickHouse(_) | Self::MongoDb(_) | Self::Redis(_) => Err(plain_error(
+                "This engine declares no foreign keys to draw.".into(),
+            )),
+            Self::External(connection) => connection.schema_graph(schema),
+        }
+    }
+
+    /// Whether [`Self::schema_graph`] answers on this connection: what
+    /// `target`, the profile's, says for a built-in driver, and for a plugin
+    /// whether it offered `graph` when it opened, which `target` cannot know.
+    pub fn draws_diagrams(&self, target: Target) -> bool {
+        match self {
+            Self::External(connection) => connection.draws_diagrams(),
+            _ => target.draws_diagrams(),
+        }
+    }
+
     /// The statements that would create this relation, for the clipboard:
     /// nothing dbdelve does runs them. The server's own rendering wherever it
     /// has one; Postgres and SQL Server tables are written back out of their
@@ -3592,6 +3654,24 @@ pub(crate) fn spawn(command: &mut std::process::Command) -> std::io::Result<std:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cancel_before_or_between_a_graph_reads_statements_holds_back_the_rest() {
+        let graph = GraphCancel::default();
+        graph.ask();
+        assert_eq!(graph.read(|held| [held(), held()]), [false, false]);
+        assert!(
+            graph.read(|held| held()),
+            "none outlives the read it was for"
+        );
+        let sent = graph.read(|held| {
+            let first = held();
+            graph.ask();
+            [first, held()]
+        });
+        assert_eq!(sent, [true, false]);
+        assert!(graph.read(|held| held()));
+    }
 
     #[test]
     fn a_bounded_feed_holds_a_push_past_its_bound_until_rows_are_taken() {

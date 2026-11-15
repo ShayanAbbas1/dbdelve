@@ -24,7 +24,7 @@ use crate::db::Syntax;
 /// The gpui-component widgets ask for their own paths — those are Lucide names
 /// too, so they resolve here as well. Add a row when something asks for one;
 /// an unlisted path simply draws nothing.
-const ICONS: [(&str, &IconData); 81] = [
+const ICONS: [(&str, &IconData); 85] = [
     ("icons/git-fork.svg", icondata_lu::LuGitFork),
     ("icons/chevron-down.svg", icondata_lu::LuChevronDown),
     ("icons/chevron-right.svg", icondata_lu::LuChevronRight),
@@ -68,6 +68,7 @@ const ICONS: [(&str, &IconData); 81] = [
     ("icons/refresh-cw.svg", icondata_lu::LuRefreshCw),
     ("icons/panel-left.svg", icondata_lu::LuPanelLeft),
     ("icons/panel-right.svg", icondata_lu::LuPanelRight),
+    ("icons/panel-bottom.svg", icondata_lu::LuPanelBottom),
     ("icons/copy.svg", icondata_lu::LuCopy),
     ("icons/type.svg", icondata_lu::LuType),
     ("icons/arrow-up-right.svg", icondata_lu::LuArrowUpRight),
@@ -95,9 +96,12 @@ const ICONS: [(&str, &IconData); 81] = [
     ),
     ("icons/keyboard.svg", icondata_lu::LuKeyboard),
     ("icons/link.svg", icondata_lu::LuLink),
+    ("icons/network.svg", icondata_lu::LuNetwork),
     ("icons/import.svg", icondata_lu::LuImport),
     ("icons/ban.svg", icondata_lu::LuBan),
     ("icons/rotate-ccw.svg", icondata_lu::LuRotateCcw),
+    ("icons/scan.svg", icondata_lu::LuScan),
+    ("icons/download.svg", icondata_lu::LuDownload),
     ("icons/engine-postgres.svg", icondata_si::SiPostgresql),
     ("icons/engine-mysql.svg", icondata_si::SiMysql),
     ("icons/engine-mariadb.svg", icondata_si::SiMariadb),
@@ -154,6 +158,8 @@ pub mod icon {
     pub const EXPAND_ALL: &str = "icons/chevrons-up-down.svg";
     /// Folds the row panel beside a grid away, and brings it back.
     pub const ROW_PANEL: &str = "icons/panel-right.svg";
+    /// Hides the results pane under a query's editor, and brings it back.
+    pub const RESULTS: &str = "icons/panel-bottom.svg";
     /// Switches the row panel between reading a row and editing it.
     pub const EDIT: &str = "icons/pencil.svg";
     /// A column header's sort state: which way the server ordered the rows, or
@@ -195,6 +201,9 @@ pub mod icon {
     pub const FUNCTION: &str = "icons/square-function.svg";
     pub const PROCEDURE: &str = "icons/square-play.svg";
     pub const STRUCTURE: &str = "icons/list-tree.svg";
+    pub const DIAGRAM: &str = "icons/network.svg";
+    pub const FIT: &str = "icons/scan.svg";
+    pub const EXPORT: &str = "icons/download.svg";
     pub const PLUS: &str = "icons/plus.svg";
     pub const CHECK: &str = "icons/check.svg";
     pub const CLOSE: &str = "icons/close.svg";
@@ -346,6 +355,7 @@ mod tests {
             icon::FULL_ACCESS,
             icon::SIDEBAR,
             icon::ROW_PANEL,
+            icon::RESULTS,
             icon::SORT_UP,
             icon::SORT_DOWN,
             icon::SORTABLE,
@@ -361,6 +371,9 @@ mod tests {
             icon::FUNCTION,
             icon::PROCEDURE,
             icon::STRUCTURE,
+            icon::DIAGRAM,
+            icon::FIT,
+            icon::EXPORT,
             icon::PLUS,
             icon::CHECK,
             icon::CLOSE,

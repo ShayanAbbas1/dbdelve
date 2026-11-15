@@ -13,7 +13,7 @@ use crate::result_grid::{ColumnView, ColumnWidth};
 use super::*;
 use crate::session::{
     Finished, Lane, PendingDelete, PendingDiscard, PendingRun, QueryRename, Queue, Resume, Step,
-    TabKey, next_step, query_name_refusal,
+    TabKey, next_step, query_name_refusal, reveals_results,
 };
 
 impl Workspace {
@@ -344,6 +344,16 @@ impl Workspace {
         // An object tab has no buffer of its own: running it again is a refresh
         // of the rows dbdelve fetched, which is the only thing there is to run.
         if let Tab::Object(id) = tab {
+            // A diagram has nothing to run, and its own `secondary-enter`
+            // (Open Structure) sits behind this unscoped binding: handing the
+            // keystroke on is what lets that one have it.
+            if matches!(
+                profile.session.active_object().map(|tab| &tab.body),
+                Some(ObjectBody::Diagram { .. })
+            ) {
+                cx.propagate();
+                return;
+            }
             self.refresh_relation(id, cx);
             return;
         }
@@ -469,6 +479,7 @@ impl Workspace {
                     message,
                     position: None,
                 });
+                profile.session.reveal_results(tab);
             }
         }
         cx.notify();
@@ -975,6 +986,7 @@ impl Workspace {
             None => false,
         };
         query.showing_messages = false;
+        query.results_hidden = false;
         // The form was built from the rows it was opened over, which can be
         // another table's, and a review's batch is refreshed by whichever
         // result is on screen when it runs.
@@ -1000,6 +1012,7 @@ impl Workspace {
         if query.messages().is_empty() || std::mem::replace(&mut query.showing_messages, true) {
             return;
         }
+        query.results_hidden = false;
         // The grid and any form beside it unmount, and whichever of them held
         // focus would take the window's only dispatch path with it.
         profile.session.editor_needs_focus = true;
@@ -1264,6 +1277,7 @@ impl Workspace {
             return;
         }
         tab.showing_plan = showing;
+        tab.results_hidden = false;
         // Either half is asked for by name, so neither leaves Messages over it.
         let switched = match showing {
             true => tab.show_slot(),
@@ -2127,6 +2141,7 @@ impl Workspace {
                 message: "The connection is not open.".into(),
                 position: None,
             });
+            profile.session.reveal_results(tab);
             cx.notify();
             if let Some(lane) = lane {
                 self.land_lane(tab, lane, Vec::new(), cx);
@@ -2337,7 +2352,9 @@ impl Workspace {
                 .and_then(|profile| profile.session.objects.iter().find(|tab| tab.id == object))
                 .and_then(|tab| match &tab.body {
                     ObjectBody::Relation { limit, .. } => *limit,
-                    ObjectBody::Routine(_) | ObjectBody::Structure { .. } => None,
+                    ObjectBody::Routine(_)
+                    | ObjectBody::Structure { .. }
+                    | ObjectBody::Diagram { .. } => None,
                 }),
             Tab::Object(_) | Tab::Query(_) => None,
         };
@@ -2369,6 +2386,13 @@ impl Workspace {
                         // the clock has a tick of its own.
                         let began = results.read(cx).delegate().streamed_set();
                         if running && pour(&feed, &results, mode, engine, (&names, &widths, &column_view), cx) {
+                            // The first arrival reveals the stream; a later
+                            // explicit hide lasts until the run completes.
+                            if began.is_none()
+                                && let Some(profile) = workspace.issued_to(&id, generation)
+                            {
+                                profile.session.reveal_results(tab);
+                            }
                             cx.notify();
                         }
                         // A grid started for the rows lacks what the structure
@@ -2744,6 +2768,17 @@ impl Workspace {
                         unrecorded = None;
                         let _ = store::append_history(&id, &landed);
                         workspace.remember_run(&id, landed);
+                    }
+                    // Hidden for statements that answer with nothing to read,
+                    // the pane comes back for one that does, queued lanes
+                    // included: what lands must never be on screen unseen.
+                    if let Some(profile) = workspace.issued_to(&id, generation)
+                        && profile
+                            .session
+                            .slot_at(tab, lane.as_ref())
+                            .is_some_and(|(state, _)| reveals_results(state, produced_grid))
+                    {
+                        profile.session.reveal_results(tab);
                     }
                     if keep_rows
                         && let Some(profile) = workspace.issued_to(&id, generation)

@@ -111,7 +111,9 @@ impl Workspace {
                         None => Ok(derived_filter(engine, &bars, columns)),
                     })
                 }
-                ObjectBody::Routine(_) | ObjectBody::Structure { .. } => None,
+                ObjectBody::Routine(_)
+                | ObjectBody::Structure { .. }
+                | ObjectBody::Diagram { .. } => None,
             }
         }) else {
             return;
@@ -440,7 +442,9 @@ impl Workspace {
     pub(crate) fn filter_rows_mut(&mut self, id: u64) -> Option<&mut Vec<FilterRow>> {
         match self.object_body_mut(id)? {
             ObjectBody::Relation { filters, .. } => Some(filters),
-            ObjectBody::Routine(_) | ObjectBody::Structure { .. } => None,
+            ObjectBody::Routine(_) | ObjectBody::Structure { .. } | ObjectBody::Diagram { .. } => {
+                None
+            }
         }
     }
 
