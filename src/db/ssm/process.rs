@@ -1,14 +1,12 @@
 //! A small re-exec watchdog: its stdin belongs only to the app. EOF ends the
 //! entire CLI process group, including the plugin, even after an app crash.
+#[cfg(any(unix, test))]
+use std::time::Duration;
 use std::{
     io::{self, Read, Write},
     process::{Child, Command, Stdio},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::mpsc,
     thread,
-    time::Duration,
 };
 const COMMAND: &str = "DBDELVE_SSM_COMMAND";
 
@@ -134,21 +132,18 @@ fn run(payload: &str) -> io::Result<i32> {
         super::super::ssh::kill_on_close_job(&process)?
     };
     let mut child = crate::db::spawn(&mut command)?;
-    let ended = Arc::new(AtomicBool::new(false));
-    let eof = ended.clone();
+    #[cfg(unix)]
+    let group = -(child.id() as i32);
+    let (send, receive) = mpsc::channel();
+    let eof = send.clone();
     thread::spawn(move || {
         let _ = io::stdin().read(&mut [0u8]);
-        eof.store(true, Ordering::Release);
+        let _ = eof.send(None);
     });
-    let status = loop {
-        if ended.load(Ordering::Acquire) {
-            break None;
-        }
-        if let Some(status) = child.try_wait()? {
-            break Some(status);
-        }
-        thread::sleep(Duration::from_millis(10));
-    };
+    thread::spawn(move || {
+        let _ = send.send(Some(child.wait()));
+    });
+    let status = receive.recv().ok().flatten().transpose()?;
     let _ = writeln!(io::stdout(), "DBDELVE_SSM_CHILD_EXITED");
     let _ = io::stdout().flush();
     #[cfg(unix)]
@@ -156,7 +151,6 @@ fn run(payload: &str) -> io::Result<i32> {
         // The group belongs to this child; argv is never interpreted by a shell.
         // TERM lets the plugin send its remote TerminateSession flag; KILL is
         // the bounded fallback for credential processes or a stuck CLI.
-        let group = -(child.id() as i32);
         unsafe {
             libc::kill(group, libc::SIGTERM);
         }
@@ -174,7 +168,10 @@ fn run(payload: &str) -> io::Result<i32> {
     }
     #[cfg(unix)]
     {
-        let _ = child.wait();
+        // After stdin's EOF, the only sender left is the CLI's reaper.
+        if status.is_none() {
+            let _ = receive.recv();
+        }
         Ok(status.and_then(|s| s.code()).unwrap_or(1))
     }
 }
