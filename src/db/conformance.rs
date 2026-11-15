@@ -16,7 +16,7 @@ use crate::db::{
 };
 use crate::explorer;
 use crate::filter::{self, Operator};
-use crate::result_grid::{NewValue, PendingRow};
+use crate::result_grid::{BinaryForm, NewValue, PendingRow, ResultGrid};
 use crate::sql::{self, SortKey};
 
 pub(super) struct Subject {
@@ -654,6 +654,99 @@ pub(super) fn generated_writes_round_trip(subject: &Subject) {
     );
     generated(&delete);
     assert!(subject.label_of(scenario, "901").is_empty(), "{at}");
+}
+
+/// Writes bytes into a throwaway table the way a grid edit does: read the
+/// row, stage text in a binary column parsed as a form, generate the update,
+/// pass it through the gate and run it, then read the bytes back exactly.
+pub(super) fn binary_edits_round_trip(
+    connection: &Connection,
+    target: Target,
+    schema: &str,
+    binary_type: &str,
+) {
+    let engine = target.engine;
+    let at = format!("binary_edits_round_trip on {engine:?}");
+    let table = engine.qualified(schema, "dbdelve_binary_edits");
+    let run = |sql: &str| {
+        connection
+            .query(sql, &CancelToken::default(), Fetch::default())
+            .unwrap_or_else(|error| panic!("{at}: `{sql}` failed: {error}"))
+    };
+    let drop = format!("DROP TABLE IF EXISTS {table}");
+    run(&drop);
+    let _cleanup = Cleanup {
+        connection,
+        statements: vec![drop],
+        rollback: false,
+        read_write: false,
+    };
+    run(&format!(
+        "CREATE TABLE {table} (id INT NOT NULL PRIMARY KEY, payload {binary_type})"
+    ));
+    run(&format!(
+        "INSERT INTO {table} (id, payload) VALUES (1, NULL)"
+    ));
+    let select = format!("SELECT id, payload FROM {table}");
+
+    let grid = |form: BinaryForm| {
+        let mut grid = ResultGrid::new(run(&select), sql::Mode::ReadWrite).with_target(target);
+        grid.set_binary_form(1, form);
+        grid
+    };
+    let stored = || {
+        let result = run(&select);
+        let value = result.rows.first().and_then(|row| row.get(1));
+        let value = value.unwrap_or_else(|| panic!("{at}: the payload is NULL"));
+        engine
+            .bytes_of(value, usize::MAX)
+            .unwrap_or_else(|| panic!("{at}: `{value}` reads as no bytes"))
+    };
+
+    let ff00 = engine
+        .bytes_text(&[0xff, 0])
+        .expect("the engine spells bytes");
+    for (form, text, bytes) in [
+        (BinaryForm::Text, "hello", b"hello".to_vec()),
+        (BinaryForm::Hex, ff00.as_str(), vec![0xff, 0]),
+        (BinaryForm::Base64, "3q2+7w==", vec![0xde, 0xad, 0xbe, 0xef]),
+        (BinaryForm::Hex, "", Vec::new()),
+    ] {
+        let mut grid = grid(form);
+        assert!(grid.editable(0, 1), "{at}: {form:?} is read-only");
+        let value = NewValue::Value(text.into());
+        let Some(literal) = engine.binary_literal(&bytes) else {
+            assert!(
+                grid.staging_refusal(0, 1, &value).is_some(),
+                "{at}: {bytes:?} has no literal and was staged"
+            );
+            continue;
+        };
+        assert!(grid.set_pending(0, 1, value), "{at}: `{text}` unstaged");
+        let update = sql::update_batch(engine, &grid.pending_updates())
+            .unwrap_or_else(|error| panic!("{at}: update_batch: {error}"));
+        assert!(update.contains(&literal), "{at}: {update}");
+        assert!(
+            sql::is_generated_write_on(engine, &update),
+            "{at}: {update}"
+        );
+        connection
+            .generated(&update, &CancelToken::default(), None, None)
+            .unwrap_or_else(|error| panic!("{at}: `{update}` failed: {error}"));
+        assert_eq!(stored(), bytes, "{at}: {update}");
+    }
+
+    run(&format!(
+        "UPDATE {table} SET payload = {}",
+        engine.binary_literal(&[0xff, 0]).unwrap()
+    ));
+    let text = grid(BinaryForm::Text);
+    assert!(
+        !text.editable(0, 1),
+        "{at}: non-UTF-8 bytes are editable as text"
+    );
+    assert!(text.bytes_refusal(0, 1).is_some(), "{at}");
+    assert!(grid(BinaryForm::Hex).editable(0, 1), "{at}");
 }
 
 /// What DBDelve writes for a browsing surface, run on the subject: a paged

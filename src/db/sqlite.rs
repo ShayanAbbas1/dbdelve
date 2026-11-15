@@ -2406,4 +2406,14 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
         read_only_session_refuses_a_write,
         generated_writes_round_trip,
     );
+
+    #[test]
+    fn binary_edits_round_trip() {
+        crate::db::conformance::binary_edits_round_trip(
+            &crate::db::Connection::Sqlite(memory("")),
+            crate::db::Target::built_in(Engine::Sqlite),
+            "main",
+            "blob",
+        );
+    }
 }
