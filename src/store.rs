@@ -2076,14 +2076,30 @@ fn diagrams_directory(profile_id: &str) -> Result<PathBuf, String> {
 /// A database's and a schema's names can hold anything, so each is escaped
 /// ([`escape_file_name`]), `.` included, and the `.` between them is the only
 /// one in the name. Behind a prefix that keeps empty names a file name.
+///
+/// Escaping can triple a name, so a pair too long for one file name (255 bytes
+/// on ext4 and APFS, staging name included) keeps a prefix of its key and ends
+/// in `~` and a hash of the whole key. Escaping never writes `~`, so no key
+/// that fits can meet one cut short, and a key that fits keeps the name it
+/// always had.
 fn diagram_path(profile_id: &str, database: Option<&str>, schema: &str) -> Result<PathBuf, String> {
-    let key = format!(
+    let mut key = format!(
         "d-{}.{}",
         escape_file_name(database.unwrap_or_default()),
         escape_file_name(schema)
     );
+    if key.len() > DIAGRAM_STEM_LIMIT {
+        let digest = ring::digest::digest(&ring::digest::SHA256, key.as_bytes());
+        let hash = hex::encode(&digest.as_ref()[..16]);
+        key.truncate(DIAGRAM_STEM_LIMIT - "~".len() - hash.len());
+        key = format!("{key}~{hash}");
+    }
     Ok(diagrams_directory(profile_id)?.join(format!("{key}.toml")))
 }
+
+/// [`write_file_with`] stages beside the file as `<stem>.tmp-<pid>-<n>`: a
+/// `u32` pid and a `u64` counter put at most 36 bytes after the stem.
+const DIAGRAM_STEM_LIMIT: usize = 255 - ".tmp-".len() - 10 - "-".len() - 20;
 
 /// Like [`escape_grid_key`], but upper-case letters are escaped too and the
 /// hex is lower-case, so nothing it writes has a letter to fold: on a
@@ -5614,6 +5630,52 @@ name = \"accounts\"
             assert!(!directory.exists(), "they go with the profile");
             assert_eq!(read_diagram("dev", None, "a.b"), Vec::new());
             delete_diagrams("dev").expect("none left is not a failure");
+        });
+    }
+
+    #[test]
+    fn an_arrangement_for_names_too_long_to_escape_into_a_file_name_still_saves() {
+        with_home(|| {
+            let card = StoredCard {
+                schema: "public".into(),
+                name: "orders".into(),
+                x: Some(1.0),
+                y: None,
+                width: None,
+                height: None,
+            };
+            let long = "S".repeat(63);
+            let other = format!("{}T", "S".repeat(62));
+            let diagrams = [
+                (Some(long.as_str()), long.as_str()),
+                (Some(long.as_str()), other.as_str()),
+                (None, long.as_str()),
+            ];
+            for (database, schema) in diagrams {
+                let path = diagram_path("dev", database, schema).unwrap();
+                let staging = path.with_extension(format!("tmp-{}-{}", u32::MAX, u64::MAX));
+                for name in [&path, &staging] {
+                    let length = name.file_name().unwrap().len();
+                    assert!(length <= 255, "{length} bytes: {}", name.display());
+                }
+                write_diagram("dev", database, schema, std::slice::from_ref(&card))
+                    .expect("an arrangement must write");
+            }
+            for (database, schema) in diagrams {
+                assert_eq!(read_diagram("dev", database, schema), vec![card.clone()]);
+            }
+            let directory = dbdelve_directory().unwrap().join("diagrams").join("dev");
+            assert_eq!(
+                fs::read_dir(&directory).unwrap().count(),
+                diagrams.len(),
+                "names alike up to the cut still get a file each"
+            );
+            assert_eq!(
+                diagram_path("dev", Some("Shop"), "public").unwrap(),
+                directory.join("d-%53hop.public.toml"),
+                "a name that fits keeps the name it always had"
+            );
+            delete_diagrams("dev").unwrap();
         });
     }
 

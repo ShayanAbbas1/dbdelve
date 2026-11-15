@@ -514,7 +514,8 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   (`store::write_diagram`), written at the end of a drag, so that however many
   there are they never grow the file that is moved aside when it breaks. Names
   are values in it, never keys, and the file name escapes both as a grid key
-  does. The database is the one a pin names (`Profile::shortcut_database`):
+  does; a pair whose escaped name would pass 255 bytes with its staging
+  suffix keeps a prefix and ends in `~` and a hash of the whole. The database is the one a pin names (`Profile::shortcut_database`):
   blank where the catalog lists every database as a schema or the profile has
   one, and while it is not known nothing is read or written, so a same-named
   schema in another database never takes the arrangement. It belongs to the
