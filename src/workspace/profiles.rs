@@ -327,6 +327,7 @@ impl Workspace {
             held: false,
             holds: Arc::default(),
             in_transaction: false,
+            transaction_statements: Vec::new(),
             auto_commit: true,
             session_changed: false,
             catalog: CatalogState::Loading,
@@ -406,6 +407,7 @@ impl Workspace {
             held: false,
             holds: Arc::default(),
             in_transaction: false,
+            transaction_statements: Vec::new(),
             auto_commit: true,
             session_changed: false,
             catalog: CatalogState::Loading,
@@ -1535,6 +1537,8 @@ impl Workspace {
         profile.drop_sessions();
         profile.state = ProfileState::Idle;
         profile.in_transaction = false;
+        profile.transaction_statements.clear();
+        profile.session.auto_after_end = None;
         profile.session_changed = false;
         profile.session.clear_prompts();
         mark_objects_stale(profile);
@@ -2028,6 +2032,8 @@ impl Workspace {
             _attempt: attempt.guard(),
         };
         profile.in_transaction = false;
+        profile.transaction_statements.clear();
+        profile.session.auto_after_end = None;
         // The transaction it was holding died with the session, and silently
         // opening another on a connection the user has just watched drop is
         // the kind of surprise this feature exists to avoid.

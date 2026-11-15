@@ -8,6 +8,7 @@
 //! edited and undone, and what runs is what is on screen.
 
 use super::*;
+use crate::session::AutoCommitPrompt;
 
 impl Workspace {
     /// Turn each statement committing on its own off or back on.
@@ -16,12 +17,20 @@ impl Workspace {
     /// the next statement: a switch that reads "off" while the session is
     /// still autocommitting is a lie for exactly as long as it takes to lose
     /// a row.
+    ///
+    /// Turning it back on while a transaction is open asks first, and sends
+    /// nothing until the question is answered.
     pub(crate) fn toggle_auto_commit(
         &mut self,
         _: &ToggleAutoCommit,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A prompt whose transaction ended under it draws nothing, and must
+        // not come back for the next one.
+        if let Some(profile) = self.profile_mut() {
+            profile.session.auto_commit_prompt = None;
+        }
         let Some((auto_commit, open, engine)) = self.profile().map(|profile| {
             (
                 profile.auto_commit,
@@ -40,14 +49,18 @@ impl Workspace {
         };
 
         if !auto_commit {
-            // Turning it back on while one is open would have to end that
-            // transaction to mean anything, and dbdelve does not get to pick
-            // between committing and discarding the user's work.
+            // Turning it back on has to end an open transaction to mean
+            // anything, and dbdelve does not get to pick between committing
+            // and discarding the user's work, so it asks. Refusing instead
+            // left no way back: in Manual every Commit and Roll back opens
+            // the next transaction at once.
             if open {
-                self.note(
-                    "A transaction is open. Commit or roll it back first.".into(),
-                    cx,
-                );
+                if let Some(profile) = self.profile_mut() {
+                    profile.session.auto_commit_prompt = Some(AutoCommitPrompt {
+                        statements_shown: false,
+                    });
+                }
+                cx.notify();
                 return;
             }
             if let Some(profile) = self.profile_mut() {
@@ -72,7 +85,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.end_transaction("COMMIT", window, cx);
+        self.end_transaction("COMMIT", true, window, cx);
     }
 
     pub(crate) fn rollback_transaction(
@@ -81,7 +94,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.end_transaction("ROLLBACK", window, cx);
+        self.end_transaction("ROLLBACK", true, window, cx);
     }
 
     /// Close the open transaction, and open the next one where the user has
@@ -90,8 +103,20 @@ impl Workspace {
     /// Both go out as one submission so the session is never briefly
     /// autocommitting between them: a statement run in that gap would commit
     /// itself under a switch that reads "off". `sql::leaves` reads the pair
-    /// and lands on the `BEGIN`, so `in_transaction` stays true across it.
-    fn end_transaction(&mut self, verb: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// and lands on the `BEGIN`, so `in_transaction` stays true across it. The
+    /// Auto dialog's end is the only one that opens no next transaction, which
+    /// is what `reopen` being false is for: it is the one end that leaves
+    /// Manual.
+    ///
+    /// Whether the statement was handed to the run, `false` where a refusal
+    /// already said why nothing was.
+    fn end_transaction(
+        &mut self,
+        verb: &str,
+        reopen: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some((open, auto_commit, engine)) = self.profile().map(|profile| {
             (
                 profile.in_transaction,
@@ -99,20 +124,89 @@ impl Workspace {
                 profile.config.engine(),
             )
         }) else {
-            return;
+            return false;
         };
         if !open {
             self.note("No transaction is open on this connection.".into(), cx);
-            return;
+            return false;
         }
-        let reopen = (!auto_commit)
+        let begin = (reopen && !auto_commit)
             .then(|| engine.begins_transaction())
             .flatten();
-        let statement = match reopen {
+        let statement = match begin {
             Some(begin) => format!("{verb};\n\n{begin};"),
             None => verb.to_string(),
         };
         self.run_in_buffer(statement, window, cx);
+        true
+    }
+
+    /// The Auto dialog's answer: end the open transaction with a plain
+    /// `verb` (`COMMIT` or `ROLLBACK`) that opens no next one, then read Auto.
+    ///
+    /// The switch flips last, and only once the statement has succeeded: the
+    /// run's completion does it (`Session::auto_after_end`). A switch reading
+    /// Auto over a transaction that is still open is wrong for as long as it
+    /// takes to lose a row, the mirror of the reason Manual opens its `BEGIN`
+    /// at once, and a `COMMIT` can fail and leave the transaction open.
+    /// `in_transaction` is marked as the statement is sent, so it is already
+    /// false here when the run started; still true means a statement is
+    /// running in that tab, or the connection is gone.
+    pub(crate) fn end_transaction_for_auto(
+        &mut self,
+        verb: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let asked = self
+            .profile_mut()
+            .and_then(|profile| profile.session.auto_commit_prompt.take())
+            .is_some();
+        if !asked {
+            return;
+        }
+        // Not `in_transaction` alone: it is also false when the transaction
+        // ended between the dialog being drawn and the click, and arming
+        // `auto_after_end` then would turn Auto on at the tab's next success.
+        // A refusal there has said why already.
+        if !self.end_transaction(verb, false, window, cx) {
+            return;
+        }
+        let Some(profile) = self.profile_mut() else {
+            return;
+        };
+        if profile.in_transaction {
+            self.note(
+                format!("The {verb} was not sent, so auto-commit is still off."),
+                cx,
+            );
+            return;
+        }
+        profile.session.auto_after_end = Some(profile.session.active);
+        cx.notify();
+    }
+
+    /// Close the Auto dialog and change nothing.
+    pub(crate) fn cancel_auto_commit_prompt(&mut self, cx: &mut Context<Self>) -> bool {
+        let cancelled = self
+            .profile_mut()
+            .and_then(|profile| profile.session.auto_commit_prompt.take())
+            .is_some();
+        if cancelled {
+            self.refocus_front();
+            cx.notify();
+        }
+        cancelled
+    }
+
+    pub(crate) fn toggle_auto_commit_statements(&mut self, cx: &mut Context<Self>) {
+        if let Some(prompt) = self
+            .profile_mut()
+            .and_then(|profile| profile.session.auto_commit_prompt.as_mut())
+        {
+            prompt.statements_shown = !prompt.statements_shown;
+        }
+        cx.notify();
     }
 
     /// Append `statement` to the buffer in front and run it from there.

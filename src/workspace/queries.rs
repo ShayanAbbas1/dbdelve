@@ -2399,6 +2399,13 @@ impl Workspace {
             })
             .or_else(|| {
                 unverified.then(|| "dbdelve refused to send an edit it could not verify.".into())
+            })
+            // An unverified edit on the connection's own session: not sent
+            // when its own brackets would end the user's open transaction.
+            .or_else(|| {
+                (edit && binding.is_none())
+                    .then(|| profile.own_write_refusal(&sql))
+                    .flatten()
             });
         // An edit sent to a transactional SQL engine leaves the grid and the
         // draft where they are until the server answers, so a refusal or a
@@ -2717,13 +2724,26 @@ impl Workspace {
         };
         // Marked on the way out, like the history: a statement that failed
         // part way may still have opened a transaction.
+        // What a lone COMMIT or ROLLBACK cleared, kept to put back when it
+        // fails where the engine keeps the transaction (SQLite's
+        // `SQLITE_BUSY`): it is read off what was sent, not off what the
+        // server did.
+        let mut ended = None;
         // Not a bound tab's: what it leaves is left on the session of its
         // database, which is not the profile's own.
         if !generated
             && binding.is_none()
             && let Some(profile) = self.issued_to(&id, generation)
         {
-            let leaves = sql::leaves(engine, explained.as_deref().unwrap_or(&sql));
+            let text = explained.as_deref().unwrap_or(&sql);
+            let leaves = sql::leaves(engine, text);
+            if leaves.transaction == Some(false)
+                && profile.in_transaction
+                && sql::after_last_end(engine, text).is_empty()
+            {
+                ended = Some(std::mem::take(&mut profile.transaction_statements));
+            }
+            profile.record_sent(&sql, leaves.transaction);
             if let Some(open) = leaves.transaction {
                 profile.in_transaction = open;
             }
@@ -2740,6 +2760,16 @@ impl Workspace {
                 .or_else(|| sql::transaction_uncertain(engine, text).then_some(true));
             (open, leaves.settings)
         });
+        // An edit dbdelve applies on the connection's own session runs inside
+        // the user's open transaction and is committed or rolled back with it,
+        // so the prompt that ends it lists it. Its reads stay out.
+        if generated
+            && edit
+            && refusal.is_none()
+            && let Some(profile) = self.issued_to(&id, generation)
+        {
+            profile.record_sent(&sql, None);
+        }
         // A plan is never cut short: its rows are the plan, not data.
         let limit = match tab {
             Tab::Query(query) if explaining.is_none() => self
@@ -3227,6 +3257,29 @@ impl Workspace {
                                     .and_then(|query| query.queue.as_mut())
                             {
                                 queue.remaining.clear();
+                            }
+                        }
+                        // Settled here, before a tab closed under the run can
+                        // end the block: whether the end really ended anything
+                        // is only known now.
+                        let ended_ok = result.is_ok();
+                        // Put back only where the engine says the failed end
+                        // left the transaction open; a guess would keep a
+                        // flag no COMMIT could clear, or offer a Roll Back
+                        // for work the server had already rolled back.
+                        if let Some(statements) = ended
+                            && !lost
+                            && result.as_ref().err().is_some_and(|error| {
+                                engine.failed_end_keeps_transaction(&error.message)
+                            })
+                        {
+                            profile.in_transaction = true;
+                            profile.transaction_statements = statements;
+                        }
+                        if profile.session.auto_after_end == Some(tab) {
+                            profile.session.auto_after_end = None;
+                            if ended_ok {
+                                profile.auto_commit = true;
                             }
                         }
                         let Some((state, results)) = profile.session.slot_at(tab, lane.as_ref())
