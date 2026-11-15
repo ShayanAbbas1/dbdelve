@@ -725,13 +725,24 @@ impl Connection {
     /// rows are read off the socket as they come, so one past the limit is
     /// dropped as soon as it is counted.
     pub fn query(&self, sql: &str, fetch: Fetch) -> Result<QueryResult, DbError> {
-        self.run(sql, true, fetch)
+        self.run(sql, true, fetch, false)
+    }
+
+    /// [`Self::query`] for a tab bound to this session's database, which is
+    /// the one it was opened on ([`Self::on_database`]): the session is put
+    /// back on it, by the driver's own call and not a `USE`, before the
+    /// statement and under the lock that runs it. A `USE` of the user's, in
+    /// this tab or another bound to the same database, may have moved it
+    /// since, and applying and running as two acquisitions would let a run
+    /// land in the other's database.
+    pub fn query_bound(&self, sql: &str, fetch: Fetch) -> Result<QueryResult, DbError> {
+        self.run(sql, true, fetch, true)
     }
 
     /// dbdelve's own SQL. Its rows are never editable, so it does not pay for the
     /// round trip that reads a primary key.
     fn internal_query(&self, sql: &str) -> Result<QueryResult, DbError> {
-        self.run(sql, false, Fetch::default())
+        self.run(sql, false, Fetch::default(), false)
     }
 
     /// `ask` on the side session, opened if there is none. A failure is taken
@@ -780,12 +791,24 @@ impl Connection {
         }) == Some(true)
     }
 
-    fn run(&self, sql: &str, editable: bool, fetch: Fetch) -> Result<QueryResult, DbError> {
+    /// `bound` puts the session back on its own database first.
+    fn run(
+        &self,
+        sql: &str,
+        editable: bool,
+        fetch: Fetch,
+        bound: bool,
+    ) -> Result<QueryResult, DbError> {
         let mut connection = self.connection.lock().map_err(|_| DbError {
             message: "The connection is unavailable after an earlier internal failure.".into(),
             position: None,
         })?;
         fetch.hold()?;
+        if bound {
+            connection
+                .select_db(&self.server.database)
+                .map_err(|error| super::unplaced(query_error(&error)))?;
+        }
 
         let mut result = QueryResult::default();
         let mut probed = Vec::new();
@@ -1062,7 +1085,7 @@ impl Connection {
                     held: Some(held),
                     ..Fetch::default()
                 };
-                self.run(&graph_sql(template, schema), false, held)
+                self.run(&graph_sql(template, schema), false, held, false)
             };
             let columns = query(GRAPH_COLUMNS_SQL)?;
             let unique_keys = query(GRAPH_UNIQUE_KEYS_SQL)?;
@@ -2025,6 +2048,43 @@ mod tests {
                 database(&profile).as_deref(),
                 Some("dbdelve_dev"),
                 "{engine:?}: the profile's own connection is where it was"
+            );
+        }
+    }
+
+    /// A used session is put back on its own database by a bound run, whichever
+    /// database a statement of the user's moved it to.
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_bound_run_moves_a_used_session_back_to_its_database() {
+        for engine in [Engine::MySql, Engine::MariaDb] {
+            let session = live_profile(engine)
+                .on_database("information_schema")
+                .expect("a session should open");
+            let cancel = crate::db::CancelToken::default();
+            let database = |bound: bool| {
+                let sql = "SELECT DATABASE()";
+                let result = match bound {
+                    true => session.query_bound(None, sql, &cancel, Fetch::default()),
+                    false => session.query(sql, &cancel, Fetch::default()),
+                };
+                result
+                    .ok()
+                    .and_then(|result| result.rows.first()?.get(0).map(str::to_string))
+            };
+            session
+                .query("USE dbdelve_dev", &cancel, Fetch::default())
+                .unwrap_or_else(|error| panic!("{engine:?}: {error}"));
+            assert_eq!(database(false), Some("dbdelve_dev".into()), "{engine:?}");
+            assert_eq!(
+                database(true),
+                Some("information_schema".into()),
+                "{engine:?}: put back before the statement"
+            );
+            assert_eq!(
+                database(false),
+                Some("information_schema".into()),
+                "{engine:?}: and it stays there"
             );
         }
     }

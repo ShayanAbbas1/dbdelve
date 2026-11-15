@@ -1729,6 +1729,7 @@ mod tests {
     #[test]
     fn the_bars_a_stored_tab_comes_back_with_are_the_bars_it_had() {
         let stored = store::StoredObject {
+            database: None,
             schema: "public".into(),
             name: "accounts".into(),
             routine: false,
@@ -1783,6 +1784,7 @@ mod tests {
         // the expression is re-derived from the bars rather than trusted as
         // written, so a regex does not reach a SQLite that has none.
         let stored = store::StoredObject {
+            database: None,
             schema: "public".into(),
             name: "accounts".into(),
             routine: false,
@@ -1830,6 +1832,7 @@ mod tests {
         // row; kept, the run refuses it and says why.
         let filter = r#""name" ILIKE '%50\%%' ESCAPE '\'"#;
         let stored = store::StoredObject {
+            database: None,
             schema: "public".into(),
             name: "accounts".into(),
             routine: false,
@@ -1873,6 +1876,7 @@ mod tests {
         assert_eq!(saved, [refused.clone(), accepted.clone()]);
 
         let stored = store::StoredObject {
+            database: None,
             schema: "public".into(),
             name: "accounts".into(),
             routine: false,
@@ -1900,6 +1904,7 @@ mod tests {
         // Spelled by a column type the restore has not loaded: re-derived, it
         // would be `N'0x00FF'`, match nothing, and miss the grid snapshot.
         let mut stored = store::StoredObject {
+            database: None,
             schema: "dbo".into(),
             name: "blobs_by_hash".into(),
             routine: false,
@@ -1941,6 +1946,7 @@ mod tests {
         // The one field an older profile has, read once on the way in. An
         // operator or joiner this build cannot read falls the same way.
         let stored = store::StoredObject {
+            database: None,
             schema: "public".into(),
             name: "accounts".into(),
             routine: false,

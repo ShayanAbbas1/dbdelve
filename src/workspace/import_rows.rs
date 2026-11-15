@@ -30,8 +30,8 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some((schema, table)) = self.import_target(cx) {
-            self.import_rows_into(schema, table, window, cx);
+        if let Some((database, schema, table)) = self.import_target(cx) {
+            self.import_rows_into(database, schema, table, window, cx);
         }
     }
 
@@ -43,7 +43,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((schema, table)) = self.import_target(cx) else {
+        let Some((database, schema, table)) = self.import_target(cx) else {
             return;
         };
         if !self.import_slot_free(cx) {
@@ -86,8 +86,9 @@ impl Workspace {
                 match read {
                     Some((format, bytes, problems)) => {
                         let source = ImportSource::Clipboard(problems);
-                        workspace
-                            .open_import(profile, schema, table, source, format, bytes, window, cx);
+                        workspace.open_import(
+                            profile, database, schema, table, source, format, bytes, window, cx,
+                        );
                     }
                     None => {
                         found.session.notice =
@@ -100,14 +101,19 @@ impl Workspace {
         .detach();
     }
 
-    /// The table the object tab in front shows, if rows can be imported into
+    /// The table the object tab in front shows, with the database it is in
+    /// when that is not the connection's own, if rows can be imported into
     /// it, or a notice saying why not.
-    fn import_target(&mut self, cx: &mut Context<Self>) -> Option<(String, String)> {
+    fn import_target(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<(Option<String>, String, String)> {
         let target = self
             .profile()
             .and_then(|profile| profile.session.active_object())
             .map(|tab| {
                 (
+                    tab.database.clone(),
                     tab.schema.clone(),
                     tab.name.clone(),
                     tab.takes_imports(self.target()),
@@ -115,8 +121,8 @@ impl Workspace {
             });
         match target {
             None => self.note("Open a table to import rows into.".into(), cx),
-            Some((_, _, false)) => self.note("This view takes no imported rows.".into(), cx),
-            Some((schema, table, true)) => return Some((schema, table)),
+            Some((.., false)) => self.note("This view takes no imported rows.".into(), cx),
+            Some((database, schema, table, true)) => return Some((database, schema, table)),
         }
         None
     }
@@ -125,13 +131,14 @@ impl Workspace {
     /// nothing else: the dialog reads the table's columns itself.
     pub(crate) fn import_rows_into(
         &mut self,
+        database: Option<String>,
         schema: String,
         table: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.import_slot_free(cx) {
-            self.prompt_import_file(schema, table, window, cx);
+            self.prompt_import_file(database, schema, table, window, cx);
         }
     }
 
@@ -179,6 +186,7 @@ impl Workspace {
     /// nothing.
     pub(crate) fn prompt_import_file(
         &mut self,
+        database: Option<String>,
         schema: String,
         table: String,
         window: &mut Window,
@@ -204,7 +212,8 @@ impl Workspace {
                         return;
                     }
                     if let Some(path) = paths.into_iter().next() {
-                        workspace.open_import_file(profile, schema, table, path, window, cx);
+                        workspace
+                            .open_import_file(profile, database, schema, table, path, window, cx);
                     }
                 }
                 Ok(Err(error)) => workspace.note(error.to_string(), cx),
@@ -216,9 +225,14 @@ impl Workspace {
 
     /// Read `path` and open `profile`'s dialog on it, in place of whatever
     /// the dialog held.
+    // The table is named by its database, schema and name, and the dialog
+    // opened on it carries all three: a struct would be a type these two
+    // functions and the dialog's field list spell out one more time.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn open_import_file(
         &mut self,
         profile: String,
+        database: Option<String>,
         schema: String,
         table: String,
         path: PathBuf,
@@ -259,8 +273,9 @@ impl Workspace {
                 match read {
                     Ok(bytes) => {
                         let source = ImportSource::File(path);
-                        workspace
-                            .open_import(profile, schema, table, source, format, bytes, window, cx);
+                        workspace.open_import(
+                            profile, database, schema, table, source, format, bytes, window, cx,
+                        );
                     }
                     Err(error) => {
                         if let Some(found) = workspace.profiles.iter_mut().find(|p| p.id == profile)
@@ -282,6 +297,7 @@ impl Workspace {
     fn open_import(
         &mut self,
         profile: String,
+        database: Option<String>,
         schema: String,
         table: String,
         source: ImportSource,
@@ -305,6 +321,7 @@ impl Workspace {
         let options = Options::detected(format, &bytes);
         session.editor_needs_focus = true;
         session.import_rows = Some(ImportDialog {
+            database,
             schema,
             table,
             structure: StructureState::Loading,
@@ -344,8 +361,15 @@ impl Workspace {
         let Some(found) = self.profiles.iter_mut().find(|found| found.id == profile) else {
             return;
         };
-        let connection = found.connection();
         let connecting = matches!(found.state, ProfileState::Connecting { .. });
+        let generation = found.generation;
+        let routed = found.route(
+            found
+                .session
+                .import_rows
+                .as_ref()
+                .and_then(ImportDialog::binding),
+        );
         let Some(dialog) = found
             .session
             .import_rows
@@ -354,22 +378,26 @@ impl Workspace {
         else {
             return;
         };
-        let Some(connection) = connection else {
+        if !routed.is_available() {
             // The connect landing loads them.
             if !connecting {
                 dialog.structure = StructureState::Failed("The connection is not open.".into());
                 self.recheck_import(profile, cx);
             }
             return;
-        };
+        }
         let (schema, table, file) = (
             dialog.schema.clone(),
             dialog.table.clone(),
             dialog.bytes.clone(),
         );
-        let structure = spawn_blocking(cx.background_executor(), move || {
-            connection.structure(&schema, &table)
-        });
+        let structure = self.run_routed(
+            profile,
+            generation,
+            routed,
+            move |connection| connection.structure(&schema, &table),
+            cx,
+        );
         let profile = profile.to_string();
         cx.spawn(async move |workspace, cx| {
             let structure = structure.await;
@@ -627,15 +655,19 @@ impl Workspace {
         let Some(profile) = self.profile_mut() else {
             return;
         };
-        let (id, connection) = (profile.id.clone(), profile.connection());
+        let id = profile.id.clone();
+        let Some(dialog) = profile.session.import_rows.as_ref() else {
+            return;
+        };
+        let routed = profile.route(dialog.binding());
         let Some(dialog) = profile.session.import_rows.as_mut() else {
             return;
         };
-        let Some(connection) = connection else {
+        if !routed.is_available() {
             dialog.error = Some("The connection is not open.".into());
             cx.notify();
             return;
-        };
+        }
         let Some(plan) = dialog.plan.clone() else {
             return;
         };
@@ -663,7 +695,13 @@ impl Workspace {
         };
         cx.notify();
 
-        let apart = spawn_blocking(cx.background_executor(), move || connection.apart());
+        // The import's own session is opened apart from the one the table's
+        // database is read over, so the profile's own tabs wait on nothing.
+        let apart = spawn_blocking(cx.background_executor(), move || {
+            routed
+                .resolve()
+                .and_then(|(connection, _)| connection.apart())
+        });
         cx.spawn({
             let id = id.clone();
             async move |workspace, cx| {

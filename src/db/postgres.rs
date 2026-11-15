@@ -726,6 +726,18 @@ fn set_search_path(client: &mut Client, schema: &str) -> Result<(), DbError> {
     }
 }
 
+/// The session's own `search_path` again, as the role, database or server set
+/// it: where a session opened with no schema picked starts.
+fn reset_search_path(client: &mut Client) -> Result<(), DbError> {
+    let reset = "RESET search_path";
+    let Client { client, driver, .. } = client;
+    driver
+        .block_on(client.simple_query(reset))
+        .and_then(|done| done)
+        .map(|_| ())
+        .map_err(|error| query_error(&error, reset))
+}
+
 /// The server's own name, which TLS verifies, dialled at the tunnel's address
 /// through `hostaddr`, which the certificate check never sees.
 /// An empty `dbname` would have the server pick the user's name, often a
@@ -1270,7 +1282,35 @@ impl Connection {
     /// dropped, so the statement runs to completion exactly as typed. Kept
     /// rows go to `feed` when there is one; see [`super::Connection::query`].
     pub fn query(&self, sql: &str, fetch: Fetch) -> Result<QueryResult, DbError> {
-        let result = self.run(sql, true, fetch);
+        self.query_as(sql, fetch, None)
+    }
+
+    /// [`Self::query`] for a tab bound to this session's database: `schema`
+    /// goes first on the `search_path`, or the session's own default is put
+    /// back where the tab binds none, before the statement and under the lock
+    /// that runs it. A statement of another tab, or one of the user's own,
+    /// may have moved it since, and two tabs bound to different schemas of one
+    /// database share this session, so applying and running as two
+    /// acquisitions would let one run in the other's schema.
+    ///
+    /// Inside a transaction block the `search_path` cannot be moved
+    /// ([`set_search_path`]), and the statement is not sent.
+    pub fn query_bound(
+        &self,
+        schema: Option<&str>,
+        sql: &str,
+        fetch: Fetch,
+    ) -> Result<QueryResult, DbError> {
+        self.query_as(sql, fetch, Some(schema))
+    }
+
+    fn query_as(
+        &self,
+        sql: &str,
+        fetch: Fetch,
+        bound: Option<Option<&str>>,
+    ) -> Result<QueryResult, DbError> {
+        let result = self.run(sql, true, fetch, bound);
         if let Some(feed) = fetch.feed {
             feed.release();
         }
@@ -1280,15 +1320,28 @@ impl Connection {
     /// dbdelve's own SQL. Its column types are never shown, so it does not pay
     /// for the extra round trip that learns them.
     fn internal_query(&self, sql: &str) -> Result<QueryResult, DbError> {
-        self.run(sql, false, Fetch::default())
+        self.run(sql, false, Fetch::default(), None)
     }
 
-    fn run(&self, sql: &str, typed: bool, fetch: Fetch) -> Result<QueryResult, DbError> {
+    /// `bound` is the schema to put the session back on first, itself `None`
+    /// for its own default, when the run is a bound tab's.
+    fn run(
+        &self,
+        sql: &str,
+        typed: bool,
+        fetch: Fetch,
+        bound: Option<Option<&str>>,
+    ) -> Result<QueryResult, DbError> {
         let mut client = self.client.lock().map_err(|_| DbError {
             message: "The connection is unavailable after an earlier internal failure.".into(),
             position: None,
         })?;
         fetch.hold()?;
+        match bound {
+            Some(Some(schema)) => set_search_path(&mut client, schema).map_err(super::unplaced)?,
+            Some(None) => reset_search_path(&mut client).map_err(super::unplaced)?,
+            None => {}
+        }
 
         // Timed from here, not from the call: one client serialises a profile's
         // queries, and time spent waiting behind the catalog load is not time
@@ -1307,7 +1360,13 @@ impl Connection {
                 .map_err(failed)?
                 .map_err(failed)?,
         );
-        if typed && let Some(feed) = fetch.feed {
+        // Not for a run in a schema of a tab's: the side session lacks that
+        // `search_path` and would type streamed rows from another table of
+        // the same name. They are typed once the statement is done instead.
+        if typed
+            && !matches!(bound, Some(Some(_)))
+            && let Some(feed) = fetch.feed
+        {
             self.describe_aside(sql, feed);
         }
         let mut assembly = Assembly::new(sql, fetch, started);
@@ -1548,7 +1607,7 @@ impl Connection {
                     held: Some(held),
                     ..Fetch::default()
                 };
-                self.run(&schema_sql(template, schema), false, held)
+                self.run(&schema_sql(template, schema), false, held, None)
             };
             let columns = query(GRAPH_COLUMNS_SQL)?;
             let unique_keys = query(GRAPH_UNIQUE_KEYS_SQL)?;
@@ -3393,6 +3452,82 @@ mod tests {
             Some("dbdelve_missing_schema"),
             "picking a schema on the new session leaves the first's pick as it was"
         );
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_two_tabs_on_one_session_each_run_in_their_own_schema() {
+        let plain = Connection::open(&live_config()).expect("connection should open");
+        let clean = || {
+            plain
+                .query(
+                    "DROP SCHEMA IF EXISTS dbdelve_bound_a CASCADE; \
+                     DROP SCHEMA IF EXISTS dbdelve_bound_b CASCADE",
+                    Fetch::default(),
+                )
+                .expect("the probe schemas should drop");
+        };
+        clean();
+        plain
+            .query(
+                "CREATE SCHEMA dbdelve_bound_a; CREATE SCHEMA dbdelve_bound_b; \
+                 CREATE TABLE dbdelve_bound_a.t (which text); \
+                 CREATE TABLE dbdelve_bound_b.t (which text); \
+                 INSERT INTO dbdelve_bound_a.t VALUES ('a'); \
+                 INSERT INTO dbdelve_bound_b.t VALUES ('b')",
+                Fetch::default(),
+            )
+            .expect("the probe tables should be created");
+
+        let session = super::super::Connection::Postgres(plain.clone())
+            .on_database(&live_config().database)
+            .expect("a session should open");
+        let cancel = crate::db::CancelToken::default();
+        let answer = |schema: Option<&str>, sql: &str| {
+            let result = session.query_bound(schema, sql, &cancel, Fetch::default());
+            result
+                .ok()
+                .and_then(|result| result.rows.first()?.get(0).map(str::to_string))
+        };
+        // One session, two tabs, run in turn: each in its own schema.
+        for _ in 0..2 {
+            assert_eq!(
+                answer(Some("dbdelve_bound_a"), "SELECT which FROM t"),
+                Some("a".into())
+            );
+            assert_eq!(
+                answer(Some("dbdelve_bound_b"), "SELECT which FROM t"),
+                Some("b".into())
+            );
+        }
+        // A tab that binds no schema starts from the session's default, not
+        // from where the last tab left it.
+        let path = answer(None, "SHOW search_path").expect("the search_path reads");
+        assert!(!path.contains("dbdelve_bound"), "{path}");
+
+        // Inside a transaction the schema cannot be moved: the statement is
+        // not sent, and the transaction can still be ended.
+        let refused = session
+            .query("BEGIN", &cancel, Fetch::default())
+            .and_then(|_| {
+                session.query_bound(
+                    Some("dbdelve_bound_a"),
+                    "SELECT 1",
+                    &cancel,
+                    Fetch::default(),
+                )
+            })
+            .expect_err("the schema cannot be switched inside a transaction");
+        assert!(
+            refused.message.starts_with("The statement was not sent"),
+            "{}",
+            refused.message
+        );
+        assert_eq!(refused.position, None);
+        session
+            .query("ROLLBACK", &cancel, Fetch::default())
+            .expect("a statement that ends the transaction goes as it is");
+        clean();
     }
 
     #[test]

@@ -153,6 +153,60 @@ impl GraphCancel {
     }
 }
 
+/// An error from putting a bound tab's database and schema back, which is
+/// dbdelve's own call and not the user's statement: no byte of their text is
+/// where it points, and it says nothing was sent.
+fn unplaced(error: DbError) -> DbError {
+    DbError {
+        message: format!(
+            "The statement was not sent: its tab's database and schema could not be set again. {}",
+            error.message
+        ),
+        position: None,
+    }
+}
+
+/// Runs `run`, handed a `held` for the statement to ask once it holds
+/// `connection`: `true` makes `connection` the one a Cancel on `cancel` (made
+/// by [`CancelToken::alongside`]) stops, `false` says the Cancel came first
+/// and the statement is dropped unsent. The connection is let go of when `run`
+/// ends.
+///
+/// A connection that is shared becomes the run's to stop only once this
+/// statement holds it; until then a Cancel just marks the run, and the
+/// statement is dropped unsent when its turn comes.
+// ponytail: it is let go of just after the connection is, so a Cancel in
+// between reaches whatever took the connection next. Closing that gap needs
+// the engine to clear it under its own lock.
+fn running_on<T>(
+    cancel: &CancelToken,
+    connection: &Connection,
+    run: impl FnOnce(&dyn Fn() -> bool) -> T,
+) -> T {
+    let slot = std::cell::Cell::new(None);
+    let hold = || {
+        let mut running = cancel
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if running.asked {
+            return false;
+        }
+        let alongside = running.alongside.get_or_insert_default();
+        alongside.push(Some(connection.clone()));
+        slot.set(Some(alongside.len() - 1));
+        true
+    };
+    let result = run(&hold);
+    if let Some(slot) = slot.get()
+        && let Ok(mut running) = cancel.0.lock()
+        && let Some(alongside) = &mut running.alongside
+    {
+        alongside[slot] = None;
+    }
+    result
+}
+
 /// Which engine a profile talks to.
 ///
 /// Also the answer to the only three questions dbdelve's own generated SQL asks
@@ -1594,6 +1648,92 @@ impl Connection {
         }
     }
 
+    /// [`Connection::query`] on a session opened for a database
+    /// ([`Connection::on_database`]), for a tab bound to it: the session is put
+    /// back on the database it was opened for, and on `schema` where the
+    /// engine picks one, in the same acquisition of its lock as the statement.
+    /// Two tabs bound to different schemas of one database share a session,
+    /// and apply and run as two acquisitions would let one run in the other's
+    /// schema. The statement itself is never touched; the binding is applied
+    /// through the driver's own calls and no text of the user's carries it.
+    ///
+    /// Postgres, DuckDB, MySQL, MariaDB and Redis apply it; Snowflake sends
+    /// the schema with the request; every other engine runs the statement as
+    /// [`Connection::query`] does, because a session of theirs that has been
+    /// moved moves itself back (SQL Server) or keeps no state a statement
+    /// leaves (ClickHouse, MongoDB).
+    ///
+    /// `cancel` is made by [`CancelToken::alongside`]: a Cancel on it stops
+    /// this session only while this statement is what it is running, and a
+    /// statement still waiting behind another tab's is dropped unsent instead
+    /// of stopping that one.
+    pub fn query_bound(
+        &self,
+        schema: Option<&str>,
+        sql: &str,
+        cancel: &CancelToken,
+        fetch: Fetch,
+    ) -> Result<QueryResult, DbError> {
+        running_on(cancel, self, |held| {
+            // SQL Server queues its own statements and counts a Cancel
+            // against that queue, so it is the connection that stops them;
+            // it only has to be told which one is running.
+            if matches!(self, Self::SqlServer(_)) && !held() {
+                return Err(plain_error("Cancelled before it was sent.".into()));
+            }
+            let fetch = Fetch {
+                held: Some(held),
+                ..fetch
+            };
+            match self {
+                Self::Postgres(connection) => connection.query_bound(schema, sql, fetch),
+                Self::MySql(connection) => connection.query_bound(sql, fetch),
+                Self::DuckDb(connection) => connection.query_bound(schema, sql, fetch),
+                Self::Redis(connection) => connection.query_bound(sql, fetch),
+                Self::Snowflake(connection) => connection.query_bound(schema, sql, cancel, fetch),
+                _ => self.query(sql, cancel, fetch),
+            }
+        })
+    }
+
+    /// [`Connection::generated`] for a tab bound to this session's database:
+    /// where that is [`Connection::query`] (Postgres, MySQL, MariaDB and
+    /// DuckDB) it is [`Connection::query_bound`], Redis's is put back on its
+    /// database too, and every other engine's own statement already names
+    /// where it goes. An edit applied from a bound
+    /// tab's grid writes to the database the rows came from, whichever way the
+    /// session has been moved since.
+    pub fn generated_bound(
+        &self,
+        schema: Option<&str>,
+        sql: &str,
+        cancel: &CancelToken,
+        feed: Option<&Feed>,
+        limit: Option<usize>,
+    ) -> Result<QueryResult, DbError> {
+        match self {
+            Self::Postgres(_) | Self::MySql(_) | Self::DuckDb(_) => self.query_bound(
+                schema,
+                sql,
+                cancel,
+                Fetch {
+                    feed,
+                    limit,
+                    ..Fetch::default()
+                },
+            ),
+            Self::Redis(connection) => connection.generated_bound(
+                sql,
+                Fetch {
+                    feed,
+                    limit,
+                    ..Fetch::default()
+                },
+            ),
+            _ => self.generated(sql, cancel, feed, limit),
+        }
+    }
+
     /// [`Connection::query`] on a connection of its own, opened the way this
     /// one was (its tunnel and side session shared), so the statement runs
     /// beside whatever this one is running rather than queued behind it, and
@@ -1640,45 +1780,18 @@ impl Connection {
             }
             Err(_) => (self.clone(), true),
         };
-        let slot = std::cell::Cell::new(None);
-        // A shared connection becomes the run's to stop only once this
-        // statement holds it; until then a Cancel just marks the run, and
-        // the statement is dropped unsent when its turn comes.
-        // ponytail: it is let go of just after the connection is, so a Cancel
-        // in between reaches whatever took the connection next. Closing that
-        // gap needs the engine to clear it under its own lock.
-        let hold = || {
-            let mut running = cancel
-                .0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if running.asked {
-                return false;
-            }
-            let alongside = running.alongside.get_or_insert_default();
-            alongside.push(Some(connection.clone()));
-            slot.set(Some(alongside.len() - 1));
-            true
-        };
-        let result = match shared {
+        running_on(cancel, &connection, |hold| match shared {
             true => connection.query(
                 sql,
                 cancel,
                 Fetch {
-                    held: Some(&hold),
+                    held: Some(hold),
                     ..fetch
                 },
             ),
             false if hold() => connection.query(sql, cancel, fetch),
             false => Err(plain_error("Cancelled before it was sent.".into())),
-        };
-        if let Some(slot) = slot.get()
-            && let Ok(mut running) = cancel.0.lock()
-            && let Some(alongside) = &mut running.alongside
-        {
-            alongside[slot] = None;
-        }
-        result
+        })
     }
 
     /// A session of its own for an import, opened the way this one was, so a

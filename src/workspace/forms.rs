@@ -3209,8 +3209,9 @@ impl Workspace {
                     PopupMenuItem::new(label).on_click(move |_, window, cx| {
                         let (schema, relation) = (schema.clone(), relation.clone());
                         _ = workspace.update(cx, |workspace, cx| {
-                            workspace
-                                .open_relation_view(schema, relation, kind, structure, window, cx);
+                            workspace.open_relation_view(
+                                None, schema, relation, kind, structure, window, cx,
+                            );
                         });
                     })
                 };
@@ -3260,7 +3261,7 @@ impl Workspace {
                         move |_, window, cx| {
                             let (schema, relation) = import_names.clone();
                             _ = import_workspace.update(cx, |workspace, cx| {
-                                workspace.import_rows_into(schema, relation, window, cx);
+                                workspace.import_rows_into(None, schema, relation, window, cx);
                             });
                         },
                     ));

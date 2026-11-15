@@ -354,6 +354,14 @@ pub struct StoredQueryTab {
     /// rest.
     #[serde(default)]
     pub queued_results: usize,
+    /// The database this tab runs on, as the server listed it, or absent for
+    /// a tab on the connection's own session. A name the server no longer
+    /// has fails the tab's run; it never retargets the tab.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
+    /// The schema in that database the tab runs in, where the engine picks one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
 }
 
 /// An opened table, view or routine, stored by name rather than by content: the
@@ -409,6 +417,11 @@ pub struct StoredObject {
     /// it was kept, and goes back to any data tab for the relation.
     #[serde(default)]
     pub origin: Option<String>,
+    /// The database this tab's object is in, as the server listed it, or
+    /// absent for the connection's own. A name the server no longer has fails
+    /// the tab's reads; it never retargets the tab.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
     /// The filter bars [`Self::filter`] was derived from. The bars are the
     /// editable state and the expression is what runs, so both are kept:
     /// nothing here parses a `WHERE` back into controls. Last, because TOML
@@ -1965,6 +1978,23 @@ pub fn object_grid_key(schema: &str, name: &str, filter: &str) -> String {
     }
 }
 
+/// [`object_grid_key`] for a tab of `database`, another database of the
+/// connection's server, where the same schema and name name another table.
+/// Under a prefix of its own, so it collides with no key of the connection's
+/// own tabs; a tab with none has the key it always had.
+pub fn object_grid_key_in(
+    database: Option<&str>,
+    schema: &str,
+    name: &str,
+    filter: &str,
+) -> String {
+    let key = object_grid_key(schema, name, filter);
+    match database {
+        Some(database) => format!("d-{}.{key}", escape_grid_key(database)),
+        None => key,
+    }
+}
+
 fn escape_grid_key(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for byte in value.bytes() {
@@ -2413,6 +2443,102 @@ pub(crate) mod tests {
         assert_eq!(resaved(include_str!("testdata/every-engine.toml")), golden);
         // Saving what was saved changes nothing.
         assert_eq!(resaved(golden), golden);
+    }
+
+    #[test]
+    fn a_query_tabs_binding_round_trips_and_an_old_tab_reads_unbound() {
+        let text = supported_stub(
+            None,
+            "[[profiles.open_queries]]\nid = 0\n\n\
+             [[profiles.open_queries]]\nid = 1\ndatabase = \"other\"\nschema = \"s\"\n\n\
+             [[profiles.open_queries]]\nid = 2\ndatabase = \"main\"\n",
+        );
+        let decoded = decode_profiles(&text, &[]).expect("the file loads");
+        let tabs = &decoded.profiles[0].open_queries;
+        assert_eq!(
+            (tabs[0].database.clone(), tabs[0].schema.clone()),
+            (None, None)
+        );
+        assert_eq!(
+            (tabs[1].database.as_deref(), tabs[1].schema.as_deref()),
+            (Some("other"), Some("s"))
+        );
+        assert_eq!(
+            (tabs[2].database.as_deref(), tabs[2].schema.as_deref()),
+            (Some("main"), None)
+        );
+
+        let saved = resaved(&text);
+        assert_eq!(saved.matches("database = \"other\"").count(), 1, "{saved}");
+        assert_eq!(saved.matches("schema = ").count(), 1, "{saved}");
+        let again = decode_profiles(&saved, &[]).expect("what was written loads");
+        assert_eq!(again.profiles[0].open_queries, *tabs);
+        assert_eq!(
+            resaved(&saved),
+            saved,
+            "saving what was saved changes nothing"
+        );
+
+        // A file from before the keys held tabs with neither, and writes
+        // them back with neither.
+        let old = supported_stub(None, "[[profiles.open_queries]]\nid = 0\n");
+        let old_saved = resaved(&old);
+        assert_eq!(old_saved.matches("database = ").count(), 1, "{old_saved}");
+        assert!(!old_saved.contains("schema = "), "{old_saved}");
+    }
+
+    #[test]
+    fn a_database_is_part_of_an_object_tabs_grid_key() {
+        assert_eq!(
+            object_grid_key_in(None, "main", "t", ""),
+            object_grid_key("main", "t", ""),
+            "a tab of the connection's own database keeps the key it always had"
+        );
+        let keys = [
+            object_grid_key_in(None, "main", "t", ""),
+            object_grid_key_in(Some("other"), "main", "t", ""),
+            object_grid_key_in(Some("third"), "main", "t", ""),
+            object_grid_key_in(Some("other"), "main", "t", "id = 1"),
+        ];
+        for (at, key) in keys.iter().enumerate() {
+            assert_eq!(keys.iter().filter(|other| *other == key).count(), 1, "{at}");
+        }
+    }
+
+    #[test]
+    fn an_object_tabs_database_round_trips_and_an_old_tab_reads_as_the_profiles() {
+        let text = supported_stub(
+            None,
+            "[[profiles.open_objects]]\nschema = \"main\"\nname = \"t\"\n\n\
+             [[profiles.open_objects]]\nschema = \"main\"\nname = \"t\"\ndatabase = \"other\"\n",
+        );
+        let decoded = decode_profiles(&text, &[]).expect("the file loads");
+        let tabs = &decoded.profiles[0].open_objects;
+        assert_eq!(
+            tabs.iter()
+                .map(|tab| tab.database.as_deref())
+                .collect::<Vec<_>>(),
+            [None, Some("other")]
+        );
+
+        let saved = resaved(&text);
+        assert_eq!(saved.matches("database = \"other\"").count(), 1, "{saved}");
+        let again = decode_profiles(&saved, &[]).expect("what was written loads");
+        assert_eq!(again.profiles[0].open_objects, *tabs);
+        assert_eq!(
+            resaved(&saved),
+            saved,
+            "saving what was saved changes nothing"
+        );
+
+        // A file from before the key held tabs without it, and writes them
+        // back without it: the profile's own `database` is the only one.
+        let old = supported_stub(
+            None,
+            "[[profiles.open_objects]]\nschema = \"main\"\nname = \"t\"\n",
+        );
+        let old_saved = resaved(&old);
+        assert_eq!(old_saved.matches("database = ").count(), 1, "{old_saved}");
     }
 
     /// `decode_profiles` as it was before any profile could be unavailable:
@@ -3391,6 +3517,7 @@ user = "shayan"
             open_queries: Vec::new(),
             open_objects: vec![
                 StoredObject {
+                    database: None,
                     schema: "public".into(),
                     name: "accounts".into(),
                     routine: false,
@@ -3406,6 +3533,7 @@ user = "shayan"
                     bars: Vec::new(),
                 },
                 StoredObject {
+                    database: None,
                     schema: "public".into(),
                     name: "total(integer)".into(),
                     routine: true,
@@ -3582,6 +3710,7 @@ open_objects = []
         };
         let profile = StoredProfile {
             open_objects: vec![StoredObject {
+                database: None,
                 schema: "public".into(),
                 name: "accounts".into(),
                 routine: false,
@@ -4102,6 +4231,7 @@ folder = "Hot"
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![StoredObject {
+                database: None,
                 schema: "public".into(),
                 name: "accounts".into(),
                 routine: false,
@@ -4187,6 +4317,7 @@ folder = "Hot"
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![StoredObject {
+                database: None,
                 schema: "main".into(),
                 name: "accounts".into(),
                 routine: false,
@@ -4376,6 +4507,7 @@ open_objects = []
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![StoredObject {
+                database: None,
                 schema: "main".into(),
                 name: "accounts".into(),
                 routine: false,
@@ -5314,15 +5446,20 @@ open_objects = []
                     name: None,
                     active: false,
                     queued_results: 0,
+                    database: None,
+                    schema: None,
                 },
                 StoredQueryTab {
                     id: 4,
                     name: Some("daily".into()),
                     active: true,
                     queued_results: 2,
+                    database: None,
+                    schema: None,
                 },
             ],
             open_objects: vec![StoredObject {
+                database: None,
                 schema: "public".into(),
                 name: "accounts".into(),
                 routine: false,
@@ -5620,6 +5757,7 @@ name = \"accounts\"
     #[test]
     fn a_structure_tab_keeps_the_data_tab_it_came_from() {
         let object = StoredObject {
+            database: None,
             schema: "public".into(),
             name: "customers".into(),
             routine: false,
@@ -5661,6 +5799,7 @@ name = \"accounts\"
             filter: String::new(),
             filter_engine: None,
             origin: None,
+            database: None,
             filters: Vec::new(),
             active: false,
             bars: vec![StoredFilter {
@@ -5923,6 +6062,7 @@ name = \"accounts\"
             open_queries: Vec::new(),
             open_objects: vec![
                 StoredObject {
+                    database: None,
                     schema: "public".into(),
                     name: "customers".into(),
                     routine: false,
@@ -5938,6 +6078,7 @@ name = \"accounts\"
                     bars: Vec::new(),
                 },
                 StoredObject {
+                    database: None,
                     schema: "public".into(),
                     name: "customers".into(),
                     routine: false,
@@ -5983,6 +6124,7 @@ name = \"accounts\"
         // have to survive the file -- values with a quote and a separator in
         // them included.
         let object = StoredObject {
+            database: None,
             schema: "public".into(),
             name: "customers".into(),
             routine: false,

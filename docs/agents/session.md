@@ -62,6 +62,75 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   reaches every one (`Profile::sessions_to_hold`, `set_mode`); all of them end
   with the connection they were opened from (`Profile::drop_sessions`). The
   agent keeps its own lanes and reaches none of them.
+- **New Query Here opens a tab bound to a database** (`QueryTab::binding`,
+  `session::Binding`), from the connections tree's menu. A database row binds
+  that database; a schema row binds by its connection's levels
+  (`Binding::for_schema_row`): where the catalog lists databases as schemas
+  the row is the database, and under a database the row is the schema, kept
+  only where the engine picks one. A connection row names no database, so it
+  opens an ordinary tab, and so does a target that switches none. Plain New
+  Query is an ordinary tab in both modes and keeps Commit, Roll Back,
+  auto-commit and reads at once. A bound tab runs on the (profile, database)
+  session in `profile.bound`, shared by every tab bound to that database;
+  when none is open the run opens it (held to reads when the profile is
+  Read-only) and keeps it (`Workspace::keep_session`) before anything is sent
+  on it. Before every run the session is put back on the binding by the
+  driver's own call, in the same acquisition of its lock as the statement
+  (`Connection::query_bound`): the database where the session can move
+  (DuckDB, MySQL, MariaDB, Redis), the schema where the target picks one
+  (Postgres, DuckDB, Snowflake, which sends it with the request). Two tabs on
+  different schemas of one session therefore each run in their own. No `USE`
+  or `SET` is written into the buffer or the statement, and the profile's own
+  database, schema, `in_transaction` and `session_changed` never move. An edit
+  applied from a bound tab's grid goes to the same session
+  (`Connection::generated_bound`), and a Cancel is a token that stops that
+  session only while it runs this tab's statement. A statement that ends a
+  transaction goes as it is, because a session inside one cannot be moved and
+  applying the binding first would stop the `COMMIT` that frees it. The
+  binding is stored with the tab (`StoredQueryTab.{database, schema}`, each
+  absent for an unbound tab) and read back as data: after a relaunch the tab is
+  bound again, and a database the server no longer has fails the run with the
+  open's own words and never retargets the tab. A `USE` or `SET` the user runs
+  in a bound tab is reset, not rewritten: the binding stays what the tab was
+  opened for, the run's notice says `The next run in this tab starts again on
+  {database}.` (`Binding::label`), and the next run puts the session back
+  there. A bound session is auto-commit and its tabs never
+  run reads at once (`ponytail:` upgrade: a session of the tab's own, which
+  would also give a tab its own transaction and queue). A bound tab completes
+  from the profile's own catalog (`ponytail:` upgrade: a provider per
+  (profile, database) catalog). Exporting every row of a bound tab's result is
+  refused with a sentence (`Workspace::refetch`): that re-read runs on the
+  profile's own session, which is another database's.
+- **An object tab carries its database** (`ObjectTab::database`, stored as
+  `StoredObject.database`, absent for the connection's own). Clicking a table
+  under another database in the connections tree opens it through the catalog
+  read for that database (`Workspace::open_object_on`), never the profile's
+  own, so `main.t` under two databases is two tabs: the tab's identity and its
+  grid snapshot key include the database (`matching_tab`,
+  `store::object_grid_key_in`). **One accessor routes every tab-scoped read and
+  write** (`Profile::connection_for(tab)` -> `Routed`, resolved on the blocking
+  pool; `Workspace::run_routed` for the reads that are not a run): the
+  preview, page and count, the structure and references, the check behind a
+  reference arrow, Export, Import Rows (the dialog carries its table's
+  database), a grid edit and the re-read after it, and the filter bars'
+  completion columns. A query tab's bound run goes through the same accessor
+  (`Profile::route`). The profile's own session keeps what is the connection's:
+  refresh, Select Database, disconnect, `set_schema`, its catalog chain, Copy
+  DDL (until it is routed by database), the transaction readout, a data file
+  opened into a new tab, and the database opens themselves. Select Database
+  closes the object tabs of the database it leaves; a tab of another database
+  stays, and its session opens again on its next read. A restored tab of
+  another database comes back by name before any connection, and a routine of
+  one waits for that database's catalog.
+- **A bound tab makes its connection the one in front.** Running or opening
+  one is acting on a row of that connection (`Workspace::new_query_here`
+  activates it), because the gate, the mode and the engine a statement meets
+  are the front connection's, never the binding's. So the titlebar names that
+  connection, the status bar shows that profile's mode, the palette's Objects
+  and Commands scopes act on that profile, and in simple mode the explorer
+  shows that profile's own tree, its own database and schema and not the
+  tab's binding. The profile's own database and schema do not move: a tab's
+  binding is where its statements run, not where the connection is.
 - **The titlebar's project and connection open the palette on Connections**
   (`Workspace::open_connections`, also `SwitchConnection`, no default chord);
   there is no switcher panel of its own. That scope is a tree

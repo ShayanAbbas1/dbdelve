@@ -1297,7 +1297,11 @@ fn import_preview(editing: &Editing, cx: &mut Context<Workspace>) -> AnyElement 
 fn import_header(dialog: &ImportDialog, cx: &mut Context<Workspace>) -> impl IntoElement {
     let t = popup_theme(cx);
     let workspace = cx.entity().downgrade();
-    let (schema, table) = (dialog.schema.clone(), dialog.table.clone());
+    let (database, schema, table) = (
+        dialog.database.clone(),
+        dialog.schema.clone(),
+        dialog.table.clone(),
+    );
     let name = dialog.source.name();
     let rows = match &dialog.prepared {
         Some(Ok(prepared)) => Some(row_readout(
@@ -1337,7 +1341,13 @@ fn import_header(dialog: &ImportDialog, cx: &mut Context<Workspace>) -> impl Int
             .disabled(running)
             .on_click(move |_, window, cx| {
                 _ = workspace.update(cx, |workspace, cx| {
-                    workspace.prompt_import_file(schema.clone(), table.clone(), window, cx);
+                    workspace.prompt_import_file(
+                        database.clone(),
+                        schema.clone(),
+                        table.clone(),
+                        window,
+                        cx,
+                    );
                 });
             }),
         )
