@@ -523,7 +523,8 @@ The shape a change to the main pane has to fit (`session.rs`, with the
 - **Parse As draws a binary column's bytes; nothing else reads it.** A
   column the engine types as bytes (`Engine::is_binary_type`, by the column's
   type or, on MongoDB, any cell's) offers Hex, Text (UTF-8) and Base64 from
-  its header's and its cells' menus. The grid holds only the server's string,
+  its header's and its cells' menus, once one of its cells reads back as
+  bytes: the type names are matched loosely. The grid holds only the server's string,
   so each drawn cell and the row panel's field read the bytes back out of it
   (`Engine::bytes_of`, spelled per engine by `EngineSpec::binary_text`, with
   `0x…` accepted everywhere because a plugin writes bytes that way whatever
