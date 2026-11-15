@@ -4889,7 +4889,7 @@ mod tests {
             .unwrap();
         let reader = side.clone();
         let read = std::thread::spawn(move || reader.schema_graph("dbo"));
-        while side.session.try_lock().is_ok() {
+        while side.session.try_lock().is_ok() && !read.is_finished() {
             std::thread::sleep(Duration::from_millis(10));
         }
         std::thread::sleep(Duration::from_millis(500));
