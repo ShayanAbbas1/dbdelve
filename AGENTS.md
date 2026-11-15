@@ -41,9 +41,13 @@ require it, stop and raise it instead.
    whose writes must run behind their guard, and on one of an SQL engine whose
    apply is verified, which a copy in the buffer would run without; Import
    Rows shows every statement before any runs; Explain prefixes a copy, never
-   the buffer; Format Query rewrites on command only, at the token level
-   (`sqlformat`, or `mql::format` on MongoDB), never an AST round-trip, which
-   drops every comment the user wrote. Row mode is the one exception: on a
+   the buffer; transaction control (Toggle Auto-commit, Commit, Roll Back)
+   appends its `BEGIN`, `COMMIT` and `ROLLBACK` to the buffer and runs them
+   from there, which is why auto-commit is a switch over statements the user
+   can read rather than a `BEGIN` on the wire they cannot; Format Query
+   rewrites on command only, at the token level (`sqlformat`, or
+   `mql::format` on MongoDB), never an AST round-trip, which drops every
+   comment the user wrote. Row mode is the one exception: on a
    relation tab whose view the user has put in Row mode, a row's `UPDATE` is
    sent when the user leaves the row, presses Save, or takes an action that
    saves it first, with no buffer and no dialog, and nothing else sends it (a

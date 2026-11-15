@@ -36,11 +36,12 @@ use gpui_component::{
 use crate::{
     InsertForm, TabKey, Workspace,
     actions::{
-        AcceptCompletion, AddFilter, CancelQuery, CopyCell, CopySelection, CustomRowLimit,
-        ExplainQuery, FormatQuery, ImportRows, ImportRowsFromClipboard, LimitTarget, NewQuery,
-        NewRow, NextPage, PreviousPage, RemoveFilter, RunQuery, SaveQuery, SetDefaultRowLimit,
-        SetEditMode, SetFilterColumn, SetFilterOperator, SetFilterRaw, SetQueryLimit, SetRowLimit,
-        ToggleComment, ToggleFilterJoin, ToggleNextJoin, ToggleResults, ToggleRowPanel,
+        AcceptCompletion, AddFilter, CancelQuery, CommitTransaction, CopyCell, CopySelection,
+        CustomRowLimit, ExplainQuery, FormatQuery, ImportRows, ImportRowsFromClipboard,
+        LimitTarget, NewQuery, NewRow, NextPage, PreviousPage, RemoveFilter, RollbackTransaction,
+        RunQuery, SaveQuery, SetDefaultRowLimit, SetEditMode, SetFilterColumn, SetFilterOperator,
+        SetFilterRaw, SetQueryLimit, SetRowLimit, ToggleAutoCommit, ToggleComment,
+        ToggleFilterJoin, ToggleNextJoin, ToggleResults, ToggleRowPanel,
     },
     db,
     db::{Engine, ExplainMode, RoutineKind, Target},
@@ -3200,6 +3201,87 @@ pub(crate) fn apply_label(mode: Option<EditMode>) -> &'static str {
         Some(EditMode::Row) => "Save row",
         _ => "Apply edits",
     }
+}
+
+/// Transaction control: whether each statement commits on its own, and the
+/// way to end one that is open.
+///
+/// Only where the engine has a transaction for the user to drive, and only on
+/// a live connection: every control here writes a statement into the buffer
+/// and runs it, and with nothing connected there is nothing to run it on.
+pub(crate) fn render_transaction(
+    profile: &Profile,
+    cx: &mut Context<Workspace>,
+) -> Option<AnyElement> {
+    if profile.config.engine().begins_transaction().is_none() || profile.connection().is_none() {
+        return None;
+    }
+    let t = *theme(cx);
+    let (auto_commit, open) = (profile.auto_commit, profile.in_transaction);
+    let mut control = div()
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .gap(px(layout::SPACE_XS))
+        .child(
+            div()
+                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                .text_color(t.text_faint)
+                .child("Tx"),
+        )
+        .children([(true, "Auto"), (false, "Manual")].map(|(choice, label)| {
+            choice_chip(
+                ("auto-commit", choice as usize),
+                label,
+                choice == auto_commit,
+                cx,
+                move |workspace, window, cx| {
+                    // One action that flips, two chips that name a side:
+                    // clicking the one already lit would flip it away from
+                    // what it says. Read now rather than at render, since a
+                    // run since then may have changed it.
+                    let current = workspace.profile().map(|profile| profile.auto_commit);
+                    if current.is_some_and(|current| current != choice) {
+                        workspace.toggle_auto_commit(&ToggleAutoCommit, window, cx);
+                    }
+                },
+            )
+        }));
+    if open {
+        control = control
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .whitespace_nowrap()
+                    .text_color(t.text_muted)
+                    .child("open"),
+            )
+            .child(
+                button(
+                    "commit-transaction",
+                    "Commit",
+                    Tone::Quiet,
+                    Control::Compact,
+                    t,
+                )
+                .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| {
+                    workspace.commit_transaction(&CommitTransaction, window, cx);
+                })),
+            )
+            .child(
+                button(
+                    "rollback-transaction",
+                    "Roll back",
+                    Tone::Quiet,
+                    Control::Compact,
+                    t,
+                )
+                .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| {
+                    workspace.rollback_transaction(&RollbackTransaction, window, cx);
+                })),
+            );
+    }
+    Some(control.into_any_element())
 }
 
 /// The tab strip. It sits directly above the tab's surface and starts where the
