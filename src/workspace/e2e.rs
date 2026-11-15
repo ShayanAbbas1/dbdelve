@@ -261,6 +261,16 @@ fn going_to_a_column_or_a_result_brings_hidden_results_back(cx: &mut TestAppCont
         query_tab(&workspace, cx, |tab, _, _| assert!(!tab.results_hidden));
         assert!(grid_has_keyboard(&workspace, cx));
 
+        // Hidden from the grid, the keyboard goes to the editor, and the chord
+        // still has a path back to the pane.
+        cx.simulate_keystrokes("secondary-j");
+        settle(cx);
+        query_tab(&workspace, cx, |tab, _, _| assert!(tab.results_hidden));
+        assert!(editor_has_keyboard(&workspace, cx));
+        cx.simulate_keystrokes("secondary-j");
+        settle(cx);
+        query_tab(&workspace, cx, |tab, _, _| assert!(!tab.results_hidden));
+
         cx.simulate_keystrokes("secondary-j");
         cx.run_until_parked();
         // Show result, the palette's way off the Messages chip.
