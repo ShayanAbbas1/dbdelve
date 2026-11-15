@@ -2553,7 +2553,11 @@ mod tests {
         let canceller = connection.clone();
         let started = Instant::now();
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(200));
+            // Once it is out: a Cancel before then refuses it unsent instead.
+            while !matches!(*canceller.graph.lock().unwrap(), GraphRead::Sent(_)) {
+                assert!(started.elapsed() < CANCEL_DEADLINE, "never sent");
+                std::thread::sleep(Duration::from_millis(5));
+            }
             canceller.cancel(&CancelToken::default()).unwrap();
         });
         let error = connection.schema_graph("sleep").unwrap_err();
