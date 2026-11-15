@@ -148,19 +148,19 @@ source: src/sql_snapshots.rs
 
 [mysql] unicode · count all
   |SELECT COUNT(*) FROM `données`.`Ünïcødé 表`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · probe all
   |SELECT 1 FROM `données`.`Ünïcødé 表` LIMIT 1|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · count filtered
   |SELECT COUNT(*) FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s'|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · probe filtered
   |SELECT 1 FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] reserved · count all
   |SELECT COUNT(*) FROM `select`.`order`|
@@ -196,35 +196,35 @@ source: src/sql_snapshots.rs
 
 [mysql] brackets and dots · count all
   |SELECT COUNT(*) FROM `[dbo]`.`a.b`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · probe all
   |SELECT 1 FROM `[dbo]`.`a.b` LIMIT 1|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · count filtered
   |SELECT COUNT(*) FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s'|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · probe filtered
   |SELECT 1 FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · count all
   |SELECT COUNT(*) FROM `back\\slash`.`trail\\`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · probe all
   |SELECT 1 FROM `back\\slash`.`trail\\` LIMIT 1|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · count filtered
   |SELECT COUNT(*) FROM `back\\slash`.`trail\\` WHERE `Name` = 'it''s'|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · probe filtered
   |SELECT 1 FROM `back\\slash`.`trail\\` WHERE `Name` = 'it''s' LIMIT 1|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] plain · count all
   |SELECT COUNT(*) FROM `public`.`accounts`|
@@ -260,19 +260,19 @@ source: src/sql_snapshots.rs
 
 [mariadb] unicode · count all
   |SELECT COUNT(*) FROM `données`.`Ünïcødé 表`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · probe all
   |SELECT 1 FROM `données`.`Ünïcødé 表` LIMIT 1|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · count filtered
   |SELECT COUNT(*) FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s'|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · probe filtered
   |SELECT 1 FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] reserved · count all
   |SELECT COUNT(*) FROM `select`.`order`|
@@ -308,35 +308,35 @@ source: src/sql_snapshots.rs
 
 [mariadb] brackets and dots · count all
   |SELECT COUNT(*) FROM `[dbo]`.`a.b`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · probe all
   |SELECT 1 FROM `[dbo]`.`a.b` LIMIT 1|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · count filtered
   |SELECT COUNT(*) FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s'|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · probe filtered
   |SELECT 1 FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · count all
   |SELECT COUNT(*) FROM `back\\slash`.`trail\\`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · probe all
   |SELECT 1 FROM `back\\slash`.`trail\\` LIMIT 1|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · count filtered
   |SELECT COUNT(*) FROM `back\\slash`.`trail\\` WHERE `Name` = 'it''s'|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · probe filtered
   |SELECT 1 FROM `back\\slash`.`trail\\` WHERE `Name` = 'it''s' LIMIT 1|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [sqlite] plain · count all
   |SELECT COUNT(*) FROM "public"."accounts"|
@@ -820,19 +820,19 @@ source: src/sql_snapshots.rs
 
 [clickhouse] unicode · count all
   |SELECT COUNT(*) FROM `données`.`Ünïcødé 表`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · probe all
   |SELECT 1 FROM `données`.`Ünïcødé 表` LIMIT 1|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · count filtered
   |SELECT COUNT(*) FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s'|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · probe filtered
   |SELECT 1 FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] reserved · count all
   |SELECT COUNT(*) FROM `select`.`order`|
@@ -868,19 +868,19 @@ source: src/sql_snapshots.rs
 
 [clickhouse] brackets and dots · count all
   |SELECT COUNT(*) FROM `[dbo]`.`a.b`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · probe all
   |SELECT 1 FROM `[dbo]`.`a.b` LIMIT 1|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · count filtered
   |SELECT COUNT(*) FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s'|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · probe filtered
   |SELECT 1 FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · count all
   |SELECT COUNT(*) FROM `back\\\\slash`.`trail\\\\`|

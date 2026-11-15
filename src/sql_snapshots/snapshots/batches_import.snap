@@ -254,11 +254,11 @@ source: src/sql_snapshots.rs
 
 [mysql] conflict column we"ird · skip=false
   |INSERT INTO `public`.`accounts` (`we"ird`) VALUES ('v')|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mysql] conflict column we"ird · skip=true
   |INSERT INTO `public`.`accounts` (`we"ird`) VALUES ('v') ON DUPLICATE KEY UPDATE `we"ird` = `we"ird`|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mysql] conflict column back`tick · skip=false
   |INSERT INTO `public`.`accounts` (`back``tick`) VALUES ('v')|
@@ -270,43 +270,43 @@ source: src/sql_snapshots.rs
 
 [mysql] conflict column it's · skip=false
   |INSERT INTO `public`.`accounts` (`it's`) VALUES ('v')|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mysql] conflict column it's · skip=true
   |INSERT INTO `public`.`accounts` (`it's`) VALUES ('v') ON DUPLICATE KEY UPDATE `it's` = `it's`|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mysql] conflict column [x] · skip=false
   |INSERT INTO `public`.`accounts` (`[x]`) VALUES ('v')|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mysql] conflict column [x] · skip=true
   |INSERT INTO `public`.`accounts` (`[x]`) VALUES ('v') ON DUPLICATE KEY UPDATE `[x]` = `[x]`|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mysql] conflict column a.b · skip=false
   |INSERT INTO `public`.`accounts` (`a.b`) VALUES ('v')|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mysql] conflict column a.b · skip=true
   |INSERT INTO `public`.`accounts` (`a.b`) VALUES ('v') ON DUPLICATE KEY UPDATE `a.b` = `a.b`|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mysql] conflict column  · skip=false
   |INSERT INTO `public`.`accounts` (``) VALUES ('v')|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mysql] conflict column  · skip=true
   |INSERT INTO `public`.`accounts` (``) VALUES ('v') ON DUPLICATE KEY UPDATE `` = ``|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mysql] operator column · skip=false
   |INSERT INTO `public`.`accounts` (`$set`) VALUES ('v')|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mysql] operator column · skip=true
   |INSERT INTO `public`.`accounts` (`$set`) VALUES ('v') ON DUPLICATE KEY UPDATE `$set` = `$set`|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mysql] relation plain · skip=false
   |INSERT INTO `public`.`accounts` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
@@ -331,12 +331,12 @@ source: src/sql_snapshots.rs
 [mysql] relation unicode · skip=false
   |INSERT INTO `données`.`Ünïcødé 表` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
   |('-2.5', NULL, '0', '')|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mysql] relation unicode · skip=true
   |INSERT INTO `données`.`Ünïcødé 表` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
   |('-2.5', NULL, '0', '') ON DUPLICATE KEY UPDATE `id` = `id`|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mysql] relation reserved · skip=false
   |INSERT INTO `select`.`order` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
@@ -361,22 +361,22 @@ source: src/sql_snapshots.rs
 [mysql] relation brackets and dots · skip=false
   |INSERT INTO `[dbo]`.`a.b` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
   |('-2.5', NULL, '0', '')|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mysql] relation brackets and dots · skip=true
   |INSERT INTO `[dbo]`.`a.b` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
   |('-2.5', NULL, '0', '') ON DUPLICATE KEY UPDATE `id` = `id`|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mysql] relation backslash · skip=false
   |INSERT INTO `back\\slash`.`trail\\` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
   |('-2.5', NULL, '0', '')|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mysql] relation backslash · skip=true
   |INSERT INTO `back\\slash`.`trail\\` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
   |('-2.5', NULL, '0', '') ON DUPLICATE KEY UPDATE `id` = `id`|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mariadb] base · skip=false
   |INSERT INTO `public`.`accounts` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
@@ -442,11 +442,11 @@ source: src/sql_snapshots.rs
 
 [mariadb] conflict column we"ird · skip=false
   |INSERT INTO `public`.`accounts` (`we"ird`) VALUES ('v')|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mariadb] conflict column we"ird · skip=true
   |INSERT INTO `public`.`accounts` (`we"ird`) VALUES ('v') ON DUPLICATE KEY UPDATE `we"ird` = `we"ird`|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mariadb] conflict column back`tick · skip=false
   |INSERT INTO `public`.`accounts` (`back``tick`) VALUES ('v')|
@@ -458,43 +458,43 @@ source: src/sql_snapshots.rs
 
 [mariadb] conflict column it's · skip=false
   |INSERT INTO `public`.`accounts` (`it's`) VALUES ('v')|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mariadb] conflict column it's · skip=true
   |INSERT INTO `public`.`accounts` (`it's`) VALUES ('v') ON DUPLICATE KEY UPDATE `it's` = `it's`|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mariadb] conflict column [x] · skip=false
   |INSERT INTO `public`.`accounts` (`[x]`) VALUES ('v')|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mariadb] conflict column [x] · skip=true
   |INSERT INTO `public`.`accounts` (`[x]`) VALUES ('v') ON DUPLICATE KEY UPDATE `[x]` = `[x]`|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mariadb] conflict column a.b · skip=false
   |INSERT INTO `public`.`accounts` (`a.b`) VALUES ('v')|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mariadb] conflict column a.b · skip=true
   |INSERT INTO `public`.`accounts` (`a.b`) VALUES ('v') ON DUPLICATE KEY UPDATE `a.b` = `a.b`|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mariadb] conflict column  · skip=false
   |INSERT INTO `public`.`accounts` (``) VALUES ('v')|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mariadb] conflict column  · skip=true
   |INSERT INTO `public`.`accounts` (``) VALUES ('v') ON DUPLICATE KEY UPDATE `` = ``|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mariadb] operator column · skip=false
   |INSERT INTO `public`.`accounts` (`$set`) VALUES ('v')|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mariadb] operator column · skip=true
   |INSERT INTO `public`.`accounts` (`$set`) VALUES ('v') ON DUPLICATE KEY UPDATE `$set` = `$set`|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mariadb] relation plain · skip=false
   |INSERT INTO `public`.`accounts` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
@@ -519,12 +519,12 @@ source: src/sql_snapshots.rs
 [mariadb] relation unicode · skip=false
   |INSERT INTO `données`.`Ünïcødé 表` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
   |('-2.5', NULL, '0', '')|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mariadb] relation unicode · skip=true
   |INSERT INTO `données`.`Ünïcødé 表` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
   |('-2.5', NULL, '0', '') ON DUPLICATE KEY UPDATE `id` = `id`|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mariadb] relation reserved · skip=false
   |INSERT INTO `select`.`order` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
@@ -549,22 +549,22 @@ source: src/sql_snapshots.rs
 [mariadb] relation brackets and dots · skip=false
   |INSERT INTO `[dbo]`.`a.b` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
   |('-2.5', NULL, '0', '')|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mariadb] relation brackets and dots · skip=true
   |INSERT INTO `[dbo]`.`a.b` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
   |('-2.5', NULL, '0', '') ON DUPLICATE KEY UPDATE `id` = `id`|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mariadb] relation backslash · skip=false
   |INSERT INTO `back\\slash`.`trail\\` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
   |('-2.5', NULL, '0', '')|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mariadb] relation backslash · skip=true
   |INSERT INTO `back\\slash`.`trail\\` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', '1', '2024-01-02T03:04:05.123Z'),|
   |('-2.5', NULL, '0', '') ON DUPLICATE KEY UPDATE `id` = `id`|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [sqlite] base · skip=false
   |INSERT INTO "public"."accounts" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', '1', '2024-01-02T03:04:05.123Z'),|
@@ -1341,7 +1341,7 @@ source: src/sql_snapshots.rs
 
 [clickhouse] conflict column we"ird · skip=false
   |INSERT INTO `public`.`accounts` (`we"ird`) VALUES ('v')|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [clickhouse] conflict column we"ird · skip=true
   error: |This engine cannot skip rows that already exist.|
@@ -1355,35 +1355,35 @@ source: src/sql_snapshots.rs
 
 [clickhouse] conflict column it's · skip=false
   |INSERT INTO `public`.`accounts` (`it's`) VALUES ('v')|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [clickhouse] conflict column it's · skip=true
   error: |This engine cannot skip rows that already exist.|
 
 [clickhouse] conflict column [x] · skip=false
   |INSERT INTO `public`.`accounts` (`[x]`) VALUES ('v')|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [clickhouse] conflict column [x] · skip=true
   error: |This engine cannot skip rows that already exist.|
 
 [clickhouse] conflict column a.b · skip=false
   |INSERT INTO `public`.`accounts` (`a.b`) VALUES ('v')|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [clickhouse] conflict column a.b · skip=true
   error: |This engine cannot skip rows that already exist.|
 
 [clickhouse] conflict column  · skip=false
   |INSERT INTO `public`.`accounts` (``) VALUES ('v')|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [clickhouse] conflict column  · skip=true
   error: |This engine cannot skip rows that already exist.|
 
 [clickhouse] operator column · skip=false
   |INSERT INTO `public`.`accounts` (`$set`) VALUES ('v')|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [clickhouse] operator column · skip=true
   error: |This engine cannot skip rows that already exist.|
@@ -1407,7 +1407,7 @@ source: src/sql_snapshots.rs
 [clickhouse] relation unicode · skip=false
   |INSERT INTO `données`.`Ünïcødé 表` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', 'true', '2024-01-02T03:04:05.123Z'),|
   |('-2.5', NULL, 'false', '')|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [clickhouse] relation unicode · skip=true
   error: |This engine cannot skip rows that already exist.|
@@ -1431,7 +1431,7 @@ source: src/sql_snapshots.rs
 [clickhouse] relation brackets and dots · skip=false
   |INSERT INTO `[dbo]`.`a.b` (`id`, `Name`, `flag`, `at`) VALUES ('1', 'it''s \\\\ é', 'true', '2024-01-02T03:04:05.123Z'),|
   |('-2.5', NULL, 'false', '')|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [clickhouse] relation brackets and dots · skip=true
   error: |This engine cannot skip rows that already exist.|
