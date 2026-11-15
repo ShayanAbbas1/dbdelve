@@ -232,7 +232,7 @@ source: src/sql_snapshots.rs
 
 [mysql] relation unicode
   |UPDATE `données`.`Ünïcødé 表` SET `Name` = 'v' WHERE `id` = '7'|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mysql] relation reserved
   |UPDATE `select`.`order` SET `Name` = 'v' WHERE `id` = '7'|
@@ -244,11 +244,11 @@ source: src/sql_snapshots.rs
 
 [mysql] relation brackets and dots
   |UPDATE `[dbo]`.`a.b` SET `Name` = 'v' WHERE `id` = '7'|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mysql] relation backslash
   |UPDATE `back\\slash`.`trail\\` SET `Name` = 'v' WHERE `id` = '7'|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mysql] empty sets
   (none)
@@ -359,7 +359,7 @@ source: src/sql_snapshots.rs
 
 [mariadb] relation unicode
   |UPDATE `données`.`Ünïcødé 表` SET `Name` = 'v' WHERE `id` = '7'|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mariadb] relation reserved
   |UPDATE `select`.`order` SET `Name` = 'v' WHERE `id` = '7'|
@@ -371,11 +371,11 @@ source: src/sql_snapshots.rs
 
 [mariadb] relation brackets and dots
   |UPDATE `[dbo]`.`a.b` SET `Name` = 'v' WHERE `id` = '7'|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mariadb] relation backslash
   |UPDATE `back\\slash`.`trail\\` SET `Name` = 'v' WHERE `id` = '7'|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mariadb] empty sets
   (none)
@@ -994,7 +994,7 @@ source: src/sql_snapshots.rs
 
 [clickhouse] relation unicode
   |UPDATE `données`.`Ünïcødé 表` SET `Name` = 'v' WHERE `id` = '7'|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [clickhouse] relation reserved
   |UPDATE `select`.`order` SET `Name` = 'v' WHERE `id` = '7'|
@@ -1006,7 +1006,7 @@ source: src/sql_snapshots.rs
 
 [clickhouse] relation brackets and dots
   |UPDATE `[dbo]`.`a.b` SET `Name` = 'v' WHERE `id` = '7'|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [clickhouse] relation backslash
   |UPDATE `back\\\\slash`.`trail\\\\` SET `Name` = 'v' WHERE `id` = '7'|

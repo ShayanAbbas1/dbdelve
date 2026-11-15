@@ -4,7 +4,7 @@ source: src/sql_snapshots.rs
 
 [postgres] "SELECT `a` FROM t"
   |SELECT `a` FROM t|
-  = write_on=false select=true classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [postgres] "SELECT [a] FROM t"
   |SELECT [a] FROM t|
@@ -215,7 +215,7 @@ source: src/sql_snapshots.rs
 
 [postgres] "SELECT `a``b` FROM t"
   |SELECT `a``b` FROM t|
-  = write_on=false select=true classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [postgres] "SELECT 'a''b'"
   |SELECT 'a''b'|
@@ -454,7 +454,7 @@ source: src/sql_snapshots.rs
 
 [mysql] "SELECT 1 FROM t WHERE a = 'x\\'"
   |SELECT 1 FROM t WHERE a = 'x\\'|
-  = write_on=false select=true classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [mysql] "SELECT \"a\\\"b\" FROM t"
   |SELECT "a\\"b" FROM t|
@@ -462,7 +462,7 @@ source: src/sql_snapshots.rs
 
 [mysql] "SELECT `a``b` FROM t"
   |SELECT `a``b` FROM t|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [mysql] "SELECT 'a''b'"
   |SELECT 'a''b'|
@@ -701,7 +701,7 @@ source: src/sql_snapshots.rs
 
 [mariadb] "SELECT 1 FROM t WHERE a = 'x\\'"
   |SELECT 1 FROM t WHERE a = 'x\\'|
-  = write_on=false select=true classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [mariadb] "SELECT \"a\\\"b\" FROM t"
   |SELECT "a\\"b" FROM t|
@@ -709,7 +709,7 @@ source: src/sql_snapshots.rs
 
 [mariadb] "SELECT `a``b` FROM t"
   |SELECT `a``b` FROM t|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [mariadb] "SELECT 'a''b'"
   |SELECT 'a''b'|
@@ -745,7 +745,7 @@ source: src/sql_snapshots.rs
 
 [sqlite] "SELECT `a` FROM t"
   |SELECT `a` FROM t|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [sqlite] "SELECT [a] FROM t"
   |SELECT [a] FROM t|
@@ -956,7 +956,7 @@ source: src/sql_snapshots.rs
 
 [sqlite] "SELECT `a``b` FROM t"
   |SELECT `a``b` FROM t|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [sqlite] "SELECT 'a''b'"
   |SELECT 'a''b'|
@@ -992,7 +992,7 @@ source: src/sql_snapshots.rs
 
 [turso] "SELECT `a` FROM t"
   |SELECT `a` FROM t|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [turso] "SELECT [a] FROM t"
   |SELECT [a] FROM t|
@@ -1203,7 +1203,7 @@ source: src/sql_snapshots.rs
 
 [turso] "SELECT `a``b` FROM t"
   |SELECT `a``b` FROM t|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [turso] "SELECT 'a''b'"
   |SELECT 'a''b'|
@@ -1239,7 +1239,7 @@ source: src/sql_snapshots.rs
 
 [duckdb] "SELECT `a` FROM t"
   |SELECT `a` FROM t|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [duckdb] "SELECT [a] FROM t"
   |SELECT [a] FROM t|
@@ -1450,7 +1450,7 @@ source: src/sql_snapshots.rs
 
 [duckdb] "SELECT `a``b` FROM t"
   |SELECT `a``b` FROM t|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [duckdb] "SELECT 'a''b'"
   |SELECT 'a''b'|
@@ -1486,7 +1486,7 @@ source: src/sql_snapshots.rs
 
 [snowflake] "SELECT `a` FROM t"
   |SELECT `a` FROM t|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [snowflake] "SELECT [a] FROM t"
   |SELECT [a] FROM t|
@@ -1689,7 +1689,7 @@ source: src/sql_snapshots.rs
 
 [snowflake] "SELECT 1 FROM t WHERE a = 'x\\'"
   |SELECT 1 FROM t WHERE a = 'x\\'|
-  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [snowflake] "SELECT \"a\\\"b\" FROM t"
   |SELECT "a\\"b" FROM t|
@@ -1697,7 +1697,7 @@ source: src/sql_snapshots.rs
 
 [snowflake] "SELECT `a``b` FROM t"
   |SELECT `a``b` FROM t|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [snowflake] "SELECT 'a''b'"
   |SELECT 'a''b'|
@@ -1936,7 +1936,7 @@ source: src/sql_snapshots.rs
 
 [clickhouse] "SELECT 1 FROM t WHERE a = 'x\\'"
   |SELECT 1 FROM t WHERE a = 'x\\'|
-  = write_on=false select=true classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=Full [Unreadable] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [clickhouse] "SELECT \"a\\\"b\" FROM t"
   |SELECT "a\\"b" FROM t|
@@ -1944,7 +1944,7 @@ source: src/sql_snapshots.rs
 
 [clickhouse] "SELECT `a``b` FROM t"
   |SELECT `a``b` FROM t|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [clickhouse] "SELECT 'a''b'"
   |SELECT 'a''b'|
@@ -1980,7 +1980,7 @@ source: src/sql_snapshots.rs
 
 [mssql] "SELECT `a` FROM t"
   |SELECT `a` FROM t|
-  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [mssql] "SELECT [a] FROM t"
   |SELECT [a] FROM t|
@@ -2191,7 +2191,7 @@ source: src/sql_snapshots.rs
 
 [mssql] "SELECT `a``b` FROM t"
   |SELECT `a``b` FROM t|
-  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [mssql] "SELECT 'a''b'"
   |SELECT 'a''b'|
@@ -2227,7 +2227,7 @@ source: src/sql_snapshots.rs
 
 [generic] "SELECT `a` FROM t"
   |SELECT `a` FROM t|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [generic] "SELECT [a] FROM t"
   |SELECT [a] FROM t|
@@ -2438,7 +2438,7 @@ source: src/sql_snapshots.rs
 
 [generic] "SELECT `a``b` FROM t"
   |SELECT `a``b` FROM t|
-  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None confirm[none]=ro:None,rw:None,full:None confirm[drop]=ro:None,rw:None,full:None confirm[truncate]=ro:None,rw:None,full:None confirm[unfiltered]=ro:None,rw:None,full:None confirm[all3]=ro:None,rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [generic] "SELECT 'a''b'"
   |SELECT 'a''b'|

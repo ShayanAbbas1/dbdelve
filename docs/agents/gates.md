@@ -131,8 +131,13 @@ anywhere in the tree, CTEs included (`sql::forbidden`), and so is every
 `INSERT` and `UPDATE` arms). On an engine where a backslash escapes
 (`Engine::backslash_escapes`), a submission with any literal holding a quote
 after an odd run of backslashes is refused, in every arm
-(`sql::parse_write`): the grammar ends the string there and the engine
-does not.
+(`sql::parse_gated`): the grammar ends the string there and the engine
+does not. The grammar reads a backticked name on every engine, so one is
+refused where the engine does not quote with a backtick (Postgres lexes it as
+an operator character), wherever it holds a doubled backtick (the grammar
+reads `` `x``y` `` as `x` aliased `y`), and on ClickHouse whenever it holds a
+backslash, which the server reads as an escape and the grammar does not. The
+filter gate parses the same way.
 
 `sql::is_generated_select` guards the filter bar, the one place user text is
 spliced into DBDelve's statement: exactly one query, nothing destructive

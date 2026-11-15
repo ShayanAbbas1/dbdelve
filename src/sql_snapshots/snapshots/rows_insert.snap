@@ -216,7 +216,7 @@ source: src/sql_snapshots.rs
 
 [mysql] relation unicode
   |INSERT INTO `données`.`Ünïcødé 表` (`Name`) VALUES ('v')|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mysql] relation reserved
   |INSERT INTO `select`.`order` (`Name`) VALUES ('v')|
@@ -228,11 +228,11 @@ source: src/sql_snapshots.rs
 
 [mysql] relation brackets and dots
   |INSERT INTO `[dbo]`.`a.b` (`Name`) VALUES ('v')|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mysql] relation backslash
   |INSERT INTO `back\\slash`.`trail\\` (`Name`) VALUES ('v')|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mariadb] four columns
   |INSERT INTO `public`.`accounts` (`id`, `Name`, `flag`, `created`) VALUES ('42', 'it''s', 'true', '2024-01-02 03:04:05.123')|
@@ -332,7 +332,7 @@ source: src/sql_snapshots.rs
 
 [mariadb] relation unicode
   |INSERT INTO `données`.`Ünïcødé 表` (`Name`) VALUES ('v')|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mariadb] relation reserved
   |INSERT INTO `select`.`order` (`Name`) VALUES ('v')|
@@ -344,11 +344,11 @@ source: src/sql_snapshots.rs
 
 [mariadb] relation brackets and dots
   |INSERT INTO `[dbo]`.`a.b` (`Name`) VALUES ('v')|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [mariadb] relation backslash
   |INSERT INTO `back\\slash`.`trail\\` (`Name`) VALUES ('v')|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [sqlite] four columns
   |INSERT INTO "public"."accounts" ("id", "Name", "flag", "created") VALUES ('42', 'it''s', 'true', '2024-01-02 03:04:05.123')|
@@ -912,7 +912,7 @@ source: src/sql_snapshots.rs
 
 [clickhouse] relation unicode
   |INSERT INTO `données`.`Ünïcødé 表` (`Name`) VALUES ('v')|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [clickhouse] relation reserved
   |INSERT INTO `select`.`order` (`Name`) VALUES ('v')|
@@ -924,7 +924,7 @@ source: src/sql_snapshots.rs
 
 [clickhouse] relation brackets and dots
   |INSERT INTO `[dbo]`.`a.b` (`Name`) VALUES ('v')|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [clickhouse] relation backslash
   |INSERT INTO `back\\\\slash`.`trail\\\\` (`Name`) VALUES ('v')|

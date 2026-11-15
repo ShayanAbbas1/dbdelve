@@ -36,8 +36,8 @@ use tree_sitter::{Node, Parser, Tree};
 
 use crate::db::{
     BinaryLiteral, ColumnDefinition, Engine, EngineSpec, ExplainMode, ExplainPrefix, FormatDialect,
-    Paging, Params, ParserDialect, SkipDuplicates, SqlSpec, StatementSplit, Syntax, TypedExplain,
-    UnreadableFloor, UpdateSpelling,
+    IdentifierQuote, Paging, Params, ParserDialect, SkipDuplicates, SqlSpec, StatementSplit,
+    Syntax, TypedExplain, UnreadableFloor, UpdateSpelling,
 };
 use crate::import_rows::Value;
 use crate::result_grid::{NewValue, PendingRow};
@@ -269,6 +269,10 @@ pub fn order_by(engine: Engine, statement: &str) -> Option<Vec<SortKey>> {
     let Some(clause) = child_of_kind(&anchor, "order_by") else {
         return Some(Vec::new());
     };
+    // `ORDER BY ALL` sorts by columns it does not name, so no key can say which.
+    if child_of_kind(&clause, "keyword_all").is_some() {
+        return None;
+    }
 
     let mut cursor = clause.walk();
     let keys = clause
@@ -811,10 +815,12 @@ pub fn is_generated_write(sql: &str) -> bool {
 }
 
 /// The SQL every test-only gate entry reads with: literals as a
-/// backslash-escaping engine reads them, and nothing an engine's spec adds.
+/// backslash-escaping engine reads them, backticked names as an engine quoting
+/// with them does, and nothing an engine's spec adds.
 #[cfg(test)]
 const STRICTEST: SqlSpec = SqlSpec {
     backslash_escapes: true,
+    identifier_quote: IdentifierQuote::Backtick,
     ..SqlSpec::ANSI
 };
 
@@ -828,7 +834,7 @@ pub(crate) fn generated_write(spec: &SqlSpec, sql: &str) -> bool {
         return false;
     };
     let sql = sql.as_ref();
-    let Some(tree) = parse_write(sql, spec.backslash_escapes) else {
+    let Some(tree) = parse_gated(sql, spec) else {
         return false;
     };
     let root = tree.root_node();
@@ -1120,7 +1126,7 @@ pub(crate) fn generated_writes(engine: Engine, sql: &str) -> Option<Vec<String>>
     if !generated_write(spec, text) {
         return None;
     }
-    let tree = parse_write(text, spec.backslash_escapes)?;
+    let tree = parse_gated(text, spec)?;
     let statements: Vec<String> = generated_statements(&tree.root_node())?
         .iter()
         .map(|statement| {
@@ -1162,7 +1168,7 @@ pub fn row_guard(engine: Engine, statement: &str) -> Option<String> {
         return None;
     }
     let text = as_written(spec, statement)?;
-    let tree = parse_write(&text, spec.backslash_escapes)?;
+    let tree = parse_gated(&text, spec)?;
     let [one] = only_statement(&tree.root_node())?;
     let (table, predicate) = one_row_delete(one)
         .filter(|(_, predicate)| row_columns(spec, *predicate, &text).is_some())
@@ -1200,7 +1206,7 @@ pub fn is_generated_select(engine: Engine, sql: &str) -> bool {
         Syntax::Redis => return crate::redis_cmd::browse::is_generated_read(sql),
         Syntax::Sql => {}
     }
-    let Some(tree) = parse(sql) else {
+    let Some(tree) = parse_gated(sql, &engine.spec().sql) else {
         return false;
     };
     let root = tree.root_node();
@@ -1369,7 +1375,7 @@ fn deletes_anything(node: tree_sitter::Node) -> bool {
 ///
 /// `sql` is as [`as_written`] gives it.
 fn delete_key_columns(spec: &SqlSpec, sql: &str) -> Option<Vec<String>> {
-    let tree = parse_write(sql, spec.backslash_escapes)?;
+    let tree = parse_gated(sql, spec)?;
     let root = tree.root_node();
     if forbidden(root) {
         return None;
@@ -1675,30 +1681,48 @@ fn commented(node: Node, sql: &str) -> bool {
             .any(|child| commented(child, sql))
 }
 
-/// [`parse`] for the write gate, refusing on an engine where a backslash
-/// escapes any literal holding a quote after an odd run of backslashes.
+/// [`parse`] for a gate, refusing a statement holding a string or a quoted
+/// name the grammar ends somewhere `spec`'s server does not.
 ///
-/// The grammar ends a string at the first lone quote whatever precedes it; the
-/// engine reads `\'` as part of the string. Everything between would be string
-/// to the gate and SQL to the engine, in any arm, so the check is on every
-/// literal in the tree rather than on the values one arm reads. Either quote
-/// character, because MySQL reads `"…"` as a string with the same escapes, and
-/// `quote_literal` doubles every backslash on these engines, so nothing it
-/// writes has an odd run.
-fn parse_write(sql: &str, backslash_escapes: bool) -> Option<Tree> {
+/// The grammar ends a string at the first lone quote whatever precedes it; an
+/// engine where a backslash escapes reads `\'` as part of the string.
+/// Everything between would be string to the gate and SQL to the engine, in
+/// any arm, so the check is on every literal in the tree rather than on the
+/// values one arm reads. Either quote character, because MySQL reads `"…"` as
+/// a string with the same escapes, and `quote_literal` doubles every backslash
+/// on these engines, so nothing it writes has an odd run.
+///
+/// The grammar reads a backticked name on every engine, up to the next
+/// backtick, and only MySQL, MariaDB and ClickHouse quote with one: Postgres
+/// lexes a backtick as an operator character, so `` `x; DELETE FROM t; --` ``
+/// is one name to the gate and a second statement to the server. Where it is
+/// the quote, a doubled one is an escaped one, which the grammar reads as one
+/// name ending and the next beginning: `` `x``y` `` reads as table `x` aliased
+/// `y`, and `x` is the table a row guard cut from that tree would count.
+/// ClickHouse escapes with a backslash inside one, which the grammar reads raw,
+/// so a backslash there is refused as well: whether or not it ends the name
+/// early, the gate would read a name other than the one the server matches.
+fn parse_gated(sql: &str, spec: &SqlSpec) -> Option<Tree> {
     let tree = parse(sql)?;
-    (!(backslash_escapes && misread_literal(tree.root_node(), sql))).then_some(tree)
+    (!misread_node(spec, tree.root_node(), sql)).then_some(tree)
 }
 
-fn misread_literal(node: Node, sql: &str) -> bool {
+fn misread_node(spec: &SqlSpec, node: Node, sql: &str) -> bool {
+    let text = sql.get(node.byte_range()).unwrap_or_default();
+    let misread = match node.kind() {
+        "literal" => spec.backslash_escapes && escaped_quote(text, b"'\""),
+        "identifier" if text.starts_with('`') => {
+            spec.identifier_quote != IdentifierQuote::Backtick
+                || sql[node.end_byte()..].starts_with('`')
+                || (spec.identifier_backslash_escapes && text.contains('\\'))
+        }
+        _ => false,
+    };
     let mut cursor = node.walk();
-    (node.kind() == "literal"
-        && sql
-            .get(node.byte_range())
-            .is_some_and(|text| escaped_quote(text, b"'\"")))
+    misread
         || node
             .children(&mut cursor)
-            .any(|child| misread_literal(child, sql))
+            .any(|child| misread_node(spec, child, sql))
 }
 
 /// Whether `text` holds one of `quotes` after an odd run of backslashes.
@@ -6711,7 +6735,6 @@ mod tests {
             r#"SELECT * FROM "public"."accounts" LIMIT 1000"#,
             r#"SELECT * FROM "public"."accounts" WHERE "state" = 'ok' LIMIT 1000"#,
             r#"SELECT * FROM "public"."accounts" WHERE "state" = 'ok' ORDER BY "id" ASC LIMIT 100 OFFSET 200"#,
-            "SELECT * FROM `dbdelve_dev`.`accounts` WHERE `state` = 'ok' LIMIT 100",
             r#"WITH x AS (SELECT 1 AS a) SELECT * FROM x LIMIT 10"#,
         ] {
             assert!(
@@ -6719,6 +6742,8 @@ mod tests {
                 "{sql} was refused"
             );
         }
+        let sql = "SELECT * FROM `dbdelve_dev`.`accounts` WHERE `state` = 'ok' LIMIT 100";
+        assert!(is_generated_select(Engine::MySql, sql), "{sql} was refused");
     }
 
     #[test]
@@ -6736,6 +6761,30 @@ mod tests {
                 "{sql} passed the gate"
             );
         }
+    }
+
+    #[test]
+    fn the_gates_refuse_a_backticked_name_the_server_ends_elsewhere() {
+        // One name to the grammar; to Postgres a backtick is an operator
+        // character, and what follows the `;` a second statement.
+        let smuggled = r#"SELECT * FROM "t" WHERE `x; DELETE FROM t; --` LIMIT 10"#;
+        assert!(!is_generated_select(Engine::Postgres, smuggled));
+        assert!(!is_generated_select(Engine::Sqlite, smuggled));
+        // One name to MySQL, `x` aliased `y` to the grammar.
+        assert!(!is_generated_select(
+            Engine::MySql,
+            "SELECT * FROM `x``y` LIMIT 10"
+        ));
+        assert!(!is_generated_write_on(
+            Engine::MySql,
+            "UPDATE `a`.`x``y` SET `c` = '1' WHERE `id` = '2'"
+        ));
+        // ClickHouse escapes the second backtick, so its name ends at the
+        // third and the `BACKUP` runs.
+        assert!(!is_generated_select(
+            Engine::ClickHouse,
+            r"SELECT `a\`` PARALLEL WITH BACKUP TABLE t TO Disk('b', 'x') -- `"
+        ));
     }
 
     #[test]

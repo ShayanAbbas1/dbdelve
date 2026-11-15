@@ -65,11 +65,11 @@ pub use mongo::MongoConfig;
 pub use postgres::PostgresConfig;
 pub use snowflake::{SnowflakeConfig, account_identifier, normalize_host};
 #[cfg(test)]
-pub use spec::{Abilities, Hints, Hooks, IdentifierQuote};
+pub use spec::{Abilities, Hints, Hooks};
 pub use spec::{
-    BinaryLiteral, EngineSpec, ExplainPrefix, ForeignTable, FormatDialect, MaterializedViewDrop,
-    Paging, Params, ParserDialect, RegexMatch, SelectTop, SkipDuplicates, SqlSpec, StatementSplit,
-    SubstringMatch, Truncate, TypedExplain,
+    BinaryLiteral, EngineSpec, ExplainPrefix, ForeignTable, FormatDialect, IdentifierQuote,
+    MaterializedViewDrop, Paging, Params, ParserDialect, RegexMatch, SelectTop, SkipDuplicates,
+    SqlSpec, StatementSplit, SubstringMatch, Truncate, TypedExplain,
 };
 pub use spec::{IdentityInsert, ReadOnlySession, UnreadableFloor};
 pub use target::{Driver, Target, cancel_cost, is_cancel};

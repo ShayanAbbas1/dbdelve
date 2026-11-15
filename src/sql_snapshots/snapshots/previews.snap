@@ -1620,179 +1620,179 @@ source: src/sql_snapshots.rs
 
 [mysql] unicode · all
   |SELECT * FROM `données`.`Ünïcødé 表`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · all · no key · paged
   |SELECT * FROM `données`.`Ünïcødé 表`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · all · no key · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · all · one key · paged
   |SELECT * FROM `données`.`Ünïcødé 表`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · all · one key · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · all · composite key · paged
   |SELECT * FROM `données`.`Ünïcødé 表`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · all · composite key · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · all · awkward keys · paged
   |SELECT * FROM `données`.`Ünïcødé 表`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · all · awkward keys · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · all · empty name · paged
   |SELECT * FROM `données`.`Ünïcødé 表`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · all · empty name · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · page
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · page · no key · paged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · page · no key · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · page · one key · paged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · page · one key · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · page · composite key · paged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · page · composite key · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · page · awkward keys · paged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · page · awkward keys · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · page · empty name · paged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · page · empty name · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · page 3
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · page 3 · no key · paged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · page 3 · no key · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · page 3 · one key · paged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · page 3 · one key · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · page 3 · composite key · paged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · page 3 · composite key · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · page 3 · awkward keys · paged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · page 3 · awkward keys · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · page 3 · empty name · paged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · page 3 · empty name · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · filtered
   |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · filtered · no key · paged
   |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · filtered · no key · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · filtered · one key · paged
   |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · filtered · one key · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · filtered · composite key · paged
   |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · filtered · composite key · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · filtered · awkward keys · paged
   |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · filtered · awkward keys · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · filtered · empty name · paged
   |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · filtered · empty name · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] reserved · all
   |SELECT * FROM `select`.`order`|
@@ -2148,355 +2148,355 @@ source: src/sql_snapshots.rs
 
 [mysql] brackets and dots · all
   |SELECT * FROM `[dbo]`.`a.b`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · all · no key · paged
   |SELECT * FROM `[dbo]`.`a.b`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · all · no key · unpaged
   |SELECT * FROM `[dbo]`.`a.b`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · all · one key · paged
   |SELECT * FROM `[dbo]`.`a.b`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · all · one key · unpaged
   |SELECT * FROM `[dbo]`.`a.b`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · all · composite key · paged
   |SELECT * FROM `[dbo]`.`a.b`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · all · composite key · unpaged
   |SELECT * FROM `[dbo]`.`a.b`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · all · awkward keys · paged
   |SELECT * FROM `[dbo]`.`a.b`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · all · awkward keys · unpaged
   |SELECT * FROM `[dbo]`.`a.b`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · all · empty name · paged
   |SELECT * FROM `[dbo]`.`a.b`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · all · empty name · unpaged
   |SELECT * FROM `[dbo]`.`a.b`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · page
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · page · no key · paged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · page · no key · unpaged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · page · one key · paged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · page · one key · unpaged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · page · composite key · paged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · page · composite key · unpaged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · page · awkward keys · paged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · page · awkward keys · unpaged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · page · empty name · paged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · page · empty name · unpaged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · page 3
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · page 3 · no key · paged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · page 3 · no key · unpaged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · page 3 · one key · paged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · page 3 · one key · unpaged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · page 3 · composite key · paged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · page 3 · composite key · unpaged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · page 3 · awkward keys · paged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · page 3 · awkward keys · unpaged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · page 3 · empty name · paged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · page 3 · empty name · unpaged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · filtered
   |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · filtered · no key · paged
   |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · filtered · no key · unpaged
   |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · filtered · one key · paged
   |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · filtered · one key · unpaged
   |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · filtered · composite key · paged
   |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · filtered · composite key · unpaged
   |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · filtered · awkward keys · paged
   |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · filtered · awkward keys · unpaged
   |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · filtered · empty name · paged
   |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · filtered · empty name · unpaged
   |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · all
   |SELECT * FROM `back\\slash`.`trail\\`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · all · no key · paged
   |SELECT * FROM `back\\slash`.`trail\\`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · all · no key · unpaged
   |SELECT * FROM `back\\slash`.`trail\\`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · all · one key · paged
   |SELECT * FROM `back\\slash`.`trail\\`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · all · one key · unpaged
   |SELECT * FROM `back\\slash`.`trail\\`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · all · composite key · paged
   |SELECT * FROM `back\\slash`.`trail\\`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · all · composite key · unpaged
   |SELECT * FROM `back\\slash`.`trail\\`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · all · awkward keys · paged
   |SELECT * FROM `back\\slash`.`trail\\`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · all · awkward keys · unpaged
   |SELECT * FROM `back\\slash`.`trail\\`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · all · empty name · paged
   |SELECT * FROM `back\\slash`.`trail\\`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · all · empty name · unpaged
   |SELECT * FROM `back\\slash`.`trail\\`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · page
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · page · no key · paged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · page · no key · unpaged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · page · one key · paged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · page · one key · unpaged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · page · composite key · paged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · page · composite key · unpaged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · page · awkward keys · paged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · page · awkward keys · unpaged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · page · empty name · paged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · page · empty name · unpaged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · page 3
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · page 3 · no key · paged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · page 3 · no key · unpaged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · page 3 · one key · paged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · page 3 · one key · unpaged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · page 3 · composite key · paged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · page 3 · composite key · unpaged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · page 3 · awkward keys · paged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · page 3 · awkward keys · unpaged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · page 3 · empty name · paged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · page 3 · empty name · unpaged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · filtered
   |SELECT * FROM `back\\slash`.`trail\\` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · filtered · no key · paged
   |SELECT * FROM `back\\slash`.`trail\\` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · filtered · no key · unpaged
   |SELECT * FROM `back\\slash`.`trail\\` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · filtered · one key · paged
   |SELECT * FROM `back\\slash`.`trail\\` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · filtered · one key · unpaged
   |SELECT * FROM `back\\slash`.`trail\\` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · filtered · composite key · paged
   |SELECT * FROM `back\\slash`.`trail\\` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · filtered · composite key · unpaged
   |SELECT * FROM `back\\slash`.`trail\\` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · filtered · awkward keys · paged
   |SELECT * FROM `back\\slash`.`trail\\` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · filtered · awkward keys · unpaged
   |SELECT * FROM `back\\slash`.`trail\\` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · filtered · empty name · paged
   |SELECT * FROM `back\\slash`.`trail\\` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · filtered · empty name · unpaged
   |SELECT * FROM `back\\slash`.`trail\\` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] no limit · paged
   |SELECT * FROM `public`.`accounts`|
@@ -2884,179 +2884,179 @@ source: src/sql_snapshots.rs
 
 [mariadb] unicode · all
   |SELECT * FROM `données`.`Ünïcødé 表`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · all · no key · paged
   |SELECT * FROM `données`.`Ünïcødé 表`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · all · no key · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · all · one key · paged
   |SELECT * FROM `données`.`Ünïcødé 表`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · all · one key · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · all · composite key · paged
   |SELECT * FROM `données`.`Ünïcødé 表`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · all · composite key · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · all · awkward keys · paged
   |SELECT * FROM `données`.`Ünïcødé 表`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · all · awkward keys · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · all · empty name · paged
   |SELECT * FROM `données`.`Ünïcødé 表`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · all · empty name · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · page
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · page · no key · paged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · page · no key · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · page · one key · paged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · page · one key · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · page · composite key · paged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · page · composite key · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · page · awkward keys · paged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · page · awkward keys · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · page · empty name · paged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · page · empty name · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · page 3
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · page 3 · no key · paged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · page 3 · no key · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · page 3 · one key · paged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · page 3 · one key · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · page 3 · composite key · paged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · page 3 · composite key · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · page 3 · awkward keys · paged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · page 3 · awkward keys · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · page 3 · empty name · paged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · page 3 · empty name · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · filtered
   |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · filtered · no key · paged
   |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · filtered · no key · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · filtered · one key · paged
   |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · filtered · one key · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · filtered · composite key · paged
   |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · filtered · composite key · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · filtered · awkward keys · paged
   |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · filtered · awkward keys · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · filtered · empty name · paged
   |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · filtered · empty name · unpaged
   |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] reserved · all
   |SELECT * FROM `select`.`order`|
@@ -3412,355 +3412,355 @@ source: src/sql_snapshots.rs
 
 [mariadb] brackets and dots · all
   |SELECT * FROM `[dbo]`.`a.b`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · all · no key · paged
   |SELECT * FROM `[dbo]`.`a.b`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · all · no key · unpaged
   |SELECT * FROM `[dbo]`.`a.b`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · all · one key · paged
   |SELECT * FROM `[dbo]`.`a.b`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · all · one key · unpaged
   |SELECT * FROM `[dbo]`.`a.b`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · all · composite key · paged
   |SELECT * FROM `[dbo]`.`a.b`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · all · composite key · unpaged
   |SELECT * FROM `[dbo]`.`a.b`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · all · awkward keys · paged
   |SELECT * FROM `[dbo]`.`a.b`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · all · awkward keys · unpaged
   |SELECT * FROM `[dbo]`.`a.b`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · all · empty name · paged
   |SELECT * FROM `[dbo]`.`a.b`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · all · empty name · unpaged
   |SELECT * FROM `[dbo]`.`a.b`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · page
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · page · no key · paged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · page · no key · unpaged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · page · one key · paged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · page · one key · unpaged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · page · composite key · paged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · page · composite key · unpaged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · page · awkward keys · paged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · page · awkward keys · unpaged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · page · empty name · paged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · page · empty name · unpaged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · page 3
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · page 3 · no key · paged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · page 3 · no key · unpaged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · page 3 · one key · paged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · page 3 · one key · unpaged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · page 3 · composite key · paged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · page 3 · composite key · unpaged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · page 3 · awkward keys · paged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · page 3 · awkward keys · unpaged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · page 3 · empty name · paged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · page 3 · empty name · unpaged
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · filtered
   |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · filtered · no key · paged
   |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · filtered · no key · unpaged
   |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · filtered · one key · paged
   |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · filtered · one key · unpaged
   |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · filtered · composite key · paged
   |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · filtered · composite key · unpaged
   |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · filtered · awkward keys · paged
   |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · filtered · awkward keys · unpaged
   |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · filtered · empty name · paged
   |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · filtered · empty name · unpaged
   |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · all
   |SELECT * FROM `back\\slash`.`trail\\`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · all · no key · paged
   |SELECT * FROM `back\\slash`.`trail\\`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · all · no key · unpaged
   |SELECT * FROM `back\\slash`.`trail\\`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · all · one key · paged
   |SELECT * FROM `back\\slash`.`trail\\`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · all · one key · unpaged
   |SELECT * FROM `back\\slash`.`trail\\`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · all · composite key · paged
   |SELECT * FROM `back\\slash`.`trail\\`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · all · composite key · unpaged
   |SELECT * FROM `back\\slash`.`trail\\`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · all · awkward keys · paged
   |SELECT * FROM `back\\slash`.`trail\\`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · all · awkward keys · unpaged
   |SELECT * FROM `back\\slash`.`trail\\`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · all · empty name · paged
   |SELECT * FROM `back\\slash`.`trail\\`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · all · empty name · unpaged
   |SELECT * FROM `back\\slash`.`trail\\`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · page
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · page · no key · paged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · page · no key · unpaged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · page · one key · paged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · page · one key · unpaged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · page · composite key · paged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · page · composite key · unpaged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · page · awkward keys · paged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · page · awkward keys · unpaged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · page · empty name · paged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · page · empty name · unpaged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · page 3
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · page 3 · no key · paged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · page 3 · no key · unpaged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · page 3 · one key · paged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · page 3 · one key · unpaged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · page 3 · composite key · paged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · page 3 · composite key · unpaged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · page 3 · awkward keys · paged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · page 3 · awkward keys · unpaged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · page 3 · empty name · paged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · page 3 · empty name · unpaged
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · filtered
   |SELECT * FROM `back\\slash`.`trail\\` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · filtered · no key · paged
   |SELECT * FROM `back\\slash`.`trail\\` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · filtered · no key · unpaged
   |SELECT * FROM `back\\slash`.`trail\\` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · filtered · one key · paged
   |SELECT * FROM `back\\slash`.`trail\\` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · filtered · one key · unpaged
   |SELECT * FROM `back\\slash`.`trail\\` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · filtered · composite key · paged
   |SELECT * FROM `back\\slash`.`trail\\` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · filtered · composite key · unpaged
   |SELECT * FROM `back\\slash`.`trail\\` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · filtered · awkward keys · paged
   |SELECT * FROM `back\\slash`.`trail\\` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · filtered · awkward keys · unpaged
   |SELECT * FROM `back\\slash`.`trail\\` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · filtered · empty name · paged
   |SELECT * FROM `back\\slash`.`trail\\` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · filtered · empty name · unpaged
   |SELECT * FROM `back\\slash`.`trail\\` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] no limit · paged
   |SELECT * FROM `public`.`accounts`|
@@ -8932,11 +8932,11 @@ source: src/sql_snapshots.rs
 
 [clickhouse] plain · page · empty name · paged
   |SELECT * FROM `public`.`accounts` ORDER BY `` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] plain · page · empty name · unpaged
   |SELECT * FROM `public`.`accounts` ORDER BY `` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] plain · page 3
   |SELECT * FROM `public`.`accounts` LIMIT 100 OFFSET 200|
@@ -8976,11 +8976,11 @@ source: src/sql_snapshots.rs
 
 [clickhouse] plain · page 3 · empty name · paged
   |SELECT * FROM `public`.`accounts` ORDER BY `` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] plain · page 3 · empty name · unpaged
   |SELECT * FROM `public`.`accounts` ORDER BY `` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] plain · filtered
   |SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' LIMIT 1000|
@@ -9020,11 +9020,11 @@ source: src/sql_snapshots.rs
 
 [clickhouse] plain · filtered · empty name · paged
   |SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' ORDER BY `` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] plain · filtered · empty name · unpaged
   |SELECT * FROM `public`.`accounts` WHERE `Name` = 'it''s' ORDER BY `` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] quotes · all
   |SELECT * FROM `my "odd" schema`.`it's ``tick`` "dq"`|
@@ -9164,139 +9164,179 @@ source: src/sql_snapshots.rs
 
 [clickhouse] unicode · all
   |SELECT * FROM `données`.`Ünïcødé 表`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · all · no key · paged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表`|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · all · no key · unpaged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表`|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · all · one key · paged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表`|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · all · one key · unpaged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表`|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · all · composite key · paged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表`|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · all · composite key · unpaged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表`|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · all · awkward keys · paged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表`|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · all · awkward keys · unpaged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表`|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · all · empty name · paged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表`|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · all · empty name · unpaged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表`|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · page
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · page · no key · paged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · page · no key · unpaged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · page · one key · paged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表` ORDER BY `id` LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · page · one key · unpaged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表` ORDER BY `id` LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · page · composite key · paged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表` ORDER BY `id`, `Region` LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · page · composite key · unpaged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表` ORDER BY `id`, `Region` LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · page · awkward keys · paged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表` ORDER BY `we"ird`, `it's`, `back``tick`, `ümlaut`, `[x]`, `a.b` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · page · awkward keys · unpaged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表` ORDER BY `we"ird`, `it's`, `back``tick`, `ümlaut`, `[x]`, `a.b` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · page · empty name · paged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表` ORDER BY `` LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · page · empty name · unpaged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表` ORDER BY `` LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · page 3
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · page 3 · no key · paged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · page 3 · no key · unpaged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · page 3 · one key · paged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表` ORDER BY `id` LIMIT 100 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · page 3 · one key · unpaged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表` ORDER BY `id` LIMIT 100 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · page 3 · composite key · paged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表` ORDER BY `id`, `Region` LIMIT 100 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · page 3 · composite key · unpaged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表` ORDER BY `id`, `Region` LIMIT 100 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · page 3 · awkward keys · paged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表` ORDER BY `we"ird`, `it's`, `back``tick`, `ümlaut`, `[x]`, `a.b` LIMIT 100 OFFSET 200|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · page 3 · awkward keys · unpaged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表` ORDER BY `we"ird`, `it's`, `back``tick`, `ümlaut`, `[x]`, `a.b` LIMIT 100 OFFSET 200|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · page 3 · empty name · paged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表` ORDER BY `` LIMIT 100 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · page 3 · empty name · unpaged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表` ORDER BY `` LIMIT 100 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · filtered
   |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · filtered · no key · paged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · filtered · no key · unpaged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · filtered · one key · paged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' ORDER BY `id` LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · filtered · one key · unpaged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' ORDER BY `id` LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · filtered · composite key · paged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' ORDER BY `id`, `Region` LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · filtered · composite key · unpaged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' ORDER BY `id`, `Region` LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · filtered · awkward keys · paged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' ORDER BY `we"ird`, `it's`, `back``tick`, `ümlaut`, `[x]`, `a.b` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · filtered · awkward keys · unpaged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' ORDER BY `we"ird`, `it's`, `back``tick`, `ümlaut`, `[x]`, `a.b` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · filtered · empty name · paged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' ORDER BY `` LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · filtered · empty name · unpaged
-  (none)
+  |SELECT * FROM `données`.`Ünïcødé 表` WHERE `Name` = 'it''s' ORDER BY `` LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] reserved · all
   |SELECT * FROM `select`.`order`|
@@ -9380,11 +9420,11 @@ source: src/sql_snapshots.rs
 
 [clickhouse] reserved · page · empty name · paged
   |SELECT * FROM `select`.`order` ORDER BY `` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] reserved · page · empty name · unpaged
   |SELECT * FROM `select`.`order` ORDER BY `` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] reserved · page 3
   |SELECT * FROM `select`.`order` LIMIT 100 OFFSET 200|
@@ -9424,11 +9464,11 @@ source: src/sql_snapshots.rs
 
 [clickhouse] reserved · page 3 · empty name · paged
   |SELECT * FROM `select`.`order` ORDER BY `` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] reserved · page 3 · empty name · unpaged
   |SELECT * FROM `select`.`order` ORDER BY `` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] reserved · filtered
   |SELECT * FROM `select`.`order` WHERE `Name` = 'it''s' LIMIT 1000|
@@ -9468,11 +9508,11 @@ source: src/sql_snapshots.rs
 
 [clickhouse] reserved · filtered · empty name · paged
   |SELECT * FROM `select`.`order` WHERE `Name` = 'it''s' ORDER BY `` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] reserved · filtered · empty name · unpaged
   |SELECT * FROM `select`.`order` WHERE `Name` = 'it''s' ORDER BY `` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] mixed case · all
   |SELECT * FROM `Sales`.`OrderLines`|
@@ -9556,11 +9596,11 @@ source: src/sql_snapshots.rs
 
 [clickhouse] mixed case · page · empty name · paged
   |SELECT * FROM `Sales`.`OrderLines` ORDER BY `` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] mixed case · page · empty name · unpaged
   |SELECT * FROM `Sales`.`OrderLines` ORDER BY `` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] mixed case · page 3
   |SELECT * FROM `Sales`.`OrderLines` LIMIT 100 OFFSET 200|
@@ -9600,11 +9640,11 @@ source: src/sql_snapshots.rs
 
 [clickhouse] mixed case · page 3 · empty name · paged
   |SELECT * FROM `Sales`.`OrderLines` ORDER BY `` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] mixed case · page 3 · empty name · unpaged
   |SELECT * FROM `Sales`.`OrderLines` ORDER BY `` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] mixed case · filtered
   |SELECT * FROM `Sales`.`OrderLines` WHERE `Name` = 'it''s' LIMIT 1000|
@@ -9644,283 +9684,363 @@ source: src/sql_snapshots.rs
 
 [clickhouse] mixed case · filtered · empty name · paged
   |SELECT * FROM `Sales`.`OrderLines` WHERE `Name` = 'it''s' ORDER BY `` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] mixed case · filtered · empty name · unpaged
   |SELECT * FROM `Sales`.`OrderLines` WHERE `Name` = 'it''s' ORDER BY `` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · all
   |SELECT * FROM `[dbo]`.`a.b`|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · all · no key · paged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b`|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · all · no key · unpaged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b`|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · all · one key · paged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b`|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · all · one key · unpaged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b`|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · all · composite key · paged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b`|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · all · composite key · unpaged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b`|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · all · awkward keys · paged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b`|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · all · awkward keys · unpaged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b`|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · all · empty name · paged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b`|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · all · empty name · unpaged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b`|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · page
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · page · no key · paged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b` LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · page · no key · unpaged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b` LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · page · one key · paged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b` ORDER BY `id` LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · page · one key · unpaged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b` ORDER BY `id` LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · page · composite key · paged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b` ORDER BY `id`, `Region` LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · page · composite key · unpaged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b` ORDER BY `id`, `Region` LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · page · awkward keys · paged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b` ORDER BY `we"ird`, `it's`, `back``tick`, `ümlaut`, `[x]`, `a.b` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · page · awkward keys · unpaged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b` ORDER BY `we"ird`, `it's`, `back``tick`, `ümlaut`, `[x]`, `a.b` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · page · empty name · paged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b` ORDER BY `` LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · page · empty name · unpaged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b` ORDER BY `` LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · page 3
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 100 OFFSET 200|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · page 3 · no key · paged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b` LIMIT 100 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · page 3 · no key · unpaged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b` LIMIT 100 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · page 3 · one key · paged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b` ORDER BY `id` LIMIT 100 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · page 3 · one key · unpaged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b` ORDER BY `id` LIMIT 100 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · page 3 · composite key · paged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b` ORDER BY `id`, `Region` LIMIT 100 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · page 3 · composite key · unpaged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b` ORDER BY `id`, `Region` LIMIT 100 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · page 3 · awkward keys · paged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b` ORDER BY `we"ird`, `it's`, `back``tick`, `ümlaut`, `[x]`, `a.b` LIMIT 100 OFFSET 200|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · page 3 · awkward keys · unpaged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b` ORDER BY `we"ird`, `it's`, `back``tick`, `ümlaut`, `[x]`, `a.b` LIMIT 100 OFFSET 200|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · page 3 · empty name · paged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b` ORDER BY `` LIMIT 100 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · page 3 · empty name · unpaged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b` ORDER BY `` LIMIT 100 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · filtered
   |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · filtered · no key · paged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · filtered · no key · unpaged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · filtered · one key · paged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' ORDER BY `id` LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · filtered · one key · unpaged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' ORDER BY `id` LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · filtered · composite key · paged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' ORDER BY `id`, `Region` LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · filtered · composite key · unpaged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' ORDER BY `id`, `Region` LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · filtered · awkward keys · paged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' ORDER BY `we"ird`, `it's`, `back``tick`, `ümlaut`, `[x]`, `a.b` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · filtered · awkward keys · unpaged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' ORDER BY `we"ird`, `it's`, `back``tick`, `ümlaut`, `[x]`, `a.b` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · filtered · empty name · paged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' ORDER BY `` LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · filtered · empty name · unpaged
-  (none)
+  |SELECT * FROM `[dbo]`.`a.b` WHERE `Name` = 'it''s' ORDER BY `` LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · all
   |SELECT * FROM `back\\\\slash`.`trail\\\\`|
   = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · all · no key · paged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\`|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · all · no key · unpaged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\`|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · all · one key · paged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\`|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · all · one key · unpaged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\`|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · all · composite key · paged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\`|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · all · composite key · unpaged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\`|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · all · awkward keys · paged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\`|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · all · awkward keys · unpaged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\`|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · all · empty name · paged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\`|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · all · empty name · unpaged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\`|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · page
   |SELECT * FROM `back\\\\slash`.`trail\\\\` LIMIT 1000|
   = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · page · no key · paged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · page · no key · unpaged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · page · one key · paged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\` ORDER BY `id` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · page · one key · unpaged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\` ORDER BY `id` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · page · composite key · paged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\` ORDER BY `id`, `Region` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · page · composite key · unpaged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\` ORDER BY `id`, `Region` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · page · awkward keys · paged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\` ORDER BY `we"ird`, `it's`, `back``tick`, `ümlaut`, `[x]`, `a.b` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · page · awkward keys · unpaged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\` ORDER BY `we"ird`, `it's`, `back``tick`, `ümlaut`, `[x]`, `a.b` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · page · empty name · paged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\` ORDER BY `` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · page · empty name · unpaged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\` ORDER BY `` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · page 3
   |SELECT * FROM `back\\\\slash`.`trail\\\\` LIMIT 100 OFFSET 200|
   = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · page 3 · no key · paged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\` LIMIT 100 OFFSET 200|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · page 3 · no key · unpaged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\` LIMIT 100 OFFSET 200|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · page 3 · one key · paged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\` ORDER BY `id` LIMIT 100 OFFSET 200|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · page 3 · one key · unpaged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\` ORDER BY `id` LIMIT 100 OFFSET 200|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · page 3 · composite key · paged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\` ORDER BY `id`, `Region` LIMIT 100 OFFSET 200|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · page 3 · composite key · unpaged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\` ORDER BY `id`, `Region` LIMIT 100 OFFSET 200|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · page 3 · awkward keys · paged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\` ORDER BY `we"ird`, `it's`, `back``tick`, `ümlaut`, `[x]`, `a.b` LIMIT 100 OFFSET 200|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · page 3 · awkward keys · unpaged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\` ORDER BY `we"ird`, `it's`, `back``tick`, `ümlaut`, `[x]`, `a.b` LIMIT 100 OFFSET 200|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · page 3 · empty name · paged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\` ORDER BY `` LIMIT 100 OFFSET 200|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · page 3 · empty name · unpaged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\` ORDER BY `` LIMIT 100 OFFSET 200|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · filtered
   |SELECT * FROM `back\\\\slash`.`trail\\\\` WHERE `Name` = 'it''s' LIMIT 1000|
   = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · filtered · no key · paged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\` WHERE `Name` = 'it''s' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · filtered · no key · unpaged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\` WHERE `Name` = 'it''s' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · filtered · one key · paged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\` WHERE `Name` = 'it''s' ORDER BY `id` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · filtered · one key · unpaged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\` WHERE `Name` = 'it''s' ORDER BY `id` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · filtered · composite key · paged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\` WHERE `Name` = 'it''s' ORDER BY `id`, `Region` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · filtered · composite key · unpaged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\` WHERE `Name` = 'it''s' ORDER BY `id`, `Region` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · filtered · awkward keys · paged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\` WHERE `Name` = 'it''s' ORDER BY `we"ird`, `it's`, `back``tick`, `ümlaut`, `[x]`, `a.b` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · filtered · awkward keys · unpaged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\` WHERE `Name` = 'it''s' ORDER BY `we"ird`, `it's`, `back``tick`, `ümlaut`, `[x]`, `a.b` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · filtered · empty name · paged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\` WHERE `Name` = 'it''s' ORDER BY `` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] backslash · filtered · empty name · unpaged
-  (none)
+  |SELECT * FROM `back\\\\slash`.`trail\\\\` WHERE `Name` = 'it''s' ORDER BY `` LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] no limit · paged
   |SELECT * FROM `public`.`accounts`|

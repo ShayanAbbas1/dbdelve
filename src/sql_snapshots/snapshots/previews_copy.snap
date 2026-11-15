@@ -256,7 +256,7 @@ source: src/sql_snapshots.rs
 
 [mysql] unicode · select top
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] unicode · drop Table
   |DROP TABLE `données`.`Ünïcødé 表`;|
@@ -340,7 +340,7 @@ source: src/sql_snapshots.rs
 
 [mysql] brackets and dots · select top
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 100|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] brackets and dots · drop Table
   |DROP TABLE `[dbo]`.`a.b`;|
@@ -368,7 +368,7 @@ source: src/sql_snapshots.rs
 
 [mysql] backslash · select top
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 100|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] backslash · drop Table
   |DROP TABLE `back\\slash`.`trail\\`;|
@@ -452,7 +452,7 @@ source: src/sql_snapshots.rs
 
 [mariadb] unicode · select top
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] unicode · drop Table
   |DROP TABLE `données`.`Ünïcødé 表`;|
@@ -536,7 +536,7 @@ source: src/sql_snapshots.rs
 
 [mariadb] brackets and dots · select top
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 100|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] brackets and dots · drop Table
   |DROP TABLE `[dbo]`.`a.b`;|
@@ -564,7 +564,7 @@ source: src/sql_snapshots.rs
 
 [mariadb] backslash · select top
   |SELECT * FROM `back\\slash`.`trail\\` LIMIT 100|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] backslash · drop Table
   |DROP TABLE `back\\slash`.`trail\\`;|
@@ -1432,7 +1432,7 @@ source: src/sql_snapshots.rs
 
 [clickhouse] unicode · select top
   |SELECT * FROM `données`.`Ünïcødé 表` LIMIT 100|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] unicode · drop Table
   |DROP TABLE `données`.`Ünïcødé 表`;|
@@ -1516,7 +1516,7 @@ source: src/sql_snapshots.rs
 
 [clickhouse] brackets and dots · select top
   |SELECT * FROM `[dbo]`.`a.b` LIMIT 100|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] brackets and dots · drop Table
   |DROP TABLE `[dbo]`.`a.b`;|
