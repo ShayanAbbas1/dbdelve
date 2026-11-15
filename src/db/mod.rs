@@ -6911,6 +6911,9 @@ mod tests {
         }
     }
 
+    // The user's service file is under %APPDATA% on Windows, which the test
+    // home does not redirect; `postgres::service` tests that path on its own.
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn identifying_text_of_a_postgres_service_holds_what_the_service_supplies() {
         use std::io::Write;

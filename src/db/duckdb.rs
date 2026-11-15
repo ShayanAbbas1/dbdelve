@@ -3981,6 +3981,12 @@ mod tests {
             .unwrap();
         assert_eq!(read.rows[0].get(0).map(str::to_string), Some("5000".into()));
         drop(session);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // Unix only: DuckDB locks its file per handle on Windows, so a second
+    // instance in the same process cannot open it; on Unix the lock is per process.
+    #[cfg(unix)]
     #[test]
     fn an_agent_open_reads_committed_rows_and_refuses_a_write() {
         let dir = std::env::temp_dir().join(format!("dbdelve-duckdb-agent-{}", std::process::id()));

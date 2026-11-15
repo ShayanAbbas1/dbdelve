@@ -14270,6 +14270,7 @@ fn agent_audit_never_records_a_row_value(cx: &mut TestAppContext) {
 
 /// A write that opens for `opening` of the test clock and then fails at once,
 /// or after `running`, as Redis answers.
+#[cfg(unix)]
 fn slow_open_then(
     opening: std::time::Duration,
     running: std::time::Duration,
@@ -16099,6 +16100,8 @@ fn a_failed_statement_answers_the_servers_words_without_the_path(cx: &mut TestAp
     });
 }
 
+// Unix only: Windows will not remove a file another handle holds open.
+#[cfg(unix)]
 #[gpui::test]
 fn a_connection_that_will_not_open_answers_a_fixed_sentence(cx: &mut TestAppContext) {
     use crate::agent::Status;
@@ -16128,6 +16131,8 @@ fn a_connection_that_will_not_open_answers_a_fixed_sentence(cx: &mut TestAppCont
     });
 }
 
+// Unix only: Windows will not remove a file another handle holds open.
+#[cfg(unix)]
 #[gpui::test]
 fn a_failed_call_audits_the_servers_words_without_the_path(cx: &mut TestAppContext) {
     use crate::agent::Status;
@@ -16383,6 +16388,9 @@ fn agent_duckdb_with<'a>(
     )
 }
 
+// Unix only: DuckDB locks its file per handle on Windows, so a second
+// instance in the same process cannot open it; on Unix the lock is per process.
+#[cfg(unix)]
 #[gpui::test]
 fn an_agent_read_on_a_duckdb_file_sees_the_latest_commit(cx: &mut TestAppContext) {
     use crate::agent::Status;
@@ -16647,6 +16655,10 @@ fn assert_cancelled_as_changed(
         assert!(workspace.agent.writes.is_empty(), "a write was started");
         assert!(workspace.agent.lanes.is_empty(), "a lane was opened");
     });
+    // The audit is written only where an agent can reach the app.
+    #[cfg(not(unix))]
+    let _ = id;
+    #[cfg(unix)]
     assert!(
         !audit_lines()
             .iter()
@@ -38988,10 +39000,12 @@ fn home_draws_an_agents_approval_and_the_visibility_dialog(cx: &mut TestAppConte
 
 /// How long the stand-in write runner holds an approved write before it opens
 /// anything: the test moves the clock to let it start and land.
+#[cfg(unix)]
 const WRITE_HOLD: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// A write that stays running for `hold` of the test scheduler's time and then
 /// runs for real, so a test decides when it starts and lands.
+#[cfg(unix)]
 fn held_write(
     hold: std::time::Duration,
     executor: &gpui::BackgroundExecutor,
@@ -39008,6 +39022,7 @@ fn held_write(
 }
 
 /// Approved writes are held for [`WRITE_HOLD`] before they run.
+#[cfg(unix)]
 fn hold_writes(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
     workspace.update(cx, |workspace, _| {
         workspace.agent.write_runner = Some(|executor, config, id, sql, engine| {
@@ -39016,6 +39031,7 @@ fn hold_writes(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
     });
 }
 
+#[cfg(unix)]
 fn writes_running(
     workspace: &Entity<Workspace>,
     cx: &mut VisualTestContext,
@@ -39039,6 +39055,7 @@ fn audit_of(id: crate::agent::CallId) -> Vec<serde_json::Value> {
         .collect()
 }
 
+#[cfg(unix)]
 fn executed() -> crate::agent::Reply {
     crate::agent::Reply {
         status: crate::agent::Status::Executed,
@@ -39047,6 +39064,7 @@ fn executed() -> crate::agent::Reply {
 }
 
 /// A held write approved and running, with its call's reply channel.
+#[cfg(unix)]
 fn running_write(
     workspace: &Entity<Workspace>,
     cx: &mut VisualTestContext,
@@ -39063,6 +39081,7 @@ fn running_write(
 }
 
 /// Let the held write start, run and land.
+#[cfg(unix)]
 fn land_write(cx: &mut VisualTestContext) {
     cx.executor().advance_clock(WRITE_HOLD);
     settle(cx);
