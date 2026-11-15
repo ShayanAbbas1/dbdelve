@@ -17,8 +17,8 @@ use crate::{
     Workspace,
     db::{
         ConnectionConfig, Driver, Engine, ExternalConfig, Fields, MongoConfig, PasswordCommand,
-        Plugin, PostgresConfig, ServerConfig, SnowflakeConfig, SshTunnel, SslMode, SsmTunnel,
-        Target, odbc_string,
+        Plugin, PostgresConfig, Properties, ServerConfig, SnowflakeConfig, SshTunnel, SslMode,
+        SsmTunnel, Target, check_time_zone, odbc_string,
     },
     explorer::Shortcuts,
     session::{Behaviour, Depth, Profile},
@@ -101,6 +101,12 @@ pub(crate) struct ConnectionForm {
     /// The profile's login database, which the form does not show and keeps
     /// as it was.
     pub(crate) login_database: Option<String>,
+    /// The session time zone, where `Target::takes_time_zone`. Blank is none.
+    /// Kept, not read, under any other target, as another engine's fields are.
+    pub(crate) time_zone: Entity<InputState>,
+    /// The profile's driver properties, one `key = value` per line, where
+    /// `Target::driver_properties` is not empty.
+    pub(crate) properties: Entity<TextareaState>,
     /// Seconds, and blank is the same as 0: no limit. Every engine has one, so
     /// unlike the credential fields it is drawn whichever engine is selected.
     pub(crate) statement_timeout: Entity<InputState>,
@@ -252,11 +258,8 @@ impl ConnectionForm {
         };
 
         let url = cx.new(|cx| InputState::new(window, cx).placeholder("Paste a connection URL"));
-        let startup_script = cx.new(|cx| {
-            TextareaState::new(window, cx)
-                .auto_grow(3, 12)
-                .placeholder("SET search_path TO app, public;")
-        });
+        // The placeholder is the target's, written by `sync_placeholders`.
+        let startup_script = cx.new(|cx| TextareaState::new(window, cx).auto_grow(3, 12));
         let name = cx.new(|cx| {
             InputState::new(window, cx).default_value(value(
                 server
@@ -420,6 +423,20 @@ impl ConnectionForm {
                 .default_value(value(config.and_then(ConnectionConfig::service)))
         });
         let project_name = cx.new(|cx| InputState::new(window, cx).placeholder("Project name"));
+        let time_zone = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("UTC")
+                .default_value(value(server.and_then(|server| server.time_zone.as_deref())))
+        });
+        let properties = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(2, 8)
+                .placeholder("application_name = billing")
+        });
+        if let Some(server) = server {
+            let lines = server.properties.lines();
+            properties.update(cx, |input, cx| input.set_value(lines, window, cx));
+        }
         let statement_timeout = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("No limit")
@@ -547,6 +564,8 @@ impl ConnectionForm {
             service,
             srv: mongo.is_some_and(|mongo| mongo.srv),
             login_database: mongo.and_then(|mongo| mongo.login_database.clone()),
+            time_zone,
+            properties,
             statement_timeout,
             depth: Depth::default(),
             startup_script,
@@ -866,6 +885,10 @@ impl ConnectionForm {
                 input.set_placeholder(placeholder, window, cx)
             });
         }
+        // A textarea, so not one of the inputs above.
+        self.startup_script.update(cx, |input, cx| {
+            input.set_placeholder(blank.startup_script, window, cx)
+        });
     }
 
     /// The service typed, where the engine has one.
@@ -1021,6 +1044,8 @@ impl ConnectionForm {
             ssm: self.ssm_tunnel(cx)?,
             ssh: self.ssh_tunnel(cx)?,
             schema: None,
+            time_zone: typed_time_zone(self.target(), &read(&self.time_zone))?,
+            properties: typed_driver_properties(self.target(), &self.properties.read(cx).value())?,
         };
         // A blank Host beside a service is whatever the service names, which
         // may be a socket directory; connect checks the Host it resolves to.
@@ -1082,6 +1107,7 @@ pub(crate) struct Placeholders {
     pub(crate) database: &'static str,
     pub(crate) user: &'static str,
     pub(crate) path: &'static str,
+    pub(crate) startup_script: &'static str,
 }
 
 /// Read against `ConnectionConfig::server`, `account` and
@@ -1112,6 +1138,7 @@ pub(crate) fn placeholders(target: Target) -> Placeholders {
             hints.user
         },
         path: hints.path,
+        startup_script: hints.startup_script,
     }
 }
 
@@ -1369,6 +1396,29 @@ fn password_placeholder(from_command: bool, editing: bool) -> &'static str {
     }
 }
 
+/// What the Time zone row says, where `target` draws it. Blank is none, and a
+/// zone that fails [`check_time_zone`] is the form's error, since it is spliced
+/// into a statement on every session. Text left in the row under a target that
+/// takes none is not read.
+fn typed_time_zone(target: Target, text: &str) -> Result<Option<String>, String> {
+    let zone = text.trim();
+    if !target.takes_time_zone() || zone.is_empty() {
+        return Ok(None);
+    }
+    check_time_zone(zone)?;
+    Ok(Some(zone.to_string()))
+}
+
+/// What the Driver properties row says, where `target` draws it: only a key
+/// the target lists is taken, and one it does not is refused by name. Text left
+/// in the row under a target that lists none is not read.
+fn typed_driver_properties(target: Target, text: &str) -> Result<Properties, String> {
+    if target.driver_properties().is_empty() {
+        return Ok(Properties::default());
+    }
+    Properties::from_lines(target.engine, text)
+}
+
 /// Blank is the default port.
 fn parse_port(label: &str, value: &str) -> Result<Option<u16>, String> {
     if value.is_empty() {
@@ -1578,6 +1628,107 @@ mod tests {
             !plugin.takes_startup_script(),
             "a plugin owns its process, whatever dialect it speaks"
         );
+    }
+
+    #[test]
+    fn the_startup_script_placeholder_is_written_in_each_engines_own_dialect() {
+        use crate::db::Hints;
+        use crate::sql::{Mode, startup_statements};
+
+        let postgres = placeholders(Target::built_in(Engine::Postgres)).startup_script;
+        assert_eq!(postgres, "SET search_path TO app, public;");
+        for engine in Engine::ALL {
+            let target = Target::built_in(engine);
+            if !target.takes_startup_script() {
+                continue;
+            }
+            let example = placeholders(target).startup_script;
+            assert!(!example.is_empty(), "{engine:?}");
+            if engine != Engine::Postgres {
+                assert_ne!(example, postgres, "{engine:?} shows Postgres's example");
+            }
+            if example != Hints::DEFAULT.startup_script {
+                assert!(
+                    startup_statements(engine, Mode::ReadOnly, &[], example).is_ok(),
+                    "{engine:?}: {example}"
+                );
+            }
+        }
+        for engine in [Engine::Sqlite, Engine::Turso] {
+            assert_eq!(
+                placeholders(Target::built_in(engine)).startup_script,
+                Hints::DEFAULT.startup_script,
+                "{engine:?} has no statement Read-only admits"
+            );
+        }
+    }
+
+    #[test]
+    fn driver_property_lines_are_read_and_refused_by_name() {
+        let postgres = Target::built_in(Engine::Postgres);
+        let read = typed_driver_properties(
+            postgres,
+            "application_name = o'brien app\nconnect_timeout = 5",
+        )
+        .expect("both are listed on Postgres");
+        assert_eq!(read.application_name.as_deref(), Some("o'brien app"));
+        assert_eq!(read.connect_timeout, Some(5));
+
+        let message = typed_driver_properties(postgres, "foo = 1").expect_err("not listed");
+        assert!(message.contains("`foo`"), "{message}");
+        let message =
+            typed_driver_properties(postgres, "connect_timeout = 5\nfoo").expect_err("no `=`");
+        assert!(message.contains("line 2"), "{message}");
+
+        // Not read where the row is not drawn, so text left in it by another
+        // engine neither fails the save nor is stored.
+        let sqlite = Target::built_in(Engine::Sqlite);
+        assert_eq!(
+            typed_driver_properties(sqlite, "foo = 1"),
+            Ok(Properties::default())
+        );
+        let sql_server = Target::built_in(Engine::SqlServer);
+        assert!(typed_driver_properties(sql_server, "connect_timeout = 5").is_err());
+
+        for engine in Engine::ALL {
+            let target = Target::built_in(engine);
+            let listed = matches!(
+                engine,
+                Engine::Postgres | Engine::MySql | Engine::MariaDb | Engine::SqlServer
+            );
+            assert_eq!(!target.driver_properties().is_empty(), listed, "{engine:?}");
+        }
+        let plugin = Target {
+            engine: Engine::Postgres,
+            driver: crate::db::Driver::Plugin(crate::store::tests::odbc_plugin()),
+        };
+        assert!(plugin.driver_properties().is_empty());
+    }
+
+    #[test]
+    fn the_time_zone_row_is_asked_of_the_target() {
+        let postgres = Target::built_in(Engine::Postgres);
+        assert_eq!(
+            typed_time_zone(postgres, " Europe/Paris "),
+            Ok(Some("Europe/Paris".to_string()))
+        );
+        assert!(typed_time_zone(postgres, "Europe/Paris'").is_err());
+        assert_eq!(typed_time_zone(postgres, "  "), Ok(None));
+        for engine in Engine::ALL {
+            let takes = matches!(
+                engine,
+                Engine::Postgres | Engine::MySql | Engine::MariaDb | Engine::ClickHouse
+            );
+            assert_eq!(
+                Target::built_in(engine).takes_time_zone(),
+                takes,
+                "{engine:?}"
+            );
+        }
+        // Not read where the row is not drawn, so text left in it by another
+        // engine neither fails the save nor is stored.
+        let sql_server = Target::built_in(Engine::SqlServer);
+        assert_eq!(typed_time_zone(sql_server, "Europe/Paris'"), Ok(None));
     }
 
     #[test]
@@ -1971,6 +2122,8 @@ mod tests {
             ssm: None,
             ssh: None,
             schema: None,
+            time_zone: None,
+            properties: Properties::default(),
         };
         let typed = ConnectionConfig::postgres(server("hunter2"));
         assert_eq!(password_to_persist(&typed, Origin::Form), Some("hunter2"));

@@ -729,6 +729,10 @@ impl Profile {
                 .then(|| self.behaviour.depth.slug().to_string()),
             startup_script: Some(self.behaviour.startup_script.clone())
                 .filter(|script| !script.trim().is_empty()),
+            time_zone: server.and_then(|server| server.time_zone.clone()),
+            driver_properties: server
+                .map(|server| server.properties.stored())
+                .unwrap_or_default(),
             confirmed: self
                 .confirmed
                 .iter()

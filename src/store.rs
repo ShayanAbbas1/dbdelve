@@ -200,6 +200,17 @@ pub struct StoredProfile {
     /// it comes before `ssh`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub startup_script: Option<String>,
+    /// The session time zone this profile connects with: a name or an offset,
+    /// checked when read. Absent leaves the server's own. A scalar, so it comes
+    /// before `ssh`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_zone: Option<String>,
+    /// The driver settings this profile sets, allow-listed per engine when
+    /// read. An inline array of pairs, never a table, so it stays before
+    /// `ssh`. Left out when empty, which is every profile written before the
+    /// setting existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub driver_properties: Vec<(String, String)>,
     /// The SSH tunnel this profile dials through, or absent for a direct
     /// connection -- which is every profile written before tunnels existed. A
     /// table, so it has to come after every scalar above. Nothing secret is in
@@ -3623,6 +3634,8 @@ user = "shayan"
                 include_schemas: Vec::new(),
                 introspection_depth: None,
                 startup_script: None,
+                time_zone: None,
+                driver_properties: Vec::new(),
                 ssh: None,
                 open_queries: Vec::new(),
                 open_objects: Vec::new(),
@@ -3690,6 +3703,8 @@ user = "shayan"
             include_schemas: Vec::new(),
             introspection_depth: None,
             startup_script: None,
+            time_zone: None,
+            driver_properties: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![
@@ -3845,6 +3860,8 @@ open_objects = []
             include_schemas: Vec::new(),
             introspection_depth: None,
             startup_script: None,
+            time_zone: None,
+            driver_properties: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: Vec::new(),
@@ -4103,6 +4120,53 @@ open_objects = []
         let golden = include_str!("testdata/every-engine.resaved.toml");
         assert_eq!(resaved(include_str!("testdata/every-engine.toml")), golden);
         assert!(!golden.contains("startup_script"));
+    }
+
+    #[test]
+    fn the_time_zone_and_driver_properties_round_trip_before_ssh() {
+        let mut profile = a_stored_profile();
+        profile.time_zone = Some("Europe/Paris".into());
+        profile.driver_properties = vec![
+            ("application_name".into(), "billing".into()),
+            ("connect_timeout".into(), "5".into()),
+        ];
+        profile.ssh = Some(SshTunnel {
+            host: "bastion".into(),
+            ..Default::default()
+        });
+        let text = written_alone(profile.clone());
+        let tunnel = text.find("[profiles.ssh]").expect("the tunnel is written");
+        for key in ["time_zone = ", "driver_properties = "] {
+            let at = text.find(key).expect("the key is written");
+            assert!(
+                at < tunnel,
+                "TOML cannot emit a scalar after a table, so {key} comes before `ssh`:\n{text}"
+            );
+        }
+        assert!(
+            text.contains("driver_properties = [") && !text.contains("[profiles.driver_properties"),
+            "an inline array of pairs, never a table:\n{text}"
+        );
+        let decoded = decode_profiles(&text, &[]).expect("the file loads");
+        assert_eq!(decoded.profiles[0].time_zone, profile.time_zone);
+        assert_eq!(
+            decoded.profiles[0].driver_properties,
+            profile.driver_properties
+        );
+        assert_eq!(
+            written_alone(decoded.profiles[0].clone()),
+            text,
+            "saving what was saved changes nothing"
+        );
+
+        let bare = written_alone(a_stored_profile());
+        assert!(
+            !bare.contains("time_zone") && !bare.contains("driver_properties"),
+            "a profile with neither is written as it always was:\n{bare}"
+        );
+        let golden = include_str!("testdata/every-engine.resaved.toml");
+        assert_eq!(resaved(include_str!("testdata/every-engine.toml")), golden);
+        assert!(!golden.contains("time_zone") && !golden.contains("driver_properties"));
     }
 
     #[test]
@@ -4672,6 +4736,8 @@ folder = "Hot"
             include_schemas: Vec::new(),
             introspection_depth: None,
             startup_script: None,
+            time_zone: None,
+            driver_properties: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![StoredObject {
@@ -4766,6 +4832,8 @@ folder = "Hot"
             include_schemas: Vec::new(),
             introspection_depth: None,
             startup_script: None,
+            time_zone: None,
+            driver_properties: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![StoredObject {
@@ -4846,6 +4914,8 @@ folder = "Hot"
             include_schemas: Vec::new(),
             introspection_depth: None,
             startup_script: None,
+            time_zone: None,
+            driver_properties: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: Vec::new(),
@@ -4972,6 +5042,8 @@ open_objects = []
             include_schemas: Vec::new(),
             introspection_depth: None,
             startup_script: None,
+            time_zone: None,
+            driver_properties: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![StoredObject {
@@ -5128,6 +5200,8 @@ open_objects = []
                     include_schemas: Vec::new(),
                     introspection_depth: None,
                     startup_script: None,
+                    time_zone: None,
+                    driver_properties: Vec::new(),
                     ssh: None,
                     open_queries: Vec::new(),
                     open_objects: Vec::new(),
@@ -5175,6 +5249,8 @@ open_objects = []
                     include_schemas: Vec::new(),
                     introspection_depth: None,
                     startup_script: None,
+                    time_zone: None,
+                    driver_properties: Vec::new(),
                     ssh: None,
                     open_queries: Vec::new(),
                     open_objects: Vec::new(),
@@ -6039,6 +6115,8 @@ active = true
             include_schemas: Vec::new(),
             introspection_depth: None,
             startup_script: None,
+            time_zone: None,
+            driver_properties: Vec::new(),
             ssh: None,
             open_queries: vec![
                 StoredQueryTab {
@@ -6674,6 +6752,8 @@ name = \"accounts\"
             include_schemas: Vec::new(),
             introspection_depth: None,
             startup_script: None,
+            time_zone: None,
+            driver_properties: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![
@@ -6810,6 +6890,8 @@ name = \"accounts\"
             include_schemas: Vec::new(),
             introspection_depth: None,
             startup_script: None,
+            time_zone: None,
+            driver_properties: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![object],

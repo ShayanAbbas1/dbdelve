@@ -737,6 +737,37 @@ impl Workspace {
         let mut session = Vec::new();
         // The target decides, as it does for the rows above: a plugin's
         // process and an engine with no session to set draw none.
+        if form.target().takes_time_zone() {
+            session.push(
+                ui::option_row(
+                    "Time zone",
+                    Some(
+                        "Applied as the session default on every session of this \
+                         connection. A name such as Europe/Paris or an offset such as \
+                         +02:00; blank leaves the server's own."
+                            .into(),
+                    ),
+                    div()
+                        .flex()
+                        .items_center()
+                        .w(px(layout::chrome(layout::FORM_TIMEOUT_WIDTH * 2.0)))
+                        .h(px(Control::Compact.height()))
+                        .px(px(layout::SPACE_SM))
+                        .rounded(px(layout::RADIUS_CONTROL))
+                        .border_1()
+                        .border_color(t.border)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(gpui_component::Sizable::small(bare(&form.time_zone))),
+                        ),
+                    t,
+                )
+                .debug_selector(|| "form-time-zone".into())
+                .into_any_element(),
+            );
+        }
         if form.target().takes_startup_script() {
             session.push(
                 ui::stacked_option_row(
@@ -752,6 +783,33 @@ impl Workspace {
                         .child(Textarea::new(&form.startup_script).font_family(mono.clone())),
                     t,
                 )
+                .into_any_element(),
+            );
+        }
+
+        let listed = form.target().driver_properties();
+        if !listed.is_empty() {
+            let keys = listed
+                .iter()
+                .map(|property| property.key())
+                .collect::<Vec<_>>()
+                .join(", ");
+            session.push(
+                ui::stacked_option_row(
+                    "Driver properties",
+                    Some(
+                        format!(
+                            "One key = value per line; only {keys} are taken. Applied to \
+                             every session of this connection."
+                        )
+                        .into(),
+                    ),
+                    div()
+                        .w_full()
+                        .child(Textarea::new(&form.properties).font_family(mono.clone())),
+                    t,
+                )
+                .debug_selector(|| "form-driver-properties".into())
                 .into_any_element(),
             );
         }

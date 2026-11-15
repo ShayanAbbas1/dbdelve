@@ -15,6 +15,11 @@ legacy Postgres(
             ssh: None,
             ssm: None,
             schema: None,
+            time_zone: None,
+            properties: Properties {
+                application_name: None,
+                connect_timeout: None,
+            },
         },
         service: None,
     },
@@ -53,6 +58,11 @@ pg Postgres(
             schema: Some(
                 "billing",
             ),
+            time_zone: None,
+            properties: Properties {
+                application_name: None,
+                connect_timeout: None,
+            },
         },
         service: None,
     },
@@ -72,6 +82,11 @@ alias Postgres(
             ssh: None,
             ssm: None,
             schema: None,
+            time_zone: None,
+            properties: Properties {
+                application_name: None,
+                connect_timeout: None,
+            },
         },
         service: Some(
             "reports",
@@ -94,6 +109,11 @@ mysql MySql(
         ssh: None,
         ssm: None,
         schema: None,
+        time_zone: None,
+        properties: Properties {
+            application_name: None,
+            connect_timeout: None,
+        },
     },
 )
 maria MariaDb(
@@ -112,6 +132,11 @@ maria MariaDb(
         ssh: None,
         ssm: None,
         schema: None,
+        time_zone: None,
+        properties: Properties {
+            application_name: None,
+            connect_timeout: None,
+        },
     },
 )
 lite Sqlite {
@@ -169,6 +194,11 @@ mssql SqlServer(
         schema: Some(
             "dbo",
         ),
+        time_zone: None,
+        properties: Properties {
+            application_name: None,
+            connect_timeout: None,
+        },
     },
 )
 mongo MongoDb(
@@ -186,6 +216,11 @@ mongo MongoDb(
             ssh: None,
             ssm: None,
             schema: None,
+            time_zone: None,
+            properties: Properties {
+                application_name: None,
+                connect_timeout: None,
+            },
         },
         srv: true,
         options: "retryWrites=true&w=majority",
@@ -210,6 +245,11 @@ redis Redis(
         ssh: None,
         ssm: None,
         schema: None,
+        time_zone: None,
+        properties: Properties {
+            application_name: None,
+            connect_timeout: None,
+        },
     },
 )
 clk ClickHouse(
@@ -239,5 +279,10 @@ clk ClickHouse(
         ),
         ssm: None,
         schema: None,
+        time_zone: None,
+        properties: Properties {
+            application_name: None,
+            connect_timeout: None,
+        },
     },
 )

@@ -18,7 +18,7 @@
 //! read and nothing else here has to know how a `Catalog` is built.
 
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -562,7 +562,7 @@ fn base_options(server: &ServerConfig, dial: Option<SocketAddr>) -> OptsBuilder 
         Some(dial) => (dial.ip().to_string(), dial.port()),
         None => (server.host.clone(), server.port.unwrap_or(DEFAULT_PORT)),
     };
-    OptsBuilder::new()
+    let options = OptsBuilder::new()
         .ip_or_hostname(Some(host))
         .tcp_port(port)
         // A loopback address would otherwise have the driver ask the server
@@ -573,7 +573,27 @@ fn base_options(server: &ServerConfig, dial: Option<SocketAddr>) -> OptsBuilder 
         .prefer_socket(dial.is_none())
         .db_name((!server.database.is_empty()).then(|| server.database.clone()))
         .user(Some(server.user.clone()))
-        .tcp_connect_timeout(Some(Duration::from_secs(CONNECT_TIMEOUT_SECONDS)))
+        .tcp_connect_timeout(Some(Duration::from_secs(
+            server
+                .properties
+                .connect_timeout
+                .map_or(CONNECT_TIMEOUT_SECONDS, u64::from),
+        )));
+    // Set only when the profile names one: unset, the driver sends its own
+    // `program_name`, as it did before the property existed. Never through
+    // `init`, which carries the statement timeout.
+    match &server.properties.application_name {
+        Some(name) => options.connect_attrs(Some(HashMap::from([("program_name", name.as_str())]))),
+        None => options,
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Connection attempts `open` has made on this thread. The compose
+    /// healthchecks connect every two seconds, so the server's own counters
+    /// cannot count one open's attempts.
+    static OPEN_ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Open a connection to `dial`, or to the host by name where there is none,
@@ -617,6 +637,8 @@ fn open(
 }
 
 fn handshake(options: OptsBuilder, server: &ServerConfig) -> Result<Conn, ::mysql::Error> {
+    #[cfg(test)]
+    OPEN_ATTEMPTS.set(OPEN_ATTEMPTS.get() + 1);
     match Conn::new(over(options.clone(), ssl_options(server))) {
         // `prefer` is the one rung where a weaker connection is reachable, and
         // reaching it is what the word means. The driver cannot say "encrypt if
@@ -624,6 +646,8 @@ fn handshake(options: OptsBuilder, server: &ServerConfig) -> Result<Conn, ::mysq
         // `prefer` amounts to. No other mode falls back, and not where nothing
         // answered at all: plaintext would find nobody there either.
         Err(encrypted) if server.sslmode == SslMode::Prefer && !unusable_address(&encrypted) => {
+            #[cfg(test)]
+            OPEN_ATTEMPTS.set(OPEN_ATTEMPTS.get() + 1);
             Conn::new(over(options, None)).map_err(|plaintext| after_prefer(encrypted, plaintext))
         }
         connected => connected,
@@ -725,10 +749,31 @@ fn connect(
     engine: Engine,
     dial: Option<SocketAddr>,
 ) -> Result<Conn, DbError> {
-    open(server, engine, dial, false, |dial| {
+    let (mut connection, _) = open(server, engine, dial, false, |dial| {
         session_options(server, engine, dial)
-    })
-    .map(|(connection, _)| connection)
+    })?;
+    set_time_zone(&mut connection, server, engine)?;
+    Ok(connection)
+}
+
+/// The profile's session time zone on a session `open` just made. Never in
+/// `init`: the zone is user-typed text the server may refuse when its tz
+/// tables are not loaded, and a failing init is retried without TLS under
+/// `sslmode=prefer`, the hazard [`replay`]'s comment names. Before the
+/// callers' script replay, so a zone the script sets wins.
+fn set_time_zone(
+    connection: &mut Conn,
+    server: &ServerConfig,
+    engine: Engine,
+) -> Result<(), DbError> {
+    match server
+        .time_zone
+        .as_deref()
+        .and_then(|zone| super::time_zone_statement(engine, zone))
+    {
+        Some(statement) => replay(connection, &[statement]),
+        None => Ok(()),
+    }
 }
 
 fn session_options(server: &ServerConfig, engine: Engine, dial: Option<SocketAddr>) -> OptsBuilder {
@@ -835,9 +880,10 @@ impl Connection {
         }
         tunnelled(server, DEFAULT_PORT, |tunnel| {
             let dial = tunnel.as_deref().map(Tunnel::dial).transpose()?;
-            let (connection, address) = open(server, engine, dial, true, |dial| {
+            let (mut connection, address) = open(server, engine, dial, true, |dial| {
                 session_options(server, engine, dial)
             })?;
+            set_time_zone(&mut connection, server, engine)?;
             Ok(Self {
                 connection_id: connection.connection_id(),
                 server: server.clone(),
@@ -2408,6 +2454,115 @@ mod tests {
         }
     }
 
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_time_zone_the_server_refuses_fails_the_connect_in_one_attempt() {
+        for engine in [Engine::MySql, Engine::MariaDb] {
+            let with_zone = |zone: &str| ServerConfig {
+                sslmode: SslMode::Prefer,
+                time_zone: Some(zone.into()),
+                ..live_config(engine)
+            };
+            OPEN_ATTEMPTS.set(0);
+            let refused = connect(&with_zone("Nowhere/Invalid"), engine, None)
+                .err()
+                .unwrap_or_else(|| panic!("{engine:?} accepted a zone it does not know"));
+            assert!(
+                refused.message.contains("time zone"),
+                "{engine:?}: {}",
+                refused.message
+            );
+            assert_eq!(OPEN_ATTEMPTS.get(), 1, "{engine:?} retried after the zone");
+
+            // Control: a first attempt that completes TLS is one attempt, so a
+            // retry would have shown as two.
+            OPEN_ATTEMPTS.set(0);
+            connect(&with_zone("+02:00"), engine, None).expect("a valid zone connects");
+            assert_eq!(OPEN_ATTEMPTS.get(), 1, "{engine:?} did not complete TLS");
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_the_time_zone_reaches_every_session() {
+        for engine in [Engine::MySql, Engine::MariaDb] {
+            let config = ServerConfig {
+                sslmode: SslMode::Disable,
+                time_zone: Some("+02:00".into()),
+                ..live_config(engine)
+            };
+            let zone = |connection: &Connection| {
+                let result = connection
+                    .query("SELECT @@session.time_zone", Fetch::default())
+                    .expect("the variable reads");
+                result.rows[0].get(0).map(str::to_string)
+            };
+            let main = Connection::open(&config, engine).expect("the connection opens");
+            assert_eq!(zone(&main).as_deref(), Some("+02:00"), "{engine:?}");
+            let beside = main.alongside().expect("a session beside it opens");
+            assert_eq!(zone(&beside).as_deref(), Some("+02:00"), "{engine:?}");
+            let other = main
+                .on_database("dbdelve_archive")
+                .expect("a session opens");
+            assert_eq!(zone(&other).as_deref(), Some("+02:00"), "{engine:?}");
+
+            // Without one the session is the server's own.
+            let bare = Connection::open(
+                &ServerConfig {
+                    time_zone: None,
+                    ..config
+                },
+                engine,
+            )
+            .expect("the connection opens");
+            assert_eq!(zone(&bare).as_deref(), Some("SYSTEM"), "{engine:?}");
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_driver_properties_reach_the_server() {
+        let properties = crate::db::Properties {
+            application_name: Some("billing app".into()),
+            connect_timeout: Some(5),
+        };
+        for engine in [Engine::MySql, Engine::MariaDb] {
+            let config = ServerConfig {
+                sslmode: SslMode::Disable,
+                properties: properties.clone(),
+                ..live_config(engine)
+            };
+            let main = Connection::open(&config, engine).expect("the connection opens");
+            let beside = main.alongside().expect("a session beside it opens");
+            if engine == Engine::MariaDb {
+                // The dev image leaves `performance_schema` off, so the attribute
+                // is not readable back; the connect and an answer are what shows
+                // the options were accepted.
+                let result = main
+                    .query("SELECT 1", Fetch::default())
+                    .expect("the session answers");
+                assert_eq!(result.rows[0].get(0), Some("1"));
+                let read = beside
+                    .query("SELECT 1", Fetch::default())
+                    .expect("the session beside answers");
+                assert_eq!(read.rows[0].get(0), Some("1"));
+                continue;
+            }
+            // The account's own view: the dev user may read it, where the table
+            // of every session needs a grant on `performance_schema`.
+            let attribute = "SELECT ATTR_VALUE FROM performance_schema.session_account_connect_attrs \
+                WHERE PROCESSLIST_ID = CONNECTION_ID() AND ATTR_NAME = 'program_name'";
+            let result = main
+                .query(attribute, Fetch::default())
+                .expect("the attribute reads");
+            assert_eq!(result.rows[0].get(0), Some("billing app"));
+            let read = beside
+                .query(attribute, Fetch::default())
+                .expect("the attribute reads beside it");
+            assert_eq!(read.rows[0].get(0), Some("billing app"));
+        }
+    }
+
     /// The compose database as the bastion sees it, by service name and the
     /// port inside the network.
     fn live_tunnelled() -> ServerConfig {
@@ -2796,13 +2951,7 @@ ORDER BY 1, 2
                 // contain anything a URL can encode.
                 user: "person@example.com".into(),
                 password: "pa ss".into(),
-                password_command: None,
-                sslmode: SslMode::default(),
-                root_certificate: None,
-                statement_timeout: 0,
-                ssm: None,
-                ssh: None,
-                schema: None,
+                ..ServerConfig::default()
             }
         );
         assert_eq!(
@@ -3385,6 +3534,44 @@ ORDER BY 1, 2
     }
 
     #[test]
+    fn driver_properties_ride_the_options() {
+        let opts = |properties| -> ::mysql::Opts {
+            base_options(
+                &ServerConfig {
+                    properties,
+                    ..ServerConfig::default()
+                },
+                None,
+            )
+            .into()
+        };
+        let set = opts(crate::db::Properties {
+            application_name: Some("billing".into()),
+            connect_timeout: Some(5),
+        });
+        assert_eq!(
+            set.get_connect_attrs()
+                .and_then(|attrs| attrs.get("program_name"))
+                .map(String::as_str),
+            Some("billing")
+        );
+        assert_eq!(set.get_tcp_connect_timeout(), Some(Duration::from_secs(5)));
+        // Nothing set is as it was: the driver's own attributes, a ten-second dial.
+        let bare = opts(crate::db::Properties::default());
+        assert!(
+            bare.get_connect_attrs()
+                .is_none_or(|attrs| !attrs.contains_key("program_name")),
+            "DBDelve names no program of its own"
+        );
+        assert_eq!(
+            bare.get_tcp_connect_timeout(),
+            Some(Duration::from_secs(10))
+        );
+        // The init channel is not touched.
+        assert!(set.get_init().is_empty());
+    }
+
+    #[test]
     fn verify_full_through_a_tunnel_is_refused_before_ssh_starts() {
         let server = ServerConfig {
             host: "db.example.test".into(),
@@ -3581,6 +3768,25 @@ ORDER BY 1, 2
         let indexes = assemble_indexes(&result).unwrap();
         assert_eq!(indexes[0].columns, ["(expression)", "id"]);
         assert_eq!(indexes[0].definition, "INDEX (id)");
+    }
+
+    #[test]
+    fn init_carries_the_timeout_and_never_the_time_zone() {
+        // The zone is user-typed text the server may refuse, and a refused
+        // init is retried in plaintext under `prefer`.
+        let init = |time_zone: Option<&str>| -> Vec<String> {
+            let server = ServerConfig {
+                statement_timeout: 30,
+                time_zone: time_zone.map(str::to_string),
+                ..ServerConfig::default()
+            };
+            ::mysql::Opts::from(session_options(&server, Engine::MySql, None))
+                .get_init()
+                .to_vec()
+        };
+        let expected = ["SET SESSION max_execution_time = 30000"];
+        assert_eq!(init(Some("Europe/Paris")), expected);
+        assert_eq!(init(None), expected);
     }
 
     #[test]
