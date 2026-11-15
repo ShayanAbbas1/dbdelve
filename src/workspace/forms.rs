@@ -892,6 +892,20 @@ impl Workspace {
                 .into_any_element(),
             );
         }
+        // Every engine's connection can be left unused, so every target draws it.
+        behaviour.push(
+            ui::option_row(
+                "Idle timeout",
+                Some(
+                    "Closes this connection's sessions after this long without use, never \
+                     while work is unfinished. Off when blank."
+                        .into(),
+                ),
+                number_field(&form.idle_timeout, "min", t),
+                t,
+            )
+            .into_any_element(),
+        );
         // Every target's connect runs the loads this chooses among.
         let depths = Depth::ALL.into_iter().enumerate().map(|(index, depth)| {
             ui::segmented_choice(
@@ -4326,6 +4340,11 @@ fn nested_field_row(
 
 /// A small boxed field for a number of seconds, its unit after it.
 fn seconds_field(input: &Entity<InputState>, t: Theme) -> gpui::Div {
+    number_field(input, "s", t)
+}
+
+/// A small boxed field for a whole number of `unit`, the unit after it.
+fn number_field(input: &Entity<InputState>, unit: &'static str, t: Theme) -> gpui::Div {
     div()
         .flex()
         .items_center()
@@ -4346,7 +4365,7 @@ fn seconds_field(input: &Entity<InputState>, t: Theme) -> gpui::Div {
             div()
                 .text_size(px(layout::chrome(layout::TEXT_SM)))
                 .text_color(t.text_faint)
-                .child("s"),
+                .child(unit),
         )
 }
 

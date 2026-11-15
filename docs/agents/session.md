@@ -308,7 +308,8 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   (`src/workspace/timers.rs`). Keep-alive is the first: `Profile.keep_alive_task`
   holds a `background_executor().timer`, replaced to re-arm and dropped to
   cancel, and it is re-armed after each round lands rather than repeating. It
-  is off unless the profile sets `keep_alive_seconds` (minimum 10), so a
+  is off unless the profile sets `keep_alive_seconds` (10 to 3600; the form refuses
+  outside it and a stored value outside it restores as off), so a
   profile that never asked arms nothing. A round pings every session in
   `Profile::sessions_to_hold` through `spawn_blocking`, each by `try_lock`, so a
   session a statement holds is skipped and never waited on; it is skipped whole
@@ -322,6 +323,35 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   timers but `advance_clock` fires them, and a test that then blocks on a
   future must drop an armed timer first (`set_behaviour` with `keep_alive:
   None`), because the scheduler jumps to the next timer when it would park.
+  `advance_clock` also runs every task that is ready, so a test that needs a
+  call still in flight when a timer fires holds it open on something that
+  only the clock or the test releases, never on the scheduler's order.
+  The idle close (`idle_timeout_minutes`, 1 to 1440 by the same rule,
+  `Profile.idle_task`) is the second:
+  it shares `disconnect`'s state change (`close_sessions`) but keeps the tabs,
+  the buffers and the profile's place in front. Idle time counts from `Profile.last_activity`, read from
+  `background_executor().now()` so `advance_clock` moves it, and only the user's
+  own work moves it (`mark_activity`: a statement's start and landing in
+  `execute_unchecked`, `run_routed`, the catalog reads, a connect landing);
+  keep-alive pings never do. The timer sleeps to the deadline
+  and checks it then, so use moves it with no re-arm per event, and the deadline
+  closes only a connected profile: one whose session was lost keeps its failure
+  and drops the timer, as `keep_alive_due` does. The deadline
+  passing does not close a profile that has work unfinished, front or not
+  (`idle_blocked`): a transaction, a bound session's transaction, a running
+  statement, a queue awaiting or holding statements, an import into it, an
+  export from it, a grid with unapplied edits (`unapplied_edits_of`, of that
+  profile, not the front-only helper). A
+  blocked profile waits a whole timeout more, counted from then: re-arming
+  from `last_activity` would be a wait already over and fire at once, for ever.
+  An idle-closed profile comes back by use: a plain Run in its query tab is
+  parked on `runs_on_connect` and `begin_connect` starts, the landing's
+  `run_waiting_files` then hands the statement to `execute_sql`, so the mode
+  gate judges it when it runs; a connect that fails drops it and the text stays
+  in its tab. A relation tab visited on it (`load_relation`) and a tree expand
+  connect it too, and the status bar offers Reconnect as it does for a failed
+  connection. An explain, a refresh or an edit's read-back is not parked: on an
+  idle profile it fails with `The connection is not open.`.
 - **A dialog's keyboard is its ring** (`Workspace::dialog_layer`): the layer
   holds focus, and `left`/`right`/`tab` step a ring across its buttons and
   then its one other control, the "Don't ask again" box (`enter` or `space`

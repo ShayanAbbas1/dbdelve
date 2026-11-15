@@ -1776,6 +1776,7 @@ impl Render for Workspace {
                 .children(self.palette.clone());
         };
         let failed = matches!(profile.state, ProfileState::Failed(_));
+        let idle = matches!(profile.state, ProfileState::Idle);
         let status = match &profile.state {
             ProfileState::Idle => "Connection is idle.".to_string(),
             ProfileState::Connecting { .. } => {
@@ -2040,10 +2041,11 @@ impl Render for Workspace {
                     .text_color(if failed { t.danger } else { t.text_muted })
                     .child(status),
             )
-            .when(failed, |group| {
+            .when(failed || idle, |group| {
                 group.child(
                     div()
                         .flex_shrink_0()
+                        .debug_selector(|| "reconnect-button".into())
                         .child(ui::reconnect_button("reconnect", t)),
                 )
             });
