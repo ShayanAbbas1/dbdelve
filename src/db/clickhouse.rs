@@ -35,7 +35,7 @@ use self::tsv::{Framed, Next, Reader, Untagged, is_cut};
 use super::tunnel::tunnelled;
 use super::{
     CancelToken, Cancelling, Catalog, Column, Databases, DbError, EditTarget, Engine, Fetch,
-    QueryResult, RelationKind, RowBuilder, ServerConfig, Stopped, Structure, UpdateSpelling,
+    QueryResult, RelationKind, RowBuilder, ServerConfig, Shown, Stopped, Structure, UpdateSpelling,
     assemble_catalog, assemble_databases, assemble_structure, plain_error, required_cell,
     terminated,
 };
@@ -105,10 +105,24 @@ SELECT
     total_bytes AS size_bytes,
     total_rows AS row_estimate
 FROM system.tables
-WHERE database NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema')
+WHERE database NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema'){only}
     AND NOT is_temporary
     AND NOT startsWith(name, '.inner')
 ORDER BY database, name";
+
+/// [`RELATIONS_SQL`] over the server-listed databases a filter matched, or all
+/// of them for `None`. Each name is quoted by the engine and the pattern a
+/// person typed never gets here.
+fn relations_sql(names: Option<&[String]>) -> String {
+    let only = names.map_or_else(String::new, |names| {
+        let quoted = names
+            .iter()
+            .map(|name| Engine::ClickHouse.quote_literal(name))
+            .collect::<Vec<_>>();
+        format!("\n    AND database IN ({})", quoted.join(", "))
+    });
+    RELATIONS_SQL.replace("{only}", &only)
+}
 
 // The structure queries name one relation, so they carry `{schema}` and
 // `{relation}` placeholders substituted by `structure_sql`.
@@ -753,8 +767,29 @@ impl Connection {
         })
     }
 
-    pub fn catalog(&self) -> Result<Catalog, DbError> {
-        assemble_catalog(self.internal_query(RELATIONS_SQL)?, QueryResult::default())
+    /// Only the matched databases are asked about; the listing is read here,
+    /// in the read's own closure, so the statement carries names the server
+    /// just gave. ClickHouse would accept an empty `IN`, but a match of nothing
+    /// sends no statement on any engine.
+    pub fn catalog(&self, shown: &Shown) -> Result<Catalog, DbError> {
+        let matched = if shown.narrows_catalog() {
+            shown.matched_databases(&self.databases()?, Engine::ClickHouse)
+        } else {
+            None
+        };
+        let names = matched.as_ref().map(|(names, _)| names.as_slice());
+        let left_out = matched.as_ref().map_or(0, |(_, left_out)| *left_out);
+        if names.is_some_and(<[String]>::is_empty) {
+            return Ok(Catalog {
+                left_out,
+                ..Catalog::default()
+            });
+        }
+        let relations = self.internal_query(&relations_sql(names))?;
+        Ok(Catalog {
+            left_out,
+            ..assemble_catalog(relations, QueryResult::default())?
+        })
     }
 
     pub fn databases(&self) -> Result<Databases, DbError> {
@@ -1660,6 +1695,85 @@ mod tests {
     use std::net::TcpListener;
     use std::time::Duration;
 
+    const BEFORE_RELATIONS: &str = r#"
+SELECT
+    database AS schema_name,
+    name AS relation_name,
+    multiIf(
+        engine IN ('View', 'LiveView', 'WindowView'), 'view',
+        engine = 'MaterializedView', 'materialized_view',
+        engine = 'Dictionary', 'dictionary',
+        engine IN ('MySQL', 'PostgreSQL', 'MongoDB', 'S3', 'S3Queue', 'URL', 'HDFS', 'Kafka',
+                   'RabbitMQ', 'NATS', 'JDBC', 'ODBC', 'Hudi', 'Redis', 'AzureBlobStorage')
+            OR startsWith(engine, 'Iceberg') OR startsWith(engine, 'DeltaLake'), 'foreign_table',
+        'table'
+    ) AS relation_kind,
+    total_bytes AS size_bytes,
+    total_rows AS row_estimate
+FROM system.tables
+WHERE database NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema')
+    AND NOT is_temporary
+    AND NOT startsWith(name, '.inner')
+ORDER BY database, name"#;
+
+    #[test]
+    fn an_unfiltered_relations_statement_is_byte_identical_and_a_filtered_one_names_only_matched_databases()
+     {
+        assert_eq!(relations_sql(None), BEFORE_RELATIONS);
+        assert!(!relations_sql(None).contains("{only}"));
+
+        let names = ["analytics".to_string(), "o'k".to_string()];
+        let filtered = relations_sql(Some(&names));
+        assert!(
+            filtered.contains("AND database IN ('analytics', 'o''k')"),
+            "{filtered}"
+        );
+        assert!(!filtered.contains("{only}"));
+    }
+
+    /// The filter is matched in Rust against the server's own listing, so only
+    /// a listed name reaches the statement.
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_the_include_list_reads_only_the_listed_databases() {
+        use crate::db::{Include, Levels, Shown};
+
+        let connection = Connection::open(&live::live_config()).expect("connection should open");
+        let user_databases = connection
+            .databases()
+            .expect("databases should list")
+            .names
+            .iter()
+            .filter(|name| !Engine::ClickHouse.is_system_database(name))
+            .count();
+        let shown = |entries: &[&str]| {
+            Include {
+                databases: entries.iter().map(|entry| (*entry).to_string()).collect(),
+                ..Include::default()
+            }
+            .resolve(Levels::DatabaseIsSchema, None, None)
+        };
+        let schema_names = |catalog: &Catalog| {
+            catalog
+                .schemas
+                .iter()
+                .map(|schema| schema.name.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let catalog = connection.catalog(&shown(&["analyt*"])).unwrap();
+        assert_eq!(schema_names(&catalog), ["analytics"]);
+        assert_eq!(catalog.left_out, user_databases - 1);
+
+        let catalog = connection.catalog(&shown(&["no_such*"])).unwrap();
+        assert!(catalog.schemas.is_empty());
+        assert_eq!(catalog.left_out, user_databases);
+
+        let all = connection.catalog(&Shown::everything()).unwrap();
+        let all = schema_names(&all);
+        assert!(all.contains(&"analytics".to_string()), "{all:?}");
+        assert!(all.contains(&"dbdelve_dev".to_string()), "{all:?}");
+    }
     const FACTS_COLUMNS: [(&str, &str); 4] = [
         ("version", "String"),
         ("name", "String"),
@@ -3876,13 +3990,13 @@ mod tests {
 #[cfg(test)]
 mod live {
     use super::*;
-    use crate::db::{Column, ConnectionConfig, Engine, ExplainMode, IndexKind, is_cancel};
+    use crate::db::{Column, ConnectionConfig, Engine, ExplainMode, IndexKind, Shown, is_cancel};
     use crate::explorer::{drop_sql, select_top_sql, truncate_sql};
     use crate::export::{RowsAs, render_rows_as};
     use crate::filter::{Operator, filter_predicate};
     use crate::sql::{Mode, Stop, classify, gate};
 
-    fn live_config() -> ServerConfig {
+    pub(super) fn live_config() -> ServerConfig {
         let url =
             std::env::var("dbdelve_CLICKHOUSE_URL").expect("dbdelve_CLICKHOUSE_URL is required");
         crate::db::server_from_url(&url, "ClickHouse").expect("dbdelve_CLICKHOUSE_URL should parse")
@@ -4846,7 +4960,9 @@ mod live {
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
     fn live_every_seeded_kind_lands_right_and_the_system_databases_stay_out() {
-        let catalog = live_any(live_config()).catalog().unwrap();
+        let catalog = live_any(live_config())
+            .catalog(&crate::db::Shown::everything())
+            .unwrap();
         let seeded = kinds_of(&catalog, "dbdelve_dev");
         let kind = |name: &str| {
             seeded
@@ -4880,7 +4996,7 @@ mod live {
     #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
     fn live_the_servers_own_row_and_byte_counts_ride_on_the_catalog() {
         let connection = live_any(live_config());
-        let catalog = connection.catalog().unwrap();
+        let catalog = connection.catalog(&crate::db::Shown::everything()).unwrap();
         let relation = |name: &str| {
             catalog
                 .schemas
@@ -4894,8 +5010,19 @@ mod live {
         assert_eq!(relation("accounts").rows, Some(50));
         assert_eq!(relation("active_accounts").rows, None);
         assert_eq!(relation("active_accounts").size, None);
-        assert!(connection.sizes().unwrap().is_empty());
-        assert!(connection.routines().unwrap().schemas.is_empty());
+        assert!(
+            connection
+                .sizes(&crate::db::Shown::everything())
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            connection
+                .routines(&crate::db::Shown::everything())
+                .unwrap()
+                .schemas
+                .is_empty()
+        );
     }
 
     #[test]
@@ -4914,7 +5041,7 @@ mod live {
             &connection,
             "SELECT count() FROM system.tables WHERE startsWith(name, '.inner')",
         ));
-        let catalog = live_any(live_config()).catalog();
+        let catalog = live_any(live_config()).catalog(&crate::db::Shown::everything());
         ran(&connection, &format!("DROP VIEW `{view}`"));
         let listed = kinds_of(&catalog.unwrap(), "dbdelve_dev");
         assert!(inner.parse::<u32>().unwrap() > 0, "no .inner table to hide");
@@ -4934,7 +5061,7 @@ mod live {
     #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
     fn live_the_databases_list_flags_the_one_connected_to() {
         let databases = live_any(live_config())
-            .databases(Engine::ClickHouse)
+            .databases(Engine::ClickHouse, &Shown::everything())
             .unwrap();
         assert_eq!(databases.current.as_deref(), Some("dbdelve_dev"));
         assert!(databases.names.iter().any(|name| name == "analytics"));

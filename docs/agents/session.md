@@ -84,6 +84,19 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   (`Profile::sessions_to_hold`, `Bound::holds`, `set_mode`); all of them end
   with the connection they were opened from (`Profile::drop_sessions`). The
   agent keeps its own lanes and reaches none of them.
+- **A profile keeps one include list per filtered level** (`Profile::include`,
+  `db::Include`; `include_databases` and `include_schemas` in `profiles.toml`,
+  each left out when empty). An entry is an exact name or a `*`/`?` glob,
+  matched in Rust ignoring case (`db::include::matches`) and never sent as
+  `LIKE`; empty means everything. `Target::levels` says which list a target
+  uses, and a list its level does not use is kept and ignored. The
+  connection's own database and active schema always show. The lists sit
+  outside `ConnectionConfig`, so changing them never reconnects. A list is
+  narrowed where each answer is read (`Connection::databases(.., &Shown)`),
+  so nothing stores an unnarrowed answer, and a database it hides is neither
+  drawn nor opened. `Databases::left_out` carries how many it hid, which
+  `SidebarTree::totals` turns into the connection row's `1 of 2` while no
+  search text is typed.
 - **New Query Here opens a tab bound to a database** (`QueryTab::binding`,
   `session::Binding`), from the connections tree's menu. A database row binds
   that database; a schema row binds by its connection's levels

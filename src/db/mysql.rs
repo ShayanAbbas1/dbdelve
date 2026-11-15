@@ -31,10 +31,10 @@ use super::tunnel::{Tunnel, tunnelled};
 use super::{
     ApplyOutcome, ApplyStage, Catalog, Column, DbError, EditTarget, Engine, Fetch, GraphCancel,
     Index, IndexKind, QueryResult, Reference, RowBuilder, RowMatch, Schema, SchemaGraph, Sending,
-    ServerConfig, Sizes, SslMode, StepKind, Stopped, Structure, VerifiedStep, assemble_catalog,
-    assemble_databases, assemble_foreign_keys, assemble_references, assemble_schema_graph,
-    assemble_sequences, assemble_sizes, assemble_structure, non_utf8_error, optional_cell,
-    plain_error, required_cell,
+    ServerConfig, Shown, Sizes, SslMode, StepKind, Stopped, Structure, VerifiedStep,
+    assemble_catalog, assemble_databases, assemble_foreign_keys, assemble_references,
+    assemble_schema_graph, assemble_sequences, assemble_sizes, assemble_structure, non_utf8_error,
+    optional_cell, plain_error, required_cell,
 };
 
 /// Without this the driver waits out the OS SYN retry budget, so a host that
@@ -96,7 +96,7 @@ SELECT TABLE_SCHEMA AS schema_name,
            WHEN TABLE_TYPE IN {views} THEN 'view'
        END AS relation_kind
 FROM information_schema.TABLES
-WHERE (TABLE_SCHEMA NOT IN {system} OR TABLE_SCHEMA = DATABASE())
+WHERE (TABLE_SCHEMA NOT IN {system} OR TABLE_SCHEMA = DATABASE()){only}
   AND (TABLE_TYPE IN {tables} OR TABLE_TYPE IN {views})
 ORDER BY TABLE_SCHEMA, TABLE_NAME
 ";
@@ -111,7 +111,7 @@ SELECT TABLE_SCHEMA AS schema_name,
        DATA_LENGTH + INDEX_LENGTH AS size_bytes,
        TABLE_ROWS AS row_estimate
 FROM information_schema.TABLES
-WHERE (TABLE_SCHEMA NOT IN {system} OR TABLE_SCHEMA = DATABASE())
+WHERE (TABLE_SCHEMA NOT IN {system} OR TABLE_SCHEMA = DATABASE()){only}
   AND TABLE_TYPE IN {stored}
 ";
 
@@ -142,7 +142,7 @@ SELECT routine.ROUTINE_SCHEMA AS schema_name,
        LOWER(COALESCE(routine.ROUTINE_BODY, '')) AS language,
        COALESCE(routine.ROUTINE_DEFINITION, '') AS definition
 FROM information_schema.ROUTINES AS routine
-WHERE (routine.ROUTINE_SCHEMA NOT IN {system} OR routine.ROUTINE_SCHEMA = DATABASE())
+WHERE (routine.ROUTINE_SCHEMA NOT IN {system} OR routine.ROUTINE_SCHEMA = DATABASE()){only}
   AND routine.ROUTINE_TYPE IN ('FUNCTION', 'PROCEDURE')
 ORDER BY routine.ROUTINE_SCHEMA, routine.ROUTINE_NAME
 ";
@@ -154,9 +154,53 @@ SELECT TABLE_SCHEMA AS schema_name,
        TABLE_NAME AS sequence_name
 FROM information_schema.TABLES
 WHERE TABLE_TYPE = 'SEQUENCE'
-  AND TABLE_SCHEMA NOT IN {system}
+  AND TABLE_SCHEMA NOT IN {system}{only}
 ORDER BY 1, 2
 ";
+
+/// ` AND column IN (...)` over the server-listed names a filter matched, on a
+/// line of its own, or nothing when no filter narrows the read. Every name is
+/// quoted by the engine, so none can end the literal; the pattern a person
+/// typed never gets here. Never called with an empty slice, for `IN ()` is a
+/// syntax error on both servers.
+fn only_clause(engine: Engine, column: &str, names: Option<&[String]>) -> String {
+    let Some(names) = names else {
+        return String::new();
+    };
+    let quoted = names
+        .iter()
+        .map(|name| engine.quote_literal(name))
+        .collect::<Vec<_>>();
+    format!("\n  AND {column} IN ({})", quoted.join(", "))
+}
+
+fn relations_sql(engine: Engine, names: Option<&[String]>) -> String {
+    RELATIONS_SQL
+        .replace("{system}", SYSTEM_SCHEMAS)
+        .replace("{tables}", TABLES)
+        .replace("{views}", VIEWS)
+        .replace("{only}", &only_clause(engine, "TABLE_SCHEMA", names))
+}
+
+fn sizes_sql(engine: Engine, names: Option<&[String]>) -> String {
+    SIZES_SQL
+        .replace("{system}", SYSTEM_SCHEMAS)
+        .replace("{stored}", STORED_TABLES)
+        .replace("{only}", &only_clause(engine, "TABLE_SCHEMA", names))
+}
+
+fn routines_sql(engine: Engine, names: Option<&[String]>) -> String {
+    ROUTINES_SQL.replace("{system}", SYSTEM_SCHEMAS).replace(
+        "{only}",
+        &only_clause(engine, "routine.ROUTINE_SCHEMA", names),
+    )
+}
+
+fn sequences_sql(engine: Engine, names: Option<&[String]>) -> String {
+    SEQUENCES_SQL
+        .replace("{system}", SYSTEM_SCHEMAS)
+        .replace("{only}", &only_clause(engine, "TABLE_SCHEMA", names))
+}
 
 // The four structure queries name one relation, so they carry `{schema}` and
 // `{relation}` placeholders substituted by `structure_sql`.
@@ -1212,17 +1256,34 @@ impl Connection {
         assemble_databases(&self.internal_query(DATABASES_SQL)?)
     }
 
-    pub fn catalog(&self) -> Result<Catalog, DbError> {
-        let relations = self.internal_query(
-            &RELATIONS_SQL
-                .replace("{system}", SYSTEM_SCHEMAS)
-                .replace("{tables}", TABLES)
-                .replace("{views}", VIEWS),
-        )?;
+    /// The server's databases the filter matches, and how many it left out, or
+    /// `None` for a read that is not narrowed. Listed here, in the read's own
+    /// closure, so the statement it feeds carries only names the server just
+    /// gave.
+    fn matched(&self, shown: &Shown) -> Result<Option<(Vec<String>, usize)>, DbError> {
+        if !shown.narrows_catalog() {
+            return Ok(None);
+        }
+        Ok(shown.matched_databases(&self.databases()?, self.engine))
+    }
+
+    pub fn catalog(&self, shown: &Shown) -> Result<Catalog, DbError> {
+        let matched = self.matched(shown)?;
+        let names = matched.as_ref().map(|(names, _)| names.as_slice());
+        let left_out = matched.as_ref().map_or(0, |(_, left_out)| *left_out);
+        if names.is_some_and(<[String]>::is_empty) {
+            return Ok(Catalog {
+                left_out,
+                ..Catalog::default()
+            });
+        }
+        let relations = self.internal_query(&relations_sql(self.engine, names))?;
         let mut catalog = assemble_catalog(relations, QueryResult::default())?;
         let schemas = self.internal_query(&SCHEMAS_SQL.replace("{system}", SYSTEM_SCHEMAS))?;
         for name in column_of(&schemas, "schema_name")? {
-            if !catalog.schemas.iter().any(|schema| schema.name == name) {
+            // An empty database the filter left out stays out, as its tables do.
+            let hidden = names.is_some_and(|names| !names.contains(&name));
+            if !hidden && !catalog.schemas.iter().any(|schema| schema.name == name) {
                 catalog.schemas.push(Schema {
                     name,
                     relations: Vec::new(),
@@ -1231,21 +1292,32 @@ impl Connection {
                 });
             }
         }
+        catalog.left_out = left_out;
         Ok(catalog)
     }
 
-    pub fn routines(&self) -> Result<Catalog, DbError> {
-        let routines = self.internal_query(&ROUTINES_SQL.replace("{system}", SYSTEM_SCHEMAS))?;
+    pub fn routines(&self, shown: &Shown) -> Result<Catalog, DbError> {
+        let matched = self.matched(shown)?;
+        let names = matched.as_ref().map(|(names, _)| names.as_slice());
+        if names.is_some_and(<[String]>::is_empty) {
+            return Ok(Catalog::default());
+        }
+        let routines = self.internal_query(&routines_sql(self.engine, names))?;
         assemble_catalog(QueryResult::default(), routines)
     }
 
     /// MariaDB's only: MySQL has no sequences, and a MariaDB before 10.3 answers
     /// the filter with no rows, so there is no version probe.
-    pub fn sequences(&self) -> Result<Catalog, DbError> {
+    pub fn sequences(&self, shown: &Shown) -> Result<Catalog, DbError> {
         if self.engine != Engine::MariaDb {
             return Ok(Catalog::default());
         }
-        let sequences = self.internal_query(&SEQUENCES_SQL.replace("{system}", SYSTEM_SCHEMAS))?;
+        let matched = self.matched(shown)?;
+        let names = matched.as_ref().map(|(names, _)| names.as_slice());
+        if names.is_some_and(<[String]>::is_empty) {
+            return Ok(Catalog::default());
+        }
+        let sequences = self.internal_query(&sequences_sql(self.engine, names))?;
         assemble_sequences(sequences)
     }
 
@@ -1261,7 +1333,12 @@ impl Connection {
     /// On a connection of its own, as [`Self::cancel`] is, so opening every
     /// table for its statistics never holds the mutex a user's query waits on.
     /// The side connection is dropped on return.
-    pub fn sizes(&self) -> Result<Sizes, DbError> {
+    pub fn sizes(&self, shown: &Shown) -> Result<Sizes, DbError> {
+        let matched = self.matched(shown)?;
+        let names = matched.as_ref().map(|(names, _)| names.as_slice());
+        if names.is_some_and(<[String]>::is_empty) {
+            return Ok(Sizes::new());
+        }
         let connection = connect(&self.server, self.engine, self.dial()?)?;
         let side = Self {
             connection_id: connection.connection_id(),
@@ -1273,13 +1350,7 @@ impl Connection {
             side: Arc::default(),
             graph: GraphCancel::default(),
         };
-        assemble_sizes(
-            side.internal_query(
-                &SIZES_SQL
-                    .replace("{system}", SYSTEM_SCHEMAS)
-                    .replace("{stored}", STORED_TABLES),
-            )?,
-        )
+        assemble_sizes(side.internal_query(&sizes_sql(self.engine, names))?)
     }
 
     pub fn references(&self, schema: &str, relation: &str) -> Result<Vec<Reference>, DbError> {
@@ -2158,6 +2229,213 @@ mod tests {
             .collect()
     }
 
+    const BEFORE_RELATIONS: &str = r#"
+SELECT TABLE_SCHEMA AS schema_name,
+       TABLE_NAME AS relation_name,
+       CASE
+           WHEN TABLE_TYPE IN ('BASE TABLE', 'SYSTEM VERSIONED') THEN 'table'
+           WHEN TABLE_TYPE IN ('VIEW', 'SYSTEM VIEW') THEN 'view'
+       END AS relation_kind
+FROM information_schema.TABLES
+WHERE (TABLE_SCHEMA NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys') OR TABLE_SCHEMA = DATABASE())
+  AND (TABLE_TYPE IN ('BASE TABLE', 'SYSTEM VERSIONED') OR TABLE_TYPE IN ('VIEW', 'SYSTEM VIEW'))
+ORDER BY TABLE_SCHEMA, TABLE_NAME
+"#;
+
+    const BEFORE_SIZES: &str = r#"
+SELECT TABLE_SCHEMA AS schema_name,
+       TABLE_NAME AS relation_name,
+       DATA_LENGTH + INDEX_LENGTH AS size_bytes,
+       TABLE_ROWS AS row_estimate
+FROM information_schema.TABLES
+WHERE (TABLE_SCHEMA NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys') OR TABLE_SCHEMA = DATABASE())
+  AND TABLE_TYPE IN ('BASE TABLE', 'SYSTEM VERSIONED')
+"#;
+
+    const BEFORE_ROUTINES: &str = r#"
+SELECT routine.ROUTINE_SCHEMA AS schema_name,
+       routine.ROUTINE_NAME AS routine_name,
+       CASE routine.ROUTINE_TYPE
+           WHEN 'FUNCTION' THEN 'function'
+           WHEN 'PROCEDURE' THEN 'procedure'
+       END AS routine_kind,
+       COALESCE((
+           SELECT GROUP_CONCAT(
+                      CONCAT_WS(' ', parameter.PARAMETER_NAME, parameter.DTD_IDENTIFIER)
+                      ORDER BY parameter.ORDINAL_POSITION
+                      SEPARATOR ', '
+                  )
+           FROM information_schema.PARAMETERS AS parameter
+           WHERE parameter.SPECIFIC_SCHEMA = routine.ROUTINE_SCHEMA
+             AND parameter.SPECIFIC_NAME = routine.SPECIFIC_NAME
+             -- Position zero is a function's return value, not an argument.
+             AND parameter.ORDINAL_POSITION > 0
+       ), '') AS identity_arguments,
+       COALESCE(routine.DTD_IDENTIFIER, '') AS result_type,
+       LOWER(COALESCE(routine.ROUTINE_BODY, '')) AS language,
+       COALESCE(routine.ROUTINE_DEFINITION, '') AS definition
+FROM information_schema.ROUTINES AS routine
+WHERE (routine.ROUTINE_SCHEMA NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys') OR routine.ROUTINE_SCHEMA = DATABASE())
+  AND routine.ROUTINE_TYPE IN ('FUNCTION', 'PROCEDURE')
+ORDER BY routine.ROUTINE_SCHEMA, routine.ROUTINE_NAME
+"#;
+
+    const BEFORE_SEQUENCES: &str = r#"
+SELECT TABLE_SCHEMA AS schema_name,
+       TABLE_NAME AS sequence_name
+FROM information_schema.TABLES
+WHERE TABLE_TYPE = 'SEQUENCE'
+  AND TABLE_SCHEMA NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')
+ORDER BY 1, 2
+"#;
+
+    #[test]
+    fn an_unfiltered_catalog_statement_is_byte_identical_to_the_one_before_the_filter() {
+        for engine in [Engine::MySql, Engine::MariaDb] {
+            assert_eq!(relations_sql(engine, None), BEFORE_RELATIONS);
+            assert_eq!(sizes_sql(engine, None), BEFORE_SIZES);
+            assert_eq!(routines_sql(engine, None), BEFORE_ROUTINES);
+            assert_eq!(sequences_sql(engine, None), BEFORE_SEQUENCES);
+            for sql in [
+                relations_sql(engine, None),
+                sizes_sql(engine, None),
+                routines_sql(engine, None),
+                sequences_sql(engine, None),
+            ] {
+                assert!(!sql.contains("{only}"));
+            }
+        }
+    }
+
+    #[test]
+    fn only_the_matched_names_reach_the_statement_quoted_by_the_engine() {
+        let names = ["a'b".to_string(), "c\\d".to_string()];
+        let relations = relations_sql(Engine::MySql, Some(&names));
+        assert!(
+            relations.contains("AND TABLE_SCHEMA IN ('a''b', 'c\\\\d')"),
+            "{relations}"
+        );
+        assert!(
+            routines_sql(Engine::MySql, Some(&names)).contains("AND routine.ROUTINE_SCHEMA IN ("),
+        );
+        assert!(sizes_sql(Engine::MariaDb, Some(&names)).contains("AND TABLE_SCHEMA IN ("));
+        assert!(sequences_sql(Engine::MariaDb, Some(&names)).contains("AND TABLE_SCHEMA IN ("));
+
+        let matched = ["dbdelve_archive".to_string()];
+        for sql in [
+            relations_sql(Engine::MySql, Some(&matched)),
+            sizes_sql(Engine::MySql, Some(&matched)),
+            routines_sql(Engine::MySql, Some(&matched)),
+            sequences_sql(Engine::MariaDb, Some(&matched)),
+        ] {
+            assert!(sql.contains("'dbdelve_archive'"), "{sql}");
+            assert!(!sql.contains("dbdelve_arch*"), "{sql}");
+            assert!(!sql.contains("{only}"), "{sql}");
+        }
+    }
+
+    #[test]
+    fn the_in_list_keeps_the_server_order_and_each_listed_spelling_once() {
+        let names = ["Zed".to_string(), "Ab".to_string(), "ab".to_string()];
+        assert!(
+            relations_sql(Engine::MySql, Some(&names)).contains("IN ('Zed', 'Ab', 'ab')"),
+            "case-sensitive servers keep both spellings"
+        );
+    }
+
+    /// One test over both servers: the filter is matched in Rust against the
+    /// server's own listing, so only a listed name reaches a statement, and a
+    /// match of nothing sends none (an empty `IN ()` is error 1064).
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_the_include_list_reads_only_the_listed_databases() {
+        use crate::db::{Include, Levels};
+
+        for engine in [Engine::MySql, Engine::MariaDb] {
+            let connection = live(engine);
+            let listed = connection.databases().expect("databases should list");
+            let user_databases = listed
+                .names
+                .iter()
+                .filter(|name| !engine.is_system_database(name))
+                .count();
+            let shown = |entries: &[&str]| {
+                Include {
+                    databases: entries.iter().map(|entry| (*entry).to_string()).collect(),
+                    ..Include::default()
+                }
+                .resolve(Levels::DatabaseIsSchema, None, None)
+            };
+
+            let archive = shown(&["dbdelve_arch*"]);
+            let catalog = connection.catalog(&archive).expect("catalog should load");
+            let schema_names = catalog
+                .schemas
+                .iter()
+                .map(|schema| schema.name.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(schema_names, ["dbdelve_archive"], "{engine:?}");
+            assert_eq!(catalog.left_out, user_databases - 1, "{engine:?}");
+            let routines = connection.routines(&archive).expect("routines should load");
+            assert!(
+                routines
+                    .schemas
+                    .iter()
+                    .all(|schema| schema.name == "dbdelve_archive"),
+                "{engine:?}"
+            );
+            let sequences = connection
+                .sequences(&archive)
+                .expect("sequences should load");
+            assert!(
+                sequences
+                    .schemas
+                    .iter()
+                    .all(|schema| schema.name == "dbdelve_archive"),
+                "{engine:?}"
+            );
+            let sizes = connection.sizes(&archive).expect("sizes should load");
+            assert!(
+                sizes.keys().all(|schema| schema == "dbdelve_archive"),
+                "{engine:?}: {:?}",
+                sizes.keys().collect::<Vec<_>>()
+            );
+            assert!(!sizes.is_empty(), "{engine:?}");
+
+            let nothing = shown(&["no_such*"]);
+            let catalog = connection
+                .catalog(&nothing)
+                .expect("a match of nothing is an empty catalog, not error 1064");
+            assert!(catalog.schemas.is_empty(), "{engine:?}");
+            assert_eq!(catalog.left_out, user_databases, "{engine:?}");
+            assert!(
+                connection
+                    .routines(&nothing)
+                    .expect("no routines statement is sent")
+                    .schemas
+                    .is_empty()
+            );
+            assert!(
+                connection
+                    .sizes(&nothing)
+                    .expect("no sizes statement is sent")
+                    .is_empty()
+            );
+
+            let all = connection
+                .catalog(&Shown::everything())
+                .expect("catalog should load");
+            let all_names = all
+                .schemas
+                .iter()
+                .map(|schema| schema.name.as_str())
+                .collect::<Vec<_>>();
+            assert!(all_names.contains(&"dbdelve_dev"), "{engine:?}");
+            assert!(all_names.contains(&"dbdelve_archive"), "{engine:?}");
+            assert_eq!(all.left_out, 0, "{engine:?}");
+        }
+    }
+
     fn probed(columns: &[(Option<&str>, Option<&str>)]) -> Vec<ProbedColumn> {
         columns
             .iter()
@@ -2864,7 +3142,9 @@ mod tests {
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(500));
             assert!(
-                canceller.sizes().expect("sizes should load")["dbdelve_dev"]
+                canceller
+                    .sizes(&Shown::everything())
+                    .expect("sizes should load")["dbdelve_dev"]
                     .contains_key("accounts")
             );
             canceller.cancel().expect("the KILL QUERY should send");
@@ -3372,8 +3652,14 @@ mod tests {
 
     fn live_catalog_round_trip(engine: Engine) {
         let connection = live(engine);
-        let mut catalog = connection.catalog().expect("catalog should load");
-        catalog.merge(connection.routines().expect("routines should load"));
+        let mut catalog = connection
+            .catalog(&Shown::everything())
+            .expect("catalog should load");
+        catalog.merge(
+            connection
+                .routines(&Shown::everything())
+                .expect("routines should load"),
+        );
         let schema = catalog
             .schemas
             .iter()
@@ -3411,7 +3697,9 @@ mod tests {
                 .any(|schema| schema.name == "mysql" || schema.name == "sys")
         );
 
-        let sizes = connection.sizes().expect("sizes should load");
+        let sizes = connection
+            .sizes(&Shown::everything())
+            .expect("sizes should load");
         assert!(sizes["dbdelve_dev"].contains_key("accounts"));
         assert!(!sizes["dbdelve_dev"].contains_key("account_overview"));
         catalog.set_sizes(&sizes);
@@ -3438,7 +3726,9 @@ mod tests {
             engine,
         )
         .expect("connection should open");
-        let catalog = connection.catalog().expect("catalog should load");
+        let catalog = connection
+            .catalog(&Shown::everything())
+            .expect("catalog should load");
         let names = catalog
             .schemas
             .iter()
@@ -3462,7 +3752,9 @@ mod tests {
     }
 
     fn live_an_empty_database_is_listed(engine: Engine) {
-        let catalog = live(engine).catalog().expect("catalog should load");
+        let catalog = live(engine)
+            .catalog(&Shown::everything())
+            .expect("catalog should load");
         let empty = catalog
             .schemas
             .iter()
@@ -3486,9 +3778,9 @@ mod tests {
                 Fetch::default(),
             )
             .expect("the fixtures should create");
-        let catalog = connection.catalog();
-        let sequences = connection.sequences();
-        let sizes = connection.sizes();
+        let catalog = connection.catalog(&Shown::everything());
+        let sequences = connection.sequences(&Shown::everything());
+        let sizes = connection.sizes(&Shown::everything());
         let versioned = connection.query("SELECT * FROM dbdelve_test_versioned", Fetch::default());
         let sequence = connection.query("SELECT * FROM dbdelve_test_sequence", Fetch::default());
         connection
@@ -4020,7 +4312,7 @@ mod tests {
             .expect("the probe sequence should be created");
 
         let second = super::super::Connection::MySql(live(Engine::MariaDb))
-            .routines()
+            .routines(&crate::db::Shown::everything())
             .expect("the second half should read");
         let listed: Vec<_> = second
             .schemas
@@ -4084,7 +4376,7 @@ mod tests {
     fn live_mysql_lists_no_sequence_and_sends_no_sequence_statement() {
         let connection = live(Engine::MySql);
         let second = super::super::Connection::MySql(live(Engine::MySql))
-            .routines()
+            .routines(&crate::db::Shown::everything())
             .expect("the second half should read");
         assert!(
             second
@@ -4103,7 +4395,7 @@ mod tests {
         );
         assert!(connection.is_lost());
         let catalog = connection
-            .sequences()
+            .sequences(&Shown::everything())
             .expect("a MySQL connection sends no sequence statement");
         assert!(catalog.schemas.is_empty());
     }

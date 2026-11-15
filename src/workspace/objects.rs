@@ -2926,6 +2926,7 @@ mod tests {
                     sequences: Vec::new(),
                 }],
                 database: None,
+                ..Default::default()
             },
             routines,
         )
