@@ -2242,6 +2242,11 @@ impl ResultGrid {
         if self.unconfirmed || !self.editable(row, col) {
             return false;
         }
+        if self.binary_seed_returned(row, col, &value) {
+            self.pending
+                .retain(|edit| (edit.row, edit.col) != (row, col));
+            return true;
+        }
         let Ok(value) = self.staged(row, col, value) else {
             return false;
         };
@@ -2332,7 +2337,7 @@ impl ResultGrid {
         col: usize,
         value: &NewValue,
     ) -> Option<&'static str> {
-        if !self.editable(row, col) {
+        if !self.editable(row, col) || self.binary_seed_returned(row, col, value) {
             return None;
         }
         self.staged(row, col, value.clone()).err()
@@ -2523,14 +2528,28 @@ impl ResultGrid {
             Some(NewValue::Value(value)) => Cow::Borrowed(value),
             Some(NewValue::Bytes(bytes)) => Cow::Owned(self.bytes_text(col, bytes)),
             Some(NewValue::Null | NewValue::Default) => Cow::Borrowed(""),
-            None => {
-                let value = self.cell(row, col).unwrap_or_default();
-                self.parsed_as(col)
-                    .filter(|_| self.holds_binary(row, col))
-                    .and_then(|form| form.show(&self.engine.bytes_of(value, usize::MAX)?, false))
-                    .map_or(Cow::Borrowed(value), Cow::Owned)
-            }
+            None => self.fetched_seed(row, col),
         }
+    }
+
+    /// [`Self::edit_seed`] of the value as fetched.
+    fn fetched_seed(&self, row: usize, col: usize) -> Cow<'_, str> {
+        let value = self.cell(row, col).unwrap_or_default();
+        self.parsed_as(col)
+            .filter(|_| self.holds_binary(row, col))
+            .and_then(|form| form.show(&self.engine.bytes_of(value, usize::MAX)?, false))
+            .map_or(Cow::Borrowed(value), Cow::Owned)
+    }
+
+    /// Text a binary cell's input was seeded with as fetched, typed back.
+    /// Compared before the form reads it: a value that is not bytes (text
+    /// in a SQLite blob column) seeds as itself, and could read as bytes
+    /// it never held.
+    fn binary_seed_returned(&self, row: usize, col: usize, value: &NewValue) -> bool {
+        matches!(value, NewValue::Value(text)
+            if self.holds_binary(row, col)
+                && self.cell(row, col).is_some()
+                && text.as_ref() == self.fetched_seed(row, col))
     }
 
     /// A cell's whole value as the row panel copies it: the staged one where
@@ -5151,6 +5170,26 @@ mod tests {
             Mode::ReadWrite,
         )
         .with_target(db::Target::built_in(engine))
+    }
+
+    #[test]
+    fn a_binary_cell_committed_as_it_was_seeded_is_no_edit_even_when_not_bytes() {
+        // SQLite keeps text in a blob column; `6869` would read as hex `hi`.
+        let mut grid = bytes_grid(db::Engine::Sqlite, "blob", &["6869", "x'6869'"], vec![0]);
+        grid.set_binary_form(1, BinaryForm::Text);
+        assert!(!grid.editable(0, 1));
+        for form in [BinaryForm::Hex, BinaryForm::Base64] {
+            grid.set_binary_form(1, form);
+            assert!(grid.set_pending(0, 1, value("4142")));
+            let seed = grid.fetched_seed(0, 1).into_owned();
+            assert_eq!(seed, "6869", "{form:?}");
+            assert_eq!(grid.staging_refusal(0, 1, &value(&seed)), None);
+            assert!(grid.set_pending(0, 1, value(&seed)), "{form:?}");
+            assert!(!grid.has_pending(), "{form:?}");
+        }
+        grid.set_binary_form(1, BinaryForm::Base64);
+        assert!(grid.set_pending(1, 1, value("aGk=")));
+        assert!(!grid.has_pending());
     }
 
     #[test]
