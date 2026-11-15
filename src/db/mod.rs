@@ -1815,17 +1815,38 @@ impl Connection {
         }
     }
 
-    /// The stored functions and procedures, as a catalog holding nothing else,
-    /// for [`Catalog::merge`] to fold into the one already on screen.
+    /// The stored functions and procedures, and the sequences of an engine
+    /// that lists them, as a catalog holding nothing else, for
+    /// [`Catalog::merge`] to fold into the one already on screen.
     pub fn routines(&self) -> Result<Catalog, DbError> {
         match self {
-            Self::Postgres(connection) => connection.routines(),
-            Self::MySql(connection) => connection.routines(),
-            Self::SqlServer(connection) => connection.routines(),
+            Self::Postgres(connection) => {
+                with_sequences(Engine::Postgres, connection.routines(), || {
+                    connection.sequences()
+                })
+            }
+            Self::MySql(connection) => {
+                with_sequences(connection.engine(), connection.routines(), || {
+                    connection.sequences()
+                })
+            }
+            Self::SqlServer(connection) => {
+                with_sequences(Engine::SqlServer, connection.routines(), || {
+                    connection.sequences()
+                })
+            }
             Self::Sqlite(connection) => connection.routines(),
             Self::Turso(connection) => connection.routines(),
-            Self::DuckDb(connection) => connection.routines(),
-            Self::Snowflake(connection) => connection.routines(),
+            Self::DuckDb(connection) => {
+                with_sequences(Engine::DuckDb, connection.routines(), || {
+                    connection.sequences()
+                })
+            }
+            Self::Snowflake(connection) => {
+                with_sequences(Engine::Snowflake, connection.routines(), || {
+                    connection.sequences()
+                })
+            }
             Self::ClickHouse(_) => Ok(Catalog::default()),
             Self::MongoDb(connection) => connection.routines(),
             Self::Redis(_) | Self::External(_) => Ok(Catalog::default()),
@@ -2474,6 +2495,9 @@ pub struct Schema {
     pub name: String,
     pub relations: Vec<Relation>,
     pub routines: Vec<Routine>,
+    /// Names only, in the server's order. Read in the catalog's second half
+    /// with the routines, so [`Connection::catalog`] never carries any.
+    pub sequences: Vec<String>,
 }
 
 /// What a connection did with a picked database or schema that was not there
@@ -2523,8 +2547,9 @@ pub struct Catalog {
 }
 
 impl Catalog {
-    /// Fold a later half into this one: the routines of a schema already here
-    /// join it, and a schema that holds only routines is added in its place.
+    /// Fold a later half into this one: the routines and sequences of a schema
+    /// already here join it, and a schema that holds only those is added in its
+    /// place.
     ///
     /// Assembled by name rather than by position, because the two halves are
     /// separate queries and a schema can appear in either alone -- one holding
@@ -2541,7 +2566,26 @@ impl Catalog {
                 .iter_mut()
                 .find(|existing| existing.name == schema.name)
             {
-                Some(existing) => existing.routines = schema.routines,
+                Some(existing) => {
+                    existing.routines = schema.routines;
+                    existing.sequences = schema.sequences;
+                }
+                None => self.schemas.push(schema),
+            }
+        }
+    }
+
+    /// Put each schema's sequences on the schema of that name here, pushing a
+    /// schema it does not hold, so [`Self::merge`] later brings in one that
+    /// holds only sequences.
+    pub fn join_sequences(&mut self, sequences: Self) {
+        for schema in sequences.schemas {
+            match self
+                .schemas
+                .iter_mut()
+                .find(|existing| existing.name == schema.name)
+            {
+                Some(existing) => existing.sequences = schema.sequences,
                 None => self.schemas.push(schema),
             }
         }
@@ -3101,6 +3145,50 @@ impl std::fmt::Display for DbError {
 
 impl std::error::Error for DbError {}
 
+/// The second half of the catalog: the routines, with the sequences joined
+/// in where the engine lists them.
+///
+/// A failed sequence read lists none and keeps the routines. The catalogs that
+/// hold sequences are readable by every role on every engine that lists them,
+/// so what fails is a server that has none (SQL Server before 2012 has no
+/// `sys.sequences`), and an empty list is then the true one.
+fn with_sequences(
+    engine: Engine,
+    routines: Result<Catalog, DbError>,
+    sequences: impl FnOnce() -> Result<Catalog, DbError>,
+) -> Result<Catalog, DbError> {
+    let mut second = routines?;
+    if Target::built_in(engine).abilities().lists_sequences
+        && let Ok(sequences) = sequences()
+    {
+        second.join_sequences(sequences);
+    }
+    Ok(second)
+}
+
+/// Sequence rows, `schema_name` and `sequence_name`, grouped by schema in the
+/// order the server gave them, as a catalog holding nothing else.
+pub(super) fn assemble_sequences(result: QueryResult) -> Result<Catalog, DbError> {
+    let mut schemas = Vec::<Schema>::new();
+    for row in &result.rows {
+        let schema_name = required_cell(&result, row, "schema_name")?;
+        let name = required_cell(&result, row, "sequence_name")?.to_string();
+        match schemas.last_mut() {
+            Some(last) if last.name == schema_name => last.sequences.push(name),
+            _ => schemas.push(Schema {
+                name: schema_name.to_string(),
+                relations: Vec::new(),
+                routines: Vec::new(),
+                sequences: vec![name],
+            }),
+        }
+    }
+    Ok(Catalog {
+        schemas,
+        database: None,
+    })
+}
+
 pub(super) fn assemble_catalog(
     relations: QueryResult,
     routines: QueryResult,
@@ -3355,6 +3443,7 @@ fn schema<'a>(
         name: name.to_string(),
         relations: Vec::new(),
         routines: Vec::new(),
+        sequences: Vec::new(),
     })
 }
 
@@ -4654,6 +4743,108 @@ mod tests {
         assert_eq!(read_only_statement(Engine::Snowflake, false), None);
     }
 
+    #[test]
+    fn merging_the_second_half_brings_its_sequences_with_its_routines() {
+        let mut screen = Catalog {
+            schemas: vec![schema("main", &["t"], &[])],
+            database: None,
+        };
+        let mut second = schema("main", &[], &["f"]);
+        second.sequences = vec!["s".to_string()];
+        screen.merge(Catalog {
+            schemas: vec![second],
+            database: None,
+        });
+
+        let main = &screen.schemas[0];
+        assert_eq!(main.relations.len(), 1);
+        assert_eq!(main.relations[0].name, "t");
+        assert_eq!(main.routines.len(), 1);
+        assert_eq!(main.routines[0].name, "f");
+        assert_eq!(main.sequences, ["s"]);
+    }
+
+    #[test]
+    fn the_sequences_join_the_routines_where_the_engine_lists_them() {
+        let routines = Ok(Catalog {
+            schemas: vec![schema("main", &[], &["f"])],
+            database: None,
+        });
+        let mut read = schema("main", &[], &[]);
+        read.sequences = vec!["a".to_string(), "b".to_string()];
+        let mut other = schema("other", &[], &[]);
+        other.sequences = vec!["n".to_string()];
+        let second = with_sequences(Engine::DuckDb, routines, || {
+            Ok(Catalog {
+                schemas: vec![read, other],
+                database: None,
+            })
+        })
+        .expect("the second half is read");
+
+        assert_eq!(second.schemas[0].routines.len(), 1);
+        assert_eq!(second.schemas[0].sequences, ["a", "b"]);
+        // A schema holding only sequences is pushed, so it can be listed.
+        assert_eq!(second.schemas[1].name, "other");
+        assert_eq!(second.schemas[1].sequences, ["n"]);
+    }
+
+    #[test]
+    fn a_failed_sequence_read_leaves_the_routines() {
+        let routines = Ok(Catalog {
+            schemas: vec![schema("main", &[], &["f"])],
+            database: None,
+        });
+        let second = with_sequences(Engine::DuckDb, routines, || {
+            Err(plain_error("no sequence catalog".to_string()))
+        })
+        .expect("the routines survive a failed sequence read");
+
+        assert_eq!(second.schemas.len(), 1);
+        assert_eq!(second.schemas[0].routines.len(), 1);
+        assert!(second.schemas[0].sequences.is_empty());
+    }
+
+    #[test]
+    fn sequences_are_read_only_where_the_engine_lists_them() {
+        let routines = Ok(Catalog::default());
+        let second = with_sequences(Engine::Sqlite, routines, || {
+            panic!("SQLite has no sequence catalog to read")
+        })
+        .expect("nothing was read");
+        assert!(second.schemas.is_empty());
+    }
+
+    #[test]
+    fn only_the_engines_that_have_sequences_list_them() {
+        let plugin: &'static plugin::Plugin = Box::leak(Box::new(plugin::Plugin {
+            id: "odbc".into(),
+            name: "ODBC".into(),
+            version: "1".into(),
+            executable: "dbdelve-odbc".into(),
+        }));
+        for engine in Engine::ALL {
+            let lists = matches!(
+                engine,
+                Engine::Postgres
+                    | Engine::SqlServer
+                    | Engine::Snowflake
+                    | Engine::DuckDb
+                    | Engine::MariaDb
+            );
+            assert_eq!(
+                Target::built_in(engine).abilities().lists_sequences,
+                lists,
+                "{engine:?}"
+            );
+            let through_a_plugin = Target {
+                engine,
+                driver: Driver::Plugin(plugin),
+            };
+            assert!(!through_a_plugin.abilities().lists_sequences, "{engine:?}");
+        }
+    }
+
     fn schema(name: &str, relations: &[&str], routines: &[&str]) -> Schema {
         Schema {
             name: name.to_string(),
@@ -4678,6 +4869,7 @@ mod tests {
                     definition: String::new(),
                 })
                 .collect(),
+            sequences: Vec::new(),
         }
     }
 

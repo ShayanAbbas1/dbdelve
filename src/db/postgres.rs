@@ -22,8 +22,8 @@ use super::{
     Catalog, Column, DbError, EditTarget, Engine, Feed, Fetch, GraphCancel, QueryResult, Reference,
     RelationKind, Row, RowBuilder, SchemaGraph, ServerConfig, Sizes, Stopped, Structure,
     assemble_catalog, assemble_databases, assemble_foreign_keys, assemble_references,
-    assemble_schema_graph, assemble_sizes, assemble_structure, create_table, non_utf8_error,
-    optional_cell, plain_error, required_cell, terminated,
+    assemble_schema_graph, assemble_sequences, assemble_sizes, assemble_structure, create_table,
+    non_utf8_error, optional_cell, plain_error, required_cell, terminated,
 };
 
 mod pgpass;
@@ -152,6 +152,17 @@ SELECT
     ELSE parent.row_estimate
     END AS row_estimate
 FROM sized AS parent
+";
+
+// The names alone: a sequence's current value is null without USAGE or SELECT
+// on it, and a listing has no use for it.
+const SEQUENCES_SQL: &str = "
+SELECT schemaname AS schema_name,
+       sequencename AS sequence_name
+FROM pg_catalog.pg_sequences
+WHERE schemaname <> 'information_schema'
+    AND schemaname NOT LIKE 'pg\\_%' ESCAPE '\\'
+ORDER BY 1, 2
 ";
 
 const ROUTINES_SQL: &str = "
@@ -1473,6 +1484,10 @@ impl Connection {
         assemble_catalog(QueryResult::default(), self.internal_query(ROUTINES_SQL)?)
     }
 
+    pub fn sequences(&self) -> Result<Catalog, DbError> {
+        assemble_sequences(self.internal_query(SEQUENCES_SQL)?)
+    }
+
     /// On a connection of its own, opened exactly as this one was, so a size
     /// waiting on a relation's lock never holds the mutex a user's query waits
     /// on. The side connection is dropped on return.
@@ -2349,6 +2364,44 @@ mod tests {
             assert!(crate::db::Connection::open(config.clone()).is_err());
         }
         assert_eq!(std::fs::read_to_string(&runs).unwrap(), "svcusersvcuser");
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_sequence_is_listed_in_its_own_kind() {
+        let plain = Connection::open(&live_config()).expect("connection should open");
+        plain
+            .query(
+                "DROP SCHEMA IF EXISTS dbdelve_sequence_probe CASCADE",
+                Fetch::default(),
+            )
+            .expect("an earlier run's schema should drop");
+        plain
+            .query(
+                "CREATE SCHEMA dbdelve_sequence_probe; \
+                 CREATE SEQUENCE dbdelve_sequence_probe.ticket",
+                Fetch::default(),
+            )
+            .expect("the probe sequence should be created");
+
+        let second = super::super::Connection::Postgres(plain)
+            .routines()
+            .expect("the second half should read");
+        let listed: Vec<_> = second
+            .schemas
+            .iter()
+            .filter(|schema| schema.name == "dbdelve_sequence_probe")
+            .map(|schema| schema.sequences.clone())
+            .collect();
+
+        let plain = Connection::open(&live_config()).expect("connection should open");
+        plain
+            .query(
+                "DROP SCHEMA dbdelve_sequence_probe CASCADE",
+                Fetch::default(),
+            )
+            .expect("the probe schema should drop");
+        assert_eq!(listed, vec![vec!["ticket".to_string()]]);
     }
 
     /// Run again in a child process, for the same reason as the password file

@@ -629,6 +629,7 @@ impl Connection {
                     rows,
                 }],
                 routines: Vec::new(),
+                sequences: Vec::new(),
             }],
             database: None,
         })

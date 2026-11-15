@@ -303,6 +303,7 @@ mod tests {
                         rows: None,
                     }],
                     routines: Vec::new(),
+                    sequences: Vec::new(),
                 }],
                 database: None,
             },

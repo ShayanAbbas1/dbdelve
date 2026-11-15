@@ -39,8 +39,8 @@ use crate::sql::Projected;
 use super::{
     Catalog, Column, Databases, DbError, EditTarget, Engine, Fetch, QueryResult, Reference,
     RowBuilder, SchemaGraph, Stopped, Structure, Unpicked, assemble_catalog, assemble_foreign_keys,
-    assemble_references, assemble_schema_graph, assemble_structure, plain_error, required_cell,
-    terminated,
+    assemble_references, assemble_schema_graph, assemble_sequences, assemble_structure,
+    plain_error, required_cell, terminated,
 };
 
 // Workaround for duckdb-rs#920, fixed upstream by #923 but unreleased past
@@ -402,6 +402,19 @@ impl Connection {
     /// show the way a routine tab does; none are listed.
     pub fn routines(&self) -> Result<Catalog, DbError> {
         Ok(Catalog::default())
+    }
+
+    /// The sequences of the database the connection is on, as a catalog holding
+    /// nothing else, for [`Catalog::join_sequences`]. The same database
+    /// [`Self::catalog`] reads, and the temporary ones left out as it leaves
+    /// out the internal tables.
+    pub fn sequences(&self) -> Result<Catalog, DbError> {
+        let result = self.internal_query(
+            "SELECT schema_name, sequence_name FROM duckdb_sequences()
+             WHERE NOT temporary AND database_name = current_database()
+             ORDER BY 1, 2",
+        )?;
+        assemble_sequences(result)
     }
 
     pub fn structure(&self, schema: &str, relation: &str) -> Result<Structure, DbError> {
@@ -1336,6 +1349,54 @@ mod tests {
             connection.query(setup, Fetch::default()).expect("setup");
         }
         connection
+    }
+
+    fn sequences_by_schema(catalog: &Catalog) -> Vec<(&str, Vec<&str>)> {
+        catalog
+            .schemas
+            .iter()
+            .filter(|schema| !schema.sequences.is_empty())
+            .map(|schema| {
+                let names = schema.sequences.iter().map(String::as_str).collect();
+                (schema.name.as_str(), names)
+            })
+            .collect()
+    }
+
+    const WITH_SEQUENCES: &str = "CREATE TABLE t (id INTEGER); CREATE SEQUENCE s; \
+                                  CREATE SCHEMA other; CREATE SEQUENCE other.n;";
+
+    #[test]
+    fn a_sequence_lands_in_the_second_half_of_the_catalog() {
+        let connection = memory(WITH_SEQUENCES);
+        let wanted = vec![("main", vec!["s"]), ("other", vec!["n"])];
+
+        let read = connection.sequences().expect("the sequences are read");
+        assert_eq!(sequences_by_schema(&read), wanted);
+
+        let connection = crate::db::Connection::DuckDb(connection);
+        let second = connection.routines().expect("the second half is read");
+        assert_eq!(sequences_by_schema(&second), wanted);
+
+        let mut screen = connection.catalog().expect("the first half is read");
+        screen.merge(second);
+        assert_eq!(sequences_by_schema(&screen), wanted);
+        let main = &screen.schemas[0];
+        assert_eq!(main.name, "main");
+        assert_eq!(main.relations.len(), 1);
+        assert_eq!(main.relations[0].name, "t");
+        // Only sequences in it, so the second half brings it in, last.
+        assert_eq!(
+            screen.schemas.last().map(|s| s.name.as_str()),
+            Some("other")
+        );
+    }
+
+    #[test]
+    fn the_first_half_of_the_catalog_lists_no_sequences() {
+        let connection = memory(WITH_SEQUENCES);
+        let first = connection.catalog().expect("the first half is read");
+        assert!(sequences_by_schema(&first).is_empty());
     }
 
     fn cells(result: &QueryResult) -> Vec<Vec<Option<&str>>> {

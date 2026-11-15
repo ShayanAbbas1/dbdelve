@@ -792,6 +792,9 @@ pub struct Abilities {
     /// rather than the one the connection is on.
     pub catalog_lists_databases: bool,
     pub picks_schema: bool,
+    /// The catalog holds sequences, listed as their own kind of object beside
+    /// the routines, in the catalog's second half.
+    pub lists_sequences: bool,
     pub exact_row_estimates: bool,
     pub schema_switch_waits_for_transaction: bool,
     /// The catalog declares foreign keys that
@@ -814,6 +817,7 @@ impl Abilities {
         switches_database_in_session: false,
         catalog_lists_databases: false,
         picks_schema: false,
+        lists_sequences: false,
         exact_row_estimates: false,
         schema_switch_waits_for_transaction: false,
         draws_diagrams: false,
@@ -908,6 +912,7 @@ pub(crate) const POSTGRES: EngineSpec = EngineSpec {
         copies_ddl: true,
         switches_database: true,
         picks_schema: true,
+        lists_sequences: true,
         schema_switch_waits_for_transaction: true,
         draws_diagrams: true,
         ..Abilities::NONE
@@ -1036,6 +1041,7 @@ pub(crate) const MARIADB: EngineSpec = EngineSpec {
         switches_database: true,
         catalog_lists_databases: true,
         draws_diagrams: true,
+        lists_sequences: true,
         ..Abilities::NONE
     },
     hooks: Hooks {
@@ -1208,6 +1214,7 @@ pub(crate) const DUCKDB: EngineSpec = EngineSpec {
         switches_database_in_session: true,
         picks_schema: true,
         draws_diagrams: true,
+        lists_sequences: true,
         ..Abilities::NONE
     },
     hooks: Hooks {
@@ -1272,6 +1279,7 @@ pub(crate) const SNOWFLAKE: EngineSpec = EngineSpec {
         copies_ddl: true,
         switches_database: true,
         picks_schema: true,
+        lists_sequences: true,
         // An exact `ROW_COUNT` per table, where the others' numbers are as of
         // the last time statistics were gathered, and SQLite keeps none.
         exact_row_estimates: true,
@@ -1351,6 +1359,7 @@ pub(crate) const SQL_SERVER: EngineSpec = EngineSpec {
         assigns_default: true,
         copies_ddl: true,
         switches_database: true,
+        lists_sequences: true,
         // No `picks_schema`: the default schema is the login's.
         draws_diagrams: true,
         ..Abilities::NONE

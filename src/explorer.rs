@@ -1425,6 +1425,7 @@ mod tests {
                 name: "aardvark".into(),
                 relations: Vec::new(),
                 routines: Vec::new(),
+                sequences: Vec::new(),
             },
         );
         after.schemas[2].relations.insert(
@@ -1489,6 +1490,7 @@ mod tests {
                         rows: None,
                     }],
                     routines: Vec::new(),
+                    sequences: Vec::new(),
                 },
                 Schema {
                     name: "public".into(),
@@ -1526,6 +1528,7 @@ mod tests {
                             definition: String::new(),
                         },
                     ],
+                    sequences: Vec::new(),
                 },
             ],
             database: None,
@@ -1572,6 +1575,7 @@ mod tests {
                     },
                 ],
                 routines: Vec::new(),
+                sequences: Vec::new(),
             }],
             database: None,
         }
