@@ -20,7 +20,7 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, TryLockError};
 use std::time::{Duration, Instant};
 
 use ::mysql::consts::{ColumnFlags, ColumnType};
@@ -966,6 +966,24 @@ impl Connection {
         self.connection
             .lock()
             .map_or(true, |mut connection| connection.ping().is_err())
+    }
+
+    /// One `COM_PING` on the session. A statement holding the connection is
+    /// the session in use, so the ping is skipped, never queued behind it; a
+    /// poisoned lock is a session every later statement would fail on, as
+    /// [`Connection::is_lost`] counts it.
+    pub fn ping(&self) -> Result<(), DbError> {
+        let mut connection = match self.connection.try_lock() {
+            Ok(connection) => connection,
+            Err(TryLockError::WouldBlock) => return Ok(()),
+            Err(TryLockError::Poisoned(_)) => {
+                return Err(DbError {
+                    message: "The connection is closed.".into(),
+                    position: None,
+                });
+            }
+        };
+        connection.ping().map_err(|error| query_error(&error))
     }
 
     fn dial(&self) -> Result<Option<SocketAddr>, DbError> {
@@ -4045,6 +4063,43 @@ ORDER BY 1, 2
                 .is_err()
         );
         assert!(connection.is_lost());
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_keep_alive_ping_answers_and_never_waits_on_a_busy_session() {
+        for engine in [Engine::MySql, Engine::MariaDb] {
+            let connection = live(engine);
+            assert!(
+                connection.ping().is_ok(),
+                "{engine:?}: an idle session answers"
+            );
+
+            // A statement holds the connection for as long as it runs; the
+            // round skips that session rather than queue behind it.
+            let busy = connection.connection.lock().expect("nothing else holds it");
+            let started = Instant::now();
+            assert!(
+                connection.ping().is_ok(),
+                "{engine:?}: a busy session is skipped"
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "{engine:?}: and the skip does not wait"
+            );
+            drop(busy);
+
+            live(engine)
+                .query(
+                    &format!("KILL {}", connection.connection_id),
+                    Fetch::default(),
+                )
+                .expect("the kill runs");
+            assert!(
+                connection.ping().is_err(),
+                "{engine:?}: a killed session is lost"
+            );
+        }
     }
 
     fn live_a_cancel_stops_a_running_statement_without_closing_the_session(engine: Engine) {

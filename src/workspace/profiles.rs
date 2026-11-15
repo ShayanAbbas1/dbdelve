@@ -17,7 +17,7 @@ use crate::explorer::Shortcuts;
 use crate::import::{self, Source};
 use crate::palette::SchemaPick;
 use crate::session::{
-    Behaviour, Bound, BoundSession, Depth, EditMode, STALE_ROWS, restored_shortcuts,
+    Behaviour, Bound, BoundSession, Depth, EditMode, MIN_KEEP_ALIVE, STALE_ROWS, restored_shortcuts,
 };
 use crate::sidebar::OPEN_ROWS_CAP;
 use crate::sql::{Destructive, Mode};
@@ -334,6 +334,7 @@ impl Workspace {
             &session.query_directory,
         );
         let takes_script = config.target().takes_startup_script();
+        let keeps_alive = config.target().keeps_alive();
         self.profiles.push(Profile {
             id: stored.id,
             name: stored.name,
@@ -370,7 +371,13 @@ impl Workspace {
                     .startup_script
                     .filter(|_| takes_script)
                     .unwrap_or_default(),
+                // Off where the engine keeps no session to ping, and under
+                // the floor a hand-edited file could set a ping storm with.
+                keep_alive: stored
+                    .keep_alive_seconds
+                    .filter(|&seconds| keeps_alive && seconds >= MIN_KEEP_ALIVE),
             },
+            keep_alive_task: None,
             confirmed: stored
                 .confirmed
                 .iter()
@@ -461,6 +468,7 @@ impl Workspace {
             include: Include::default(),
             // The form's value is applied by `save_form` once this returns.
             behaviour: Behaviour::default(),
+            keep_alive_task: None,
             confirmed: Vec::new(),
             confirmed_stale: false,
             generation: 0,
@@ -1031,8 +1039,14 @@ impl Workspace {
         }
         let depth_changed = profile.behaviour.depth != behaviour.depth;
         let script_changed = profile.behaviour.startup_script != behaviour.startup_script;
+        let keep_alive_changed = profile.behaviour.keep_alive != behaviour.keep_alive;
         profile.behaviour = behaviour;
         self.remember_profiles(cx);
+        if keep_alive_changed {
+            // A new interval counts from now and a cleared one drops the timer;
+            // neither touches the connection.
+            self.arm_keep_alive(id, cx);
+        }
         let profile = &mut self.profiles[index];
         if profile.connection().is_none() {
             // Nothing live to disagree with the text: the next connect reads
@@ -1732,6 +1746,7 @@ impl Workspace {
         );
         profile.generation = generation;
         profile.drop_sessions();
+        profile.keep_alive_task = None;
         profile.state = ProfileState::Idle;
         profile.in_transaction = false;
         profile.transaction_statements.clear();
@@ -2242,6 +2257,7 @@ impl Workspace {
         };
         profile.generation = generation;
         profile.drop_sessions();
+        profile.keep_alive_task = None;
         let attempt = crate::db::ConnectAttempt::default();
         profile.cleanup_attempt = profile.config.ssm().map(|_| attempt.clone());
         profile.state = ProfileState::Connecting {
@@ -2422,6 +2438,7 @@ impl Workspace {
                     if unpicked.is_some() {
                         workspace.remember_profiles(cx);
                     }
+                    workspace.arm_keep_alive(&id, cx);
                     workspace.load_catalog(&id, generation, cx);
                     workspace.load_import_columns(&id, cx);
                     workspace.reload_front_object(&id, cx);

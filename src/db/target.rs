@@ -147,6 +147,12 @@ impl Target {
         self.driver == Driver::BuiltIn && self.engine.spec().takes_startup_script
     }
 
+    /// Whether a profile can keep its sessions alive with a ping: DBDelve's
+    /// own driver sends it, and a plugin's process keeps its own session.
+    pub fn keeps_alive(self) -> bool {
+        self.driver == Driver::BuiltIn && self.engine.spec().keeps_alive
+    }
+
     /// The driver properties a profile can set: DBDelve's own driver maps each
     /// to the one field it names, and a plugin's process takes none.
     pub fn driver_properties(self) -> &'static [Property] {
@@ -675,6 +681,32 @@ mod tests {
             assert!(!plugin.ordered_edits(), "{engine:?}");
             assert!(!plugin.keeps_edits(), "{engine:?}");
         }
+    }
+
+    #[test]
+    fn keep_alive_is_offered_where_a_session_stays_open() {
+        for engine in Engine::ALL {
+            assert_eq!(
+                Target::built_in(engine).keeps_alive(),
+                matches!(
+                    engine,
+                    Engine::Postgres
+                        | Engine::MySql
+                        | Engine::MariaDb
+                        | Engine::SqlServer
+                        | Engine::Redis
+                ),
+                "{engine:?}"
+            );
+        }
+        let plugin = Target {
+            engine: Engine::Postgres,
+            driver: Driver::Plugin(odbc()),
+        };
+        assert!(
+            !plugin.keeps_alive(),
+            "a plugin's process keeps its own session"
+        );
     }
 
     #[test]

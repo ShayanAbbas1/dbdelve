@@ -72,6 +72,10 @@ pub(crate) struct Profile {
     /// What this profile does with its connection rather than what the
     /// connection is. Not part of `config`: changing it never reconnects.
     pub(crate) behaviour: Behaviour,
+    /// The pending keep-alive round, one-shot and re-armed after each. Dropping
+    /// it cancels the round, which is how a disconnect, a connect and a changed
+    /// interval end the old timer.
+    pub(crate) keep_alive_task: Option<gpui::Task<()>>,
     pub(crate) confirmed: Vec<Destructive>,
     /// Whether this connection has silenced the prompt before editing rows
     /// restored from an earlier session. Stored as [`STALE_ROWS`] among
@@ -488,6 +492,29 @@ impl Profile {
             .collect()
     }
 
+    /// Every session the keep-alive pings: the profile's own connection and
+    /// each one open for another database.
+    pub(crate) fn sessions_to_ping(&self) -> Vec<Connection> {
+        self.connection()
+            .into_iter()
+            .chain(
+                self.sessions_to_hold()
+                    .into_iter()
+                    .map(|bound| bound.connection.clone()),
+            )
+            .collect()
+    }
+
+    /// Whether a statement of the user's has left a transaction open on the
+    /// profile's own session or on any session open for another database.
+    pub(crate) fn any_transaction_open(&self) -> bool {
+        self.in_transaction
+            || self
+                .sessions_to_hold()
+                .iter()
+                .any(|bound| bound.in_transaction())
+    }
+
     /// Whether `session` is still the one registered for `database`. One
     /// that was lost and replaced since has nothing left to say about it.
     pub(crate) fn is_registered(&self, database: &str, session: &Arc<Bound>) -> bool {
@@ -729,6 +756,7 @@ impl Profile {
                 .then(|| self.behaviour.depth.slug().to_string()),
             startup_script: Some(self.behaviour.startup_script.clone())
                 .filter(|script| !script.trim().is_empty()),
+            keep_alive_seconds: self.behaviour.keep_alive,
             time_zone: server.and_then(|server| server.time_zone.clone()),
             driver_properties: server
                 .map(|server| server.properties.stored())
@@ -2617,6 +2645,10 @@ impl Depth {
     }
 }
 
+/// The fewest seconds between keep-alive pings. Under it a ping is traffic of
+/// its own rather than a keep-alive, and a hand-edited file could set a storm.
+pub(crate) const MIN_KEEP_ALIVE: u32 = 10;
+
 /// What a profile does with its connection rather than what the connection
 /// is, so changing it never reconnects.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -2625,6 +2657,9 @@ pub(crate) struct Behaviour {
     /// The user's text, as typed. Gated on every use and never stored gated: a
     /// mode lowered since it was written is judged at the next connect.
     pub(crate) startup_script: String,
+    /// Seconds between pings of the sessions the user holds open; `None` is
+    /// off. Never read by anything but the keep-alive timer.
+    pub(crate) keep_alive: Option<u32>,
 }
 
 /// Which surface the main pane is showing, and what a run targets. Both kinds
