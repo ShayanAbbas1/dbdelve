@@ -451,8 +451,12 @@ driver printing to stdout would corrupt them (`ponytail:` not on Windows).
   `FILTER_CONDITION`, and every column one of the table's: an expression
   index names its expression, or nothing, in `COLUMN_NAME`. psqlODBC and Db2
   leave `FILTER_CONDITION` NULL, so through them a partial unique index flags
-  its column. ODBC has no word for a partition, so one a driver lists as a
-  `TABLE` is drawn as a card of its own (not checked live).
+  its column. A foreign key into another catalog (`PKTABLE_CAT` set and not
+  `FKTABLE_CAT`, on a driver with schemas) is left out, as Snowflake's into
+  another database is: the graph names a key's schema and table only, and
+  would draw it into this catalog. A NULL or blank catalog on either side
+  counts as the same one. ODBC has no word for a partition, so one a driver
+  lists as a `TABLE` is drawn as a card of its own (not checked live).
 
 ### The driver manager, per platform
 

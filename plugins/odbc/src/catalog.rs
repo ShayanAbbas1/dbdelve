@@ -349,6 +349,9 @@ impl<T> Group<T> {
 /// `FK_NAME` NULL, each unnamed `KEY_SEQ` 1 row starts a key of its own,
 /// unless its table also has an unnamed `KEY_SEQ` 2 or more, when which rows
 /// pair up cannot be told and none of that table's unnamed keys is drawn.
+/// A key into another catalog is left out, as Snowflake's into another
+/// database is: a graph's key names a schema and a table, and drawn by them
+/// it would point at a table of this catalog.
 fn graph_keys_from(
     rows: &[Row],
     mine: impl Fn(&Row) -> Option<usize>,
@@ -356,6 +359,7 @@ fn graph_keys_from(
 ) -> Vec<GraphKey> {
     let rows: Vec<(usize, &Row)> = rows
         .iter()
+        .filter(|row| !in_another_catalog(row))
         .filter_map(|row| mine(row).map(|table| (table, row)))
         .collect();
     let unnamed_composite: HashSet<usize> = rows
@@ -387,6 +391,15 @@ fn graph_keys_from(
             }
         })
         .collect()
+}
+
+/// Whether an `SQLForeignKeys` row's key points into a catalog other than
+/// its own table's, where the driver has schemas: without them the catalog
+/// is the schema the key names. A catalog a driver leaves NULL or blank on
+/// either side is taken to be the same one.
+fn in_another_catalog(row: &Row) -> bool {
+    let (referenced, own) = (name(row, 0), name(row, 4));
+    !name(row, 1).is_empty() && !referenced.is_empty() && !own.is_empty() && referenced != own
 }
 
 fn has_schemas(session: &Session) -> bool {
@@ -1179,6 +1192,39 @@ mod tests {
             .map(|key| key.name)
             .collect();
         assert_ne!(names[2], names[3], "two unnamed keys stay two");
+    }
+
+    #[test]
+    fn a_key_into_another_catalog_is_left_out() {
+        let tables = ["ITEMS".to_string(), "ACCOUNTS".to_string()];
+        let key = |name: &str, catalogs: (Option<&str>, Option<&str>), schema: &str| {
+            let mut row = foreign("ITEMS", "A", "1", Some(name), (schema, "ACCOUNTS", "ID"));
+            (row[0], row[4]) = (
+                catalogs.0.map(str::to_string),
+                catalogs.1.map(str::to_string),
+            );
+            row
+        };
+        let rows = [
+            key("ELSEWHERE", (Some("OTHER_DB"), Some("HERE")), "S"),
+            key(
+                "ELSEWHERE_STUB",
+                (Some("OTHER_DB"), Some("HERE")),
+                "BILLING",
+            ),
+            key("SAME", (Some("HERE  "), Some("HERE")), "S"),
+            key("UNNAMED", (None, None), "S"),
+            key("HALF", (Some("OTHER_DB"), None), "S"),
+            key("NO_SCHEMAS", (Some("OTHER_DB"), Some("HERE")), ""),
+        ];
+        let graph = graph_from("S", &tables, &[], &[], &[], &rows);
+        let keys: Vec<&str> = graph
+            .foreign_keys
+            .iter()
+            .map(|key| key.name.as_str())
+            .collect();
+        assert_eq!(keys, ["SAME", "UNNAMED", "HALF", "NO_SCHEMAS"]);
+        assert_eq!(graph.foreign_keys[3].referenced_schema, "OTHER_DB");
     }
 
     #[test]
