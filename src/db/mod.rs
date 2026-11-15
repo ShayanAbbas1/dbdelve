@@ -52,6 +52,8 @@ mod turso;
 mod xlsx;
 
 pub use builtins::{Builtin, BuiltinKind};
+#[cfg(test)]
+pub(crate) use clickhouse::mock as clickhouse_mock;
 pub use duckdb::IN_MEMORY as DUCKDB_IN_MEMORY;
 pub use external::ExternalConfig;
 #[cfg(test)]
@@ -59,6 +61,7 @@ pub(crate) use external::echo;
 pub use graph::{GraphColumn, KeyTarget, SchemaGraph};
 #[cfg(test)]
 pub use graph::{GraphKey, GraphTable};
+pub(crate) use include::same_name;
 pub use include::{Include, Shown};
 pub use password_command::{PasswordCommand, loggable_error};
 pub use plugin::Plugin;
@@ -2326,6 +2329,34 @@ impl Connection {
         }?;
         databases.system_last(engine);
         Ok(shown.narrow_databases(databases))
+    }
+
+    /// The databases the connections tree draws when nothing is filtered,
+    /// which the filter picker lists and a filtered catalog counts against.
+    /// Where the catalog lists databases as schemas, these are the ones
+    /// holding something it reads, the server's own left out. Elsewhere they
+    /// are every database [`Self::databases`] lists, unnarrowed.
+    ///
+    /// ponytail: where the catalog lists databases as schemas, an empty
+    /// database is not listed, since the tree draws none, so the picker's total
+    /// stays the connection row's and the database cannot be ticked before it
+    /// holds something, though a name typed in the pattern field still covers
+    /// it. The upgrade is drawing empty databases in the tree, which would
+    /// change the unfiltered count.
+    pub fn catalog_databases(&self, engine: Engine) -> Result<Databases, DbError> {
+        match self {
+            Self::MySql(connection) => connection.catalog_databases(),
+            Self::ClickHouse(connection) => connection.catalog_databases(),
+            Self::Postgres(_)
+            | Self::SqlServer(_)
+            | Self::Sqlite(_)
+            | Self::Turso(_)
+            | Self::DuckDb(_)
+            | Self::Snowflake(_)
+            | Self::MongoDb(_)
+            | Self::Redis(_)
+            | Self::External(_) => self.databases(engine, &Shown::everything()),
+        }
     }
 
     /// Make `schema` the first place unqualified names resolve in every

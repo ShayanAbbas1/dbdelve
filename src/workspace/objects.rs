@@ -780,6 +780,11 @@ impl Workspace {
                     None => self.refresh_schema(cx),
                 }
             }
+            NodeAction::FilterDatabases => {
+                if self.make_front(&node.profile, cx) {
+                    self.open_filter_picker(&node.profile, window, cx);
+                }
+            }
         }
     }
 

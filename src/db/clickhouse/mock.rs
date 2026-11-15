@@ -339,6 +339,13 @@ impl Mock {
         Self { port, state }
     }
 
+    /// A connection opened on this mock as the tests' writer on `dbdelve_dev`,
+    /// for a test above `src/db/` that drives code asking a
+    /// `crate::db::Connection`, so no driver type is named there.
+    pub fn connection(&self) -> crate::db::Connection {
+        crate::db::Connection::ClickHouse(super::tests::open(self))
+    }
+
     /// A profile pointed at this mock.
     pub fn server(&self) -> ServerConfig {
         ServerConfig {

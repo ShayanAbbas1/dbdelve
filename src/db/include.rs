@@ -28,13 +28,20 @@ pub struct Include {
 }
 
 impl Include {
-    /// What a file held: entries that are empty or only whitespace dropped,
-    /// at most [`ENTRIES_CAP`] of each list kept, in the order they were
-    /// written.
+    /// What a file held, or what Save is about to write: each entry trimmed,
+    /// those left empty dropped, at most [`ENTRIES_CAP`] of each list kept, in
+    /// the order written.
     pub fn from_stored(databases: Vec<String>, schemas: Vec<String>) -> Self {
         let kept = |list: Vec<String>| {
             list.into_iter()
-                .filter(|entry| !entry.trim().is_empty())
+                // ponytail: a name the server lists with leading or trailing
+                // whitespace is matched by no exact entry once trimmed, since
+                // matching runs on the server's own spelling; a glob such as
+                // `*name*` still covers it. The upgrade is an entry spelling
+                // that keeps edge whitespace (a quoted name), read here and
+                // written by the picker.
+                .map(|entry| entry.trim().to_string())
+                .filter(|entry| !entry.is_empty())
                 .take(ENTRIES_CAP)
                 .collect()
         };
@@ -194,10 +201,14 @@ impl Shown {
     /// carries. An empty list means nothing matched, which is the caller's cue
     /// to send no statement.
     ///
-    /// ponytail: a database that matches but holds no table or view is
-    /// in neither number, since the catalog is read from the tables view; the
-    /// upgrade is counting from the database listing, which would change the
-    /// unfiltered number Phase 7 draws.
+    /// Both numbers are drawn from `listed`, whichever listing the caller
+    /// passes. ClickHouse's and MySQL's `catalog` pass `catalog_databases`, the
+    /// databases the catalog draws, so a database holding nothing the catalog
+    /// reads is in neither number, as it is in no unfiltered count, and the
+    /// shown and the hidden add up to the unfiltered tree's count. MySQL's
+    /// `matched`, which `routines`, `sequences` and `sizes` call, passes the
+    /// server's whole `SCHEMATA` listing and uses only the names, never the
+    /// hidden count.
     pub fn matched_databases(
         &self,
         listed: &Databases,
@@ -229,7 +240,9 @@ fn lowered(text: &str) -> impl Iterator<Item = char> {
     text.chars().flat_map(char::to_lowercase)
 }
 
-fn same_name(a: &str, b: &str) -> bool {
+/// Whether two names are one as the filter reads them, ignoring case by
+/// Unicode simple lowercase of each character.
+pub(crate) fn same_name(a: &str, b: &str) -> bool {
     lowered(a).eq(lowered(b))
 }
 
@@ -417,6 +430,19 @@ mod tests {
         assert_eq!(capped.databases.len(), ENTRIES_CAP);
         assert_eq!(capped.schemas.len(), ENTRIES_CAP);
         assert_eq!(capped.databases, many[..ENTRIES_CAP]);
+    }
+
+    #[test]
+    fn a_stored_entry_is_trimmed_so_a_padded_one_matches() {
+        let include =
+            Include::from_stored(text(&["  prod  ", " \t ", "app*\t"]), text(&[" public"]));
+        assert_eq!(include.databases, ["prod", "app*"]);
+        assert_eq!(include.schemas, ["public"]);
+
+        let shown = include.resolve(Levels::DatabaseThenSchema, None, None);
+        assert!(shown.shows_database("PROD"));
+        assert!(shown.shows_database("app1"));
+        assert!(shown.shows_schema("public"));
     }
 
     #[test]

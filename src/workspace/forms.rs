@@ -1311,7 +1311,9 @@ impl Workspace {
             }
             Some("stable-import") => self.stable_import_buttons(),
             Some("unsaved") => 3,
-            Some("import-rows" | "schema-export") | None => 0,
+            // Forms with fields and a list of their own, which Tab moves the
+            // keyboard through and whose buttons act through their own handlers.
+            Some("import-rows" | "schema-export" | "filter-picker") | None => 0,
             Some(_) => 2 + checkbox,
         }
     }
