@@ -90,10 +90,27 @@ pub struct Connection {
     statement_timeout: Option<Duration>,
     /// The file, for [`Self::alongside`] to open again; `None` in memory.
     path: Option<String>,
+    /// Opened with `SQLITE_OPEN_READ_ONLY`, which [`Self::alongside`] keeps.
+    read_only: bool,
 }
 
 impl Connection {
     pub fn open(path: &str, statement_timeout: u32) -> Result<Self, DbError> {
+        Self::open_with(path, statement_timeout, false)
+    }
+
+    /// Opened by the engine for reads only: any write is refused by SQLite
+    /// itself, whatever statement reaches it.
+    ///
+    /// ponytail: a read-only open of a WAL file needs its `-shm` to exist or to
+    /// be creatable beside it, so a file on a read-only directory that is not
+    /// held open by a writer is refused. The upgrade is `immutable=1`, which
+    /// would stop it seeing the user's later commits.
+    pub fn open_read_only(path: &str, statement_timeout: u32) -> Result<Self, DbError> {
+        Self::open_with(path, statement_timeout, true)
+    }
+
+    fn open_with(path: &str, statement_timeout: u32, read_only: bool) -> Result<Self, DbError> {
         let path = crate::store::home_expanded(path);
         if !path.exists() {
             return Err(plain_error(format!(
@@ -102,11 +119,16 @@ impl Connection {
             )));
         }
 
-        Ok(Self::wrap(open_file(&path)?, statement_timeout))
+        Ok(Self::wrap(
+            open_file(&path, read_only)?,
+            statement_timeout,
+            read_only,
+        ))
     }
 
-    fn wrap(connection: rusqlite::Connection, statement_timeout: u32) -> Self {
+    fn wrap(connection: rusqlite::Connection, statement_timeout: u32, read_only: bool) -> Self {
         Self {
+            read_only,
             interrupt: Arc::new(connection.get_interrupt_handle()),
             statement_timeout: (statement_timeout > 0)
                 .then(|| Duration::from_secs(u64::from(statement_timeout))),
@@ -124,7 +146,7 @@ impl Connection {
         let path = self.path.as_deref().ok_or_else(|| {
             plain_error("An in-memory database cannot be opened a second time.".into())
         })?;
-        let connection = open_file(std::path::Path::new(path))?;
+        let connection = open_file(std::path::Path::new(path), self.read_only)?;
         Ok(Self {
             interrupt: Arc::new(connection.get_interrupt_handle()),
             connection: Arc::new(Mutex::new(connection)),
@@ -1407,18 +1429,41 @@ fn query_error(error: &rusqlite::Error, submission: &str) -> DbError {
 /// `SQLITE_OPEN_URI` is off for the same reason: the path came out of the URL
 /// already, and leaving URI parsing on would make a path containing `?` mean
 /// something other than itself.
-fn open_file(path: &std::path::Path) -> Result<rusqlite::Connection, DbError> {
-    rusqlite::Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+fn open_file(path: &std::path::Path, read_only: bool) -> Result<rusqlite::Connection, DbError> {
+    let access = if read_only {
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+    } else {
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+    };
+    rusqlite::Connection::open_with_flags(path, access | OpenFlags::SQLITE_OPEN_NO_MUTEX).map_err(
+        |error| {
+            plain_error(format!(
+                "Cannot open {}: {}",
+                path.display(),
+                describe(&error)
+            ))
+        },
     )
-    .map_err(|error| {
-        plain_error(format!(
-            "Cannot open {}: {}",
-            path.display(),
-            describe(&error)
-        ))
-    })
+}
+
+/// Whether the file at `path` is in WAL journal mode, read from its header:
+/// after the `SQLite format 3\0` magic, bytes 18 and 19 are the file format
+/// write and read versions, 2 and 2 for WAL and 1 and 1 for a rollback journal.
+/// `None` for a file that is missing, shorter than the fields, or not a SQLite
+/// database, so a caller can tell "rollback" from "cannot say".
+pub(super) fn journal_is_wal(path: &str) -> Option<bool> {
+    use std::io::Read;
+
+    let mut header = Vec::with_capacity(100);
+    std::fs::File::open(crate::store::home_expanded(path))
+        .ok()?
+        .take(100)
+        .read_to_end(&mut header)
+        .ok()?;
+    if header.len() < 20 || !header.starts_with(b"SQLite format 3\0") {
+        return None;
+    }
+    Some(header[18] == 2 && header[19] == 2)
 }
 
 /// One submission run on a session already held: the statements, stepped as
@@ -1767,7 +1812,75 @@ pub(super) mod tests {
     fn memory_with_timeout(setup: &str, statement_timeout: u32) -> Connection {
         let connection = rusqlite::Connection::open_in_memory().expect("in-memory should open");
         connection.execute_batch(setup).expect("setup should apply");
-        Connection::wrap(connection, statement_timeout)
+        Connection::wrap(connection, statement_timeout, false)
+    }
+
+    /// The built-in list as the bundled build answers it: every built-in
+    /// function, the grammar-defined names, minus the engine's own deny and
+    /// egress names.
+    fn built_in_list() -> String {
+        let connection = rusqlite::Connection::open_in_memory().expect("in-memory should open");
+        let mut statement = connection
+            .prepare("SELECT DISTINCT lower(name) FROM pragma_function_list WHERE builtin = 1")
+            .expect("the catalog answers");
+        let mut names: Vec<String> = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("the catalog answers")
+            .collect::<Result<_, _>>()
+            .expect("every name is text");
+        let version: String = connection
+            .query_row("SELECT sqlite_version()", [], |row| row.get(0))
+            .expect("the version answers");
+        assert!(
+            names.iter().any(|name| name == "lower"),
+            "the catalog answered nothing"
+        );
+        let spec = &crate::db::Engine::Sqlite.spec().sql;
+        names.extend(
+            crate::db::spec::GRAMMAR_FUNCTIONS
+                .iter()
+                .map(|name| name.to_string()),
+        );
+        // Operators and multi-word forms (`+`, `->>`, `is distinct from`) are
+        // answered as functions but are never a call's bare name.
+        names.retain(|name| {
+            name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && !spec.denied_functions.contains(&name.as_str())
+                && !spec.egress_functions.contains(&name.as_str())
+        });
+        names.sort();
+        names.dedup();
+        let mut list = format!(
+            "# SQLite {version} pragma_function_list WHERE builtin = 1, plus grammar-defined names, minus denied_functions and egress_functions.\n\
+             # Written by the_built_in_list_is_written_from_the_bundled_catalog.\n"
+        );
+        for name in names {
+            list.push_str(&name);
+            list.push('\n');
+        }
+        list
+    }
+
+    #[test]
+    fn the_built_in_list_is_the_bundled_catalogs_answer() {
+        let committed: Vec<&str> = include_str!("functions/sqlite.txt").lines().collect();
+        let fresh = built_in_list();
+        assert_eq!(
+            committed,
+            fresh.lines().collect::<Vec<&str>>(),
+            "src/db/functions/sqlite.txt is not what the bundled build answers; if the \
+             sqlite pin moved, run the_built_in_list_is_written_from_the_bundled_catalog"
+        );
+    }
+
+    #[test]
+    #[ignore = "writes src/db/functions/sqlite.txt from the bundled build; run when the sqlite pin moves"]
+    fn the_built_in_list_is_written_from_the_bundled_catalog() {
+        std::fs::write(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/src/db/functions/sqlite.txt"),
+            built_in_list(),
+        )
+        .expect("the list is written");
     }
 
     /// A step of a verified apply as `sql::draft_batch` writes it, over `birds`.
@@ -2416,6 +2529,20 @@ SELECT n FROM counting
         }
     }
 
+    /// Why SQLite's `egress_functions` is empty: `readfile` and `writefile` are
+    /// the command-line shell's functions, not the library's, so the bundled
+    /// library has no function that reaches a file.
+    #[test]
+    fn the_bundled_library_reads_and_writes_no_files() {
+        let connection = memory("");
+        for sql in ["SELECT readfile('x')", "SELECT writefile('x', 'y')"] {
+            assert!(
+                connection.query(sql, Fetch::default()).is_err(),
+                "{sql} ran on the bundled library"
+            );
+        }
+    }
+
     #[test]
     fn a_row_limit_keeps_the_first_rows_and_counts_the_rest() {
         let connection = memory("");
@@ -2484,7 +2611,7 @@ SELECT n FROM counting
         writer.execute_batch(ACCOUNTS).unwrap();
         // The timeout turns a read that was never stopped into a failure
         // rather than a test that never ends.
-        let connection = Connection::wrap(rusqlite::Connection::open(&path).unwrap(), 10);
+        let connection = Connection::wrap(rusqlite::Connection::open(&path).unwrap(), 10, false);
 
         let started = Instant::now();
         let result = connection
@@ -3677,6 +3804,67 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
             }),
             _guard: None,
         }
+    }
+
+    #[test]
+    fn a_files_journal_mode_is_read_from_its_header() {
+        let dir = std::env::temp_dir().join(format!("dbdelve-journal-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wal = dir.join("wal.db");
+        let rollback = dir.join("rollback.db");
+        let empty = dir.join("empty.db");
+        let text = dir.join("text.db");
+        for path in [&wal, &rollback, &empty, &text] {
+            let _ = std::fs::remove_file(path);
+        }
+        rusqlite::Connection::open(&wal)
+            .unwrap()
+            .execute_batch("PRAGMA journal_mode = WAL; CREATE TABLE t (id INTEGER);")
+            .unwrap();
+        rusqlite::Connection::open(&rollback)
+            .unwrap()
+            .execute_batch("CREATE TABLE t (id INTEGER);")
+            .unwrap();
+        std::fs::write(&empty, b"").unwrap();
+        std::fs::write(
+            &text,
+            "this is a text file that is longer than a header's magic and version bytes",
+        )
+        .unwrap();
+        let read = |path: &std::path::Path| journal_is_wal(&path.to_string_lossy());
+        assert_eq!(read(&wal), Some(true));
+        assert_eq!(read(&rollback), Some(false));
+        assert_eq!(read(&empty), None);
+        assert_eq!(read(&text), None);
+        assert_eq!(read(&dir.join("missing.db")), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_agent_open_reads_committed_rows_and_refuses_a_write() {
+        let dir = std::env::temp_dir().join(format!("dbdelve-agent-sqlite-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("agent.db");
+        let _ = std::fs::remove_file(&path);
+        // WAL, the mode a file the user keeps open is likely to be in.
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "PRAGMA journal_mode = WAL; CREATE TABLE t (id INTEGER); INSERT INTO t VALUES (1);",
+            )
+            .unwrap();
+        let path = path.to_string_lossy().into_owned();
+        let user = crate::db::Connection::Sqlite(Connection::open(&path, 0).unwrap());
+        let refusal = crate::db::assert_agent_open_reads_and_refuses_a_write(
+            crate::db::ConnectionConfig::Sqlite {
+                path,
+                statement_timeout: 0,
+            },
+            &user,
+        );
+        assert!(refusal.contains("readonly"), "{refusal}");
+        drop(user);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     crate::db::conformance::suite!(

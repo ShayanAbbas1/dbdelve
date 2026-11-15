@@ -54,8 +54,10 @@ session DBDelve owns out from under it:
 - `CLIENT REPLY`: it stops the server answering.
 
 **Read-only holds by classification alone.** Redis has no read-only session to
-ask the server for, so every command is looked up by name (and subcommand:
-`CONFIG GET` reads, `CONFIG SET` is destructive) in a table. Reads need
+ask the server for, so every command is looked up by name (and subcommand) in
+a table. `CONFIG GET` and `CLIENT LIST` write nothing and are rated a write for
+what they return (`requirepass` and `masterauth`, and every connected client's
+address and name), while `CONFIG SET` is destructive. Reads need
 nothing, writes need Read-write, `FLUSHDB`, `FLUSHALL`, `SHUTDOWN`, `DEBUG`,
 `CONFIG SET` and the like need Full and ask first, and a command the table does
 not know is refused in Read-only and asks once elsewhere. Scripts (`EVAL`,

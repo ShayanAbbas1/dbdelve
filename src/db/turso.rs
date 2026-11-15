@@ -26,6 +26,27 @@ pub struct Connection {
 
 impl Connection {
     pub fn open(path: &str, statement_timeout: u32) -> Result<Self, DbError> {
+        Self::open_inner(path, statement_timeout)
+    }
+
+    /// Opened for an agent: `PRAGMA query_only` on this connection makes Turso
+    /// refuse a write on it.
+    ///
+    /// Not `OpenFlags::ReadOnly`: `turso_core` keeps one `Database` per file for
+    /// the whole process, so the flag is ignored when the user already has the
+    /// file open here (the write goes through), and when the agent opens first
+    /// it makes the user's own connection read-only. The pragma is per
+    /// connection and touches neither. The agent could undo it by statement, so
+    /// `sql::agent_gate` stays the boundary -- this is as strong as the server
+    /// engines' session hold, no stronger. It is set here and not through
+    /// `read_only_statement`, so the user's own Read-only mode is unchanged.
+    pub fn open_query_only(path: &str, statement_timeout: u32) -> Result<Self, DbError> {
+        let connection = Self::open_inner(path, statement_timeout)?;
+        connection.query("PRAGMA query_only = 1", Fetch::default())?;
+        Ok(connection)
+    }
+
+    fn open_inner(path: &str, statement_timeout: u32) -> Result<Self, DbError> {
         let path = crate::store::home_expanded(path);
         if !path.exists() {
             return Err(plain_error(format!(
@@ -726,6 +747,62 @@ mod tests {
             .unwrap();
         release.join().unwrap();
         assert_eq!(count(&waiter), "2");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_agent_open_reads_committed_rows_and_refuses_a_write() {
+        let dir = std::env::temp_dir().join(format!("dbdelve-turso-agent-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = |path: &str| crate::db::ConnectionConfig::Turso {
+            path: path.to_string(),
+            statement_timeout: 0,
+        };
+
+        // The user's connection is open first.
+        let path = dir.join("user-first.db").to_string_lossy().into_owned();
+        let user = Connection::open_at(&path, None, 0).unwrap();
+        user.query(
+            "CREATE TABLE t (id INTEGER); INSERT INTO t VALUES (1)",
+            Fetch::default(),
+        )
+        .unwrap();
+        let user = crate::db::Connection::Turso(user);
+        let refusal = crate::db::assert_agent_open_reads_and_refuses_a_write(config(&path), &user);
+        assert!(refusal.contains("query_only"), "{refusal}");
+        // The user's connection is still writable after the agent's refusal.
+        user.query(
+            "INSERT INTO t VALUES (3)",
+            &crate::db::CancelToken::default(),
+            Fetch::default(),
+        )
+        .expect("the user's connection stays writable");
+        drop(user);
+
+        // The agent's connection is open first.
+        let path = dir.join("agent-first.db").to_string_lossy().into_owned();
+        let setup = Connection::open_at(&path, None, 0).unwrap();
+        setup
+            .query(
+                "CREATE TABLE t (id INTEGER); INSERT INTO t VALUES (1)",
+                Fetch::default(),
+            )
+            .unwrap();
+        drop(setup);
+        let agent = crate::db::Connection::open_for_agent(config(&path)).unwrap();
+        let user = Connection::open(&path, 0).unwrap();
+        user.query("INSERT INTO t VALUES (2)", Fetch::default())
+            .expect("the user's connection stays writable when the agent opened first");
+        let cancel = crate::db::CancelToken::default();
+        let rows = agent
+            .query("SELECT count(*) FROM t", &cancel, Fetch::default())
+            .unwrap();
+        assert_eq!(rows.rows[0].get(0).unwrap().to_string(), "2");
+        let refusal = agent
+            .query("INSERT INTO t VALUES (4)", &cancel, Fetch::default())
+            .expect_err("the agent's connection refuses the write");
+        assert!(refusal.message.contains("query_only"), "{refusal}");
+        drop((agent, user));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -166,7 +166,7 @@ source: src/sql_snapshots.rs
 [mongodb] delete then an inserted $where
   |db.getCollection("accounts").deleteOne({_id: 1});|
   |db.getCollection("accounts").insertOne({"$where": "1"});|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match=Some(1)
+  = write_on=false select=false classify=Full [] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=None confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match=Some(1)
 
 [mongodb] delete then an inserted $set
   |db.getCollection("accounts").deleteOne({_id: 1});|
@@ -181,7 +181,7 @@ source: src/sql_snapshots.rs
 [mongodb] delete then an updated $where
   |db.getCollection("accounts").deleteOne({_id: 1});|
   |db.getCollection("accounts").updateOne({_id: 2}, {$set: {"a": {"$where": "1"}}});|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match=Some(1)
+  = write_on=false select=false classify=Full [] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=None confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match=Some(1)
 
 [mongodb] delete then text that does not parse
   |db.getCollection("accounts").deleteOne({_id: 1});|

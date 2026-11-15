@@ -1,0 +1,25 @@
+truncated: none
+plan: engine=postgres analyzed=yes basis=measured time_unit="measured (ms)" cost_unit="planner cost, arbitrary units" total=802.582ms execution="939.005 ms" planning="16.546 ms" outside_nodes=136.423ms conditions=verbatim
+findings:
+  n3 hot 53.8% self=432.147ms Seq Scan on events e
+tree:
+  n0 Limit self=148.593ms 18.5% est=10 act=10 loops=1
+    | Buffers: shared hit=364 read=249643, temp read=841 written=1033
+    n1 Sort self=111.038ms 13.8% est=166685 act=100010 loops=1
+      | Sort Key: e.amount DESC, e.id
+      | Sort Method: external merge  Disk: 4088kB
+      | Buffers: shared hit=364 read=249643, temp read=841 written=1033
+      n2 Hash Semi Join self=110.276ms 13.7% est=166685 act=166667 loops=1
+        | Hash Cond: (e.kind = events.kind)
+        | Buffers: shared hit=358 read=249643
+        n3 Seq Scan on events e self=432.147ms 53.8% est=1000000 act=1000000 loops=1
+          | Buffers: shared hit=357 read=249643
+        n4 Hash self=0.397ms 0.0% est=1 act=1 loops=1
+          | Buckets: 1024  Batches: 1  Memory Usage: 9kB
+          | Buffers: shared hit=1
+          n5 Limit self=0.049ms 0.0% est=1 act=1 loops=1
+            | Buffers: shared hit=1
+            n6 Seq Scan on events self=0.082ms 0.0% est=169400 act=1 loops=1
+              | Filter: (account_id = 3)
+              | Rows Removed by Filter: 1  [total 1 over 1 loops]
+              | Buffers: shared hit=1

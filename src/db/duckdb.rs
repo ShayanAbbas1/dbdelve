@@ -31,7 +31,7 @@ use duckdb::arrow::compute::cast;
 use duckdb::arrow::datatypes::{DataType, Field, FieldRef};
 use duckdb::arrow::error::ArrowError;
 use duckdb::arrow::util::display::{ArrayFormatter, FormatOptions};
-use duckdb::{Config, InterruptHandle};
+use duckdb::{AccessMode, Config, InterruptHandle};
 use num_bigint::BigUint;
 
 use crate::sql::Projected;
@@ -120,8 +120,24 @@ struct Pick {
 
 impl Connection {
     pub fn open(path: &str, statement_timeout: u32) -> Result<Self, DbError> {
+        Self::open_with(path, statement_timeout, false)
+    }
+
+    /// Opened by the engine for reads only (`access_mode` `READ_ONLY`): DuckDB
+    /// refuses a write on it. A database in memory has no file to open a second
+    /// time, so it is refused here.
+    pub fn open_read_only(path: &str, statement_timeout: u32) -> Result<Self, DbError> {
+        Self::open_with(path, statement_timeout, true)
+    }
+
+    fn open_with(path: &str, statement_timeout: u32, read_only: bool) -> Result<Self, DbError> {
         let connection = match path.trim() {
-            "" | IN_MEMORY => duckdb::Connection::open_in_memory_with_flags(config()?)
+            "" | IN_MEMORY if read_only => {
+                return Err(plain_error(
+                    "A database in memory cannot be opened read-only.".into(),
+                ));
+            }
+            "" | IN_MEMORY => duckdb::Connection::open_in_memory_with_flags(config(false)?)
                 .map_err(|error| plain_error(error.to_string()))?,
             path => {
                 let path = crate::store::home_expanded(path);
@@ -134,7 +150,7 @@ impl Connection {
                         path.display()
                     )));
                 }
-                duckdb::Connection::open_with_flags(&path, config()?).map_err(|error| {
+                duckdb::Connection::open_with_flags(&path, config(read_only)?).map_err(|error| {
                     plain_error(format!("Cannot open {}: {error}", path.display()))
                 })?
             }
@@ -860,10 +876,16 @@ fn compose_sequence(schema: &str, name: &str, numbers: [&str; 4], cycle: &str) -
 /// with the type's name rather than squeezed into the nearest Arrow type,
 /// where a `UHUGEINT` wraps into a negative `DECIMAL(38,0)` and a `HUGEINT`
 /// cannot be told from a decimal. [`printable`] reads the tags.
-fn config() -> Result<Config, DbError> {
-    Config::default()
+fn config(read_only: bool) -> Result<Config, DbError> {
+    let config = Config::default()
         .with("arrow_lossless_conversion", "true")
-        .map_err(|error| plain_error(error.to_string()))
+        .map_err(|error| plain_error(error.to_string()))?;
+    if read_only {
+        return config
+            .access_mode(AccessMode::ReadOnly)
+            .map_err(|error| plain_error(error.to_string()));
+    }
+    Ok(config)
 }
 
 fn lock(
@@ -1968,6 +1990,86 @@ mod tests {
             assert!(!is_matchable(data_type), "{data_type}");
         }
     }
+
+    /// The built-in list as the bundled build answers it: scalar, aggregate and
+    /// macro functions the build marks as changing nothing, the grammar-defined
+    /// names, minus the engine's own deny and egress names. Table functions are
+    /// left out on purpose (see `DuckDB`'s `builtin_functions` in `spec.rs`).
+    fn built_in_list() -> String {
+        let connection = memory("");
+        let answer = connection
+            .query(
+                "SELECT DISTINCT lower(function_name) FROM duckdb_functions() \
+                 WHERE internal AND NOT coalesce(has_side_effects, false) \
+                 AND function_type IN ('scalar', 'aggregate', 'macro') ORDER BY 1",
+                Fetch::default(),
+            )
+            .expect("the catalog answers");
+        let version = connection
+            .query(
+                "SELECT library_version FROM pragma_version()",
+                Fetch::default(),
+            )
+            .expect("the version answers");
+        let version = version.rows[0].get(0).expect("a version").to_string();
+        let mut names: Vec<String> = answer
+            .rows
+            .iter()
+            .filter_map(|row| row.get(0))
+            .map(str::to_owned)
+            .collect();
+        assert!(
+            names.iter().any(|name| name == "lower"),
+            "the catalog answered nothing"
+        );
+        let spec = &crate::db::Engine::DuckDb.spec().sql;
+        names.extend(
+            crate::db::spec::GRAMMAR_FUNCTIONS
+                .iter()
+                .map(|name| name.to_string()),
+        );
+        // Operators and multi-word forms (`+`, `->>`, `is distinct from`) are
+        // answered as functions but are never a call's bare name.
+        names.retain(|name| {
+            name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && !spec.denied_functions.contains(&name.as_str())
+                && !spec.egress_functions.contains(&name.as_str())
+        });
+        names.sort();
+        names.dedup();
+        let mut list = format!(
+            "# DuckDB {version} duckdb_functions(): internal scalar, aggregate and macro functions without side effects, plus grammar-defined names,\n\
+             # minus denied_functions and egress_functions. Written by the_built_in_list_is_written_from_the_bundled_catalog.\n"
+        );
+        for name in names {
+            list.push_str(&name);
+            list.push('\n');
+        }
+        list
+    }
+
+    #[test]
+    fn the_built_in_list_is_the_bundled_catalogs_answer() {
+        let committed: Vec<&str> = include_str!("functions/duckdb.txt").lines().collect();
+        let fresh = built_in_list();
+        assert_eq!(
+            committed,
+            fresh.lines().collect::<Vec<&str>>(),
+            "src/db/functions/duckdb.txt is not what the bundled build answers; if the \
+             duckdb pin moved, run the_built_in_list_is_written_from_the_bundled_catalog"
+        );
+    }
+
+    #[test]
+    #[ignore = "writes src/db/functions/duckdb.txt from the bundled build; run when the duckdb pin moves"]
+    fn the_built_in_list_is_written_from_the_bundled_catalog() {
+        std::fs::write(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/src/db/functions/duckdb.txt"),
+            built_in_list(),
+        )
+        .expect("the list is written");
+    }
+
     fn cells(result: &QueryResult) -> Vec<Vec<Option<&str>>> {
         result.rows.iter().map(|row| row.iter().collect()).collect()
     }
@@ -1995,6 +2097,81 @@ mod tests {
             .unwrap();
         assert_eq!(result.columns[0].name, "nombre");
         assert_eq!(cells(&result), [[Some("Ada Lovelace")]]);
+    }
+
+    /// The premise of DuckDB's `bare_path_reads`: a quoted string in a table
+    /// position is read as a file, wherever the table goes, and the agent's
+    /// gate asks first for each spelling.
+    #[test]
+    fn a_quoted_path_reads_the_file_wherever_the_table_goes() {
+        let path = fixture("clientes.csv");
+        let connection = memory("");
+        for sql in [
+            format!("SELECT * FROM '{path}'"),
+            format!("SELECT * FROM \"{path}\""),
+            format!("SELECT * FROM '{path}' a, '{path}' b"),
+            format!("SELECT 1 FROM (SELECT 1) x WHERE 1 IN (SELECT 1 FROM '{path}')"),
+        ] {
+            let result = connection.query(&sql, Fetch::default()).unwrap();
+            assert!(!result.rows.is_empty(), "{sql} returned no rows");
+            assert!(
+                matches!(
+                    crate::sql::agent_gate(
+                        crate::db::Engine::DuckDb,
+                        &sql,
+                        crate::sql::Mode::ReadWrite
+                    ),
+                    crate::sql::AgentVerdict::Approve(..)
+                ),
+                "{sql} is not asked about"
+            );
+        }
+    }
+
+    /// Table functions of extensions the embedded build does not load, so
+    /// `duckdb_functions()` cannot list them: they read a file, a lake or
+    /// another server all the same.
+    const EXTENSION_READERS: &[&str] = &[
+        "iceberg_scan",
+        "delta_scan",
+        "st_read",
+        "sqlite_scan",
+        "postgres_scan",
+        "postgres_query",
+        "mysql_scan",
+        "mysql_query",
+    ];
+
+    #[test]
+    fn every_file_reading_table_function_is_on_the_egress_list() {
+        let connection = memory("");
+        let result = connection
+            .query(
+                "SELECT DISTINCT function_name FROM duckdb_functions() \
+                 WHERE function_type = 'table' ORDER BY 1",
+                Fetch::default(),
+            )
+            .unwrap();
+        let listed = crate::db::Engine::DuckDb.spec().sql.egress_functions;
+        let found: Vec<&str> = result.rows.iter().filter_map(|row| row.get(0)).collect();
+        assert!(found.contains(&"read_csv"), "the catalog answered nothing");
+        for name in &found {
+            let reads = name.starts_with("read_")
+                || name.starts_with("parquet_")
+                || name.ends_with("_scan")
+                || *name == "glob"
+                || *name == "sniff_csv";
+            assert!(
+                !reads || listed.contains(name),
+                "{name} is in duckdb_functions() and not on egress_functions"
+            );
+        }
+        for name in listed {
+            assert!(
+                found.contains(name) || EXTENSION_READERS.contains(name),
+                "{name} is on egress_functions and is neither in duckdb_functions() nor an extension reader"
+            );
+        }
     }
 
     #[test]
@@ -3574,6 +3751,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_agent_open_reads_committed_rows_and_refuses_a_write() {
+        let dir = std::env::temp_dir().join(format!("dbdelve-duckdb-agent-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("agent.duckdb");
+        drop(::duckdb::Connection::open(&path).expect("the scratch database is created"));
+        let path = path.to_string_lossy().into_owned();
+        let user = Connection::open(&path, 0).unwrap();
+        user.query(
+            "CREATE TABLE t (id INTEGER); INSERT INTO t VALUES (1)",
+            Fetch::default(),
+        )
+        .unwrap();
+        let user = crate::db::Connection::DuckDb(user);
+        crate::db::assert_agent_open_reads_and_refuses_a_write(
+            crate::db::ConnectionConfig::duckdb(path, 0),
+            &user,
+        );
+        drop(user);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     struct ScratchDir(std::path::PathBuf);
 
     impl Drop for ScratchDir {
@@ -3654,6 +3853,7 @@ mod tests {
         row_limit_drains_an_ineligible_read,
         capped_read_keeps_the_users_transaction,
         read_only_session_refuses_a_write,
+        denied_functions_agree_with_the_server,
         generated_writes_round_trip,
         generated_draft_round_trip,
         verified_draft_round_trip,

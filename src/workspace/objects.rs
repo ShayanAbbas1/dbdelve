@@ -2300,7 +2300,7 @@ impl Workspace {
             Tab::Query(id) => {
                 if let Some(query_tab) = profile.session.query_tab_mut(id) {
                     query_tab.query = restored_state(&snapshot);
-                    if let Some((plan, showing)) = Explained::restored(&snapshot) {
+                    if let Some((plan, showing)) = Explained::restored(&snapshot, engine) {
                         query_tab.plan = Some(plan);
                         query_tab.showing_plan = showing;
                         // A restored queue's results are copies, none of them

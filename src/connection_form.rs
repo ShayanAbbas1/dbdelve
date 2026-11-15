@@ -899,6 +899,7 @@ impl ConnectionForm {
             ssm: self.ssm_tunnel(cx)?,
             ssh: self.ssh_tunnel(cx)?,
             schema: None,
+            read_only: false,
         };
         // A blank Host beside a service is whatever the service names, which
         // may be a socket directory; connect checks the Host it resolves to.
@@ -1772,6 +1773,7 @@ mod tests {
             ssm: None,
             ssh: None,
             schema: None,
+            read_only: false,
         };
         let typed = ConnectionConfig::postgres(server("hunter2"));
         assert_eq!(password_to_persist(&typed, Origin::Form), Some("hunter2"));

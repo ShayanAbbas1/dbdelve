@@ -1,0 +1,6 @@
+truncated: none
+plan: engine=mysql analyzed=no basis=structure-only time_unit="measured (ms)" cost_unit="planner cost, single figure" total=none conditions=verbatim
+findings: none
+tree:
+  | id=1  select_type=SIMPLE  table=orders  partitions=NULL  type=ALL  possible_keys=PRIMARY  key=NULL  key_len=NULL  ref=NULL  rows=3  filtered=33.33  Extra="Using where"
+  | id=1  select_type=SIMPLE  table=accounts  partitions=NULL  type=eq_ref  possible_keys=PRIMARY  key=PRIMARY  key_len=8  ref=dbdelve_dev.orders.account_id  rows=1  filtered=100.00  Extra=NULL

@@ -229,6 +229,103 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   rename to the name it has). File → New Project (`NewProject`, no default
   chord) opens that, or the welcome surface's name field while no
   connection is in front.
+- **A profile is hidden from agents until its owner says otherwise.**
+  `Profile::agent_visible` is false for every profile, including each one
+  written before the flag existed, and `Workspace::set_agent_visible` is the
+  one place it changes, keyed by id: a second writer would be one more path to
+  tell when a profile is hidden. Making a profile visible goes only through the
+  `agent-visibility` dialog (`Command::ShowToAgents` opens it, and the
+  dialog's `Make visible` is the only caller that passes `true`). It opens with
+  the ring on Cancel (`first_choice`), so an `enter` held or repeated from the
+  palette row that raised it cancels instead of grants, and it states the
+  engine's server-side hold while the profile is Read-only
+  (`Engine::read_only_hold`) and that rows an agent reads leave the machine --
+  static facts, so opening it connects to nothing. Hiding is one action with no
+  dialog (`Command::HideFromAgents`), because narrowing needs no consent.
+  Neither command is remembered under Recent. A visible profile carries a bot
+  marker on its palette rows and beside its name in the titlebar; a hidden one
+  is drawn as it always was. The agent-side lookup filters to visible profiles
+  before it compares names (`Workspace::agent_profile`), so a hidden profile and
+  a missing one answer alike. The one other route to a change is a save in
+  `save_profile` that changes where the profile connects
+  (`ConnectionConfig::needs_reconnect`, an engine change included). That save
+  hides a visible profile and says so, because the dialog's consent and facts
+  were about the old target. A restore (`restore_profile`) that reads a visible
+  profile as Postgres, because this build cannot read its engine, hides it for
+  the same reason; `Workspace::new` saves that hide once every profile and
+  project is in, so it waits in `AgentState::visibility_choices` until then.
+  Profiles are saved whole by
+  whichever window saves, so a window's flags are the file's
+  (`Workspace::adopt_saved_visibility`, on every save and every agent call)
+  except where it made a choice of its own that no save has written yet
+  (`AgentState::visibility_choices`): a grant made in one window's dialog, or a
+  hide, is neither undone by another window's save nor missed by the window
+  serving agents.
+- **An agent's call reaches the window only through the pump, and ends only
+  through `finish_call`.** The socket's threads send `Inbound` messages on a
+  channel and a foreground task hands each to `Workspace::on_agent_message`;
+  a call is addressed by its `CallId`, never by its place in a list.
+  `finish_call` removes the call by id before it replies, so a call ended by
+  two things at once answers at most once, and it writes the call's one log
+  line, so a hangup that arrives after the answer adds nothing. A statement
+  that waits for a person is drawn in the approval dialog
+  (`agent-approval`): the first entry of every `dialog_layer` list, so it is
+  drawn behind every dialog the user is already answering, and below the
+  titlebar. Deny is its one ring stop and Approve is a single mouse click that
+  works only after it has been on screen for `ARM_DELAY`, uncovered by another
+  dialog or the palette, counted afresh each time it is shown again; every key
+  denies, so no keystroke already in flight can approve what the person has
+  not read.
+  Two records are kept of a call, for two readers. The Agent activity dialog
+  reads the in-memory log (`AgentState::log`, at most `AUDIT_CAP`), this
+  session's own: names, a code, a time, the statement cut at `AUDIT_SQL_CAP`
+  and never a row, and an approved call is labelled as one. What outlives the
+  window is `agent-audit.jsonl`, beside `profiles.toml` and one per storage
+  variant, `0600`: an `outcome` line for every call and a `started` line for
+  each call about to be sent to the server, a catalog listing's included, with
+  no statement (`AgentState::record`, `note_started`). An approved read's is
+  written at Approve, before it waits its turn on the lane, so one that a hide
+  or the kill switch ends while it waits has a `started` line and was never
+  sent. The two
+  are paired by `(session, id)` and appended in the order the window handled
+  them, never sorted by time. A statement a person approved is kept whole and
+  its `started` line is written before anything is opened, and a write that
+  cannot be recorded is not run; a plain read's statement is cut as it is in
+  memory and its `started` line is best effort. No line holds a row value: a
+  failed call keeps only the first line of the server's error, scrubbed and cut
+  where it starts to quote or bracket something (`agent::audited_error`), since
+  that is where a server puts the value it names, Postgres's `DETAIL` a line
+  later. The agent's answer keeps the whole scrubbed error. A value a server
+  writes unquoted in its own words is the one thing the cut cannot tell apart.
+  `store::AuditLog` counts the lines once and keeps the count, and past
+  `AUDIT_SLACK` lines rewrites the file to its newest `AUDIT_KEEP`, verbatim;
+  the cut is by count, so a call that runs across it can keep its `outcome` and
+  lose its `started` line.
+  A line a crash left without its end is ended before the next is written. A
+  hangup withdraws a call that is still waiting for approval, and an approved
+  write that is already running finishes. Quitting does not wait for one, and
+  its `started` line is the trace it leaves. Hiding or removing a profile
+  rejects the calls waiting on it, and the kill switch answers every pending
+  call before it drops the bridge, so a waiting client reads a whole answer and
+  not a bare end. The wire speaks version 3; a shim already running from an
+  older build keeps speaking version 2 until its agent restarts it, and is
+  refused. The titlebar mark has three states and is the same in all three
+  titlebars: nothing while no bridge runs, the MCP logo dim while one listens
+  alone, and lit with the count of waiting calls once a shim is attached or a
+  call waits. It carries the kill switch and the log in a popover, and the
+  popover exists only while the mark does: turning access on is the palette's.
+  Nothing in it animates. The approval dialog starts below the titlebar, so
+  while one waits the mark and its kill switch can still be clicked; the
+  keyboard stays with the dialog, where every key denies.
+- **One window serves agents, and the lock beside the socket says which.** The
+  window that binds holds an exclusive `flock` on `agent/s.lock` for as long as
+  it serves, and the kernel lets go of it if the process dies. A window that
+  cannot take it is told another one serves; one that takes it owns the path,
+  so a socket already there is a crash's leftover and is replaced, and the
+  socket it removes on stopping is its own. A connect is never what decides
+  this: a socket with a full backlog refuses a connect as a stale one does. A
+  connection's first frame must arrive whole within its time, not each read
+  within it, so a peer sending a byte at a time is closed as a silent one is.
 - **No connection is a state, not a prompt.** With no profile in front
   (`Workspace::active` is `None`) and no form open, the window is the welcome
   surface (`Workspace::render_welcome`): New project, New connection, each
@@ -239,6 +336,8 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   them (No project, then each project with its own hung beneath it), each
   row the palette's (logo in its colour, name, endpoint, a status dot while
   it is open in the background), and a click or `enter` on one activates it.
+  An agent's approval and the visibility dialog a row opens are drawn there
+  too, since the connections they are about are listed.
   ⌘⇧P there opens Commands on the surface's own verbs
   (`palette::welcome_items`: new connection, data file, project, imports,
   themes, fonts, Settings), plus the connections, and nothing that needs a

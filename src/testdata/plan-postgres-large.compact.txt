@@ -1,0 +1,246 @@
+truncated: none
+plan: engine=postgres analyzed=yes basis=measured time_unit="measured (ms)" cost_unit="planner cost, arbitrary units" total=9119.317ms execution="9273.512 ms" planning="21.833 ms" outside_nodes=154.195ms conditions=verbatim
+findings:
+  n18 misestimate over x200 est=200 act=1 HashAggregate
+  n8 misestimate over x33 est=200 act=6 GroupAggregate
+  n19 misestimate under x33 est=4759 act=158330 CTE Scan on big x
+  n9 misestimate under x33 est=28556 act=949990 Sort
+  n10 misestimate under x33 est=28556 act=949990 Hash Join
+  n0 misestimate over x16 est=482 act=29 Append
+  n45 misestimate over x12 est=12 act=1 Gather Merge
+  n55 misestimate over x12 est=12 act=1 Gather Merge
+tree:
+  n0 Append self=0.627ms 0.0% est=482 act=29 loops=1
+    | Buffers: shared hit=7520 read=2492612, temp read=14427 written=14696
+    n1 [CTE big] Seq Scan on events events_9 self=609.894ms 6.6% est=951878 act=949990 loops=1
+      | Filter: (amount > '50'::numeric)
+      | Rows Removed by Filter: 50010  [total 50010 over 1 loops]
+      | Buffers: shared hit=550 read=249450
+    n2 Subquery Scan on "*SELECT* 1" self=0.128ms 0.0% est=36 act=6 loops=1
+      | Buffers: shared hit=422 read=249610
+      n3 Finalize GroupAggregate self=1.397ms 0.0% est=36 act=6 loops=1
+        | Group Key: events.account_id, events.kind
+        | Buffers: shared hit=422 read=249610
+        n4 Gather Merge self=132.841ms 1.4% est=72 act=12 loops=1 parallel=2workers
+          | Workers Planned: 2
+          | Workers Launched: 2
+          | Buffers: shared hit=422 read=249610
+          n5 Sort self=0.987ms 0.0% est=108 act=12 (x 3 loops) loops=3 parallel=2workers
+            | Sort Key: events.account_id, events.kind
+            | Sort Method: quicksort  Memory: 25kB
+            | Buffers: shared hit=422 read=249610
+            | Worker 0:  Sort Method: quicksort  Memory: 25kB
+            | Worker 1:  Sort Method: quicksort  Memory: 25kB
+            n6 Partial HashAggregate self=48.917ms 0.5% est=108 act=12 (x 3 loops) loops=3 parallel=2workers
+              | Group Key: events.account_id, events.kind
+              | Batches: 1  Memory Usage: 24kB
+              | Buffers: shared hit=390 read=249610
+              | Worker 0:  Batches: 1  Memory Usage: 24kB
+              | Worker 1:  Batches: 1  Memory Usage: 24kB
+              n7 Parallel Seq Scan on events self=1066.057ms 11.6% est=1125678 act=899991 (x 3 loops) loops=3 parallel=2workers
+                | Filter: (amount > '100'::numeric)
+                | Rows Removed by Filter: 33337  [total 100011 over 3 loops]
+                | Buffers: shared hit=390 read=249610
+    n8 GroupAggregate self=65.471ms 0.7% est=200 act=6 loops=1
+      | Group Key: b.account_id
+      | Buffers: shared hit=1068 read=498932, temp read=8715 written=13662
+      n9 Sort self=260.382ms 2.8% est=28556 act=949990 loops=1
+        | Sort Key: b.account_id
+        | Sort Method: external merge  Disk: 23248kB
+        | Buffers: shared hit=1068 read=498932, temp read=8715 written=13662
+        n10 Hash Join self=101.179ms 1.1% est=28556 act=949990 loops=1
+          | Hash Cond: (b.account_id = events_1.account_id)
+          | Buffers: shared hit=1068 read=498932, temp written=4870
+          n11 CTE Scan on big b self=169.903ms 1.8% est=951878 act=949990 loops=1
+            | Buffers: shared hit=550 read=249450, temp written=4870
+          n12 Hash self=0.192ms 0.0% est=6 act=6 loops=1
+            | Buckets: 1024  Batches: 1  Memory Usage: 9kB
+            | Buffers: shared hit=518 read=249482
+            n13 Unique self=0.104ms 0.0% est=6 act=6 loops=1
+              | Buffers: shared hit=518 read=249482
+              n14 Sort self=0.569ms 0.0% est=12 act=18 loops=1
+                | Sort Key: events_1.account_id
+                | Sort Method: quicksort  Memory: 25kB
+                | Buffers: shared hit=518 read=249482
+                n15 Gather self=187.28ms 2.0% est=12 act=18 loops=1 parallel=2workers
+                  | Workers Planned: 2
+                  | Workers Launched: 2
+                  | Buffers: shared hit=518 read=249482
+                  n16 HashAggregate self=441.591ms 4.8% est=18 act=18 (x 3 loops) loops=3 parallel=2workers
+                    | Group Key: events_1.account_id
+                    | Batches: 1  Memory Usage: 24kB
+                    | Buffers: shared hit=518 read=249482
+                    | Worker 0:  Batches: 1  Memory Usage: 24kB
+                    | Worker 1:  Batches: 1  Memory Usage: 24kB
+                    n17 Parallel Seq Scan on events events_1 self=145.413ms 1.5% est=1250001 act=999999 (x 3 loops) loops=3 parallel=2workers
+                      | Buffers: shared hit=518 read=249482
+    n18 HashAggregate self=16.212ms 0.1% est=200 act=1 loops=1
+      | Group Key: x.account_id
+      | Batches: 1  Memory Usage: 40kB
+      | Buffers: temp read=4871 written=1
+      n19 CTE Scan on big x self=68.129ms 0.7% est=4759 act=158330 loops=1
+        | Filter: (kind = 'click'::text)
+        | Rows Removed by Filter: 791660  [total 791660 over 1 loops]  [fact: removed >= 1000 and more than kept, per loop]
+        | Buffers: temp read=4871 written=1
+    n20 Subquery Scan on "*SELECT* 4" self=0.073ms 0.0% est=10 act=10 loops=1
+      | Buffers: shared hit=618 read=249386, temp read=841 written=1033
+      n21 Subquery Scan on s self=0.306ms 0.0% est=10 act=10 loops=1
+        | Buffers: shared hit=618 read=249386, temp read=841 written=1033
+        n22 Limit self=3.061ms 0.0% est=10 act=10 loops=1
+          | Buffers: shared hit=618 read=249386, temp read=841 written=1033
+          n23 Sort self=117.018ms 1.2% est=166685 act=100010 loops=1
+            | Sort Key: e.amount DESC, e.id
+            | Sort Method: external merge  Disk: 4088kB
+            | Buffers: shared hit=618 read=249386, temp read=841 written=1033
+            n24 Hash Semi Join self=97.321ms 1.0% est=166685 act=166667 loops=1
+              | Hash Cond: (e.kind = events_2.kind)
+              | Buffers: shared hit=615 read=249386
+              n25 Seq Scan on events e self=418.616ms 4.5% est=1000000 act=1000000 loops=1
+                | Buffers: shared hit=614 read=249386
+              n26 Hash self=0.126ms 0.0% est=1 act=1 loops=1
+                | Buckets: 1024  Batches: 1  Memory Usage: 9kB
+                | Buffers: shared hit=1
+                n27 Limit self=0.055ms 0.0% est=1 act=1 loops=1
+                  | Buffers: shared hit=1
+                  n28 Seq Scan on events events_2 self=0.053ms 0.0% est=169400 act=1 loops=1
+                    | Filter: (account_id = 3)
+                    | Rows Removed by Filter: 3  [total 3 over 1 loops]
+                    | Buffers: shared hit=1
+    n29 Finalize GroupAggregate self=0.76ms 0.0% est=6 act=1 loops=1
+      | Group Key: events_3.account_id
+      | Buffers: shared hit=662 read=249354
+      n30 Gather Merge self=121.111ms 1.3% est=12 act=3 loops=1 parallel=2workers
+        | Workers Planned: 2
+        | Workers Launched: 2
+        | Buffers: shared hit=662 read=249354
+        n31 Sort self=0.627ms 0.0% est=18 act=3 (x 3 loops) loops=3 parallel=2workers
+          | Sort Key: events_3.account_id
+          | Sort Method: quicksort  Memory: 25kB
+          | Buffers: shared hit=662 read=249354
+          | Worker 0:  Sort Method: quicksort  Memory: 25kB
+          | Worker 1:  Sort Method: quicksort  Memory: 25kB
+          n32 Partial HashAggregate self=10.546ms 0.1% est=18 act=3 (x 3 loops) loops=3 parallel=2workers
+            | Group Key: events_3.account_id
+            | Batches: 1  Memory Usage: 24kB
+            | Buffers: shared hit=646 read=249354
+            | Worker 0:  Batches: 1  Memory Usage: 24kB
+            | Worker 1:  Batches: 1  Memory Usage: 24kB
+            n33 Parallel Seq Scan on events events_3 self=896.232ms 9.8% est=163959 act=133329 (x 3 loops) loops=3 parallel=2workers
+              | Filter: ((amount > '200'::numeric) AND (kind = 'click'::text))
+              | Rows Removed by Filter: 288890  [total 866670 over 3 loops]  [fact: removed >= 1000 and more than kept, per loop]
+              | Buffers: shared hit=646 read=249354
+    n34 Finalize GroupAggregate self=0.403ms 0.0% est=6 act=1 loops=1
+      | Group Key: events_4.account_id
+      | Buffers: shared hit=758 read=249258
+      n35 Gather Merge self=218.451ms 2.3% est=12 act=3 loops=1 parallel=2workers
+        | Workers Planned: 2
+        | Workers Launched: 2
+        | Buffers: shared hit=758 read=249258
+        n36 Sort self=0.58ms 0.0% est=18 act=3 (x 3 loops) loops=3 parallel=2workers
+          | Sort Key: events_4.account_id
+          | Sort Method: quicksort  Memory: 25kB
+          | Buffers: shared hit=758 read=249258
+          | Worker 0:  Sort Method: quicksort  Memory: 25kB
+          | Worker 1:  Sort Method: quicksort  Memory: 25kB
+          n37 Partial HashAggregate self=8.998ms 0.0% est=18 act=3 (x 3 loops) loops=3 parallel=2workers
+            | Group Key: events_4.account_id
+            | Batches: 1  Memory Usage: 24kB
+            | Buffers: shared hit=742 read=249258
+            | Worker 0:  Batches: 1  Memory Usage: 24kB
+            | Worker 1:  Batches: 1  Memory Usage: 24kB
+            n38 Parallel Seq Scan on events events_4 self=664.387ms 7.2% est=166098 act=133332 (x 3 loops) loops=3 parallel=2workers
+              | Filter: ((amount > '200'::numeric) AND (kind = 'view'::text))
+              | Rows Removed by Filter: 288889  [total 866667 over 3 loops]  [fact: removed >= 1000 and more than kept, per loop]
+              | Buffers: shared hit=742 read=249258
+    n39 Finalize GroupAggregate self=4.851ms 0.0% est=6 act=1 loops=1
+      | Group Key: events_5.account_id
+      | Buffers: shared hit=854 read=249162
+      n40 Gather Merge self=266.982ms 2.9% est=12 act=3 loops=1 parallel=2workers
+        | Workers Planned: 2
+        | Workers Launched: 2
+        | Buffers: shared hit=854 read=249162
+        n41 Sort self=0.593ms 0.0% est=18 act=3 (x 3 loops) loops=3 parallel=2workers
+          | Sort Key: events_5.account_id
+          | Sort Method: quicksort  Memory: 25kB
+          | Buffers: shared hit=854 read=249162
+          | Worker 0:  Sort Method: quicksort  Memory: 25kB
+          | Worker 1:  Sort Method: quicksort  Memory: 25kB
+          n42 Partial HashAggregate self=7.319ms 0.0% est=18 act=3 (x 3 loops) loops=3 parallel=2workers
+            | Group Key: events_5.account_id
+            | Batches: 1  Memory Usage: 24kB
+            | Buffers: shared hit=838 read=249162
+            | Worker 0:  Batches: 1  Memory Usage: 24kB
+            | Worker 1:  Batches: 1  Memory Usage: 24kB
+            n43 Parallel Seq Scan on events events_5 self=550.659ms 6.0% est=169737 act=133329 (x 3 loops) loops=3 parallel=2workers
+              | Filter: ((amount > '200'::numeric) AND (kind = 'purchase'::text))
+              | Rows Removed by Filter: 288890  [total 866670 over 3 loops]  [fact: removed >= 1000 and more than kept, per loop]
+              | Buffers: shared hit=838 read=249162
+    n44 Finalize GroupAggregate self=0.472ms 0.0% est=6 act=1 loops=1
+      | Group Key: events_6.account_id
+      | Buffers: shared hit=950 read=249066
+      n45 Gather Merge self=267.267ms 2.9% est=12 act=1 loops=1 parallel=2workers
+        | Workers Planned: 2
+        | Workers Launched: 2
+        | Buffers: shared hit=950 read=249066
+        n46 Sort self=0.988ms 0.0% est=18 act=0 (x 3 loops) loops=3 parallel=2workers
+          | Sort Key: events_6.account_id
+          | Sort Method: quicksort  Memory: 25kB
+          | Buffers: shared hit=950 read=249066
+          | Worker 0:  Sort Method: quicksort  Memory: 25kB
+          | Worker 1:  Sort Method: quicksort  Memory: 25kB
+          n47 Partial HashAggregate self=6.194ms 0.0% est=18 act=0 (x 3 loops) loops=3 parallel=2workers
+            | Group Key: events_6.account_id
+            | Batches: 1  Memory Usage: 24kB
+            | Buffers: shared hit=934 read=249066
+            | Worker 0:  Batches: 1  Memory Usage: 24kB
+            | Worker 1:  Batches: 1  Memory Usage: 24kB
+            n48 Parallel Seq Scan on events events_6 self=537.358ms 5.8% est=167067 act=133335 (x 3 loops) loops=3 parallel=2workers
+              | Filter: ((amount > '200'::numeric) AND (kind = 'refund'::text))
+              | Rows Removed by Filter: 288889  [total 866667 over 3 loops]  [fact: removed >= 1000 and more than kept, per loop]
+              | Buffers: shared hit=934 read=249066
+    n49 Finalize GroupAggregate self=1.01ms 0.0% est=6 act=1 loops=1
+      | Group Key: events_7.account_id
+      | Buffers: shared hit=1046 read=248970
+      n50 Gather Merge self=252.283ms 2.7% est=12 act=3 loops=1 parallel=2workers
+        | Workers Planned: 2
+        | Workers Launched: 2
+        | Buffers: shared hit=1046 read=248970
+        n51 Sort self=0.6ms 0.0% est=18 act=3 (x 3 loops) loops=3 parallel=2workers
+          | Sort Key: events_7.account_id
+          | Sort Method: quicksort  Memory: 25kB
+          | Buffers: shared hit=1046 read=248970
+          | Worker 0:  Sort Method: quicksort  Memory: 25kB
+          | Worker 1:  Sort Method: quicksort  Memory: 25kB
+          n52 Partial HashAggregate self=7.227ms 0.0% est=18 act=3 (x 3 loops) loops=3 parallel=2workers
+            | Group Key: events_7.account_id
+            | Batches: 1  Memory Usage: 24kB
+            | Buffers: shared hit=1030 read=248970
+            | Worker 0:  Batches: 1  Memory Usage: 24kB
+            | Worker 1:  Batches: 1  Memory Usage: 24kB
+            n53 Parallel Seq Scan on events events_7 self=529.926ms 5.8% est=167667 act=133329 (x 3 loops) loops=3 parallel=2workers
+              | Filter: ((amount > '200'::numeric) AND (kind = 'signup'::text))
+              | Rows Removed by Filter: 288890  [total 866670 over 3 loops]  [fact: removed >= 1000 and more than kept, per loop]
+              | Buffers: shared hit=1030 read=248970
+    n54 Finalize GroupAggregate self=1.106ms 0.0% est=6 act=1 loops=1
+      | Group Key: events_8.account_id
+      | Buffers: shared hit=1142 read=248874
+      n55 Gather Merge self=261.935ms 2.8% est=12 act=1 loops=1 parallel=2workers
+        | Workers Planned: 2
+        | Workers Launched: 2
+        | Buffers: shared hit=1142 read=248874
+        n56 Sort self=0.474ms 0.0% est=18 act=0 (x 3 loops) loops=3 parallel=2workers
+          | Sort Key: events_8.account_id
+          | Sort Method: quicksort  Memory: 25kB
+          | Buffers: shared hit=1142 read=248874
+          | Worker 0:  Sort Method: quicksort  Memory: 25kB
+          | Worker 1:  Sort Method: quicksort  Memory: 25kB
+          n57 Partial HashAggregate self=6.59ms 0.0% est=18 act=0 (x 3 loops) loops=3 parallel=2workers
+            | Group Key: events_8.account_id
+            | Batches: 1  Memory Usage: 24kB
+            | Buffers: shared hit=1126 read=248874
+            | Worker 0:  Batches: 1  Memory Usage: 24kB
+            | Worker 1:  Batches: 1  Memory Usage: 24kB
+            n58 Parallel Seq Scan on events events_8 self=539.486ms 5.9% est=167466 act=133332 (x 3 loops) loops=3 parallel=2workers
+              | Filter: ((amount > '200'::numeric) AND (kind = 'churn'::text))
+              | Rows Removed by Filter: 288889  [total 866667 over 3 loops]  [fact: removed >= 1000 and more than kept, per loop]
+              | Buffers: shared hit=1126 read=248874

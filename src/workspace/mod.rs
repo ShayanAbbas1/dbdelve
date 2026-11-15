@@ -4,6 +4,9 @@
 //! grouped by concern in the sibling modules, which are parts of this same
 //! inherent impl rather than types of their own.
 
+mod agent;
+mod agent_read;
+mod agent_write;
 mod commands;
 mod diagrams;
 #[cfg(test)]
@@ -25,6 +28,7 @@ mod queries;
 mod sidebar;
 mod stable_import;
 mod tabs;
+mod transactions;
 mod welcome;
 
 use std::collections::{HashMap, HashSet};
@@ -34,10 +38,13 @@ use gpui_component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
 
 pub(crate) use diagrams::{SideRead, drawn_in_diagrams};
 pub(crate) use import_dialog::PreviewGrid;
+#[cfg(test)]
+pub(crate) use profiles::restored;
 pub(crate) use profiles::unavailable_reason;
 pub(crate) use projects::project_name_refusal;
 pub(crate) use queries::error_in_buffer;
 
+use crate::actions::{DisconnectAgents, ShowAgentActivity};
 use crate::channel::Channel;
 use crate::connection_form::{Origin, passphrase_to_persist, password_to_persist};
 use crate::session::{catalog_relation, write_buffer, write_grids};
@@ -413,6 +420,19 @@ pub(crate) struct Workspace {
     /// Numbers each Show DDL read, so an answer that comes back after the
     /// dialog was closed, or put up for another object, is not drawn.
     pub(crate) last_ddl_request: u64,
+    /// The id of the profile whose agent-visibility dialog is open. Only that
+    /// dialog sets it, and `set_agent_visible` grants visibility only to the
+    /// profile it names.
+    pub(crate) agent_visibility_prompt: Option<String>,
+    /// Whether an agent's read of the profile in [`Self::agent_visibility_prompt`]
+    /// can make the owner's commit wait. Read from the file once, when the
+    /// dialog opens, so drawing it never touches the disk.
+    pub(crate) agent_visibility_blocks_commits: bool,
+    /// The agent bridge: the socket, and the calls waiting on this window.
+    pub(crate) agent: agent::AgentState,
+    /// Whether the `Agent activity` dialog is up. Only the popover's item
+    /// opens it and only its own close and `escape` end it.
+    pub(crate) agent_audit_open: bool,
     /// The opacity field in the settings panel. Kept here rather than built
     /// with the card, because an input is state the user is part-way through
     /// typing into and a fresh one every frame would swallow the keystroke.
@@ -435,6 +455,14 @@ pub(crate) struct Workspace {
     pub(crate) dialog_choice: std::cell::Cell<usize>,
     /// What held the keyboard when the first dialog went up.
     pub(crate) focus_before_dialog: std::cell::RefCell<Option<FocusHandle>>,
+    /// The source statement the approval dialog was last drawn from, by call,
+    /// so Approve can refuse a call that was never drawn or whose statement is
+    /// not the one drawn (GATE-10). Written by the render through `&self`.
+    pub(crate) approval_shown: std::cell::RefCell<Option<(crate::agent::CallId, String)>>,
+    /// Where the approval's statement block is scrolled, by call, so the next
+    /// call opens at its first line and the scrollbar reads the same offset.
+    pub(crate) approval_scroll:
+        std::cell::RefCell<Option<(crate::agent::CallId, gpui::ScrollHandle)>>,
     /// See [`Workspace::welcome_project_focus`].
     pub(crate) welcome_project_focus: std::cell::RefCell<Vec<FocusHandle>>,
     pub(crate) update: Option<update::Update>,
@@ -591,6 +619,10 @@ impl Workspace {
             theme_before_preview: None,
             ddl_view: None,
             last_ddl_request: 0,
+            agent_visibility_prompt: None,
+            agent_visibility_blocks_commits: false,
+            agent_audit_open: false,
+            agent: agent::AgentState::default(),
             opacity_input,
             #[cfg(test)]
             held: Vec::new(),
@@ -605,6 +637,8 @@ impl Workspace {
             dialog_in_front: std::cell::Cell::default(),
             dialog_choice: std::cell::Cell::default(),
             focus_before_dialog: std::cell::RefCell::default(),
+            approval_shown: std::cell::RefCell::default(),
+            approval_scroll: std::cell::RefCell::default(),
             welcome_project_focus: std::cell::RefCell::default(),
             update: None,
             update_checks: None,
@@ -613,6 +647,10 @@ impl Workspace {
         };
 
         let mut load_failure = None;
+        // Read once, here, to decide whether to listen. The window keeps no
+        // copy: a saved one is what would write `true` back over another
+        // window's kill switch (see `agent_access_to_save`).
+        let mut listen_at_launch = false;
         match store::load_profiles(&workspace.plugins) {
             Ok(store::ProfileList {
                 profiles,
@@ -625,6 +663,7 @@ impl Workspace {
                 // Before the first frame, so the window is drawn in the faces
                 // the user picked rather than repainted into them.
                 let stored_settings = stored_settings.unwrap_or_default();
+                listen_at_launch = stored_settings.agent_access.unwrap_or(false);
                 // Ahead of the fonts and the theme, which size gpui-component's
                 // widgets off the chrome size as they install.
                 let chrome_font_size =
@@ -732,6 +771,14 @@ impl Workspace {
                     .chain(workspace.unavailable.iter().map(|gone| gone.id.as_str()))
                     .collect::<Vec<_>>();
                 workspace.projects = projects::normalized_projects(projects, &live);
+                // Only a restore that hid a profile read as Postgres leaves a
+                // choice at launch. Saving after the loop and the projects
+                // writes the whole file, and clears the choice so another
+                // window's later grant is adopted, not overwritten. A launch
+                // that narrowed nothing writes nothing.
+                if !workspace.agent.visibility_choices.is_empty() {
+                    workspace.remember_profiles(cx);
+                }
             }
             Err(failure) => {
                 workspace.store_unreadable = !failure.moved_aside;
@@ -787,6 +834,12 @@ impl Workspace {
         }
         if let Some(message) = load_failure {
             workspace.note(message, cx);
+        }
+        // A refusal is shown and nothing saved changes: the choice is the
+        // user's, and a window that found another one serving can be asked
+        // again from the palette.
+        if listen_at_launch && let Err(text) = workspace.listen_for_agents(cx) {
+            workspace.note(text, cx);
         }
 
         if workspace.settings.check_for_updates {
@@ -861,11 +914,15 @@ impl Workspace {
         // would wait for background work to finish. The profiles only when a
         // write is pending: written unasked, they would put this session's
         // copy over one another instance saved since.
+        //
+        // The agent socket file goes with the window; the user's choice stays
+        // saved, so the next launch listens again only if access was on.
         cx.on_app_quit(|workspace: &mut Self, cx: &mut Context<Self>| {
             workspace.persist_buffers(cx);
             if workspace.profiles_unsaved {
                 let _ = workspace.save_profiles(cx);
             }
+            workspace.drop_bridge();
             async {}
         })
         .detach();
@@ -875,6 +932,7 @@ impl Workspace {
             if workspace.profiles_unsaved {
                 let _ = workspace.save_profiles(cx);
             }
+            workspace.drop_bridge();
         })
         .detach();
 
@@ -957,6 +1015,24 @@ impl Workspace {
             Some(profile) => profile.session.editor_needs_focus = true,
             None => self.welcome_needs_focus = true,
         }
+    }
+
+    fn disconnect_agents_action(
+        &mut self,
+        _: &DisconnectAgents,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.disconnect_agents(cx);
+    }
+
+    fn show_agent_activity_action(
+        &mut self,
+        _: &ShowAgentActivity,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_agent_activity(cx);
     }
 
     pub(crate) fn note(&mut self, message: String, cx: &mut Context<Self>) {
@@ -1534,6 +1610,62 @@ impl Workspace {
             .children(self.settings_open.then(|| render_settings_panel(self, cx)))
             .into_any_element()
     }
+
+    /// The agent mark for a titlebar, or nothing while no bridge runs, so a
+    /// window with agent access off draws exactly what it always did. Every
+    /// titlebar asks for it, so no surface hides an agent that is attached.
+    fn render_agent_mark(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = *theme(cx);
+        let mark = self.agent_mark_state()?;
+        // Snapshotted before the closure, as the mode pill's `silenced` is:
+        // the menu is built when it opens, from what was drawn.
+        let waiting = self.agent.calls.len();
+        // On a wrapper: `dropdown_menu` wraps the button, so a margin on the
+        // button never reaches the titlebar's row.
+        Some(
+            div()
+                .child(ui::agent_mark(t, mark).dropdown_menu(move |menu, _, _| {
+                    // The kill switch is the first item that can be selected, so
+                    // the keyboard reaches it with one step. The mark is drawn
+                    // only while access is on, so turning access on is the
+                    // palette's; the item after it reads what agents did.
+                    menu.label(match waiting {
+                        0 => "No calls waiting".to_string(),
+                        1 => "1 call waiting for you".to_string(),
+                        n => format!("{n} calls waiting for you"),
+                    })
+                    .label("Agent access is on")
+                    .menu(
+                        "Disconnect agents and turn access off",
+                        Box::new(DisconnectAgents),
+                    )
+                    .menu("Agent activity", Box::new(ShowAgentActivity))
+                }))
+                .into_any_element(),
+        )
+    }
+}
+
+/// One line of the agent call log, newest at the top of the menu: how long ago,
+/// the tool, the connection, and how the call ended. A name the agent gave that
+/// resolved nothing is quoted as asked for, so its words never read as a
+/// connection of DBDelve's.
+fn agent_log_label(entry: &agent::LogEntry, now: u64) -> String {
+    let age = ui::relative_age(now.saturating_sub(entry.at) / 1000);
+    let mut line = format!("{age} ago \u{b7} {}", entry.tool.name());
+    match (&entry.resolved, &entry.asked) {
+        (Some(name), _) => line.push_str(&format!(" \u{b7} {name}")),
+        (None, Some(asked)) => line.push_str(&format!(" \u{b7} asked for \"{asked}\"")),
+        (None, None) => {}
+    }
+    line.push_str(&format!(" \u{b7} {}", entry.status.as_str()));
+    if entry.requester_gone {
+        line.push_str(" \u{b7} no requester");
+    }
+    if entry.decision == Some(agent::Decision::Approved) {
+        line.push_str(" \u{b7} approved");
+    }
+    line
 }
 
 impl Workspace {
@@ -1862,6 +1994,8 @@ impl Render for Workspace {
                 .on_action(cx.listener(Self::select_theme))
                 .on_action(cx.listener(Self::show_editor))
                 .on_action(cx.listener(Self::submit_connection))
+                .on_action(cx.listener(Self::disconnect_agents_action))
+                .on_action(cx.listener(Self::show_agent_activity_action))
                 .on_action(cx.listener(Self::next_profile))
                 .on_action(cx.listener(Self::zoom_editor_in))
                 .on_action(cx.listener(Self::zoom_editor_out))
@@ -1871,7 +2005,13 @@ impl Render for Workspace {
                 .on_action(cx.listener(Self::copy_diagnostics))
                 // Without a titlebar of its own the form has no drag handle at
                 // all, since the platform's is transparent.
-                .child(titlebar(t, None, Vec::new(), Vec::new(), Vec::new()))
+                .child(titlebar(
+                    t,
+                    None,
+                    self.render_agent_mark(cx).into_iter().collect(),
+                    Vec::new(),
+                    Vec::new(),
+                ))
                 .children(self.render_cleanup_notice(t, cx))
                 .child(
                     div()
@@ -1881,6 +2021,11 @@ impl Render for Workspace {
                 )
                 .children(self.dialog_layer(
                     [
+                        // First, so it is drawn behind every other dialog: an
+                        // agent's unsolicited approval never covers one the user
+                        // is already answering.
+                        ("agent-approval", self.render_agent_approval(cx)),
+                        ("agent-audit", self.render_agent_audit(cx)),
                         ("import-choice", self.render_import_choice(cx)),
                         ("stable-import", self.render_stable_import(cx)),
                     ],
@@ -1903,6 +2048,8 @@ impl Render for Workspace {
                 .on_action(cx.listener(Self::select_theme))
                 .on_action(cx.listener(Self::show_editor))
                 .on_action(cx.listener(Self::open_connection_form))
+                .on_action(cx.listener(Self::disconnect_agents_action))
+                .on_action(cx.listener(Self::show_agent_activity_action))
                 .on_action(cx.listener(Self::new_project))
                 .on_action(cx.listener(Self::import_from))
                 .on_action(cx.listener(Self::open_settings))
@@ -1920,7 +2067,10 @@ impl Render for Workspace {
                 .child(titlebar(
                     t,
                     None,
-                    self.render_update_pill(cx).into_iter().collect(),
+                    self.render_agent_mark(cx)
+                        .into_iter()
+                        .chain(self.render_update_pill(cx))
+                        .collect(),
                     Vec::new(),
                     Vec::new(),
                 ))
@@ -1928,6 +2078,12 @@ impl Render for Workspace {
                 .child(self.beside_settings(self.render_welcome(window, cx).into_any_element(), cx))
                 .children(self.dialog_layer(
                     [
+                        // Home lists the connections, so an agent's call on a
+                        // visible one and the visibility dialog its row opens
+                        // both arrive here as well as in front of a profile.
+                        ("agent-approval", self.render_agent_approval(cx)),
+                        ("agent-audit", self.render_agent_audit(cx)),
+                        ("agent-visibility", self.render_agent_visibility(cx)),
                         ("import-choice", self.render_import_choice(cx)),
                         ("stable-import", self.render_stable_import(cx)),
                     ],
@@ -2007,6 +2163,7 @@ impl Render for Workspace {
         let view_sorting = views::render_view_sorting(profile, cx);
         let edit_mode = views::render_edit_mode(profile, cx);
         let apply_label = views::apply_label(views::view_edit_mode(profile));
+        let transaction = views::render_transaction(profile, cx);
         let hidden_columns = views::render_hidden_columns(profile, cx);
         let relation = profile
             .session
@@ -2277,6 +2434,7 @@ impl Render for Workspace {
             || paging.is_some()
             || view_sorting.is_some()
             || edit_mode.is_some()
+            || transaction.is_some()
             || hidden_columns.is_some()
             || query_status.is_some()
             || refreshable_snapshot
@@ -2331,6 +2489,7 @@ impl Render for Workspace {
                         .flex()
                         .items_center()
                         .gap(px(layout::SPACE_SM))
+                        .children(transaction)
                         .children(view_sorting)
                         .children(hidden_columns)
                         .children(left_stats.map(|stats| {
@@ -2683,9 +2842,14 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::command_palette))
             .on_action(cx.listener(Self::search_everything))
             .on_action(cx.listener(Self::cycle_mode))
+            .on_action(cx.listener(Self::toggle_auto_commit))
+            .on_action(cx.listener(Self::commit_transaction))
+            .on_action(cx.listener(Self::rollback_transaction))
             .on_action(cx.listener(Self::switch_connection))
             .on_action(cx.listener(Self::disconnect))
             .on_action(cx.listener(Self::toggle_sidebar))
+            .on_action(cx.listener(Self::disconnect_agents_action))
+            .on_action(cx.listener(Self::show_agent_activity_action))
             .on_action(cx.listener(Self::focus_sidebar))
             .on_action(cx.listener(Self::collapse_all_schemas))
             .on_action(cx.listener(Self::expand_all_schemas))
@@ -2785,6 +2949,7 @@ impl Render for Workspace {
                         })
                         .into_any_element()
                 })
+                .chain(self.render_agent_mark(cx))
                 .chain(update_pill)
                 .collect(),
                 [
@@ -2823,11 +2988,17 @@ impl Render for Workspace {
             .child(self.beside_settings(main_pane, cx))
             .children(self.dialog_layer(
                 [
+                    // First, so it is drawn behind every other dialog: an
+                    // agent's unsolicited approval never covers one the user is
+                    // already answering, and `escape` reaches it last.
+                    ("agent-approval", self.render_agent_approval(cx)),
+                    ("agent-audit", self.render_agent_audit(cx)),
                     ("show-ddl", self.render_show_ddl(cx)),
                     ("apply-review", self.render_apply_review(cx)),
                     ("import-rows", self.render_import_rows(window, cx)),
                     ("delete", self.render_delete_confirmation(cx)),
                     ("discard", self.render_discard_confirmation(cx)),
+                    ("agent-visibility", self.render_agent_visibility(cx)),
                     ("pending-export", self.render_pending_export(cx)),
                     ("pending-run", self.render_pending_run(cx)),
                     ("queue-failure", self.render_queue_failure(cx)),
