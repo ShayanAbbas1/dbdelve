@@ -87,6 +87,17 @@ FROM information_schema.SCHEMATA
 WHERE SCHEMA_NAME NOT IN {system} OR SCHEMA_NAME = DATABASE()
 ";
 
+// The databases the unfiltered tree draws: every one `SCHEMAS_SQL` lists, by
+// its own predicate, since `catalog` adds each of those whether or not it
+// holds a relation. Routines and sequences are read under the same predicate,
+// so they name no database outside it.
+const CATALOG_DATABASES_SQL: &str = "
+SELECT SCHEMA_NAME AS name, SCHEMA_NAME = DATABASE() AS is_current
+FROM information_schema.SCHEMATA
+WHERE SCHEMA_NAME NOT IN {system} OR SCHEMA_NAME = DATABASE()
+ORDER BY SCHEMA_NAME
+";
+
 const RELATIONS_SQL: &str = "
 SELECT TABLE_SCHEMA AS schema_name,
        TABLE_NAME AS relation_name,
@@ -171,6 +182,10 @@ fn only_clause(engine: Engine, column: &str, names: Option<&[String]>) -> String
         .map(|name| engine.quote_literal(name))
         .collect::<Vec<_>>();
     format!("\n  AND {column} IN ({})", quoted.join(", "))
+}
+
+fn catalog_databases_sql() -> String {
+    CATALOG_DATABASES_SQL.replace("{system}", SYSTEM_SCHEMAS)
 }
 
 fn relations_sql(engine: Engine, names: Option<&[String]>) -> String {
@@ -1035,10 +1050,20 @@ impl Connection {
         assemble_databases(&self.internal_query(DATABASES_SQL)?)
     }
 
-    /// The server's databases the filter matches, and how many it left out, or
-    /// `None` for a read that is not narrowed. Listed here, in the read's own
-    /// closure, so the statement it feeds carries only names the server just
-    /// gave.
+    /// The databases the catalog draws, the server's own left out: what the
+    /// unfiltered tree shows, so a filtered catalog counts its hidden ones on
+    /// the same basis and the filter picker lists exactly these.
+    pub fn catalog_databases(&self) -> Result<super::Databases, DbError> {
+        assemble_databases(&self.internal_query(&catalog_databases_sql())?)
+    }
+
+    /// The server's databases the filter matches, or `None` for a read that is
+    /// not narrowed. Listed here, in the read's own closure, so the statement
+    /// it feeds carries only names the server just gave. It lists on whichever
+    /// connection it is called on: `routines` and `sequences` call it on the
+    /// user's connection, where they read, and `sizes` on its side session.
+    /// Those callers use only the names, never the hidden count, so the full
+    /// listing serves.
     fn matched(&self, shown: &Shown) -> Result<Option<(Vec<String>, usize)>, DbError> {
         if !shown.narrows_catalog() {
             return Ok(None);
@@ -1046,8 +1071,14 @@ impl Connection {
         Ok(shown.matched_databases(&self.databases()?, self.engine))
     }
 
+    /// The listing is [`Self::catalog_databases`], so the `left_out` returned
+    /// is on the unfiltered tree's basis.
     pub fn catalog(&self, shown: &Shown) -> Result<Catalog, DbError> {
-        let matched = self.matched(shown)?;
+        let matched = if shown.narrows_catalog() {
+            shown.matched_databases(&self.catalog_databases()?, self.engine)
+        } else {
+            None
+        };
         let names = matched.as_ref().map(|(names, _)| names.as_slice());
         let left_out = matched.as_ref().map_or(0, |(_, left_out)| *left_out);
         if names.is_some_and(<[String]>::is_empty) {
@@ -1109,15 +1140,12 @@ impl Connection {
         self.show_create("SEQUENCE", schema, name)
     }
 
-    /// On a connection of its own, as [`Self::cancel`] is, so opening every
-    /// table for its statistics never holds the mutex a user's query waits on.
-    /// The side connection is dropped on return.
+    /// The whole read, the database listing a filter needs included, runs on a
+    /// connection of its own, as [`Self::cancel`] does, so neither listing what
+    /// to read nor opening every table for its statistics holds the mutex a
+    /// user's query waits on. The side connection is dropped on return; a
+    /// filter that matches nothing still opens it, to list there.
     pub fn sizes(&self, shown: &Shown) -> Result<Sizes, DbError> {
-        let matched = self.matched(shown)?;
-        let names = matched.as_ref().map(|(names, _)| names.as_slice());
-        if names.is_some_and(<[String]>::is_empty) {
-            return Ok(Sizes::new());
-        }
         let connection = connect(&self.server, self.engine, self.dial()?)?;
         let side = Self {
             connection_id: connection.connection_id(),
@@ -1129,6 +1157,11 @@ impl Connection {
             side: Arc::default(),
             graph: GraphCancel::default(),
         };
+        let matched = side.matched(shown)?;
+        let names = matched.as_ref().map(|(names, _)| names.as_slice());
+        if names.is_some_and(<[String]>::is_empty) {
+            return Ok(Sizes::new());
+        }
         assemble_sizes(side.internal_query(&sizes_sql(self.engine, names))?)
     }
 
@@ -1746,6 +1779,58 @@ ORDER BY 1, 2
     }
 
     #[test]
+    fn the_listing_a_filtered_catalog_counts_over_reads_with_the_schemas_predicate() {
+        let predicate = "WHERE SCHEMA_NAME NOT IN {system} OR SCHEMA_NAME = DATABASE()";
+        assert!(SCHEMAS_SQL.contains(predicate));
+        assert!(CATALOG_DATABASES_SQL.contains(predicate));
+        let listing = catalog_databases_sql();
+        assert_eq!(listing.matches(SYSTEM_SCHEMAS).count(), 1, "{listing}");
+        assert!(!listing.contains('{'), "{listing}");
+    }
+
+    /// The picker's list, the unfiltered tree and a filtered one count the
+    /// same databases, so a filtered total never exceeds the unfiltered one.
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_the_pickers_total_and_a_filtered_total_are_the_unfiltered_count() {
+        use crate::db::{Include, Levels};
+
+        for engine in [Engine::MySql, Engine::MariaDb] {
+            let connection = live_profile(engine);
+            let mut picker = connection
+                .catalog_databases(engine)
+                .expect("databases should list")
+                .names;
+            let drawn = |shown: &Shown| {
+                let mut catalog = connection.catalog(shown).expect("catalog should read");
+                catalog.merge(connection.routines(shown).expect("routines should read"));
+                catalog
+            };
+            let unfiltered = drawn(&Shown::everything());
+            let filtered = drawn(
+                &Include {
+                    databases: vec!["dbdelve_arch*".into()],
+                    ..Include::default()
+                }
+                .resolve(Levels::DatabaseIsSchema, None, None),
+            );
+
+            assert_eq!(
+                filtered.schemas.len() + filtered.left_out,
+                unfiltered.schemas.len(),
+                "{engine:?}"
+            );
+            let mut tree: Vec<_> = unfiltered.schemas.iter().map(|s| s.name.clone()).collect();
+            picker.sort();
+            tree.sort();
+            assert_eq!(picker, tree, "{engine:?}");
+            for system in ["information_schema", "mysql", "performance_schema", "sys"] {
+                assert!(!picker.iter().any(|name| name == system), "{engine:?}");
+            }
+        }
+    }
+
+    #[test]
     fn the_in_list_keeps_the_server_order_and_each_listed_spelling_once() {
         let names = ["Zed".to_string(), "Ab".to_string(), "ab".to_string()];
         assert!(
@@ -1764,12 +1849,11 @@ ORDER BY 1, 2
 
         for engine in [Engine::MySql, Engine::MariaDb] {
             let connection = live(engine);
-            let listed = connection.databases().expect("databases should list");
-            let user_databases = listed
+            let user_databases = connection
+                .catalog_databases()
+                .expect("databases should list")
                 .names
-                .iter()
-                .filter(|name| !engine.is_system_database(name))
-                .count();
+                .len();
             let shown = |entries: &[&str]| {
                 Include {
                     databases: entries.iter().map(|entry| (*entry).to_string()).collect(),
@@ -1844,6 +1928,76 @@ ORDER BY 1, 2
             assert!(all_names.contains(&"dbdelve_dev"), "{engine:?}");
             assert!(all_names.contains(&"dbdelve_archive"), "{engine:?}");
             assert_eq!(all.left_out, 0, "{engine:?}");
+        }
+    }
+
+    /// A filter makes the sizes read list databases first; that listing must
+    /// not queue on the user's connection behind a statement holding it.
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_filtered_sizes_read_answers_while_a_statement_holds_the_users_connection() {
+        use crate::db::{Include, Levels};
+
+        /// How long the user's statement holds the connection.
+        const HELD_FOR: Duration = Duration::from_secs(10);
+        /// How long the sizes read may take; well under `HELD_FOR`.
+        const ANSWER_WITHIN: Duration = Duration::from_secs(5);
+
+        for engine in [Engine::MySql, Engine::MariaDb] {
+            let connection = live(engine);
+            let observer = live(engine);
+            let id = connection.connection_id;
+            let sleeper = connection.clone();
+            let holding = std::thread::spawn(move || {
+                let _ = sleeper.query(
+                    &format!("SELECT SLEEP({})", HELD_FOR.as_secs()),
+                    Fetch::default(),
+                );
+            });
+
+            // The processlist, not a fixed sleep, says the statement is running.
+            let polled = Instant::now();
+            loop {
+                let running = observer
+                    .query(
+                        &format!(
+                            "SELECT COUNT(*) FROM information_schema.PROCESSLIST \
+                             WHERE ID = {id} AND COMMAND = 'Query'"
+                        ),
+                        Fetch::default(),
+                    )
+                    .expect("the processlist should read");
+                if running.rows != vec![vec![Some("0".into())]] {
+                    break;
+                }
+                assert!(
+                    polled.elapsed() < Duration::from_secs(5),
+                    "{engine:?}: the user's statement never started"
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+
+            let archive = Include {
+                databases: vec!["dbdelve_arch*".into()],
+                ..Include::default()
+            }
+            .resolve(Levels::DatabaseIsSchema, None, None);
+            let started = Instant::now();
+            let sizes = connection.sizes(&archive);
+            let elapsed = started.elapsed();
+            let still_holding = !holding.is_finished();
+
+            observer
+                .query(&format!("KILL QUERY {id}"), Fetch::default())
+                .expect("the sleeping statement should be killed");
+            holding.join().expect("the sleeping statement should end");
+
+            assert!(sizes.is_ok(), "{engine:?}: {sizes:?}");
+            assert!(
+                elapsed < ANSWER_WITHIN,
+                "{engine:?}: sizes waited {elapsed:?} on the user's connection"
+            );
+            assert!(still_holding, "{engine:?}: the user's statement had ended");
         }
     }
 

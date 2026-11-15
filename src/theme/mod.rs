@@ -129,6 +129,9 @@ pub mod layout {
     /// chord, and its list capped so a catalog of thousands scrolls rather than
     /// filling the window.
     pub const PALETTE_WIDTH: f32 = 640.0;
+    /// The filter picker: two checklists side by side, each wide enough for a
+    /// database name and its hint.
+    pub const FILTER_DIALOG_WIDTH: f32 = 640.0;
     pub const PALETTE_MAX_HEIGHT: f32 = 400.0;
     pub const PALETTE_MIN_HEIGHT: f32 = 120.0;
     /// What the card holds besides its list -- the field, the scopes and the
@@ -796,7 +799,7 @@ impl Theme {
     /// appearance (`starting_theme`), and both are opaque: a blurred window
     /// reads as noise among a desktop full of others, so glass is something to
     /// pick, not a start.
-    fn built_in() -> [Self; 29] {
+    pub(crate) fn built_in() -> [Self; 29] {
         [
             Self::black(),
             Self::dark(),
