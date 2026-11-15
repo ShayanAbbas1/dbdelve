@@ -31,10 +31,12 @@ sessions remain the CLI's responsibility. DBDelve does not store AWS keys or
 perform an interactive login.
 
 Selecting AWS SSM checks both tools locally in the background. **Found** means
-that the executable's `--version` command completed successfully; it does not
-verify AWS credentials, permissions, or database connectivity. Each check has
-a three-second timeout. **Missing** or **Couldn't run** provides official
-installation instructions and **Choose executable…**. After installation, use
+that the executable's `--version` command completed successfully and returned
+recognized version output; it does not verify AWS credentials, permissions,
+or database connectivity. Each check has a three-second timeout.
+**Wrong executable** distinguishes an unrecognized tool from **Missing** or
+**Couldn't run**. These states offer **Choose executable…** and an official
+**Installation guide**. After installation, use
 **Check again**; if your desktop app's PATH has not picked up the installation,
 choose the executable under **Advanced** or restart the app.
 

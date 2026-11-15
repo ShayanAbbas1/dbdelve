@@ -627,37 +627,54 @@ impl Workspace {
                     .into_iter()
                     .enumerate()
                     {
-                        security.push(
-                            nested_field_row(0.0, id, label, input, bare(input), t)
-                                .child(browse_button(
-                                    if index == 0 {
-                                        "browse-aws-cli"
-                                    } else {
-                                        "browse-ssm-plugin"
-                                    },
-                                    input,
-                                    t,
-                                    cx,
-                                ))
-                                .into_any_element(),
-                        );
-                        if let Some(crate::db::ssm::dependencies::Status::Found(path)) = form
+                        let found = form
                             .ssm_dependencies
                             .as_ref()
-                            .map(|results| &results[index])
-                        {
-                            security.push(
-                                div()
-                                    .px(px(layout::SPACE_LG))
-                                    .pb(px(layout::SPACE_SM))
-                                    .text_size(px(layout::chrome(layout::TEXT_SM)))
-                                    .text_color(t.text_muted)
-                                    .child(format!("Detected: {}", path.display()))
-                                    .into_any_element(),
+                            .map(|results| &results[index]);
+                        let row = div()
+                            .debug_selector(move || format!("ssm-executable-{index}"))
+                            .child(
+                                nested_field_row(0.0, id, label, input, bare(input), t)
+                                    .min_h(px(layout::chrome(layout::CONTROL_HEIGHT)))
+                                    .child(browse_button(
+                                        if index == 0 {
+                                            "browse-aws-cli"
+                                        } else {
+                                            "browse-ssm-plugin"
+                                        },
+                                        input,
+                                        t,
+                                        cx,
+                                    )),
                             );
-                        }
+                        use crate::db::ssm::dependencies::Status;
+                        let detail = match found {
+                            _ if form.ssm_checking => "Detecting…".to_owned(),
+                            None => "Detecting…".to_owned(),
+                            Some(Status::Found(path)) => format!("Detected: {}", path.display()),
+                            Some(Status::Missing) => "Not detected".to_owned(),
+                            Some(Status::WrongExecutable(_)) => "Wrong executable".to_owned(),
+                            Some(Status::Unavailable(_)) => "Couldn’t run executable".to_owned(),
+                        };
+                        let row = row.child(
+                            div()
+                                .debug_selector({
+                                    let detail = detail.clone();
+                                    move || format!("ssm-path-{index}: {detail}")
+                                })
+                                .px(px(layout::SPACE_LG))
+                                .pb(px(layout::SPACE_SM))
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                                .text_color(t.text_muted)
+                                .child(detail),
+                        );
+                        security.push(row.into_any_element());
                     }
-                    security.push(help("Paths are optional. Leave blank to use PATH. After installing, choose the executable here if the desktop app cannot find it.").into_any_element());
+                    security.push(help("Paths are optional. Leave blank to use PATH. After installing, choose the executable here if the desktop app cannot find it.").pt(px(layout::SPACE_MD)).into_any_element());
                 }
             }
             if form.ssh {
@@ -964,7 +981,7 @@ impl Workspace {
         let Some(form) = &mut self.form else {
             return;
         };
-        if !form.ssm || form.ssm_checking || form.ssm_dependencies.is_some() {
+        if !form.ssm || form.ssm_checking {
             return;
         }
         form.ssm_checking = true;
@@ -1043,23 +1060,24 @@ impl Workspace {
         ].into_iter().enumerate() {
             let status = form.ssm_dependencies.as_ref().map(|results| &results[index]);
             let title = match status {
+                _ if form.ssm_checking => "Checking…",
                 Some(ToolStatus::Found(_)) => "Found",
                 Some(ToolStatus::Missing) => "Missing",
+                Some(ToolStatus::WrongExecutable(_)) => "Wrong executable",
                 Some(ToolStatus::Unavailable(_)) => "Couldn’t run",
                 None => "Checking…",
             };
             let mut row = div().flex().flex_col().gap(px(layout::SPACE_XS))
                 .child(div().flex().items_center().justify_between().gap(px(layout::SPACE_MD))
                     .child(div().text_color(t.text).child(label))
-                    .child(div().text_color(t.text_muted).child(title)));
-            if let Some(ToolStatus::Unavailable(message)) = status {
+                    .child(div().debug_selector(move || format!("ssm-status-{index}: {title}")).text_color(t.text_muted).child(title)));
+            if let Some(ToolStatus::Unavailable(message) | ToolStatus::WrongExecutable(message)) = status {
                 row = row.child(div().text_color(t.text_muted).child(message.clone()));
             }
-            if matches!(status, Some(ToolStatus::Missing | ToolStatus::Unavailable(_))) {
-                row = row.child(div().flex().flex_wrap().gap(px(layout::SPACE_SM))
-                    .child(button(("ssm-install", index), "Installation instructions", Tone::Primary, Control::Compact, t)
-                        .on_click(move |_, _, cx| cx.open_url(url)))
-                    .child(button(("ssm-choose", index), "Choose executable…", Tone::Primary, Control::Compact, t)
+            if matches!(status, Some(ToolStatus::Missing | ToolStatus::Unavailable(_) | ToolStatus::WrongExecutable(_))) {
+                row = row.child(div().flex().flex_wrap().items_center().gap(px(layout::SPACE_SM))
+                    .child(div().rounded(px(layout::RADIUS_CONTROL)).border_1().border_color(t.border).bg(t.element_active)
+                        .child(button(("ssm-choose", index), "Choose executable…", Tone::Primary, Control::Compact, t)
                         .debug_selector(move || format!("ssm-choose-{index}"))
                         .on_click(cx.listener(move |workspace, _, window, cx| {
                             if let Some(form) = &mut workspace.form {
@@ -1068,7 +1086,10 @@ impl Workspace {
                                 cx.notify();
                                 workspace.browse_into(input, window, cx);
                             }
-                        }))));
+                        }))))
+                    .child(button(("ssm-install", index), "Installation guide ↗", Tone::Quiet, Control::Compact, t)
+                        .debug_selector(move || format!("ssm-install-{index}"))
+                        .on_click(move |_, _, cx| cx.open_url(url))));
             }
             setup = setup.child(row);
         }
@@ -1093,12 +1114,10 @@ impl Workspace {
                                 Control::Compact,
                                 t,
                             )
+                            .debug_selector(|| "ssm-check-again".into())
                             .disabled(form.ssm_checking)
                             .on_click(cx.listener(
                                 |workspace, _, _, cx| {
-                                    if let Some(form) = &mut workspace.form {
-                                        form.ssm_dependencies = None;
-                                    }
                                     workspace.check_ssm_dependencies(cx);
                                 },
                             )),
