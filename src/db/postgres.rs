@@ -3362,7 +3362,7 @@ mod tests {
             .expect("the probe sequence should be created");
 
         let second = super::super::Connection::Postgres(plain)
-            .routines()
+            .routines(&crate::db::Shown::everything())
             .expect("the second half should read");
         let listed: Vec<_> = second
             .schemas

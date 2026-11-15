@@ -10,7 +10,7 @@ use gpui_component::tree::{TreeEvent, TreeState};
 use crate::connection_form::{
     ConnectionTest, Reported, duplicate_profile_name, keep_schema, name_is_automatic,
 };
-use crate::db::{ExternalConfig, PasswordCommand, Plugin};
+use crate::db::{ExternalConfig, Include, PasswordCommand, Plugin};
 use crate::explorer::Shortcuts;
 use crate::import::{self, Source};
 use crate::palette::SchemaPick;
@@ -342,6 +342,9 @@ impl Workspace {
             }),
             // A silenced kind this build cannot read is dropped, which only
             // means that kind still asks.
+            // A file is a person's to edit: blanks are dropped and each list is
+            // capped, as `open_rows` is.
+            include: Include::from_stored(stored.include_databases, stored.include_schemas),
             confirmed: stored
                 .confirmed
                 .iter()
@@ -422,6 +425,9 @@ impl Workspace {
             config,
             color,
             mode,
+            // Every way a profile is made starts unfiltered, for the same
+            // reason it starts hidden: the lists are the owner's to write.
+            include: Include::default(),
             confirmed: Vec::new(),
             confirmed_stale: false,
             generation: 0,
@@ -1220,6 +1226,7 @@ impl Workspace {
         profile.schema_refresh = Some(profile.generation);
         let (id, generation) = (profile.id.clone(), profile.generation);
         let in_transaction = profile.in_transaction;
+        let shown = profile.shown();
         cx.notify();
 
         let refresh_task = spawn_blocking(cx.background_executor(), move || {
@@ -1231,8 +1238,8 @@ impl Workspace {
                 true => connection.apart().map_err(lost)?,
                 false => connection.clone(),
             };
-            let catalog = reader.catalog().map_err(lost)?;
-            Ok::<_, (DbError, bool)>((catalog, reader.routines()))
+            let catalog = reader.catalog(&shown).map_err(lost)?;
+            Ok::<_, (DbError, bool)>((catalog, reader.routines(&shown)))
         });
 
         cx.spawn(async move |workspace, cx| {
@@ -1329,8 +1336,9 @@ impl Workspace {
             return;
         };
         let (id, generation) = (profile.id.clone(), profile.generation);
+        let shown = profile.shown();
         let fetch = spawn_blocking(cx.background_executor(), move || {
-            connection.databases(target.engine)
+            connection.databases(target.engine, &shown)
         });
         cx.spawn_in(window, async move |workspace, cx| {
             let result = fetch.await;
@@ -2264,7 +2272,9 @@ impl Workspace {
             self.catalog_landed(id, cx);
             return;
         };
-        let catalog_task = spawn_blocking(cx.background_executor(), move || connection.catalog());
+        let shown = profile.shown();
+        let catalog_task =
+            spawn_blocking(cx.background_executor(), move || connection.catalog(&shown));
 
         let id = id.to_string();
         cx.spawn(async move |workspace, cx| {
@@ -2312,8 +2322,10 @@ impl Workspace {
         let (engine, in_transaction) = (profile.config.engine(), profile.in_transaction);
         // A refresh lists them again, and inside the user's transaction a
         // failed read would fail it on Postgres, as `refresh_schema` says.
+        let shown = profile.shown();
         let listing = spawn_blocking(cx.background_executor(), move || {
-            metadata_reader(&connection, in_transaction).and_then(|reader| reader.databases(engine))
+            metadata_reader(&connection, in_transaction)
+                .and_then(|reader| reader.databases(engine, &shown))
         });
         let id = id.to_string();
         cx.spawn(async move |workspace, cx| {
@@ -2341,10 +2353,15 @@ impl Workspace {
         let Some(profile) = self.issued_to(id, generation) else {
             return;
         };
+        // A session a bound tab opened for a database the filter hides is the
+        // tab's, and the tree reads nothing it does not draw (D-08).
+        let shown = profile.shown();
         let open: Vec<String> = profile
             .bound
             .iter()
-            .filter(|(_, session)| matches!(session, BoundSession::Open(_)))
+            .filter(|(database, session)| {
+                matches!(session, BoundSession::Open(_)) && shown.shows_database(database)
+            })
             .map(|(database, _)| database.clone())
             .collect();
         self.list_databases(id, generation, cx);
@@ -2492,8 +2509,11 @@ impl Workspace {
             .bound
             .insert(database.clone(), BoundSession::Open(session.clone()));
         // The connection's own database is read over its own session, and
-        // another is not asked for again once a session is registered.
-        if profile.active_database().as_deref() != Some(database.as_str()) {
+        // another is not asked for again once a session is registered. One the
+        // filter hides keeps its session for the tab and is never read (D-08).
+        if profile.active_database().as_deref() != Some(database.as_str())
+            && profile.shown().shows_database(&database)
+        {
             profile
                 .database_catalogs
                 .entry(database.clone())
@@ -2517,10 +2537,17 @@ impl Workspace {
         let Some(session) = self.session_for(id, &database, generation) else {
             return;
         };
+        // The active schema is kept in the connection's own database only.
+        let Some(shown) = self
+            .issued_to(id, generation)
+            .map(|profile| profile.shown().in_another_database())
+        else {
+            return;
+        };
         let task = spawn_blocking(cx.background_executor(), {
             let session = session.clone();
             move || {
-                let result = session.metadata(Connection::catalog);
+                let result = session.metadata(|connection| connection.catalog(&shown));
                 let lost = result.is_err() && session.connection.is_lost();
                 (result, lost)
             }
@@ -2595,9 +2622,16 @@ impl Workspace {
         let Some(session) = self.session_for(id, database, generation) else {
             return;
         };
+        // The active schema is kept in the connection's own database only.
+        let Some(shown) = self
+            .issued_to(id, generation)
+            .map(|profile| profile.shown().in_another_database())
+        else {
+            return;
+        };
         let task = spawn_blocking(cx.background_executor(), {
             let session = session.clone();
-            move || session.metadata(Connection::routines)
+            move || session.metadata(|connection| connection.routines(&shown))
         });
         let (id, database) = (id.to_string(), database.to_string());
         cx.spawn(async move |workspace, cx| {
@@ -2678,13 +2712,20 @@ impl Workspace {
         let Some(session) = self.session_for(id, database, generation) else {
             return;
         };
+        // The active schema is kept in the connection's own database only.
+        let Some(shown) = self
+            .issued_to(id, generation)
+            .map(|profile| profile.shown().in_another_database())
+        else {
+            return;
+        };
         #[cfg(test)]
         {
             self.size_reads += 1;
         }
         let task = spawn_blocking(cx.background_executor(), {
             let session = session.clone();
-            move || session.metadata(Connection::sizes)
+            move || session.metadata(|connection| connection.sizes(&shown))
         });
         let (id, database) = (id.to_string(), database.to_string());
         cx.spawn(async move |workspace, cx| {
@@ -2763,7 +2804,10 @@ impl Workspace {
             }
             return;
         };
-        let routines_task = spawn_blocking(cx.background_executor(), move || connection.routines());
+        let shown = profile.shown();
+        let routines_task = spawn_blocking(cx.background_executor(), move || {
+            connection.routines(&shown)
+        });
 
         let id = id.to_string();
         cx.spawn(async move |workspace, cx| {
@@ -2814,9 +2858,9 @@ impl Workspace {
         if !self.settings.show_sizes {
             return;
         }
-        let Some(connection) = self
+        let Some((connection, shown)) = self
             .issued_to(id, generation)
-            .and_then(|profile| profile.connection())
+            .and_then(|profile| Some((profile.connection()?, profile.shown())))
         else {
             return;
         };
@@ -2824,7 +2868,7 @@ impl Workspace {
         {
             self.size_reads += 1;
         }
-        let sizes_task = spawn_blocking(cx.background_executor(), move || connection.sizes());
+        let sizes_task = spawn_blocking(cx.background_executor(), move || connection.sizes(&shown));
 
         let id = id.to_string();
         cx.spawn(async move |workspace, cx| {
