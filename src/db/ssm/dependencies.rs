@@ -309,7 +309,9 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(probe(&path, "aws", Duration::from_millis(500)).is_err());
+        // Long enough for a loaded runner to start the script and write the
+        // pid; the script sleeps far longer, so the timeout still fires.
+        assert!(probe(&path, "aws", Duration::from_secs(5)).is_err());
         let pid: i32 = std::fs::read_to_string(&pid_file)
             .expect("probe descendant did not start; cleanup was not tested")
             .trim()
