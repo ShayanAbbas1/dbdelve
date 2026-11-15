@@ -15,13 +15,25 @@ use gpui_component::tree::{TreeEvent, TreeState};
 
 use super::profiles::explorer_content;
 use super::*;
-use crate::db::Syntax;
+use crate::db::{Levels, Syntax};
 use crate::explorer::{
     Member, PINNED_GROUP, QUERIES_GROUP, Shortcut, folds, is_schema_row, saved_query,
 };
 use crate::icons::{queries_group_icon, saved_query_icon};
-use crate::sidebar::{self as model, Content, Listed, Node};
+use crate::sidebar::{self as model, Content, Listed, Node, schema_row_is_a_database};
 use crate::ui::row_icon_tinted;
+
+/// The id of the row of `profile`'s front tab in the connections tree, if
+/// the tab has one.
+pub(crate) fn front_row_id(profile: &Profile) -> Option<String> {
+    let row = profile.front_row()?;
+    Some(model::listed_row(
+        &profile.id,
+        profile.config.target().levels(),
+        profile.active_database().as_deref(),
+        &row,
+    ))
+}
 
 pub(crate) struct ConnectionsSidebar {
     pub(crate) tree: Entity<TreeState>,
@@ -29,11 +41,29 @@ pub(crate) struct ConnectionsSidebar {
     pub(crate) nodes: Arc<HashMap<String, Node>>,
     pub(crate) highlights: Arc<HashMap<String, Vec<Range<usize>>>>,
     pub(crate) shortcuts: Arc<HashMap<String, Shortcut>>,
+    /// How many rows each folder row holds, by row id.
+    pub(crate) counts: Arc<HashMap<String, usize>>,
+    /// What the tree is narrowed by.
+    pub(crate) filter: Entity<InputState>,
+    /// The folds the tree had when the first key was typed, which come back
+    /// when the field is cleared: while text is in it every kept row is open.
+    pub(crate) folds_before_filter: Option<HashMap<String, bool>>,
+    /// The group the last build was made for, which `None` outer says is no
+    /// build yet. A build for another group opens that one.
+    group: Option<Option<String>>,
 }
 
 impl ConnectionsSidebar {
-    pub(crate) fn new(cx: &mut Context<Workspace>) -> Self {
+    pub(crate) fn new(window: &mut Window, cx: &mut Context<Workspace>) -> Self {
         let tree = cx.new(|cx| TreeState::new(cx));
+        let filter =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Filter connections and objects…"));
+        cx.subscribe(&filter, |workspace, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                workspace.rebuild_connections(cx);
+            }
+        })
+        .detach();
         // The tree emits `Expanded` for a click, `enter` and an arrow, and
         // also for every ancestor a reveal opens, so what listens must be
         // happy to hear it twice (`expand_node`).
@@ -48,6 +78,10 @@ impl ConnectionsSidebar {
             nodes: Arc::default(),
             highlights: Arc::default(),
             shortcuts: Arc::default(),
+            counts: Arc::default(),
+            filter,
+            folds_before_filter: None,
+            group: None,
         }
     }
 }
@@ -57,7 +91,7 @@ impl Workspace {
     /// selected row are put back by id, so nothing a landing changes moves the
     /// user's place.
     pub(crate) fn rebuild_connections(&mut self, cx: &mut Context<Self>) {
-        if self.settings.view_mode != model::ViewMode::Complex {
+        if self.view_mode() != model::ViewMode::Complex {
             return;
         }
         let tree = self.connections.tree.clone();
@@ -67,40 +101,87 @@ impl Workspace {
             .filter(|entry| entry.depth() == 0)
             .map(|entry| entry.item().clone())
             .collect();
-        let folds = folds(&roots);
+        let mut folds = folds(&roots);
+        // While text is in the filter every kept row is open, so the folds
+        // the user had are kept aside from its first key and come back when
+        // the field is empty. Read on every rebuild: a landing in the
+        // background rebuilds mid-filter, and must not mistake the opened
+        // tree for the user's.
+        let text = self.connections.filter.read(cx).value();
+        let filter = text.trim();
+        match (
+            filter.is_empty(),
+            self.connections.folds_before_filter.take(),
+        ) {
+            (true, Some(before)) => folds = before,
+            (false, None) => self.connections.folds_before_filter = Some(folds.clone()),
+            (false, kept) => self.connections.folds_before_filter = kept,
+            (true, None) => {}
+        }
+        // The group in front starts open. What the last build left of its
+        // fold is only how it started, so it is let go when the front
+        // connection has moved to another group; a fold made in the group
+        // it stays in is kept.
+        let current = self.current_group().map(str::to_string);
+        if self.connections.group.as_ref() != Some(&current) {
+            folds.remove(&model::group_row(current.as_deref()));
+        }
         let selected = state.selected_item().map(|item| item.id.clone());
 
         let listed = self
             .profiles
             .iter()
-            .map(|profile| Listed {
-                id: &profile.id,
-                name: &profile.name,
-                content: match (&profile.state, &profile.catalog) {
-                    (ProfileState::Idle, _) => Content::Unloaded,
-                    (ProfileState::Connecting { .. }, _) | (_, CatalogState::Loading) => {
-                        Content::Loading
-                    }
-                    (ProfileState::Failed(message), _) | (_, CatalogState::Failed(message)) => {
-                        Content::Failed(message.clone())
-                    }
-                    (ProfileState::Connected(_), CatalogState::Loaded(..)) => {
-                        Content::Loaded(explorer_content(profile, ""))
-                    }
-                },
+            .map(|profile| {
+                let levels = profile.config.target().levels();
+                let database = profile.active_database();
+                // What the filter matches by name it keeps whole: a connection
+                // or a database named for it lists everything it has.
+                let narrowed = match model::keeps_rows_whole(
+                    filter,
+                    &profile.name,
+                    levels,
+                    database.as_deref(),
+                ) {
+                    true => "",
+                    false => filter,
+                };
+                Listed {
+                    id: &profile.id,
+                    name: &profile.name,
+                    content: match (&profile.state, &profile.catalog) {
+                        (ProfileState::Idle, _) => Content::Unloaded,
+                        (ProfileState::Connecting { .. }, _) | (_, CatalogState::Loading) => {
+                            Content::Loading
+                        }
+                        (ProfileState::Failed(message), _) | (_, CatalogState::Failed(message)) => {
+                            Content::Failed(message.clone())
+                        }
+                        (ProfileState::Connected(_), CatalogState::Loaded(..)) => {
+                            Content::Loaded(explorer_content(profile, narrowed))
+                        }
+                    },
+                    levels,
+                    database,
+                }
             })
             .collect();
-        let built = model::build(&self.projects, listed, &folds);
-        let front = self.profile().map(|profile| {
-            let row = profile
-                .front_row()
-                .map_or_else(String::new, |row| model::scoped_row(&profile.id, &row));
-            SharedString::from(row)
-        });
+        let built = model::build(
+            &self.projects,
+            listed,
+            &folds,
+            self.listing_scope(),
+            current.as_deref(),
+            filter,
+        );
+        self.connections.group = Some(current);
+        let front = self
+            .profile()
+            .map(|profile| SharedString::from(front_row_id(profile).unwrap_or_default()));
 
         self.connections.nodes = Arc::new(built.nodes);
         self.connections.highlights = Arc::new(built.highlights);
         self.connections.shortcuts = Arc::new(built.shortcuts);
+        self.connections.counts = Arc::new(built.counts);
         tree.update(cx, |tree, cx| {
             tree.set_items(built.items, cx);
             // A row the user moved to stays selected: a landing in the
@@ -139,12 +220,23 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some((profile, row)) = model::unscoped(id) else {
+        let Some(model::Scoped {
+            profile,
+            database,
+            inner: row,
+        }) = model::unscoped(id)
+        else {
             return false;
         };
         let Some(index) = self.profiles.iter().position(|p| p.id == profile) else {
             return false;
         };
+        // Only the connection's own database opens through its own catalog.
+        if database.is_some_and(|database| {
+            self.profiles[index].active_database().as_deref() != Some(database)
+        }) {
+            return false;
+        }
         let leaf = match self.connections.nodes.get(id) {
             Some(Node::Row { leaf }) => *leaf,
             _ => None,
@@ -171,9 +263,10 @@ impl Workspace {
         let nodes = self.connections.nodes.clone();
         let highlights = self.connections.highlights.clone();
         let shortcuts = self.connections.shortcuts.clone();
+        let counts = self.connections.counts.clone();
         // What each connection's rows are drawn in, by profile id: its logo
         // and the dialect its saved queries are written in.
-        let targets: HashMap<String, (&'static str, Syntax)> = self
+        let targets: HashMap<String, (&'static str, Syntax, Levels)> = self
             .profiles
             .iter()
             .map(|profile| {
@@ -182,6 +275,7 @@ impl Workspace {
                     (
                         profile.config.target().logo(),
                         profile.config.engine().syntax(),
+                        profile.config.target().levels(),
                     ),
                 )
             })
@@ -191,10 +285,10 @@ impl Workspace {
             let id = entry.item().id.as_str();
             let node = nodes.get(id);
             let scoped = model::unscoped(id);
-            let inner = scoped.map(|(_, row)| row);
-            let target = match (node, scoped) {
+            let inner = scoped.as_ref().map(|scoped| scoped.inner);
+            let target = match (node, &scoped) {
                 (Some(Node::Connection { profile }), _) => targets.get(profile.as_str()),
-                (_, Some((profile, _))) => targets.get(profile),
+                (_, Some(scoped)) => targets.get(scoped.profile),
                 _ => None,
             };
             let leaf = match node {
@@ -226,7 +320,7 @@ impl Workspace {
                     highlighted(label, matched, t),
                     ListItem::new(index).text_color(t.text),
                 ),
-                Some(Node::Group | Node::Connection { .. }) => (
+                Some(Node::Group | Node::Connection { .. } | Node::Database) => (
                     highlighted(label, matched, t),
                     ListItem::new(index)
                         .text_color(t.text)
@@ -261,19 +355,27 @@ impl Workspace {
                     }),
                 ) => Some(object_icon(object.kind)),
                 _ if query.is_some() || missing => {
-                    target.map(|(_, syntax)| saved_query_icon(*syntax))
+                    target.map(|(_, syntax, _)| saved_query_icon(*syntax))
                 }
                 _ if entry.is_expanded() => Some(icon::CHEVRON_DOWN),
                 _ => Some(icon::CHEVRON_RIGHT),
             };
             let heading = match node {
                 Some(Node::Group) => Some(icon::PROJECT),
-                Some(Node::Connection { .. }) => target.map(|(logo, _)| *logo),
+                Some(Node::Connection { .. }) => target.map(|(logo, ..)| *logo),
+                Some(Node::Database) => Some(icon::DATABASE),
                 _ if inner == Some(QUERIES_GROUP) => {
-                    target.map(|(_, syntax)| queries_group_icon(*syntax))
+                    target.map(|(_, syntax, _)| queries_group_icon(*syntax))
                 }
                 _ if pinned_group => Some(icon::PIN),
-                _ if schema_row => Some(icon::SCHEMA),
+                // A shape that lists databases as schemas, or whose one
+                // schema is its database, draws that row as a database.
+                _ if schema_row => Some(
+                    match target.is_some_and(|(.., levels)| schema_row_is_a_database(*levels)) {
+                        true => icon::DATABASE,
+                        false => icon::SCHEMA,
+                    },
+                ),
                 _ if folder_shortcut => Some(icon::FOLDER),
                 _ => None,
             };
@@ -312,6 +414,16 @@ impl Workspace {
                                 .whitespace_nowrap()
                                 .child(label),
                         })
+                        .when_some(counts.get(id), |row, count| {
+                            row.child(
+                                div()
+                                    .flex_none()
+                                    .whitespace_nowrap()
+                                    .text_color(t.text_faint)
+                                    .text_size(px(layout::chrome(layout::TEXT_XS)))
+                                    .child(count.to_string()),
+                            )
+                        })
                         .when_some(leaf.and_then(|leaf| leaf.size), |row, size| {
                             row.child(
                                 div()
@@ -335,14 +447,43 @@ impl Workspace {
                 });
             })
         });
-        div().size_full().flex().flex_col().child(
-            div()
-                .flex_1()
-                .min_h_0()
-                .key_context("Explorer")
-                .track_focus(&self.explorer_focus)
-                .on_action(cx.listener(Self::open_sidebar_item))
-                .child(tree),
-        )
+        let t = *theme(cx);
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            // The same quiet filter row simple mode draws over its tree.
+            .child(
+                div()
+                    .w_full()
+                    .h(px(layout::chrome(layout::TAB_HEIGHT)))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(layout::SPACE_XS))
+                    .px(px(layout::SPACE_SM))
+                    .border_b_1()
+                    .border_color(t.border)
+                    .child(row_icon(t, icon::SEARCH))
+                    // Clipped by a box of its own: the input lays its
+                    // placeholder out at its full width.
+                    .child(
+                        div().flex_1().min_w_0().overflow_hidden().child(
+                            Input::new(&self.connections.filter)
+                                .w_full()
+                                .min_w_0()
+                                .appearance(false),
+                        ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .key_context("Explorer")
+                    .track_focus(&self.explorer_focus)
+                    .on_action(cx.listener(Self::open_sidebar_item))
+                    .child(tree),
+            )
     }
 }

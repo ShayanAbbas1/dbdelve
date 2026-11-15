@@ -757,6 +757,8 @@ impl Workspace {
             Command::ProjectActions(at) => {
                 self.open_palette(PaletteMode::ProjectActions(at), window, cx)
             }
+            Command::SetProjectViewMode(at, mode) => self.set_project_view_mode(at, mode, cx),
+            Command::SetProjectListing(at, scope) => self.set_project_listing(at, scope, cx),
             Command::EditConnection(index) => self.edit_profile(index, window, cx),
             Command::DuplicateConnection(index) => self.duplicate_profile(index, window, cx),
             Command::ChooseProject(index) => {

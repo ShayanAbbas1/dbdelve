@@ -3,11 +3,12 @@
 //! These were methods on `Workspace` in main.rs. Rust lets one inherent
 //! impl live in as many modules as it has concerns; they moved out whole.
 
+use super::sidebar::front_row_id;
 use super::*;
 use crate::actions::{FocusSidebar, OpenSidebarItem, ToggleResults, ToggleResultsFocus};
 use crate::explorer::Shortcut;
 use crate::session::PendingDiscard;
-use crate::sidebar::{ViewMode, connection_row, scoped_row};
+use crate::sidebar::{ViewMode, connection_row};
 use crate::tab_drag::{self, Drag, Slot};
 
 /// How tall an Edit mode input grows before it scrolls instead.
@@ -76,7 +77,7 @@ impl Workspace {
         };
         // The connections tree is always drawn, so it always has a handle a
         // window can be focused on.
-        let complex = self.settings.view_mode == ViewMode::Complex;
+        let complex = self.view_mode() == ViewMode::Complex;
         // A handle no element tracks is a window with no dispatch path.
         if !complex && !super::forms::explorer_drawn(profile) {
             return;
@@ -84,10 +85,7 @@ impl Workspace {
         let (front, tree) = match complex {
             // With no object open, the connection in front is the row.
             true => (
-                Some(profile.front_row().map_or_else(
-                    || connection_row(&profile.id),
-                    |row| scoped_row(&profile.id, &row),
-                )),
+                Some(front_row_id(profile).unwrap_or_else(|| connection_row(&profile.id))),
                 self.connections.tree.clone(),
             ),
             false => (profile.front_row(), profile.session.explorer_tree.clone()),
@@ -133,7 +131,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.settings.view_mode == ViewMode::Complex {
+        if self.view_mode() == ViewMode::Complex {
             let selected = self
                 .connections
                 .tree

@@ -128,6 +128,7 @@ impl Workspace {
             verbose_logging: Some(self.settings.verbose_logging),
             welcomed: Some(self.settings.welcomed),
             view_mode: Some(self.settings.view_mode.slug().into()),
+            listing_scope: Some(self.settings.listing_scope.slug().into()),
             custom_keybindings: Some(self.settings.custom_keybindings.clone()),
             theme_opacity: Some(self.settings.theme_opacity.clone()),
         };
@@ -340,6 +341,7 @@ impl Workspace {
             self.note(message, cx);
         }
         self.remember_profiles(cx);
+        self.rebuild_connections(cx);
         self.profiles.len() - 1
     }
 
@@ -945,6 +947,8 @@ impl Workspace {
             self.note(message, cx);
         }
         self.remember_profiles(cx);
+        // The name is the row's label.
+        self.rebuild_connections(cx);
 
         if reconnect {
             self.reconnect(index, cx);
@@ -1335,6 +1339,7 @@ impl Workspace {
         let name = profile.name.clone();
         self.active = None;
         self.remember_profiles(cx);
+        self.rebuild_connections(cx);
         self.refocus_front();
         if let Err(message) = persisted {
             self.note(message, cx);
@@ -1779,6 +1784,7 @@ impl Workspace {
             // leaving one.
             self.project_named(project).connections.extend(ids);
             self.remember_profiles(cx);
+            self.rebuild_connections(cx);
         }
         // A first launch has nothing in front yet. Otherwise the connection
         // in front stays there rather than a batch of new ones each
@@ -2448,6 +2454,9 @@ impl Workspace {
         // Written here rather than at quit, so the profile in front survives a
         // crash as well as a close.
         self.remember_profiles(cx);
+        // The connection in front decides the sidebar, the listing and the
+        // group that starts open.
+        self.rebuild_connections(cx);
         if let Some(profile) = self.profile_mut() {
             profile.session.editor_needs_focus = true;
             profile.session.clear_prompts();
@@ -2547,6 +2556,7 @@ impl Workspace {
         };
         self.active = active_after_removal(self.active, index, self.profiles.len());
         self.remember_profiles(cx);
+        self.rebuild_connections(cx);
         if self.profile().is_none() {
             self.refocus_front();
         }

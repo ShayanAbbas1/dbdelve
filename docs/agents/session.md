@@ -36,7 +36,21 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   (`Workspace::open_connection_row`), because the gate, the mode and the
   engine a statement meets are the front connection's. Every landing that
   rebuilds a connection's own tree (`rebuild_explorer`) rebuilds this one
-  last, and a change to the set of connections does too (`remember_profiles`).
+  last. So does every change to what it lists, at the place that makes it
+  (`create_profile`, `save_profile`, `remove_profile`, `activate`,
+  `disconnect`, the project verbs, a lost connection) rather than from
+  `remember_profiles`, which every tab change and run also calls.
+  The view mode and `listing_scope` (`all` or `current`, the connections of
+  the project in front only, with no group row) are each global, in
+  `[settings]`, and each overridable by a project (`[[projects]] view_mode`,
+  `listing_scope`, from its palette actions). The front connection's project
+  decides (`Workspace::view_mode`, `Workspace::listing_scope`), so moving
+  between projects set differently flips the sidebar; with none in front, or
+  in No project, the global value applies. A value this build cannot read
+  follows the global one. With every project listed, the group in front starts
+  open and the others folded, each launch; a fold the user makes is kept for
+  the session, and a rebuild for another front group opens that one. A switch
+  moves no tab, binding or connection.
 - **The titlebar's project and connection open the palette on Connections**
   (`Workspace::open_connections`, also `SwitchConnection`, no default chord);
   there is no switcher panel of its own. That scope is a tree

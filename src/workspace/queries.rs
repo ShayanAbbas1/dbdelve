@@ -2853,6 +2853,10 @@ impl Workspace {
                     if succeeded && let Tab::Object(object) = tab {
                         workspace.mark_columns(object, cx);
                     }
+                    if lost {
+                        // The connection's row says it failed.
+                        workspace.rebuild_connections(cx);
+                    }
                     cx.notify();
 
                     let had_refresh = refresh.is_some();

@@ -251,7 +251,7 @@ impl ExplorerTree {
 
 /// One filter pass over the catalog: the query parsed once, and what the rows
 /// it keeps record as they are built.
-struct Builder {
+pub(crate) struct Builder {
     query: Query,
     fuzzy: Fuzzy,
     lowercase: String,
@@ -260,7 +260,7 @@ struct Builder {
 }
 
 impl Builder {
-    fn new(filter: &str) -> Self {
+    pub(crate) fn new(filter: &str) -> Self {
         Self {
             query: Query::new(filter),
             fuzzy: Fuzzy::new(),
@@ -271,7 +271,7 @@ impl Builder {
     }
 
     /// Whether the row `id`'s own name matches, noting which characters did.
-    fn name_matches(&mut self, id: &str, name: &str) -> bool {
+    pub(crate) fn name_matches(&mut self, id: &str, name: &str) -> bool {
         if self.query.is_empty() {
             return true;
         }
@@ -283,6 +283,11 @@ impl Builder {
             self.highlights.insert(id.to_string(), ranges);
         }
         true
+    }
+
+    /// The characters each matched name had matched, by the row id given.
+    pub(crate) fn into_highlights(self) -> HashMap<String, Vec<Range<usize>>> {
+        self.highlights
     }
 
     // Substring, not fuzzy: these are searched for a word like `bigint` or
