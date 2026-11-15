@@ -1417,6 +1417,27 @@ impl Connection {
             .map_or(true, |client| client.client.is_closed())
     }
 
+    /// One `SELECT 1` on the session. A statement holding the client is the
+    /// session in use, so the ping is skipped, never queued behind it; a
+    /// poisoned lock is a session every later statement would fail on, as
+    /// [`Connection::is_lost`] counts it.
+    pub fn ping(&self) -> Result<(), DbError> {
+        let mut client = match self.client.try_lock() {
+            Ok(client) => client,
+            Err(TryLockError::WouldBlock) => return Ok(()),
+            Err(TryLockError::Poisoned(_)) => {
+                return Err(plain_error("The connection is closed.".into()));
+            }
+        };
+        let ping = "SELECT 1";
+        let Client { client, driver, .. } = &mut *client;
+        driver
+            .block_on(client.simple_query(ping))
+            .and_then(|done| done)
+            .map(|_| ())
+            .map_err(|error| query_error(&error, ping))
+    }
+
     /// Cancellation is advisory and racy by the driver's own admission: the
     /// server reports nothing about whether the request landed, and it may
     /// arrive after the statement has already finished. So `Ok` here means the
@@ -3074,6 +3095,34 @@ mod tests {
             cell(&beside, "SHOW application_name").as_deref(),
             Some("o'brien app")
         );
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_keep_alive_ping_answers_and_never_waits_on_a_busy_session() {
+        let connection = Connection::open(&live_config()).expect("the connection opens");
+        assert!(connection.ping().is_ok(), "an idle session answers");
+
+        // A statement holds the client for as long as it runs; the round
+        // skips that session rather than queue behind it.
+        let busy = connection.client.lock().expect("nothing else holds it");
+        let started = Instant::now();
+        assert!(connection.ping().is_ok(), "a busy session is skipped");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "and the skip does not wait"
+        );
+        drop(busy);
+
+        let pid = cell(&connection, "SELECT pg_backend_pid()").expect("the pid is read");
+        Connection::open(&live_config())
+            .expect("a second connection opens")
+            .query(
+                &format!("SELECT pg_terminate_backend({pid})"),
+                Fetch::default(),
+            )
+            .expect("the terminate runs");
+        assert!(connection.ping().is_err(), "a terminated session is lost");
     }
 
     #[test]

@@ -188,6 +188,13 @@ pub struct StoredProfile {
     /// it comes before `ssh`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub startup_script: Option<String>,
+    /// Seconds between pings of the sessions this profile holds open, so an
+    /// idle cut-off between here and the server does not close them. Absent is
+    /// off, which is every profile written before the setting existed; a value
+    /// under 10, or on an engine that keeps no session, reads as off. A scalar,
+    /// so it comes before `ssh`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_alive_seconds: Option<u32>,
     /// The session time zone this profile connects with: a name or an offset,
     /// checked when read. Absent leaves the server's own. A scalar, so it comes
     /// before `ssh`.
@@ -3522,6 +3529,7 @@ user = "shayan"
                 include_schemas: Vec::new(),
                 introspection_depth: None,
                 startup_script: None,
+                keep_alive_seconds: None,
                 time_zone: None,
                 driver_properties: Vec::new(),
                 ssh: None,
@@ -3589,6 +3597,7 @@ user = "shayan"
             include_schemas: Vec::new(),
             introspection_depth: None,
             startup_script: None,
+            keep_alive_seconds: None,
             time_zone: None,
             driver_properties: Vec::new(),
             ssh: None,
@@ -3744,6 +3753,7 @@ open_objects = []
             include_schemas: Vec::new(),
             introspection_depth: None,
             startup_script: None,
+            keep_alive_seconds: None,
             time_zone: None,
             driver_properties: Vec::new(),
             ssh: None,
@@ -3952,6 +3962,41 @@ open_objects = []
         let golden = include_str!("testdata/every-engine.resaved.toml");
         assert_eq!(resaved(include_str!("testdata/every-engine.toml")), golden);
         assert!(!golden.contains("startup_script"));
+    }
+
+    #[test]
+    fn the_keep_alive_round_trips_before_ssh() {
+        let mut profile = a_stored_profile();
+        profile.keep_alive_seconds = Some(120);
+        profile.ssh = Some(SshTunnel {
+            host: "bastion".into(),
+            ..Default::default()
+        });
+        let text = written_alone(profile.clone());
+        let at = text
+            .find("keep_alive_seconds = 120")
+            .expect("it is written");
+        let tunnel = text.find("[profiles.ssh]").expect("and the tunnel");
+        assert!(
+            at < tunnel,
+            "TOML cannot emit a scalar after a table, so it comes before `ssh`:\n{text}"
+        );
+        let decoded = decode_profiles(&text, &[]).expect("the file loads");
+        assert_eq!(decoded.profiles[0].keep_alive_seconds, Some(120));
+        assert_eq!(
+            written_alone(decoded.profiles[0].clone()),
+            text,
+            "saving what was saved changes nothing"
+        );
+
+        let bare = written_alone(a_stored_profile());
+        assert!(
+            !bare.contains("keep_alive"),
+            "a profile with none is written as it always was:\n{bare}"
+        );
+        let golden = include_str!("testdata/every-engine.resaved.toml");
+        assert_eq!(resaved(include_str!("testdata/every-engine.toml")), golden);
+        assert!(!golden.contains("keep_alive"));
     }
 
     #[test]
@@ -4560,6 +4605,7 @@ folder = "Hot"
             include_schemas: Vec::new(),
             introspection_depth: None,
             startup_script: None,
+            keep_alive_seconds: None,
             time_zone: None,
             driver_properties: Vec::new(),
             ssh: None,
@@ -4654,6 +4700,7 @@ folder = "Hot"
             include_schemas: Vec::new(),
             introspection_depth: None,
             startup_script: None,
+            keep_alive_seconds: None,
             time_zone: None,
             driver_properties: Vec::new(),
             ssh: None,
@@ -4734,6 +4781,7 @@ folder = "Hot"
             include_schemas: Vec::new(),
             introspection_depth: None,
             startup_script: None,
+            keep_alive_seconds: None,
             time_zone: None,
             driver_properties: Vec::new(),
             ssh: None,
@@ -4860,6 +4908,7 @@ open_objects = []
             include_schemas: Vec::new(),
             introspection_depth: None,
             startup_script: None,
+            keep_alive_seconds: None,
             time_zone: None,
             driver_properties: Vec::new(),
             ssh: None,
@@ -5014,6 +5063,7 @@ open_objects = []
                     include_schemas: Vec::new(),
                     introspection_depth: None,
                     startup_script: None,
+                    keep_alive_seconds: None,
                     time_zone: None,
                     driver_properties: Vec::new(),
                     ssh: None,
@@ -5061,6 +5111,7 @@ open_objects = []
                     include_schemas: Vec::new(),
                     introspection_depth: None,
                     startup_script: None,
+                    keep_alive_seconds: None,
                     time_zone: None,
                     driver_properties: Vec::new(),
                     ssh: None,
@@ -5890,6 +5941,7 @@ open_objects = []
             include_schemas: Vec::new(),
             introspection_depth: None,
             startup_script: None,
+            keep_alive_seconds: None,
             time_zone: None,
             driver_properties: Vec::new(),
             ssh: None,
@@ -6517,6 +6569,7 @@ name = \"accounts\"
             include_schemas: Vec::new(),
             introspection_depth: None,
             startup_script: None,
+            keep_alive_seconds: None,
             time_zone: None,
             driver_properties: Vec::new(),
             ssh: None,
@@ -6653,6 +6706,7 @@ name = \"accounts\"
             include_schemas: Vec::new(),
             introspection_depth: None,
             startup_script: None,
+            keep_alive_seconds: None,
             time_zone: None,
             driver_properties: Vec::new(),
             ssh: None,

@@ -875,6 +875,23 @@ impl Workspace {
             )
             .into_any_element(),
         );
+        // Asked of the target, so the engines that keep a session open gain the
+        // row by turning the fact on, with no change here.
+        if form.target().keeps_alive() {
+            behaviour.push(
+                ui::option_row(
+                    "Keep-alive",
+                    Some(
+                        "Pings the connection's open sessions this often so an idle cut-off \
+                         between here and the server does not close them. Off when blank."
+                            .into(),
+                    ),
+                    seconds_field(&form.keep_alive, t),
+                    t,
+                )
+                .into_any_element(),
+            );
+        }
         // Every target's connect runs the loads this chooses among.
         let depths = Depth::ALL.into_iter().enumerate().map(|(index, depth)| {
             ui::segmented_choice(

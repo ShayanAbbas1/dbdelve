@@ -22,7 +22,7 @@
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
 use ::redis::{
@@ -282,6 +282,35 @@ impl Connection {
             multi: false,
             watching: false,
         })
+    }
+
+    /// One `PING` on the session. A command holding it is the session in use,
+    /// so the ping is skipped, never queued behind it; a session not dialled
+    /// is left alone, and so is one with a `MULTI` open, where the `PING`
+    /// would be queued into the user's transaction instead of answered. A
+    /// ping that does not come back whole takes the session with it, as any
+    /// command does (`send`).
+    pub fn ping(&self) -> Result<(), DbError> {
+        let mut held = match self.session.try_lock() {
+            Ok(held) => held,
+            Err(TryLockError::WouldBlock) => return Ok(()),
+            // A panic mid-command leaves nothing a later command would not
+            // find out, which is how `lock` treats it too.
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        };
+        let Some(live) = held.as_mut() else {
+            return Ok(());
+        };
+        if live.multi {
+            return Ok(());
+        }
+        let Err(error) = ::redis::cmd("PING").query::<String>(&mut live.client) else {
+            return Ok(());
+        };
+        if error.is_io_error() || error.is_unrecoverable_error() || !live.client.is_open() {
+            *held = None;
+        }
+        Err(plain_error(message(&error)))
     }
 
     /// `CLIENT KILL ID` over a connection of its own, because the session
@@ -2483,6 +2512,40 @@ mod tests {
 
     fn live() -> Connection {
         Connection::open(&live_config()).expect("connection should open")
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_keep_alive_ping_answers_and_skips_an_open_multi() {
+        const KEY: &str = "live:keep:alive";
+        let connection = live();
+        ran(&connection, &format!("DEL {KEY}"));
+        assert!(connection.ping().is_ok(), "an idle session answers");
+
+        // A command holds the session for as long as it runs; the round
+        // skips it rather than queue behind it.
+        let busy = lock(&connection.session);
+        let started = Instant::now();
+        assert!(connection.ping().is_ok(), "a busy session is skipped");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "and the skip does not wait"
+        );
+        drop(busy);
+
+        // The ping sends nothing inside the user's MULTI: a PING queued there
+        // would be one more command EXEC ran, and its reply one more element.
+        ran(&connection, "MULTI");
+        assert!(connection.ping().is_ok(), "an open MULTI is skipped");
+        ran(&connection, &format!("SET {KEY} 1"));
+        let exec = ran(&connection, "EXEC");
+        assert_eq!(
+            exec.rows.len(),
+            1,
+            "EXEC ran only what was queued before it: {:?}",
+            cells(&exec)
+        );
+        ran(&connection, &format!("DEL {KEY}"));
     }
 
     fn ran(connection: &Connection, text: &str) -> QueryResult {

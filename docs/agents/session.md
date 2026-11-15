@@ -327,6 +327,24 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   a connection of its own, on threads the scheduler does not own, so a test
   that runs more than one statement calls `cx.executor().allow_parking()`
   first. Focus moves that wait for the next frame need `settle`.
+- **Per-profile timers are one-shot tasks on the profile**
+  (`src/workspace/timers.rs`). Keep-alive is the first: `Profile.keep_alive_task`
+  holds a `background_executor().timer`, replaced to re-arm and dropped to
+  cancel, and it is re-armed after each round lands rather than repeating. It
+  is off unless the profile sets `keep_alive_seconds` (minimum 10), so a
+  profile that never asked arms nothing. A round pings every session in
+  `Profile::sessions_to_hold` through `spawn_blocking`, each by `try_lock`, so a
+  session a statement holds is skipped and never waited on; it is skipped whole
+  while `in_transaction` or any `bound_transactions` entry holds; and a failed
+  ping stops the keep-alive until the next connect without a word, the lost
+  session being found on its next use. Only engines with `EngineSpec.keeps_alive`
+  are pinged (Postgres, MySQL, MariaDB, SQL Server, Redis); each ping is
+  `try_lock`, leaves a session never logged in or dialled alone, and a Redis
+  session with a `MULTI` open too, where a `PING` would be queued. A ping writes no profile field: it is not
+  the user's activity. In the e2e harness `run_until_parked` does not jump to
+  timers but `advance_clock` fires them, and a test that then blocks on a
+  future must drop an armed timer first (`set_behaviour` with `keep_alive:
+  None`), because the scheduler jumps to the next timer when it would park.
 - **A dialog's keyboard is its ring** (`Workspace::dialog_layer`): the layer
   holds focus, and `left`/`right`/`tab` step a ring across its buttons and
   then its one other control, the "Don't ask again" box (`enter` or `space`

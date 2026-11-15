@@ -2762,6 +2762,27 @@ impl Connection {
         }
     }
 
+    /// One round trip on this session, so an idle cut-off between here and the
+    /// server does not close it. Returns at once, sending nothing, when a
+    /// statement holds the session, and is a no-op on an engine with no
+    /// long-lived session to keep (`Target::keeps_alive`). The error is a
+    /// session that did not answer.
+    pub fn ping(&self) -> Result<(), DbError> {
+        match self {
+            Self::Postgres(connection) => connection.ping(),
+            Self::MySql(connection) => connection.ping(),
+            Self::SqlServer(connection) => connection.ping(),
+            Self::Redis(connection) => connection.ping(),
+            Self::Sqlite(_)
+            | Self::Turso(_)
+            | Self::DuckDb(_)
+            | Self::Snowflake(_)
+            | Self::ClickHouse(_)
+            | Self::MongoDb(_)
+            | Self::External(_) => Ok(()),
+        }
+    }
+
     /// Ask the server to hold this session to reads, or let go of that hold.
     ///
     /// Defence in depth, not a privilege boundary: this is a session setting,
