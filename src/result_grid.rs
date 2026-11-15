@@ -2558,12 +2558,22 @@ impl ResultGrid {
     /// Text a binary cell's input was seeded with as fetched, typed back.
     /// Compared before the form reads it: a value that is not bytes (text
     /// in a SQLite blob column) seeds as itself, and could read as bytes
-    /// it never held.
+    /// it never held. Bytes the form cannot show (not UTF-8, as Text) also
+    /// seed as the server's spelling, but there that spelling typed in is
+    /// text like any other, never the value it spells.
     fn binary_seed_returned(&self, row: usize, col: usize, value: &NewValue) -> bool {
-        matches!(value, NewValue::Value(text)
-            if self.holds_binary(row, col)
-                && self.cell(row, col).is_some()
-                && text.as_ref() == self.fetched_seed(row, col))
+        let NewValue::Value(text) = value else {
+            return false;
+        };
+        let Some(cell) = self.cell(row, col).filter(|_| self.holds_binary(row, col)) else {
+            return false;
+        };
+        match (self.parsed_as(col), self.engine.bytes_of(cell, usize::MAX)) {
+            (Some(form), Some(bytes)) => form
+                .show(&bytes, false)
+                .is_some_and(|seed| seed == text.as_ref()),
+            _ => text.as_ref() == cell,
+        }
     }
 
     /// A cell's whole value as the row panel copies it: the staged one where
@@ -5204,6 +5214,20 @@ mod tests {
         grid.set_binary_form(1, BinaryForm::Base64);
         assert!(grid.set_pending(1, 1, value("aGk=")));
         assert!(!grid.has_pending());
+    }
+
+    #[test]
+    fn the_servers_spelling_typed_as_text_is_text_where_the_bytes_are_not() {
+        let mut grid = bytes_grid(db::Engine::Postgres, "bytea", &[r"\xff"], vec![0]);
+        grid.set_binary_form(1, BinaryForm::Hex);
+        assert!(grid.set_pending(0, 1, value("6869")));
+        grid.set_binary_form(1, BinaryForm::Text);
+        assert!(grid.editable(0, 1));
+        assert!(grid.set_pending(0, 1, value(r"\xff")));
+        assert_eq!(
+            grid.pending_value(0, 1),
+            Some(&NewValue::Bytes(br"\xff".to_vec()))
+        );
     }
 
     #[test]
