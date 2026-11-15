@@ -23,7 +23,11 @@ use crate::{
     icons::icon,
     sql::{Mode, SortKey},
     store::{GRID_ROW_CAP, StoredGrid, captured_at},
-    theme::{ConnectionColor, color::Srgb, fonts, layout, theme},
+    theme::{
+        ConnectionColor,
+        color::{Rgba, Srgb},
+        fonts, layout, theme,
+    },
     ui::{Control, Tone, icon_button},
 };
 
@@ -392,9 +396,10 @@ pub struct ResultGrid {
     /// it ([`Self::take_left_row`]). The grid does not know the view's edit mode,
     /// so it only records.
     left_row: Option<usize>,
-    /// The cell, and the input, a ring move off its row closed without
-    /// committing, until the workspace takes it ([`Self::take_closed_input`]):
-    /// what was typed in it is a Row view's to stage and send with its row.
+    /// The cell, and the input, a ring move closed without committing, until
+    /// the workspace stages it ([`Self::commit_closed_input`]): what was typed
+    /// in it is kept as a staged edit in every view, and a Row view sends it
+    /// with its row.
     closed_input: Option<(usize, usize, Entity<InputState>)>,
     /// The row whose send the server refused, and what it said, until that row
     /// is edited, reverted or sent.
@@ -432,6 +437,22 @@ pub struct ResultGrid {
     /// of a query result.
     not_nullable: Vec<usize>,
     has_default: Vec<usize>,
+    /// The rows the user added in a Draft view, in the order they were added,
+    /// after every fetched row: the display index of `added[i]` is
+    /// `fetched_rows() + i`. Kept apart from `pending` because a `(row, col)`
+    /// there would name a fetched row once `append_rows` extends `result.rows`,
+    /// and `result.rows` is never written, so discarding the draft is dropping
+    /// this and `pending`.
+    added: Vec<AddedRow>,
+    /// The fetched rows the user marked for deletion in a Draft view, by index
+    /// into `result.rows`: remapped by a sort in memory as `pending`'s rows
+    /// are, so a mark stays on the row it was put on. An added row is never
+    /// marked, it is removed (`toggle_marks`).
+    marked: std::collections::BTreeSet<usize>,
+    /// The columns the server fills itself on an insert and refuses a value
+    /// for (`Engine::generates`), by index into `columns`, marked where the
+    /// structure arrives. An added row takes no value in them.
+    generated: Vec<usize>,
     /// The hover group each key column's cells share, one per key column and
     /// built where the keys are marked. `render_td` runs for every visible cell
     /// every frame, and a group named there would be a `format!` per cell per
@@ -474,6 +495,11 @@ pub struct ResultGrid {
     /// own double-click handler, which has no route back to the profile.
     /// `Workspace::set_mode` is the only thing that writes it after construction.
     mode: Mode,
+    /// Whether a row holding a staged cell, an added row or a delete mark is
+    /// washed as a whole. A Classic view paints the per-cell edited wash alone,
+    /// and the grid cannot see its tab's mode, so the completion handler,
+    /// `hydrate_tab` and `Workspace::set_edit_mode` write it here.
+    row_washes: bool,
     /// Asked, never matched on, which of the column types is bytes.
     engine: db::Engine,
     /// The binary columns drawn as something other than what the server
@@ -546,6 +572,25 @@ struct PendingEdit {
     /// already paints the keyword in italics, and a second spelling of it on
     /// screen is one too many.
     shown: Option<SharedString>,
+}
+
+/// One row added in a Draft view. Only the cells the user touched are held: a
+/// column left out is one the server's default fills, which is a different
+/// write from `''` or `NULL`.
+struct AddedRow {
+    /// Unique across the process, drawn from the counter `next_rows_id` draws
+    /// on, so a row can be named after others are added or removed.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the delete marks and the added accent are its first readers"
+        )
+    )]
+    id: u64,
+    /// The touched cells by column index. Never `NewValue::Default`: staging
+    /// that takes the cell back out, since leaving it out is what it means.
+    cells: Vec<(usize, NewValue)>,
 }
 
 struct Editing {
@@ -662,6 +707,9 @@ impl ResultGrid {
             foreign_keys: Vec::new(),
             not_nullable: Vec::new(),
             has_default: Vec::new(),
+            added: Vec::new(),
+            marked: std::collections::BTreeSet::new(),
+            generated: Vec::new(),
             follow_groups: Vec::new(),
             reference_menus: Vec::new(),
             primary_key: Vec::new(),
@@ -673,6 +721,7 @@ impl ResultGrid {
             selected_row: None,
             reference_anchor: None,
             mode,
+            row_washes: true,
             engine: db::Engine::default(),
             binary_forms: Vec::new(),
             edits_bytes: false,
@@ -688,6 +737,17 @@ impl ResultGrid {
     pub fn with_target(mut self, target: db::Target) -> Self {
         self.edits_bytes = target.edits_bytes();
         self.with_engine(target.engine)
+    }
+
+    /// Turns the whole-row washes (updated, added, deleted) on or off; see
+    /// the field.
+    pub fn set_row_washes(&mut self, on: bool) {
+        self.row_washes = on;
+    }
+
+    #[cfg(test)]
+    pub fn row_washes(&self) -> bool {
+        self.row_washes
     }
 
     pub fn with_engine(mut self, engine: db::Engine) -> Self {
@@ -1375,7 +1435,7 @@ impl ResultGrid {
     /// Wide enough for the last row's number and no wider, padded the same on
     /// both sides.
     fn gutter_width(&self) -> f32 {
-        let digits = self.result.rows.len().max(1).to_string().len() as f32;
+        let digits = self.rows_total().max(1).to_string().len() as f32;
         layout::grid(digits * DIGIT_WIDTH) + 2.0 * layout::SPACE_SM
     }
 
@@ -1530,6 +1590,14 @@ impl ResultGrid {
     pub fn mark_columns(&mut self, not_nullable: &[String], has_default: &[String]) {
         self.not_nullable = self.columns_named(not_nullable);
         self.has_default = self.columns_named(has_default);
+    }
+
+    /// Tell the grid which columns the server fills itself on an insert
+    /// (`Engine::generates`), by name for the reason `mark_columns` is: an
+    /// added row takes no value in them. A `GENERATED BY DEFAULT` identity is
+    /// not among them, so the user can type that one.
+    pub fn mark_generated(&mut self, generated: &[String]) {
+        self.generated = self.columns_named(generated);
     }
 
     fn columns_named(&self, names: &[String]) -> Vec<usize> {
@@ -1852,20 +1920,24 @@ impl ResultGrid {
         if self.result.cell_types.len() == order.len() {
             reorder(&mut self.result.cell_types, &order);
         }
+        // Only a fetched row moves: an added row is past `moved_to`, and
+        // stays where it was added.
+        let moved = |row: usize| moved_to.get(row).copied().unwrap_or(row);
         for edit in &mut self.pending {
-            edit.row = moved_to[edit.row];
+            edit.row = moved(edit.row);
         }
+        self.marked = self.marked.iter().map(|&row| moved(row)).collect();
         // Every field that names a row by its index goes through the same
         // permutation: a refused row's mark and Esc's target would otherwise
         // sit on whichever row is now at the old position.
         if let Some((row, _)) = &mut self.send_failure {
-            *row = moved_to[*row];
+            *row = moved(*row);
         }
         if let Some(row) = &mut self.left_row {
-            *row = moved_to[*row];
+            *row = moved(*row);
         }
         if let Some((row, _, _)) = &mut self.closed_input {
-            *row = moved_to[*row];
+            *row = moved(*row);
         }
         self.active = None;
         self.editing = None;
@@ -1950,7 +2022,12 @@ impl ResultGrid {
             return None;
         }
         if self.copies_rows() {
-            let rows: Vec<usize> = self.selected_rows.iter().copied().collect();
+            let rows: Vec<usize> = self
+                .selected_rows
+                .iter()
+                .copied()
+                .filter(|&row| row < self.fetched_rows())
+                .collect();
             let result = self.rows_of(&rows)?;
             let text = export::render(export::Format::Tsv, &result);
             return Some(copied_rows(text, &result));
@@ -1982,14 +2059,23 @@ impl ResultGrid {
         })
     }
 
-    /// The rows "Copy Rows As" and the row-number gutter's own highlight agree
-    /// on: every row the user has selected there, in order, or the active
-    /// cell's row alone when nothing has been.
+    /// The rows "Copy Rows As" works on: every row the user has selected in
+    /// the gutter, in order, or the active cell's row alone when nothing has
+    /// been. An added row is left out, being no row of the result.
     pub fn selected_row_indices(&self) -> Vec<usize> {
-        if self.row_selection_anchor.is_some() {
-            return self.selected_rows.iter().copied().collect();
+        self.selected_draft_rows()
+            .into_iter()
+            .filter(|&row| row < self.fetched_rows())
+            .collect()
+    }
+
+    /// [`Self::selected_row_indices`] with the added rows kept: what Delete
+    /// row acts on in a Draft view, where an added row is removed.
+    pub fn selected_draft_rows(&self) -> Vec<usize> {
+        match self.row_selection_anchor.is_some() {
+            true => self.selected_rows.iter().copied().collect(),
+            false => self.active.map(|(row, _)| row).into_iter().collect(),
         }
-        self.active.map(|(row, _)| vec![row]).unwrap_or_default()
     }
 
     /// The whole value behind the active cell, which is what `cmd+c` copies —
@@ -2035,7 +2121,7 @@ impl ResultGrid {
     pub fn select_col(&mut self, col: usize) {
         // A result with no rows has no cell for the ring to sit on, and every
         // reader of `active` takes its row to be one that exists.
-        if self.result.rows.is_empty() {
+        if self.rows_total() == 0 {
             return;
         }
         self.set_active(self.active.map_or(0, |(row, _)| row), col);
@@ -2066,13 +2152,12 @@ impl ResultGrid {
             self.left_row = Some(old);
         }
         if closing {
-            // Kept only when the move leaves the input's row: a click on
-            // another cell of the same row drops what was typed, as it always
-            // did.
+            // Every move that closes the input records it, within the row too:
+            // a click on another cell of the row is a click away like any
+            // other, and the workspace stages what was typed.
             self.closed_input = self
                 .editing
                 .take()
-                .filter(|editing| editing.row != row)
                 .and_then(|editing| Some((editing.row, editing.col, editing.input?)));
         }
         self.active = Some((row, col));
@@ -2084,10 +2169,14 @@ impl ResultGrid {
         self.left_row.take()
     }
 
-    /// The cell a ring move closed an input on, and the text it holds, once.
-    pub(crate) fn take_closed_input(&mut self, cx: &App) -> Option<(usize, usize, SharedString)> {
-        let (row, col, input) = self.closed_input.take()?;
-        Some((row, col, input.read(cx).value().clone()))
+    /// Stage, once, the text of the input a ring move closed, by the rule every
+    /// close commits with ([`Self::commit_text`]), and a mode that refuses the
+    /// write stages nothing and says nothing, as the Row path always did.
+    pub(crate) fn commit_closed_input(&mut self, cx: &App) {
+        let Some((row, col, input)) = self.closed_input.take() else {
+            return;
+        };
+        self.commit_text(row, col, input.read(cx).value().clone());
     }
 
     /// The row whose send the server refused and the words it said, drawn on
@@ -2137,6 +2226,12 @@ impl ResultGrid {
     /// since what the grid shows is a blob *literal* that [`db::Engine::writes_back`]
     /// would otherwise write as the text it looks like.
     pub fn editable(&self, row: usize, col: usize) -> bool {
+        // Before every structural rule, and not in `set_pending`, whose `false`
+        // reads as a mode refusal and raises the mode prompt: a marked row is
+        // deleted, so a value staged on it would be written beside its `DELETE`.
+        if self.is_marked(row) {
+            return false;
+        }
         // Structural only: the mode lives one step further in, on `set_pending`.
         // A Read-only connection still opens its cells, because an open input is
         // how a value is selected and copied out of one -- what it refuses is
@@ -2147,12 +2242,20 @@ impl ResultGrid {
         let Some(Some(name)) = edit.columns.get(col) else {
             return false;
         };
-        let settable = match &edit.row_match {
-            db::RowMatch::Key => !edit.keys.contains(&col) || self.engine.edits_key_column(name),
-            db::RowMatch::EveryColumn { fixed } => !fixed.contains(&col),
+        let settable = match self.added_index(row) {
+            // An added row's key is typed unless the server generates it: it
+            // is a value the row is inserted with, where a fetched row's key
+            // is what the row was found by, and an edit of it cannot be
+            // re-verified afterwards.
+            Some(added) => added < self.added.len() && !self.generated.contains(&col),
+            None => match &edit.row_match {
+                db::RowMatch::Key => {
+                    !edit.keys.contains(&col) || self.engine.edits_key_column(name)
+                }
+                db::RowMatch::EveryColumn { fixed } => !fixed.contains(&col),
+            },
         };
-        row < self.result.rows.len()
-            && settable
+        settable
             && match self.holds_binary(row, col) {
                 true => self.bytes_refusal(row, col).is_none(),
                 false => self.engine.writes_back(
@@ -2180,6 +2283,11 @@ impl ResultGrid {
         }
         if !self.edits_bytes {
             return Some("Binary values cannot be edited on this connection.");
+        }
+        // An added row is written by an `INSERT`, whose values the write gate
+        // admits only as quoted text, never as the engine's bytes literal.
+        if self.added_index(row).is_some() {
+            return Some("Binary values cannot be set in an added row.");
         }
         // ponytail: a row named by bytes would need the bytes' literal in its
         // predicate, which the write gate admits nowhere. Lift this with a
@@ -2209,6 +2317,48 @@ impl ResultGrid {
         not_text.then_some(
             "These bytes are not UTF-8 text. Parse the column as Hex or Base64 to edit them.",
         )
+    }
+
+    /// Which added row `row` is, when it is past the fetched rows: its place in
+    /// `added`, which may still be past the end.
+    fn added_index(&self, row: usize) -> Option<usize> {
+        row.checked_sub(self.fetched_rows())
+    }
+
+    fn added_row(&self, row: usize) -> Option<&AddedRow> {
+        self.added.get(self.added_index(row)?)
+    }
+
+    /// How many rows the server sent, which the rows added in the grid come
+    /// after: an added row's index is this plus its place among them.
+    pub fn fetched_rows(&self) -> usize {
+        self.result.rows.len()
+    }
+
+    pub fn added_count(&self) -> usize {
+        self.added.len()
+    }
+
+    /// Every row the grid draws: the fetched ones and the ones added after them.
+    fn rows_total(&self) -> usize {
+        self.fetched_rows() + self.added.len()
+    }
+
+    /// Add an empty row at the end of the grid and put the ring on its first
+    /// column in view, which is its display index. `None` where nothing can be
+    /// inserted: no edit target, rows awaiting the stale-rows prompt, or a mode
+    /// below Read-write.
+    pub fn add_row(&mut self) -> Option<usize> {
+        if self.unconfirmed || self.mode < Mode::ReadWrite || self.result.edit.is_none() {
+            return None;
+        }
+        self.added.push(AddedRow {
+            id: next_rows_id(),
+            cells: Vec::new(),
+        });
+        let row = self.fetched_rows() + self.added.len() - 1;
+        self.set_active(row, self.view.first().copied().unwrap_or(0));
+        Some(row)
     }
 
     fn column_type(&self, col: usize) -> Option<&str> {
@@ -2325,6 +2475,11 @@ impl ResultGrid {
             return false;
         }
         self.forget_failure(row);
+        // Before the no-op test below: an added cell has no fetched value to
+        // equal, so a NULL staged there would read as one already held.
+        if let Some(index) = self.added_index(row) {
+            return self.set_added(index, col, value);
+        }
         let value = if self.binary_seed_returned(row, col, &value) {
             if !self.out_in_send(row, col) {
                 self.pending
@@ -2452,6 +2607,24 @@ impl ResultGrid {
             .unwrap_or_else(|| hex::encode_upper(bytes))
     }
 
+    /// [`Self::set_pending`] for the added row at `index` of `added`, which
+    /// `editable` has already admitted. `Default` takes the cell back out: the
+    /// server's default is what an untouched column gets.
+    fn set_added(&mut self, index: usize, col: usize, value: NewValue) -> bool {
+        // The one mode gate behind every write, as `set_pending`'s.
+        if self.mode < Mode::ReadWrite {
+            return false;
+        }
+        let Some(added) = self.added.get_mut(index) else {
+            return false;
+        };
+        added.cells.retain(|(held, _)| *held != col);
+        if value != NewValue::Default {
+            added.cells.push((col, value));
+        }
+        true
+    }
+
     /// Stage a value on a cell from outside the input, closing any input open
     /// over it. `false` when the cell is not editable, and nothing happens then.
     ///
@@ -2475,21 +2648,126 @@ impl ResultGrid {
     }
 
     pub fn has_pending(&self) -> bool {
-        !self.pending.is_empty()
+        !self.pending.is_empty() || !self.added.is_empty() || !self.marked.is_empty()
     }
 
+    /// Whether the draft holds a change that is no staged cell: a row added or
+    /// a row marked for deletion. What wording that says "edits" for cells
+    /// alone asks, to say "changes" instead.
+    pub fn holds_rows(&self) -> bool {
+        !self.added.is_empty() || !self.marked.is_empty()
+    }
+
+    /// The size of the draft: the cells staged on fetched rows, the rows added
+    /// and the rows marked, each counted once.
     pub fn pending_count(&self) -> usize {
-        self.pending.len()
+        self.pending.len() + self.added_count() + self.marked_count()
     }
 
-    /// The pending cell after the ring in reading order (before it, when
-    /// `back`), wrapping at either end. Reading order rather than edit order:
-    /// the walk should move through the grid the way the eye does.
+    pub fn marked_count(&self) -> usize {
+        self.marked.len()
+    }
+
+    pub fn is_marked(&self, row: usize) -> bool {
+        self.marked.contains(&row)
+    }
+
+    /// Toggle the deletion mark of the rows picked, an added row among them
+    /// being removed instead (it was never on the server). Then, when every
+    /// fetched row picked is marked they are unmarked, otherwise each unmarked
+    /// one is marked. A newly marked row drops its staged cells, which
+    /// unmarking does not bring back: only its `DELETE` is sent.
+    ///
+    /// `false`, with nothing changed, when the mode is below Read-write, the
+    /// rows await the stale-rows prompt, nothing was picked, or a fetched row
+    /// picked cannot be named by its key: a `DELETE` of it would reach another
+    /// row or none.
+    pub fn toggle_marks(&mut self, rows: &[usize]) -> bool {
+        if self.unconfirmed
+            || self.mode < Mode::ReadWrite
+            || self.result.edit.is_none()
+            || rows.is_empty()
+        {
+            return false;
+        }
+        let fetched = self.fetched_rows();
+        let picked: std::collections::BTreeSet<usize> = rows.iter().copied().collect();
+        if picked
+            .iter()
+            .any(|&row| row < fetched && self.row_key(row).is_none())
+        {
+            return false;
+        }
+        // Highest first: each removal moves the added rows after it down one.
+        for &row in picked.iter().rev().filter(|&&row| row >= fetched) {
+            if row - fetched < self.added.len() {
+                self.added.remove(row - fetched);
+            }
+        }
+        let rows_left = self.rows_total();
+        if picked.iter().any(|&row| row >= fetched) {
+            // The ring, the selection and an open input may name a row that is
+            // gone or now another's.
+            self.editing = None;
+            self.clear_row_selection();
+            self.selected_row = None;
+            if let Some((row, col)) = self.active
+                && row >= rows_left
+            {
+                self.active = rows_left.checked_sub(1).map(|row| (row, col));
+            }
+        }
+        let fetched_picked: Vec<usize> = picked.into_iter().filter(|&row| row < fetched).collect();
+        if fetched_picked.iter().all(|row| self.marked.contains(row)) {
+            for row in &fetched_picked {
+                self.marked.remove(row);
+            }
+        } else {
+            for row in fetched_picked {
+                if self.marked.insert(row) {
+                    self.discard_row(row);
+                }
+            }
+        }
+        true
+    }
+
+    /// The `DELETE` each marked row is written as, in grid order, each named by
+    /// the key it was fetched with. A row whose key cannot be read is left out,
+    /// which `toggle_marks` never lets be marked; the caller compares the count
+    /// with [`Self::marked_count`].
+    pub fn draft_deletes(&self) -> Vec<crate::sql::DraftDelete> {
+        self.marked
+            .iter()
+            .filter_map(|&row| {
+                let (schema, table, keys, null_keys) = self.row_key(row)?;
+                Some(crate::sql::DraftDelete {
+                    schema,
+                    table,
+                    keys,
+                    null_keys,
+                    types: self.row_types(row),
+                })
+            })
+            .collect()
+    }
+
+    /// The change after the ring in reading order (before it, when `back`),
+    /// wrapping at either end: each staged cell, each marked row at its first
+    /// column and each added row at its first touched column. Reading order
+    /// rather than edit order: the walk should move through the grid the way
+    /// the eye does.
     fn pending_beside(&self, back: bool) -> Option<(usize, usize)> {
+        let fetched = self.fetched_rows();
         let mut cells: Vec<_> = self
             .pending
             .iter()
             .map(|edit| (edit.row, edit.col))
+            .chain(self.marked.iter().map(|&row| (row, 0)))
+            .chain(self.added.iter().enumerate().map(|(place, added)| {
+                let first = added.cells.iter().map(|(col, _)| *col).min();
+                (fetched + place, first.unwrap_or(0))
+            }))
             .collect();
         cells.sort_unstable();
         let found = self.active.and_then(|here| match back {
@@ -2507,6 +2785,8 @@ impl ResultGrid {
     /// Back to exactly what the server returned.
     pub fn discard_pending(&mut self) {
         self.pending.clear();
+        self.added.clear();
+        self.marked.clear();
         self.editing = None;
         self.send_failure = None;
     }
@@ -2733,6 +3013,65 @@ impl ResultGrid {
             .collect()
     }
 
+    /// The edit target's key columns by their real names: what a marked row is
+    /// found by, and what the key check of a draft's `DELETE`s reads.
+    pub fn key_columns(&self) -> Vec<String> {
+        let Some(edit) = &self.result.edit else {
+            return Vec::new();
+        };
+        edit.keys
+            .iter()
+            .filter_map(|&col| edit.columns.get(col)?.clone())
+            .collect()
+    }
+
+    /// The `INSERT` each added row is written as: its touched cells by real
+    /// column name in column order, `NULL` as `None`, and the types the writers
+    /// spell a literal by. `Err` carries the display index of the first added
+    /// row with no touched cell, which has nothing to insert: a row of nothing
+    /// is `DEFAULT VALUES`, and no engine's draft writes that.
+    pub(crate) fn draft_inserts(&self) -> Result<Vec<crate::sql::DraftInsert>, usize> {
+        let Some(edit) = &self.result.edit else {
+            return Ok(Vec::new());
+        };
+        self.added
+            .iter()
+            .enumerate()
+            .map(|(index, added)| {
+                let row = self.fetched_rows() + index;
+                let mut cells: Vec<(usize, String, Option<String>)> = added
+                    .cells
+                    .iter()
+                    .filter_map(|(col, value)| {
+                        let name = edit.columns.get(*col)?.clone()?;
+                        let value = match value {
+                            NewValue::Value(value) => Some(value.to_string()),
+                            NewValue::Null => None,
+                            NewValue::Default => return None,
+                            // Never staged here: an added row's binary cell
+                            // is read-only (`bytes_refusal`).
+                            NewValue::Bytes(_) => return None,
+                        };
+                        Some((*col, name, value))
+                    })
+                    .collect();
+                if cells.is_empty() {
+                    return Err(row);
+                }
+                cells.sort_by_key(|(col, _, _)| *col);
+                Ok(crate::sql::DraftInsert {
+                    schema: edit.schema.clone(),
+                    table: edit.table.clone(),
+                    columns: cells
+                        .into_iter()
+                        .map(|(_, name, value)| (name, value))
+                        .collect(),
+                    types: self.row_types(row),
+                })
+            })
+            .collect()
+    }
+
     /// Each edit target column's real name against the type the result gave
     /// its cell in `row`, for the writers that spell a literal by its type.
     pub fn row_types(&self, row: usize) -> Vec<(String, String)> {
@@ -2773,6 +3112,14 @@ impl ResultGrid {
     }
 
     pub fn pending_value(&self, row: usize, col: usize) -> Option<&NewValue> {
+        if let Some(index) = self.added_index(row) {
+            let added = self.added.get(index)?;
+            return added
+                .cells
+                .iter()
+                .find(|(held, _)| *held == col)
+                .map(|(_, value)| value);
+        }
         self.pending_at(row, col).map(|edit| &edit.value)
     }
 
@@ -2896,11 +3243,30 @@ impl ResultGrid {
             self.editing = None;
             return true;
         };
-        if !self.set_pending(row, col, NewValue::Value(input.read(cx).value().clone())) {
+        if !self.commit_text(row, col, input.read(cx).value().clone()) {
             return false;
         }
         self.editing = None;
         true
+    }
+
+    /// Take `text`, what an input opened on the cell holds, into the draft.
+    /// `false` when the mode refused the write.
+    ///
+    /// Every close of a cell's input commits by this rule: Enter; Tab,
+    /// Shift-Tab, Up and Down through [`commit_and_step`]; a Row view's edge
+    /// key through `Workspace::step_past_edge`; a click away through
+    /// [`Self::commit_closed_input`]. Text equal to what the input was seeded
+    /// with is nothing typed, on every row: a NULL, a staged NULL or DEFAULT and
+    /// an added row's untouched cell all seed empty, and writing that back would
+    /// put `''` over them or in the `INSERT` over the server's default. Nothing
+    /// staged asks nothing of the mode. The empty string over a NULL is
+    /// `SetEmpty`'s, which stages through [`Self::set_pending`] and not here.
+    fn commit_text(&mut self, row: usize, col: usize, text: SharedString) -> bool {
+        if *text == *self.edit_seed(row, col) {
+            return true;
+        }
+        self.set_pending(row, col, NewValue::Value(text))
     }
 }
 
@@ -2930,7 +3296,7 @@ enum Step {
 
 /// Take an open input's value and hand the keyboard back to the grid. `false`
 /// when the mode refused the write.
-fn commit_from_input(
+pub(crate) fn commit_from_input(
     table: &mut TableState<ResultGrid>,
     window: &mut Window,
     cx: &mut Context<TableState<ResultGrid>>,
@@ -2960,8 +3326,9 @@ fn commit_from_input(
 }
 
 /// Commit, then carry the edit one cell along, the way a spreadsheet does:
-/// `up`/`down` by row, `tab`/`shift-tab` by column. At an edge there is nowhere
-/// to go, and the key does nothing, the same as `left` at the caret's start.
+/// `up`/`down` by row, `tab`/`shift-tab` by column. At an edge there is no cell
+/// to step to and no wrap, and what the key does with the input is the view's:
+/// the grid hands it to the workspace as [`crate::actions::StepPastEdge`].
 ///
 /// Stepped from the active cell rather than handed to the table's own
 /// `SelectDown` or `SelectNextColumn`: the grid runs the library in row and
@@ -2976,6 +3343,7 @@ fn commit_and_step(
     cx.stop_propagation();
     let grid = table.delegate();
     let Some(to) = grid.step_from_active(&step, grid.rows_count(cx)) else {
+        window.dispatch_action(Box::new(crate::actions::StepPastEdge), cx);
         return;
     };
     if !commit_from_input(table, window, cx) {
@@ -3013,6 +3381,20 @@ pub(crate) fn step_col(
     if let Some(col) = to {
         table.set_selected_col(col, cx);
     }
+}
+
+/// Add an empty row to the end of the grid, with the ring on its first cell and
+/// the row selected and scrolled to, as moving to it by key would leave it. The
+/// row goes through `set_selected_row`, whose echo lands in `select_row` keeping
+/// the column `add_row` set. `None`, and nothing changed, where the grid takes
+/// no new row ([`ResultGrid::add_row`]).
+pub(crate) fn add_row_at_end(
+    table: &mut TableState<ResultGrid>,
+    cx: &mut Context<TableState<ResultGrid>>,
+) -> Option<usize> {
+    let row = table.delegate_mut().add_row()?;
+    table.set_selected_row(row, cx);
+    Some(row)
 }
 
 /// Move the ring to the next pending edit (the previous one when `back`) and
@@ -3234,7 +3616,7 @@ pub(crate) fn take_keyboard(
     cx: &mut Context<TableState<ResultGrid>>,
 ) {
     table.focus_handle(cx).focus(window, cx);
-    if table.delegate().result.rows.is_empty() || table.selected_row().is_some() {
+    if table.delegate().rows_total() == 0 || table.selected_row().is_some() {
         return;
     }
     let row = match table.delegate().active {
@@ -3427,7 +3809,7 @@ impl TableDelegate for ResultGrid {
     }
 
     fn rows_count(&self, _: &App) -> usize {
-        self.result.rows.len()
+        self.rows_total()
     }
 
     /// A wash across the row, for one the gutter has picked out. Painted here
@@ -3461,6 +3843,19 @@ impl TableDelegate for ResultGrid {
             .id(("row", row_ix))
             .relative()
             .max_w(px(content_width));
+        // The row's state wash first, so the selection paints over it: a
+        // selected row with changes still reads as selected, and the two
+        // stay apart (`theme::tests`) with one over the other.
+        let washes = self.row_washes;
+        let row = row.when(washes && self.row_has_pending(row_ix), |row| {
+            row.child(div().absolute().size_full().bg(t.updated))
+        });
+        let row = row.when(washes && self.added_row(row_ix).is_some(), |row| {
+            row.child(div().absolute().size_full().bg(t.added))
+        });
+        let row = row.when(washes && self.is_marked(row_ix), |row| {
+            row.child(div().absolute().size_full().bg(t.deleted))
+        });
         if !self.selected_rows.contains(&row_ix) {
             return row;
         }
@@ -3549,11 +3944,22 @@ impl TableDelegate for ResultGrid {
         match col_ix.checked_sub(GUTTER).and_then(|p| self.column_at(p)) {
             Some(col) => self.data_td(row_ix, col, window, cx).into_any_element(),
             None => {
-                let (faint, text, selected_bg, danger) = {
+                let (faint, text, selected_bg, danger, updated, added, deleted) = {
                     let t = theme(cx);
-                    (t.text_faint, t.text, t.selection, t.danger)
+                    (
+                        t.text_faint,
+                        t.text,
+                        t.selection,
+                        t.danger,
+                        t.updated,
+                        t.added,
+                        t.deleted,
+                    )
                 };
                 let selected = self.selected_rows.contains(&row_ix);
+                let changed = self.row_has_pending(row_ix);
+                let is_added = self.added_row(row_ix).is_some();
+                let is_deleted = self.is_marked(row_ix);
                 // What the server said to this row's send, on the one cell
                 // that is the row's and not a column's.
                 let refused = self
@@ -3566,8 +3972,48 @@ impl TableDelegate for ResultGrid {
                     .debug_selector(move || format!("row-number-{row_ix}"))
                     .size_full()
                     .justify_end()
+                    .relative()
                     .when(selected, |cell| cell.bg(selected_bg))
                     .text_color(if selected { text } else { faint })
+                    // A strip on the leading edge, in the wash's own hue at
+                    // full strength: the wash alone is colour, and where it
+                    // is faint a row with changes must still be told.
+                    .when(changed, |cell| {
+                        cell.child(
+                            div()
+                                .debug_selector(move || format!("row-updated-{row_ix}"))
+                                .absolute()
+                                .left_0()
+                                .top_0()
+                                .bottom_0()
+                                .w(px(3.0))
+                                .bg(Rgba { a: 1.0, ..updated }),
+                        )
+                    })
+                    .when(is_added, |cell| {
+                        cell.child(
+                            div()
+                                .debug_selector(move || format!("row-added-{row_ix}"))
+                                .absolute()
+                                .left_0()
+                                .top_0()
+                                .bottom_0()
+                                .w(px(3.0))
+                                .bg(Rgba { a: 1.0, ..added }),
+                        )
+                    })
+                    .when(is_deleted, |cell| {
+                        cell.child(
+                            div()
+                                .debug_selector(move || format!("row-deleted-{row_ix}"))
+                                .absolute()
+                                .left_0()
+                                .top_0()
+                                .bottom_0()
+                                .w(px(3.0))
+                                .bg(Rgba { a: 1.0, ..deleted }),
+                        )
+                    })
                     .when_some(refused.clone(), |cell, message| {
                         cell.text_color(danger).tooltip(move |window, cx| {
                             Tooltip::new(message.clone()).build(window, cx)
@@ -4031,20 +4477,28 @@ impl ResultGrid {
         }
 
         // A pending value is painted from the pending set; `result.rows`
-        // stays exactly as fetched.
+        // stays exactly as fetched. An added row has no fetched value at all,
+        // so its cells come from the row's own list.
         let pending = self.pending_at(row_ix, col_ix);
+        let added = self.added_row(row_ix).is_some();
+        let staged = self.pending_value(row_ix, col_ix);
         // Which word the italic branch below paints. A staged keyword has no
         // `shown`, so it falls into the same branch a fetched NULL does while
         // still wearing the edited wash — but it must say which keyword, or a
-        // staged `DEFAULT` would read as a staged `NULL`.
-        let keyword = match pending.map(|pending| &pending.value) {
+        // staged `DEFAULT` would read as a staged `NULL`. An added row's
+        // untouched cell holds nothing yet, which is not a NULL: it says what
+        // the server will do where the column has a default, and nothing where
+        // it has none.
+        let keyword = match staged {
             Some(NewValue::Default) => DEFAULT_LABEL,
-            None if self.missing(row_ix, col_ix) => SharedString::default(),
+            None if added && self.offers_default(col_ix) => DEFAULT_LABEL,
+            None if added || self.missing(row_ix, col_ix) => SharedString::default(),
             _ => NULL_LABEL,
         };
-        let (cell, unparsed) = match pending {
-            Some(pending) => (pending.shown.clone(), false),
-            None => match self.painted(row_ix, col_ix) {
+        let (cell, unparsed) = match (pending, staged) {
+            (Some(pending), _) => (pending.shown.clone(), false),
+            (None, Some(value)) => (pending_shown(value), false),
+            (None, None) => match self.painted(row_ix, col_ix) {
                 Some((shown, unparsed)) => (Some(shown), unparsed),
                 None => (None, false),
             },
@@ -4057,18 +4511,23 @@ impl ResultGrid {
             .then(|| self.follow_group(col_ix).cloned())
             .flatten();
 
+        // A deleted row's ink is faint and struck through, so the deletion
+        // reads without the wash's colour.
+        let deleted = self.is_marked(row_ix);
         base.overflow_hidden()
             .whitespace_nowrap()
             .text_ellipsis()
-            .text_color(match (cell.is_some(), numeric) {
+            .text_color(match (cell.is_some() && !deleted, numeric) {
                 (false, _) => faint,
                 (true, _) if unparsed => muted,
                 (true, true) => number,
                 (true, false) => text,
             })
+            .when(deleted, |cell| cell.line_through())
             // Italic so a NULL cannot be mistaken for the four-letter string.
             .when(cell.is_none(), |cell| cell.italic())
-            .when(pending.is_some(), |cell| cell.bg(edited_bg))
+            // The whole added row is new, so no one of its cells is "edited".
+            .when(staged.is_some() && !added, |cell| cell.bg(edited_bg))
             // The value is the child that gives way, beside an arrow or not.
             // Bare text in a row does not shrink and a flex container does not
             // ellipsise its own text, so a value as wide as its column -- every
@@ -4210,8 +4669,9 @@ pub(crate) fn new_grid(
     // through it: a subscription set up at one call site would leave the other
     // grid navigating an invisible selection.
     //
-    // Every ring move ends in `SelectRow` or `ClearSelection`, so these two arms
-    // are the one consumer of the row the ring left: a Row view sends it.
+    // Every ring move ends in `SelectRow`, `ClearSelection` or `SelectColumn`, so
+    // these three arms are the one consumer of the input a move closed and of the
+    // row the ring left: the input's text is staged, and a Row view sends the row.
     cx.subscribe(
         &grid,
         |workspace, table, event: &TableEvent, cx| match event {
@@ -4252,6 +4712,10 @@ pub(crate) fn new_grid(
                     table.delegate_mut().select_col(col);
                     cx.notify();
                 });
+                // A column move inside the row closes an input too, and a
+                // record left for a later row move would stage over an edit
+                // made in between.
+                workspace.flush_left_row(&table, cx);
             }
             TableEvent::ClearSelection => {
                 table.update(cx, |table, cx| {
@@ -4996,6 +5460,34 @@ mod tests {
     }
 
     #[test]
+    fn the_edit_walk_stops_at_added_rows_and_marked_rows() {
+        let mut grid = editable_grid();
+        assert!(grid.set_pending(0, 1, value("earlier")));
+        assert!(grid.toggle_marks(&[1]));
+        assert_eq!(grid.add_row(), Some(2));
+        assert!(grid.set_pending(2, 1, value("third")));
+        grid.set_active(0, 0);
+
+        let walk = |grid: &mut ResultGrid, back| {
+            let to = grid.pending_beside(back).unwrap();
+            grid.set_active(to.0, to.1);
+            to
+        };
+        assert_eq!(walk(&mut grid, false), (0, 1), "the staged cell");
+        assert_eq!(walk(&mut grid, false), (1, 0), "the marked row");
+        assert_eq!(walk(&mut grid, false), (2, 1), "the added row, at its cell");
+        assert_eq!(walk(&mut grid, false), (0, 1), "wraps");
+        assert_eq!(walk(&mut grid, true), (2, 1));
+        assert_eq!(walk(&mut grid, true), (1, 0));
+        assert_eq!(walk(&mut grid, true), (0, 1));
+
+        // An added row with nothing typed in it is still a stop.
+        assert_eq!(grid.add_row(), Some(3));
+        grid.set_active(2, 1);
+        assert_eq!(walk(&mut grid, false), (3, 0));
+    }
+
+    #[test]
     fn a_pending_edit_leaves_the_fetched_rows_alone() {
         // The grid shows changed-against-server by holding both. Writing the
         // edit into `result.rows` would lose the server's value for good.
@@ -5718,6 +6210,30 @@ mod tests {
     }
 
     #[test]
+    fn an_added_rows_binary_cell_stays_read_only_while_a_fetched_one_takes_bytes() {
+        let mut grid = bytes_grid(db::Engine::Postgres, "bytea", &[r"\x6869"], vec![0]);
+        grid.set_binary_form(1, BinaryForm::Text);
+        assert_eq!(grid.add_row(), Some(1));
+        assert!(!grid.editable(1, 1) && !grid.set_pending(1, 1, value("hi")));
+        assert_eq!(
+            grid.bytes_refusal(1, 1),
+            Some("Binary values cannot be set in an added row.")
+        );
+        assert!(
+            grid.set_pending(1, 2, value("l")),
+            "its other cells take values"
+        );
+        assert!(grid.draft_inserts().is_ok_and(|inserts| inserts.len() == 1));
+
+        // Beside it, a fetched row's binary cell stages the bytes its form reads.
+        assert!(grid.set_pending(0, 1, value("hey")));
+        assert_eq!(
+            grid.pending_value(0, 1),
+            Some(&NewValue::Bytes(b"hey".to_vec()))
+        );
+    }
+
+    #[test]
     fn a_binary_cell_committed_as_it_was_seeded_is_no_edit_even_when_not_bytes() {
         // SQLite keeps text in a blob column; `6869` would read as hex `hi`.
         let mut grid = bytes_grid(db::Engine::Sqlite, "blob", &["6869", "x'6869'"], vec![0]);
@@ -6208,10 +6724,10 @@ mod tests {
     #[test]
     fn the_empty_string_over_a_null_is_an_edit() {
         // It was not, while the two were the same three characters of SQL.
-        // What now keeps an untouched input on a NULL from writing an empty
-        // string over it is the editor -- `begin_edit` is a deliberate gesture
-        // and `cancel_edit` records nothing -- not `set_pending`, which can no
-        // longer tell a typed empty string from a seeded one and must not try.
+        // What keeps an untouched input on a NULL from writing an empty string
+        // over it is `commit_text`'s seed rule, on every row, not `set_pending`,
+        // which cannot tell a typed empty string from a seeded one and must not
+        // try: it records the empty string over a NULL, as `SetEmpty` needs.
         let mut grid = grid_with_a_null();
 
         assert!(grid.set_pending(0, 1, value("")));
@@ -6758,8 +7274,8 @@ mod tests {
 
     #[test]
     fn a_step_off_the_edge_of_the_grid_goes_nowhere() {
-        // At an edge the key has to do nothing rather than close the edit or
-        // wrap: the input stays open on the cell the user is typing into.
+        // At an edge the ring goes nowhere and never wraps; what an edge key
+        // does with the input is `Workspace::step_past_edge`'s.
         assert_eq!(step_target((1, 1), &Step::Rows(1), 3, 3), Some((2, 1)));
         assert_eq!(step_target((1, 1), &Step::Cols(-1), 3, 3), Some((1, 0)));
         assert_eq!(step_target((0, 1), &Step::Rows(-1), 3, 3), None);
@@ -7677,5 +8193,468 @@ mod tests {
             metadata(copied_row_slice(large, false, &columns, &rows, &[])).as_deref(),
             Some(r#"{"dbdelve":2,"columns":[{"name":"v","type":null}],"header":false}"#)
         );
+    }
+
+    #[test]
+    fn an_added_row_sits_after_the_fetched_rows_and_stays_last_through_a_memory_sort() {
+        let mut grid = ResultGrid::new(
+            QueryResult {
+                columns: vec![column("id"), column("note")],
+                rows: rows(vec![
+                    vec![Some("1".into()), Some("b".into())],
+                    vec![Some("2".into()), Some("c".into())],
+                    vec![Some("3".into()), Some("a".into())],
+                ]),
+                edit: Some(EditTarget {
+                    schema: "public".into(),
+                    table: "notes".into(),
+                    columns: vec![Some("id".into()), Some("note".into())],
+                    keys: vec![0],
+                    ..Default::default()
+                }),
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        );
+        assert_eq!(grid.add_row(), Some(3));
+        assert!(grid.set_pending(3, 1, NewValue::Value("zz".into())));
+
+        grid.sort_in_memory(vec![(1, false)]);
+
+        assert_eq!(
+            grid.cell(0, 1),
+            Some("c"),
+            "the fetched rows were reordered"
+        );
+        assert_eq!(grid.cell(2, 1), Some("a"));
+        assert_eq!(grid.fetched_rows() + grid.added_count(), 4);
+        assert_eq!(grid.cell(3, 1), None, "never a fetched value");
+        assert_eq!(
+            grid.pending_value(3, 1),
+            Some(&NewValue::Value("zz".into())),
+            "the added row is still last, with its cell"
+        );
+
+        // Rows 0 and 3 selected: the added one is no row of the result, so
+        // neither the copy nor the label counts it.
+        grid.click_row(0, false, false);
+        grid.click_row(3, false, true);
+        assert_eq!(grid.selected_row_indices(), vec![0]);
+        let copied = grid
+            .rows_of(&grid.selected_row_indices())
+            .expect("a fetched row is selected");
+        assert_eq!(copied.rows.len(), 1);
+
+        grid.click_row(3, false, false);
+        assert!(grid.selected_row_indices().is_empty());
+        assert!(grid.copy().is_none(), "an added row alone copies nothing");
+    }
+
+    #[test]
+    fn the_gutter_is_wide_enough_for_an_added_rows_number() {
+        let mut grid = editable_grid();
+        let narrow = grid.gutter_width();
+        for _ in 0..8 {
+            assert!(grid.add_row().is_some());
+        }
+        // Ten rows in all: the last number has a digit more than nine did.
+        assert_eq!(grid.fetched_rows() + grid.added_count(), 10);
+        assert!(grid.gutter_width() > narrow);
+    }
+
+    #[test]
+    fn an_added_row_writes_only_the_cells_it_touches() {
+        let mut grid = editable_grid();
+        assert_eq!(grid.add_row(), Some(2));
+        assert!(grid.set_pending(2, 1, NewValue::Value("third".into())));
+        // Default is the server's own, so it is no more a value than leaving
+        // the cell alone.
+        assert!(grid.set_pending(2, 0, NewValue::Default));
+
+        let inserts = grid.draft_inserts().expect("the row holds a touched cell");
+        assert_eq!(inserts.len(), 1);
+        assert_eq!(
+            (inserts[0].schema.as_str(), inserts[0].table.as_str()),
+            ("public", "measurements")
+        );
+        assert_eq!(
+            inserts[0].columns,
+            [("body".to_string(), Some("third".to_string()))]
+        );
+
+        assert!(grid.set_pending(2, 0, NewValue::Null));
+        let inserts = grid.draft_inserts().expect("the row holds touched cells");
+        assert_eq!(
+            inserts[0].columns,
+            [
+                ("id".to_string(), None),
+                ("body".to_string(), Some("third".to_string()))
+            ],
+            "column order, NULL as None"
+        );
+
+        assert_eq!(
+            grid.pending_value(2, 1),
+            Some(&NewValue::Value("third".into()))
+        );
+        assert_eq!(grid.cell(2, 1), None, "never a fetched value");
+        assert_eq!(grid.fetched_rows(), 2);
+        assert_eq!(grid.added_count(), 1);
+        assert!(grid.pending_updates().is_empty(), "no fetched row changed");
+    }
+
+    #[test]
+    fn a_key_column_takes_a_value_on_an_added_row_and_a_generated_column_does_not() {
+        let mut grid = editable_grid();
+        assert!(!grid.editable(0, 0), "a fetched row's key stays fixed");
+        assert_eq!(grid.add_row(), Some(2));
+        assert!(grid.editable(2, 0), "the user types an added row's key");
+        assert!(
+            !grid.editable(2, 2),
+            "a computed column names no real column"
+        );
+
+        grid.mark_generated(&["id".to_string()]);
+        assert!(!grid.editable(2, 0));
+        assert!(!grid.set_pending(2, 0, NewValue::Value("9".into())));
+        assert!(grid.editable(2, 1));
+        assert!(grid.set_pending(2, 1, NewValue::Value("third".into())));
+
+        grid.set_mode(Mode::ReadOnly);
+        assert!(!grid.set_pending(2, 1, NewValue::Value("fourth".into())));
+        assert_eq!(grid.add_row(), None, "a Read-only grid adds nothing");
+        assert_eq!(grid.added_count(), 1);
+    }
+
+    #[test]
+    fn closing_an_untouched_added_cell_without_typing_does_not_touch_it() {
+        let mut grid = editable_grid();
+        grid.add_row();
+        assert!(grid.begin_edit(2, 1));
+        // The input seeds empty and closes empty: that is not a value, so the
+        // column stays out of the INSERT and the server's default applies.
+        assert!(grid.commit_text(2, 1, "".into()));
+        assert_eq!(grid.pending_value(2, 1), None);
+        assert_eq!(grid.draft_inserts().err(), Some(2));
+
+        // Set Value to Empty is the one way to write the empty string.
+        assert!(grid.stage(2, 1, NewValue::Value("".into())));
+        assert_eq!(grid.pending_value(2, 1), Some(&NewValue::Value("".into())));
+        let inserts = grid.draft_inserts().expect("the cell is now touched");
+        assert_eq!(
+            inserts[0].columns,
+            [("body".to_string(), Some(String::new()))]
+        );
+
+        // Reopened and closed unchanged, a staged NULL stays one.
+        assert!(grid.set_pending(2, 1, NewValue::Null));
+        assert!(grid.begin_edit(2, 1));
+        assert!(grid.commit_text(2, 1, "".into()));
+        assert_eq!(grid.pending_value(2, 1), Some(&NewValue::Null));
+    }
+
+    #[test]
+    fn an_input_closed_as_it_opened_records_nothing_on_a_fetched_row_and_asks_no_mode() {
+        let mut grid = grid_with_a_null();
+        assert!(grid.begin_edit(0, 1));
+        assert!(grid.commit_text(0, 1, "".into()));
+        assert_eq!(grid.pending_value(0, 1), None, "a NULL stays a NULL");
+
+        assert!(grid.set_pending(0, 1, NewValue::Default));
+        assert!(grid.begin_edit(0, 1));
+        assert!(grid.commit_text(0, 1, "".into()));
+        assert_eq!(grid.pending_value(0, 1), Some(&NewValue::Default));
+
+        // `set_pending` takes nulling a fetched NULL for no edit, so the staged
+        // NULL it has to be kept over sits on a cell with a value.
+        let mut grid = editable_grid();
+        assert!(grid.set_pending(0, 1, NewValue::Null));
+        assert!(grid.begin_edit(0, 1));
+        assert!(grid.commit_text(0, 1, "".into()));
+        assert_eq!(grid.pending_value(0, 1), Some(&NewValue::Null));
+
+        let mut grid = grid_with_a_null();
+        grid.set_mode(Mode::ReadOnly);
+        assert!(
+            grid.commit_text(0, 1, "".into()),
+            "nothing was typed, so no mode is asked for"
+        );
+        assert_eq!(grid.pending_count(), 0);
+        assert!(
+            !grid.commit_text(0, 1, "x".into()),
+            "typed text still meets the mode"
+        );
+    }
+
+    #[test]
+    fn an_added_row_with_no_touched_cell_blocks_the_draft() {
+        let mut grid = editable_grid();
+        assert_eq!(grid.add_row(), Some(2));
+        assert_eq!(grid.add_row(), Some(3));
+        assert!(grid.set_pending(3, 1, NewValue::Value("fourth".into())));
+        assert_ne!(
+            grid.added[0].id, grid.added[1].id,
+            "each row has its own id"
+        );
+        assert_eq!(
+            grid.draft_inserts().err(),
+            Some(2),
+            "the first added row's display index"
+        );
+        assert!(grid.set_pending(2, 1, NewValue::Value("third".into())));
+        assert_eq!(
+            grid.draft_inserts().expect("both rows are touched").len(),
+            2
+        );
+    }
+
+    #[test]
+    fn a_by_default_identity_takes_a_value_on_an_added_row() {
+        let definition = |name: &str, default: &str| db::ColumnDefinition {
+            name: name.into(),
+            data_type: "int4".into(),
+            nullable: false,
+            default: Some(default.into()),
+        };
+        let generated = |engine: db::Engine, columns: &[db::ColumnDefinition]| -> Vec<String> {
+            columns
+                .iter()
+                .filter(|column| engine.generates(column))
+                .map(|column| column.name.clone())
+                .collect()
+        };
+        let postgres = generated(
+            db::Engine::Postgres,
+            &[
+                definition("id", "GENERATED BY DEFAULT AS IDENTITY"),
+                definition("total", "GENERATED ALWAYS AS (a + 1) STORED"),
+            ],
+        );
+        assert_eq!(postgres, ["total"]);
+
+        let mut grid = ResultGrid::new(
+            QueryResult {
+                columns: vec![column("id"), column("total")],
+                rows: rows(vec![vec![Some("7".into()), Some("8".into())]]),
+                edit: Some(EditTarget {
+                    schema: "public".into(),
+                    table: "measurements".into(),
+                    columns: vec![Some("id".into()), Some("total".into())],
+                    keys: vec![0],
+                    ..Default::default()
+                }),
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        )
+        .with_engine(db::Engine::Postgres);
+        grid.mark_generated(&postgres);
+        assert_eq!(grid.add_row(), Some(1));
+        assert!(grid.editable(1, 0), "BY DEFAULT takes a value");
+        assert!(!grid.editable(1, 1), "GENERATED ALWAYS does not");
+
+        let mysql = generated(
+            db::Engine::MySql,
+            &[
+                definition("id", "AUTO_INCREMENT"),
+                definition("body", "'none'"),
+            ],
+        );
+        assert_eq!(mysql, ["id"]);
+    }
+
+    #[test]
+    fn the_draft_count_counts_cells_added_rows_and_marks() {
+        let mut grid = editable_grid();
+        assert!(grid.set_pending(0, 1, NewValue::Value("edited".into())));
+        assert_eq!(grid.add_row(), Some(2));
+        assert!(grid.toggle_marks(&[1]));
+
+        assert_eq!(grid.pending_count(), 3);
+        assert_eq!(grid.marked_count(), 1);
+        assert_eq!(grid.added_count(), 1);
+        assert!(grid.has_pending());
+        assert!(grid.holds_rows());
+
+        grid.discard_pending();
+        assert_eq!(grid.pending_count(), 0);
+        assert_eq!(grid.marked_count(), 0);
+        assert_eq!(grid.added_count(), 0);
+        assert!(!grid.has_pending());
+        assert!(!grid.holds_rows());
+
+        // A mark alone is a draft, and says changes rather than edits.
+        assert!(grid.toggle_marks(&[0]));
+        assert!(grid.has_pending() && grid.holds_rows());
+    }
+
+    #[test]
+    fn marking_a_row_clears_its_edits_and_unmarking_does_not_restore_them() {
+        let mut grid = editable_grid();
+        assert!(grid.set_pending(1, 1, NewValue::Value("changed".into())));
+        assert!(grid.set_pending(0, 1, NewValue::Value("kept".into())));
+
+        assert!(grid.toggle_marks(&[1]));
+        assert!(grid.is_marked(1));
+        assert_eq!(grid.pending_value(1, 1), None);
+        assert_eq!(
+            grid.pending_value(0, 1),
+            Some(&NewValue::Value("kept".into())),
+            "another row's edit stays"
+        );
+        let updates = grid.pending_updates();
+        assert_eq!(updates.len(), 1, "only the unmarked row is updated");
+        assert_eq!(updates[0].keys, [("id".to_string(), "7".to_string())]);
+
+        let deletes = grid.draft_deletes();
+        assert_eq!(deletes.len(), 1);
+        assert_eq!(
+            (deletes[0].schema.as_str(), deletes[0].table.as_str()),
+            ("public", "measurements")
+        );
+        assert_eq!(deletes[0].keys, [("id".to_string(), "8".to_string())]);
+
+        assert!(grid.toggle_marks(&[1]));
+        assert!(!grid.is_marked(1));
+        assert_eq!(grid.pending_value(1, 1), None, "the cleared edit is gone");
+        assert!(grid.draft_deletes().is_empty());
+    }
+
+    #[test]
+    fn marks_follow_their_rows_through_a_memory_sort() {
+        let mut grid = ResultGrid::new(
+            QueryResult {
+                columns: vec![column("id"), column("note")],
+                rows: rows(vec![
+                    vec![Some("8".into()), Some("a".into())],
+                    vec![Some("7".into()), Some("b".into())],
+                    vec![Some("9".into()), Some("c".into())],
+                ]),
+                edit: Some(EditTarget {
+                    schema: "public".into(),
+                    table: "measurements".into(),
+                    columns: vec![Some("id".into()), Some("note".into())],
+                    keys: vec![0],
+                    ..Default::default()
+                }),
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        );
+        assert!(grid.toggle_marks(&[0]));
+
+        grid.sort_in_memory(vec![(0, false)]);
+
+        assert_eq!(
+            grid.cell(1, 0),
+            Some("8"),
+            "the marked row moved to the middle"
+        );
+        assert!(grid.is_marked(1) && !grid.is_marked(0) && !grid.is_marked(2));
+        let deletes = grid.draft_deletes();
+        assert_eq!(deletes.len(), 1);
+        assert_eq!(deletes[0].keys, [("id".to_string(), "8".to_string())]);
+
+        grid.sort_in_memory(vec![(0, true)]);
+        assert_eq!(grid.cell(1, 0), Some("8"));
+        grid.sort_in_memory(vec![(1, false)]);
+        assert_eq!(grid.cell(2, 1), Some("a"), "the marked row is last by note");
+        assert!(grid.is_marked(2) && !grid.is_marked(0) && !grid.is_marked(1));
+        assert_eq!(
+            grid.draft_deletes()[0].keys,
+            [("id".to_string(), "8".to_string())]
+        );
+    }
+
+    #[test]
+    fn marking_an_added_row_removes_it() {
+        let mut grid = editable_grid();
+        assert_eq!(grid.add_row(), Some(2));
+        assert!(grid.set_pending(2, 1, NewValue::Value("third".into())));
+        assert_eq!(grid.add_row(), Some(3));
+        assert!(grid.set_pending(3, 1, NewValue::Value("fourth".into())));
+
+        assert!(grid.toggle_marks(&[2]));
+
+        assert_eq!(grid.added_count(), 1);
+        assert_eq!(
+            grid.marked_count(),
+            0,
+            "an added row is removed, not marked"
+        );
+        assert_eq!(
+            grid.pending_value(2, 1),
+            Some(&NewValue::Value("fourth".into())),
+            "the other added row moved up into the place"
+        );
+        assert_eq!(grid.pending_value(3, 1), None);
+        assert!(grid.active().is_none_or(|(row, _)| row < 3));
+
+        assert!(grid.toggle_marks(&[2]));
+        assert_eq!(grid.added_count(), 0);
+        assert!(!grid.has_pending());
+        assert_eq!(grid.active().map(|(row, _)| row), Some(1));
+    }
+
+    #[test]
+    fn a_marked_row_refuses_staging() {
+        let mut grid = editable_grid();
+        assert!(grid.toggle_marks(&[1]));
+
+        assert!(!grid.editable(1, 1));
+        assert!(!grid.begin_edit(1, 1));
+        assert!(!grid.set_pending(1, 1, NewValue::Value("late".into())));
+        assert!(!grid.stage(1, 1, NewValue::Null));
+        assert_eq!(grid.pending_value(1, 1), None);
+        assert!(!grid.row_editable(1));
+        assert!(grid.editable(0, 1), "another row is still editable");
+        assert!(grid.begin_edit(0, 1));
+    }
+
+    #[test]
+    fn a_mixed_selection_marks_every_unmarked_row_and_a_marked_selection_unmarks() {
+        let mut grid = editable_grid();
+        assert!(grid.toggle_marks(&[0]));
+
+        assert!(grid.toggle_marks(&[0, 1]));
+        assert!(grid.is_marked(0) && grid.is_marked(1), "a mixed one marks");
+        assert!(grid.toggle_marks(&[0, 1]));
+        assert!(
+            !grid.is_marked(0) && !grid.is_marked(1),
+            "a marked one unmarks"
+        );
+        assert_eq!(grid.marked_count(), 0);
+
+        // A row with no key to name it refuses the whole selection.
+        let mut grid = ResultGrid::new(
+            QueryResult {
+                columns: vec![column("id"), column("note")],
+                rows: rows(vec![
+                    vec![Some("7".into()), Some("a".into())],
+                    vec![None, Some("b".into())],
+                ]),
+                edit: Some(EditTarget {
+                    schema: "public".into(),
+                    table: "measurements".into(),
+                    columns: vec![Some("id".into()), Some("note".into())],
+                    keys: vec![0],
+                    ..Default::default()
+                }),
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        );
+        assert!(!grid.toggle_marks(&[0, 1]));
+        assert_eq!(
+            grid.marked_count(),
+            0,
+            "the nameable row was not marked either"
+        );
+        assert!(grid.toggle_marks(&[0]));
+
+        grid.set_mode(Mode::ReadOnly);
+        assert!(!grid.toggle_marks(&[0]), "below Read-write nothing toggles");
+        assert!(grid.is_marked(0));
+        assert!(!grid.toggle_marks(&[]), "nothing picked changes nothing");
     }
 }

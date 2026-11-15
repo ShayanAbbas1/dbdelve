@@ -3835,7 +3835,16 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             }
             // Only on a row dbdelve can name by its primary key -- the same
             // condition that makes a cell of it editable.
-            if workspace.has_nameable_row(cx) {
+            // In a Draft view the gesture marks the row, or removes an added
+            // one; it deletes nothing until the draft is applied.
+            if workspace.has_markable_row(cx) {
+                items.push(command(
+                    "Mark row for deletion",
+                    icon::DELETE,
+                    Command::DeleteRow,
+                    ROWS,
+                ));
+            } else if workspace.has_nameable_row(cx) {
                 items.push(command(
                     "Delete row…",
                     icon::DELETE,

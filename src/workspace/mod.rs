@@ -2005,6 +2005,12 @@ impl Render for Workspace {
         let notice = profile.session.shown_notice().map(str::to_string);
         let update_pill = self.render_update_pill(cx);
         let pending_count = self.pending_edit_count(cx);
+        let pending_noun = match (self.draft_holds_rows(cx), pending_count) {
+            (false, 1) => "edit",
+            (false, _) => "edits",
+            (true, 1) => "change",
+            (true, _) => "changes",
+        };
         let has_pending = pending_count > 0;
         let has_results = self.has_results(cx);
         let show_result_actions = has_results && !has_pending;
@@ -2249,10 +2255,7 @@ impl Render for Workspace {
                                 .text_ellipsis()
                                 .whitespace_nowrap()
                                 .text_color(t.text_muted)
-                                .child(format!(
-                                    "{pending_count} pending {}",
-                                    if pending_count == 1 { "edit" } else { "edits" }
-                                ));
+                                .child(format!("{pending_count} pending {pending_noun}"));
                             div()
                                 .min_w_0()
                                 .flex()

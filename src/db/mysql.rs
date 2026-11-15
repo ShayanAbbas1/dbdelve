@@ -2920,6 +2920,7 @@ mod tests {
         capped_read_keeps_the_users_transaction,
         read_only_session_refuses_a_write,
         generated_writes_round_trip,
+        generated_draft_round_trip,
     );
 
     crate::db::conformance::suite!(
@@ -2937,6 +2938,7 @@ mod tests {
         capped_read_keeps_the_users_transaction,
         read_only_session_refuses_a_write,
         generated_writes_round_trip,
+        generated_draft_round_trip,
     );
 
     #[test]

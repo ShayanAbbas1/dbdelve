@@ -135,6 +135,10 @@ impl Workspace {
         let focused = results.update(cx, |table, cx| {
             crate::result_grid::reveal_column(table, col, window, cx)
         });
+        // The ring moved without a table event, which is what would have
+        // staged the input it closed; left recorded, a later move would stage
+        // that text over an edit of the same cell made in between.
+        self.flush_left_row(&results, cx);
         // The grid holds the keyboard now. Closing the palette asked for the
         // tab's own focus back, which in a query tab is the editor, and the
         // next render would hand it there, leaving the arrow keys typing.

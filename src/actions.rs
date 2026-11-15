@@ -218,6 +218,10 @@ actions!(
         SetEmpty,
         SetDefault,
         RequestWriteMode,
+        // Dispatched by the grid when a step key finds no cell to step to and an
+        // input is open; no key binds it. The grid does not know the view's edit
+        // mode, so the workspace decides what the edge does.
+        StepPastEdge,
         FollowForeignKey,
         DeleteRow,
         ApplyEdits,

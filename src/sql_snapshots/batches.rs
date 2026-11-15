@@ -648,3 +648,144 @@ fn a_row_sends_update_is_one_gated_statement_wherever_row_mode_is_offered() {
         }
     }
 }
+
+fn draft_delete(
+    schema: &str,
+    table: &str,
+    id: &str,
+    types: &[(String, String)],
+) -> sql::DraftDelete {
+    sql::DraftDelete {
+        schema: schema.to_owned(),
+        table: table.to_owned(),
+        keys: vec![("id".to_owned(), id.to_owned())],
+        null_keys: Vec::new(),
+        types: types.to_vec(),
+    }
+}
+
+fn draft_insert(
+    schema: &str,
+    table: &str,
+    columns: &[(&str, Option<&str>)],
+    types: &[(String, String)],
+) -> sql::DraftInsert {
+    sql::DraftInsert {
+        schema: schema.to_owned(),
+        table: table.to_owned(),
+        columns: columns
+            .iter()
+            .map(|(column, value)| ((*column).to_owned(), value.map(str::to_owned)))
+            .collect(),
+        types: types.to_vec(),
+    }
+}
+
+#[test]
+fn draft_batches_per_engine() {
+    let mut out = String::new();
+    let (_, schema, table) = RELATIONS[0];
+    for engine in Engine::ALL
+        .into_iter()
+        .filter(|engine| engine.syntax() == crate::db::Syntax::Sql)
+    {
+        let spec = engine.spec();
+        let types = column_types_of(engine);
+        let delete = |id| draft_delete(schema, table, id, &types);
+        let update = |id| {
+            pending(
+                schema,
+                table,
+                &[("Name", set("it's"))],
+                &[("id", id)],
+                &types,
+            )
+        };
+        let insert =
+            |id, name| draft_insert(schema, table, &[("id", Some(id)), ("Name", name)], &types);
+        let mut record = |case: &str, deletes: &[_], updates: &[_], inserts: &[_], ok| {
+            outcome(
+                &mut out,
+                engine,
+                case,
+                sql::sql_draft_batch(spec, deletes, updates, inserts),
+                ok,
+            );
+        };
+        let mixed = (
+            [delete("7"), delete("8")],
+            [update("5"), update("6")],
+            [insert("9", Some("a")), insert("10", Some("b"))],
+        );
+        record("mixed bracketed", &mixed.0, &mixed.1, &mixed.2, true);
+        record("one delete", &[delete("7")], &[], &[], true);
+        record("one update", &[], &[update("5")], &[], true);
+        record("one insert", &[], &[], &[insert("9", Some("a"))], true);
+        record("marks only", &mixed.0, &[], &[], true);
+        record("adds only", &[], &[], &mixed.2, true);
+        record(
+            "an insert holding a null",
+            &[],
+            &[],
+            &[insert("9", None)],
+            true,
+        );
+        record("empty", &[], &[], &[], false);
+    }
+    check("batches_draft", &out);
+}
+
+/// A draft is written by one function and read by two checks, and the apply
+/// reviews it only when both agree: the gate admits its shape, and the key check
+/// finds the grid's key on the grid's table in every `DELETE`. So wherever the
+/// gate admits a generated draft the key check counts its one `DELETE`, and the
+/// gate recovers its three statements; `plain`, `reserved` and `mixed case` are
+/// admitted everywhere, which keeps the loop from passing by refusing every
+/// name. A relation the gate refuses is recorded as it is, not asserted
+/// admitted, as the update test above does.
+#[test]
+fn every_draft_output_is_gated_wherever_row_mode_is_offered() {
+    let engines: Vec<_> = Engine::ALL
+        .into_iter()
+        .filter(|engine| Target::built_in(*engine).row_edits())
+        .collect();
+    assert!(engines.len() > 1, "{engines:?}");
+    for engine in engines {
+        let types = column_types_of(engine);
+        for (case, schema, table) in RELATIONS {
+            let delete = [draft_delete(schema, table, "7", &types)];
+            let update = [pending(
+                schema,
+                table,
+                &[("Name", set("it's"))],
+                &[("id", "8")],
+                &types,
+            )];
+            let insert = [draft_insert(
+                schema,
+                table,
+                &[("id", Some("9")), ("Name", None)],
+                &types,
+            )];
+            let at = format!("{engine:?} {case}");
+            let text = sql::draft_batch(engine, &delete, &update, &insert)
+                .unwrap_or_else(|why| panic!("{at}: {why}"));
+            let admitted = sql::is_generated_write_on(engine, &text);
+            if admitted {
+                assert_eq!(
+                    sql::draft_deletes_match(engine, &text, &["id"], schema, table),
+                    Some(1),
+                    "{at}: {text}"
+                );
+                assert_eq!(
+                    sql::generated_writes(engine, &text).map(|statements| statements.len()),
+                    Some(3),
+                    "{at}: {text}"
+                );
+            }
+            if ["plain", "reserved", "mixed case"].contains(&case) {
+                assert!(admitted, "{at}: {text}");
+            }
+        }
+    }
+}

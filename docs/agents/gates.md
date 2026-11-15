@@ -79,7 +79,9 @@ into a buffer or onto the wire, whatever the user asked for. It writes
 `DELETE` only as the explicit deletion of one named row: by primary key (on
 an engine without unique keys, by all of the row's values as read, and only
 when exactly one row matches), from a direct ask, with the statement shown before it runs
-(`sql::delete_row`). The one exception to both is the explorer's
+(`sql::delete_row`), or as one `DELETE` per row the user marked in a reviewed
+draft, each naming that row's key and shown with the rest of the draft before it
+runs. The one exception to both is the explorer's
 right-click menu, whose Copy DROP and Copy TRUNCATE (SQLite's spelling is
 `DELETE FROM`, MongoDB's `drop()` and `deleteMany({})`, Redis's Copy
 TRUNCATE `FLUSHDB`, with no Copy DROP) put the text on the
@@ -93,7 +95,7 @@ an unsorted grid.
 
 **Generated SQL passes a whitelist gate, and there is one per path.**
 `sql::is_generated_write` is the single gate every statement the grid writes
-passes first. It admits exactly four shapes:
+passes first. It admits exactly five shapes:
 
 - a batch of `UPDATE`s, optionally bracketed by a `BEGIN`/`COMMIT` the gate
   can see closed, each setting columns only to values DBDelve writes
@@ -127,6 +129,18 @@ passes first. It admits exactly four shapes:
   which has no unique key, is the one exception to the terms: a row is named
   by every value, and a term may also be `toString(col) = '…'` (the only
   function call admitted, over a bare column) or `col IS NULL`;
+- a draft: more than one statement, optionally bracketed as the first shape
+  is, each an `UPDATE`, an `INSERT` of exactly one row with no skip tail
+  (otherwise as the second shape reads it) or a `DELETE` of the third shape,
+  holding at least one `INSERT` or `DELETE`, with no comment anywhere in it
+  (`sql::draft_sequence`). The count of `delete` nodes in the whole tree must
+  equal the count of top-level statements that are such a `DELETE`, so one
+  hidden in a CTE beside an `UPDATE` is refused. Refused on ClickHouse, whose
+  one-row guard a sequence cannot carry. A sequence's `UPDATE`s are read as a
+  batch's are: every set value one the first shape admits (the bytes literal
+  included), and the predicate not read on an engine that names a row by its
+  key, so the draft's writer, not the gate, is what keeps an `UPDATE` to one
+  row;
 - a submission that is exactly one lone `BEGIN`, `BEGIN TRANSACTION`,
   `COMMIT` or `ROLLBACK`, compared as text. These are the brackets of an
   import's transaction, which spans submissions on a connection of the
@@ -134,8 +148,8 @@ passes first. It admits exactly four shapes:
 
 Because it is a whitelist, `DROP` and `TRUNCATE` are refused structurally,
 anywhere in the tree, CTEs included (`sql::forbidden`), and so is every
-`delete` outside that one shape (`sql::deletes_anything`, checked on the
-`INSERT` and `UPDATE` arms). On an engine where a backslash escapes
+`delete` outside those shapes (`sql::deletes_anything`, checked on the
+`INSERT` and `UPDATE` arms; the draft's count of `delete` nodes). On an engine where a backslash escapes
 (`Engine::backslash_escapes`), a submission with any literal holding a quote
 after an odd run of backslashes is refused, in every arm
 (`sql::parse_gated`): the grammar ends the string there and the engine
@@ -194,9 +208,13 @@ can disagree. `sql::delete_matches_key` answers the half the gate cannot,
 whether the `WHERE` names exactly the row's key as a set. It is a readout,
 not a second gate: it admits nothing, and a caller runs both.
 
-**Multi-row deletion is not admitted.** When it is wanted, the path is the
-`BEGIN`/`COMMIT` bracketing multi-row edits already use: one `DELETE` per
-row, each naming its own key, never one predicate covering several.
+**Multi-row deletion by predicate is not admitted.** A reviewed draft may carry
+one `DELETE` per marked row, each naming its own key and table, inside the
+`BEGIN`/`COMMIT` bracketing multi-row edits already use, never one predicate
+covering several. The gate reads each `DELETE`'s shape and cannot know the key
+or the table, so `sql::draft_deletes_match` reads them out of the same parse
+tree, and the draft is reviewed only when both hold and the `DELETE`s it
+counts are the marks the grid holds.
 
 A cell is editable only when DBDelve can name its row by primary key; when
 it cannot, the grid stays read-only and says why, and never guesses at a

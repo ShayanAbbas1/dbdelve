@@ -1,6 +1,6 @@
 use super::{check, statement_with};
 use crate::{
-    db::{Engine, Syntax},
+    db::{Engine, Syntax, Target},
     sql::{self, Destructive, Mode},
 };
 
@@ -220,6 +220,171 @@ fn sql_gate_corpus_per_engine() {
         }
     }
     check("gates_sql", &out);
+}
+
+/// What a draft's apply asks of a text, besides the gate: how many `DELETE`s it
+/// names on the grid's table, for a key of `id` and for a composite of `id` and
+/// `Region` (half of which an `id`-only `DELETE` names), and how many
+/// statements the gate recovers from it.
+fn draft_more(engine: Engine, text: &str) -> String {
+    let key = |keys: &[&str]| sql::draft_deletes_match(engine, text, keys, "public", "accounts");
+    format!(
+        " draft_deletes_match[id]={:?} draft_deletes_match[id+Region]={:?} statements={:?}",
+        key(&["id"]),
+        key(&["id", "Region"]),
+        sql::generated_writes(engine, text).map(|statements| statements.len()),
+    )
+}
+
+#[test]
+fn draft_gate_corpus_per_engine() {
+    use crate::import_rows::Value;
+
+    let mut out = String::new();
+    let nine = Value::Text("9".into());
+    for engine in sql_engines() {
+        let q = engine.qualified("public", "accounts");
+        let id = engine.quote_identifier("id");
+        let name = engine.quote_identifier("Name");
+        let region = engine.quote_identifier("Region");
+        let other = engine.qualified("public", "other");
+        let upd = format!("UPDATE {q} SET {name} = 'x' WHERE {id} = '8'");
+        let del = format!("DELETE FROM {q} WHERE {id} = '7'");
+        let ins = format!("INSERT INTO {q} ({id}, {name}) VALUES ('9', NULL)");
+        let cte_delete = format!("WITH d AS (DELETE FROM {q} WHERE {id} = '8' RETURNING *)");
+        let joined = |parts: &[&str]| {
+            parts
+                .iter()
+                .map(|part| match part.starts_with("--") {
+                    true => (*part).to_owned(),
+                    false => format!("{part};"),
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let bracket = |body: &str| format!("BEGIN;\n{body}\nCOMMIT;");
+
+        let admitted: Vec<(&str, Vec<&str>)> = vec![
+            ("delete update insert", vec![&del, &upd, &ins]),
+            ("delete delete", vec![&del, &del]),
+            ("insert insert", vec![&ins, &ins]),
+            ("update insert", vec![&upd, &ins]),
+            ("delete insert", vec![&del, &ins]),
+        ];
+        let mut refused: Vec<(String, String)> = Vec::new();
+        let mut refuse = |case: &str, parts: &[&str]| {
+            let body = joined(parts);
+            refused.push((case.to_owned(), body.clone()));
+            refused.push((format!("{case}, bracketed"), bracket(&body)));
+        };
+        let cte_update = format!("{cte_delete} UPDATE {q} SET {name} = 'x' WHERE {id} = '8'");
+        let two_rows = format!("INSERT INTO {q} ({id}) VALUES ('9'), ('10')");
+        let from_select = format!("INSERT INTO {q} SELECT * FROM {q}");
+        let returning = format!("{ins} RETURNING *");
+        let or_delete = format!("{del} OR 1 = 1");
+        let no_where = format!("DELETE FROM {q}");
+        let delete_returning = format!("{del} RETURNING *");
+        let cte_select = format!("{cte_delete} SELECT 1");
+        refuse("update beside a cte delete", &[&upd, &cte_select]);
+        refuse("cte delete update beside insert", &[&cte_update, &ins]);
+        refuse("cte delete update beside update", &[&cte_update, &upd]);
+        refuse("delete beside two-row insert", &[&del, &two_rows]);
+        refuse("delete beside insert select", &[&del, &from_select]);
+        refuse("delete beside insert returning", &[&del, &returning]);
+        refuse("delete, comment, insert", &[&del, "-- note", &ins]);
+        refuse(
+            "delete, executable comment, insert",
+            &[&del, "/*! SELECT 1 */", &ins],
+        );
+        refuse("delete or, beside insert", &[&or_delete, &ins]);
+        refuse("delete no where, beside insert", &[&no_where, &ins]);
+        refuse(
+            "delete returning, beside insert",
+            &[&delete_returning, &ins],
+        );
+        let skip = sql::insert_rows(
+            engine,
+            "public",
+            "accounts",
+            &[("id", "int")],
+            &[vec![Some(&nine)]],
+            true,
+        );
+        if let Ok(skip) = &skip {
+            refuse("delete beside skip-tail insert", &[&del, skip]);
+        }
+        refused.push((
+            "bracket never closed".into(),
+            format!("BEGIN;\n{};", joined(&[&del, &ins])),
+        ));
+
+        // The key-level cases: the shape is a draft's, and only the key check
+        // can tell that it is not the grid's.
+        let elsewhere = format!("DELETE FROM {other} WHERE {id} = '7'");
+        let half = format!("DELETE FROM {q} WHERE {region} = 'eu'");
+        let mut key_level: Vec<(&str, String)> = Vec::new();
+        for (case, delete) in [
+            ("delete of another table", &elsewhere),
+            ("delete by half a key", &half),
+        ] {
+            let body = joined(&[delete, &ins]);
+            key_level.push((case, body.clone()));
+            key_level.push((case, bracket(&body)));
+        }
+
+        for (case, parts) in &admitted {
+            let body = joined(parts);
+            for (case, text) in [
+                (case.to_string(), body.clone()),
+                (format!("{case}, bracketed"), bracket(&body)),
+            ] {
+                corpus_with(&mut out, engine, &case, &text, &draft_more(engine, &text));
+                if Target::built_in(engine).row_edits() {
+                    let verdict = sql::classify(engine, &text);
+                    assert!(
+                        sql::is_generated_write_on(engine, &text),
+                        "{engine:?} {case}: {text}"
+                    );
+                    assert_eq!(
+                        (verdict.mode, verdict.destructive.is_empty()),
+                        (Mode::ReadWrite, true),
+                        "{engine:?} {case}"
+                    );
+                    assert_eq!(
+                        sql::gate(&verdict, Mode::ReadOnly, &[]),
+                        Some(sql::Stop::Upgrade(Mode::ReadWrite))
+                    );
+                    assert_eq!(sql::gate(&verdict, Mode::ReadWrite, &[]), None);
+                    assert_eq!(sql::gate(&verdict, Mode::Full, &[]), None);
+                } else if engine == Engine::ClickHouse {
+                    assert!(
+                        !sql::is_generated_write_on(engine, &text),
+                        "{engine:?} {case}: {text}"
+                    );
+                }
+            }
+        }
+        for (case, text) in &refused {
+            corpus_with(&mut out, engine, case, text, &draft_more(engine, text));
+            assert!(
+                !sql::is_generated_write_on(engine, text),
+                "{engine:?} {case}: {text}"
+            );
+        }
+        for (case, text) in &key_level {
+            corpus_with(&mut out, engine, case, text, &draft_more(engine, text));
+            if Target::built_in(engine).row_edits() {
+                for keys in [&["id"][..], &["id", "Region"]] {
+                    assert_eq!(
+                        sql::draft_deletes_match(engine, text, keys, "public", "accounts"),
+                        None,
+                        "{engine:?} {case}: {text}"
+                    );
+                }
+            }
+        }
+    }
+    check("gates_draft", &out);
 }
 
 #[test]
