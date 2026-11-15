@@ -299,28 +299,31 @@ mod tests {
         let root = std::env::temp_dir().join(format!("dbdelve-probe-tree-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let path = root.join("aws");
-        let marker = root.join("survived");
-        let started = root.join("started");
+        let pid_file = root.join("child-pid");
         std::fs::write(
             &path,
             format!(
-                "#!/bin/sh\n(touch '{}'; sleep 2; touch '{}') &\nwait\n",
-                started.display(),
-                marker.display()
+                "#!/bin/sh\nsleep 60 &\necho $! > '{}'\nwait\n",
+                pid_file.display()
             ),
         )
         .unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
         assert!(probe(&path, "aws", Duration::from_millis(500)).is_err());
-        thread::sleep(Duration::from_secs(3));
-        let did_start = started.exists();
-        let survived = marker.exists();
+        let pid: i32 = std::fs::read_to_string(&pid_file)
+            .expect("probe descendant did not start; cleanup was not tested")
+            .trim()
+            .parse()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while unsafe { libc::kill(pid, 0) } == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "probe descendant survived timeout"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
         std::fs::remove_dir_all(root).unwrap();
-        assert!(
-            did_start,
-            "probe descendant did not start; cleanup was not tested"
-        );
-        assert!(!survived, "probe descendant survived timeout");
     }
     #[cfg(unix)]
     #[test]

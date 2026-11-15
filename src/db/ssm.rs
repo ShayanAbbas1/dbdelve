@@ -854,10 +854,11 @@ mod lifecycle_tests {
         let attempt = ConnectAttempt::default();
         fixture.config.attempt = Some(attempt.clone());
         let tunnel = fixture.open();
+        let address = tunnel.dial().unwrap();
         attempt.cancel();
         let deadline = Instant::now() + Duration::from_secs(3);
-        while tunnel.dial().is_ok() {
-            assert!(Instant::now() < deadline);
+        while TcpStream::connect(address).is_ok() {
+            assert!(Instant::now() < deadline, "listener survived cancellation");
             thread::sleep(Duration::from_millis(20));
         }
     }
