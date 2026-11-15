@@ -520,6 +520,25 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   streaming pass reproduces the old split/trim/drop-empty/join-with-space
   flattening and stops one character past the limit. The cost follows the
   number of cells drawn, not their size.
+- **Parse As draws a binary column's bytes; nothing else reads it.** A
+  column the engine types as bytes (`Engine::is_binary_type`, by the column's
+  type or, on MongoDB, any cell's) offers Hex, Text (UTF-8) and Base64 from
+  its header's and its cells' menus. The grid holds only the server's string,
+  so each drawn cell and the row panel's field read the bytes back out of it
+  (`Engine::bytes_of`, spelled per engine by `EngineSpec::binary_text`, with
+  `0x…` accepted everywhere because a plugin writes bytes that way whatever
+  dialect it speaks), decoding only as many as the cell or field can show.
+  It is a transform at paint time, never a rewrite of `result.rows`: copy,
+  Copy As, export, the in-memory sort, the filter bar, insert and import
+  literals and the row panel's copy all keep the server's spelling, the one
+  form every engine reads back. Text is a strict UTF-8 decode; bytes that are
+  not UTF-8, or a value that is not the engine's spelling (a MongoDB UUID,
+  a Snowflake session set to base64), keep the server's text in the muted
+  colour. Hex where bytes already arrive as hex stores nothing, so the
+  default is the server's text exactly. The choice is per column, by name,
+  and rides `ColumnView` across re-runs and pages and into the snapshot
+  (`StoredGrid::parsed`). Redis is left out: its non-UTF-8 values are tagged
+  `bytes`, not a binary type, and shown in redis-cli's escapes.
 
 
 ## Completion
