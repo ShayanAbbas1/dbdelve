@@ -688,27 +688,39 @@ fn connection_string(server: &ServerConfig) -> String {
 }
 
 /// `schema` ahead of the session's default `search_path`, as the role,
-/// database or server set it, so `"$user"` and extension schemas stay on it.
+/// database or server set it, so `"$user"` and extension schemas stay on it;
+/// that default alone where there is no `schema`, as `RESET` would put back.
 /// `reset_val` is that default however many switches came before. Sets nothing
 /// inside a transaction block, where the block's first statement has already
 /// moved `statement_timestamp` past its start: a ROLLBACK would undo the set.
-fn set_search_path_sql(schema: &str) -> String {
+/// There it answers only when the path is already the one it would set, so a
+/// bound tab goes on inside the transaction its own statement opened, and a
+/// tab bound to another schema is still refused.
+fn set_search_path_sql(schema: Option<&str>) -> String {
     // An `E''` literal reads the same whatever `standard_conforming_strings` is.
-    let first = Engine::Postgres
-        .quote_identifier(schema)
-        .replace('\\', r"\\")
-        .replace('\'', "''");
+    // `concat_ws` skips the NULL that stands for no schema.
+    let first = schema.map_or_else(
+        || "NULL".to_string(),
+        |schema| {
+            let quoted = Engine::Postgres
+                .quote_identifier(schema)
+                .replace('\\', r"\\")
+                .replace('\'', "''");
+            format!("E'{quoted}'")
+        },
+    );
     format!(
-        "SELECT pg_catalog.set_config('search_path', \
-         pg_catalog.concat_ws(', ', E'{first}', NULLIF(reset_val, '')), false) \
-         FROM pg_catalog.pg_settings WHERE name = 'search_path' \
-         AND pg_catalog.transaction_timestamp() = pg_catalog.statement_timestamp()"
+        "SELECT CASE WHEN outside THEN pg_catalog.set_config('search_path', path, false) END \
+         FROM (SELECT pg_catalog.concat_ws(', ', {first}, NULLIF(reset_val, '')) AS path, \
+         pg_catalog.transaction_timestamp() = pg_catalog.statement_timestamp() AS outside \
+         FROM pg_catalog.pg_settings WHERE name = 'search_path') AS wanted \
+         WHERE outside OR pg_catalog.current_setting('search_path') = path"
     )
 }
 
 /// A `SET` after connecting rather than a startup option: PgBouncer and other
 /// poolers refuse a connection that sends `options` at all.
-fn set_search_path(client: &mut Client, schema: &str) -> Result<(), DbError> {
+fn set_search_path(client: &mut Client, schema: Option<&str>) -> Result<(), DbError> {
     let set = set_search_path_sql(schema);
     let Client { client, driver, .. } = client;
     let messages = driver
@@ -1123,7 +1135,7 @@ impl Connection {
         let pid = row.as_ref().and_then(|row| row.get(0)?.parse().ok());
         let current_schema = row.and_then(|row| row.get(1).map(str::to_string));
         if let Some(schema) = &server.schema {
-            set_search_path(&mut client, schema)?;
+            set_search_path(&mut client, Some(schema))?;
         }
 
         Ok(Self {
@@ -1174,11 +1186,11 @@ impl Connection {
         let Some(schema) = self.server().schema else {
             return Ok(());
         };
-        set_search_path(&mut client, &schema)?;
+        set_search_path(&mut client, Some(&schema))?;
         if let Ok(mut side) = self.side.lock()
             && side.as_ref().is_some_and(|side| {
                 side.client.lock().map_or(true, |mut side| {
-                    set_search_path(&mut side, &schema).is_err()
+                    set_search_path(&mut side, Some(&schema)).is_err()
                 })
             })
         {
@@ -1269,7 +1281,36 @@ impl Connection {
     /// dropped, so the statement runs to completion exactly as typed. Kept
     /// rows go to `feed` when there is one; see [`super::Connection::query`].
     pub fn query(&self, sql: &str, fetch: Fetch) -> Result<QueryResult, DbError> {
-        let result = self.run(sql, true, fetch);
+        self.query_as(sql, fetch, None)
+    }
+
+    /// [`Self::query`] for a tab bound to this session's database: `schema`
+    /// goes first on the `search_path`, or the session's own default is put
+    /// back where the tab binds none, before the statement and under the lock
+    /// that runs it. A statement of another tab, or one of the user's own,
+    /// may have moved it since, and two tabs bound to different schemas of one
+    /// database share this session, so applying and running as two
+    /// acquisitions would let one run in the other's schema.
+    ///
+    /// Inside a transaction block the `search_path` cannot be moved
+    /// ([`set_search_path`]): a statement whose schema it is already on goes
+    /// on, and any other is not sent.
+    pub fn query_bound(
+        &self,
+        schema: Option<&str>,
+        sql: &str,
+        fetch: Fetch,
+    ) -> Result<QueryResult, DbError> {
+        self.query_as(sql, fetch, Some(schema))
+    }
+
+    fn query_as(
+        &self,
+        sql: &str,
+        fetch: Fetch,
+        bound: Option<Option<&str>>,
+    ) -> Result<QueryResult, DbError> {
+        let result = self.run(sql, true, fetch, bound);
         if let Some(feed) = fetch.feed {
             feed.release();
         }
@@ -1279,15 +1320,26 @@ impl Connection {
     /// dbdelve's own SQL. Its column types are never shown, so it does not pay
     /// for the extra round trip that learns them.
     fn internal_query(&self, sql: &str) -> Result<QueryResult, DbError> {
-        self.run(sql, false, Fetch::default())
+        self.run(sql, false, Fetch::default(), None)
     }
 
-    fn run(&self, sql: &str, typed: bool, fetch: Fetch) -> Result<QueryResult, DbError> {
+    /// `bound` is the schema to put the session back on first, itself `None`
+    /// for its own default, when the run is a bound tab's.
+    fn run(
+        &self,
+        sql: &str,
+        typed: bool,
+        fetch: Fetch,
+        bound: Option<Option<&str>>,
+    ) -> Result<QueryResult, DbError> {
         let mut client = self.client.lock().map_err(|_| DbError {
             message: "The connection is unavailable after an earlier internal failure.".into(),
             position: None,
         })?;
-        fetch.hold()?;
+        let held = fetch.hold()?;
+        if let Some(schema) = bound {
+            set_search_path(&mut client, schema).map_err(super::unplaced)?;
+        }
 
         // Timed from here, not from the call: one client serialises a profile's
         // queries, and time spent waiting behind the catalog load is not time
@@ -1306,7 +1358,13 @@ impl Connection {
                 .map_err(failed)?
                 .map_err(failed)?,
         );
-        if typed && let Some(feed) = fetch.feed {
+        // Not for a run in a schema of a tab's: the side session lacks that
+        // `search_path` and would type streamed rows from another table of
+        // the same name. They are typed once the statement is done instead.
+        if typed
+            && !matches!(bound, Some(Some(_)))
+            && let Some(feed) = fetch.feed
+        {
             self.describe_aside(sql, feed);
         }
         let mut assembly = Assembly::new(sql, fetch, started);
@@ -1362,6 +1420,7 @@ impl Connection {
 
         // The client mutex is not reentrant and `edit_target` runs its catalog
         // query through it, so the lock has to go before the question is asked.
+        drop(held);
         drop(client);
         result.edit = self.edit_target(&probed);
 
@@ -1547,7 +1606,7 @@ impl Connection {
                     held: Some(held),
                     ..Fetch::default()
                 };
-                self.run(&schema_sql(template, schema), false, held)
+                self.run(&schema_sql(template, schema), false, held, None)
             };
             let columns = query(GRAPH_COLUMNS_SQL)?;
             let unique_keys = query(GRAPH_UNIQUE_KEYS_SQL)?;
@@ -2320,10 +2379,21 @@ mod tests {
 
     #[test]
     fn the_active_schema_is_quoted_then_escaped_into_the_literal() {
-        assert!(set_search_path_sql("Sales").contains(r#"E'"Sales"'"#));
+        assert!(set_search_path_sql(Some("Sales")).contains(r#"E'"Sales"'"#));
         assert!(
-            set_search_path_sql(r#"it's "odd" \here"#).contains(r#"E'"it''s ""odd"" \\here"'"#)
+            set_search_path_sql(Some(r#"it's "odd" \here"#))
+                .contains(r#"E'"it''s ""odd"" \\here"'"#)
         );
+    }
+
+    #[test]
+    fn no_schema_puts_back_the_default_path_under_the_same_transaction_rule() {
+        let sql = set_search_path_sql(None);
+        assert!(
+            sql.contains("concat_ws(', ', NULL, NULLIF(reset_val, ''))"),
+            "{sql}"
+        );
+        assert!(sql.contains("WHERE outside OR"), "{sql}");
     }
 
     /// Run again in a child process, `PGSERVICEFILE` set before it starts, as
@@ -3402,6 +3472,113 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_two_tabs_on_one_session_each_run_in_their_own_schema() {
+        let plain = Connection::open(&live_config()).expect("connection should open");
+        let clean = || {
+            plain
+                .query(
+                    "DROP SCHEMA IF EXISTS dbdelve_bound_a CASCADE; \
+                     DROP SCHEMA IF EXISTS dbdelve_bound_b CASCADE",
+                    Fetch::default(),
+                )
+                .expect("the probe schemas should drop");
+        };
+        clean();
+        plain
+            .query(
+                "CREATE SCHEMA dbdelve_bound_a; CREATE SCHEMA dbdelve_bound_b; \
+                 CREATE TABLE dbdelve_bound_a.t (which text); \
+                 CREATE TABLE dbdelve_bound_b.t (which text); \
+                 INSERT INTO dbdelve_bound_a.t VALUES ('a'); \
+                 INSERT INTO dbdelve_bound_b.t VALUES ('b')",
+                Fetch::default(),
+            )
+            .expect("the probe tables should be created");
+
+        let session = super::super::Connection::Postgres(plain.clone())
+            .on_database(&live_config().database)
+            .expect("a session should open");
+        let cancel = crate::db::CancelToken::default();
+        let answer = |schema: Option<&str>, sql: &str| {
+            let result = session.query_bound(schema, sql, &cancel, Fetch::default());
+            result
+                .ok()
+                .and_then(|result| result.rows.first()?.get(0).map(str::to_string))
+        };
+        // One session, two tabs, run in turn: each in its own schema.
+        for _ in 0..2 {
+            assert_eq!(
+                answer(Some("dbdelve_bound_a"), "SELECT which FROM t"),
+                Some("a".into())
+            );
+            assert_eq!(
+                answer(Some("dbdelve_bound_b"), "SELECT which FROM t"),
+                Some("b".into())
+            );
+        }
+        // A tab that binds no schema starts from the session's default, not
+        // from where the last tab left it.
+        let path = answer(None, "SHOW search_path").expect("the search_path reads");
+        assert!(!path.contains("dbdelve_bound"), "{path}");
+
+        // Inside a transaction the schema cannot be moved: the statement is
+        // not sent, and the transaction can still be ended.
+        let refused = session
+            .query("BEGIN", &cancel, Fetch::default())
+            .and_then(|_| {
+                session.query_bound(
+                    Some("dbdelve_bound_a"),
+                    "SELECT 1",
+                    &cancel,
+                    Fetch::default(),
+                )
+            })
+            .expect_err("the schema cannot be switched inside a transaction");
+        assert!(
+            refused.message.starts_with("The statement was not sent"),
+            "{}",
+            refused.message
+        );
+        assert_eq!(refused.position, None);
+        session
+            .query("ROLLBACK", &cancel, Fetch::default())
+            .expect("a statement that ends the transaction goes as it is");
+
+        // A transaction a bound tab opened goes on in its schema, and a tab
+        // bound to another is still refused inside it.
+        session
+            .query_bound(Some("dbdelve_bound_a"), "BEGIN", &cancel, Fetch::default())
+            .expect("a bound tab opens a transaction");
+        assert_eq!(
+            answer(Some("dbdelve_bound_a"), "SELECT which FROM t"),
+            Some("a".into())
+        );
+        assert_eq!(answer(Some("dbdelve_bound_b"), "SELECT which FROM t"), None);
+        assert_eq!(
+            answer(Some("dbdelve_bound_a"), "SELECT which FROM t"),
+            Some("a".into()),
+            "the refusal sent nothing that failed the transaction"
+        );
+        // What dbdelve writes names its schema and needs none set, so a table
+        // tab of the database still reads inside that transaction.
+        let generated = session
+            .generated_bound(
+                None,
+                "SELECT which FROM dbdelve_bound_b.t",
+                &cancel,
+                None,
+                None,
+            )
+            .expect("a statement of dbdelve's goes as it is");
+        assert_eq!(generated.rows[0].get(0), Some("b"));
+        session
+            .query("ROLLBACK", &cancel, Fetch::default())
+            .expect("the transaction ends");
+        clean();
+    }
+
+    #[test]
     #[ignore = "requires a local Postgres server configured through PG*"]
     fn live_a_runs_notices_come_back_with_it_and_only_with_it() {
         let connection = Connection::open(&live_config()).expect("connection should open");
@@ -4115,6 +4292,7 @@ mod tests {
                     reads_only: true,
                     feed: Some(&feed),
                     held: None,
+                    let_go: None,
                 },
             );
             let _ = sender.send(result);

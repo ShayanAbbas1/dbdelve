@@ -484,7 +484,7 @@ impl Connection {
         cancel: &CancelToken,
         fetch: Fetch,
     ) -> Result<(QueryResult, Vec<Said>), DbError> {
-        fetch.hold()?;
+        let _held = fetch.hold()?;
         let started = Instant::now();
         let eligible = fetch.reads_only && fetch.limit.is_some() && self.opened.stops_early;
         let query = Request::Query {

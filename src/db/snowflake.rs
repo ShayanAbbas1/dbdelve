@@ -839,6 +839,19 @@ impl Connection {
         self.submit(sql, Cancellable::Yes(cancel), fetch, schema.as_deref())
     }
 
+    /// [`Self::query_with`] in `schema` of the database this session was
+    /// opened on, for a tab bound to them: both ride on the request, so
+    /// nothing a tab or the session's own active schema holds can move it.
+    pub fn query_bound(
+        &self,
+        schema: Option<&str>,
+        sql: &str,
+        cancel: &CancelToken,
+        fetch: Fetch,
+    ) -> Result<QueryResult, DbError> {
+        self.submit(sql, Cancellable::Yes(cancel), fetch, schema)
+    }
+
     /// [`Self::query_with`] outside the active schema, for a statement dbdelve
     /// wrote for the user to run: a relation's preview or an applied edit.
     pub fn generated(
@@ -1937,9 +1950,8 @@ mod tests {
     #[test]
     fn a_handle_leaves_the_running_list_however_the_query_ends() {
         let running = Mutex::new(Cancelling {
-            asked: false,
             handles: vec!["other".to_string()],
-            alongside: None,
+            ..Cancelling::default()
         });
         let attempt = || -> Result<(), DbError> {
             running
@@ -2751,6 +2763,41 @@ mod tests {
                 (json!("DBDELVE_TEST"), json!(r#""Sales EU""#)),
                 (json!("OTHER_DB"), json!(r#""Archive""#)),
             ]
+        );
+    }
+
+    #[test]
+    fn a_bound_run_sends_its_own_schema_and_never_the_sessions() {
+        let mock = Mock::start();
+        let sql = "SELECT 1 AS one, NULL AS nothing, '' AS blank, DATE '2024-02-29' AS leap";
+        mock.answer(sql, "query");
+        let session = connected(&mock).on_database("OTHER_DB");
+        session.set_schema(Some("Archive"));
+        let session = crate::db::Connection::Snowflake(session);
+        for schema in [Some("Sales EU"), None] {
+            session
+                .query_bound(schema, sql, &CancelToken::default(), Fetch::default())
+                .expect("runs");
+        }
+
+        let sent = mock
+            .requests()
+            .iter()
+            .filter(|request| request.body["statement"] == sql)
+            .map(|request| {
+                (
+                    request.body["database"].clone(),
+                    request.body["schema"].clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sent,
+            [
+                (json!("OTHER_DB"), json!(r#""Sales EU""#)),
+                (json!("OTHER_DB"), json!(null)),
+            ],
+            "the tab's schema, or none, and not the one the session had picked"
         );
     }
 

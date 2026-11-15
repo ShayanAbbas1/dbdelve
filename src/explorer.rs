@@ -50,6 +50,13 @@ pub fn is_schema_row(id: &str) -> bool {
     id.starts_with(SCHEMA_ROW)
 }
 
+/// The schema a schema row (see [`is_schema_row`]) is, as the server listed
+/// it: taken from the row's id, which holds the name whole, and not from its
+/// label.
+pub fn schema_row_name(id: &str) -> Option<&str> {
+    id.strip_prefix(SCHEMA_ROW)
+}
+
 const SCHEMA_ROW: &str = "schema-";
 
 /// The row id of a schema.

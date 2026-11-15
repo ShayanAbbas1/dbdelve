@@ -9890,6 +9890,7 @@ mod tests {
             (Engine::Postgres, "COMMIT", &closed),
             (Engine::Postgres, "END", &closed),
             (Engine::MySql, "ROLLBACK", &closed),
+            (Engine::DuckDb, "ROLLBACK", &closed),
             (Engine::Postgres, "COMMIT AND CHAIN", &open),
             (
                 Engine::Postgres,

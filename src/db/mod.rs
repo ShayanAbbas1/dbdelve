@@ -14,7 +14,7 @@
 //! its own.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -95,6 +95,12 @@ struct Cancelling {
     /// `Some` for a run made by [`CancelToken::alongside`]: the connections
     /// its statements are running on, each emptied once its statement ends.
     alongside: Option<Vec<Option<Connection>>>,
+    /// Held by a Cancel for as long as it is sending to `alongside`'s
+    /// connections, and taken by a statement before it empties its place
+    /// there: a Cancel that found the statement is sent before the statement
+    /// lets go of its connection, and never reaches what runs there next.
+    /// Taken before the lock on this, never under it.
+    sending: Arc<Mutex<()>>,
 }
 
 impl CancelToken {
@@ -115,19 +121,25 @@ impl CancelToken {
         Arc::ptr_eq(&self.0, &other.0)
     }
 
-    /// Mark the run cancelled and hand back the connections it is running on,
-    /// or `None` for a run on the profile's own.
-    fn stop_alongside(&self) -> Option<Vec<Connection>> {
-        let mut running = self.0.lock().ok()?;
-        let connections = running
-            .alongside
-            .as_ref()?
-            .iter()
-            .flatten()
-            .cloned()
-            .collect();
-        running.asked = true;
-        Some(connections)
+    /// Mark the run cancelled and `send` to the connections it is running on,
+    /// each still held by its statement until `send` returns; `None` for a run
+    /// on the profile's own.
+    fn stop_alongside<T>(&self, send: impl FnOnce(&[Connection]) -> T) -> Option<T> {
+        let sending = self.0.lock().ok()?.sending.clone();
+        let _sending = sending.lock().unwrap_or_else(PoisonError::into_inner);
+        let connections: Vec<Connection> = {
+            let mut running = self.0.lock().ok()?;
+            let connections = running
+                .alongside
+                .as_ref()?
+                .iter()
+                .flatten()
+                .cloned()
+                .collect();
+            running.asked = true;
+            connections
+        };
+        Some(send(&connections))
     }
 }
 
@@ -151,6 +163,69 @@ impl GraphCancel {
         self.0.store(false, Ordering::SeqCst);
         read
     }
+}
+
+/// An error from putting a bound tab's database and schema back, which is
+/// dbdelve's own call and not the user's statement: no byte of their text is
+/// where it points, and it says nothing was sent.
+fn unplaced(error: DbError) -> DbError {
+    DbError {
+        message: format!(
+            "The statement was not sent: its tab's database and schema could not be set again. {}",
+            error.message
+        ),
+        position: None,
+    }
+}
+
+/// Runs `run`, handed a `held` for the statement to ask once it holds
+/// `connection`: `true` makes `connection` the one a Cancel on `cancel` (made
+/// by [`CancelToken::alongside`]) stops, `false` says the Cancel came first
+/// and the statement is dropped unsent. And a `let_go` for it to call before
+/// it lets go of `connection` ([`Fetch::let_go`]), after which no Cancel on
+/// `cancel` reaches it; called again when `run` ends, for a statement that
+/// asked `held` itself.
+///
+/// A connection that is shared becomes the run's to stop only once this
+/// statement holds it; until then a Cancel just marks the run, and the
+/// statement is dropped unsent when its turn comes. It stops being the run's
+/// before the next statement can take it.
+fn running_on<T>(
+    cancel: &CancelToken,
+    connection: &Connection,
+    run: impl FnOnce(&dyn Fn() -> bool, &dyn Fn()) -> T,
+) -> T {
+    let slot = std::cell::Cell::new(None);
+    let hold = || {
+        let mut running = cancel.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if running.asked {
+            return false;
+        }
+        let alongside = running.alongside.get_or_insert_default();
+        alongside.push(Some(connection.clone()));
+        slot.set(Some(alongside.len() - 1));
+        true
+    };
+    let let_go = || {
+        let Some(slot) = slot.take() else {
+            return;
+        };
+        // A Cancel sending to this connection finishes first.
+        let sending = cancel
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .sending
+            .clone();
+        let _sending = sending.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut running = cancel.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(alongside) = &mut running.alongside {
+            alongside[slot] = None;
+        }
+    };
+    let result = run(&hold, &let_go);
+    let_go();
+    result
 }
 
 /// Which engine a profile talks to.
@@ -1594,6 +1669,127 @@ impl Connection {
         }
     }
 
+    /// [`Connection::query`] on a session opened for a database
+    /// ([`Connection::on_database`]), for a tab bound to it: the session is put
+    /// back on the database it was opened for, and on `schema` where the
+    /// engine picks one, in the same acquisition of its lock as the statement.
+    /// Two tabs bound to different schemas of one database share a session,
+    /// and apply and run as two acquisitions would let one run in the other's
+    /// schema. The statement itself is never touched; the binding is applied
+    /// through the driver's own calls and no text of the user's carries it.
+    ///
+    /// Postgres, DuckDB, MySQL, MariaDB and Redis apply it; Snowflake sends
+    /// the schema with the request; every other engine runs the statement as
+    /// [`Connection::query`] does, because a session of theirs that has been
+    /// moved moves itself back (SQL Server) or keeps no state a statement
+    /// leaves (ClickHouse, MongoDB).
+    ///
+    /// `cancel` is made by [`CancelToken::alongside`]: a Cancel on it stops
+    /// this session only while this statement is what it is running, and a
+    /// statement still waiting behind another tab's is dropped unsent instead
+    /// of stopping that one.
+    pub fn query_bound(
+        &self,
+        schema: Option<&str>,
+        sql: &str,
+        cancel: &CancelToken,
+        fetch: Fetch,
+    ) -> Result<QueryResult, DbError> {
+        running_on(cancel, self, |held, let_go| {
+            let fetch = Fetch {
+                held: Some(held),
+                let_go: Some(let_go),
+                ..fetch
+            };
+            match self {
+                Self::Postgres(connection) => connection.query_bound(schema, sql, fetch),
+                Self::MySql(connection) => connection.query_bound(sql, fetch),
+                Self::DuckDb(connection) => connection.query_bound(schema, sql, fetch),
+                Self::Redis(connection) => connection.query_bound(sql, fetch),
+                Self::Snowflake(connection) => connection.query_bound(schema, sql, cancel, fetch),
+                _ => self.query(sql, cancel, fetch),
+            }
+        })
+    }
+
+    /// [`Connection::query`] registered in `cancel` as [`Self::query_bound`]
+    /// is, with nothing put back first: for a statement that ends a bound
+    /// tab's transaction, which a session inside one could not be moved for.
+    /// Without the registration a Cancel while it waits for the session would
+    /// stop nothing.
+    pub fn query_unplaced(
+        &self,
+        sql: &str,
+        cancel: &CancelToken,
+        fetch: Fetch,
+    ) -> Result<QueryResult, DbError> {
+        running_on(cancel, self, |held, let_go| {
+            self.query(
+                sql,
+                cancel,
+                Fetch {
+                    held: Some(held),
+                    let_go: Some(let_go),
+                    ..fetch
+                },
+            )
+        })
+    }
+
+    /// [`Connection::generated`] for a tab bound to this session's database:
+    /// where that is [`Connection::query`] (MySQL, MariaDB and DuckDB) it is
+    /// [`Connection::query_bound`], Redis's is put back on its database too,
+    /// and every other engine's own statement already names where it goes,
+    /// Postgres's among them, whose session never leaves its database. An edit
+    /// applied from a bound tab's grid writes to the database the rows came
+    /// from, whichever way the session has been moved since.
+    pub fn generated_bound(
+        &self,
+        schema: Option<&str>,
+        sql: &str,
+        cancel: &CancelToken,
+        feed: Option<&Feed>,
+        limit: Option<usize>,
+    ) -> Result<QueryResult, DbError> {
+        match self {
+            // A Postgres session cannot leave its database, and what dbdelve
+            // writes names its schema, so nothing is put back: setting the
+            // search path again is refused inside a transaction another tab
+            // of the database opened, which would stop a table tab's preview.
+            Self::Postgres(connection) => running_on(cancel, self, |held, let_go| {
+                connection.query(
+                    sql,
+                    Fetch {
+                        feed,
+                        limit,
+                        held: Some(held),
+                        let_go: Some(let_go),
+                        ..Fetch::default()
+                    },
+                )
+            }),
+            Self::MySql(_) | Self::DuckDb(_) => self.query_bound(
+                schema,
+                sql,
+                cancel,
+                Fetch {
+                    feed,
+                    limit,
+                    ..Fetch::default()
+                },
+            ),
+            Self::Redis(connection) => connection.generated_bound(
+                sql,
+                Fetch {
+                    feed,
+                    limit,
+                    ..Fetch::default()
+                },
+            ),
+            _ => self.generated(sql, cancel, feed, limit),
+        }
+    }
+
     /// [`Connection::query`] on a connection of its own, opened the way this
     /// one was (its tunnel and side session shared), so the statement runs
     /// beside whatever this one is running rather than queued behind it, and
@@ -1640,45 +1836,19 @@ impl Connection {
             }
             Err(_) => (self.clone(), true),
         };
-        let slot = std::cell::Cell::new(None);
-        // A shared connection becomes the run's to stop only once this
-        // statement holds it; until then a Cancel just marks the run, and
-        // the statement is dropped unsent when its turn comes.
-        // ponytail: it is let go of just after the connection is, so a Cancel
-        // in between reaches whatever took the connection next. Closing that
-        // gap needs the engine to clear it under its own lock.
-        let hold = || {
-            let mut running = cancel
-                .0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if running.asked {
-                return false;
-            }
-            let alongside = running.alongside.get_or_insert_default();
-            alongside.push(Some(connection.clone()));
-            slot.set(Some(alongside.len() - 1));
-            true
-        };
-        let result = match shared {
+        running_on(cancel, &connection, |hold, let_go| match shared {
             true => connection.query(
                 sql,
                 cancel,
                 Fetch {
-                    held: Some(&hold),
+                    held: Some(hold),
+                    let_go: Some(let_go),
                     ..fetch
                 },
             ),
             false if hold() => connection.query(sql, cancel, fetch),
             false => Err(plain_error("Cancelled before it was sent.".into())),
-        };
-        if let Some(slot) = slot.get()
-            && let Ok(mut running) = cancel.0.lock()
-            && let Some(alongside) = &mut running.alongside
-        {
-            alongside[slot] = None;
-        }
-        result
+        })
     }
 
     /// A session of its own for an import, opened the way this one was, so a
@@ -2109,16 +2279,19 @@ impl Connection {
     /// a query already returning gigabytes is past the point where stopping the
     /// server helps.
     pub fn cancel(&self, cancel: &CancelToken) -> Result<(), DbError> {
-        if let Some(alongside) = cancel.stop_alongside()
-            && !matches!(
-                self,
-                Self::Snowflake(_) | Self::ClickHouse(_) | Self::MongoDb(_) | Self::External(_)
-            )
-        {
-            return alongside
-                .iter()
-                .map(|connection| connection.cancel(&CancelToken::default()))
-                .fold(Ok(()), Result::and);
+        let stops_alongside = !matches!(
+            self,
+            Self::Snowflake(_) | Self::ClickHouse(_) | Self::MongoDb(_) | Self::External(_)
+        );
+        if let Some(Some(sent)) = cancel.stop_alongside(|alongside| {
+            stops_alongside.then(|| {
+                alongside
+                    .iter()
+                    .map(|connection| connection.cancel(&CancelToken::default()))
+                    .fold(Ok(()), Result::and)
+            })
+        }) {
+            return sent;
         }
         match self {
             Self::Postgres(connection) => connection.cancel(),
@@ -2896,14 +3069,33 @@ pub struct Fetch<'a> {
     /// on a connection it shares ([`Connection::query_alongside`]'s fallback),
     /// so a Cancel before then drops it rather than stopping the other.
     pub held: Option<&'a dyn Fn() -> bool>,
+    /// Called once the statement is over, before it lets go of its
+    /// connection: a Cancel that found it while it held the connection has
+    /// been sent by then, and none that comes later reaches whatever takes the
+    /// connection next.
+    pub let_go: Option<&'a dyn Fn()>,
 }
 
-impl Fetch<'_> {
-    /// [`Fetch::held`], as the error an engine returns before sending.
-    fn hold(&self) -> Result<(), DbError> {
+impl<'a> Fetch<'a> {
+    /// [`Fetch::held`], as the error an engine returns before sending. What it
+    /// hands back calls [`Fetch::let_go`] when dropped, so it is bound where
+    /// it is dropped before the engine's lock on the connection is.
+    fn hold(&self) -> Result<LetGo<'a>, DbError> {
         match self.held.is_none_or(|held| held()) {
-            true => Ok(()),
+            true => Ok(LetGo(self.let_go)),
             false => Err(plain_error("Cancelled before it was sent.".into())),
+        }
+    }
+}
+
+/// See [`Fetch::hold`].
+#[must_use]
+struct LetGo<'a>(Option<&'a dyn Fn()>);
+
+impl Drop for LetGo<'_> {
+    fn drop(&mut self) {
+        if let Some(let_go) = self.0 {
+            let_go();
         }
     }
 }

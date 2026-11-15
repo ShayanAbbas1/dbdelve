@@ -188,7 +188,7 @@ impl Connection {
             message: "The connection is unavailable after an earlier internal failure.".into(),
             position: None,
         })?;
-        fetch.hold()?;
+        let held = fetch.hold()?;
 
         let mut result = QueryResult::default();
         let mut probed = Vec::new();
@@ -332,6 +332,7 @@ impl Connection {
 
         // The mutex is not reentrant and `edit_target` runs a pragma through it,
         // so the lock has to go before the question is asked.
+        drop(held);
         drop(connection);
         if editable {
             result.edit = self.edit_target(&probed);
@@ -1506,6 +1507,48 @@ SELECT count(*) FROM forever
             crate::db::is_cancel(crate::db::Target::built_in(Engine::Sqlite), &error),
             "{}",
             error.message
+        );
+    }
+
+    #[test]
+    fn a_cancel_that_found_a_statement_on_a_shared_session_is_sent_before_the_statement_lets_go() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let connection = crate::db::Connection::Sqlite(memory(""));
+        let cancel = crate::db::CancelToken::alongside();
+        let sent = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            crate::db::running_on(&cancel, &connection, |held, let_go| {
+                assert!(held());
+                let (found, finding) = std::sync::mpsc::channel();
+                let (cancel, sent) = (&cancel, &sent);
+                let sender = scope.spawn(move || {
+                    cancel.stop_alongside(|alongside| {
+                        found
+                            .send(alongside.len())
+                            .expect("the statement is listening");
+                        // Long enough for a statement that did not wait to
+                        // have let go and its session to have been taken.
+                        std::thread::sleep(Duration::from_millis(100));
+                        sent.store(true, Ordering::SeqCst);
+                    })
+                });
+                assert_eq!(
+                    finding.recv().ok(),
+                    Some(1),
+                    "the Cancel found the statement"
+                );
+                let_go();
+                assert!(
+                    sent.load(Ordering::SeqCst),
+                    "the Cancel reached the session while the statement still held it"
+                );
+                assert!(sender.join().is_ok());
+            });
+        });
+        assert_eq!(
+            cancel.stop_alongside(|alongside| alongside.len()),
+            Some(0),
+            "a later Cancel reaches nothing"
         );
     }
 

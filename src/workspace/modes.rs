@@ -199,15 +199,21 @@ impl Workspace {
         cx.notify();
     }
 
-    /// `sql::gate` for a run on `profile`, with `Settings::run_unreadable`
-    /// applied where `session::skips_run_once` allows it: whether a prompt
-    /// goes up at all. A prompt already up re-derives with the plain gate.
+    /// `sql::gate` for a run of `tab` on `profile`, with
+    /// `Settings::run_unreadable` applied where `session::skips_run_once`
+    /// allows it: whether a prompt goes up at all. A prompt already up
+    /// re-derives with the plain gate.
     pub(crate) fn gate_run(
         &self,
         profile: &Profile,
+        tab: Tab,
         verdict: &sql::Verdict,
         own_run: bool,
     ) -> Option<Stop> {
+        // `held` is the profile's own connection's hold. A bound tab runs on
+        // the session of its database, whose hold lands on its own and is not
+        // tracked, so it is never counted as held there.
+        let held = profile.held && profile.binding_of(tab).is_none();
         sql::gate_own_run(
             verdict,
             profile.mode,
@@ -216,7 +222,7 @@ impl Workspace {
                 self.settings.run_unreadable,
                 own_run,
                 profile.mode,
-                profile.held,
+                held,
             ),
         )
     }

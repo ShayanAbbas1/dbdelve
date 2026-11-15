@@ -3917,6 +3917,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             )
             && crate::workspace::drawn_in_diagrams(kind)
             && profile.draws_diagrams()
+            && tab.database.is_none()
             && profile.connection().is_some()
         {
             items.push(command(

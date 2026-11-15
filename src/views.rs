@@ -171,7 +171,9 @@ pub fn render_main_content(
             tab,
             &profile.id,
             profile.config.target(),
-            profile.draws_diagrams(),
+            // A diagram reads the connection's own database, so a tab of
+            // another one offers none.
+            profile.draws_diagrams() && tab.database.is_none(),
             matches!(profile.state, ProfileState::Failed(_)),
             row_panel,
             profile

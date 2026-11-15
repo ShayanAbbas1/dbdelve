@@ -161,12 +161,20 @@ impl Workspace {
 
     /// The statement that fetches every row of the grid in front again, or
     /// why there is none to run.
-    fn refetch(&self) -> Result<Refetch, &'static str> {
+    pub(super) fn refetch(&self) -> Result<Refetch, &'static str> {
         let profile = self.profile().ok_or("the connection is gone.")?;
         let engine = profile.config.engine();
         let refetch = match profile.session.active {
             Tab::Query(id) => {
                 let tab = profile.session.query_tab(id).ok_or("the tab is gone.")?;
+                // The rows came from the session of the tab's database, and
+                // every row is fetched again on the profile's own.
+                if tab.binding.is_some() {
+                    return Err(
+                        "this tab runs on the session of the database it is bound to, \
+                         and every row would be fetched on the connection's own.",
+                    );
+                }
                 // Which statement Refresh would run: on a queue, the one
                 // behind the result the switcher shows.
                 let queued = tab.queue.as_ref().and_then(|queue| {
@@ -188,6 +196,7 @@ impl Workspace {
                 Refetch {
                     sql,
                     generated: false,
+                    binding: None,
                 }
             }
             Tab::Object(_) => {
@@ -205,7 +214,10 @@ impl Workspace {
                     StructureState::Loaded(structure) => structure.row_key(),
                     _ => Vec::new(),
                 };
-                relation_refetch(engine, &tab.schema, &tab.name, filter, sort, &key)?
+                Refetch {
+                    binding: profile.binding_of(profile.session.active),
+                    ..relation_refetch(engine, &tab.schema, &tab.name, filter, sort, &key)?
+                }
             }
         };
         self.cleared(refetch)
@@ -253,7 +265,9 @@ impl Workspace {
         let id = profile.id.clone();
         let generation = profile.generation;
         let engine = profile.config.engine();
-        let connection = profile.connection();
+        // Of the tab the rows were asked for in, which the save panel, being
+        // modeless, may no longer have in front.
+        let routed = profile.connection_for(profile.session.active);
         let rows = result.rows.len();
         let chosen = choose_path(&stem, format.extension(), cx);
 
@@ -264,13 +278,12 @@ impl Workspace {
             // The panel is modeless, and a DuckDB connection follows a database
             // switch in place: what it says now of a table of this name could
             // be another's, and these rows are written either way.
-            let connection = workspace
+            let routed = workspace
                 .update(cx, |workspace, _| {
                     workspace.issued_to(&id, generation).is_some()
                 })
                 .unwrap_or(false)
-                .then_some(connection)
-                .flatten();
+                .then_some(routed);
             // Rendering a hundred thousand rows is not work to do on the frame
             // thread, and the write even less so, and a table's columns may
             // have to be asked for over the network first.
@@ -286,6 +299,11 @@ impl Workspace {
                     rows,
                     "export of shown rows started"
                 );
+                // The columns are only a nicety: a session that will not open
+                // writes the rows without them.
+                let connection = routed
+                    .and_then(|routed| routed.resolve().ok())
+                    .map(|(connection, _)| connection);
                 let target = match &connection {
                     Some(connection) => knowing_the_table(connection, &target, format, engine),
                     None => target,
@@ -394,7 +412,7 @@ impl Workspace {
     /// Run `refetch` and stream its rows into `path`, once the save panel has
     /// answered. Asked again here, since the panel is modeless: a `BEGIN` or a
     /// mode change while it was open would change the answer.
-    fn start_export(
+    pub(super) fn start_export(
         &mut self,
         id: &str,
         generation: u64,
@@ -417,18 +435,13 @@ impl Workspace {
                 profile.in_turn().is_some(),
             ),
         };
-        let connection = profile.connection();
-        let refusal = refusal.or(connection
-            .is_none()
-            .then_some("the connection is not open."));
+        let routed = profile.route(refetch.binding.clone());
+        let refusal = refusal.or((!routed.is_available()).then_some("the connection is not open."));
         if let Some(reason) = refusal {
             profile.session.notice = Some(format!("All rows were not exported: {reason}"));
             cx.notify();
             return;
         }
-        let Some(connection) = connection else {
-            return;
-        };
         let read_only = profile.mode == Mode::ReadOnly;
         let progress = Arc::new(ExportProgress::default());
         let started = Instant::now();
@@ -472,15 +485,18 @@ impl Workspace {
             move || {
                 let format = FileAs::for_path(&path, engine);
                 tracing::info!(format = format.extension(), "export of every row started");
-                let ended = export_every_row(
-                    &connection,
-                    &refetch,
-                    &target,
-                    read_only,
-                    engine,
-                    &path,
-                    &progress,
-                );
+                let ended = match routed.resolve() {
+                    Ok((connection, _)) => export_every_row(
+                        &connection,
+                        &refetch,
+                        &target,
+                        read_only,
+                        engine,
+                        &path,
+                        &progress,
+                    ),
+                    Err(error) => Err(Ended::Failed(error.message)),
+                };
                 log_export(format, ended.as_ref().copied());
                 ended
             }
@@ -722,6 +738,7 @@ fn relation_refetch(
     Ok(Refetch {
         sql,
         generated: true,
+        binding: None,
     })
 }
 
@@ -983,6 +1000,7 @@ fn stream(
                         feed: Some(&feed),
                         reads_only: true,
                         held: None,
+                        let_go: None,
                     },
                     read_only,
                 );
@@ -1225,6 +1243,7 @@ mod tests {
         Refetch {
             sql: sql.into(),
             generated: false,
+            binding: None,
         }
     }
 
@@ -1270,6 +1289,7 @@ mod tests {
         let relation = Refetch {
             sql: relation_sql(Engine::Postgres, "public", "t", "", &[], None, 0),
             generated: true,
+            binding: None,
         };
         assert_eq!(
             refetch_refusal(Engine::Postgres, &relation, Mode::ReadOnly, &[], false),

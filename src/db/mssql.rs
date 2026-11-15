@@ -1029,15 +1029,21 @@ impl Connection {
         connected?;
         let session = guard.as_mut().expect("connected above");
 
-        if cancellable {
+        let held = if cancellable {
             // Under the lock Cancel takes, so a Cancel either finds the
             // statement running or keeps it from being sent.
             let mut in_flight = self.in_flight();
-            fetch.hold()?;
+            let held = fetch.hold()?;
             in_flight.running = true;
             in_flight.stopped = false;
-        }
+            Some(held)
+        } else {
+            None
+        };
         let ran = self.execute(session, sql, origin, fetch);
+        // While it still reads as running: a Cancel let in after this would
+        // find nothing running and keep itself for the next statement queued.
+        drop(held);
         let stopped = {
             let mut in_flight = self.in_flight();
             in_flight.running = false;

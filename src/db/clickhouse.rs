@@ -925,7 +925,7 @@ impl Connection {
     ) -> Result<QueryResult, Failed> {
         let started = Instant::now();
         let mut session = matches!(kind, Kind::User).then(|| lock(&self.session));
-        fetch.hold().map_err(Failed::Unsent)?;
+        let _held = fetch.hold().map_err(Failed::Unsent)?;
         if let Some(session) = session.as_deref_mut() {
             if session.id.is_none() {
                 *session = Session {

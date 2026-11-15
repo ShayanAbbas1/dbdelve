@@ -112,7 +112,7 @@ impl Connection {
             message: "The connection is unavailable after an earlier internal failure.".into(),
             position: None,
         })?;
-        fetch.hold()?;
+        let _held = fetch.hold()?;
 
         let mut result = QueryResult::default();
         let mut filled = None;

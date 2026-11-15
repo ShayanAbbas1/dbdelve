@@ -364,11 +364,48 @@ impl Connection {
     /// prepares it, and the last one streams: its rows arrive a batch at a
     /// time, so a read is stopped past the limit by fetching no further.
     pub fn query(&self, sql: &str, fetch: Fetch) -> Result<QueryResult, DbError> {
+        self.submit(sql, fetch, None)
+    }
+
+    /// [`Self::query`] for a tab bound to this session's database: the
+    /// database the session was opened on, and `schema` of it (the database's
+    /// own default when `None`), are put back with the same `USE` every move
+    /// makes before the statement, under the lock that runs it. A statement
+    /// of another tab, or one of the user's own, may have moved the session
+    /// since, and two tabs bound to different schemas of one database share
+    /// it, so applying and running as two acquisitions would let one run in
+    /// the other's schema. The pick the connection keeps for sessions opened
+    /// from it is never written.
+    pub fn query_bound(
+        &self,
+        schema: Option<&str>,
+        sql: &str,
+        fetch: Fetch,
+    ) -> Result<QueryResult, DbError> {
+        self.submit(sql, fetch, Some(schema))
+    }
+
+    /// `bound` is the schema to put the session back on first, itself `None`
+    /// for the database's default, when the run is a bound tab's.
+    fn submit(
+        &self,
+        sql: &str,
+        fetch: Fetch,
+        bound: Option<Option<&str>>,
+    ) -> Result<QueryResult, DbError> {
         // Armed before the lock, so time queued behind another statement on
         // this connection counts against the limit too.
         let _deadline = self.deadline();
         let connection = lock(&self.connection)?;
-        fetch.hold()?;
+        let _held = fetch.hold()?;
+        if let Some(schema) = bound {
+            // After the lock, as `apply_pick` reads it.
+            let pick = Pick {
+                database: self.pick().database.clone(),
+                schema: schema.map(str::to_string),
+            };
+            self.go(&connection, &pick).map_err(super::unplaced)?;
+        }
         let mut result =
             run(&connection, sql, fetch).map_err(|error| rolled_back(&connection, sql, error))?;
         if !result.columns.is_empty() {
@@ -2552,6 +2589,100 @@ mod tests {
         assert_eq!(at(&connection), on("memory", "main"));
         // The database it names has to be there.
         assert!(connection.on_database("gone").is_err());
+    }
+
+    /// The one cell a statement answers, as text.
+    fn cell(result: Result<QueryResult, DbError>) -> Option<String> {
+        let result = result.unwrap();
+        result.rows[0].get(0).map(str::to_string)
+    }
+
+    #[test]
+    fn a_bound_run_puts_its_database_and_schema_back_first() {
+        let connection =
+            memory("ATTACH ':memory:' AS other; CREATE SCHEMA other.s1; CREATE SCHEMA other.s2;");
+        let session = connection.on_database("other").unwrap();
+        assert_eq!(
+            cell(session.query_bound(Some("s1"), "SELECT current_schema()", Fetch::default())),
+            Some("s1".into())
+        );
+        // A statement of the user's moved it away, as a `USE` in a tab would.
+        session.query("USE memory", Fetch::default()).unwrap();
+        assert_eq!(
+            cell(session.query_bound(
+                Some("s1"),
+                "SELECT current_database() || '.' || current_schema()",
+                Fetch::default()
+            )),
+            Some("other.s1".into())
+        );
+        assert_eq!(
+            cell(session.query_bound(None, "SELECT current_schema()", Fetch::default())),
+            Some("main".into()),
+            "no schema is where the database starts"
+        );
+        // Neither run moved the connection it was opened from.
+        assert_eq!(at(&connection), on("memory", "main"));
+    }
+
+    #[test]
+    fn a_bound_run_reaches_a_database_whatever_its_name_holds() {
+        let connection = memory(r#"ATTACH ':memory:' AS "odd ""name""""#);
+        let session = connection.on_database(r#"odd "name""#).unwrap();
+        assert_eq!(
+            cell(session.query_bound(None, "SELECT current_database()", Fetch::default())),
+            Some(r#"odd "name""#.into())
+        );
+    }
+
+    #[test]
+    fn a_cancel_asked_before_a_bound_statement_holds_its_session_drops_it_unsent() {
+        let session = crate::db::Connection::DuckDb(memory("CREATE TABLE t (n INTEGER)"));
+        let cancel = crate::db::CancelToken::alongside();
+        session.cancel(&cancel).unwrap();
+        let error = session
+            .query_bound(None, "INSERT INTO t VALUES (1)", &cancel, Fetch::default())
+            .unwrap_err();
+        assert_eq!(error.message, "Cancelled before it was sent.");
+        let rows = session
+            .query(
+                "SELECT count(*) FROM t",
+                &crate::db::CancelToken::default(),
+                Fetch::default(),
+            )
+            .unwrap();
+        assert_eq!(rows.rows[0].get(0), Some("0"), "nothing was sent");
+    }
+
+    /// A COMMIT or ROLLBACK of a bound tab goes without the binding, and a
+    /// Cancel asked while it waits for the session stops it all the same.
+    #[test]
+    fn a_cancel_asked_before_an_unplaced_statement_holds_its_session_drops_it_unsent() {
+        let session = crate::db::Connection::DuckDb(memory("CREATE TABLE t (n INTEGER)"));
+        let cancel = crate::db::CancelToken::alongside();
+        session.cancel(&cancel).unwrap();
+        let error = session
+            .query_unplaced("INSERT INTO t VALUES (1)", &cancel, Fetch::default())
+            .unwrap_err();
+        assert_eq!(error.message, "Cancelled before it was sent.");
+    }
+
+    #[test]
+    fn a_bound_run_that_cannot_put_its_schema_back_says_nothing_was_sent() {
+        let connection = memory("ATTACH ':memory:' AS other");
+        let session = connection.on_database("other").unwrap();
+        let error = session
+            .query_bound(Some("gone"), "SELECT 1", Fetch::default())
+            .unwrap_err();
+        assert!(
+            error.message.starts_with("The statement was not sent"),
+            "{}",
+            error.message
+        );
+        assert_eq!(
+            error.position, None,
+            "no byte of the user's text is at fault"
+        );
     }
 
     #[test]

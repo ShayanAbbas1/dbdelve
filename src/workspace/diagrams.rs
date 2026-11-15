@@ -140,6 +140,7 @@ impl Workspace {
         let profile = self.profile_mut()?;
         profile.session.objects.push(ObjectTab {
             id,
+            database: None,
             schema,
             name: String::new(),
             kind: None,
@@ -267,6 +268,7 @@ impl Workspace {
             None => RelationKind::default(),
         };
         self.open_relation_view(
+            None,
             schema.to_string(),
             table.to_string(),
             kind,
