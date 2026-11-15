@@ -7,6 +7,7 @@ use super::*;
 use crate::actions::{FocusSidebar, OpenSidebarItem, ToggleResults, ToggleResultsFocus};
 use crate::explorer::Shortcut;
 use crate::session::PendingDiscard;
+use crate::sidebar::{ViewMode, connection_row, scoped_row};
 use crate::tab_drag::{self, Drag, Slot};
 
 /// How tall an Edit mode input grows before it scrolls instead.
@@ -73,12 +74,24 @@ impl Workspace {
         let Some(profile) = self.profile() else {
             return;
         };
+        // The connections tree is always drawn, so it always has a handle a
+        // window can be focused on.
+        let complex = self.settings.view_mode == ViewMode::Complex;
         // A handle no element tracks is a window with no dispatch path.
-        if !super::forms::explorer_drawn(profile) {
+        if !complex && !super::forms::explorer_drawn(profile) {
             return;
         }
-        let front = profile.front_row();
-        let tree = profile.session.explorer_tree.clone();
+        let (front, tree) = match complex {
+            // With no object open, the connection in front is the row.
+            true => (
+                Some(profile.front_row().map_or_else(
+                    || connection_row(&profile.id),
+                    |row| scoped_row(&profile.id, &row),
+                )),
+                self.connections.tree.clone(),
+            ),
+            false => (profile.front_row(), profile.session.explorer_tree.clone()),
+        };
         tree.update(cx, |tree, cx| {
             let front = front.map(gpui::SharedString::from).and_then(|id| {
                 tree.reveal_item(&id, gpui::ScrollStrategy::Center, cx);
@@ -120,6 +133,25 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.settings.view_mode == ViewMode::Complex {
+            let selected = self
+                .connections
+                .tree
+                .read(cx)
+                .selected_entry()
+                .map(|entry| (entry.item().id.clone(), entry.is_folder()));
+            if let Some((id, folder)) = selected
+                && !self.open_connection_row(&id, window, cx)
+                && folder
+            {
+                // Folding is the tree's own, behind its `Confirm`.
+                window.dispatch_action(
+                    Box::new(gpui_base::actions::Confirm { secondary: false }),
+                    cx,
+                );
+            }
+            return;
+        }
         let Some(profile) = self.profile() else {
             return;
         };

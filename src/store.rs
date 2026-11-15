@@ -668,6 +668,11 @@ pub struct StoredSettings {
     /// before there was one.
     #[serde(default)]
     pub welcomed: Option<bool>,
+    /// Which sidebar the window draws, `simple` or `complex`. Absent reads as
+    /// simple, which is what every file written before it showed. A scalar,
+    /// so it stays above the tables below.
+    #[serde(default)]
+    pub view_mode: Option<String>,
     /// Keybinding overrides, keyed by the action id in
     /// `keybindings::REGISTRY`. Only the ones a user actually changed --
     /// everything else stays on whatever the running build defaults to.
@@ -4442,6 +4447,7 @@ open_objects = []
                 run_unreadable: Some(true),
                 verbose_logging: Some(true),
                 welcomed: Some(true),
+                view_mode: Some("complex".into()),
                 custom_keybindings: Some(HashMap::from([(
                     "apply_edits".to_string(),
                     "cmd-shift-s".to_string(),
@@ -4554,6 +4560,25 @@ open_objects = []
             .expect("a file predating settings must load")
             .settings;
         assert_eq!(missing, None);
+    }
+
+    #[test]
+    fn the_view_mode_round_trips_and_an_old_file_reads_as_simple() {
+        let complex =
+            decode_profiles("[settings]\nview_mode = \"complex\"\n", &[]).expect("the file loads");
+        assert_eq!(
+            complex
+                .settings
+                .as_ref()
+                .and_then(|s| s.view_mode.as_deref()),
+            Some("complex")
+        );
+        let text = encode_profiles(&complex).expect("the file encodes");
+        assert!(text.contains("view_mode = \"complex\""), "{text}");
+
+        let old = decode_profiles("[settings]\ncheck_for_updates = false\n", &[])
+            .expect("the file loads");
+        assert_eq!(old.settings.expect("settings").view_mode, None);
     }
 
     #[test]

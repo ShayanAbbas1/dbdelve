@@ -17,6 +17,26 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   (`ConnectionForm::project`), an edited one in its own, and "New project…"
   names one that saving makes, or joins if the name is taken
   (`projects::chosen_project`).
+- **The sidebar has two view modes**, `view_mode` in `[settings]`
+  (`sidebar::ViewMode`; absent or unknown reads as `simple`). Simple is the
+  tree of the connection in front, as it always was. Complex
+  (`workspace/sidebar.rs`) is one tree for the window: every connection under
+  its project, No project first and only while a project exists. The rows
+  under a connection are the ones simple mode builds for it
+  (`profiles::explorer_content`), with every id prefixed
+  `connection:{len}:{profile id}/` (`sidebar::scoped_row`, the length keeping a
+  `/` in a name from moving the seam), so two connections that list
+  `main.birds` never share a row, and folds and the selection survive a
+  rebuild by id. An idle connection is folded whatever its stored fold says,
+  over one static `Loading…` row (no spinner: `AGENTS.md` GPUI hazards), and
+  its first expand connects it without making it the front connection; a
+  failed connect leaves its reason on a row under that connection alone. Rows
+  under a connection start folded, so a connect never unfolds a catalog.
+  Acting on a row of another connection makes it the front connection first
+  (`Workspace::open_connection_row`), because the gate, the mode and the
+  engine a statement meets are the front connection's. Every landing that
+  rebuilds a connection's own tree (`rebuild_explorer`) rebuilds this one
+  last, and a change to the set of connections does too (`remember_profiles`).
 - **The titlebar's project and connection open the palette on Connections**
   (`Workspace::open_connections`, also `SwitchConnection`, no default chord);
   there is no switcher panel of its own. That scope is a tree
