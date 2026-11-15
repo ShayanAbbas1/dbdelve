@@ -42,7 +42,7 @@ use crate::channel::Channel;
 use crate::connection_form::{Origin, passphrase_to_persist, password_to_persist};
 use crate::session::{catalog_relation, write_buffer, write_grids};
 use crate::settings_panel::{SettingMatch, SettingsTab, filter_settings, render_settings_panel};
-use crate::sidebar::ViewMode;
+use crate::sidebar::{ListingScope, ViewMode, effective_listing_scope, effective_view_mode};
 use crate::sql::{Mode, appended_statement, remember_statement, update_batch};
 use crate::theme::{install_fonts, install_theme, restored_fonts, restored_theme};
 use crate::*;
@@ -98,6 +98,9 @@ pub(crate) struct Settings {
     /// Which sidebar is drawn: the tree of the connection in front, or every
     /// connection under its project.
     pub(crate) view_mode: ViewMode,
+    /// Which connections that sidebar lists: every project's, or only those
+    /// of the project in front.
+    pub(crate) listing_scope: ListingScope,
 }
 
 impl Settings {
@@ -136,6 +139,7 @@ impl Default for Settings {
             welcomed: false,
             custom_keybindings: HashMap::new(),
             view_mode: ViewMode::default(),
+            listing_scope: ListingScope::default(),
         }
     }
 }
@@ -553,7 +557,7 @@ impl Workspace {
             opacity_input,
             focus: cx.focus_handle(),
             explorer_focus: cx.focus_handle(),
-            connections: sidebar::ConnectionsSidebar::new(cx),
+            connections: sidebar::ConnectionsSidebar::new(window, cx),
             dialog_focus: cx.focus_handle(),
             dialog_in_front: std::cell::Cell::default(),
             dialog_choice: std::cell::Cell::default(),
@@ -655,6 +659,8 @@ impl Workspace {
                     .unwrap_or_default();
                 workspace.settings.view_mode =
                     ViewMode::from_slug(stored_settings.view_mode.as_deref());
+                workspace.settings.listing_scope =
+                    ListingScope::from_slug(stored_settings.listing_scope.as_deref());
                 // Ahead of the restore, which must not prune grids an
                 // unavailable profile under the same id still owns.
                 workspace.unavailable = unavailable;
@@ -2495,16 +2501,14 @@ impl Render for Workspace {
                                 .size_full()
                                 .flex()
                                 .flex_col()
-                                .child(div().flex_1().min_h_0().child(
-                                    match self.settings.view_mode {
-                                        ViewMode::Complex => {
-                                            self.render_connections(cx).into_any_element()
-                                        }
-                                        ViewMode::Simple => {
-                                            self.render_explorer(profile, cx).into_any_element()
-                                        }
-                                    },
-                                ))
+                                .child(div().flex_1().min_h_0().child(match self.view_mode() {
+                                    ViewMode::Complex => {
+                                        self.render_connections(cx).into_any_element()
+                                    }
+                                    ViewMode::Simple => {
+                                        self.render_explorer(profile, cx).into_any_element()
+                                    }
+                                }))
                                 .child(
                                     div()
                                         .h(px(layout::chrome(layout::STATUS_HEIGHT)))

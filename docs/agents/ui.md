@@ -55,8 +55,8 @@ object tab's grid, with no buffer to go to, it still does.
 It does **not** provide a fuzzy matcher, and its `command` palette filters by
 substring in a fixed layout. Both are ours: `src/fuzzy.rs` is the one matcher
 (`nucleo-matcher`) every list that narrows as it is typed into goes through --
-the palette and its pickers (the connection form's engine among them), completions, the explorer's filter and the settings search -- so a query that finds something in one finds it in the others, and
-each draws the matched characters with `ui::highlighted`. A palette row carries a `Command`; `Workspace::run_command` routes every one into
+the palette and its pickers (the connection form's engine among them), completions, the explorer's filter, the connections filter over the complex sidebar (`explorer::Builder`, over every loaded subtree and the connection, database and project names; it never connects or loads anything, and a connection that has not loaded is kept only by its own name) and the settings search -- so a query that finds something in one finds it in the others, and
+each draws the matched characters with `ui::highlighted`. The connections tree's `Loading…` row is static text, not a spinner: nothing new moves. A palette row carries a `Command`; `Workspace::run_command` routes every one into
 the method its button or keystroke already calls, so the palette is never a
 second implementation of anything. `cmd+p` (`FuzzyOpen`, "Go to Object")
 opens it on Objects, `cmd+shift+p` on Commands, `SearchEverything` (no default chord) on All and the titlebar's project or

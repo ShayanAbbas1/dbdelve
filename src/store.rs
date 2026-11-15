@@ -673,6 +673,10 @@ pub struct StoredSettings {
     /// so it stays above the tables below.
     #[serde(default)]
     pub view_mode: Option<String>,
+    /// Which connections the sidebar lists, `all` or `current` (only the
+    /// project in front). Absent reads as `all`. A scalar, above the tables.
+    #[serde(default)]
+    pub listing_scope: Option<String>,
     /// Keybinding overrides, keyed by the action id in
     /// `keybindings::REGISTRY`. Only the ones a user actually changed --
     /// everything else stays on whatever the running build defaults to.
@@ -704,6 +708,16 @@ pub struct StoredProject {
     /// Profile ids, in the order they were added.
     #[serde(default)]
     pub connections: Vec<String>,
+    /// `simple` or `complex`: this project's sidebar, over the global
+    /// `[settings] view_mode`. Absent follows the global value, as does one
+    /// this build does not know.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_mode: Option<String>,
+    /// `all` or `current`: which connections the sidebar lists while this
+    /// project is in front, over `[settings] listing_scope`. Absent follows
+    /// the global value, as does one this build does not know.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listing_scope: Option<String>,
 }
 
 /// A decoded profile file: the profiles, the id of the one that was in front,
@@ -4448,6 +4462,7 @@ open_objects = []
                 verbose_logging: Some(true),
                 welcomed: Some(true),
                 view_mode: Some("complex".into()),
+                listing_scope: Some("current".into()),
                 custom_keybindings: Some(HashMap::from([(
                     "apply_edits".to_string(),
                     "cmd-shift-s".to_string(),
@@ -4458,10 +4473,14 @@ open_objects = []
                 StoredProject {
                     name: "Billing".into(),
                     connections: vec!["dev".into(), "local".into()],
+                    view_mode: None,
+                    listing_scope: None,
                 },
                 StoredProject {
                     name: "Empty".into(),
                     connections: Vec::new(),
+                    view_mode: None,
+                    listing_scope: None,
                 },
             ],
             profiles: vec![
@@ -4579,6 +4598,60 @@ open_objects = []
         let old = decode_profiles("[settings]\ncheck_for_updates = false\n", &[])
             .expect("the file loads");
         assert_eq!(old.settings.expect("settings").view_mode, None);
+    }
+
+    #[test]
+    fn a_projects_view_mode_round_trips_and_an_old_file_reads_with_none() {
+        let file = "[[projects]]\nname = \"Zoo\"\nconnections = [\"b\"]\nview_mode = \"complex\"\n\n\
+                    [[projects]]\nname = \"Plain\"\nconnections = []\n";
+        let list = decode_profiles(file, &[]).expect("the file loads");
+        assert_eq!(list.projects[0].view_mode.as_deref(), Some("complex"));
+        assert_eq!(list.projects[1].view_mode, None);
+
+        let text = encode_profiles(&list).expect("the file encodes");
+        assert_eq!(text.matches("view_mode").count(), 1, "{text}");
+        let again = decode_profiles(&text, &[]).expect("the file loads again");
+        assert_eq!(again.projects, list.projects);
+
+        // A file written before the key resaves without it.
+        let old = decode_profiles("[[projects]]\nname = \"Old\"\nconnections = []\n", &[])
+            .expect("the file loads");
+        assert_eq!(old.projects[0].view_mode, None);
+        assert!(
+            !encode_profiles(&old)
+                .expect("it encodes")
+                .contains("view_mode")
+        );
+    }
+
+    #[test]
+    fn the_listing_scope_round_trips_and_an_old_file_reads_with_none() {
+        let file = "[settings]\nlisting_scope = \"current\"\n\n\
+                    [[projects]]\nname = \"Zoo\"\nconnections = []\nlisting_scope = \"all\"\n\n\
+                    [[projects]]\nname = \"Plain\"\nconnections = []\n";
+        let list = decode_profiles(file, &[]).expect("the file loads");
+        let settings = list.settings.as_ref().expect("settings");
+        assert_eq!(settings.listing_scope.as_deref(), Some("current"));
+        assert_eq!(list.projects[0].listing_scope.as_deref(), Some("all"));
+        assert_eq!(list.projects[1].listing_scope, None);
+
+        let text = encode_profiles(&list).expect("the file encodes");
+        assert_eq!(text.matches("listing_scope").count(), 2, "{text}");
+        let again = decode_profiles(&text, &[]).expect("the file loads again");
+        assert_eq!(again, list);
+
+        let old = decode_profiles(
+            "[settings]\ncheck_for_updates = false\n\n[[projects]]\nname = \"Old\"\nconnections = []\n",
+            &[],
+        )
+        .expect("the file loads");
+        assert_eq!(old.settings.as_ref().expect("settings").listing_scope, None);
+        assert_eq!(old.projects[0].listing_scope, None);
+        assert!(
+            !encode_profiles(&old)
+                .expect("it encodes")
+                .contains("listing_scope")
+        );
     }
 
     #[test]
