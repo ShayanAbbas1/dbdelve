@@ -29,7 +29,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Before any build, so a release that cannot go out fails in seconds
       # instead of after every asset has been built.
       - id: version
@@ -64,7 +64,7 @@ jobs:
         runner: [ubuntu-22.04, ubuntu-22.04-arm]
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # The same list the README tells a Linux user to install before building
       # from source, plus unixodbc-dev for the ODBC bridge to link against.
@@ -86,7 +86,7 @@ jobs:
       # --release`, so this one is the packaging step alone.
       - run: dev/package-appimage.sh
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: linux-${{ matrix.runner }}
           path: |
@@ -99,7 +99,7 @@ jobs:
     # arm64, which is all the cask installs on.
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # bundle.sh also builds the ODBC bridge; unixODBC compiles from source
       # into it with the runner's C compiler, so nothing is installed here.
@@ -124,7 +124,7 @@ jobs:
           hdiutil create -volname "DBDelve $VERSION" -srcfolder target/dmg \
             -size "${SIZE_MB}m" -ov -format UDZO "target/DBDelve-$VERSION.dmg"
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: macos
           path: target/DBDelve-*.dmg
@@ -134,7 +134,7 @@ jobs:
     needs: version
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # The hosted image already has MSVC, the Windows SDK (GPUI's shaders)
       # and rc.exe (the icon resource). Inno Setup is only for wrapping the
@@ -144,7 +144,7 @@ jobs:
       - run: choco install innosetup --no-progress --yes
       - run: powershell -File dev/package-windows.ps1
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows
           path: |
@@ -158,8 +158,8 @@ jobs:
     needs: [linux, macos, windows]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: dist
           merge-multiple: true
@@ -205,7 +205,7 @@ jobs:
           done
         env:
           UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: signatures
           path: dist/*.minisig
@@ -216,8 +216,8 @@ jobs:
     if: inputs.publish
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: dist
           merge-multiple: true
@@ -258,13 +258,13 @@ jobs:
     if: needs.version.outputs.prerelease == 'false'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: macos
 
       # TAP_TOKEN is a fine-grained PAT with contents: write on the tap alone.
       # github.token cannot push to another repository.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ShayanAbbas1/homebrew-dbdelve
           token: ${{ secrets.TAP_TOKEN }}
