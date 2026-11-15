@@ -520,7 +520,8 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   streaming pass reproduces the old split/trim/drop-empty/join-with-space
   flattening and stops one character past the limit. The cost follows the
   number of cells drawn, not their size.
-- **Parse As draws a binary column's bytes; nothing else reads it.** A
+- **Parse As draws a binary column's bytes and reads an edit of them; nothing
+  else reads it.** A
   column the engine types as bytes (`Engine::is_binary_type`, by the column's
   type or, on MongoDB, any cell's) offers Hex, Text (UTF-8) and Base64 from
   its header's and its cells' menus, once one of its cells reads back as
@@ -532,7 +533,17 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   It is a transform at paint time, never a rewrite of `result.rows`: copy,
   Copy As, export, the in-memory sort, the filter bar, insert and import
   literals and the row panel's copy all keep the server's spelling, the one
-  form every engine reads back. Text is a strict UTF-8 decode; bytes that are
+  form every engine reads back. An edit is seeded with the whole value in
+  the column's form and read back by it (`BinaryForm::read`): Text is the
+  UTF-8 bytes, Base64 decodes, Hex takes the driver's spelling or bare hex.
+  The bytes are staged (`NewValue::Bytes`), never the text, and written as
+  the engine's literal; text that reads as no bytes keeps the input open
+  and says why (`RefuseEdit`). A binary cell is editable only where
+  `Target::edits_bytes` holds (a built-in driver on an engine with a bytes
+  literal: Postgres, MySQL, MariaDB, SQLite, SQL Server), its row is not
+  named by a binary value (a binary key, or an engine naming rows by every
+  value), and, parsed as Text, its whole value is UTF-8; `bytes_refusal`
+  says which failed. Text is a strict UTF-8 decode; bytes that are
   not UTF-8, or a value that is not the engine's spelling (a MongoDB UUID,
   a Snowflake session set to base64), keep the server's text in the muted
   colour. Hex where bytes already arrive as hex stores nothing, so the

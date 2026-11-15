@@ -89,7 +89,21 @@ an unsorted grid.
 passes first. It admits exactly four shapes:
 
 - a batch of `UPDATE`s, optionally bracketed by a `BEGIN`/`COMMIT` the gate
-  can see closed;
+  can see closed, each setting columns only to values DBDelve writes
+  (`sql::literal_sets`): a single-quoted literal (`N'…'` too, never two
+  adjacent), a bare `0x…`, `NULL`, `DEFAULT`, or the engine's own literal of
+  bytes (`Engine::binary_literal`): `E'\\x…'` on Postgres, `X'…'` on MySQL,
+  MariaDB and SQLite, `0x…` on SQL Server, hex digits in pairs and nothing
+  else between the quotes, read off the text because the grammar reads
+  `X'00' 'aa'` as one literal. No number, column, function call,
+  concatenation or subquery is a value DBDelve sets. The predicate is not
+  read on this arm (ClickHouse's, which names rows by every value, is);
+  the bytes literal is admitted only as a set value, never in a key, a
+  `DELETE` or an `INSERT`. Postgres's is an escape string so that
+  `standard_conforming_strings` cannot change what it means, MySQL's is
+  `X'…'` because `0x` has no empty spelling there, and SQL Server, whose
+  server reads a bare `0x` as empty bytes, has empty bytes refused instead
+  because the grammar does not read a bare `0x` as one literal;
 - one `INSERT`, naming the columns it fills, of one or more rows whose
   values are each exactly one single-quoted literal (`N'…'` too, never two
   adjacent), a bare `0x…` hex literal or `NULL` (no subquery, function call
