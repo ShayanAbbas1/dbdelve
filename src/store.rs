@@ -164,6 +164,12 @@ pub struct StoredProfile {
     /// order they were picked. Same rules as `open_rows`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub selected_rows: Vec<String>,
+    /// The slug of the connect-time loads this profile runs; absent is every
+    /// load, which is every profile written before the setting existed. A slug
+    /// this build cannot read reads as every load, so a newer build's value
+    /// costs this one field and nothing else. A scalar, so it comes before `ssh`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub introspection_depth: Option<String>,
     /// The SSH tunnel this profile dials through, or absent for a direct
     /// connection -- which is every profile written before tunnels existed. A
     /// table, so it has to come after every scalar above. Nothing secret is in
@@ -3469,6 +3475,7 @@ user = "shayan"
                 ssm: None,
                 open_rows: Vec::new(),
                 selected_rows: Vec::new(),
+                introspection_depth: None,
                 ssh: None,
                 open_queries: Vec::new(),
                 open_objects: Vec::new(),
@@ -3530,6 +3537,7 @@ user = "shayan"
             ssm: None,
             open_rows: Vec::new(),
             selected_rows: Vec::new(),
+            introspection_depth: None,
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![
@@ -3679,6 +3687,7 @@ open_objects = []
             ssm: None,
             open_rows: Vec::new(),
             selected_rows: Vec::new(),
+            introspection_depth: None,
             ssh: None,
             open_queries: Vec::new(),
             open_objects: Vec::new(),
@@ -3745,6 +3754,61 @@ open_objects = []
         assert!(
             !golden.contains("open_rows"),
             "the fixtures hold neither key"
+        );
+    }
+
+    #[test]
+    fn the_introspection_depth_round_trips_before_ssh_and_an_unknown_slug_reads_as_sizes() {
+        use crate::session::Depth;
+        let mut profile = a_stored_profile();
+        profile.introspection_depth = Some("relations".into());
+        profile.ssh = Some(SshTunnel {
+            host: "bastion".into(),
+            ..Default::default()
+        });
+        let text = written_alone(profile.clone());
+        let depth = text
+            .find("introspection_depth = \"relations\"")
+            .expect("the depth is written");
+        let tunnel = text.find("[profiles.ssh]").expect("and the tunnel");
+        assert!(
+            depth < tunnel,
+            "TOML cannot emit a scalar after a table, so it comes before `ssh`:\n{text}"
+        );
+        let decoded = decode_profiles(&text, &[]).expect("the file loads");
+        assert_eq!(
+            decoded.profiles[0].introspection_depth,
+            profile.introspection_depth
+        );
+        assert_eq!(
+            written_alone(decoded.profiles[0].clone()),
+            text,
+            "saving what was saved changes nothing"
+        );
+
+        let bare = written_alone(a_stored_profile());
+        assert!(
+            !bare.contains("introspection_depth"),
+            "a profile at the default is written as it always was:\n{bare}"
+        );
+        let old = decode_profiles(&bare, &[]).expect("an older file loads");
+        assert_eq!(old.profiles[0].introspection_depth, None);
+
+        // A slug a newer build wrote costs this one field and nothing else.
+        let newer = text.replace("\"relations\"", "\"everything\"");
+        let decoded = decode_profiles(&newer, &[]).expect("the profile still loads");
+        assert_eq!(decoded.profiles[0].name, "Dev");
+        let read = decoded.profiles[0]
+            .introspection_depth
+            .as_deref()
+            .and_then(Depth::from_slug);
+        assert_eq!(read.unwrap_or_default(), Depth::Sizes);
+
+        let golden = include_str!("testdata/every-engine.resaved.toml");
+        assert_eq!(resaved(include_str!("testdata/every-engine.toml")), golden);
+        assert!(
+            !golden.contains("introspection_depth"),
+            "the fixtures hold no such key"
         );
     }
 
@@ -4303,6 +4367,7 @@ folder = "Hot"
             ssm: None,
             open_rows: Vec::new(),
             selected_rows: Vec::new(),
+            introspection_depth: None,
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![StoredObject {
@@ -4391,6 +4456,7 @@ folder = "Hot"
             ssm: None,
             open_rows: Vec::new(),
             selected_rows: Vec::new(),
+            introspection_depth: None,
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![StoredObject {
@@ -4465,6 +4531,7 @@ folder = "Hot"
             ssm: None,
             open_rows: Vec::new(),
             selected_rows: Vec::new(),
+            introspection_depth: None,
             ssh: None,
             open_queries: Vec::new(),
             open_objects: Vec::new(),
@@ -4585,6 +4652,7 @@ open_objects = []
             ssm: None,
             open_rows: Vec::new(),
             selected_rows: Vec::new(),
+            introspection_depth: None,
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![StoredObject {
@@ -4732,6 +4800,7 @@ open_objects = []
                     ssm: None,
                     open_rows: Vec::new(),
                     selected_rows: Vec::new(),
+                    introspection_depth: None,
                     ssh: None,
                     open_queries: Vec::new(),
                     open_objects: Vec::new(),
@@ -4773,6 +4842,7 @@ open_objects = []
                     ssm: None,
                     open_rows: Vec::new(),
                     selected_rows: Vec::new(),
+                    introspection_depth: None,
                     ssh: None,
                     open_queries: Vec::new(),
                     open_objects: Vec::new(),
@@ -5526,6 +5596,7 @@ open_objects = []
             ssm: None,
             open_rows: Vec::new(),
             selected_rows: Vec::new(),
+            introspection_depth: None,
             ssh: None,
             open_queries: vec![
                 StoredQueryTab {
@@ -6147,6 +6218,7 @@ name = \"accounts\"
             ssm: None,
             open_rows: Vec::new(),
             selected_rows: Vec::new(),
+            introspection_depth: None,
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![
@@ -6277,6 +6349,7 @@ name = \"accounts\"
             ssm: None,
             open_rows: Vec::new(),
             selected_rows: Vec::new(),
+            introspection_depth: None,
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![object],

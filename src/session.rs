@@ -65,6 +65,9 @@ pub(crate) struct Profile {
     pub(crate) config: ConnectionConfig,
     pub(crate) color: Option<ConnectionColor>,
     pub(crate) mode: Mode,
+    /// What this profile does with its connection rather than what the
+    /// connection is. Not part of `config`: changing it never reconnects.
+    pub(crate) behaviour: Behaviour,
     pub(crate) confirmed: Vec<Destructive>,
     /// Whether this connection has silenced the prompt before editing rows
     /// restored from an earlier session. Stored as [`STALE_ROWS`] among
@@ -91,6 +94,10 @@ pub(crate) struct Profile {
     /// cleared, so a reconnect that drops the refresh's answer takes the
     /// refresh with it.
     pub(crate) schema_refresh: Option<u64>,
+    /// Whether a depth was saved while a read of the catalog was under way,
+    /// which a refresh would have declined to start: the landing of that read
+    /// clears this and reads again with the saved depth.
+    pub(crate) reread_after_load: bool,
     /// What the server listed the last time Select Database asked.
     pub(crate) databases: Databases,
     /// The session opened for each other database of the server, by name,
@@ -530,6 +537,8 @@ impl Profile {
             next_query_id: Some(self.session.next_query_id),
             color: self.color.map(|color| color.slug().to_string()),
             mode: Some(self.mode.slug().to_string()),
+            introspection_depth: (self.behaviour.depth != Depth::default())
+                .then(|| self.behaviour.depth.slug().to_string()),
             confirmed: self
                 .confirmed
                 .iter()
@@ -1884,6 +1893,54 @@ pub(crate) enum Routines {
     Loading,
     Loaded,
     Failed,
+    /// The profile's [`Depth`] chose not to read them. Not an error and no
+    /// notice is written, but nothing about a routine can be said from it
+    /// either, so a restored routine tab keeps waiting as under `Failed`.
+    Skipped,
+}
+
+/// Which of the connect-time loads run. `Sizes` is every load, as before the
+/// setting existed; columns are no level, since no connect reads them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Depth {
+    /// The relations of the catalog.
+    Relations,
+    /// Then the routines and sequences.
+    Routines,
+    /// Then table sizes, which also need Show sizes.
+    #[default]
+    Sizes,
+}
+
+impl Depth {
+    pub(crate) const ALL: [Depth; 3] = [Depth::Relations, Depth::Routines, Depth::Sizes];
+
+    pub(crate) fn slug(self) -> &'static str {
+        match self {
+            Depth::Relations => "relations",
+            Depth::Routines => "routines",
+            Depth::Sizes => "sizes",
+        }
+    }
+
+    pub(crate) fn from_slug(slug: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|depth| depth.slug() == slug)
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Depth::Relations => "Relations",
+            Depth::Routines => "+ Routines",
+            Depth::Sizes => "+ Sizes",
+        }
+    }
+}
+
+/// What a profile does with its connection rather than what the connection
+/// is, so changing it never reconnects.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Behaviour {
+    pub(crate) depth: Depth,
 }
 
 /// Which surface the main pane is showing, and what a run targets. Both kinds
@@ -4953,5 +5010,16 @@ mod tests {
         // a newer build's tabs -- must not hand out a live id.
         assert_eq!(next_query_id(1, &tabs(&[0, 4])), 5);
         assert_eq!(next_query_id(0, &tabs(&[])), 0);
+    }
+
+    #[test]
+    fn depth_levels_are_ordered_and_default_to_today() {
+        assert!(Depth::Relations < Depth::Routines);
+        assert!(Depth::Routines < Depth::Sizes);
+        assert_eq!(Depth::default(), Depth::Sizes);
+        for depth in Depth::ALL {
+            assert_eq!(Depth::from_slug(depth.slug()), Some(depth));
+        }
+        assert_eq!(Depth::from_slug("everything"), None);
     }
 }

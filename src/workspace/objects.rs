@@ -2829,6 +2829,22 @@ mod tests {
     }
 
     #[test]
+    fn a_stored_routine_waits_while_the_depth_skips_the_routines() {
+        let pending = [stored("accounts", false), stored("digest()", true)];
+
+        let (opened, waiting) = restorable(
+            Engine::Postgres,
+            true,
+            &catalog_with(Routines::Skipped),
+            &pending,
+        );
+
+        assert_eq!(opened.len(), 1);
+        assert_eq!(name(&opened[0].0), "accounts");
+        assert_eq!(waiting, [stored("digest()", true)]);
+    }
+
+    #[test]
     fn a_stored_structure_tab_comes_back_as_a_structure_tab() {
         let pending = [
             store::StoredObject {

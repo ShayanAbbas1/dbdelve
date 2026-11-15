@@ -83,6 +83,17 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   reaches every one (`Profile::sessions_to_hold`, `set_mode`); all of them end
   with the connection they were opened from (`Profile::drop_sessions`). The
   agent keeps its own lanes and reaches none of them.
+- **A profile's `introspection_depth` chooses which connect-time loads run**
+  (`Profile::behaviour.depth`, `session::Depth`; `relations`, `routines` or
+  `sizes`, left out at the default `sizes`, which is every load): relations
+  always, then routines and sequences, then sizes, which also need Show sizes.
+  It lives on `Profile::behaviour`, outside `ConnectionConfig`, so changing it
+  re-reads over the open session (`Workspace::set_behaviour`) and never
+  reconnects. The one rule governs the connection's own catalog, every other
+  database's and Refresh. A skipped routines read lands `Routines::Skipped`,
+  which is not an error: no notice is written, and a restored routine tab
+  stays pending as it does for `Failed`. A slug this build cannot read reads
+  as `sizes`, costing that one field.
 - **New Query Here opens a tab bound to a database** (`QueryTab::binding`,
   `session::Binding`), from the connections tree's menu. A database row binds
   that database; a schema row binds by its connection's levels
