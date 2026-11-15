@@ -95,6 +95,30 @@ accept a library default appearance; map it to our theme tokens.
 ---
 
 
+A connection row in the complex sidebar reads, left to right, logo (in the
+connection's colour; an uncoloured connection's logo wears its engine's
+brand), name, host (`ConnectionConfig::endpoint()`, which gives way first: it
+takes only the width the name leaves and shortens with an ellipsis down to
+nothing before the name shortens), count and status dot, with a coloured
+connection's whole row filled with `ConnectionColor::fill()` under the
+selection and hover `ListItem` draws over it. The dot is the connection's own
+state (`ProfileState`). `a_tinted_sidebar_row_reads_in_every_theme` holds the
+fill to the floors the other tints keep; `Theme::text_faint` is under any floor
+on some surfaces untinted, so the host and the count are held to what a tint
+takes from them instead. While the filter has text, a line under the tree
+counts the listed connections that have not loaded, which it could not search.
+
+Settings > General > Sidebar carries three display settings, stored in
+`[settings]` (`sidebar_density`, `sidebar_show_host`, `sidebar_show_sizes`, each
+absent when never set). Density (Compact, Standard, Comfortable: row height and
+indent step 22/12, 26/14 and 30/16 px) is the connections tree's alone: the
+simple explorer keeps its own rows whatever it is, since no density reproduces
+its row exactly (its indent step is 12 px, Compact's, but not its height). Show host drops the host from connection rows. Show sizes off
+draws no size in either tree and means no read: `load_sizes` and the database
+sizes step return before sending `sizes()`, and turning it on again reads every
+connected profile and loaded database (`sidebar::shown_size` decides the slot;
+the agent's own catalog read is not part of it).
+
 ## Titlebar and appearance
 
 - **Titlebar**: macOS and Windows get DBDelve's own strip over a transparent

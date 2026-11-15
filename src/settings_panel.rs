@@ -24,7 +24,7 @@ use crate::{
     keybindings::{self, KeybindingSpec},
     palette::Mode as PaletteMode,
     scroller::{SmoothScrollable, smooth},
-    sidebar::{ListingScope, ViewMode},
+    sidebar::{Density, ListingScope, ViewMode},
     theme::{
         Appearance, FontSlot, OPACITY_MAX, OPACITY_MIN, OPACITY_STEP, Theme, fonts, layout,
         popup_theme,
@@ -123,6 +123,9 @@ enum SettingId {
     ColorTitlebar,
     SidebarEveryConnection,
     SidebarCurrentProject,
+    SidebarDensity,
+    SidebarShowHost,
+    SidebarShowSizes,
     Font(FontSlot),
     /// A [`KeybindingSpec::id`].
     Keybinding(&'static str),
@@ -240,6 +243,40 @@ fn setting_rows() -> Vec<SettingRow> {
             "Only the current project",
             "List only the connections of the project in front.",
             &["sidebar", "tree", "connections", "project", "explorer"],
+        ),
+        row(
+            SettingId::SidebarDensity,
+            SettingsTab::General,
+            "Sidebar",
+            "Density",
+            "How tall the rows of the connections tree are. The tree for the \
+             connection in front keeps its own.",
+            &[
+                "sidebar",
+                "tree",
+                "rows",
+                "height",
+                "compact",
+                "comfortable",
+            ],
+        ),
+        row(
+            SettingId::SidebarShowHost,
+            SettingsTab::General,
+            "Sidebar",
+            "Show host",
+            "Connection rows show the host and port, or the file path.",
+            &["sidebar", "tree", "endpoint", "address", "port", "path"],
+        ),
+        row(
+            SettingId::SidebarShowSizes,
+            SettingsTab::General,
+            "Sidebar",
+            "Show sizes",
+            "Rows show each table's size on disk, in this tree and in the tree \
+             for the connection in front. Off, DBDelve does not read sizes at \
+             all.",
+            &["sidebar", "tree", "bytes", "disk", "statistics"],
         ),
         row(
             SettingId::CheckForUpdates,
@@ -957,6 +994,37 @@ fn render_control(
                 })),
             )
             .into_any_element(),
+        SettingId::SidebarDensity => {
+            let density = settings.density;
+            segmented(t)
+                .children(Density::ALL.map(|choice| {
+                    segmented_choice(
+                        ("sidebar-density", choice as usize),
+                        choice.label(),
+                        choice == density,
+                        true,
+                        t,
+                    )
+                    .on_click(cx.listener(
+                        move |workspace, _: &ClickEvent, _, cx| {
+                            workspace.set_density(choice, cx);
+                        },
+                    ))
+                }))
+                .into_any_element()
+        }
+        SettingId::SidebarShowHost => switch("sidebar-show-host", settings.show_host, t)
+            .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
+                let show = !workspace.settings.show_host;
+                workspace.set_show_host(show, cx);
+            }))
+            .into_any_element(),
+        SettingId::SidebarShowSizes => switch("sidebar-show-sizes", settings.show_sizes, t)
+            .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
+                let show = !workspace.settings.show_sizes;
+                workspace.set_show_sizes(show, cx);
+            }))
+            .into_any_element(),
         SettingId::MatchSystemAppearance => switch(
             "match-system-appearance",
             settings.match_system_appearance,
@@ -1224,6 +1292,13 @@ mod tests {
     }
 
     #[test]
+    fn the_sidebar_display_settings_are_found_by_their_words() {
+        assert!(found("density").contains(&SettingId::SidebarDensity));
+        assert!(found("host").contains(&SettingId::SidebarShowHost));
+        assert!(found("sizes").contains(&SettingId::SidebarShowSizes));
+    }
+
+    #[test]
     fn font_finds_the_three_font_rows() {
         let found = found("font");
         for slot in [FontSlot::Chrome, FontSlot::Editor, FontSlot::Grid] {
@@ -1288,7 +1363,7 @@ mod tests {
                 SettingId::Keybinding("sort_active_column"),
             ]
         );
-        assert_eq!(found("!keyboard").len(), 19);
+        assert_eq!(found("!keyboard").len(), 22);
     }
 
     #[test]

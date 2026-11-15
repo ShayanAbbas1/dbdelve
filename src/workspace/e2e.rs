@@ -1277,6 +1277,15 @@ fn launch_duckdb<'a>(
     cx: &'a mut TestAppContext,
     extra: &str,
 ) -> (Entity<Workspace>, &'a mut VisualTestContext) {
+    launch_duckdb_with(cx, "", extra)
+}
+
+/// `launch_duckdb` with more `[settings]` keys.
+fn launch_duckdb_with<'a>(
+    cx: &'a mut TestAppContext,
+    settings: &str,
+    extra: &str,
+) -> (Entity<Workspace>, &'a mut VisualTestContext) {
     // Left alone, CI's live job puts a connection from `PG*` among these.
     crate::IGNORE_ENVIRONMENT.set(true);
     let directory = store::dbdelve_directory().expect("the test home has a data directory");
@@ -1295,6 +1304,7 @@ fn launch_duckdb<'a>(
              [settings]\n\
              check_for_updates = false\n\
              view_mode = \"complex\"\n\
+             {settings}\n\
              [[profiles]]\n\
              id = \"e2e\"\n\
              name = \"E2E\"\n\
@@ -1787,6 +1797,44 @@ fn a_database_that_cannot_be_opened_says_so_on_its_own_row(cx: &mut TestAppConte
             assert_eq!(workspace.opened, ["other", "other"]);
         });
 
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_filter_says_how_many_connections_it_did_not_search(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = two_connections(cx);
+        cx.simulate_resize(gpui::size(gpui::px(1024.), gpui::px(900.)));
+        settle(cx);
+        // `a` connected; `b` never asked to load.
+        let a = connections_row(&workspace, cx, &connection_row("a")).expect("a is showing");
+        click_connections_row(cx, a);
+        assert_eq!(profile_state(&workspace, cx, "b"), "idle");
+        let footer = |cx: &mut VisualTestContext| cx.debug_bounds("connections-unsearched");
+        assert!(footer(cx).is_none(), "no text, no line");
+
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                let filter = workspace.connections.filter.clone();
+                filter.update(cx, |input, cx| input.focus(window, cx));
+            });
+        });
+        cx.simulate_input("bir");
+        settle(cx);
+        assert!(
+            footer(cx).is_some(),
+            "b was not searched, and the tree says so"
+        );
+        assert_eq!(
+            workspace.read_with(cx, |workspace, _| workspace.connections.unsearched),
+            1
+        );
+        assert_eq!(profile_state(&workspace, cx, "b"), "idle", "and stays idle");
+
+        cx.simulate_keystrokes("secondary-a backspace");
+        settle(cx);
+        assert!(footer(cx).is_none(), "cleared, the line goes");
         quit(workspace, cx);
     });
 }
@@ -7924,6 +7972,335 @@ fn moving_a_connection_to_another_project_keeps_its_rows_and_folds(cx: &mut Test
             kept(&workspace, cx),
             (rows.0, rows.1, rows.2, Some(NO_PROJECT_ROW.to_string())),
             "its project deleted"
+        );
+        quit(workspace, cx);
+    });
+}
+
+/// Where the connections tree drew `kind` (`logo`, `name`, `host`,
+/// `count`, `status`, `fill`) for the connection `id`, if it did.
+fn connection_part(
+    cx: &mut VisualTestContext,
+    kind: &str,
+    id: &str,
+) -> Option<gpui::Bounds<gpui::Pixels>> {
+    // `debug_bounds` takes a `'static` selector; a test's few rows can leak.
+    let selector: &'static str = format!("connections-{kind}-{id}").leak();
+    cx.debug_bounds(selector)
+}
+
+/// The status the connections tree's dot for `id` was drawn in.
+fn connection_dot(cx: &mut VisualTestContext, id: &str) -> Option<&'static str> {
+    ["idle", "connecting", "connected", "failed"]
+        .into_iter()
+        .find(|status| {
+            let selector: &'static str = format!("connections-dot-{id}-{status}").leak();
+            cx.debug_bounds(selector).is_some()
+        })
+}
+
+/// Two SQLite connections in complex mode, `a` in front and connected, each
+/// with its own extra keys, and `settings` among the `[settings]`.
+fn coloured_connections<'a>(
+    cx: &'a mut TestAppContext,
+    settings: &str,
+    a: &str,
+    b: &str,
+) -> (Entity<Workspace>, &'a mut VisualTestContext) {
+    // Left alone, CI's live job puts a connection from `PG*` among these.
+    crate::IGNORE_ENVIRONMENT.set(true);
+    let (workspace, cx) = launch_connections(
+        cx,
+        "create table birds (name text);",
+        &format!("view_mode = \"complex\"\n{settings}"),
+        &format!(
+            "{}{}",
+            sqlite_profile("a", "Birds", a),
+            sqlite_profile("b", "Flocks", b)
+        ),
+    );
+    settle(cx);
+    (workspace, cx)
+}
+
+/// One DuckDB profile as `profiles.toml` spells it, over the file at `path`,
+/// which is created holding `t`. A DuckDB connection counts the schemas it
+/// lists; a SQLite one is flat and counts nothing.
+fn duckdb_profile(id: &str, name: &str, path: &std::path::Path, extra: &str) -> String {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("the directory must be creatable");
+    }
+    ::duckdb::Connection::open(path)
+        .and_then(|connection| connection.execute_batch("CREATE TABLE t (id INTEGER);"))
+        .expect("the schema must apply");
+    format!(
+        "[[profiles]]\nid = {id:?}\nname = {name:?}\nhost = \"\"\ndatabase = \"\"\n\
+         user = \"\"\nengine = \"duckdb\"\npath = {:?}\n{extra}\n",
+        path.display().to_string()
+    )
+}
+
+#[gpui::test]
+fn a_connection_row_carries_its_logo_status_and_colour(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        // Left alone, CI's live job puts a connection from `PG*` among these.
+        crate::IGNORE_ENVIRONMENT.set(true);
+        let directory = store::dbdelve_directory().expect("the test home has a data directory");
+        let (workspace, cx) = launch_connections(
+            cx,
+            "",
+            "view_mode = \"complex\"",
+            &format!(
+                "{}{}",
+                duckdb_profile(
+                    "a",
+                    "Birds",
+                    &directory.join("birds.duckdb"),
+                    "color = \"red\""
+                ),
+                sqlite_profile("b", "Flocks", "")
+            ),
+        );
+        settle(cx);
+        assert_eq!(profile_state(&workspace, cx, "a"), "connected");
+
+        let [logo, name, host, count, status] =
+            ["logo", "name", "host", "count", "status"].map(|kind| {
+                connection_part(cx, kind, "a")
+                    .unwrap_or_else(|| panic!("the row of `a` draws its {kind}"))
+            });
+        assert!(
+            connection_part(cx, "fill", "a").is_some(),
+            "red fills its row"
+        );
+        let lefts = [logo, name, host, count, status].map(|bounds| bounds.left());
+        assert!(
+            lefts.windows(2).all(|pair| pair[0] < pair[1]),
+            "logo, name, host, count, status, left to right: {lefts:?}"
+        );
+        assert_eq!(connection_dot(cx, "a"), Some("connected"));
+
+        for kind in ["logo", "host", "status"] {
+            assert!(
+                connection_part(cx, kind, "b").is_some(),
+                "`b` draws its {kind}"
+            );
+        }
+        assert!(
+            connection_part(cx, "fill", "b").is_none(),
+            "`b` is uncoloured and fills nothing"
+        );
+        assert_eq!(connection_dot(cx, "b"), Some("idle"), "never absent");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_long_host_gives_way_before_the_connection_name(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        crate::IGNORE_ENVIRONMENT.set(true);
+        let directory = store::dbdelve_directory().expect("the test home has a data directory");
+        let long = directory
+            .join("a".repeat(48))
+            .join("b".repeat(48))
+            .join("c".repeat(48))
+            .join("birds.duckdb");
+        let (workspace, cx) = launch_connections(
+            cx,
+            "",
+            "view_mode = \"complex\"",
+            &duckdb_profile("a", "Birds", &long, ""),
+        );
+        settle(cx);
+        let name_before = connection_part(cx, "name", "a").expect("the name is drawn");
+        let host_before = connection_part(cx, "host", "a").expect("the host is drawn");
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let narrowest = gpui::px(crate::theme::layout::SIDEBAR_MIN_WIDTH);
+            workspace.sidebar_width.set(narrowest);
+            workspace
+                .shell_split
+                .update(cx, |state, cx| state.resize_panel(0, narrowest, window, cx));
+        });
+        settle(cx);
+
+        let name = connection_part(cx, "name", "a").expect("the name is drawn");
+        let host = connection_part(cx, "host", "a").expect("the host is drawn");
+        let count = connection_part(cx, "count", "a").expect("the count is drawn");
+        assert!(
+            host.size.width < host_before.size.width,
+            "the narrow sidebar took its room from the host"
+        );
+        assert_eq!(
+            name.size.width, name_before.size.width,
+            "the name keeps its text"
+        );
+        assert!(
+            name.right() <= host.left(),
+            "the host starts after the name"
+        );
+        assert!(
+            host.right() <= count.left(),
+            "the host ends before the count"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_status_dot_follows_the_connection(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        // `b` in front and connected; `a` never connected.
+        crate::IGNORE_ENVIRONMENT.set(true);
+        let (workspace, cx) = launch_connections(
+            cx,
+            "create table t (id integer);",
+            "view_mode = \"complex\"",
+            &format!(
+                "{}{}",
+                sqlite_profile("b", "Flocks", ""),
+                sqlite_profile("a", "Orders", "")
+            ),
+        );
+        settle(cx);
+        assert_eq!(connection_dot(cx, "a"), Some("idle"), "idle is a status");
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.connections.tree.update(cx, |_, cx| {
+                cx.emit(TreeEvent::Expanded(connection_row("a").into()));
+            });
+        });
+        assert_eq!(profile_state(&workspace, cx, "a"), "connecting");
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        assert_eq!(connection_dot(cx, "a"), Some("connecting"));
+        settle(cx);
+        assert_eq!(connection_dot(cx, "a"), Some("connected"));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn two_connections_of_one_colour_are_two_tinted_rows(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let tinted = "color = \"blue\"";
+        let (workspace, cx) = coloured_connections(cx, "", tinted, tinted);
+        for id in ["a", "b"] {
+            for kind in ["fill", "status"] {
+                assert!(
+                    connection_part(cx, kind, id).is_some(),
+                    "`{id}` draws its own {kind}"
+                );
+            }
+        }
+        let (a, b) = (
+            connection_part(cx, "fill", "a").unwrap(),
+            connection_part(cx, "fill", "b").unwrap(),
+        );
+        assert_ne!(a.origin.y, b.origin.y, "two rows, not one");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_density_setting_sets_the_connections_trees_row_height(cx: &mut TestAppContext) {
+    use crate::{sidebar::Density, theme::layout};
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = coloured_connections(cx, "sidebar_density = \"compact\"", "", "");
+        let height = |cx: &mut VisualTestContext, selector: &'static str| {
+            cx.debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} is drawn"))
+                .size
+                .height
+        };
+        assert_eq!(
+            height(cx, "connections-row-0"),
+            gpui::px(layout::chrome(22.))
+        );
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_density(Density::Comfortable, cx)
+        });
+        settle(cx);
+        assert_eq!(
+            height(cx, "connections-row-0"),
+            gpui::px(layout::chrome(30.))
+        );
+
+        // The simple tree keeps its rows whatever the density.
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_view_mode(ViewMode::Simple, cx)
+        });
+        settle(cx);
+        let simple = height(cx, "explorer-row-0");
+        for density in Density::ALL {
+            workspace.update(cx, |workspace, cx| workspace.set_density(density, cx));
+            settle(cx);
+            assert_eq!(height(cx, "explorer-row-0"), simple, "{density:?}");
+        }
+        let saved = store::peek_profiles(&[]).expect("the file reads");
+        let saved = saved.settings.and_then(|settings| settings.sidebar_density);
+        assert_eq!(saved.as_deref(), Some(Density::ALL[2].slug()));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn hiding_the_host_drops_it_from_connection_rows(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = coloured_connections(cx, "", "", "");
+        assert!(connection_part(cx, "host", "a").is_some());
+        workspace.update(cx, |workspace, cx| workspace.set_show_host(false, cx));
+        settle(cx);
+        assert!(connection_part(cx, "host", "a").is_none());
+        assert!(connection_part(cx, "host", "b").is_none());
+        let saved = store::peek_profiles(&[]).expect("the file reads");
+        assert_eq!(
+            saved
+                .settings
+                .and_then(|settings| settings.sidebar_show_host),
+            Some(false)
+        );
+        workspace.update(cx, |workspace, cx| workspace.set_show_host(true, cx));
+        settle(cx);
+        assert!(connection_part(cx, "host", "a").is_some());
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn with_sizes_off_no_size_read_starts(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) =
+            launch_duckdb_with(cx, "sidebar_show_sizes = false", "mode = \"full\"");
+        let reads = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| workspace.size_reads)
+        };
+        let at = connections_row(&workspace, cx, &connection_row("e2e")).expect("it shows");
+        click_connections_row(cx, at);
+        attach_other(&workspace, cx);
+        let other = database_row("e2e", "other");
+        let at = connections_row(&workspace, cx, &other).expect("the attached database shows");
+        click_connections_row(cx, at);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the connection is in front");
+            assert!(
+                matches!(
+                    profile.database_catalogs.get("other"),
+                    Some(CatalogState::Loaded(..))
+                ),
+                "the other database loaded"
+            );
+        });
+        assert_eq!(reads(&workspace, cx), 0, "no size was asked for");
+        assert!(connection_part(cx, "count", "e2e").is_some(), "counts stay");
+
+        workspace.update(cx, |workspace, cx| workspace.set_show_sizes(true, cx));
+        settle(cx);
+        assert_eq!(
+            reads(&workspace, cx),
+            2,
+            "one for the connection and one for the loaded database"
         );
         quit(workspace, cx);
     });

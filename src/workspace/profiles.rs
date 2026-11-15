@@ -148,6 +148,9 @@ impl Workspace {
             welcomed: Some(self.settings.welcomed),
             view_mode: Some(self.settings.view_mode.slug().into()),
             listing_scope: Some(self.settings.listing_scope.slug().into()),
+            sidebar_density: Some(self.settings.density.slug().into()),
+            sidebar_show_host: Some(self.settings.show_host),
+            sidebar_show_sizes: Some(self.settings.show_sizes),
             custom_keybindings: Some(self.settings.custom_keybindings.clone()),
             theme_opacity: Some(self.settings.theme_opacity.clone()),
         };
@@ -2342,6 +2345,38 @@ impl Workspace {
         .detach();
     }
 
+    /// Show sizes was turned on: read the sizes that were skipped, for every
+    /// connected profile whose catalog is in and every other database already
+    /// loaded over a session of its own.
+    pub(super) fn read_sizes_again(&mut self, cx: &mut Context<Self>) {
+        let reads: Vec<(String, u64, Vec<String>)> = self
+            .profiles
+            .iter()
+            .filter(|profile| {
+                matches!(profile.state, ProfileState::Connected(_))
+                    && matches!(profile.catalog, CatalogState::Loaded(..))
+            })
+            .map(|profile| {
+                let loaded = profile
+                    .database_catalogs
+                    .iter()
+                    .filter(|(name, catalog)| {
+                        matches!(catalog, CatalogState::Loaded(..))
+                            && matches!(profile.bound.get(*name), Some(BoundSession::Open(_)))
+                    })
+                    .map(|(name, _)| name.clone())
+                    .collect();
+                (profile.id.clone(), profile.generation, loaded)
+            })
+            .collect();
+        for (id, generation, databases) in reads {
+            self.load_sizes(&id, generation, cx);
+            for database in databases {
+                self.load_database_sizes(&id, &database, generation, cx);
+            }
+        }
+    }
+
     /// Dropped without a word when it fails, as the profile's own are.
     fn load_database_sizes(
         &mut self,
@@ -2350,9 +2385,16 @@ impl Workspace {
         generation: u64,
         cx: &mut Context<Self>,
     ) {
+        if !self.settings.show_sizes {
+            return;
+        }
         let Some(session) = self.session_for(id, database, generation) else {
             return;
         };
+        #[cfg(test)]
+        {
+            self.size_reads += 1;
+        }
         let task = spawn_blocking(cx.background_executor(), {
             let session = session.clone();
             move || session.connection.sizes()
@@ -2475,13 +2517,23 @@ impl Workspace {
     /// A failure is dropped without a word: a size is a nicety, and one a role
     /// may simply lack the privilege for, so a notice would repeat on every
     /// connect about something the user never asked for.
+    ///
+    /// With Show sizes off nothing is asked: a role whose statistics read takes
+    /// locks or opens every table is never sent it.
     fn load_sizes(&mut self, id: &str, generation: u64, cx: &mut Context<Self>) {
+        if !self.settings.show_sizes {
+            return;
+        }
         let Some(connection) = self
             .issued_to(id, generation)
             .and_then(|profile| profile.connection())
         else {
             return;
         };
+        #[cfg(test)]
+        {
+            self.size_reads += 1;
+        }
         let sizes_task = spawn_blocking(cx.background_executor(), move || connection.sizes());
 
         let id = id.to_string();
