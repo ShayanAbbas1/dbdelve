@@ -47,6 +47,27 @@ impl Workspace {
         self.sidebar_changed(cx);
     }
 
+    /// How tall the connections tree's rows are. The simple tree keeps its own.
+    pub(crate) fn set_density(&mut self, density: Density, cx: &mut Context<Self>) {
+        self.settings.density = density;
+        self.sidebar_changed(cx);
+    }
+
+    pub(crate) fn set_show_host(&mut self, show: bool, cx: &mut Context<Self>) {
+        self.settings.show_host = show;
+        self.sidebar_changed(cx);
+    }
+
+    /// Whether either tree draws sizes. Off, none is read; turned on again,
+    /// every connected profile and every database already loaded is read.
+    pub(crate) fn set_show_sizes(&mut self, show: bool, cx: &mut Context<Self>) {
+        let was = std::mem::replace(&mut self.settings.show_sizes, show);
+        self.sidebar_changed(cx);
+        if show && !was {
+            self.read_sizes_again(cx);
+        }
+    }
+
     /// A project's listing scope: its own choice, or with `None` the global
     /// setting's.
     pub(crate) fn set_project_listing(

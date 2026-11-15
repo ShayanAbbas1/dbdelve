@@ -93,6 +93,70 @@ impl ListingScope {
     }
 }
 
+/// How tall the connections tree's rows are and how far each level steps in.
+/// The simple tree keeps its own rows whatever this is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Density {
+    Compact,
+    #[default]
+    Standard,
+    Comfortable,
+}
+
+impl Density {
+    pub(crate) const ALL: [Density; 3] =
+        [Density::Compact, Density::Standard, Density::Comfortable];
+
+    /// How `profiles.toml` spells it.
+    pub(crate) fn slug(self) -> &'static str {
+        match self {
+            Density::Compact => "compact",
+            Density::Standard => "standard",
+            Density::Comfortable => "comfortable",
+        }
+    }
+
+    /// The density a stored slug names; none, or one this build does not
+    /// know, is the standard one.
+    pub(crate) fn from_slug(slug: Option<&str>) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|density| Some(density.slug()) == slug)
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Density::Compact => "Compact",
+            Density::Standard => "Standard",
+            Density::Comfortable => "Comfortable",
+        }
+    }
+
+    /// A row's height before zoom.
+    pub(crate) fn row_height(self) -> f32 {
+        match self {
+            Density::Compact => 22.,
+            Density::Standard => 26.,
+            Density::Comfortable => 30.,
+        }
+    }
+
+    /// What each level of depth adds to a row's indent, before zoom.
+    pub(crate) fn indent(self) -> f32 {
+        match self {
+            Density::Compact => 12.,
+            Density::Standard => 14.,
+            Density::Comfortable => 16.,
+        }
+    }
+}
+
+/// The size a row draws: the one it has, while sizes are shown.
+pub(crate) fn shown_size(size: Option<u64>, show_sizes: bool) -> Option<u64> {
+    size.filter(|_| show_sizes)
+}
+
 /// The scope a project in front lists: its own choice, or `global` when it
 /// has none, when its choice is one this build cannot read, and when no
 /// project is in front.
@@ -312,6 +376,11 @@ pub(crate) struct SidebarTree {
     /// that has not loaded has no entry: nothing is counted before it is
     /// known, and never as `0`.
     pub(crate) counts: HashMap<String, usize>,
+    /// While there is text, how many of the listed connections have not
+    /// loaded, so the filter could not look inside them. Nothing loads for a
+    /// filter, and a tree that dropped them without a word would read as
+    /// having searched them.
+    pub(crate) unsearched: usize,
 }
 
 /// What a loaded schema or database with nothing in it says in its one row.
@@ -338,7 +407,8 @@ pub(crate) const NO_OBJECTS: &str = "No objects";
 /// connection that has not loaded is kept only by its own name, and folded,
 /// since nothing here can load it; a project is kept by its name or by a
 /// connection it kept. While there is text every kept row that has rows under
-/// it is open, so a match is seen, and the counts are of the rows kept.
+/// it is open, so a match is seen, and the counts are of the rows kept. The
+/// listed connections that have not loaded are counted in `unsearched`.
 pub(crate) fn build(
     projects: &[StoredProject],
     listed: Vec<Listed<'_>>,
@@ -356,14 +426,19 @@ pub(crate) fn build(
     // connection a second project also names stays under the first, as it
     // does in the palette.
     let mut buckets: Vec<Vec<TreeItem>> = vec![Vec::new(); projects.len() + 1];
+    let mut unsearched = vec![0; projects.len() + 1];
     for connection in listed {
         let bucket = projects
             .iter()
             .position(|project| project.connections.iter().any(|id| id == connection.id))
             .map_or(0, |at| at + 1);
+        if search.filtering && !matches!(connection.content, Content::Loaded(_)) {
+            unsearched[bucket] += 1;
+        }
         buckets[bucket].extend(connection_item(&mut tree, connection, folds, &mut search));
     }
     if projects.is_empty() {
+        tree.unsearched = unsearched[0];
         tree.items = buckets.swap_remove(0);
         tree.highlights.extend(search.builder.into_highlights());
         return tree;
@@ -372,10 +447,12 @@ pub(crate) fn build(
         let bucket = current
             .and_then(|name| projects.iter().position(|project| project.name == name))
             .map_or(0, |at| at + 1);
+        tree.unsearched = unsearched[bucket];
         tree.items = buckets.swap_remove(bucket);
         tree.highlights.extend(search.builder.into_highlights());
         return tree;
     }
+    tree.unsearched = unsearched.iter().sum();
     let current_row = group_row(current);
     let mut buckets = buckets.into_iter();
     // A group with nothing in it is a row that only says so, which is wanted
@@ -781,6 +858,25 @@ mod tests {
     use super::*;
     use crate::db::{Catalog, Relation, RelationKind, Schema};
     use crate::explorer;
+
+    #[test]
+    fn each_density_has_its_row_height_and_indent() {
+        let steps = Density::ALL.map(|density| (density.row_height(), density.indent()));
+        assert_eq!(steps, [(22., 12.), (26., 14.), (30., 16.)]);
+        assert_eq!(Density::default(), Density::Standard);
+        for density in Density::ALL {
+            assert_eq!(Density::from_slug(Some(density.slug())), density);
+        }
+        assert_eq!(Density::from_slug(None), Density::Standard);
+        assert_eq!(Density::from_slug(Some("roomy")), Density::Standard);
+    }
+
+    #[test]
+    fn a_size_is_shown_only_while_sizes_are_on() {
+        assert_eq!(shown_size(Some(10), true), Some(10));
+        assert_eq!(shown_size(Some(10), false), None);
+        assert_eq!(shown_size(None, true), None);
+    }
 
     fn project(name: &str, members: &[&str]) -> StoredProject {
         StoredProject {
@@ -1825,6 +1921,37 @@ mod tests {
         assert!(kept.highlights.contains_key(&connection_row("u")));
         // No text keeps every connection, as before.
         assert_eq!(with("").items.len(), 1);
+    }
+
+    #[test]
+    fn the_filter_counts_the_listed_connections_it_could_not_look_inside() {
+        let projects = [project("Zoo", &["z"])];
+        let with = |scope: ListingScope, current: Option<&str>, filter: &str| {
+            super::build(
+                &projects,
+                vec![
+                    listed("a", "Birds", Content::Loaded(tables(&["birds"], filter))),
+                    unloaded_named("u", "Flocks"),
+                    listed("f", "Pond", Content::Failed("refused".into())),
+                    unloaded_named("z", "Keepers"),
+                ],
+                &HashMap::new(),
+                scope,
+                current,
+                filter,
+            )
+            .unsearched
+        };
+
+        // Idle and failed alike: neither has rows to look in, kept by its
+        // name or not.
+        assert_eq!(with(ListingScope::All, None, "bir"), 3);
+        assert_eq!(with(ListingScope::All, None, "flo"), 3);
+        // Only what is listed: the current project alone, or no project.
+        assert_eq!(with(ListingScope::Current, Some("Zoo"), "bir"), 1);
+        assert_eq!(with(ListingScope::Current, None, "bir"), 2);
+        // No text, no search.
+        assert_eq!(with(ListingScope::All, None, ""), 0);
     }
 
     #[test]

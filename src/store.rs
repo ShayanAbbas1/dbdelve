@@ -677,6 +677,18 @@ pub struct StoredSettings {
     /// project in front). Absent reads as `all`. A scalar, above the tables.
     #[serde(default)]
     pub listing_scope: Option<String>,
+    /// How tall the connections tree's rows are: `compact`, `standard` or
+    /// `comfortable`. Absent reads as standard, and is not written back until
+    /// a save has a value. A scalar, above the tables.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidebar_density: Option<String>,
+    /// Whether the connections tree's rows show their host. Absent reads as on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidebar_show_host: Option<bool>,
+    /// Whether either tree shows table sizes, and whether DBDelve reads them
+    /// at all. Absent reads as on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidebar_show_sizes: Option<bool>,
     /// Keybinding overrides, keyed by the action id in
     /// `keybindings::REGISTRY`. Only the ones a user actually changed --
     /// everything else stays on whatever the running build defaults to.
@@ -4449,6 +4461,9 @@ open_objects = []
                 welcomed: Some(true),
                 view_mode: Some("complex".into()),
                 listing_scope: Some("current".into()),
+                sidebar_density: Some("compact".into()),
+                sidebar_show_host: Some(false),
+                sidebar_show_sizes: Some(false),
                 custom_keybindings: Some(HashMap::from([(
                     "apply_edits".to_string(),
                     "cmd-shift-s".to_string(),
@@ -4637,6 +4652,37 @@ open_objects = []
             !encode_profiles(&old)
                 .expect("it encodes")
                 .contains("listing_scope")
+        );
+    }
+
+    #[test]
+    fn the_sidebar_display_settings_round_trip_and_an_old_file_reads_the_defaults() {
+        let file = "[settings]\nsidebar_density = \"compact\"\nsidebar_show_host = false\n\
+                    sidebar_show_sizes = false\n";
+        let list = decode_profiles(file, &[]).expect("the file loads");
+        let settings = list.settings.as_ref().expect("settings");
+        assert_eq!(settings.sidebar_density.as_deref(), Some("compact"));
+        assert_eq!(settings.sidebar_show_host, Some(false));
+        assert_eq!(settings.sidebar_show_sizes, Some(false));
+        let text = encode_profiles(&list).expect("the file encodes");
+        assert_eq!(text.matches("sidebar_").count(), 3, "{text}");
+        assert_eq!(decode_profiles(&text, &[]).expect("it loads again"), list);
+
+        let old = decode_profiles("[settings]\ncheck_for_updates = false\n", &[])
+            .expect("the file loads");
+        let settings = old.settings.as_ref().expect("settings");
+        assert_eq!(
+            (
+                &settings.sidebar_density,
+                settings.sidebar_show_host,
+                settings.sidebar_show_sizes
+            ),
+            (&None, None, None)
+        );
+        assert!(
+            !encode_profiles(&old)
+                .expect("it encodes")
+                .contains("sidebar_")
         );
     }
 

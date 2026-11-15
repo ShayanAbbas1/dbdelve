@@ -20,8 +20,8 @@ use crate::explorer::{
     Member, PINNED_GROUP, QUERIES_GROUP, Shortcut, folds, is_schema_row, saved_query,
 };
 use crate::icons::{queries_group_icon, saved_query_icon};
-use crate::sidebar::{self as model, Content, Listed, Node, schema_row_is_a_database};
-use crate::ui::row_icon_tinted;
+use crate::sidebar::{self as model, Content, Listed, Node, schema_row_is_a_database, shown_size};
+use crate::ui::{Status, row_icon_tinted, status_dot};
 
 /// The id of the row of `profile`'s front tab in the connections tree, if
 /// the tab has one.
@@ -35,6 +35,24 @@ pub(crate) fn front_row_id(profile: &Profile) -> Option<String> {
     ))
 }
 
+/// What a connection's row draws from its profile, copied once per frame for
+/// the tree's row closure.
+struct RowLook {
+    color: Option<ConnectionColor>,
+    status: Status,
+    host: String,
+}
+
+/// The name a test reads a drawn status by.
+fn status_name(status: Status) -> &'static str {
+    match status {
+        Status::Idle => "idle",
+        Status::Connecting => "connecting",
+        Status::Connected => "connected",
+        Status::Failed => "failed",
+    }
+}
+
 pub(crate) struct ConnectionsSidebar {
     pub(crate) tree: Entity<TreeState>,
     /// What each row stands for, by row id.
@@ -43,6 +61,8 @@ pub(crate) struct ConnectionsSidebar {
     pub(crate) shortcuts: Arc<HashMap<String, Shortcut>>,
     /// How many rows each folder row holds, by row id.
     pub(crate) counts: Arc<HashMap<String, usize>>,
+    /// How many listed connections the filter could not look inside.
+    pub(crate) unsearched: usize,
     /// What the tree is narrowed by.
     pub(crate) filter: Entity<InputState>,
     /// The folds the tree had when the first key was typed, which come back
@@ -56,8 +76,7 @@ pub(crate) struct ConnectionsSidebar {
 impl ConnectionsSidebar {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Workspace>) -> Self {
         let tree = cx.new(|cx| TreeState::new(cx));
-        let filter =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Filter connections and objects…"));
+        let filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter loaded objects…"));
         cx.subscribe(&filter, |workspace, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 workspace.rebuild_connections(cx);
@@ -79,6 +98,7 @@ impl ConnectionsSidebar {
             highlights: Arc::default(),
             shortcuts: Arc::default(),
             counts: Arc::default(),
+            unsearched: 0,
             filter,
             folds_before_filter: None,
             group: None,
@@ -201,6 +221,7 @@ impl Workspace {
         self.connections.highlights = Arc::new(built.highlights);
         self.connections.shortcuts = Arc::new(built.shortcuts);
         self.connections.counts = Arc::new(built.counts);
+        self.connections.unsearched = built.unsearched;
         tree.update(cx, |tree, cx| {
             tree.set_items(built.items, cx);
             // A row the user moved to stays selected: a landing in the
@@ -331,6 +352,28 @@ impl Workspace {
                 )
             })
             .collect();
+        // What a connection's row says about it, read from the profile on
+        // every frame rather than baked into the tree, so a colour or a state
+        // shows on the next frame without a rebuild.
+        let looks: HashMap<String, RowLook> = self
+            .profiles
+            .iter()
+            .map(|profile| {
+                (
+                    profile.id.clone(),
+                    RowLook {
+                        color: profile.color,
+                        status: Status::from(&profile.state),
+                        host: profile.config.endpoint(),
+                    },
+                )
+            })
+            .collect();
+        let (density, show_host, show_sizes) = (
+            self.settings.density,
+            self.settings.show_host,
+            self.settings.show_sizes,
+        );
         let tree = render_tree(&self.connections.tree, move |index, entry, _, _, cx| {
             let t = *theme(cx);
             let id = entry.item().id.as_str();
@@ -430,14 +473,32 @@ impl Workspace {
                 _ if folder_shortcut => Some(icon::FOLDER),
                 _ => None,
             };
+            let connection = match node {
+                Some(Node::Connection { profile }) => looks
+                    .get(profile.as_str())
+                    .map(|look| (profile.as_str(), look)),
+                _ => None,
+            };
+            let host = connection
+                .map(|(_, look)| look.host.as_str())
+                .filter(|host| show_host && !host.is_empty());
+            // The fill sits under the row's own content; `ListItem` draws the
+            // selection and the hover over it, so a selected row still reads
+            // as selected.
             let row = row
                 .mx(px(layout::SPACE_XS))
                 .rounded(px(layout::RADIUS_CONTROL))
+                .when_some(connection.and_then(|(_, look)| look.color), |row, color| {
+                    row.bg(color.fill())
+                })
                 // `ListItem` sizes its text in `rems`, which tracks the
                 // library's 16 rather than dbdelve's body size.
                 .text_size(px(layout::chrome(layout::TEXT_MD)))
+                // The tree gives every row the height of its first, so each
+                // is told its density's.
+                .h(px(layout::chrome(density.row_height())))
                 .pl(px(
-                    layout::SPACE_SM + entry.depth() as f32 * layout::SPACE_MD
+                    layout::SPACE_SM + entry.depth() as f32 * density.indent()
                 ))
                 .child(
                     div()
@@ -452,39 +513,116 @@ impl Workspace {
                                 false => row_icon(t, path).into_any_element(),
                             })
                         })
-                        .when_some(heading, |row, path| row.child(row_icon(t, path)))
+                        .when_some(heading, |row, path| {
+                            row.child(match connection {
+                                Some((profile, look)) => {
+                                    let profile = profile.to_string();
+                                    div()
+                                        .flex_none()
+                                        .debug_selector(move || {
+                                            format!("connections-logo-{profile}")
+                                        })
+                                        .child(row_icon_tinted(t, path, look.color))
+                                        .into_any_element()
+                                }
+                                None => row_icon(t, path).into_any_element(),
+                            })
+                        })
                         .child(match pinned_group {
                             // The tree gives every row the height of its first:
                             // the empty text keeps this one a line tall.
                             true => div().flex_1().flex().items_center().child("\u{200B}"),
-                            false => div()
-                                .flex_1()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .whitespace_nowrap()
-                                .child(label),
+                            // A host after the name takes the room the name
+                            // leaves, so the name shortens only once the host
+                            // has none.
+                            false => {
+                                let name = div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .whitespace_nowrap()
+                                    .when(host.is_none(), |name| name.flex_1())
+                                    .child(label);
+                                match connection {
+                                    Some((profile, _)) => {
+                                        let profile = profile.to_string();
+                                        name.debug_selector(move || {
+                                            format!("connections-name-{profile}")
+                                        })
+                                    }
+                                    None => name,
+                                }
+                            }
+                        })
+                        .when_some(connection.zip(host), |row, ((profile, _), host)| {
+                            let profile = profile.to_string();
+                            row.child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .whitespace_nowrap()
+                                    .text_color(t.text_faint)
+                                    .text_size(px(layout::chrome(layout::TEXT_XS)))
+                                    .debug_selector(move || format!("connections-host-{profile}"))
+                                    .child(host.to_string()),
+                            )
                         })
                         .when_some(counts.get(id), |row, count| {
+                            let tag = connection.map(|(profile, _)| profile.to_string());
                             row.child(
                                 div()
                                     .flex_none()
                                     .whitespace_nowrap()
                                     .text_color(t.text_faint)
                                     .text_size(px(layout::chrome(layout::TEXT_XS)))
+                                    .when_some(tag, |count, profile| {
+                                        count.debug_selector(move || {
+                                            format!("connections-count-{profile}")
+                                        })
+                                    })
                                     .child(count.to_string()),
                             )
                         })
-                        .when_some(leaf.and_then(|leaf| leaf.size), |row, size| {
+                        .when_some(
+                            shown_size(leaf.and_then(|leaf| leaf.size), show_sizes),
+                            |row, size| {
+                                row.child(
+                                    div()
+                                        .flex_none()
+                                        .whitespace_nowrap()
+                                        .text_color(t.text_faint)
+                                        .text_size(px(layout::chrome(layout::TEXT_XS)))
+                                        .child(human_bytes(size)),
+                                )
+                            },
+                        )
+                        // The user's own connection, in a slot as wide as the
+                        // icon column.
+                        .when_some(connection, |row, (profile, look)| {
+                            let (slot, dot) = (profile.to_string(), profile.to_string());
+                            let status = look.status;
                             row.child(
                                 div()
                                     .flex_none()
-                                    .whitespace_nowrap()
-                                    .text_color(t.text_faint)
-                                    .text_size(px(layout::chrome(layout::TEXT_XS)))
-                                    .child(human_bytes(size)),
+                                    .size(px(layout::chrome(layout::ICON_SIZE)))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .debug_selector(move || format!("connections-status-{slot}"))
+                                    .child(status_dot(t, status).debug_selector(move || {
+                                        format!("connections-dot-{dot}-{}", status_name(status))
+                                    })),
                             )
-                        }),
+                        })
+                        .when_some(
+                            connection.and_then(|(profile, look)| look.color.map(|_| profile)),
+                            |row, profile| {
+                                let profile = profile.to_string();
+                                row.debug_selector(move || format!("connections-fill-{profile}"))
+                            },
+                        ),
                 )
                 .debug_selector(move || format!("connections-row-{index}"));
             if missing || (leaf.is_none() && query.is_none()) {
@@ -536,5 +674,35 @@ impl Workspace {
                     .on_action(cx.listener(Self::open_sidebar_item))
                     .child(tree),
             )
+            .children(unsearched_line(self.connections.unsearched).map(|line| {
+                div()
+                    .debug_selector(|| "connections-unsearched".into())
+                    .flex_shrink_0()
+                    .flex()
+                    .items_start()
+                    .gap(px(layout::SPACE_XS))
+                    .px(px(layout::SPACE_SM))
+                    .py(px(layout::SPACE_XS))
+                    .border_t_1()
+                    .border_color(t.border)
+                    .text_size(px(layout::chrome(layout::TEXT_SM)))
+                    .text_color(t.text_muted)
+                    .child(div().flex_none().child(row_icon(t, icon::SEARCH)))
+                    // Wrapped, not clipped: the sidebar is narrow, and a
+                    // sentence cut off mid-word says nothing.
+                    .child(div().flex_1().min_w_0().child(line))
+            }))
+    }
+}
+
+/// What the foot of the filtered tree says about the connections the filter
+/// could not look inside, or nothing when it looked inside them all.
+fn unsearched_line(unsearched: usize) -> Option<String> {
+    match unsearched {
+        0 => None,
+        1 => Some("1 connection is not loaded and was not searched".into()),
+        n => Some(format!(
+            "{n} connections are not loaded and were not searched"
+        )),
     }
 }
