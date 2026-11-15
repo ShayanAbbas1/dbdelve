@@ -24,6 +24,7 @@ const FAKE: EngineSpec = EngineSpec {
     default_port: None,
     takes_options: false,
     takes_service: false,
+    takes_startup_script: false,
     resolves_srv: false,
     system_databases: &[],
     binary_types: &[],

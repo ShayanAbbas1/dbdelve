@@ -5683,6 +5683,68 @@ pub(crate) fn gate_own_run(
     gate(verdict, mode, confirmed).filter(|stop| !(run_unreadable && *stop == Stop::RunOnce))
 }
 
+/// The statements of a profile's startup script, judged as the statements of
+/// any other submission are, or why the script may not run. Called at the
+/// form's save and again at every connect, under the profile's mode as it
+/// stands, so a script written under one mode and a profile since lowered
+/// does not run on trust.
+///
+/// All of it or none of it: every unit passes [`gate`] under `mode`, and the
+/// whole leaves no transaction open, which a session that replays the script
+/// on every connection it opens could not close. No dialog is raised -- a
+/// script has no one to ask -- so a statement the gate would stop at a
+/// confirmation fails the script the same way one it refuses does. A blank
+/// script is no script and returns no statements; one holding only comments
+/// is refused, as it was written to do something.
+///
+/// The messages say what the gate found and never repeat the script.
+pub(crate) fn startup_statements(
+    engine: Engine,
+    mode: Mode,
+    confirmed: &[Destructive],
+    script: &str,
+) -> Result<Vec<String>, String> {
+    if script.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let refused = |reason: String| format!("The startup script was not run: {reason}");
+    batch_counts(engine, script).map_err(refused)?;
+    let units: Vec<String> = queued_statements(engine, script, None)
+        .into_iter()
+        .map(|range| script[range].to_string())
+        .collect();
+    if units.is_empty() {
+        return Err("The startup script holds no statement.".into());
+    }
+    for unit in &units {
+        match gate(&classify(engine, unit), mode, confirmed) {
+            None => {}
+            Some(Stop::Upgrade(needed)) => {
+                return Err(refused(format!(
+                    "it holds a statement that needs {}, and this connection is {}.",
+                    needed.label(),
+                    mode.label()
+                )));
+            }
+            Some(Stop::Confirm(kind)) => {
+                return Err(refused(format!(
+                    "it holds a {} statement, which this connection asks about first.",
+                    kind.label()
+                )));
+            }
+            Some(Stop::RunOnce) => {
+                return Err(refused(
+                    "DBDelve could not read one of its statements.".into(),
+                ));
+            }
+        }
+    }
+    if leaves(engine, script).transaction == Some(true) || transaction_uncertain(engine, script) {
+        return Err(refused("it would leave a transaction open.".into()));
+    }
+    Ok(units)
+}
+
 /// `sql` laid out over several lines: the same tokens, indented. Refused when
 /// the buffer holds a dollar-quoted body, which this cannot reflow safely.
 ///
@@ -12168,5 +12230,76 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A startup script is judged by the gate every statement is, one unit at
+    /// a time under the profile's mode, and refused whole: a refusal runs none
+    /// of it, and what it says never repeats the script.
+    #[test]
+    fn a_startup_script_is_gated_like_any_statement() {
+        let read_only =
+            |engine, script: &str| startup_statements(engine, Mode::ReadOnly, &[], script);
+        let full = |script: &str| startup_statements(Engine::Postgres, Mode::Full, &[], script);
+
+        assert_eq!(
+            read_only(Engine::Postgres, "SET search_path TO app, public"),
+            Ok(vec!["SET search_path TO app, public".to_string()])
+        );
+        let two = read_only(
+            Engine::Postgres,
+            "SET search_path TO a;\nSET search_path TO b",
+        )
+        .expect("two settings are two units");
+        assert_eq!(two.len(), 2);
+        assert!(
+            two[0].starts_with("SET search_path TO a") && two[1] == "SET search_path TO b",
+            "{two:?}"
+        );
+
+        assert_eq!(read_only(Engine::Postgres, "   \n"), Ok(vec![]));
+        for script in [
+            "-- nothing\n/* here */",
+            "SELEC nonsense ??",
+            "SET GLOBAL x = 1;;;;( ",
+        ] {
+            let refused = read_only(Engine::Postgres, script).expect_err(script);
+            assert!(refused.starts_with("The startup script"), "{refused}");
+        }
+        let write = read_only(Engine::MySql, "INSERT INTO secret_table VALUES (1)")
+            .expect_err("a write needs more");
+        assert!(write.starts_with("The startup script"), "{write}");
+        assert!(!write.contains("secret_table"), "{write}");
+
+        for script in ["BEGIN", "BEGIN; SET search_path TO app; COMMIT"] {
+            let refused = full(script).expect_err(script);
+            assert!(refused.starts_with("The startup script"), "{refused}");
+            assert!(refused.contains("transaction"), "{refused}");
+        }
+
+        let dropped = full("DROP TABLE secret_table").expect_err("a drop asks first");
+        assert!(dropped.starts_with("The startup script"), "{dropped}");
+        assert!(!dropped.contains("secret_table"), "{dropped}");
+        assert!(
+            startup_statements(
+                Engine::Postgres,
+                Mode::Full,
+                &[Destructive::Drop],
+                "DROP TABLE secret_table"
+            )
+            .is_ok()
+        );
+
+        // A mix is refused whole, the permitted statement included.
+        let mixed = read_only(
+            Engine::Postgres,
+            "SELECT 1;\nDELETE FROM secret_table WHERE id = 1",
+        )
+        .expect_err("a write is not a read");
+        assert!(mixed.starts_with("The startup script"), "{mixed}");
+        assert!(!mixed.contains("secret_table"), "{mixed}");
+
+        let counted = startup_statements(Engine::SqlServer, Mode::Full, &[], "SELECT 1;\nGO 2")
+            .expect_err("a counted GO repeats its batch");
+        assert!(counted.starts_with("The startup script"), "{counted}");
     }
 }

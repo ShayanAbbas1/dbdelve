@@ -810,6 +810,21 @@ pub struct Connection {
     /// asked once per session: Structure would otherwise pay a round trip for
     /// it on every open.
     statistics_expression: Arc<OnceLock<bool>>,
+    /// The statements the profile's gated startup script came to, replayed by
+    /// [`Self::alongside`] and [`Self::on_database`] on every session opened
+    /// for the user. Empty until [`Self::with_startup`] sets it.
+    startup: Arc<[String]>,
+}
+
+/// The profile's startup statements on `connection`, in the order written.
+/// Ordinary statements after the connect and never the driver's `init`: a
+/// failing `init` is retried without TLS under `sslmode=prefer`, and the
+/// script is the user's text, which has no business causing that.
+fn replay(connection: &mut Conn, startup: &[String]) -> Result<(), DbError> {
+    startup
+        .iter()
+        .try_for_each(|statement| connection.query_drop(statement))
+        .map_err(|error| query_error(&error))
 }
 
 impl Connection {
@@ -833,8 +848,24 @@ impl Connection {
                 side: Arc::default(),
                 graph: GraphCancel::default(),
                 statistics_expression: Arc::default(),
+                startup: Arc::default(),
             })
         })
+    }
+
+    /// Runs `statements` now on this session and keeps them for every session
+    /// opened beside it. The first error stops the rest. Cancel and `KILL`
+    /// sessions never run them.
+    pub fn with_startup(mut self, statements: Vec<String>) -> Result<Self, DbError> {
+        replay(
+            &mut *self.connection.lock().map_err(|_| DbError {
+                message: "The connection is unavailable after an earlier internal failure.".into(),
+                position: None,
+            })?,
+            &statements,
+        )?;
+        self.startup = statements.into();
+        Ok(self)
     }
 
     pub fn engine(&self) -> Engine {
@@ -844,7 +875,8 @@ impl Connection {
     /// A second session, for a statement to run on beside this one's; see
     /// [`super::Connection::query_alongside`]. It shares the side session.
     pub fn alongside(&self) -> Result<Self, DbError> {
-        let connection = connect(&self.server, self.engine, self.dial()?)?;
+        let mut connection = connect(&self.server, self.engine, self.dial()?)?;
+        replay(&mut connection, &self.startup)?;
         Ok(Self {
             connection_id: connection.connection_id(),
             connection: Arc::new(Mutex::new(connection)),
@@ -866,7 +898,8 @@ impl Connection {
             database: database.to_string(),
             ..self.server.clone()
         };
-        let connection = connect(&server, self.engine, self.dial()?)?;
+        let mut connection = connect(&server, self.engine, self.dial()?)?;
+        replay(&mut connection, &self.startup)?;
         Ok(Self {
             connection_id: connection.connection_id(),
             server,
@@ -1449,6 +1482,8 @@ impl Connection {
             side: Arc::default(),
             graph: GraphCancel::default(),
             statistics_expression: Arc::default(),
+            // Reads of DBDelve's own, never a statement of the user's.
+            startup: Arc::default(),
         };
         let matched = side.matched(shown)?;
         let names = matched.as_ref().map(|(names, _)| names.as_slice());
@@ -2333,6 +2368,46 @@ mod tests {
         assert_eq!(matched_count(1, long), Some(1));
         assert_eq!(matched_count(0, long), None);
     }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_the_startup_script_holds_on_every_user_session() {
+        for engine in [Engine::MySql, Engine::MariaDb] {
+            let config = ServerConfig {
+                sslmode: SslMode::Disable,
+                ..live_config(engine)
+            };
+            let count = |connection: &Connection| {
+                let result = connection
+                    .query("SELECT @dbdelve_n", Fetch::default())
+                    .expect("the variable reads");
+                result.rows[0].get(0).map(str::to_string)
+            };
+            let script = || vec!["SET @dbdelve_n = COALESCE(@dbdelve_n, 0) + 1".to_string()];
+            let scripted = Connection::open(&config, engine)
+                .and_then(|connection| connection.with_startup(script()))
+                .expect("the script runs");
+            assert_eq!(count(&scripted).as_deref(), Some("1"), "{engine:?}");
+            let beside = scripted.alongside().expect("a session beside it opens");
+            assert_eq!(count(&beside).as_deref(), Some("1"), "{engine:?}");
+            let other = scripted
+                .on_database("dbdelve_archive")
+                .expect("a session opens");
+            assert_eq!(count(&other).as_deref(), Some("1"), "{engine:?}");
+            assert_eq!(count(&scripted).as_deref(), Some("1"), "{engine:?}");
+
+            let plain = Connection::open(&config, engine).expect("the connection opens");
+            assert_eq!(count(&plain), None, "{engine:?}");
+
+            let Err(error) = Connection::open(&config, engine).and_then(|connection| {
+                connection.with_startup(vec!["SELECT * FROM no_such_table".into()])
+            }) else {
+                panic!("{engine:?}: a failing script should fail the open");
+            };
+            assert!(error.message.contains("no_such_table"), "{}", error.message);
+        }
+    }
+
     /// The compose database as the bastion sees it, by service name and the
     /// port inside the network.
     fn live_tunnelled() -> ServerConfig {

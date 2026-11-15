@@ -9,6 +9,7 @@ use std::time::Duration;
 use gpui::{Animation, AnimationExt, Div, PathPromptOptions, StyledText, ease_out_quint};
 use gpui_component::button::Button;
 use gpui_component::checkbox::Checkbox;
+use gpui_component::input::Textarea;
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::spinner::Spinner;
 use gpui_component::tooltip::Tooltip;
@@ -733,6 +734,28 @@ impl Workspace {
             }
         }
 
+        let mut session = Vec::new();
+        // The target decides, as it does for the rows above: a plugin's
+        // process and an engine with no session to set draw none.
+        if form.target().takes_startup_script() {
+            session.push(
+                ui::stacked_option_row(
+                    "Startup script",
+                    Some(
+                        "Runs on every session DBDelve opens for this connection, checked \
+                         against its access mode first. Stored in profiles.toml as plain \
+                         text."
+                            .into(),
+                    ),
+                    div()
+                        .w_full()
+                        .child(Textarea::new(&form.startup_script).font_family(mono.clone())),
+                    t,
+                )
+                .into_any_element(),
+            );
+        }
+
         let mut behaviour = Vec::new();
         // Only while creating: past that, `Workspace::set_mode` is the one
         // door a mode changes through, from the titlebar, and it pushes the
@@ -846,6 +869,9 @@ impl Workspace {
             .child(section("Connection", connection))
             .when(!security.is_empty(), |body| {
                 body.child(section("Security", security))
+            })
+            .when(!session.is_empty(), |body| {
+                body.child(section("Session", session))
             })
             .child(section("Behaviour", behaviour))
     }

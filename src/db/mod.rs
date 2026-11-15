@@ -2171,6 +2171,28 @@ impl Connection {
         }
     }
 
+    /// Runs the profile's gated startup `statements` now, on this session, and
+    /// keeps them for every session the driver opens beside it. Only the live
+    /// connection a user works on is handed them: a connection opened from a
+    /// [`ConnectionConfig`] alone holds no script.
+    ///
+    /// An engine without a carrier is handed none; it refuses a non-empty list
+    /// rather than drop it, so a script is never silently skipped.
+    pub fn with_startup(self, statements: Vec<String>) -> Result<Self, DbError> {
+        match self {
+            Self::Sqlite(connection) => connection.with_startup(statements).map(Self::Sqlite),
+            Self::Postgres(connection) => connection.with_startup(statements).map(Self::Postgres),
+            Self::MySql(connection) => connection.with_startup(statements).map(Self::MySql),
+            Self::SqlServer(connection) => connection.with_startup(statements).map(Self::SqlServer),
+            Self::Turso(connection) => connection.with_startup(statements).map(Self::Turso),
+            Self::DuckDb(connection) => connection.with_startup(statements).map(Self::DuckDb),
+            other if statements.is_empty() => Ok(other),
+            _ => Err(plain_error(
+                "This connection runs no startup script.".into(),
+            )),
+        }
+    }
+
     /// Open now what the first run would otherwise wait on opening.
     pub fn warm(&self) {
         if let Self::Postgres(connection) = self {
@@ -7654,5 +7676,64 @@ mod tests {
             }
         }
         crate::sql_snapshots::check("spellings_read_only", &out);
+    }
+
+    /// The script is the user's session's: every session the driver opens
+    /// beside theirs replays it, and a connection opened from the config alone
+    /// never sees it.
+    #[test]
+    fn a_startup_script_replays_on_every_user_session() {
+        let directory =
+            std::env::temp_dir().join(format!("dbdelve-startup-replay-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("the directory is creatable");
+        let path = directory.join("startup.db");
+        rusqlite::Connection::open(&path).expect("the file is creatable");
+        let config = ConnectionConfig::Sqlite {
+            path: path.display().to_string(),
+            statement_timeout: 0,
+        };
+        let cache_size = |connection: &Connection| {
+            let result = connection
+                .query(
+                    "PRAGMA cache_size",
+                    &CancelToken::default(),
+                    Fetch::default(),
+                )
+                .expect("the pragma reads");
+            result.rows[0].get(0).map(str::to_string)
+        };
+
+        let plain = Connection::open(config.clone()).expect("it opens");
+        let default = cache_size(&plain);
+        assert_ne!(default.as_deref(), Some("4000"));
+        let unchanged = Connection::open(config.clone())
+            .and_then(|connection| connection.with_startup(vec![]))
+            .expect("an empty script runs nothing");
+        assert_eq!(cache_size(&unchanged), default);
+
+        let scripted = Connection::open(config.clone())
+            .and_then(|connection| connection.with_startup(vec!["PRAGMA cache_size = 4000".into()]))
+            .expect("the script runs");
+        assert_eq!(cache_size(&scripted).as_deref(), Some("4000"));
+        let apart = scripted.apart().expect("a session beside it opens");
+        assert_eq!(cache_size(&apart).as_deref(), Some("4000"));
+        let beside = scripted
+            .query_alongside(
+                "PRAGMA cache_size",
+                &CancelToken::default(),
+                Fetch::default(),
+                false,
+            )
+            .expect("a statement runs beside it");
+        assert_eq!(beside.rows[0].get(0), Some("4000"));
+
+        let fresh = Connection::open(config).expect("it opens");
+        assert_eq!(
+            cache_size(&fresh),
+            default,
+            "a connection of its own has none"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
     }
 }

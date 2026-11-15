@@ -891,6 +891,11 @@ pub struct Connection {
     graph: GraphCancel,
     /// The login's default schema in the database it opened on.
     default_schema: Option<String>,
+    /// The statements the profile's gated startup script came to, run by
+    /// [`Self::connect`] on every login: the main session's, one opened for a
+    /// database, one beside it, and any reconnect after a stop. Empty until
+    /// [`Self::with_startup`] sets it.
+    startup: Arc<[String]>,
 }
 
 impl Connection {
@@ -904,6 +909,7 @@ impl Connection {
                 alongside: false,
                 graph: GraphCancel::default(),
                 default_schema: None,
+                startup: Arc::default(),
             };
             let mut session = connection.connect()?;
             // Asked even when the profile names one, for the server's spelling
@@ -971,7 +977,7 @@ impl Connection {
         .map_err(|error| connect_error(&error, &self.server))?;
 
         self.in_flight().socket = Some(socket);
-        Ok(Session {
+        let mut session = Session {
             runtime,
             client,
             timeout: self.server.statement_timeout,
@@ -979,7 +985,32 @@ impl Connection {
             rowcount: false,
             in_transit: false,
             repeatable_read: false,
-        })
+        };
+        // Session options last on a login are the script's: a login holds them
+        // until the connection drops, so replaying here covers every one.
+        self.startup
+            .iter()
+            .try_for_each(|statement| ask(&mut session, statement).map(|_| ()))?;
+        Ok(session)
+    }
+
+    /// Runs `statements` now on the session `open` logged in, and keeps them
+    /// for every login from here on. The first error stops the rest.
+    pub fn with_startup(mut self, statements: Vec<String>) -> Result<Self, DbError> {
+        {
+            let mut session = self.session.lock().map_err(|_| {
+                plain_error(
+                    "The connection is unavailable after an earlier internal failure.".into(),
+                )
+            })?;
+            if let Some(session) = session.as_mut() {
+                statements
+                    .iter()
+                    .try_for_each(|statement| ask(session, statement).map(|_| ()))?;
+            }
+        }
+        self.startup = statements.into();
+        Ok(self)
     }
 
     /// The profile's database, or the login's default when it names none,
@@ -3111,6 +3142,35 @@ mod tests {
         assert_eq!(
             first_value(&mut session, "SELECT 1").expect("it reaches the server"),
             Some("1".to_string())
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_the_startup_script_holds_on_every_login() {
+        let first_day = |connection: &Connection| {
+            let result = connection
+                .query("SELECT @@DATEFIRST", Fetch::default())
+                .expect("the option reads");
+            result.rows[0].get(0).map(str::to_string)
+        };
+        let plain = live();
+        let default = first_day(&plain);
+        assert_ne!(default.as_deref(), Some("3"));
+        let scripted = live()
+            .with_startup(vec!["SET DATEFIRST 3".into()])
+            .expect("the script runs");
+        assert_eq!(first_day(&scripted).as_deref(), Some("3"));
+        // The lazy first login of a session beside it.
+        let beside = scripted.alongside();
+        assert_eq!(first_day(&beside).as_deref(), Some("3"));
+        let database = scripted.current_database().to_string();
+        let other = scripted.on_database(&database).expect("a session opens");
+        assert_eq!(first_day(&other).as_deref(), Some("3"));
+        assert_eq!(
+            first_day(&plain),
+            default,
+            "the script is the session's own"
         );
     }
 
@@ -6219,6 +6279,7 @@ mod tests {
             alongside: true,
             graph: GraphCancel::default(),
             default_schema: None,
+            startup: Arc::default(),
         };
         let reader = side.clone();
         let read = std::thread::spawn(move || reader.schema_graph("dbo"));
@@ -6250,6 +6311,7 @@ mod tests {
             alongside: false,
             graph: GraphCancel::default(),
             default_schema: None,
+            startup: Arc::default(),
         };
         let user = connection.clone();
         let run = std::thread::spawn(move || user.query("SELECT 1", Fetch::default()));

@@ -496,3 +496,30 @@ The core of the mode check is in `AGENTS.md`, "Connection modes". The detail:
   served. `Profile::held` is cleared as it goes and set only when the latest
   lands, or when a connect lands, which fails rather than open unheld; until
   then an unreadable statement in Read-only asks even with the opt-in on.
+
+## Startup script
+
+- **The script is user SQL, gated like any other.** `sql::startup_statements`
+  splits it with `queued_statements`, passes each unit through `classify` and
+  `gate`, and the whole through `leaves` and `transaction_uncertain`. It runs at
+  save, in Test connection and at every connect, under the profile's current
+  mode. A refusal or an error fails the connect; a script is never skipped.
+- **The live connection carries the gated statements** and its driver replays
+  them on every session it opens for the user, with no gate of its own, because
+  the statements passed one. That is why a script approved under a higher mode
+  cannot stay where the mode is lowered: `set_mode` re-gates it under the new
+  mode and reconnects the profile when it is refused, and the connect fails
+  saying so. Raising the mode, or lowering it to one the script passes, leaves
+  every session open.
+- **An import holds the mode instead.** `reconnect` will not interrupt a running
+  import, so lowering to a mode that refuses the script waits for it, with a
+  notice; the mode on screen is never below what the open sessions ran under.
+- **A connect re-checks as it lands.** A mode lowered while a connect is under
+  way finds no connection to re-gate, so the landing gates the script again
+  under the mode now picked and connects again when it is refused
+  (`begin_connect`). The same landing connects again when the script it ran is
+  no longer the profile's, which a save that edits the script and reconnects
+  would otherwise leave running the old one.
+- **An edit applies from the next connect.** A script saved while the profile is
+  connected leaves the live sessions with the statements they were given and
+  says so.

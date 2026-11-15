@@ -108,6 +108,10 @@ pub struct Connection {
     /// held: there a `USE` of the user's is meant to stay, and the catalog
     /// follows it.
     held: bool,
+    /// The statements the profile's gated startup script came to, replayed on
+    /// every session opened from this instance for the user. Empty until
+    /// [`Self::with_startup`] sets it.
+    startup: Arc<[String]>,
 }
 
 /// The database and schema unqualified names resolve in, None for where the
@@ -169,6 +173,7 @@ impl Connection {
             home: Arc::new(home),
             unpicked: None,
             held: false,
+            startup: Arc::default(),
         })
     }
 
@@ -224,6 +229,9 @@ impl Connection {
         if pick != Pick::default() {
             self.go(&connection, &pick)?;
         }
+        // After the pick, so the script runs last on a session that is already
+        // where it will work and the user's own text wins.
+        self.replay(&connection)?;
         Ok(Self {
             interrupt: connection.interrupt_handle(),
             connection: Arc::new(Mutex::new(connection)),
@@ -247,6 +255,7 @@ impl Connection {
             schema: None,
         };
         self.go(&connection, &pick)?;
+        self.replay(&connection)?;
         Ok(Self {
             interrupt: connection.interrupt_handle(),
             connection: Arc::new(Mutex::new(connection)),
@@ -255,6 +264,22 @@ impl Connection {
             held: true,
             ..self.clone()
         })
+    }
+
+    /// Runs `statements` now, in the order written, and keeps them for every
+    /// session [`Self::alongside`] and [`Self::on_database`] open. The first
+    /// error stops the rest.
+    pub fn with_startup(mut self, statements: Vec<String>) -> Result<Self, DbError> {
+        self.startup = statements.into();
+        self.replay(&*lock(&self.connection)?)?;
+        Ok(self)
+    }
+
+    /// The startup statements on `connection`, rows discarded.
+    fn replay(&self, connection: &duckdb::Connection) -> Result<(), DbError> {
+        self.startup
+            .iter()
+            .try_for_each(|statement| connection.execute_batch(statement).map_err(query_error))
     }
 
     fn pick(&self) -> std::sync::MutexGuard<'_, Pick> {
@@ -1711,6 +1736,14 @@ mod tests {
             connection.query(setup, Fetch::default()).expect("setup");
         }
         connection
+    }
+
+    #[test]
+    fn a_type_duckdb_names_no_other_way_reads_lowercase() {
+        let result = memory("")
+            .query("SELECT NULL AS nothing", Fetch::default())
+            .expect("the query runs");
+        assert_eq!(result.columns[0].data_type.as_deref(), Some("null"));
     }
 
     #[test]
@@ -3580,6 +3613,96 @@ mod tests {
             Engine::DuckDb,
             "main",
         );
+    }
+
+    /// `progress_bar_time` is scoped to the connection (`LOCAL`), so a session that
+    /// never ran the script reads the default and one that did reads the
+    /// script's value.
+    fn progress_bar_time(connection: &Connection) -> String {
+        let result = connection
+            .query(
+                "SELECT current_setting('progress_bar_time')",
+                Fetch::default(),
+            )
+            .expect("the setting reads");
+        result.rows[0].get(0).unwrap_or_default().to_string()
+    }
+
+    const SCRIPT: &str = "SET progress_bar_time = 5000";
+
+    fn startup_file(name: &str) -> (std::path::PathBuf, String) {
+        let dir =
+            std::env::temp_dir().join(format!("dbdelve-duckdb-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("startup.duckdb");
+        drop(::duckdb::Connection::open(&path).expect("the scratch database is created"));
+        let text = path.to_string_lossy().into_owned();
+        (dir, text)
+    }
+
+    #[test]
+    fn a_startup_script_replays_on_every_session_of_the_instance() {
+        let (dir, path) = startup_file("replay");
+        let plain = Connection::open(&path, 0).unwrap();
+        let scope = plain
+            .query(
+                "SELECT scope FROM duckdb_settings() WHERE name = 'progress_bar_time'",
+                Fetch::default(),
+            )
+            .unwrap();
+        assert_eq!(scope.rows[0].get(0), Some("LOCAL"));
+        let default = progress_bar_time(&plain);
+        assert_ne!(default, "5000");
+        drop(plain);
+
+        let scripted = Connection::open(&path, 0)
+            .unwrap()
+            .with_startup(vec![SCRIPT.into()])
+            .expect("the script runs");
+        assert_eq!(progress_bar_time(&scripted), "5000");
+        assert_eq!(progress_bar_time(&scripted.alongside().unwrap()), "5000");
+        let apart = crate::db::Connection::DuckDb(scripted.clone())
+            .apart()
+            .expect("a session beside it opens");
+        let crate::db::Connection::DuckDb(apart) = apart else {
+            unreachable!("apart keeps the engine")
+        };
+        assert_eq!(progress_bar_time(&apart), "5000");
+        let home = scripted.current_database().to_string();
+        let other = scripted.on_database(&home).unwrap();
+        assert_eq!(progress_bar_time(&other), "5000");
+        drop((scripted, apart, other));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_bound_tab_session_opened_by_its_caller_replays_the_startup_script() {
+        let (dir, path) = startup_file("bound");
+        let scripted = Connection::open(&path, 0)
+            .unwrap()
+            .with_startup(vec![SCRIPT.into()])
+            .unwrap();
+        let database = scripted.current_database().to_string();
+        let (session, _) = crate::session::Routed::Open {
+            from: crate::db::Connection::DuckDb(scripted),
+            database,
+            schema: None,
+            read_only: false,
+        }
+        .resolve()
+        .expect("the bound session opens");
+        let read = session
+            .query(
+                "SELECT current_setting('progress_bar_time')",
+                &crate::db::CancelToken::default(),
+                Fetch::default(),
+            )
+            .unwrap();
+        assert_eq!(read.rows[0].get(0).map(str::to_string), Some("5000".into()));
+        drop(session);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     struct ScratchDir(std::path::PathBuf);
