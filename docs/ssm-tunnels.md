@@ -84,10 +84,19 @@ Job Object. Local cleanup is independent of a bounded, best-effort remote
 remote session visible until AWS expires it. A dropped tunnel never falls
 back to a direct database connection or replays a query.
 
-**Downgrading:** older DBDelve releases do not understand the `ssm` field and
-may ignore it, connecting directly. Do not open SSM profiles with an older
-release; use a separate application variant/profile directory when testing
-older versions. Existing direct and SSH profiles work in this version.
+**Downgrading:** SSM profiles are saved with a non-string engine guard
+(`[profiles.engine.ssm]`) as well as their tunnel settings. Older releases
+cannot read that engine as a direct connection. Releases with unavailable-profile
+support retain the whole profile without opening it; earlier releases, or the
+plain-reader fallback, reject the file and may preserve it as
+`profiles.toml.broken`. Keep a backup or use a separate application variant
+when testing older versions, since those versions cannot use the SSM profile.
+Existing direct and SSH profiles retain their original format.
+
+SSM profiles from earlier development builds acquire the guard when saved by
+this build. An old copy that has never been saved by the fixed build remains
+unsafe to open in an older release. A guarded profile with missing tunnel
+settings is refused, never restored as a direct connection.
 
 ## Opt-in live verification
 

@@ -334,8 +334,8 @@ impl Profile {
             // A plugin profile's engine is the plugin, and its dialect is
             // `speaks`: `engine()` answers with the dialect.
             engine: Some(match external {
-                Some(external) => format!("{}{}", store::PLUGIN_TAG, external.plugin.id),
-                None => engine.as_str().to_string(),
+                Some(external) => format!("{}{}", store::PLUGIN_TAG, external.plugin.id).into(),
+                None => engine.as_str().into(),
             }),
             speaks: external.map(|external| external.speaks.as_str().to_string()),
             connection: external.map(|external| external.connection.clone()),
