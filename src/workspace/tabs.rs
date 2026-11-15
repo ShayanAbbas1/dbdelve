@@ -90,6 +90,10 @@ impl Workspace {
             ),
             false => (profile.front_row(), profile.session.explorer_tree.clone()),
         };
+        // Rows left out of a folded subtree are built for it first.
+        if complex && let Some(front) = front.as_deref() {
+            self.reveal_connections_row(front, cx);
+        }
         tree.update(cx, |tree, cx| {
             let front = front.map(gpui::SharedString::from).and_then(|id| {
                 tree.reveal_item(&id, gpui::ScrollStrategy::Center, cx);

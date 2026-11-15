@@ -8,24 +8,34 @@
 //! the engine a statement meets are always those of the connection it was
 //! opened on.
 
-use std::{collections::HashMap, ops::Range, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::Range,
+    sync::Arc,
+};
 
 use gpui::{Entity, SharedString, StyledText};
-use gpui_component::tree::{TreeEvent, TreeState};
+use gpui_base::actions::{SelectDown, SelectUp};
+use gpui_component::{
+    ActiveTheme as _,
+    tree::{TreeEvent, TreeItem, TreeState},
+};
 
-use super::forms::{MenuRow, explorer_menu, is_shortcut_row, node_items, shortcut_row_menu};
+use super::forms::{
+    MenuRow, explorer_menu, is_shortcut_row, node_items, selection_menu, shortcut_row_menu,
+};
 use super::profiles::{database_content, explorer_content};
 use super::*;
 use crate::db::{Levels, Syntax};
 use crate::explorer::{
-    ExplorerLeaf, Member, PINNED_GROUP, QUERIES_GROUP, Shortcut, folds, is_schema_row, saved_query,
+    ExplorerLeaf, Member, PINNED_GROUP, QUERIES_GROUP, Shortcut, is_schema_row, saved_query,
     schema_row_name,
 };
 use crate::icons::{queries_group_icon, saved_query_icon};
 use crate::session::Binding;
 use crate::sidebar::{
-    self as model, Content, Listed, Node, NodeKind, SelectedNode, node_actions,
-    schema_row_is_a_database, shown_size,
+    self as model, Content, Listed, Node, NodeKind, OPEN_ROWS_CAP, SelectedNode, Selection,
+    SelectionAction, node_actions, schema_row_is_a_database, shown_size,
 };
 use crate::ui::{Status, row_icon_tinted, status_dot};
 
@@ -104,6 +114,17 @@ pub(crate) struct ConnectionsSidebar {
     /// The folds the tree had when the first key was typed, which come back
     /// when the field is cleared: while text is in it every kept row is open.
     pub(crate) folds_before_filter: Option<HashMap<String, bool>>,
+    /// The rows a modifier click gathered; complex mode only.
+    pub(crate) selection: Selection,
+    /// The rows the last build closed because nothing had loaded under them.
+    unloaded: HashSet<String>,
+    /// The rows the last build left folded with their rows left out, and the
+    /// row each left-out row hangs from.
+    pruned: HashSet<String>,
+    hidden: HashMap<String, String>,
+    /// Rows the next build opens whatever the folds say: the rows above one
+    /// a reveal is after.
+    reveal: Vec<String>,
     /// The group the last build was made for, which `None` outer says is no
     /// build yet. A build for another group opens that one.
     group: Option<Option<String>>,
@@ -126,6 +147,7 @@ impl ConnectionsSidebar {
             if let TreeEvent::Expanded(id) = event {
                 workspace.expand_node(id, cx);
             }
+            workspace.tree_folded(cx);
         })
         .detach();
         Self {
@@ -137,6 +159,11 @@ impl ConnectionsSidebar {
             unsearched: 0,
             filter,
             folds_before_filter: None,
+            selection: Selection::default(),
+            unloaded: HashSet::new(),
+            pruned: HashSet::new(),
+            hidden: HashMap::new(),
+            reveal: Vec::new(),
             group: None,
         }
     }
@@ -157,7 +184,13 @@ impl Workspace {
             .filter(|entry| entry.depth() == 0)
             .map(|entry| entry.item().clone())
             .collect();
-        let mut folds = folds(&roots);
+        let mut folds = model::held_folds(&roots, &self.connections.unloaded);
+        // The tree is the user's unless a filter has opened it: the folds it
+        // had are kept aside from the first key, and what it holds in between
+        // is not theirs to be remembered.
+        if self.connections.folds_before_filter.is_none() {
+            self.capture_rows(&roots.iter().collect::<Vec<_>>(), &folds);
+        }
         // While text is in the filter every kept row is open, so the folds
         // the user had are kept aside from its first key and come back when
         // the field is empty. Read on every rebuild: a landing in the
@@ -173,6 +206,15 @@ impl Workspace {
             (false, None) => self.connections.folds_before_filter = Some(folds.clone()),
             (false, kept) => self.connections.folds_before_filter = kept,
             (true, None) => {}
+        }
+        // What was stored opens a row once the tree has one to open: the rows
+        // the tree holds are as it has them, so a fold made since is kept, and
+        // the rest wait for their subtree to load.
+        for row in self.profiles.iter().flat_map(|profile| &profile.open_rows) {
+            folds.entry(row.clone()).or_insert(true);
+        }
+        for row in std::mem::take(&mut self.connections.reveal) {
+            folds.insert(row, true);
         }
         // The group in front starts open. What the last build left of its
         // fold is only how it started, so it is let go when the front
@@ -249,24 +291,148 @@ impl Workspace {
             filter,
         );
         self.connections.group = Some(current);
+        self.connections.unloaded = built.unloaded;
+        self.connections.pruned = built.pruned;
+        self.connections.hidden = built.hidden;
         let front = self
             .profile()
             .map(|profile| SharedString::from(front_row_id(profile).unwrap_or_default()));
 
+        // A row that no longer exists is no longer selected. A filter hides
+        // rows without removing them, so it keeps what it hides.
+        if filter.is_empty() {
+            let present: HashSet<String> = built.nodes.keys().cloned().collect();
+            self.connections.selection.retain(&present);
+        }
+        // No selection of the user's yet, and the tree's row only the one it
+        // falls to: what was stored comes back as its rows appear.
+        let restored = filter.is_empty()
+            && self.connections.selection.rows.is_empty()
+            && selected
+                .as_ref()
+                .is_none_or(|row| front.as_ref().is_some_and(|front| front == row));
+        if restored {
+            let rows: Vec<String> = self
+                .profiles
+                .iter()
+                .flat_map(|profile| &profile.selected_rows)
+                .filter(|row| built.nodes.contains_key(row.as_str()))
+                .cloned()
+                .collect();
+            if !rows.is_empty() {
+                self.connections.selection = Selection {
+                    anchor: rows.last().cloned(),
+                    rows,
+                };
+            }
+        }
+        self.remember_selection();
         self.connections.nodes = Arc::new(built.nodes);
         self.connections.highlights = Arc::new(built.highlights);
         self.connections.shortcuts = Arc::new(built.shortcuts);
         self.connections.counts = Arc::new(built.counts);
         self.connections.unsearched = built.unsearched;
+        // When the row the tree had is gone, one of the rows still selected
+        // is where it goes, so the selection is not left with none of its own.
+        let kept = self
+            .connections
+            .selection
+            .rows
+            .last()
+            .map(|id| SharedString::from(id.clone()));
         tree.update(cx, |tree, cx| {
             tree.set_items(built.items, cx);
             // A row the user moved to stays selected: a landing in the
-            // background must not send Enter elsewhere.
-            let row = selected
-                .and_then(|selected| tree.index_of(&selected))
-                .or_else(|| front.and_then(|front| tree.index_of(&front)));
+            // background must not send Enter elsewhere. A selection that has
+            // just come back from the file is where the tree goes, not the
+            // row it fell to.
+            let at = |id: Option<SharedString>| id.and_then(|id| tree.index_of(&id));
+            let row = match restored {
+                true => at(kept.clone()).or_else(|| at(selected.clone())),
+                false => at(selected.clone()).or_else(|| at(kept)),
+            }
+            .or_else(|| at(front));
             tree.set_selected_index(row, cx);
         });
+    }
+
+    /// What the tree holds of every profile's open rows, put on the profile:
+    /// the rows open in the tree, then the ones it has no say over yet, which
+    /// wait for their subtree to load. `held` is what the tree has a say over.
+    /// The rows are written out with the profile at its next save.
+    fn capture_rows(&mut self, roots: &[&TreeItem], held: &HashMap<String, bool>) {
+        let open: Vec<Vec<String>> = self
+            .profiles
+            .iter()
+            .map(|profile| {
+                roots
+                    .iter()
+                    .map(|root| model::open_rows_of(std::slice::from_ref(*root), &profile.id))
+                    .find(|rows| !rows.is_empty())
+                    .unwrap_or_default()
+            })
+            .collect();
+        for (profile, open) in self.profiles.iter_mut().zip(open) {
+            profile.open_rows = model::remembered_rows(open, &profile.open_rows, held);
+        }
+    }
+
+    /// The selection, split between the profiles whose rows it holds. Nothing
+    /// is selected until a click has, and nothing is written then, so a
+    /// selection that is still on its way back from the file is not lost to
+    /// one that was never made.
+    fn remember_selection(&mut self) {
+        let rows = &self.connections.selection.rows;
+        if rows.is_empty() {
+            return;
+        }
+        for profile in &mut self.profiles {
+            profile.selected_rows = rows
+                .iter()
+                .filter(|row| model::profile_of_row(row) == Some(profile.id.as_str()))
+                .take(OPEN_ROWS_CAP)
+                .cloned()
+                .collect();
+        }
+    }
+
+    /// The connections tree as it stands now, put on the profiles that save
+    /// it. Not while a filter has opened the tree: its folds are not the
+    /// user's.
+    pub(crate) fn capture_tree(&mut self, cx: &mut Context<Self>) {
+        if self.view_mode() != model::ViewMode::Complex
+            || self.connections.folds_before_filter.is_some()
+        {
+            return;
+        }
+        let state = self.connections.tree.clone();
+        let state = state.read(cx);
+        let roots: Vec<&TreeItem> = (0..)
+            .map_while(|ix| state.entry(ix))
+            .filter(|entry| entry.depth() == 0)
+            .map(|entry| entry.item())
+            .collect();
+        let mut held = HashMap::new();
+        for root in &roots {
+            held.extend(model::held_folds(
+                std::slice::from_ref(*root),
+                &self.connections.unloaded,
+            ));
+        }
+        self.capture_rows(&roots, &held);
+        self.remember_selection();
+    }
+
+    /// A row of the connections tree was opened or folded: the tree as the
+    /// user has it now is what the next start comes back to, and nothing else
+    /// saves it.
+    fn tree_folded(&mut self, cx: &mut Context<Self>) {
+        if self.view_mode() != model::ViewMode::Complex {
+            return;
+        }
+        self.capture_tree(cx);
+        // Soon rather than now: a run of folds writes the file once.
+        self.remember_profiles_soon(cx);
     }
 
     /// What a row of one connection's own rows is: the object its leaf opens,
@@ -312,6 +478,172 @@ impl Workspace {
             .clone();
         let leaf = profile.session.explorer_leaves.get(id.as_ref()).copied();
         self.row_node(&profile.id, None, &id, leaf)
+    }
+
+    /// An arrow moves the tree's row alone: a set modifier clicks gathered is
+    /// let go of, down to the row the arrow leaves, so arrowing back onto one
+    /// of its rows does not gather it again.
+    fn let_go_of_gathered(&mut self, window: &Window, cx: &mut Context<Self>) {
+        // A row's menu is drawn under the tree, and its arrows move through
+        // the items of a menu that acts on the whole set.
+        let in_menu = window
+            .context_stack()
+            .iter()
+            .any(|context| context.contains("PopupMenu"));
+        if in_menu || self.connections.selection.rows.len() < 2 {
+            return;
+        }
+        if let Some(front) = self.connections.tree.read(cx).selected_item() {
+            let front = front.id.to_string();
+            self.connections.selection.click(&front);
+            cx.notify();
+        }
+    }
+
+    /// The ids of the rows the connections tree has selected: the set a
+    /// modifier click gathered while the tree's own row is in it, and that
+    /// row alone once an arrow or a click has moved the tree off the set.
+    pub(crate) fn selected_rows(&self, cx: &App) -> Vec<String> {
+        let Some(front) = self
+            .connections
+            .tree
+            .read(cx)
+            .selected_item()
+            .map(|item| item.id.to_string())
+        else {
+            return Vec::new();
+        };
+        let rows = &self.connections.selection.rows;
+        match rows.contains(&front) {
+            true => rows.clone(),
+            false => vec![front],
+        }
+    }
+
+    /// The nodes of those rows, in the order they were picked.
+    pub(crate) fn selected_nodes(&self, cx: &App) -> Vec<SelectedNode> {
+        self.nodes_of(&self.selected_rows(cx))
+    }
+
+    /// The nodes of the rows `ids` that are nodes an action applies to.
+    fn nodes_of(&self, ids: &[String]) -> Vec<SelectedNode> {
+        ids.iter()
+            .filter_map(|id| self.connections_node(id))
+            .collect()
+    }
+
+    /// What every one of `nodes` offers: the menu's and the palette's list of
+    /// what a selection can do. Pin is withheld unless each is an object of
+    /// its connection's own database that a shortcut can hold.
+    pub(crate) fn selection_offers(&self, nodes: &[SelectedNode]) -> Vec<SelectionAction> {
+        let mut items = Vec::new();
+        for node in nodes {
+            let Some(profile) = self.profiles.iter().find(|found| found.id == node.profile) else {
+                return Vec::new();
+            };
+            items.push((node.kind, profile.config.target()));
+        }
+        let mut actions = model::selection_actions(&items);
+        let pinnable = |node: &SelectedNode| {
+            let own = self
+                .profiles
+                .iter()
+                .find(|found| found.id == node.profile)
+                .and_then(|found| found.active_database());
+            let elsewhere = node
+                .database
+                .as_ref()
+                .is_some_and(|database| own.as_ref() != Some(database));
+            !elsewhere
+                && node
+                    .leaf
+                    .is_some_and(|leaf| self.member_in(&node.profile, leaf.target).is_some())
+        };
+        if !nodes.iter().all(pinnable) {
+            actions.retain(|action| *action != SelectionAction::Pin);
+        }
+        actions
+    }
+
+    /// Opens every row above `id` that the tree has left out, so that the row
+    /// is there to be selected and scrolled to. The rows above it that are
+    /// drawn are the tree's to open (`TreeState::reveal_item`).
+    pub(crate) fn reveal_connections_row(&mut self, id: &str, cx: &mut Context<Self>) {
+        let mut above = Vec::new();
+        let mut at = id.to_string();
+        while let Some(parent) = self.connections.hidden.get(&at) {
+            above.push(parent.clone());
+            at = parent.clone();
+        }
+        if above.is_empty() {
+            return;
+        }
+        self.connections.reveal.extend(above);
+        self.rebuild_connections(cx);
+    }
+
+    /// What a click on the connections tree's row `id` does with `modifiers`
+    /// held. Whether the tree is to be kept from its own click: a Cmd-, Ctrl-
+    /// or Shift-click on a node changes the selection and nothing else, where
+    /// the tree would also move its row and fold or unfold it.
+    pub(crate) fn click_connections_row(
+        &mut self,
+        id: &str,
+        opens: bool,
+        modifiers: gpui::Modifiers,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if (modifiers.secondary() || modifiers.shift) && self.connections_node(id).is_some() {
+            // The tree's own row is where a range or a toggle starts, whether
+            // or not a modifier click has been there before.
+            let current = self.selected_rows(cx);
+            let selection = &mut self.connections.selection;
+            if selection.rows != current {
+                *selection = Selection {
+                    anchor: current.last().cloned(),
+                    rows: current,
+                };
+            }
+            match modifiers.shift {
+                true => {
+                    let visible = self.visible_nodes(cx);
+                    self.connections.selection.extend_to(id, &visible);
+                }
+                false => self.connections.selection.toggle(id),
+            }
+            let rows = &self.connections.selection.rows;
+            let shown = match rows.iter().any(|row| row == id) {
+                true => id.to_string(),
+                false => rows.last().cloned().unwrap_or_else(|| id.to_string()),
+            };
+            self.connections.tree.update(cx, |tree, cx| {
+                tree.set_selected_index(tree.index_of(&shown.into()), cx);
+            });
+            // Nothing folds or opens, so nothing else would save it.
+            self.capture_tree(cx);
+            self.remember_profiles(cx);
+            cx.notify();
+            return true;
+        }
+        self.connections.selection.click(id);
+        // Saved by what the click does next, if it does anything: a fold, a
+        // tab opened.
+        self.capture_tree(cx);
+        if opens {
+            self.open_connection_row(id, window, cx);
+        }
+        false
+    }
+
+    /// The ids of the rows the tree is showing that an action applies to.
+    fn visible_nodes(&self, cx: &App) -> Vec<String> {
+        let tree = self.connections.tree.read(cx);
+        (0..)
+            .map_while(|ix| tree.entry(ix))
+            .map(|entry| entry.item().id.to_string())
+            .filter(|id| self.connections_node(id).is_some())
+            .collect()
     }
 
     /// What the connections tree's row `id` is, if it is a node an action
@@ -390,6 +722,11 @@ impl Workspace {
     /// Anything else lands here too (a reveal opens every ancestor of its
     /// row, a second expand repeats the first), and does nothing.
     pub(crate) fn expand_node(&mut self, id: &SharedString, cx: &mut Context<Self>) {
+        // A row built folded holds one inert row where its rows are: opened,
+        // it is built again with them.
+        if self.connections.pruned.contains(id.as_str()) {
+            self.rebuild_connections(cx);
+        }
         match self.connections.nodes.get(id.as_str()) {
             Some(Node::Connection { profile }) => {
                 let profile = profile.clone();
@@ -526,8 +863,18 @@ impl Workspace {
                 )
             })
             .collect();
+        // The rows a modifier click gathered, which the tree does not know to
+        // draw as selected: a lone row is the tree's own.
+        let selected = Arc::new(self.selected_rows(cx));
+        let gathered: HashSet<String> = Some(selected.as_slice())
+            .filter(|rows| rows.len() > 1)
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect();
         let menu_workspace = workspace.clone();
         let menu_shortcuts = shortcuts.clone();
+        let menu_selected = selected.clone();
         let (density, show_host, show_sizes) = (
             self.settings.density,
             self.settings.show_host,
@@ -649,6 +996,13 @@ impl Workspace {
                 .rounded(px(layout::RADIUS_CONTROL))
                 .when_some(connection.and_then(|(_, look)| look.color), |row, color| {
                     row.bg(color.fill())
+                })
+                .when(gathered.contains(id), |row| {
+                    // What the tree draws its own selected row with.
+                    row.bg(match cx.theme().list.active_highlight {
+                        true => cx.theme().list_active,
+                        false => cx.theme().accent,
+                    })
                 })
                 // `ListItem` sizes its text in `rems`, which tracks the
                 // library's 16 rather than dbdelve's body size.
@@ -784,15 +1138,20 @@ impl Workspace {
                         ),
                 )
                 .debug_selector(move || format!("connections-row-{index}"));
-            if missing || (leaf.is_none() && query.is_none()) {
+            if matches!(node, Some(Node::Notice)) {
                 return row;
             }
+            let opens = !missing && (leaf.is_some() || query.is_some());
             let workspace = workspace.clone();
             let id = id.to_string();
-            row.on_click(move |_, window, cx| {
-                _ = workspace.update(cx, |workspace, cx| {
-                    workspace.open_connection_row(&id, window, cx)
+            row.on_click(move |event, window, cx| {
+                let modifiers = event.modifiers();
+                let gathered = workspace.update(cx, |workspace, cx| {
+                    workspace.click_connections_row(&id, opens, modifiers, window, cx)
                 });
+                if gathered.unwrap_or(false) {
+                    cx.stop_propagation();
+                }
             })
         })
         .context_menu(move |_, entry, menu, window, cx| {
@@ -801,6 +1160,22 @@ impl Workspace {
                 return menu;
             };
             let state = entity.read(cx);
+            // A row of several selected is the menu of all of them.
+            // As of the last frame: the tree is being updated while its menu
+            // is built, so it cannot be read for its row.
+            let rows = &menu_selected;
+            if rows.len() > 1 && rows.iter().any(|row| row == id) {
+                let nodes = state.nodes_of(rows);
+                if nodes.len() == rows.len() {
+                    let kinds: Vec<_> = nodes.iter().map(|node| node.kind).collect();
+                    return selection_menu(
+                        menu,
+                        model::selection_header(&kinds),
+                        state.selection_offers(&nodes),
+                        &menu_workspace,
+                    );
+                }
+            }
             let shortcut = menu_shortcuts.get(id).cloned();
             let Some(node) = state.connections_node(id) else {
                 // A saved query, a folder, the Pinned group or a pin whose
@@ -897,6 +1272,13 @@ impl Workspace {
                     .key_context("Explorer")
                     .track_focus(&self.explorer_focus)
                     .on_action(cx.listener(Self::open_sidebar_item))
+                    // Before the tree moves its row.
+                    .capture_action(cx.listener(|workspace, _: &SelectUp, window, cx| {
+                        workspace.let_go_of_gathered(window, cx)
+                    }))
+                    .capture_action(cx.listener(|workspace, _: &SelectDown, window, cx| {
+                        workspace.let_go_of_gathered(window, cx)
+                    }))
                     .child(tree),
             )
             .children(unsearched_line(self.connections.unsearched).map(|line| {

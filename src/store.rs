@@ -151,6 +151,19 @@ pub struct StoredProfile {
     /// removing the field would drop it on the next save.
     #[serde(default)]
     pub open_query: Option<String>,
+    /// The rows of the connections tree this profile had open, by row id, in
+    /// tree order: complex mode only. Rows, not objects: an id is compared
+    /// against the rows a loaded subtree has and never parsed into an action,
+    /// so one that names something gone opens nothing. Left out when empty,
+    /// which is every profile written before the tree remembered, and every
+    /// profile in simple mode. A build without the key drops it on its next
+    /// save, and the tree then starts folded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub open_rows: Vec<String>,
+    /// The rows of the connections tree this profile held selected, in the
+    /// order they were picked. Same rules as `open_rows`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_rows: Vec<String>,
     /// The SSH tunnel this profile dials through, or absent for a direct
     /// connection -- which is every profile written before tunnels existed. A
     /// table, so it has to come after every scalar above. Nothing secret is in
@@ -3468,6 +3481,8 @@ user = "shayan"
                 confirmed: vec!["drop".into(), "truncate".into()],
                 open_query: None,
                 ssm: None,
+                open_rows: Vec::new(),
+                selected_rows: Vec::new(),
                 ssh: None,
                 open_queries: Vec::new(),
                 open_objects: Vec::new(),
@@ -3527,6 +3542,8 @@ user = "shayan"
             confirmed: Vec::new(),
             open_query: Some("daily".into()),
             ssm: None,
+            open_rows: Vec::new(),
+            selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![
@@ -3674,6 +3691,8 @@ open_objects = []
             confirmed: Vec::new(),
             open_query: None,
             ssm: None,
+            open_rows: Vec::new(),
+            selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: Vec::new(),
@@ -3693,6 +3712,54 @@ open_objects = []
             unavailable: Vec::new(),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn open_rows_round_trip_capped_and_an_old_file_reads_none() {
+        let mut profile = a_stored_profile();
+        profile.open_rows = vec![
+            "connection:3:dev".into(),
+            "connection:3:dev/schema-public".into(),
+        ];
+        profile.selected_rows = vec![
+            "connection:3:dev/table:public.a".into(),
+            "connection:3:dev/table:public.b".into(),
+        ];
+        profile.ssh = Some(SshTunnel {
+            host: "bastion".into(),
+            ..Default::default()
+        });
+        let text = written_alone(profile.clone());
+        let open = text.find("open_rows").expect("the open rows are written");
+        let selected = text.find("selected_rows").expect("so is the selection");
+        let tunnel = text.find("[profiles.ssh]").expect("and the tunnel");
+        assert!(
+            open < selected && selected < tunnel,
+            "TOML cannot emit a scalar after a table, so both come before `ssh`:\n{text}"
+        );
+        let decoded = decode_profiles(&text, &[]).expect("the file loads");
+        assert_eq!(decoded.profiles[0].open_rows, profile.open_rows);
+        assert_eq!(decoded.profiles[0].selected_rows, profile.selected_rows);
+        assert_eq!(
+            written_alone(decoded.profiles[0].clone()),
+            text,
+            "saving what was saved changes nothing"
+        );
+
+        let bare = written_alone(a_stored_profile());
+        assert!(
+            !bare.contains("open_rows") && !bare.contains("selected_rows"),
+            "a profile with none is written as it always was:\n{bare}"
+        );
+        let old = decode_profiles(&bare, &[]).expect("an older file loads");
+        assert!(old.profiles[0].open_rows.is_empty());
+        assert!(old.profiles[0].selected_rows.is_empty());
+        let golden = include_str!("testdata/every-engine.resaved.toml");
+        assert_eq!(resaved(include_str!("testdata/every-engine.toml")), golden);
+        assert!(
+            !golden.contains("open_rows"),
+            "the fixtures hold neither key"
+        );
     }
 
     #[test]
@@ -4024,6 +4091,8 @@ folder = "Hot"
     fn an_ssh_tunnel_with_every_field_survives_the_round_trip_through_toml() {
         let profile = StoredProfile {
             ssm: None,
+            open_rows: Vec::new(),
+            selected_rows: Vec::new(),
             ssh: Some(SshTunnel {
                 host: "dbdelve-bastion".into(),
                 port: Some(2222),
@@ -4052,6 +4121,8 @@ folder = "Hot"
     fn an_ssh_tunnel_with_only_a_host_survives_the_round_trip_through_toml() {
         let profile = StoredProfile {
             ssm: None,
+            open_rows: Vec::new(),
+            selected_rows: Vec::new(),
             ssh: Some(SshTunnel {
                 host: "dbdelve-bastion".into(),
                 port: None,
@@ -4117,6 +4188,8 @@ folder = "Hot"
         let profile = StoredProfile {
             schema: Some(r#"Sales "EU""#.into()),
             ssm: None,
+            open_rows: Vec::new(),
+            selected_rows: Vec::new(),
             ssh: Some(SshTunnel {
                 host: "dbdelve-bastion".into(),
                 ..SshTunnel::default()
@@ -4242,6 +4315,8 @@ folder = "Hot"
             confirmed: Vec::new(),
             open_query: None,
             ssm: None,
+            open_rows: Vec::new(),
+            selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![StoredObject {
@@ -4328,6 +4403,8 @@ folder = "Hot"
             confirmed: Vec::new(),
             open_query: None,
             ssm: None,
+            open_rows: Vec::new(),
+            selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![StoredObject {
@@ -4400,6 +4477,8 @@ folder = "Hot"
             confirmed: Vec::new(),
             open_query: None,
             ssm: None,
+            open_rows: Vec::new(),
+            selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: Vec::new(),
@@ -4518,6 +4597,8 @@ open_objects = []
             confirmed: Vec::new(),
             open_query: None,
             ssm: None,
+            open_rows: Vec::new(),
+            selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![StoredObject {
@@ -4663,6 +4744,8 @@ open_objects = []
                     confirmed: Vec::new(),
                     open_query: None,
                     ssm: None,
+                    open_rows: Vec::new(),
+                    selected_rows: Vec::new(),
                     ssh: None,
                     open_queries: Vec::new(),
                     open_objects: Vec::new(),
@@ -4702,6 +4785,8 @@ open_objects = []
                     confirmed: Vec::new(),
                     open_query: None,
                     ssm: None,
+                    open_rows: Vec::new(),
+                    selected_rows: Vec::new(),
                     ssh: None,
                     open_queries: Vec::new(),
                     open_objects: Vec::new(),
@@ -5523,6 +5608,8 @@ open_objects = []
             confirmed: Vec::new(),
             open_query: Some("daily".into()),
             ssm: None,
+            open_rows: Vec::new(),
+            selected_rows: Vec::new(),
             ssh: None,
             open_queries: vec![
                 StoredQueryTab {
@@ -6142,6 +6229,8 @@ name = \"accounts\"
             confirmed: Vec::new(),
             open_query: None,
             ssm: None,
+            open_rows: Vec::new(),
+            selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![
@@ -6270,6 +6359,8 @@ name = \"accounts\"
             confirmed: Vec::new(),
             open_query: None,
             ssm: None,
+            open_rows: Vec::new(),
+            selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![object],

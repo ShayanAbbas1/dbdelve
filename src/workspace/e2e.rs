@@ -968,6 +968,21 @@ fn connections_row(
     })
 }
 
+/// The connections tree's row `id` made showing and selected, through every
+/// folded row above it, those the tree left out as well as those it drew.
+fn reveal_connections_row(workspace: &Entity<Workspace>, cx: &mut VisualTestContext, id: &str) {
+    workspace.update(cx, |workspace, cx| {
+        workspace.reveal_connections_row(id, cx);
+        workspace.connections.tree.update(cx, |tree, cx| {
+            let row = id.to_string().into();
+            tree.reveal_item(&row, gpui::ScrollStrategy::Top, cx);
+            // A reveal alone repaints nothing; selecting does.
+            tree.set_selected_index(tree.index_of(&row), cx);
+        });
+    });
+    settle(cx);
+}
+
 /// A row of the connections tree: whether it is open, and its children's ids
 /// and labels with whether each is disabled.
 type ConnectionsItem = (bool, Vec<(String, String, bool)>);
@@ -1187,15 +1202,7 @@ fn an_object_row_of_a_connection_behind_opens_on_that_connection(cx: &mut TestAp
         }
         let reveal = |id: &str, cx: &mut VisualTestContext| {
             let row = scoped_row(id, None, &explorer::relation_row("main", "birds"));
-            workspace.update(cx, |workspace, cx| {
-                workspace.connections.tree.update(cx, |tree, cx| {
-                    let row = row.clone().into();
-                    tree.reveal_item(&row, gpui::ScrollStrategy::Top, cx);
-                    // A reveal alone repaints nothing; selecting does.
-                    tree.set_selected_index(tree.index_of(&row), cx);
-                });
-            });
-            settle(cx);
+            reveal_connections_row(&workspace, cx, &row);
             row
         };
         let a_birds = reveal("a", cx);
@@ -3171,11 +3178,14 @@ fn the_palette_copies_what_the_explorer_menu_copies(cx: &mut TestAppContext) {
 /// What the `Show DDL` dialog holds, if it is up.
 fn ddl_text(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Option<String> {
     workspace.read_with(cx, |workspace, _| {
-        workspace.ddl_view.as_ref().map(|view| match &view.text {
-            super::DdlText::Loading => "loading".to_string(),
-            super::DdlText::Ready(text) => text.clone(),
-            super::DdlText::Failed(error) => format!("failed: {error}"),
-        })
+        workspace
+            .ddl_view
+            .as_ref()
+            .map(|view| match &view.sections[0].text {
+                super::DdlText::Loading => "loading".to_string(),
+                super::DdlText::Ready(text) => text.clone(),
+                super::DdlText::Failed(error) => format!("failed: {error}"),
+            })
     })
 }
 
@@ -3290,8 +3300,10 @@ fn an_empty_definition_says_so_and_offers_nothing_to_copy(cx: &mut TestAppContex
                 workspace.ddl_view = Some(super::DdlView {
                     profile,
                     name: "birds".into(),
-                    title: "Table main.birds".into(),
-                    text,
+                    sections: vec![super::DdlSection {
+                        title: "Table main.birds".into(),
+                        text,
+                    }],
                     request: 1,
                 });
                 cx.notify();
@@ -8414,6 +8426,8 @@ fn disconnecting_redraws_the_connection_in_front_as_not_open(cx: &mut TestAppCon
         workspace.update(cx, |workspace, cx| workspace.activate(0, cx));
         settle(cx);
         assert_eq!(profile_state(&workspace, cx, "a"), "connected");
+        // Folded until it is opened, so its rows are one inert row until then.
+        open_connections_rows(&workspace, cx, std::slice::from_ref(&a));
         let (_, rows) = connections_item(&workspace, cx, &a).expect("a is listed");
         assert!(rows.iter().any(|(id, ..)| id == &schema), "{rows:?}");
 
@@ -8452,17 +8466,12 @@ fn moving_a_connection_to_another_project_keeps_its_rows_and_folds(cx: &mut Test
             let at = connections_row(&workspace, cx, row).expect("the row is listed");
             click_connections_row(cx, at);
         }
-        workspace.update(cx, |workspace, cx| {
-            workspace.connections.tree.update(cx, |tree, cx| {
-                // A relation is under its category, which a reveal opens.
-                let id = birds.clone().into();
-                tree.reveal_item(&id, gpui::ScrollStrategy::Top, cx);
-                let row = tree.index_of(&id);
-                assert!(row.is_some(), "the schema's relations are listed");
-                tree.set_selected_index(row, cx);
-            });
-        });
-        settle(cx);
+        // A relation is under its category, which a reveal opens.
+        reveal_connections_row(&workspace, cx, &birds);
+        assert!(
+            connections_row(&workspace, cx, &birds).is_some(),
+            "the schema's relations are listed"
+        );
 
         // What the rows of `b` are, and the group row they are drawn under.
         let kept = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
@@ -10457,6 +10466,866 @@ fn a_palette_row_acts_on_the_connection_of_the_node_it_was_built_for(cx: &mut Te
             "the node's connection is in front once the row acts"
         );
         press(cx, "escape");
+        quit(workspace, cx);
+    });
+}
+
+/// Connections `a` and `b` over one file holding `birds` and `flocks`, both
+/// open and with their tables showing in the connections tree.
+fn selection_fixture(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext) {
+    crate::IGNORE_ENVIRONMENT.set(true);
+    let (workspace, cx) = launch_connections(
+        cx,
+        "create table birds (name text); create table flocks (name text);",
+        "view_mode = \"complex\"",
+        &format!(
+            "{}{}",
+            sqlite_profile("a", "Birds", ""),
+            sqlite_profile("b", "Flocks", ""),
+        ),
+    );
+    // Tall enough to draw every row of both connections, which a click needs.
+    cx.simulate_resize(gpui::size(gpui::px(1024.), gpui::px(900.)));
+    settle(cx);
+    for id in ["a", "b"] {
+        let at = connections_row(&workspace, cx, &connection_row(id)).unwrap();
+        click_connections_row(cx, at);
+    }
+    // `a`'s `birds` is revealed last, so it is the row the tree has selected.
+    for id in ["b", "a"] {
+        for name in ["flocks", "birds"] {
+            reveal_connections_row(&workspace, cx, &table_row(id, name));
+        }
+    }
+    (workspace, cx)
+}
+
+/// The connections tree's row of `name`, a table of connection `id`.
+fn table_row(id: &str, name: &str) -> String {
+    scoped_row(id, None, &explorer::relation_row("main", name))
+}
+
+/// A click on the connections tree's row `id`, with `modifiers` held.
+fn click_connections_row_with(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    id: &str,
+    modifiers: gpui::Modifiers,
+) {
+    let index = connections_row(workspace, cx, id).expect("the row is showing");
+    let selector: &'static str = format!("connections-row-{index}").leak();
+    let bounds = cx.debug_bounds(selector).expect("the row is drawn");
+    cx.simulate_click(bounds.center(), modifiers);
+    settle(cx);
+}
+
+/// The names of the object tabs of connection `id`, in tab order.
+fn object_tab_names(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    id: &str,
+) -> Vec<String> {
+    workspace.read_with(cx, |workspace, _| {
+        workspace
+            .profiles
+            .iter()
+            .find(|profile| profile.id == id)
+            .expect("the profile was restored")
+            .session
+            .objects
+            .iter()
+            .map(|tab| tab.name.clone())
+            .collect()
+    })
+}
+
+/// The ids of the rows the connections tree has selected, and the row the
+/// tree itself has.
+fn selected_rows(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) -> (Vec<String>, Option<String>) {
+    workspace.read_with(cx, |workspace, cx| {
+        (
+            workspace.connections.selection.rows.clone(),
+            workspace
+                .connections
+                .tree
+                .read(cx)
+                .selected_item()
+                .map(|item| item.id.to_string()),
+        )
+    })
+}
+
+#[gpui::test]
+fn arrowing_off_a_gathered_selection_and_back_does_not_gather_it_again(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = selection_fixture(cx);
+        let (birds, flocks) = (table_row("a", "birds"), table_row("a", "flocks"));
+        click_connections_row_with(&workspace, cx, &birds, gpui::Modifiers::default());
+        click_connections_row_with(&workspace, cx, &flocks, gpui::Modifiers::secondary_key());
+        assert_eq!(
+            selected_rows(&workspace, cx).0,
+            [birds.clone(), flocks.clone()]
+        );
+
+        cx.dispatch_action(gpui_base::actions::SelectUp);
+        settle(cx);
+        let (_, moved_to) = selected_rows(&workspace, cx);
+        assert_eq!(
+            moved_to.as_deref(),
+            Some(birds.as_str()),
+            "the arrow moved the row"
+        );
+        cx.dispatch_action(gpui_base::actions::SelectDown);
+        settle(cx);
+        let rows = workspace.read_with(cx, |workspace, cx| workspace.selected_rows(cx));
+        assert_eq!(rows, [flocks], "the arrow let the gathered rows go");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn secondary_clicking_two_tables_selects_both_and_open_all_opens_each(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = selection_fixture(cx);
+        let (birds, flocks) = (table_row("a", "birds"), table_row("a", "flocks"));
+        click_connections_row_with(&workspace, cx, &birds, gpui::Modifiers::default());
+        click_connections_row_with(&workspace, cx, &flocks, gpui::Modifiers::secondary_key());
+
+        let (rows, anchor) = selected_rows(&workspace, cx);
+        assert_eq!(rows, [birds.clone(), flocks.clone()]);
+        assert_eq!(
+            anchor.as_deref(),
+            Some(flocks.as_str()),
+            "the last row clicked"
+        );
+        workspace.read_with(cx, |workspace, cx| {
+            let kinds: Vec<_> = workspace
+                .selected_nodes(cx)
+                .iter()
+                .map(|node| node.kind)
+                .collect();
+            assert_eq!(
+                crate::sidebar::selection_header(&kinds),
+                "2 tables selected"
+            );
+        });
+        assert_eq!(
+            object_tab_names(&workspace, cx, "a"),
+            ["birds"],
+            "the modifier click opened nothing; the plain one opened its table"
+        );
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.run_selection_action(crate::sidebar::SelectionAction::OpenAll, window, cx)
+        });
+        settle(cx);
+        assert_eq!(object_tab_names(&workspace, cx, "a"), ["birds", "flocks"]);
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn open_all_opens_each_row_on_its_own_connection(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = selection_fixture(cx);
+        let (a_birds, b_flocks) = (table_row("a", "birds"), table_row("b", "flocks"));
+        click_connections_row_with(&workspace, cx, &a_birds, gpui::Modifiers::default());
+        click_connections_row_with(&workspace, cx, &b_flocks, gpui::Modifiers::secondary_key());
+        assert_eq!(object_tab_names(&workspace, cx, "b"), Vec::<String>::new());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.run_selection_action(crate::sidebar::SelectionAction::OpenAll, window, cx)
+        });
+        settle(cx);
+        assert_eq!(object_tab_names(&workspace, cx, "a"), ["birds"]);
+        assert_eq!(object_tab_names(&workspace, cx, "b"), ["flocks"]);
+        assert_eq!(
+            front_profile(&workspace, cx),
+            "b",
+            "the connection acted on last is the one in front"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn shift_clicking_selects_every_row_between_the_anchor_and_the_click(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = selection_fixture(cx);
+        let (birds, flocks) = (table_row("a", "birds"), table_row("a", "flocks"));
+        let tables = scoped_row("a", None, "category-Tables-main");
+        click_connections_row_with(&workspace, cx, &birds, gpui::Modifiers::default());
+        click_connections_row_with(&workspace, cx, &flocks, gpui::Modifiers::shift());
+        assert_eq!(
+            selected_rows(&workspace, cx).0,
+            [birds.clone(), flocks.clone()]
+        );
+        // A modifier click on a folder selects it and leaves it as it was.
+        let schema = scoped_row("a", None, "schema-main");
+        assert_eq!(
+            connections_item(&workspace, cx, &schema).map(|item| item.0),
+            Some(true)
+        );
+        click_connections_row_with(&workspace, cx, &schema, gpui::Modifiers::secondary_key());
+        assert_eq!(
+            connections_item(&workspace, cx, &schema).map(|item| item.0),
+            Some(true)
+        );
+        assert!(selected_rows(&workspace, cx).0.contains(&schema));
+        // The category's label between them is no node an action applies to,
+        // and a plain click on it is the whole selection again.
+        click_connections_row_with(&workspace, cx, &tables, gpui::Modifiers::default());
+        assert_eq!(selected_rows(&workspace, cx).0, [tables]);
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn simple_mode_keeps_one_selected_row(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        cx.simulate_keystrokes("secondary-k e");
+        settle(cx);
+        let row = explorer_row(&workspace, "relation-main\0birds", cx).center();
+        cx.simulate_click(row, gpui::Modifiers::secondary_key());
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(
+                workspace.profile().unwrap().session.objects.len(),
+                1,
+                "a secondary-modifier click opens the table as a plain click does"
+            );
+            assert_eq!(
+                workspace.connections.selection,
+                crate::sidebar::Selection::default(),
+                "no selection set exists in simple mode"
+            );
+        });
+        quit(workspace, cx);
+    });
+}
+
+/// `birds` and `flocks` of `a` selected, with nothing opened: the tree's own
+/// row is `birds` already, and a modifier click adds `flocks` to it.
+fn two_tables_selected(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
+    click_connections_row_with(
+        workspace,
+        cx,
+        &table_row("a", "flocks"),
+        gpui::Modifiers::secondary_key(),
+    );
+    assert_eq!(
+        selected_rows(workspace, cx).0,
+        [table_row("a", "birds"), table_row("a", "flocks")]
+    );
+}
+
+/// The clipboard's text.
+fn clipboard_text(cx: &mut VisualTestContext) -> String {
+    cx.read_from_clipboard()
+        .and_then(|item| item.text())
+        .unwrap_or_default()
+}
+
+#[gpui::test]
+fn copy_names_and_copy_ddl_cover_every_selected_table(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = selection_fixture(cx);
+        two_tables_selected(&workspace, cx);
+        let at = connections_row(&workspace, cx, &table_row("a", "birds")).unwrap();
+
+        // The header, then Open All, Copy Names, Copy DDL, Show DDL, Pin and
+        // Refresh: the header is a row the keyboard stops at.
+        pick_from_connections_menu(cx, at, 3);
+        assert_eq!(clipboard_text(cx), "birds\nflocks");
+
+        pick_from_connections_menu(cx, at, 4);
+        settle(cx);
+        assert_eq!(
+            clipboard_text(cx),
+            "CREATE TABLE birds (name text);\n\nCREATE TABLE flocks (name text);"
+        );
+        assert_eq!(
+            object_tab_names(&workspace, cx, "a"),
+            Vec::<String>::new(),
+            "copying opens nothing"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn show_ddl_on_a_selection_lists_each_definition_in_one_dialog(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = selection_fixture(cx);
+        two_tables_selected(&workspace, cx);
+        let at = connections_row(&workspace, cx, &table_row("a", "birds")).unwrap();
+
+        pick_from_connections_menu(cx, at, 5);
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("show-ddl"));
+        workspace.read_with(cx, |workspace, _| {
+            let view = workspace.ddl_view.as_ref().expect("the dialog is up");
+            let sections: Vec<_> = view
+                .sections
+                .iter()
+                .map(|section| match &section.text {
+                    super::DdlText::Ready(text) => (section.title.clone(), text.clone()),
+                    _ => (section.title.clone(), "not read".to_string()),
+                })
+                .collect();
+            assert_eq!(
+                sections,
+                [
+                    (
+                        "Table main.birds".to_string(),
+                        "CREATE TABLE birds (name text);".to_string()
+                    ),
+                    (
+                        "Table main.flocks".to_string(),
+                        "CREATE TABLE flocks (name text);".to_string()
+                    ),
+                ]
+            );
+        });
+        assert!(cx.debug_bounds("show-ddl-text-0").is_some());
+        assert!(cx.debug_bounds("show-ddl-text-1").is_some());
+        assert!(
+            cx.debug_bounds("show-ddl-diagram-choice").is_none(),
+            "a diagram is of one relation"
+        );
+
+        // Each definition has a Copy of its own.
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string("before".into()));
+        let copy = cx.debug_bounds("show-ddl-copy-1").expect("drawn").center();
+        cx.simulate_click(copy, gpui::Modifiers::default());
+        settle(cx);
+        assert_eq!(clipboard_text(cx), "CREATE TABLE flocks (name text);");
+
+        press(cx, "escape");
+        assert_eq!(front_dialog(&workspace, cx), None);
+        assert!(
+            workspace.read_with(cx, |workspace, _| workspace.ddl_view.is_none()),
+            "escape closes it"
+        );
+        assert!(editor_has_keyboard(&workspace, cx), "the keyboard is back");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn pin_and_refresh_act_on_every_selected_row(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = selection_fixture(cx);
+        two_tables_selected(&workspace, cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.run_selection_action(crate::sidebar::SelectionAction::Pin, window, cx);
+            // Again: Pin pins what is not pinned and unpins nothing.
+            workspace.run_selection_action(crate::sidebar::SelectionAction::Pin, window, cx)
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.profile().unwrap().shortcuts.pins.len(), 2);
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn refresh_reads_each_database_of_the_selection_again(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = two_databases_each_holding_t(cx);
+        cx.simulate_resize(gpui::size(gpui::px(1024.), gpui::px(900.)));
+        settle(cx);
+        let other = database_row("e2e", "other");
+        let at = connections_row(&workspace, cx, &other).expect("other is listed");
+        click_connections_row(cx, at);
+        run_in_front(&workspace, cx, "CREATE TABLE other.main.fresh (id INTEGER)");
+        run_in_front(&workspace, cx, "CREATE TABLE fresh_own (id INTEGER)");
+
+        let t_rows: Vec<String> = workspace.read_with(cx, |workspace, _| {
+            let mut rows: Vec<_> = workspace
+                .connections
+                .nodes
+                .keys()
+                .filter(|id| id.ends_with("relation-main\0t"))
+                .cloned()
+                .collect();
+            rows.sort();
+            rows
+        });
+        assert_eq!(
+            t_rows.len(),
+            2,
+            "`t` of each database is listed: {t_rows:?}"
+        );
+        for row in t_rows.iter().rev() {
+            reveal_connections_row(&workspace, cx, row);
+        }
+        // The first is the tree's row, the second joins it.
+        click_connections_row_with(&workspace, cx, &t_rows[1], gpui::Modifiers::secondary_key());
+        assert_eq!(selected_rows(&workspace, cx).0.len(), 2);
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.run_selection_action(crate::sidebar::SelectionAction::Refresh, window, cx)
+        });
+        settle(cx);
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let names = |catalog: &crate::db::Catalog| {
+                let mut names: Vec<_> = catalog
+                    .schemas
+                    .iter()
+                    .flat_map(|schema| schema.relations.iter().map(|r| r.name.clone()))
+                    .collect();
+                names.sort();
+                names
+            };
+            let profile = workspace.profile().unwrap();
+            assert_eq!(
+                names(workspace.catalog().expect("the own catalog")),
+                ["fresh_own", "t"]
+            );
+            match profile.database_catalogs.get("other") {
+                Some(CatalogState::Loaded(catalog, _)) => {
+                    assert_eq!(names(catalog), ["fresh", "t"])
+                }
+                _ => panic!("the catalog of `other` has not loaded"),
+            }
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_selection_survives_a_rebuild_and_drops_rows_that_are_gone(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = selection_fixture(cx);
+        two_tables_selected(&workspace, cx);
+        let (birds, flocks) = (table_row("a", "birds"), table_row("a", "flocks"));
+
+        workspace.update(cx, |workspace, cx| workspace.rebuild_connections(cx));
+        settle(cx);
+        assert_eq!(selected_rows(&workspace, cx).0, [birds.clone(), flocks]);
+
+        rusqlite::Connection::open(store::dbdelve_directory().unwrap().join("e2e.db"))
+            .and_then(|db| db.execute_batch("drop table flocks"))
+            .unwrap();
+        workspace.update(cx, |workspace, cx| workspace.refresh_schema(cx));
+        settle(cx);
+        let (rows, tree_row) = selected_rows(&workspace, cx);
+        assert_eq!(
+            rows,
+            std::slice::from_ref(&birds),
+            "a row that is gone drops out"
+        );
+        assert_eq!(
+            tree_row.as_deref(),
+            Some(birds.as_str()),
+            "and the tree's own row is one that is left"
+        );
+        quit(workspace, cx);
+    });
+}
+
+/// What the palette's Commands scope lists, with each row's detail.
+fn palette_rows(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) -> Vec<(String, Option<String>)> {
+    cx.simulate_keystrokes("secondary-shift-p");
+    settle(cx);
+    let rows = workspace.read_with(cx, |workspace, cx| {
+        let palette = workspace.palette.as_ref().expect("the palette is up");
+        palette
+            .read(cx)
+            .labels_with_details()
+            .into_iter()
+            .map(|(label, detail)| (label.to_string(), detail.map(str::to_string)))
+            .collect()
+    });
+    cx.simulate_keystrokes("escape");
+    settle(cx);
+    rows
+}
+
+#[gpui::test]
+fn the_palette_offers_the_selections_actions_as_its_menu_does(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = selection_fixture(cx);
+        two_tables_selected(&workspace, cx);
+        let selection = [
+            "Open All",
+            "Copy Names",
+            "Copy DDL",
+            "Show DDL",
+            "Pin",
+            "Refresh",
+        ];
+
+        let rows = palette_rows(&workspace, cx);
+        for label in selection {
+            assert!(
+                rows.contains(&(label.to_string(), Some("2 tables selected".to_string()))),
+                "{label} is offered, detailed with how many: {rows:?}"
+            );
+        }
+        for label in ["Copy Name", "New Query Here"] {
+            assert!(
+                rows.iter().all(|(shown, _)| shown != label),
+                "{label} is one row's, and several are selected"
+            );
+        }
+
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string("before".into()));
+        cx.simulate_keystrokes("secondary-shift-p");
+        settle(cx);
+        cx.simulate_input("Copy Names");
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        assert_eq!(clipboard_text(cx), "birds\nflocks");
+
+        // One row selected: its own node's rows, as 07-15's palette lists them.
+        click_connections_row_with(
+            &workspace,
+            cx,
+            &table_row("a", "flocks"),
+            gpui::Modifiers::default(),
+        );
+        let rows = palette_rows(&workspace, cx);
+        for label in ["Open All", "Copy Names"] {
+            assert!(
+                rows.iter().all(|(shown, _)| shown != label),
+                "{label} needs several rows"
+            );
+        }
+        assert!(
+            rows.contains(&("Copy Name".to_string(), Some("flocks".to_string()))),
+            "the one selected row offers its own: {rows:?}"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn no_selection_action_sends_a_generated_statement(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = selection_fixture(cx);
+        two_tables_selected(&workspace, cx);
+        let counts = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                let session = &workspace.profile().unwrap().session;
+                (store::history("a").len(), session.history.len())
+            })
+        };
+        let before = counts(&workspace, cx);
+        for action in [
+            crate::sidebar::SelectionAction::OpenAll,
+            crate::sidebar::SelectionAction::CopyNames,
+            crate::sidebar::SelectionAction::CopyDdl,
+            crate::sidebar::SelectionAction::ShowDdl,
+            crate::sidebar::SelectionAction::Pin,
+            crate::sidebar::SelectionAction::Refresh,
+        ] {
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.run_selection_action(action, window, cx)
+            });
+            settle(cx);
+            settle(cx);
+            if front_dialog(&workspace, cx).is_some() {
+                press(cx, "escape");
+            }
+        }
+        assert_eq!(counts(&workspace, cx), before, "no statement was recorded");
+        quit(workspace, cx);
+    });
+}
+
+/// Connections `a` and `b` over one file holding `birds` and `flocks`, in
+/// complex mode, `a` in front. The window is tall enough to draw every row.
+fn remembering_fixture(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext) {
+    crate::IGNORE_ENVIRONMENT.set(true);
+    let (workspace, cx) = launch_connections(
+        cx,
+        "create table birds (name text); create table flocks (name text);",
+        "view_mode = \"complex\"",
+        &format!(
+            "{}{}",
+            sqlite_profile("a", "Birds", ""),
+            sqlite_profile("b", "Flocks", ""),
+        ),
+    );
+    cx.simulate_resize(gpui::size(gpui::px(1024.), gpui::px(900.)));
+    settle(cx);
+    (workspace, cx)
+}
+
+/// A click on each of `ids` in turn, each as showing when its turn comes.
+fn open_connections_rows(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    ids: &[String],
+) {
+    for id in ids {
+        let at = connections_row(workspace, cx, id)
+            .unwrap_or_else(|| panic!("{id} is not showing to be clicked"));
+        click_connections_row(cx, at);
+    }
+}
+
+/// Whether the connections tree's row `id` is showing and open.
+fn connections_row_open(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    id: &str,
+) -> bool {
+    connections_item(workspace, cx, id).is_some_and(|(open, _)| open)
+}
+
+#[gpui::test]
+fn folds_and_the_selection_in_the_connections_tree_come_back_after_a_relaunch(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = remembering_fixture(cx);
+        let (a_main, a_tables) = (
+            scoped_row("a", None, "schema-main"),
+            scoped_row("a", None, "category-Tables-main"),
+        );
+        let (b_main, b_tables) = (
+            scoped_row("b", None, "schema-main"),
+            scoped_row("b", None, "category-Tables-main"),
+        );
+        let (birds, flocks) = (table_row("a", "birds"), table_row("a", "flocks"));
+        open_connections_rows(
+            &workspace,
+            cx,
+            &[connection_row("a"), a_main.clone(), a_tables.clone()],
+        );
+        // Opening `b` connects it, and its rows are there once it has.
+        open_connections_rows(&workspace, cx, &[connection_row("b"), b_main.clone()]);
+        assert_eq!(profile_state(&workspace, cx, "b"), "connected");
+        click_connections_row_with(&workspace, cx, &birds, gpui::Modifiers::default());
+        click_connections_row_with(&workspace, cx, &flocks, gpui::Modifiers::secondary_key());
+        assert_eq!(
+            selected_rows(&workspace, cx).0,
+            [birds.clone(), flocks.clone()]
+        );
+
+        let (workspace, cx) = relaunch_closing(workspace, cx);
+        cx.simulate_resize(gpui::size(gpui::px(1024.), gpui::px(900.)));
+        settle(cx);
+        assert_eq!(
+            profile_state(&workspace, cx, "b"),
+            "idle",
+            "nothing is connected on the strength of what was stored"
+        );
+        for row in [connection_row("a"), a_main, a_tables] {
+            assert!(
+                connections_row_open(&workspace, cx, &row),
+                "{row} is open as it was left"
+            );
+        }
+        assert_eq!(
+            selected_rows(&workspace, cx),
+            (vec![birds, flocks.clone()], Some(flocks)),
+            "the rows that were selected are, and the last is the tree's own"
+        );
+        assert!(
+            !connections_row_open(&workspace, cx, &connection_row("b")),
+            "an idle connection stays folded whatever was stored"
+        );
+        assert_eq!(
+            connections_item(&workspace, cx, &connection_row("b"))
+                .map(|(_, children)| children.len()),
+            Some(1),
+            "and holds only its notice"
+        );
+
+        open_connections_rows(&workspace, cx, &[connection_row("b")]);
+        assert_eq!(profile_state(&workspace, cx, "b"), "connected");
+        assert!(
+            connections_row_open(&workspace, cx, &b_main),
+            "once it has loaded its rows open as they were left"
+        );
+        assert!(
+            !connections_row_open(&workspace, cx, &b_tables),
+            "and only those"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn removing_a_connection_takes_its_stored_rows_and_leaves_the_others(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = remembering_fixture(cx);
+        open_connections_rows(
+            &workspace,
+            cx,
+            &[
+                connection_row("a"),
+                scoped_row("a", None, "schema-main"),
+                connection_row("b"),
+                scoped_row("b", None, "schema-main"),
+                scoped_row("b", None, "category-Tables-main"),
+            ],
+        );
+        click_connections_row_with(
+            &workspace,
+            cx,
+            &table_row("b", "birds"),
+            gpui::Modifiers::default(),
+        );
+        let stored = |id: &str| {
+            let profile = store::peek_profiles(&[])
+                .expect("profiles.toml reads back")
+                .profiles
+                .into_iter()
+                .find(|profile| profile.id == id)
+                .unwrap_or_else(|| panic!("{id} was saved"));
+            (profile.open_rows, profile.selected_rows)
+        };
+        let (a_before, b_before) = (stored("a"), stored("b"));
+        assert!(
+            a_before.0.contains(&connection_row("a")) && b_before.0.contains(&connection_row("b")),
+            "each connection saved its open rows: {a_before:?} {b_before:?}"
+        );
+        assert_eq!(b_before.1, [table_row("b", "birds")]);
+
+        workspace.update(cx, |workspace, cx| {
+            let at = workspace
+                .profiles
+                .iter()
+                .position(|profile| profile.id == "b")
+                .expect("b is listed");
+            workspace.remove_profile(at, cx);
+        });
+        settle(cx);
+        let file = std::fs::read_to_string(
+            store::dbdelve_directory()
+                .expect("the test home has a data directory")
+                .join("profiles.toml"),
+        )
+        .expect("profiles.toml reads");
+        assert!(
+            !file.contains("connection:1:b"),
+            "no stored row names the removed connection:\n{file}"
+        );
+        assert_eq!(stored("a"), a_before, "another's rows do not change");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn expanding_a_folded_loaded_row_builds_its_rows(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = remembering_fixture(cx);
+        let (a, main) = (connection_row("a"), scoped_row("a", None, "schema-main"));
+        assert_eq!(profile_state(&workspace, cx, "a"), "connected");
+        assert_eq!(
+            connections_item(&workspace, cx, &a),
+            Some((false, vec![(format!("folded:{a}"), String::new(), true)])),
+            "a connected connection left folded is one row and one inert row"
+        );
+        open_connections_rows(&workspace, cx, std::slice::from_ref(&a));
+        assert!(
+            connections_row_open(&workspace, cx, &a),
+            "the click opened it"
+        );
+        let (_, children) = connections_item(&workspace, cx, &a).expect("the row is showing");
+        assert!(
+            children.iter().any(|(id, ..)| *id == main),
+            "and its rows were built for it: {children:?}"
+        );
+        assert_eq!(
+            connections_item(&workspace, cx, &main).map(|(open, children)| (open, children.len())),
+            Some((false, 1)),
+            "each folded in its turn"
+        );
+        open_connections_rows(&workspace, cx, std::slice::from_ref(&main));
+        assert_eq!(
+            connections_item(
+                &workspace,
+                cx,
+                &scoped_row("a", None, "category-Tables-main")
+            )
+            .map(|(open, children)| (open, children.len())),
+            Some((false, 1)),
+            "the schema's own rows are there to be clicked, each folded in its turn"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_rebuild_landing_while_moving_through_the_tree_keeps_folds_and_the_selection(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = remembering_fixture(cx);
+        let rows = [
+            connection_row("a"),
+            scoped_row("a", None, "schema-main"),
+            scoped_row("a", None, "category-Tables-main"),
+        ];
+        open_connections_rows(&workspace, cx, &rows);
+        let (birds, flocks) = (table_row("a", "birds"), table_row("a", "flocks"));
+        click_connections_row_with(&workspace, cx, &birds, gpui::Modifiers::default());
+        click_connections_row_with(&workspace, cx, &flocks, gpui::Modifiers::secondary_key());
+        let before = selected_rows(&workspace, cx);
+        assert_eq!(before.0, [birds, flocks]);
+
+        // A saved query changing, then table sizes landing: both rebuild the
+        // tree while the user is part-way through it.
+        workspace.update(cx, |workspace, cx| {
+            workspace.refresh_query_library("a", cx);
+            workspace.read_sizes_again(cx);
+        });
+        settle(cx);
+        workspace.update(cx, |workspace, cx| workspace.refresh_query_library("a", cx));
+        settle(cx);
+
+        for row in &rows {
+            assert!(connections_row_open(&workspace, cx, row), "{row} is open");
+        }
+        assert_eq!(selected_rows(&workspace, cx), before);
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn focusing_the_sidebar_reveals_the_front_row_inside_a_folded_subtree(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = remembering_fixture(cx);
+        let birds = table_row("a", "birds");
+        open_connections_rows(
+            &workspace,
+            cx,
+            &[
+                connection_row("a"),
+                scoped_row("a", None, "schema-main"),
+                scoped_row("a", None, "category-Tables-main"),
+                birds.clone(),
+            ],
+        );
+        // Folded again and the tree rebuilt, so what was under it is gone from
+        // the rows drawn.
+        open_connections_rows(&workspace, cx, &[connection_row("a")]);
+        workspace.update(cx, |workspace, cx| workspace.refresh_query_library("a", cx));
+        settle(cx);
+        assert!(connections_row(&workspace, cx, &birds).is_none());
+
+        cx.simulate_keystrokes("secondary-k e");
+        settle(cx);
+        assert_eq!(
+            selected_rows(&workspace, cx).1,
+            Some(birds),
+            "the tab in front is revealed where it is, through every folded row above it"
+        );
         quit(workspace, cx);
     });
 }

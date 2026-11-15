@@ -51,6 +51,27 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   open and the others folded, each launch; a fold the user makes is kept for
   the session, and a rebuild for another front group opens that one. A switch
   moves no tab, binding or connection.
+  The rows a connection has open and the rows selected under it come back
+  after a restart: `open_rows` and `selected_rows` on its `[[profiles]]` entry
+  (`StoredProfile`, before `ssh`, each left out when empty and each read and
+  written no further than `sidebar::OPEN_ROWS_CAP`), complex mode only, so
+  simple mode stores nothing new. They are ids, compared with the rows a
+  loaded subtree has and never parsed into an action: an idle connection stays
+  folded at launch whatever was stored, and when it is opened and has loaded
+  its stored inner rows open as they were left, so a stored row never connects
+  or loads anything. A row that names something gone opens nothing. The tree is
+  put on the profiles at a rebuild, a fold and a modifier click
+  (`Workspace::capture_tree`), never while a filter has opened it, and the
+  profile's own save writes it; stored rows the tree has no say over yet (not
+  built, or an idle connection's) are kept, and a row the tree holds is as the
+  tree has it. A project's fold is not stored. A folded row of a loaded
+  connection is built as one disabled `{row}/folded` row until it is opened
+  (`sidebar::prune`), which is what keeps ten large catalogs cheap to redraw:
+  opening it rebuilds (`Workspace::expand_node`), and a row under a folded one
+  is revealed by opening what is above it (`Workspace::reveal_connections_row`,
+  from the keyboard focus), not by `TreeState::reveal_item`, which only finds
+  rows already built. Counts and selection still see every row: they come
+  from the whole content.
   On a shape that draws databases over its schemas or objects
   (`Levels::lists_other_databases`), the server's other databases are listed
   once per connection into `profile.databases` (`Workspace::list_databases`)

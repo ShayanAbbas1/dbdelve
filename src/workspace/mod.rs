@@ -2776,12 +2776,29 @@ impl Render for Workspace {
 /// What the `Show DDL` dialog shows, and which object it was asked about: the
 /// answer lands only while the view still names the same request.
 pub(crate) struct DdlView {
-    /// The connection the object belongs to, by id.
+    /// The connection the object belongs to, by id; of several, the one acted
+    /// on last.
     pub(crate) profile: String,
     pub(crate) name: String,
+    /// One definition for one object, one per object for several.
+    pub(crate) sections: Vec<DdlSection>,
+    pub(crate) request: u64,
+}
+
+impl DdlView {
+    /// What the dialog's header says: the object's, or how many it lists.
+    pub(crate) fn heading(&self) -> String {
+        match self.sections.as_slice() {
+            [only] => only.title.clone(),
+            sections => format!("{} definitions", sections.len()),
+        }
+    }
+}
+
+/// One object's definition in the dialog, under its name.
+pub(crate) struct DdlSection {
     pub(crate) title: String,
     pub(crate) text: DdlText,
-    pub(crate) request: u64,
 }
 
 /// The definition as the dialog has it.
