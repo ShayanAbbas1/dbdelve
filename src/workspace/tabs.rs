@@ -953,7 +953,7 @@ impl Workspace {
     }
 
     /// Between the buffer and the rows it ran: to whichever the keyboard is
-    /// not in. On an object tab, which has no buffer, to its grid.
+    /// not in. On an object tab, which has no buffer, to its grid or canvas.
     pub(crate) fn toggle_results_focus(
         &mut self,
         _: &ToggleResultsFocus,
@@ -1019,7 +1019,10 @@ impl Workspace {
                     .then(|| Focus::Grid(results.clone()))
             }
             ObjectBody::Structure { grid, .. } => Some(Focus::Structure(grid.clone())),
-            ObjectBody::Routine(_) | ObjectBody::Diagram { .. } => None,
+            ObjectBody::Diagram { view, .. } => {
+                Some(Focus::Diagram(view.read(cx).focus_handle().clone()))
+            }
+            ObjectBody::Routine(_) => None,
         }
     }
 

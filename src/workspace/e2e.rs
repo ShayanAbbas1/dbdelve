@@ -4402,6 +4402,27 @@ fn keys_only_switched_just_before_a_neighbourhood_holds_back_on_the_schema(
     });
 }
 
+/// From the sidebar, the chord that moves between a buffer and its rows
+/// puts the keyboard on a diagram's canvas, which has neither.
+#[gpui::test]
+fn toggle_results_focus_puts_the_keyboard_on_a_diagram_from_the_sidebar(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, DIAGRAM_SCHEMA);
+        let view = show_diagram(&workspace, cx);
+        let canvas = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| view.read(cx).focus_handle().is_focused(window))
+        };
+        cx.simulate_keystrokes("secondary-k e");
+        settle(cx);
+        assert!(!canvas(cx), "the sidebar took the keyboard");
+        cx.simulate_keystrokes("secondary-k r");
+        settle(cx);
+        assert!(canvas(cx), "the canvas has it back");
+
+        quit(workspace, cx);
+    });
+}
+
 /// The diagram tab in front, once read, and how many diagram tabs are open.
 fn diagram_in_front(
     workspace: &Entity<Workspace>,
