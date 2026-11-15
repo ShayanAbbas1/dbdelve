@@ -344,6 +344,10 @@ fn order_by_corpus(engine: Engine) -> Vec<(&'static str, String)> {
             "nulls first",
             format!("SELECT * FROM {q} ORDER BY a NULLS FIRST"),
         ),
+        (
+            "order by all",
+            format!("SELECT * FROM {q} ORDER BY ALL DESC"),
+        ),
         ("explain", format!("EXPLAIN SELECT * FROM {q} ORDER BY a")),
         ("no from", "SELECT 1 ORDER BY 1".to_owned()),
         ("unparseable", "SELECT * FROM".to_owned()),

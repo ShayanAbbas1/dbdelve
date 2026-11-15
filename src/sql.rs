@@ -269,6 +269,10 @@ pub fn order_by(engine: Engine, statement: &str) -> Option<Vec<SortKey>> {
     let Some(clause) = child_of_kind(&anchor, "order_by") else {
         return Some(Vec::new());
     };
+    // `ORDER BY ALL` sorts by columns it does not name, so no key can say which.
+    if child_of_kind(&clause, "keyword_all").is_some() {
+        return None;
+    }
 
     let mut cursor = clause.walk();
     let keys = clause

@@ -25,6 +25,7 @@ source: src/sql_snapshots.rs
 [postgres] semicolon => |[a asc=true] (1 keys)|
 [postgres] two statements => (none)
 [postgres] nulls first => (none)
+[postgres] order by all => (none)
 [postgres] explain => (none)
 [postgres] no from => (none)
 [postgres] unparseable => (none)
@@ -55,6 +56,7 @@ source: src/sql_snapshots.rs
 [mysql] semicolon => |[a asc=true] (1 keys)|
 [mysql] two statements => (none)
 [mysql] nulls first => (none)
+[mysql] order by all => (none)
 [mysql] explain => (none)
 [mysql] no from => (none)
 [mysql] unparseable => (none)
@@ -85,6 +87,7 @@ source: src/sql_snapshots.rs
 [mariadb] semicolon => |[a asc=true] (1 keys)|
 [mariadb] two statements => (none)
 [mariadb] nulls first => (none)
+[mariadb] order by all => (none)
 [mariadb] explain => (none)
 [mariadb] no from => (none)
 [mariadb] unparseable => (none)
@@ -115,6 +118,7 @@ source: src/sql_snapshots.rs
 [sqlite] semicolon => |[a asc=true] (1 keys)|
 [sqlite] two statements => (none)
 [sqlite] nulls first => (none)
+[sqlite] order by all => (none)
 [sqlite] explain => (none)
 [sqlite] no from => (none)
 [sqlite] unparseable => (none)
@@ -145,6 +149,7 @@ source: src/sql_snapshots.rs
 [turso] semicolon => |[a asc=true] (1 keys)|
 [turso] two statements => (none)
 [turso] nulls first => (none)
+[turso] order by all => (none)
 [turso] explain => (none)
 [turso] no from => (none)
 [turso] unparseable => (none)
@@ -175,6 +180,7 @@ source: src/sql_snapshots.rs
 [duckdb] semicolon => |[a asc=true] (1 keys)|
 [duckdb] two statements => (none)
 [duckdb] nulls first => (none)
+[duckdb] order by all => (none)
 [duckdb] explain => (none)
 [duckdb] no from => (none)
 [duckdb] unparseable => (none)
@@ -205,6 +211,7 @@ source: src/sql_snapshots.rs
 [snowflake] semicolon => |[a asc=true] (1 keys)|
 [snowflake] two statements => (none)
 [snowflake] nulls first => (none)
+[snowflake] order by all => (none)
 [snowflake] explain => (none)
 [snowflake] no from => (none)
 [snowflake] unparseable => (none)
@@ -235,6 +242,7 @@ source: src/sql_snapshots.rs
 [clickhouse] semicolon => |[a asc=true] (1 keys)|
 [clickhouse] two statements => (none)
 [clickhouse] nulls first => (none)
+[clickhouse] order by all => (none)
 [clickhouse] explain => (none)
 [clickhouse] no from => (none)
 [clickhouse] unparseable => (none)
@@ -265,6 +273,7 @@ source: src/sql_snapshots.rs
 [mssql] semicolon => |[a asc=true] (1 keys)|
 [mssql] two statements => (none)
 [mssql] nulls first => (none)
+[mssql] order by all => (none)
 [mssql] explain => (none)
 [mssql] no from => (none)
 [mssql] unparseable => (none)
@@ -295,6 +304,7 @@ source: src/sql_snapshots.rs
 [mongodb] semicolon => (none)
 [mongodb] two statements => (none)
 [mongodb] nulls first => (none)
+[mongodb] order by all => (none)
 [mongodb] explain => (none)
 [mongodb] no from => (none)
 [mongodb] unparseable => (none)
@@ -342,6 +352,7 @@ source: src/sql_snapshots.rs
 [redis] semicolon => (none)
 [redis] two statements => (none)
 [redis] nulls first => (none)
+[redis] order by all => (none)
 [redis] explain => (none)
 [redis] no from => (none)
 [redis] unparseable => (none)
@@ -374,6 +385,7 @@ source: src/sql_snapshots.rs
 [generic] semicolon => |[a asc=true] (1 keys)|
 [generic] two statements => (none)
 [generic] nulls first => (none)
+[generic] order by all => (none)
 [generic] explain => (none)
 [generic] no from => (none)
 [generic] unparseable => (none)
