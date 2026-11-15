@@ -567,25 +567,95 @@ impl Workspace {
                     .into_any_element(),
             );
             if form.ssm {
+                if form.ssm_dependencies.is_none() && !form.ssm_checking {
+                    let workspace = cx.entity().downgrade();
+                    cx.defer(move |cx| {
+                        let _ = workspace
+                            .update(cx, |workspace, cx| workspace.check_ssm_dependencies(cx));
+                    });
+                }
+                security.push(self.render_ssm_setup(t, cx).into_any_element());
                 for (index, (id, label, input)) in [
                     ("ssm-target", "Target instance", &form.ssm_target),
                     ("ssm-profile", "AWS profile", &form.ssm_profile),
                     ("ssm-region", "AWS region", &form.ssm_region),
-                    ("ssm-aws-cli", "AWS CLI path", &form.ssm_aws_cli),
-                    ("ssm-plugin", "Plugin path", &form.ssm_plugin),
                 ]
                 .into_iter()
                 .enumerate()
                 {
                     let row = nested_field_row(layout::SPACE_MD, id, label, input, bare(input), t);
-                    let row = if id == "ssm-plugin" {
-                        div().child(row).child(help(
-                            "Executable paths are optional. Leave blank to find the tools on PATH.",
-                        ))
-                    } else {
-                        row
-                    };
                     security.push(revealed(row, "ssm-reveal", index, !cx.reduce_motion()));
+                }
+                security.push(
+                    div()
+                        .px(px(layout::SPACE_LG))
+                        .py(px(layout::SPACE_SM))
+                        .child(
+                            button(
+                                "ssm-advanced",
+                                if form.ssm_advanced {
+                                    "Hide advanced"
+                                } else {
+                                    "Advanced"
+                                },
+                                Tone::Quiet,
+                                Control::Compact,
+                                t,
+                            )
+                            .debug_selector(|| "ssm-advanced".into())
+                            .on_click(cx.listener(
+                                |workspace, _, _, cx| {
+                                    if let Some(form) = &mut workspace.form {
+                                        form.ssm_advanced = !form.ssm_advanced;
+                                        if !form.ssm_advanced {
+                                            form.needs_focus = Some(form.ssm_target.clone());
+                                        }
+                                        cx.notify();
+                                    }
+                                },
+                            )),
+                        )
+                        .into_any_element(),
+                );
+                if form.ssm_advanced {
+                    for (index, (id, label, input)) in [
+                        ("ssm-aws-cli", "AWS CLI path", &form.ssm_aws_cli),
+                        ("ssm-plugin", "Plugin path", &form.ssm_plugin),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        security.push(
+                            nested_field_row(layout::SPACE_MD, id, label, input, bare(input), t)
+                                .child(browse_button(
+                                    if index == 0 {
+                                        "browse-aws-cli"
+                                    } else {
+                                        "browse-ssm-plugin"
+                                    },
+                                    input,
+                                    t,
+                                    cx,
+                                ))
+                                .into_any_element(),
+                        );
+                        if let Some(crate::db::ssm::dependencies::Status::Found(path)) = form
+                            .ssm_dependencies
+                            .as_ref()
+                            .map(|results| &results[index])
+                        {
+                            security.push(
+                                div()
+                                    .px(px(layout::SPACE_LG))
+                                    .pb(px(layout::SPACE_SM))
+                                    .text_size(px(layout::chrome(layout::TEXT_SM)))
+                                    .text_color(t.text_muted)
+                                    .child(format!("Detected: {}", path.display()))
+                                    .into_any_element(),
+                            );
+                        }
+                    }
+                    security.push(help("Paths are optional. Leave blank to use PATH. After installing, choose the executable here if the desktop app cannot find it.").into_any_element());
                 }
             }
             if form.ssh {
@@ -886,6 +956,124 @@ impl Workspace {
             )
             .into_any_element(),
         )
+    }
+
+    fn check_ssm_dependencies(&mut self, cx: &mut Context<Self>) {
+        let Some(form) = &mut self.form else {
+            return;
+        };
+        if !form.ssm || form.ssm_checking || form.ssm_dependencies.is_some() {
+            return;
+        }
+        form.ssm_checking = true;
+        let input = form.ssm_aws_cli.clone();
+        let paths = [
+            form.ssm_aws_cli.read(cx).value().trim().to_owned(),
+            form.ssm_plugin.read(cx).value().trim().to_owned(),
+        ];
+        let checked = paths.clone();
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |workspace, cx| {
+            // Coalesce edits without starting a process for every keystroke.
+            executor.timer(Duration::from_millis(400)).await;
+            let current = workspace
+                .update(cx, |workspace, cx| {
+                    let Some(form) = &mut workspace.form else {
+                        return false;
+                    };
+                    if form.ssm_aws_cli != input {
+                        return false;
+                    }
+                    if !form.ssm
+                        || form.ssm_aws_cli.read(cx).value().trim() != paths[0]
+                        || form.ssm_plugin.read(cx).value().trim() != paths[1]
+                    {
+                        form.ssm_checking = false;
+                        cx.notify();
+                        return false;
+                    }
+                    true
+                })
+                .unwrap_or(false);
+            if !current {
+                return;
+            }
+            let results = spawn_blocking(&executor, move || {
+                crate::db::ssm::dependencies::check(
+                    (!checked[0].is_empty()).then(|| std::path::Path::new(&checked[0])),
+                    (!checked[1].is_empty()).then(|| std::path::Path::new(&checked[1])),
+                )
+            })
+            .await;
+            _ = workspace.update(cx, |workspace, cx| {
+                let Some(form) = &mut workspace.form else {
+                    return;
+                };
+                if form.ssm_aws_cli != input {
+                    return;
+                }
+                form.ssm_checking = false;
+                if form.ssm_aws_cli.read(cx).value().trim() == paths[0]
+                    && form.ssm_plugin.read(cx).value().trim() == paths[1]
+                {
+                    form.ssm_dependencies = Some(results);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn render_ssm_setup(&self, t: Theme, cx: &mut Context<Self>) -> Div {
+        use crate::db::ssm::dependencies::Status as ToolStatus;
+        let form = self.form.as_ref().expect("form is open");
+        let mut setup = div()
+            .px(px(layout::SPACE_LG))
+            .py(px(layout::SPACE_SM))
+            .flex()
+            .flex_col()
+            .gap(px(layout::SPACE_SM))
+            .text_size(px(layout::chrome(layout::TEXT_SM)));
+        for (index, (label, url)) in [
+            ("AWS CLI", "https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"),
+            ("Session Manager plugin", "https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html"),
+        ].into_iter().enumerate() {
+            let status = form.ssm_dependencies.as_ref().map(|results| &results[index]);
+            let title = match status {
+                Some(ToolStatus::Found(_)) => "Found",
+                Some(ToolStatus::Missing) => "Missing",
+                Some(ToolStatus::Unavailable(_)) => "Couldn’t run",
+                None => "Checking…",
+            };
+            let mut row = div().flex().flex_col().gap(px(layout::SPACE_XS))
+                .child(div().text_color(t.text).child(format!("{label}: {title}")));
+            if let Some(ToolStatus::Unavailable(message)) = status {
+                row = row.child(div().text_color(t.text_muted).child(message.clone()));
+            }
+            if matches!(status, Some(ToolStatus::Missing | ToolStatus::Unavailable(_))) {
+                row = row.child(div().flex().flex_wrap().gap(px(layout::SPACE_SM))
+                    .child(button(("ssm-install", index), "Installation instructions", Tone::Quiet, Control::Compact, t)
+                        .on_click(move |_, _, cx| cx.open_url(url)))
+                    .child(button(("ssm-choose", index), "Choose executable…", Tone::Quiet, Control::Compact, t)
+                        .on_click(cx.listener(move |workspace, _, window, cx| {
+                            if let Some(form) = &mut workspace.form {
+                                form.ssm_advanced = true;
+                                let input = if index == 0 { form.ssm_aws_cli.clone() } else { form.ssm_plugin.clone() };
+                                cx.notify();
+                                workspace.browse_into(input, window, cx);
+                            }
+                        }))));
+            }
+            setup = setup.child(row);
+        }
+        setup.child(div().text_color(t.text_muted).child("Checks local tools only. Use Test to check AWS access and the database. For SSO, sign in with the AWS CLI first."))
+            .child(button("ssm-check-again", "Check again", Tone::Quiet, Control::Compact, t)
+                .disabled(form.ssm_checking)
+                .on_click(cx.listener(|workspace, _, _, cx| {
+                    if let Some(form) = &mut workspace.form { form.ssm_dependencies = None; }
+                    workspace.check_ssm_dependencies(cx);
+                })))
     }
 
     /// The native Open dialog, for a file found rather than typed into
@@ -3580,6 +3768,9 @@ fn shown_file_fields<'a>(form: &'a ConnectionForm, cx: &App) -> Vec<&'a Entity<I
             }
             if form.ssh {
                 shown.push(&form.ssh_identity_file);
+            }
+            if form.ssm && form.ssm_advanced {
+                shown.extend([&form.ssm_aws_cli, &form.ssm_plugin]);
             }
             shown
         }

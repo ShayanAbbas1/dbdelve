@@ -15,6 +15,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+pub(crate) mod dependencies;
 mod process;
 pub use process::helper;
 

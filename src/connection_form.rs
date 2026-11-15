@@ -72,6 +72,9 @@ pub(crate) struct ConnectionForm {
     pub(crate) ssm_region: Entity<InputState>,
     pub(crate) ssm_aws_cli: Entity<InputState>,
     pub(crate) ssm_plugin: Entity<InputState>,
+    pub(crate) ssm_advanced: bool,
+    pub(crate) ssm_checking: bool,
+    pub(crate) ssm_dependencies: Option<[crate::db::ssm::dependencies::Status; 2]>,
     pub(crate) ssh_host: Entity<InputState>,
     pub(crate) ssh_port: Entity<InputState>,
     pub(crate) ssh_user: Entity<InputState>,
@@ -428,6 +431,17 @@ impl ConnectionForm {
             }));
         }
 
+        for input in [&ssm_aws_cli, &ssm_plugin] {
+            subscriptions.push(cx.subscribe(input, |workspace, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    if let Some(form) = &mut workspace.form {
+                        form.ssm_dependencies = None;
+                        form.test = None;
+                    }
+                    cx.notify();
+                }
+            }));
+        }
         let mut form = Self {
             needs_focus: None,
             url,
@@ -454,6 +468,9 @@ impl ConnectionForm {
             ssm_region,
             ssm_aws_cli,
             ssm_plugin,
+            ssm_advanced: false,
+            ssm_checking: false,
+            ssm_dependencies: None,
             ssh_host,
             ssh_port,
             ssh_user,

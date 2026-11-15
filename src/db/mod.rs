@@ -38,7 +38,7 @@ mod snowflake;
 mod spec;
 mod sqlite;
 mod ssh;
-mod ssm;
+pub(crate) mod ssm;
 mod tunnel;
 pub use ssm::helper as ssm_helper;
 pub use ssm::{ConnectAttempt, ConnectGuard, SsmTunnel};

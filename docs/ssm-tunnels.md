@@ -30,7 +30,15 @@ Assumed roles, credential processes, environment credentials, and existing SSO
 sessions remain the CLI's responsibility. DBDelve does not store AWS keys or
 perform an interactive login.
 
-The optional **AWS CLI path** and **Plugin path** accept absolute paths, useful
+Selecting AWS SSM checks both tools locally in the background. **Found** means
+that the executable's `--version` command completed successfully; it does not
+verify AWS credentials, permissions, or database connectivity. Each check has
+a three-second timeout. **Missing** or **Couldn't run** provides official
+installation instructions and **Choose executable…**. After installation, use
+**Check again**; if your desktop app's PATH has not picked up the installation,
+choose the executable under **Advanced** or restart the app.
+
+The optional **AWS CLI path** and **Plugin path** under **Advanced** accept absolute paths, useful
 when an app launched from Finder or a desktop launcher has a different PATH
 from your shell. The plugin file must be named `session-manager-plugin`
 (`session-manager-plugin.exe` on Windows). Paths containing spaces work.
