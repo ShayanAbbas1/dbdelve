@@ -17,7 +17,8 @@ use crate::explorer::Shortcuts;
 use crate::import::{self, Source};
 use crate::palette::SchemaPick;
 use crate::session::{
-    Behaviour, Bound, BoundSession, Depth, EditMode, MIN_KEEP_ALIVE, STALE_ROWS, restored_shortcuts,
+    Behaviour, Bound, BoundSession, Depth, EditMode, MAX_IDLE_TIMEOUT, MAX_KEEP_ALIVE,
+    MIN_KEEP_ALIVE, STALE_ROWS, restored_shortcuts,
 };
 use crate::sidebar::OPEN_ROWS_CAP;
 use crate::sql::{Destructive, Mode};
@@ -74,6 +75,30 @@ fn forget_what_was_read(profile: &mut Profile, window: &mut Window, cx: &mut Con
     profile.session.clear_prompts();
     profile.session.apply_review = None;
     profile.session.insert_form = None;
+}
+
+/// Which grid of `profile` holds cell edits nobody applied, said as the start
+/// of a refusal. Of any profile, not only the one in front: the idle close asks
+/// it of every one.
+pub(super) fn unapplied_edits_of(profile: &Profile, cx: &App) -> Option<String> {
+    let session = &profile.session;
+    let unapplied = |results: &Entity<gpui_component::table::TableState<ResultGrid>>| {
+        results.read(cx).delegate().has_pending()
+    };
+    if !session.grids().any(unapplied) {
+        return None;
+    }
+    let edited = session
+        .objects
+        .iter()
+        .find(|tab| session.results(Tab::Object(tab.id)).is_some_and(unapplied));
+    Some(match edited {
+        Some(tab) => format!(
+            "{}.{} has cell edits that have not been applied",
+            tab.schema, tab.name
+        ),
+        None => "A query tab has cell edits that have not been applied".into(),
+    })
 }
 
 /// What `profile` lists in the sidebar under `filter`: its Pinned group and
@@ -371,13 +396,22 @@ impl Workspace {
                     .startup_script
                     .filter(|_| takes_script)
                     .unwrap_or_default(),
-                // Off where the engine keeps no session to ping, and under
-                // the floor a hand-edited file could set a ping storm with.
-                keep_alive: stored
-                    .keep_alive_seconds
-                    .filter(|&seconds| keeps_alive && seconds >= MIN_KEEP_ALIVE),
+                // Off where the engine keeps no session to ping, under the
+                // floor a hand-edited file could set a ping storm with, and
+                // past the ceiling it would set a timer that never fires.
+                keep_alive: stored.keep_alive_seconds.filter(|&seconds| {
+                    keeps_alive && (MIN_KEEP_ALIVE..=MAX_KEEP_ALIVE).contains(&seconds)
+                }),
+                // Every engine can be left idle; a 0 is the form's way of
+                // saying off, and a file can say it too. Past the ceiling the
+                // deadline would never be reached, so that is off as well.
+                idle_timeout: stored
+                    .idle_timeout_minutes
+                    .filter(|minutes| (1..=MAX_IDLE_TIMEOUT).contains(minutes)),
             },
             keep_alive_task: None,
+            last_activity: cx.background_executor().now(),
+            idle_task: None,
             confirmed: stored
                 .confirmed
                 .iter()
@@ -469,6 +503,8 @@ impl Workspace {
             // The form's value is applied by `save_form` once this returns.
             behaviour: Behaviour::default(),
             keep_alive_task: None,
+            last_activity: cx.background_executor().now(),
+            idle_task: None,
             confirmed: Vec::new(),
             confirmed_stale: false,
             generation: 0,
@@ -1040,12 +1076,18 @@ impl Workspace {
         let depth_changed = profile.behaviour.depth != behaviour.depth;
         let script_changed = profile.behaviour.startup_script != behaviour.startup_script;
         let keep_alive_changed = profile.behaviour.keep_alive != behaviour.keep_alive;
+        let idle_changed = profile.behaviour.idle_timeout != behaviour.idle_timeout;
         profile.behaviour = behaviour;
         self.remember_profiles(cx);
         if keep_alive_changed {
             // A new interval counts from now and a cleared one drops the timer;
             // neither touches the connection.
             self.arm_keep_alive(id, cx);
+        }
+        if idle_changed {
+            // Counted from the last use, so a longer timeout is not cut short
+            // by one that was shorter, and a cleared one drops the timer.
+            self.arm_idle(id, cx);
         }
         let profile = &mut self.profiles[index];
         if profile.connection().is_none() {
@@ -1359,6 +1401,10 @@ impl Workspace {
     /// saved comes
     /// back after the user moved on.
     fn refresh_schema_of(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(id) = self.profiles.get(index).map(|profile| profile.id.clone()) else {
+            return;
+        };
+        self.mark_activity(&id, cx);
         let Some(profile) = self.profiles.get_mut(index) else {
             return;
         };
@@ -1635,24 +1681,71 @@ impl Workspace {
     /// Which grid of the profile in front holds cell edits nobody applied,
     /// said as the start of a refusal.
     fn unapplied_edits(&self, cx: &App) -> Option<String> {
-        let session = &self.profile()?.session;
-        let unapplied = |results: &Entity<gpui_component::table::TableState<ResultGrid>>| {
-            results.read(cx).delegate().has_pending()
+        unapplied_edits_of(self.profile()?, cx)
+    }
+
+    /// What closing a profile's connection changes in the profile itself, shared
+    /// by [`Self::disconnect`] and the idle close: the sessions go, an open
+    /// transaction with them, and every answer issued to the old generation
+    /// lands on one that is no longer the profile's and is dropped. Tabs and
+    /// buffers stay. Answers whether an open transaction was rolled back, which
+    /// only a disconnect the user asked for can meet.
+    ///
+    /// An SSM session the connection held is cleaned up as it closes, and a
+    /// cleanup the service did not confirm is said once it answers.
+    pub(super) fn close_sessions(&mut self, index: usize, cx: &mut Context<Self>) -> bool {
+        self.next_generation += 1;
+        let generation = self.next_generation;
+        let Some(profile) = self.profiles.get_mut(index) else {
+            return false;
         };
-        if !session.grids().any(unapplied) {
-            return None;
+        let cleanup = if matches!(
+            profile.state,
+            ProfileState::Connecting { .. } | ProfileState::Connected(_)
+        ) {
+            profile
+                .cleanup_attempt
+                .take()
+                .map(|attempt| attempt.observe_cleanup())
+        } else {
+            profile.cleanup_attempt = None;
+            None
+        };
+        let rolled_back = profile.in_transaction && profile.connection().is_some();
+        tracing::info!(
+            connection = crate::logging::connection_number(&profile.id),
+            engine = profile.config.target().label(),
+            was_connected = profile.connection().is_some(),
+            rolled_back,
+            "disconnected"
+        );
+        profile.generation = generation;
+        profile.drop_sessions();
+        profile.keep_alive_task = None;
+        profile.idle_task = None;
+        profile.state = ProfileState::Idle;
+        profile.in_transaction = false;
+        profile.transaction_statements.clear();
+        profile.session.auto_after_end = None;
+        profile.session_changed = false;
+        profile.session.clear_prompts();
+        mark_objects_stale(profile);
+        if let Some(cleanup) = cleanup {
+            cx.spawn(async move |workspace, cx| {
+                if let Ok(result) = cleanup.await
+                    && !result.accepted
+                {
+                    workspace
+                        .update(cx, |workspace, cx| {
+                            workspace.cleanup_notices.push(result);
+                            cx.notify();
+                        })
+                        .ok();
+                }
+            })
+            .detach();
         }
-        let edited = session
-            .objects
-            .iter()
-            .find(|tab| session.results(Tab::Object(tab.id)).is_some_and(unapplied));
-        Some(match edited {
-            Some(tab) => format!(
-                "{}.{} has cell edits that have not been applied",
-                tab.schema, tab.name
-            ),
-            None => "A query tab has cell edits that have not been applied".into(),
-        })
+        rolled_back
     }
 
     /// Closes the connection in front and leads to the welcome surface. Its
@@ -1717,60 +1810,15 @@ impl Workspace {
         if let Some(index) = self.active {
             self.cancel_diagram_reads(index, cx);
         }
-        // A connect still on its way, and every answer issued to this one,
-        // land on a generation that is no longer the profile's and are dropped.
-        self.next_generation += 1;
-        let generation = self.next_generation;
-        let Some(profile) = self.profile_mut() else {
+        let Some(index) = self.active else {
             return;
         };
-        let cleanup = if matches!(
-            profile.state,
-            ProfileState::Connecting { .. } | ProfileState::Connected(_)
-        ) {
-            profile
-                .cleanup_attempt
-                .take()
-                .map(|attempt| attempt.observe_cleanup())
-        } else {
-            profile.cleanup_attempt = None;
-            None
+        let rolled_back = self.close_sessions(index, cx);
+        let Some(profile) = self.profiles.get(index) else {
+            return;
         };
-        let rolled_back = profile.in_transaction && profile.connection().is_some();
-        tracing::info!(
-            connection = crate::logging::connection_number(&profile.id),
-            engine = profile.config.target().label(),
-            was_connected = profile.connection().is_some(),
-            rolled_back,
-            "disconnected"
-        );
-        profile.generation = generation;
-        profile.drop_sessions();
-        profile.keep_alive_task = None;
-        profile.state = ProfileState::Idle;
-        profile.in_transaction = false;
-        profile.transaction_statements.clear();
-        profile.session.auto_after_end = None;
-        profile.session_changed = false;
-        profile.session.clear_prompts();
-        mark_objects_stale(profile);
         let name = profile.name.clone();
         self.active = None;
-        if let Some(cleanup) = cleanup {
-            cx.spawn(async move |workspace, cx| {
-                if let Ok(result) = cleanup.await
-                    && !result.accepted
-                {
-                    workspace
-                        .update(cx, |workspace, cx| {
-                            workspace.cleanup_notices.push(result);
-                            cx.notify();
-                        })
-                        .ok();
-                }
-            })
-            .detach();
-        }
         self.remember_profiles(cx);
         self.rebuild_connections(cx);
         self.refocus_front();
@@ -2258,6 +2306,7 @@ impl Workspace {
         profile.generation = generation;
         profile.drop_sessions();
         profile.keep_alive_task = None;
+        profile.idle_task = None;
         let attempt = crate::db::ConnectAttempt::default();
         profile.cleanup_attempt = profile.config.ssm().map(|_| attempt.clone());
         profile.state = ProfileState::Connecting {
@@ -2438,7 +2487,9 @@ impl Workspace {
                     if unpicked.is_some() {
                         workspace.remember_profiles(cx);
                     }
+                    workspace.mark_activity(&id, cx);
                     workspace.arm_keep_alive(&id, cx);
+                    workspace.arm_idle(&id, cx);
                     workspace.load_catalog(&id, generation, cx);
                     workspace.load_import_columns(&id, cx);
                     workspace.reload_front_object(&id, cx);
@@ -2467,6 +2518,9 @@ impl Workspace {
     }
 
     pub(crate) fn load_catalog(&mut self, id: &str, generation: u64, cx: &mut Context<Self>) {
+        if self.issued_to(id, generation).is_some() {
+            self.mark_activity(id, cx);
+        }
         let Some(profile) = self.issued_to(id, generation) else {
             return;
         };
@@ -2752,6 +2806,9 @@ impl Workspace {
         generation: u64,
         cx: &mut Context<Self>,
     ) {
+        if self.issued_to(id, generation).is_some() {
+            self.mark_activity(id, cx);
+        }
         let Some(session) = self.session_for(id, &database, generation) else {
             return;
         };

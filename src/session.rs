@@ -76,6 +76,16 @@ pub(crate) struct Profile {
     /// it cancels the round, which is how a disconnect, a connect and a changed
     /// interval end the old timer.
     pub(crate) keep_alive_task: Option<gpui::Task<()>>,
+    /// When the user last used this profile, on the scheduler's clock
+    /// (`BackgroundExecutor::now`) so a test's `advance_clock` moves it. Moved
+    /// only by the user's own work -- a statement, a catalog read, a connect --
+    /// and never by a keep-alive ping, which would hold an unattended
+    /// connection open for ever.
+    pub(crate) last_activity: std::time::Instant,
+    /// The pending idle close, one-shot: it sleeps until `last_activity` plus
+    /// the timeout. Dropping it cancels the close, which is how a disconnect, a
+    /// connect and a changed timeout end the old one.
+    pub(crate) idle_task: Option<gpui::Task<()>>,
     pub(crate) confirmed: Vec<Destructive>,
     /// Whether this connection has silenced the prompt before editing rows
     /// restored from an earlier session. Stored as [`STALE_ROWS`] among
@@ -757,6 +767,7 @@ impl Profile {
             startup_script: Some(self.behaviour.startup_script.clone())
                 .filter(|script| !script.trim().is_empty()),
             keep_alive_seconds: self.behaviour.keep_alive,
+            idle_timeout_minutes: self.behaviour.idle_timeout,
             time_zone: server.and_then(|server| server.time_zone.clone()),
             driver_properties: server
                 .map(|server| server.properties.stored())
@@ -2649,6 +2660,17 @@ impl Depth {
 /// its own rather than a keep-alive, and a hand-edited file could set a storm.
 pub(crate) const MIN_KEEP_ALIVE: u32 = 10;
 
+/// The most seconds between keep-alive pings. Every cut-off a ping answers (a
+/// load balancer, a pooler's idle limit) is under an hour, so past this the
+/// timer would not fire in any session a user keeps; the number was one of two
+/// in the phase with no ceiling at all.
+pub(crate) const MAX_KEEP_ALIVE: u32 = 3600;
+
+/// The most minutes an idle timeout may wait: a day. Past it the deadline is
+/// one a session left open would not reach, so the setting would be a timer
+/// that never fires.
+pub(crate) const MAX_IDLE_TIMEOUT: u32 = 1440;
+
 /// What a profile does with its connection rather than what the connection
 /// is, so changing it never reconnects.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -2660,6 +2682,9 @@ pub(crate) struct Behaviour {
     /// Seconds between pings of the sessions the user holds open; `None` is
     /// off. Never read by anything but the keep-alive timer.
     pub(crate) keep_alive: Option<u32>,
+    /// Whole minutes without use after which the profile closes its
+    /// sessions; `None` is off. Read by the idle timer only.
+    pub(crate) idle_timeout: Option<u32>,
 }
 
 /// Which surface the main pane is showing, and what a run targets. Both kinds
