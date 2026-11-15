@@ -1171,16 +1171,25 @@ impl MetalRenderer {
             .as_ref()
             .context("missing path intermediate texture")?;
 
-        let mut vertices = Vec::new();
-        for path in paths {
-            vertices.extend(path.vertices.iter().map(|v| PathRasterizationVertex {
+        // dbdelve patch: written straight into the instance buffer. Gathered
+        // into a `Vec` grown by doubling first, a frame of millions of vertices
+        // left a fresh realloc'd block of hundreds of megabytes in the macOS
+        // footprint every frame.
+        let vertex_count = paths.iter().map(|path| path.vertices.len()).sum();
+        let (vertex_instance_bindings, slots) =
+            writer.allocate::<PathRasterizationVertex>(vertex_count)?;
+        let vertices = paths.iter().flat_map(|path| {
+            let bounds = path.bounds.intersect(&path.content_mask.bounds);
+            path.vertices.iter().map(move |v| PathRasterizationVertex {
                 xy_position: v.xy_position,
                 st_position: v.st_position,
                 color: path.color,
-                bounds: path.bounds.intersect(&path.content_mask.bounds),
-            }));
+                bounds,
+            })
+        });
+        for (slot, vertex) in slots.iter_mut().zip(vertices) {
+            slot.write(vertex);
         }
-        let vertex_instance_bindings = writer.write(&vertices)?;
 
         let render_pass_descriptor = metal::RenderPassDescriptor::new();
         let color_attachment = render_pass_descriptor
@@ -1219,7 +1228,8 @@ impl MetalRenderer {
         command_encoder.draw_primitives(
             metal::MTLPrimitiveType::Triangle,
             0,
-            vertices.len() as u64,
+            // dbdelve patch: counted above, with the vertices written in place.
+            vertex_count as u64,
         );
 
         command_encoder.end_encoding();
