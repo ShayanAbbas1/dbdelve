@@ -4326,6 +4326,14 @@ mod tests {
             );
         }
         assert_eq!(Engine::Sqlite.bytes_of("x'", 64), None);
+        // Past the part read, the shape of the whole value still counts.
+        let long = "41".repeat(2000);
+        assert_eq!(Engine::Sqlite.bytes_of(&format!("x'{long}"), 2), None);
+        assert_eq!(Engine::Sqlite.bytes_of(&format!("x'{long}4'"), 2), None);
+        assert_eq!(
+            Engine::Sqlite.bytes_of(&format!("x'{long}'"), 2),
+            Some(b"AA".to_vec())
+        );
 
         assert!(Engine::Postgres.shows_bytes_as_hex());
 

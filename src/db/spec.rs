@@ -268,7 +268,14 @@ impl BinaryText {
 impl Payload<'_> {
     /// Only the front of the digits is read: a blob can run to megabytes,
     /// and its cell is drawn every frame. Whatever lies past `most` bytes is
-    /// checked for its length alone.
+    /// checked for its length alone, as `payload` checks its closing quote.
+    ///
+    /// ponytail: a character that is no digit past the part read goes
+    /// unseen, so a cell can show bytes that the row panel, reading further,
+    /// refuses. Only text imitating the engine's own spelling of bytes (a
+    /// SQLite BLOB-affinity column holding text) can do that: a driver
+    /// renders real bytes whole. If it matters, validate each value once per
+    /// result, off the draw path, and keep the answer beside the rows.
     fn decode(self, most: usize) -> Option<Vec<u8>> {
         match self {
             Self::Hex(digits) => {
