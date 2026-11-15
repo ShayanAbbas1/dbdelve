@@ -2571,9 +2571,9 @@ fn restored_config(
         }
         if let Some(tag) = stored.engine.as_deref()
             && !tag.starts_with(store::PLUGIN_TAG)
-            && Engine::parse(tag).is_ok_and(|engine| engine.fields() != crate::db::Fields::Server)
+            && Engine::parse(tag).is_ok_and(|engine| !Target::built_in(engine).takes_ssm_tunnel())
         {
-            return Err("SSM needs a TCP database connection.".into());
+            return Err("SSM needs a supported TCP database connection.".into());
         }
     }
     let Some(tag) = stored.engine.as_deref() else {
@@ -2927,6 +2927,35 @@ region = 'ap-northeast-1'
         stored.ssh = None;
         stored.engine = Some("sqlite".into());
         assert!(restored_config(&stored, SslMode::VerifyFull, &[]).is_err());
+    }
+
+    #[test]
+    fn ssm_restore_refuses_mongodb_but_preserves_its_ssh_support() {
+        let mut stored = store::decode_profiles(
+            r#"[[profiles]]
+id = 'mongo'
+name = 'MongoDB'
+engine = 'mongodb'
+host = 'private.example.test'
+port = 27017
+database = 'app'
+user = 'reader'
+[profiles.ssm]
+target = 'i-0123456789abcdef0'
+"#,
+            &[],
+        )
+        .unwrap()
+        .profiles
+        .remove(0);
+        assert!(restored_config(&stored, SslMode::Prefer, &[]).is_err());
+        stored.ssm = None;
+        let (direct, _) = restored_config(&stored, SslMode::Prefer, &[]).unwrap();
+        assert_eq!(direct.engine(), Engine::MongoDb);
+        stored.ssh = Some(crate::db::SshTunnel::default());
+        let (ssh, _) = restored_config(&stored, SslMode::Prefer, &[]).unwrap();
+        assert_eq!(ssh.engine(), Engine::MongoDb);
+        assert_eq!(ssh.ssh(), stored.ssh.as_ref());
     }
 
     #[test]

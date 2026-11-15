@@ -292,9 +292,9 @@ impl Output {
 fn valid_session_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 200
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'@'))
+        && id.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'@' | b'+' | b'=' | b',')
+        })
 }
 fn diagnostic(line: &str) -> Option<&'static str> {
     let lower = line.to_ascii_lowercase();
@@ -602,6 +602,40 @@ mod tests {
         out.line("Exiting session with sessionId: user-123.", true);
         assert!(out.closed);
     }
+    #[test]
+    fn ssm_readiness_accepts_role_identity_punctuation() {
+        for session in [
+            "alice+db-0123456789abcdef0",
+            "alice=db-0123456789abcdef0",
+            "alice,db-0123456789abcdef0",
+            "Alice_1+=,.@-0123456789abcdef0",
+        ] {
+            let mut out = Output::default();
+            out.line(&format!("Starting session with SessionId: {session}"), true);
+            assert_eq!(out.session.as_deref(), Some(session));
+            assert_eq!(out.port, None);
+            let mut out = Output::default();
+            let ready = format!("Port 15432 opened for sessionId {session}.");
+            out.line(&ready, false);
+            assert_eq!(out.port, None);
+            out.line(&ready, true);
+            assert_eq!(out.port, Some(15432));
+            assert_eq!(out.session.as_deref(), Some(session));
+        }
+    }
+
+    #[test]
+    fn ssm_readiness_rejects_malformed_session_ids() {
+        for session in ["", "alice db", "alice/db", "alice;db", "alice\"db"] {
+            let mut out = Output::default();
+            out.line(&format!("Starting session with SessionId: {session}"), true);
+            out.line(&format!("Port 15432 opened for sessionId {session}."), true);
+            assert_eq!(out.session, None);
+            assert_eq!(out.port, None);
+        }
+        assert!(!valid_session_id(&"a".repeat(201)));
+    }
+
     #[test]
     fn watchdog_exit_invalidates_readiness_before_cleanup_finishes() {
         let mut out = Output::default();
