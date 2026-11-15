@@ -532,7 +532,9 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   (`DiagramView::centre_on`), held as the restored centre until the first
   read lands. Each is offered where `Profile::draws_diagrams` says, which asks
   the live connection: a plugin draws only once it offered `graph`, which its
-  `Target` cannot know.
+  `Target` cannot know. So a restored diagram stays pending until the profile
+  says it draws, which on a plugin is after connecting; on a connection that
+  does not, it stays pending and on disk rather than being dropped.
 - **`clip` reads only the window a cell shows, not the whole value.**
   `ResultGrid::shown` clips a cell as it is drawn, on the frame thread, for
   every visible cell of every frame. Nothing clipped is kept: a stored second

@@ -1631,6 +1631,7 @@ impl Workspace {
         }
         let (opened, still_pending) = restorable(
             profile.config.engine(),
+            profile.draws_diagrams(),
             &profile.catalog,
             &profile.session.pending_objects,
         );
@@ -1679,7 +1680,10 @@ enum Reopened {
 /// Split the stored tabs into those that can open now and those still waiting.
 ///
 /// A diagram opens at once, as a relation does, and is read when shown: a
-/// schema since dropped says so in its tab.
+/// schema since dropped says so in its tab. That is once `draws` says the
+/// profile draws diagrams, which a plugin's answers only once connected, so
+/// until then it waits; on a connection that does not draw it waits on, kept
+/// on disk with how it was looked at for a plugin that comes to offer `graph`.
 ///
 /// A routine waits for the routines, not just the catalog: resolved against
 /// relations alone it would find nothing and be dropped for good. One whose
@@ -1687,6 +1691,7 @@ enum Reopened {
 /// about whether the routine still exists.
 fn restorable(
     engine: Engine,
+    draws: bool,
     catalog: &CatalogState,
     pending: &[store::StoredObject],
 ) -> (Vec<(Reopened, bool)>, Vec<store::StoredObject>) {
@@ -1698,7 +1703,9 @@ fn restorable(
     let mut opened = Vec::new();
     let mut still_pending = Vec::new();
     for stored in pending {
-        if stored.diagram {
+        if stored.diagram && !draws {
+            still_pending.push(stored.clone());
+        } else if stored.diagram {
             opened.push((
                 Reopened::Diagram(
                     stored.schema.clone(),
@@ -1855,7 +1862,8 @@ mod tests {
             stored("digest()", true),
         ];
 
-        let (opened, waiting) = restorable(Engine::Postgres, &CatalogState::Loading, &pending);
+        let (opened, waiting) =
+            restorable(Engine::Postgres, true, &CatalogState::Loading, &pending);
 
         assert_eq!(opened.len(), 2, "before the catalog, as a relation");
         assert_eq!(name(&opened[0].0), "accounts");
@@ -1866,6 +1874,38 @@ mod tests {
             _ => panic!("the diagram comes back second, in front"),
         }
         assert_eq!(waiting.len(), 1);
+    }
+
+    /// A plugin's profile says it draws only once connected, after the
+    /// restore first runs: a diagram dropped then, as a tab that could not
+    /// open, would be gone from disk at the next save.
+    #[test]
+    fn a_stored_diagram_waits_while_the_profile_cannot_say_it_draws() {
+        let diagram = store::StoredObject {
+            diagram: true,
+            diagram_view: Some(store::StoredDiagram {
+                zoom: Some(0.5),
+                ..store::StoredDiagram::default()
+            }),
+            active: true,
+            ..stored("", false)
+        };
+        let pending = [stored("accounts", false), diagram.clone()];
+
+        let (opened, waiting) =
+            restorable(Engine::Postgres, false, &CatalogState::Loading, &pending);
+        assert_eq!(opened.len(), 1);
+        assert_eq!(name(&opened[0].0), "accounts");
+        assert_eq!(
+            waiting,
+            std::slice::from_ref(&diagram),
+            "kept whole, view and all"
+        );
+
+        let (opened, waiting) =
+            restorable(Engine::Postgres, true, &CatalogState::Loading, &waiting);
+        assert!(matches!(opened[..], [(Reopened::Diagram(..), true)]));
+        assert!(waiting.is_empty());
     }
 
     fn catalog_with(routines: Routines) -> CatalogState {
@@ -1900,14 +1940,19 @@ mod tests {
         // Relations are in, routines are not: the relation opens, and the
         // routine is neither resolved against a catalog without it nor dropped.
         for routines in [Routines::Loading, Routines::Failed] {
-            let (opened, waiting) = restorable(Engine::Postgres, &catalog_with(routines), &pending);
+            let (opened, waiting) =
+                restorable(Engine::Postgres, true, &catalog_with(routines), &pending);
             assert_eq!(opened.len(), 1);
             assert_eq!(name(&opened[0].0), "accounts");
             assert_eq!(waiting, [stored("digest()", true)]);
         }
 
-        let (opened, waiting) =
-            restorable(Engine::Postgres, &catalog_with(Routines::Loaded), &pending);
+        let (opened, waiting) = restorable(
+            Engine::Postgres,
+            true,
+            &catalog_with(Routines::Loaded),
+            &pending,
+        );
         assert_eq!(opened.len(), 2);
         assert!(waiting.is_empty());
     }
@@ -1922,7 +1967,7 @@ mod tests {
             stored("accounts", false),
         ];
 
-        let (opened, _) = restorable(Engine::Postgres, &CatalogState::Loading, &pending);
+        let (opened, _) = restorable(Engine::Postgres, true, &CatalogState::Loading, &pending);
 
         assert!(matches!(
             opened[0].0,
@@ -1941,7 +1986,8 @@ mod tests {
             ..stored("accounts", false)
         }];
 
-        let (opened, waiting) = restorable(Engine::Postgres, &CatalogState::Loading, &pending);
+        let (opened, waiting) =
+            restorable(Engine::Postgres, true, &CatalogState::Loading, &pending);
 
         assert_eq!(opened.len(), 1);
         assert_eq!(name(&opened[0].0), "accounts");
