@@ -5138,6 +5138,67 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_engine_that_opens_a_transaction_spells_one_the_gate_reads() {
+        use crate::db::Engine;
+
+        for engine in Engine::ALL {
+            let Some(begin) = engine.begins_transaction() else {
+                continue;
+            };
+            // The buffer gets this text and the user may run it again, so it
+            // has to read back as a bracket rather than as a statement the
+            // gate cannot place.
+            assert!(is_transaction_bracket(begin), "{engine:?}: {begin}");
+            assert!(
+                is_transaction_bracket(&format!("{begin};")),
+                "{engine:?}: {begin};"
+            );
+            // Transaction control runs in every mode: asking for Read-write
+            // to end a transaction would teach people to live in Full.
+            assert_eq!(classify(engine, begin).mode, Mode::ReadOnly, "{engine:?}");
+            for verb in ["COMMIT", "ROLLBACK"] {
+                assert_eq!(classify(engine, verb).mode, Mode::ReadOnly, "{engine:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn opening_a_transaction_is_not_the_same_question_as_bracketing_a_batch() {
+        use crate::db::Engine;
+
+        // The one engine the two answer differently, and the reason
+        // `begins_transaction` exists at all: collapsing them into one method
+        // would stop Postgres ever opening a transaction.
+        assert_eq!(Engine::Postgres.transaction_start(), None);
+        assert_eq!(Engine::Postgres.begins_transaction(), Some("BEGIN"));
+
+        // Where neither has a transaction to offer, both say so.
+        for engine in [Engine::MongoDb, Engine::Redis] {
+            assert_eq!(engine.transaction_start(), None, "{engine:?}");
+            assert_eq!(engine.begins_transaction(), None, "{engine:?}");
+        }
+    }
+
+    #[test]
+    fn ending_a_transaction_and_opening_the_next_leaves_one_open() {
+        use crate::db::Engine;
+
+        // What Commit sends while auto-commit is off. `leaves` reading the
+        // pair as closed would leave the switch saying "off" over a session
+        // that is autocommitting again.
+        for engine in [Engine::Postgres, Engine::MySql, Engine::Sqlite] {
+            let begin = engine.begins_transaction().expect("opens one");
+            let sent = format!("COMMIT;\n\n{begin};");
+            assert_eq!(leaves(engine, &sent).transaction, Some(true), "{engine:?}");
+            assert_eq!(
+                leaves(engine, "COMMIT;").transaction,
+                Some(false),
+                "{engine:?}"
+            );
+        }
+    }
+
+    #[test]
     fn the_mode_cycle_runs_read_only_to_full_and_back() {
         assert_eq!(Mode::ReadOnly.next(), Mode::ReadWrite);
         assert_eq!(Mode::ReadWrite.next(), Mode::Full);

@@ -81,6 +81,12 @@ pub(crate) struct Profile {
     /// queue's reads would not see. Read off what was sent, not asked of the
     /// server; cleared by a `COMMIT` or `ROLLBACK`, and on connect.
     pub(crate) in_transaction: bool,
+    /// Whether each of the user's statements commits on its own. Off means
+    /// dbdelve keeps a transaction open for them, opening it by writing a
+    /// `BEGIN` into the buffer where they can read it -- never onto the wire
+    /// unseen (`AGENTS.md` hard rule 1). Per connection, and off again on
+    /// connect, because the transaction it was holding died with the session.
+    pub(crate) auto_commit: bool,
     /// Whether they have changed the session in a way that lasts as long as
     /// it does -- a `SET`, `USE` or temporary table. Cleared on connect.
     pub(crate) session_changed: bool,

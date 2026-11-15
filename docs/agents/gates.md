@@ -61,6 +61,19 @@ where the user can read it:
   before any runs.
 - **Explain** puts the engine's `EXPLAIN` prefix on a copy of the
   statement, never into the buffer.
+- **Transaction control** appends its own statement to the buffer and runs it
+  from there (`Workspace::run_in_buffer`, `src/workspace/transactions.rs`).
+  Turning auto-commit off opens the transaction at once, because a switch
+  reading "off" over a session that is still autocommitting is wrong for as
+  long as it takes to lose a row; Commit and Roll Back send `COMMIT;` and the
+  next `BEGIN;` as one submission, because a gap between them is a statement
+  that commits itself under a switch saying "off". `Engine::begins_transaction`
+  spells the `BEGIN`, and is not `Engine::transaction_start`: that one answers
+  whether a *generated* batch needs brackets, and says `None` for Postgres,
+  where one submission is already one implicit transaction. Turning
+  auto-commit back on while a transaction is open is refused rather than
+  resolved, since dbdelve does not get to choose between committing the
+  user's work and discarding it.
 - **Format Query** rewrites the buffer on command only, through
   `sqlformat`'s token-level reformatter (on MongoDB, `mql::format`'s
   bracket-depth layout over the tree-sitter tokens, refused unless the

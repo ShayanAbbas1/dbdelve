@@ -23,6 +23,7 @@ mod profiles;
 mod projects;
 mod queries;
 mod tabs;
+mod transactions;
 mod welcome;
 
 use std::collections::{HashMap, HashSet};
@@ -1772,6 +1773,7 @@ impl Render for Workspace {
         let paging =
             running.or_else(|| views::render_paging(profile, self.custom_limit.as_ref(), cx));
         let view_sorting = views::render_view_sorting(profile, cx);
+        let transaction = views::render_transaction(profile, cx);
         let hidden_columns = views::render_hidden_columns(profile, cx);
         let relation = profile
             .session
@@ -2032,6 +2034,7 @@ impl Render for Workspace {
             || notice.is_some()
             || paging.is_some()
             || view_sorting.is_some()
+            || transaction.is_some()
             || hidden_columns.is_some()
             || query_status.is_some()
             || refreshable_snapshot
@@ -2060,6 +2063,7 @@ impl Render for Workspace {
                         .flex()
                         .items_center()
                         .gap(px(layout::SPACE_SM))
+                        .children(transaction)
                         .children(view_sorting)
                         .children(hidden_columns)
                         .children(left_stats.map(|stats| {
@@ -2392,6 +2396,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::command_palette))
             .on_action(cx.listener(Self::search_everything))
             .on_action(cx.listener(Self::cycle_mode))
+            .on_action(cx.listener(Self::toggle_auto_commit))
+            .on_action(cx.listener(Self::commit_transaction))
+            .on_action(cx.listener(Self::rollback_transaction))
             .on_action(cx.listener(Self::switch_connection))
             .on_action(cx.listener(Self::disconnect))
             .on_action(cx.listener(Self::toggle_sidebar))
