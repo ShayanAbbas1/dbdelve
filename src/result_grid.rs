@@ -2112,12 +2112,18 @@ impl ResultGrid {
             );
         }
         // The whole value, not the part a cell draws: an input holds all of it.
+        // A staged one first, since that is what the input would be seeded with.
+        let not_utf8 = |bytes: &[u8]| std::str::from_utf8(bytes).is_err();
         let not_text = self.binary_form(col) == Some(BinaryForm::Text)
-            && self.cell(row, col).is_some_and(|value| {
-                self.engine
-                    .bytes_of(value, usize::MAX)
-                    .is_none_or(|bytes| std::str::from_utf8(&bytes).is_err())
-            });
+            && match self.pending_value(row, col) {
+                Some(NewValue::Bytes(bytes)) => not_utf8(bytes),
+                Some(_) => false,
+                None => self.cell(row, col).is_some_and(|value| {
+                    self.engine
+                        .bytes_of(value, usize::MAX)
+                        .is_none_or(|bytes| not_utf8(&bytes))
+                }),
+            };
         not_text.then_some(
             "These bytes are not UTF-8 text. Parse the column as Hex or Base64 to edit them.",
         )
@@ -5145,6 +5151,25 @@ mod tests {
             Mode::ReadWrite,
         )
         .with_target(db::Target::built_in(engine))
+    }
+
+    #[test]
+    fn a_staged_value_that_is_not_utf8_leaves_its_cell_read_only_as_text() {
+        let mut grid = bytes_grid(db::Engine::Sqlite, "blob", &["x'6869'"], vec![0]);
+        grid.set_binary_form(1, BinaryForm::Hex);
+        assert!(grid.set_pending(0, 1, value("FF")));
+        grid.set_binary_form(1, BinaryForm::Text);
+        assert!(!grid.editable(0, 1));
+        assert!(grid.bytes_refusal(0, 1).is_some());
+        assert!(!grid.set_pending(0, 1, value("x'FF'")));
+        assert_eq!(grid.pending_value(0, 1), Some(&NewValue::Bytes(vec![0xff])));
+
+        // Staged text is as editable as fetched text, and seeds as itself.
+        grid.set_binary_form(1, BinaryForm::Hex);
+        assert!(grid.set_pending(0, 1, value("686921")));
+        grid.set_binary_form(1, BinaryForm::Text);
+        assert!(grid.editable(0, 1));
+        assert_eq!(grid.edit_seed(0, 1), "hi!");
     }
 
     #[test]

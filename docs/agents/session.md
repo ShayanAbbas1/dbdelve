@@ -543,7 +543,7 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   `Target::edits_bytes` holds (a built-in driver on an engine with a bytes
   literal: Postgres, MySQL, MariaDB, SQLite, SQL Server), its row is not
   named by a binary value (a binary key, or an engine naming rows by every
-  value), and, parsed as Text, its whole value is UTF-8; `bytes_refusal`
+  value), and, parsed as Text, its whole value, staged or else fetched, is UTF-8; `bytes_refusal`
   says which failed. Text is a strict UTF-8 decode; bytes that are
   not UTF-8, or a value that is not the engine's spelling (a MongoDB UUID,
   a Snowflake session set to base64), keep the server's text in the muted
