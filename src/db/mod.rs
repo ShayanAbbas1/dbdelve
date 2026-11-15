@@ -780,6 +780,20 @@ impl Engine {
         self.spec().is_binary_type(data_type)
     }
 
+    /// The first `most` bytes of a value of a binary type
+    /// ([`Engine::is_binary_type`]) as this engine's driver rendered it, or
+    /// `None` where `value` is not its spelling of bytes. What the grid shows
+    /// a column parsed as text or base64 from; nothing written back reads it.
+    pub fn bytes_of(self, value: &str, most: usize) -> Option<Vec<u8>> {
+        self.spec().bytes_of(value, most)
+    }
+
+    /// Whether bytes already arrive as hex digits, so that showing them as
+    /// hex is showing them as they came.
+    pub fn shows_bytes_as_hex(self) -> bool {
+        self.spec().binary_text != Some(spec::BinaryText::BinData)
+    }
+
     /// Whether a column of `data_type` holds numbers on this engine: the names
     /// [`is_numeric_type`] knows, plus the ones its spec adds, read through
     /// the wrappers its spec peels.
@@ -4268,6 +4282,69 @@ mod tests {
             for data_type in ["bytea", "blob", "longblob", "varbinary(16)", "BINARY"] {
                 assert!(engine.is_binary_type(data_type), "{engine:?} {data_type}");
             }
+        }
+    }
+
+    #[test]
+    fn bytes_read_back_out_of_each_engines_own_spelling_of_them() {
+        let dead = b"\xde\xad\xbe\xef".to_vec();
+        for (engine, empty, upper, lower) in [
+            (Engine::Postgres, "\\x", "\\xDEADBEEF", "\\xdeadbeef"),
+            (Engine::MySql, "0x", "0xDEADBEEF", "0xdeadbeef"),
+            (Engine::MariaDb, "0x", "0xDEADBEEF", "0xdeadbeef"),
+            (Engine::SqlServer, "0x", "0xDEADBEEF", "0xdeadbeef"),
+            (Engine::Generic, "0x", "0xDEADBEEF", "0xdeadbeef"),
+            (Engine::Sqlite, "x''", "x'DEADBEEF'", "x'deadbeef'"),
+            (Engine::Turso, "x''", "x'DEADBEEF'", "x'deadbeef'"),
+            (Engine::DuckDb, "", "DEADBEEF", "deadbeef"),
+            (Engine::Snowflake, "", "DEADBEEF", "deadbeef"),
+        ] {
+            assert_eq!(engine.bytes_of(empty, 64), Some(Vec::new()), "{engine:?}");
+            assert_eq!(engine.bytes_of(upper, 64), Some(dead.clone()), "{engine:?}");
+            assert_eq!(engine.bytes_of(lower, 64), Some(dead.clone()), "{engine:?}");
+            // Only as much as was asked for.
+            assert_eq!(engine.bytes_of(upper, 2), Some(dead[..2].to_vec()));
+            for not_bytes in [
+                &upper[..upper.len() - 1],
+                &upper.replace("EF", "EG"),
+                "a word",
+            ] {
+                assert_eq!(
+                    engine.bytes_of(not_bytes, 64),
+                    None,
+                    "{engine:?} {not_bytes}"
+                );
+            }
+        }
+        // A plugin speaking Postgres writes bytes as any plugin does.
+        assert_eq!(
+            Engine::Postgres.bytes_of("0xDEADBEEF", 64),
+            Some(dead.clone())
+        );
+        assert_eq!(Engine::Sqlite.bytes_of("x'", 64), None);
+
+        assert!(Engine::Postgres.shows_bytes_as_hex());
+
+        let mongo = Engine::MongoDb;
+        assert!(!mongo.shows_bytes_as_hex());
+        assert_eq!(
+            mongo.bytes_of("BinData(0, '3q2+7w==')", 64),
+            Some(dead.clone())
+        );
+        assert_eq!(mongo.bytes_of("BinData(5, '')", 64), Some(Vec::new()));
+        assert_eq!(
+            mongo.bytes_of("BinData(0, '3q2+7w==')", 3),
+            Some(dead[..3].to_vec())
+        );
+        for not_bytes in [
+            "BinData(0, '3q2+7w=')",
+            "BinData(0, '3q2+7w=*')",
+            "BinData(x, '3q2+7w==')",
+            "BinData(0, '3q2+7w==",
+            // A UUID is shown as one, not as its bytes.
+            "0e5c1a2b-3c4d-4e5f-8a9b-0c1d2e3f4a5b",
+        ] {
+            assert_eq!(mongo.bytes_of(not_bytes, 64), None, "{not_bytes}");
         }
     }
 

@@ -2461,6 +2461,9 @@ fn render_row_inspector(
                                                     ),
                                                 )
                                             }
+                                            Some(text) if field.unparsed => {
+                                                value.text_color(t.text_muted).child(text)
+                                            }
                                             Some(text) => value.text_color(t.text).child(text),
                                             None if field.missing => value,
                                             // Italic so a NULL cannot be read

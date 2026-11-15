@@ -41,6 +41,9 @@ pub struct EngineSpec {
     pub system_databases: &'static [&'static str],
     /// Exact type names read as bytes beyond the families every engine shares.
     pub binary_types: &'static [&'static str],
+    /// How the driver writes a value of one of those types as text, `None`
+    /// where no column is ever typed as one.
+    pub binary_text: Option<BinaryText>,
     /// Exact lower-cased type names that are numbers beyond the families every
     /// engine shares, without their precision.
     pub numeric_types: &'static [&'static str],
@@ -148,6 +151,16 @@ impl EngineSpec {
             || self.binary_types.contains(&name.as_str())
     }
 
+    /// [`Engine::bytes_of`](super::Engine::bytes_of).
+    pub fn bytes_of(&self, value: &str, most: usize) -> Option<Vec<u8>> {
+        self.binary_text
+            .and_then(|text| text.payload(value))
+            // A plugin writes bytes this way whatever dialect it speaks
+            // (`external::rows`), and what asks knows only the dialect.
+            .or_else(|| BinaryText::ZeroX.payload(value))?
+            .decode(most)
+    }
+
     /// [`Engine::is_numeric_type`](super::Engine::is_numeric_type). Wrappers
     /// come off first, so `Nullable(UInt64)` answers as `UInt64` does.
     pub fn is_numeric_type(&self, data_type: &str) -> bool {
@@ -208,6 +221,77 @@ fn unwrap_type_wrapper<'a>(name: &'a str, wrapper: &str) -> Option<&'a str> {
         .strip_prefix('(')?
         .strip_suffix(')')
         .map(str::trim)
+}
+
+/// How a driver writes bytes as text, which is all the grid holds of them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BinaryText {
+    /// `0xDEADBEEF`, the T-SQL and MySQL literal.
+    ZeroX,
+    /// `\xdeadbeef`, Postgres' `bytea_output = hex`, the server's default.
+    BackslashX,
+    /// `x'DEADBEEF'`, SQLite's literal.
+    QuotedX,
+    /// `deadbeef`, as Arrow prints a blob and Snowflake sends one.
+    Bare,
+    /// `BinData(0, '3q2+7w==')`, the shell's spelling.
+    BinData,
+}
+
+/// The digits of bytes written as text, before they are decoded.
+enum Payload<'a> {
+    Hex(&'a str),
+    Base64(&'a str),
+}
+
+impl BinaryText {
+    fn payload(self, value: &str) -> Option<Payload<'_>> {
+        match self {
+            Self::ZeroX => value.strip_prefix("0x").map(Payload::Hex),
+            Self::BackslashX => value.strip_prefix("\\x").map(Payload::Hex),
+            Self::QuotedX => value
+                .strip_prefix("x'")?
+                .strip_suffix('\'')
+                .map(Payload::Hex),
+            Self::Bare => Some(Payload::Hex(value)),
+            Self::BinData => {
+                let (subtype, rest) = value.strip_prefix("BinData(")?.split_once(", '")?;
+                subtype.parse::<u8>().ok()?;
+                rest.strip_suffix("')").map(Payload::Base64)
+            }
+        }
+    }
+}
+
+impl Payload<'_> {
+    /// Only the front of the digits is read: a blob can run to megabytes,
+    /// and its cell is drawn every frame. Whatever lies past `most` bytes is
+    /// checked for its length alone.
+    fn decode(self, most: usize) -> Option<Vec<u8>> {
+        match self {
+            Self::Hex(digits) => {
+                let digits = digits.as_bytes();
+                if digits.len() % 2 != 0 {
+                    return None;
+                }
+                let read = digits.len().min(most.saturating_mul(2));
+                hex::decode(&digits[..read]).ok()
+            }
+            Self::Base64(digits) => {
+                use base64::Engine as _;
+                let digits = digits.as_bytes();
+                if digits.len() % 4 != 0 {
+                    return None;
+                }
+                let read = digits.len().min(most.div_ceil(3).saturating_mul(4));
+                let mut bytes = base64::engine::general_purpose::STANDARD
+                    .decode(&digits[..read])
+                    .ok()?;
+                bytes.truncate(most);
+                Some(bytes)
+            }
+        }
+    }
 }
 
 /// What the connection form says a blank field means.
@@ -722,6 +806,7 @@ pub(crate) const POSTGRES: EngineSpec = EngineSpec {
     // `postgres` is an ordinary database people work in.
     system_databases: &[],
     binary_types: &[],
+    binary_text: Some(BinaryText::BackslashX),
     numeric_types: &[],
     type_wrappers: &[],
     hints: Hints {
@@ -779,6 +864,7 @@ pub(crate) const MYSQL: EngineSpec = EngineSpec {
     resolves_srv: false,
     system_databases: &["information_schema", "mysql", "performance_schema", "sys"],
     binary_types: &[],
+    binary_text: Some(BinaryText::ZeroX),
     numeric_types: &[],
     type_wrappers: &[],
     hints: Hints::DEFAULT,
@@ -842,6 +928,7 @@ pub(crate) const MARIADB: EngineSpec = EngineSpec {
     resolves_srv: false,
     system_databases: &["information_schema", "mysql", "performance_schema", "sys"],
     binary_types: &[],
+    binary_text: Some(BinaryText::ZeroX),
     numeric_types: &[],
     type_wrappers: &[],
     hints: Hints::DEFAULT,
@@ -910,6 +997,7 @@ pub(crate) const SQLITE: EngineSpec = EngineSpec {
     resolves_srv: false,
     system_databases: &[],
     binary_types: &[],
+    binary_text: Some(BinaryText::QuotedX),
     numeric_types: &[],
     type_wrappers: &[],
     hints: Hints::DEFAULT,
@@ -962,6 +1050,7 @@ pub(crate) const TURSO: EngineSpec = EngineSpec {
     resolves_srv: false,
     system_databases: &[],
     binary_types: &[],
+    binary_text: Some(BinaryText::QuotedX),
     numeric_types: &[],
     type_wrappers: &[],
     hints: Hints::DEFAULT,
@@ -1006,6 +1095,7 @@ pub(crate) const DUCKDB: EngineSpec = EngineSpec {
     resolves_srv: false,
     system_databases: &[],
     binary_types: &[],
+    binary_text: Some(BinaryText::Bare),
     numeric_types: &[],
     type_wrappers: &[],
     hints: Hints {
@@ -1068,6 +1158,7 @@ pub(crate) const SNOWFLAKE: EngineSpec = EngineSpec {
     // share too, but one people query.
     system_databases: &["SNOWFLAKE"],
     binary_types: &[],
+    binary_text: Some(BinaryText::Bare),
     numeric_types: &[],
     type_wrappers: &[],
     hints: Hints {
@@ -1135,6 +1226,7 @@ pub(crate) const SQL_SERVER: EngineSpec = EngineSpec {
     // `image` is the legacy binary type here; elsewhere it is a name anyone
     // may give a column or a domain, and a SQLite `image` column holds text.
     binary_types: &["image", "rowversion", "timestamp"],
+    binary_text: Some(BinaryText::ZeroX),
     numeric_types: &[],
     type_wrappers: &[],
     hints: Hints::DEFAULT,
@@ -1207,6 +1299,7 @@ pub(crate) const MONGODB: EngineSpec = EngineSpec {
     resolves_srv: true,
     system_databases: &["admin", "local", "config"],
     binary_types: &["bindata"],
+    binary_text: Some(BinaryText::BinData),
     numeric_types: &[],
     type_wrappers: &[],
     hints: Hints {
@@ -1247,6 +1340,7 @@ pub(crate) const REDIS: EngineSpec = EngineSpec {
     resolves_srv: false,
     system_databases: &[],
     binary_types: &[],
+    binary_text: None,
     numeric_types: &[],
     type_wrappers: &[],
     hints: Hints {
@@ -1289,6 +1383,7 @@ pub(crate) const CLICKHOUSE: EngineSpec = EngineSpec {
     resolves_srv: false,
     system_databases: &["system", "INFORMATION_SCHEMA", "information_schema"],
     binary_types: &[],
+    binary_text: None,
     numeric_types: &[
         "int8",
         "int16",
@@ -1415,6 +1510,7 @@ pub(crate) const GENERIC: EngineSpec = EngineSpec {
     resolves_srv: false,
     system_databases: &[],
     binary_types: &[],
+    binary_text: Some(BinaryText::ZeroX),
     // Db2's decimal float, which right-aligns like any number.
     numeric_types: &["decfloat"],
     type_wrappers: &[],

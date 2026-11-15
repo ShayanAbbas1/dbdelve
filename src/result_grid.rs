@@ -142,12 +142,84 @@ pub struct GridSelection {
     row: Option<usize>,
 }
 
-/// The columns a grid hides and pins, by name, carried from one result to
-/// the next in the same tab.
+/// The columns a grid hides and pins, and the binary ones it parses, by name,
+/// carried from one result to the next in the same tab.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ColumnView {
     hidden: Vec<ColumnKey>,
     pinned: Vec<ColumnKey>,
+    parsed: Vec<(ColumnKey, BinaryForm)>,
+}
+
+/// What a binary column's bytes are drawn as. Drawn only: a copy, an export,
+/// a sort, a filter and a written-back literal all read the server's own
+/// spelling, which is the one form of the bytes every one of them can trust.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BinaryForm {
+    Hex,
+    Text,
+    Base64,
+}
+
+impl BinaryForm {
+    pub const ALL: [Self; 3] = [Self::Hex, Self::Text, Self::Base64];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Hex => "Hex",
+            Self::Text => "Text (UTF-8)",
+            Self::Base64 => "Base64",
+        }
+    }
+
+    /// A snapshot's spelling. A name rather than an index, and one this
+    /// build does not know is dropped rather than failing the whole snapshot.
+    pub fn slug(self) -> &'static str {
+        match self {
+            Self::Hex => "hex",
+            Self::Text => "text",
+            Self::Base64 => "base64",
+        }
+    }
+
+    pub fn from_slug(slug: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|form| form.slug() == slug)
+    }
+
+    /// How many bytes it takes to fill `chars` characters.
+    fn bytes_for(self, chars: usize) -> usize {
+        match self {
+            Self::Hex => chars.div_ceil(2),
+            Self::Base64 => chars.div_ceil(4) * 3,
+            Self::Text => chars * 4,
+        }
+    }
+
+    /// `bytes` in this form, ending in `…` where `cut` says more followed.
+    /// `None` for bytes that are not UTF-8, which are never shown as text
+    /// with replacement characters standing in for what they hold.
+    fn show(self, bytes: &[u8], cut: bool) -> Option<String> {
+        use base64::Engine as _;
+        let mut shown = match self {
+            Self::Hex => hex::encode_upper(bytes),
+            Self::Base64 => base64::engine::general_purpose::STANDARD.encode(bytes),
+            Self::Text => match std::str::from_utf8(bytes) {
+                Ok(text) => text.to_string(),
+                // The read stopped inside a character, not on a byte that
+                // was never part of one.
+                Err(error) if cut && error.error_len().is_none() => {
+                    std::str::from_utf8(&bytes[..error.valid_up_to()])
+                        .ok()?
+                        .to_string()
+                }
+                Err(_) => return None,
+            },
+        };
+        if cut {
+            shown.push('…');
+        }
+        Some(shown)
+    }
 }
 
 /// A column by name, and which of the columns sharing that name it is:
@@ -369,6 +441,9 @@ pub struct ResultGrid {
     mode: Mode,
     /// Asked, never matched on, which of the column types is bytes.
     engine: db::Engine,
+    /// The binary columns drawn as something other than what the server
+    /// sent, as indices into `columns`. A handful at most, scanned per cell.
+    binary_forms: Vec<(usize, BinaryForm)>,
     /// Whether the rows are a table's that Import Rows writes into, marked the
     /// way the structure's keys are, so the cell menu offers a paste.
     takes_imports: bool,
@@ -553,6 +628,7 @@ impl ResultGrid {
             reference_anchor: None,
             mode,
             engine: db::Engine::default(),
+            binary_forms: Vec::new(),
             takes_imports: false,
             focus: None,
         };
@@ -563,6 +639,11 @@ impl ResultGrid {
     pub fn with_engine(mut self, engine: db::Engine) -> Self {
         self.engine = engine;
         self.numeric = numeric_columns(engine, &self.result.columns);
+        // A restored grid is fitted before it learns its engine, which is
+        // what reads its parsed columns' bytes.
+        if !self.binary_forms.is_empty() {
+            self.refit_from_the_top();
+        }
         self
     }
 
@@ -644,6 +725,13 @@ impl ResultGrid {
         grid = grid.with_column_view(&ColumnView {
             hidden: stored.hidden.clone(),
             pinned: stored.pinned.clone(),
+            parsed: stored
+                .parsed
+                .iter()
+                .filter_map(|(name, nth, slug)| {
+                    Some(((name.clone(), *nth), BinaryForm::from_slug(slug)?))
+                })
+                .collect(),
         });
         let (rows, columns) = (grid.result.rows.len(), grid.columns.len());
         // A snapshot is capped, so the cell that was active may be past the
@@ -783,6 +871,11 @@ impl ResultGrid {
                 .collect(),
             hidden: view.hidden,
             pinned: view.pinned,
+            parsed: view
+                .parsed
+                .into_iter()
+                .map(|((name, nth), form)| (name, nth, form.slug().to_string()))
+                .collect(),
             active: self.active,
             last_query: None,
             limit: None,
@@ -1070,8 +1163,8 @@ impl ResultGrid {
             .map(|(col, _)| col)
     }
 
-    /// What a later result keeps of this one's hidden and pinned columns, by
-    /// name, so a refresh or the next page does not undo them.
+    /// What a later result keeps of this one's hidden, pinned and parsed
+    /// columns, by name, so a refresh or the next page does not undo them.
     pub fn column_view(&self) -> ColumnView {
         ColumnView {
             hidden: (0..self.columns.len())
@@ -1082,11 +1175,16 @@ impl ResultGrid {
                 .iter()
                 .map(|&col| self.column_key(col))
                 .collect(),
+            parsed: self
+                .binary_forms
+                .iter()
+                .map(|&(col, form)| (self.column_key(col), form))
+                .collect(),
         }
     }
 
-    /// Hide and pin this result's columns as an earlier one had them, by
-    /// name. A column the earlier result did not have -- one just added to
+    /// Hide, pin and parse this result's columns as an earlier one had them,
+    /// by name. A column the earlier result did not have -- one just added to
     /// the `SELECT` -- is drawn, and a name no longer here is let go.
     pub fn with_column_view(mut self, view: &ColumnView) -> Self {
         for key in &view.pinned {
@@ -1100,6 +1198,14 @@ impl ResultGrid {
             if let Some(col) = self.column_keyed(key) {
                 self.hide_column(col);
             }
+        }
+        self.binary_forms = view
+            .parsed
+            .iter()
+            .filter_map(|(key, form)| Some((self.column_keyed(key)?, *form)))
+            .collect();
+        if !self.binary_forms.is_empty() {
+            self.refit_from_the_top();
         }
         self
     }
@@ -1412,7 +1518,72 @@ impl ResultGrid {
     /// and cost a pass over all of it before the first frame, when only the
     /// cells on screen are ever drawn.
     fn shown(&self, row_ix: usize, col_ix: usize) -> Option<SharedString> {
-        Some(clip(self.cell(row_ix, col_ix)?).into())
+        self.painted(row_ix, col_ix).map(|(shown, _)| shown)
+    }
+
+    /// [`Self::shown`], and whether the cell's column is parsed and its bytes
+    /// could not be: those are drawn as the server sent them, muted.
+    fn painted(&self, row_ix: usize, col_ix: usize) -> Option<(SharedString, bool)> {
+        let cell = self.cell(row_ix, col_ix)?;
+        Some(
+            match self.parsed(row_ix, col_ix, cell, CELL_DISPLAY_LIMIT) {
+                Some(Some(parsed)) => (clip(&parsed).into(), false),
+                unparsed => (clip(cell).into(), unparsed.is_some()),
+            },
+        )
+    }
+
+    /// A binary cell as its column's parsed form draws it, decoded no further
+    /// than `chars` characters of that form need: `None` where the cell is
+    /// drawn as the server sent it, `Some(None)` where its bytes have no such
+    /// form or the text is not the engine's spelling of bytes.
+    fn parsed(&self, row: usize, col: usize, value: &str, chars: usize) -> Option<Option<String>> {
+        let form = self.parsed_as(col)?;
+        if !self
+            .cell_type(row, col)
+            .is_some_and(|data_type| self.engine.is_binary_type(data_type))
+        {
+            return None;
+        }
+        let most = form.bytes_for(chars);
+        Some(self.engine.bytes_of(value, most + 1).and_then(|bytes| {
+            let cut = bytes.len() > most;
+            form.show(&bytes[..bytes.len().min(most)], cut)
+        }))
+    }
+
+    fn parsed_as(&self, col: usize) -> Option<BinaryForm> {
+        self.binary_forms
+            .iter()
+            .find(|(parsed, _)| *parsed == col)
+            .map(|&(_, form)| form)
+    }
+
+    /// The form a binary column is drawn in: `None` for one drawn as the
+    /// server sent it where that is not hex.
+    pub fn binary_form(&self, col: usize) -> Option<BinaryForm> {
+        self.parsed_as(col)
+            .or_else(|| self.engine.shows_bytes_as_hex().then_some(BinaryForm::Hex))
+    }
+
+    pub fn set_binary_form(&mut self, col: usize, form: BinaryForm) {
+        self.binary_forms.retain(|(parsed, _)| *parsed != col);
+        if form != BinaryForm::Hex || !self.engine.shows_bytes_as_hex() {
+            self.binary_forms.push((col, form));
+        }
+        self.refit_from_the_top();
+    }
+
+    /// Whether a column holds bytes, by its type or, where each cell has a
+    /// type of its own, by any of its cells': what offers to parse them.
+    pub fn holds_bytes(&self, col: usize) -> bool {
+        let binary = |data_type: &str| self.engine.is_binary_type(data_type);
+        self.column_type(col).is_some_and(binary)
+            || self
+                .result
+                .cell_types
+                .iter()
+                .any(|types| types.get(col).is_some_and(|data_type| binary(data_type)))
     }
 
     /// Whether the row has no such field at all: a document store's absent
@@ -1444,6 +1615,13 @@ impl ResultGrid {
                     Some(NewValue::Value(value)) => Some(value.as_ref()),
                     Some(NewValue::Null | NewValue::Default) => None,
                     None => self.cell(row_ix, col_ix),
+                };
+                let parsed = cell
+                    .filter(|_| edit.is_none())
+                    .and_then(|value| self.parsed(row_ix, col_ix, value, FIELD_DISPLAY_LIMIT));
+                let cell = match &parsed {
+                    Some(Some(parsed)) => Some(parsed.as_str()),
+                    _ => cell,
                 };
                 let json = cell.and_then(indented_json);
                 Field {
@@ -1478,6 +1656,7 @@ impl ResultGrid {
                         .into()
                     }),
                     json: json.is_some(),
+                    unparsed: matches!(parsed, Some(None)),
                     edit,
                 }
             })
@@ -2221,6 +2400,9 @@ pub struct Field {
     pub json: bool,
     /// The row has no such field at all, which is not a NULL.
     pub missing: bool,
+    /// The column is parsed and these bytes could not be, so `value` is the
+    /// server's own spelling of them.
+    pub unparsed: bool,
     /// The edit staged on this cell, which `value` already shows where it is
     /// a value rather than a keyword.
     pub edit: Option<NewValue>,
@@ -2334,16 +2516,18 @@ pub(crate) fn step_pending(
     scroll_to_drawn_col(table, col, cx);
 }
 
-/// A header's menu: hide, pin or unpin that column, and bring back the
-/// hidden ones.
+/// A header's menu: hide, pin or unpin that column, bring back the hidden
+/// ones, and parse a binary one.
 fn column_menu(
     menu: PopupMenu,
     table: &Entity<TableState<ResultGrid>>,
     col: usize,
-    cx: &App,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
     let grid = table.read(cx).delegate();
     let (drawn, hidden, pinned) = (grid.view.len(), grid.hidden_columns(), grid.is_pinned(col));
+    let parsing = grid.holds_bytes(col).then(|| grid.binary_form(col));
     let relay = |change: fn(&mut ResultGrid, usize)| {
         let table = table.clone();
         move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
@@ -2368,6 +2552,36 @@ fn column_menu(
         menu.item(
             PopupMenuItem::new(format!("Show All Columns ({hidden} hidden)"))
                 .on_click(relay(|grid, _| grid.show_all_columns())),
+        )
+    })
+    .when_some(parsing, |menu, current| {
+        let table = table.clone();
+        menu.separator()
+            .submenu("Parse As", window, cx, move |submenu, _, _| {
+                binary_forms(submenu, &table, col, current)
+            })
+    })
+}
+
+/// One entry per form a binary column's bytes can be drawn in, the one it
+/// is drawn in checked.
+fn binary_forms(
+    menu: PopupMenu,
+    table: &Entity<TableState<ResultGrid>>,
+    col: usize,
+    current: Option<BinaryForm>,
+) -> PopupMenu {
+    BinaryForm::ALL.into_iter().fold(menu, |menu, form| {
+        let table = table.clone();
+        menu.item(
+            PopupMenuItem::new(form.label())
+                .checked(current == Some(form))
+                .on_click(move |_, _, cx| {
+                    table.update(cx, |table, cx| {
+                        table.delegate_mut().set_binary_form(col, form);
+                        cx.notify();
+                    });
+                }),
         )
     })
 }
@@ -2741,7 +2955,9 @@ impl TableDelegate for ResultGrid {
                     .min_w_0()
                     .flex()
                     .child(self.data_th(col, window, cx))
-                    .context_menu(move |menu, _, cx| column_menu(menu, &table, col, cx))
+                    .context_menu(move |menu, window, cx| {
+                        column_menu(menu, &table, col, window, cx)
+                    })
                     .into_any_element()
             }
             None => {
@@ -2870,6 +3086,12 @@ impl TableDelegate for ResultGrid {
             1 => "Copy Row As",
             _ => "Copy Rows As",
         };
+        let parse_as = self.holds_bytes(col).then(|| {
+            let (table, current) = (cx.entity(), self.binary_form(col));
+            PopupMenu::build(window, cx, move |submenu, _, _| {
+                binary_forms(submenu, &table, col, current)
+            })
+        });
         let hidden = self.hidden_columns();
         let name = &self.result.columns[col].name;
         // The row's own name for it, which is the one thing a generic label
@@ -2917,6 +3139,12 @@ impl TableDelegate for ResultGrid {
                     format!("Show All Columns ({hidden} hidden)"),
                     Box::new(crate::ShowAllColumns),
                 )
+            })
+            .when_some(parse_as, |menu, parse_as| {
+                menu.item(PopupMenuItem::submenu(
+                    format!("Parse \u{201c}{name}\u{201d} As"),
+                    parse_as,
+                ))
             })
             .when(!stages.is_empty(), PopupMenu::separator);
         stages
@@ -3060,10 +3288,11 @@ impl ResultGrid {
         window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        let (text, faint, edited_bg, active_ring, divider, number, palette) = {
+        let (text, muted, faint, edited_bg, active_ring, divider, number, palette) = {
             let t = theme(cx);
             (
                 t.text,
+                t.text_muted,
                 t.text_faint,
                 t.edited,
                 t.accent,
@@ -3233,9 +3462,12 @@ impl ResultGrid {
             None if self.missing(row_ix, col_ix) => SharedString::default(),
             _ => NULL_LABEL,
         };
-        let cell = match pending {
-            Some(pending) => pending.shown.clone(),
-            None => self.shown(row_ix, col_ix),
+        let (cell, unparsed) = match pending {
+            Some(pending) => (pending.shown.clone(), false),
+            None => match self.painted(row_ix, col_ix) {
+                Some((shown, unparsed)) => (Some(shown), unparsed),
+                None => (None, false),
+            },
         };
 
         let follows_a_key = self.follows_a_key(col_ix)
@@ -3250,6 +3482,7 @@ impl ResultGrid {
             .text_ellipsis()
             .text_color(match (cell.is_some(), numeric) {
                 (false, _) => faint,
+                (true, _) if unparsed => muted,
                 (true, true) => number,
                 (true, false) => text,
             })
@@ -4265,6 +4498,7 @@ mod tests {
                 dragged: Vec::new(),
                 hidden: Vec::new(),
                 pinned: Vec::new(),
+                parsed: Vec::new(),
                 active: None,
                 last_query: None,
                 limit: None,
@@ -4518,6 +4752,123 @@ mod tests {
             assert!(!grid.set_pending(0, 1, value("x'CD'")), "{data_type}");
             assert!(!grid.has_pending(), "{data_type}");
         }
+    }
+
+    #[test]
+    fn a_binary_form_draws_whole_bytes_and_stops_where_the_read_did() {
+        let shown = |form: BinaryForm, bytes: &[u8], cut| form.show(bytes, cut);
+        assert_eq!(
+            shown(BinaryForm::Hex, b"\xde\xad", false).as_deref(),
+            Some("DEAD")
+        );
+        assert_eq!(
+            shown(BinaryForm::Base64, b"\xde\xad\xbe\xef", false).as_deref(),
+            Some("3q2+7w==")
+        );
+        assert_eq!(
+            shown(BinaryForm::Text, "h\u{e9}".as_bytes(), false).as_deref(),
+            Some("h\u{e9}")
+        );
+        assert_eq!(shown(BinaryForm::Text, b"", false).as_deref(), Some(""));
+        assert_eq!(shown(BinaryForm::Text, b"a\xff", false), None);
+        // A character the read cut in two is left off; a byte that is no
+        // character's is never let through, cut or not.
+        assert_eq!(
+            shown(BinaryForm::Text, b"h\xc3", true).as_deref(),
+            Some("h…")
+        );
+        assert_eq!(shown(BinaryForm::Text, b"h\xc3", false), None);
+        assert_eq!(shown(BinaryForm::Text, b"h\xff", true), None);
+        assert_eq!(
+            shown(BinaryForm::Hex, b"\xde", true).as_deref(),
+            Some("DE…")
+        );
+        for form in BinaryForm::ALL {
+            assert_eq!(BinaryForm::from_slug(form.slug()), Some(form));
+        }
+    }
+
+    #[test]
+    fn a_parsed_binary_column_is_drawn_parsed_and_read_as_the_server_sent_it() {
+        let hello = "\\x68656c6c6f";
+        let mut grid = ResultGrid::new(
+            QueryResult {
+                columns: vec![column("id"), typed("payload", "bytea")],
+                rows: rows(vec![
+                    vec![Some("2".into()), Some(hello.into())],
+                    vec![Some("1".into()), Some("\\xff".into())],
+                    vec![Some("3".into()), None],
+                ]),
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        )
+        .with_engine(db::Engine::Postgres);
+        assert!(grid.holds_bytes(1) && !grid.holds_bytes(0));
+        assert_eq!(grid.binary_form(1), Some(BinaryForm::Hex));
+
+        grid.set_binary_form(1, BinaryForm::Text);
+        assert_eq!(grid.painted(0, 1), Some(("hello".into(), false)));
+        // Not UTF-8: the server's own spelling, marked as not parsed.
+        assert_eq!(grid.painted(1, 1), Some(("\\xff".into(), true)));
+        assert_eq!(grid.shown(2, 1), None);
+        assert_eq!(grid.fields(0)[1].value.as_deref(), Some("hello"));
+        assert!(grid.fields(1)[1].unparsed);
+
+        assert_eq!(grid.cell(0, 1), Some(hello));
+        assert_eq!(grid.edit_seed(0, 1), hello);
+        grid.set_active(0, 1);
+        assert_eq!(
+            grid.rows_as(RowsAs::Text).and_then(|item| item.text()),
+            Some(format!("2\t{hello}"))
+        );
+        grid.sort_in_memory(vec![(1, true)]);
+        assert_eq!(grid.cell(0, 1), Some(hello), "sorted by the server's text");
+
+        let restored =
+            ResultGrid::restored(&grid.stored(), Mode::ReadWrite).with_engine(db::Engine::Postgres);
+        assert_eq!(restored.binary_form(1), Some(BinaryForm::Text));
+        assert_eq!(restored.shown(0, 1).as_deref(), Some("hello"));
+
+        // Hex is how the bytes arrive here, so picking it parses nothing.
+        grid.set_binary_form(1, BinaryForm::Hex);
+        assert!(grid.binary_forms.is_empty());
+        assert_eq!(grid.shown(0, 1).as_deref(), Some(hello));
+    }
+
+    #[test]
+    fn a_document_field_parses_only_the_cells_that_hold_bytes() {
+        let mut grid = ResultGrid::new(
+            QueryResult {
+                columns: vec![column("_id"), column("blob")],
+                rows: rows(vec![
+                    vec![Some("1".into()), Some("BinData(0, '3q2+7w==')".into())],
+                    vec![Some("2".into()), Some("plain".into())],
+                    vec![
+                        Some("3".into()),
+                        Some("0e5c1a2b-3c4d-4e5f-8a9b-0c1d2e3f4a5b".into()),
+                    ],
+                ]),
+                cell_types: vec![
+                    vec!["int", "binData"],
+                    vec!["int", "string"],
+                    vec!["int", "binData"],
+                ],
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        )
+        .with_engine(db::Engine::MongoDb);
+        assert!(grid.holds_bytes(1));
+        assert_eq!(grid.binary_form(1), None, "drawn as the shell spells it");
+
+        grid.set_binary_form(1, BinaryForm::Hex);
+        assert_eq!(grid.painted(0, 1), Some(("DEADBEEF".into(), false)));
+        assert_eq!(grid.painted(1, 1), Some(("plain".into(), false)));
+        assert_eq!(
+            grid.painted(2, 1),
+            Some(("0e5c1a2b-3c4d-4e5f-8a9b-0c1d2e3f4a5b".into(), true))
+        );
     }
 
     #[test]
