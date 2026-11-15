@@ -1706,7 +1706,9 @@ impl Render for Workspace {
         let failed = matches!(profile.state, ProfileState::Failed(_));
         let status = match &profile.state {
             ProfileState::Idle => "Connection is idle.".to_string(),
-            ProfileState::Connecting => format!("Connecting to {}…", profile.config.endpoint()),
+            ProfileState::Connecting { .. } => {
+                format!("Connecting to {}…", profile.config.endpoint())
+            }
             // Connected is the one state worth spending on decoration: every
             // other one is news, and news beats where the connection points.
             // Its name is already on the switcher in the titlebar.
@@ -2436,6 +2438,7 @@ impl Render for Workspace {
                     .on_action(cx.listener(Self::save_query))
                     .on_action(cx.listener(Self::close_tab))
                     .on_action(cx.listener(Self::go_to_column))
+                    .on_action(cx.listener(Self::toggle_results))
                     .on_action(cx.listener(Self::toggle_row_panel))
                     .on_action(cx.listener(Self::toggle_row_edit))
                     .on_action(cx.listener(Self::toggle_structure))
@@ -2842,6 +2845,7 @@ mod tests {
             user: String::new(),
             password: String::new(),
             statement_timeout: 0,
+            ssm: None,
             ssh: None,
         }))
         .unwrap();

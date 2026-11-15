@@ -32,7 +32,7 @@ pub(super) use self::edit::{match_value, review_notes};
 pub(super) use self::http::port;
 use self::http::{Bounds, Scheme, Stop, Watch};
 use self::tsv::{Framed, Next, Reader, Untagged, is_cut};
-use super::ssh::tunnelled;
+use super::tunnel::tunnelled;
 use super::{
     CancelToken, Cancelling, Catalog, Column, Databases, DbError, EditTarget, Engine, Fetch,
     QueryResult, RelationKind, RowBuilder, ServerConfig, Stopped, Structure, UpdateSpelling,
@@ -4434,6 +4434,7 @@ mod live {
         let connection = Connection::open(&ServerConfig {
             host: "clickhouse".into(),
             port: Some(DEFAULT_PORT),
+            ssm: None,
             ssh: crate::db::ssh::live_bastion("dbdelve-bastion"),
             ..live_config()
         })

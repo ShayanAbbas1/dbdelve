@@ -40,7 +40,7 @@ use crate::{
         ExplainQuery, FormatQuery, ImportRows, ImportRowsFromClipboard, LimitTarget, NewQuery,
         NewRow, NextPage, PreviousPage, RemoveFilter, RunQuery, SaveQuery, SetDefaultRowLimit,
         SetFilterColumn, SetFilterOperator, SetFilterRaw, SetQueryLimit, SetRowLimit,
-        ToggleComment, ToggleFilterJoin, ToggleNextJoin, ToggleRowPanel,
+        ToggleComment, ToggleFilterJoin, ToggleNextJoin, ToggleResults, ToggleRowPanel,
     },
     db,
     db::{Engine, ExplainMode, RoutineKind, Target},
@@ -227,14 +227,15 @@ fn completion_target(editor: &Entity<EditorState>) -> Div {
 
 /// The editor over the rows it produces. Every runnable surface is this:
 /// the query buffer and an opened relation differ in where their SQL came
-/// from, not in what they are.
+/// from, not in what they are. With no `bottom` -- results the user hid --
+/// the editor and its toolbar take the whole height.
 fn render_editor_surface(
     split: gpui::ElementId,
     editor: &Entity<EditorState>,
     font_size: f32,
     query: &QueryState,
     toolbar: AnyElement,
-    bottom: AnyElement,
+    bottom: Option<AnyElement>,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     let t = *theme(cx);
@@ -282,6 +283,9 @@ fn render_editor_surface(
         .flex_col()
         .child(buffer)
         .child(toolbar);
+    let Some(bottom) = bottom else {
+        return top.into_any_element();
+    };
 
     let expanded = result_pane_is_expanded(query);
     let (editor_height, results_height) = if expanded {
@@ -342,7 +346,9 @@ fn render_query_surface(
     // answer about the buffer above it, and two scrolling regions in a split
     // that is already a split leaves neither enough room to read.
     let (shown_state, shown_grid) = tab.shown();
-    let bottom = match tab.plan_shown() {
+    // Not built at all while hidden, so the row panel is off screen too and
+    // its toggle has nothing to fold.
+    let bottom = (!tab.results_hidden).then(|| match tab.plan_shown() {
         // Under the same switcher as the rows, or a typed `EXPLAIN`, which has
         // no Data to flip to, would hide what its statement raised.
         Some(explained) => {
@@ -378,7 +384,7 @@ fn render_query_surface(
             &scope,
             cx,
         ),
-    };
+    });
     render_editor_surface(
         // Keyed by the buffer rather than the profile: two query tabs are two
         // splits, and sharing one id would carry the first one's drag position
@@ -3510,9 +3516,10 @@ fn render_query_toolbar(
 
     // Drawn only once there is a plan to turn to. Before that the pair would be
     // a control with one working half, which is the same as no control at all.
+    // Nor while the pane it flips is hidden.
     let plan_toggle = session
         .active_query_tab()
-        .filter(|tab| tab.flips_to_plan())
+        .filter(|tab| tab.flips_to_plan() && !tab.results_hidden)
         .map(|tab| {
             div()
                 .flex_shrink_0()
@@ -3542,6 +3549,25 @@ fn render_query_toolbar(
         .flatten()
         .map(|(_, table, _)| insert_button("new-row", format!("Insert in {table}"), t));
 
+    // First on the bar that is the editor/results boundary, and on every query
+    // tab: an empty pane is exactly the room someone writing DDL wants back.
+    let results_toggle = session.active_query_tab().map(|tab| {
+        let label = if tab.results_hidden {
+            "Show results"
+        } else {
+            "Hide results"
+        };
+        icon_button(
+            "toggle-results",
+            icon::RESULTS,
+            Tone::Quiet,
+            Control::Compact,
+            t,
+        )
+        .tooltip_with_action(label, &ToggleResults, None)
+        .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleResults), cx))
+    });
+
     let named = session.open_query().is_some();
     let save_workspace = workspace.clone();
     let rename_workspace = workspace.clone();
@@ -3553,6 +3579,7 @@ fn render_query_toolbar(
         .border_t_1()
         .border_color(t.border)
         .text_size(px(layout::chrome(layout::TEXT_SM)))
+        .children(results_toggle)
         .children(plan_toggle)
         .child(div().flex_1())
         .children(naming)

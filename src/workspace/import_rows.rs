@@ -345,7 +345,7 @@ impl Workspace {
             return;
         };
         let connection = found.connection();
-        let connecting = matches!(found.state, ProfileState::Connecting);
+        let connecting = matches!(found.state, ProfileState::Connecting { .. });
         let Some(dialog) = found
             .session
             .import_rows

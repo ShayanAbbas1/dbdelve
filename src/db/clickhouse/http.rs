@@ -19,7 +19,7 @@ use ureq::unversioned::transport::{
 };
 use ureq::{Agent, Error, Timeout};
 
-use crate::db::ssh::Tunnel;
+use crate::db::tunnel::Tunnel;
 use crate::db::{DbError, ServerConfig, plain_error};
 use crate::tls::{self, SslMode};
 

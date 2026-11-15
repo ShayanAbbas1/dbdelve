@@ -24,7 +24,7 @@ use crate::db::Syntax;
 /// The gpui-component widgets ask for their own paths — those are Lucide names
 /// too, so they resolve here as well. Add a row when something asks for one;
 /// an unlisted path simply draws nothing.
-const ICONS: [(&str, &IconData); 84] = [
+const ICONS: [(&str, &IconData); 85] = [
     ("icons/git-fork.svg", icondata_lu::LuGitFork),
     ("icons/chevron-down.svg", icondata_lu::LuChevronDown),
     ("icons/chevron-right.svg", icondata_lu::LuChevronRight),
@@ -68,6 +68,7 @@ const ICONS: [(&str, &IconData); 84] = [
     ("icons/refresh-cw.svg", icondata_lu::LuRefreshCw),
     ("icons/panel-left.svg", icondata_lu::LuPanelLeft),
     ("icons/panel-right.svg", icondata_lu::LuPanelRight),
+    ("icons/panel-bottom.svg", icondata_lu::LuPanelBottom),
     ("icons/copy.svg", icondata_lu::LuCopy),
     ("icons/type.svg", icondata_lu::LuType),
     ("icons/arrow-up-right.svg", icondata_lu::LuArrowUpRight),
@@ -157,6 +158,8 @@ pub mod icon {
     pub const EXPAND_ALL: &str = "icons/chevrons-up-down.svg";
     /// Folds the row panel beside a grid away, and brings it back.
     pub const ROW_PANEL: &str = "icons/panel-right.svg";
+    /// Hides the results pane under a query's editor, and brings it back.
+    pub const RESULTS: &str = "icons/panel-bottom.svg";
     /// Switches the row panel between reading a row and editing it.
     pub const EDIT: &str = "icons/pencil.svg";
     /// A column header's sort state: which way the server ordered the rows, or
@@ -352,6 +355,7 @@ mod tests {
             icon::FULL_ACCESS,
             icon::SIDEBAR,
             icon::ROW_PANEL,
+            icon::RESULTS,
             icon::SORT_UP,
             icon::SORT_DOWN,
             icon::SORTABLE,

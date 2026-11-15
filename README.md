@@ -64,8 +64,7 @@ Any other database with an ODBC driver is reachable through the bundled ODBC
 bridge, with that driver installed: IBM Db2, Oracle, SAP HANA, SAP ASE
 (Sybase), Informix, Teradata, Vertica, Exasol, Firebird, Amazon Redshift,
 Google BigQuery, Databricks, Apache Hive, Trino and Presto, Dremio,
-InterSystems IRIS, Microsoft Access and more. Grid editing is off, and
-statements you type run under the connection's mode. See
+InterSystems IRIS, Microsoft Access and more. See
 [Connecting through ODBC](docs/odbc.md).
 
 
@@ -133,6 +132,10 @@ statements you type run under the connection's mode. See
   Unix socket on the SSH host, optionally as another user (Run as); the server
   needs `socat`, and passwordless `sudo` for it when Run as is set. TLS modes
   other than `disable` and `prefer` are refused there.
+- **Reach private databases through AWS SSM.** Choose AWS SSM in the connection
+  form to use your installed AWS CLI and Session Manager plugin, with profile
+  and region settings and automatic local port selection. See
+  [SSM tunnels](docs/ssm-tunnels.md) for setup and TLS restrictions.
 - **Sign in with a short-lived token.** On Postgres, MySQL, MariaDB, SQL
   Server, Redis and ClickHouse, a profile's Password command prints the
   password at every login, so cloud IAM auth keeps working after the token

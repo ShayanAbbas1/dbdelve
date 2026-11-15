@@ -63,6 +63,7 @@ fn config() -> ExternalConfig {
         user: user(),
         password: env::var("dbdelve_ODBC_DB2_PASSWORD").unwrap_or_default(),
         statement_timeout: 0,
+        ssm: None,
         ssh: None,
     }
 }
@@ -425,6 +426,7 @@ fn live_db2_through_a_tunnel() {
     );
     let connection = open_as(ExternalConfig {
         connection,
+        ssm: None,
         ssh: crate::db::ssh::live_bastion("dbdelve-bastion"),
         ..base
     });

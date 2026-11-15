@@ -95,7 +95,7 @@ jobs:
     steps:
       - &checkout
         name: checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       # First, so the databases boot while everything else runs.
@@ -118,12 +118,12 @@ jobs:
       # runs: the prebuilt download is quicker than carrying it in the cache.
       - &install-nextest
         name: install nextest
-        uses: taiki-e/install-action@v2.90.1
+        uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
         with:
           tool: cargo-nextest@0.9.150
       - &rust-cache
         name: rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # rust-cache saves a directory of target/ that is not a profile with its
@@ -159,12 +159,13 @@ jobs:
           docker compose up -d --wait
       # nextest for the retries .config/nextest.toml gives the live tests. Its
       # test() matches any part of a name, as cargo test's filters do. CI has
-      # no Snowflake account, and the live Snowflake tests panic without one;
-      # the mock tests cover the same ground offline.
+      # no Snowflake account or AWS SSM target/credentials; those live tests
+      # are explicitly opt-in. Their offline tests still run here.
       - name: test
         run: >-
           cargo nextest run --run-ignored all -E 'not (test(snowflake::tests::live_)
-          | test(turso::tests::live_) | test(reads_run_at_once) | test(conformance)
+          | test(turso::tests::live_) | test(live_ssm_)
+          | test(reads_run_at_once) | test(conformance)
           | test(external::db2::) | test(external::psqlodbc::))'
       # These time two reads run at once against the same two in turn. With
       # the rest of the suite sharing the runner's cores, a CPU-bound engine
@@ -247,7 +248,7 @@ jobs:
             libfontconfig-dev libxkbcommon-dev libxkbcommon-x11-dev \
             libwayland-dev libdbus-1-dev unixodbc unixodbc-dev
       - name: cache IBM driver
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: dev/db2/.cache
           key: ibm-clidriver-${{ hashFiles('dev/db2/driver.sh') }}

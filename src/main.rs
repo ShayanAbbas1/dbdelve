@@ -70,7 +70,7 @@ use actions::{
     SelectTheme, SetDefault, SetDefaultRowLimit, SetEmpty, SetFilterColumn, SetFilterOperator,
     SetFilterRaw, SetMode, SetNull, SetQueryLimit, SetRowLimit, ShowAllColumns, ShowEditor,
     ShowMessages, ShowReferences, SortActiveColumn, SortColumn, SubmitConnection, SwitchConnection,
-    ToggleComment, ToggleFilterJoin, ToggleNextJoin, TogglePinColumn, ToggleRowEdit,
+    ToggleComment, ToggleFilterJoin, ToggleNextJoin, TogglePinColumn, ToggleResults, ToggleRowEdit,
     ToggleRowPanel, ToggleSidebar, ToggleStructure, ZoomEditorIn, ZoomEditorOut,
 };
 use completion::SchemaCompletions;
@@ -197,12 +197,16 @@ fn connection_config_from(
         root_certificate,
         // No `PG*` variable means it, and dbdelve is not inventing one.
         statement_timeout: 0,
+        ssm: None,
         ssh: None,
         schema: None,
     })))
 }
 
 fn main() {
+    if let Some(code) = db::ssm_helper() {
+        std::process::exit(code);
+    }
     // ssh runs this executable as its askpass to fetch a key's passphrase,
     // which must answer and exit before anything else starts.
     if let Some(status) = db::askpass(std::env::args_os().nth(1).as_deref()) {
@@ -403,6 +407,7 @@ pub(crate) fn app_menus(imports_rows: bool) -> Vec<Menu> {
             disabled: false,
             items: vec![
                 MenuItem::action("Toggle Sidebar", ToggleSidebar),
+                MenuItem::action("Toggle Results", ToggleResults),
                 MenuItem::action("Toggle Row Panel", ToggleRowPanel),
                 MenuItem::action("Toggle Row Panel Edit Mode", ToggleRowEdit),
                 MenuItem::action("Toggle Data / Structure", ToggleStructure),

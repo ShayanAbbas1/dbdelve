@@ -16,7 +16,8 @@ use tokio_postgres::{
 
 use crate::tls;
 
-use super::ssh::{self, Bridged, SocketBridge, Tunnel, tunnelled};
+use super::ssh::{self, Bridged, SocketBridge};
+use super::tunnel::{Tunnel, tunnelled};
 use super::{
     Catalog, Column, DbError, EditTarget, Engine, Feed, Fetch, QueryResult, Reference,
     RelationKind, Row, RowBuilder, SchemaGraph, ServerConfig, Sizes, Stopped, Structure,
@@ -624,6 +625,7 @@ pub fn config_from_url(url: &str) -> Result<PostgresConfig, String> {
             root_certificate,
             // A URL has nowhere to say it; the form is where it is set.
             statement_timeout: 0,
+            ssm: None,
             ssh: None,
             schema: None,
         },
@@ -2129,6 +2131,7 @@ mod tests {
             sslmode: SslMode::default(),
             root_certificate: None,
             statement_timeout: 0,
+            ssm: None,
             ssh: None,
             schema: None,
         }
@@ -2150,6 +2153,7 @@ mod tests {
             sslmode: SslMode::Disable,
             root_certificate: None,
             statement_timeout: 0,
+            ssm: None,
             ssh: None,
             schema: None,
         }
@@ -2161,6 +2165,7 @@ mod tests {
         ServerConfig {
             host: "postgres".into(),
             port: Some(5432),
+            ssm: None,
             ssh: crate::db::ssh::live_bastion(alias),
             ..live_config()
         }
@@ -2177,6 +2182,7 @@ mod tests {
             host: "/var/run/postgresql".into(),
             port: Some(5432),
             sslmode: SslMode::Prefer,
+            ssm: None,
             ssh,
             ..live_config()
         }
@@ -2632,6 +2638,7 @@ mod tests {
             host: host.into(),
             port: Some(5433),
             sslmode,
+            ssm: None,
             ssh: Some(crate::db::SshTunnel {
                 host: "bastion".into(),
                 run_as: run_as.map(str::to_string),
@@ -2791,6 +2798,7 @@ mod tests {
                     sslmode: SslMode::default(),
                     root_certificate: None,
                     statement_timeout: 0,
+                    ssm: None,
                     ssh: None,
                     schema: None,
                 },
@@ -3470,6 +3478,55 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires DBDELVE_SSM_POSTGRES_URL, DBDELVE_SSM_TARGET, and configured AWS CLI credentials/tools"]
+    fn live_ssm_query_side_connection_cancel_and_cleanup() {
+        let url = std::env::var("DBDELVE_SSM_POSTGRES_URL").expect("set DBDELVE_SSM_POSTGRES_URL");
+        let mut server = config_from_url(&url).unwrap().resolved().unwrap();
+        server.ssm = Some(crate::db::SsmTunnel {
+            target: std::env::var("DBDELVE_SSM_TARGET").expect("set DBDELVE_SSM_TARGET"),
+            profile: std::env::var("DBDELVE_SSM_PROFILE").ok(),
+            region: std::env::var("DBDELVE_SSM_REGION").ok(),
+            aws_cli: std::env::var_os("DBDELVE_SSM_AWS_CLI").map(Into::into),
+            session_manager_plugin: std::env::var_os("DBDELVE_SSM_PLUGIN").map(Into::into),
+            ..Default::default()
+        });
+        let connection = Connection::open(&server).unwrap();
+        assert_eq!(
+            connection.query("SELECT 1", Fetch::default()).unwrap().rows,
+            vec![vec![Some("1".into())]]
+        );
+        let side = connection.alongside().unwrap();
+        assert!(side.query("SELECT 1", Fetch::default()).is_ok());
+        drop(side);
+        let canceller = connection.clone();
+        let cancelling = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            canceller.cancel().unwrap();
+        });
+        assert!(
+            connection
+                .query("SELECT pg_sleep(30)", Fetch::default())
+                .unwrap_err()
+                .message
+                .contains("cancel")
+        );
+        cancelling.join().unwrap();
+        let Route::Tunnel(tunnel) = &connection.route else {
+            panic!("SSM route required")
+        };
+        let address = tunnel.dial().unwrap();
+        drop(connection);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::net::TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "SSM listener survived disconnect"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
     #[ignore = "requires the dev bastions and Postgres configured through dbdelve_SSH_CONFIG and PG*"]
     fn live_ssh_a_query_runs_through_the_bastion() {
         let connection =
@@ -3576,6 +3633,7 @@ mod tests {
     fn live_ssh_every_login_over_the_socket_is_given_the_key_passphrase() {
         let (ssh, _key) = crate::db::ssh::live_bastion_with_a_passphrase("socket", "correct horse");
         let server = ServerConfig {
+            ssm: None,
             ssh: Some(ssh),
             ..live_socket("dbdelve-bastion", Some("postgres"))
         };

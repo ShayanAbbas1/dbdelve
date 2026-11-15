@@ -224,7 +224,7 @@ impl From<&ProfileState> for Status {
     fn from(state: &ProfileState) -> Self {
         match state {
             ProfileState::Idle => Status::Idle,
-            ProfileState::Connecting => Status::Connecting,
+            ProfileState::Connecting { .. } => Status::Connecting,
             ProfileState::Connected(_) => Status::Connected,
             ProfileState::Failed(_) => Status::Failed,
         }
