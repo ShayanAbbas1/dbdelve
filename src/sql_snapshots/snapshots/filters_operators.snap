@@ -1183,396 +1183,396 @@ source: src/sql_snapshots.rs
 
 [mysql] we"ird Equals · plain
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` = 'ok' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Equals · single quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Equals · backslash before quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` = '\\\\''' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Equals · odd backslashes then quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` = 'a\\\\\\\\\\\\''b' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Equals · unicode
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` = '李小龍 ünï 😀' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Equals · like metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` = '100%_[x]' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Equals · glob metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` = '*?[a]\\\\' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Equals · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` = '' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird NotEquals · plain
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <> 'ok' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird NotEquals · single quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <> 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird NotEquals · backslash before quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <> '\\\\''' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird NotEquals · odd backslashes then quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <> 'a\\\\\\\\\\\\''b' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird NotEquals · unicode
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <> '李小龍 ünï 😀' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird NotEquals · like metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <> '100%_[x]' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird NotEquals · glob metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <> '*?[a]\\\\' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird NotEquals · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <> '' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Contains · plain
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '%ok%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Contains · single quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '%it''s%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Contains · backslash before quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '%\\\\\\\\''%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Contains · odd backslashes then quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '%a\\\\\\\\\\\\\\\\\\\\\\\\''b%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Contains · unicode
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '%李小龍 ünï 😀%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Contains · like metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '%100\\\\%\\\\_[x]%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Contains · glob metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '%*?[a]\\\\\\\\%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Contains · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '%%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird NotContains · plain
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` NOT LIKE '%ok%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird NotContains · single quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` NOT LIKE '%it''s%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird NotContains · backslash before quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` NOT LIKE '%\\\\\\\\''%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird NotContains · odd backslashes then quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` NOT LIKE '%a\\\\\\\\\\\\\\\\\\\\\\\\''b%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird NotContains · unicode
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` NOT LIKE '%李小龍 ünï 😀%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird NotContains · like metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` NOT LIKE '%100\\\\%\\\\_[x]%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird NotContains · glob metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` NOT LIKE '%*?[a]\\\\\\\\%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird NotContains · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` NOT LIKE '%%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird StartsWith · plain
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE 'ok%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird StartsWith · single quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE 'it''s%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird StartsWith · backslash before quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '\\\\\\\\''%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird StartsWith · odd backslashes then quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE 'a\\\\\\\\\\\\\\\\\\\\\\\\''b%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird StartsWith · unicode
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '李小龍 ünï 😀%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird StartsWith · like metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '100\\\\%\\\\_[x]%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird StartsWith · glob metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '*?[a]\\\\\\\\%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird StartsWith · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird EndsWith · plain
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '%ok' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird EndsWith · single quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '%it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird EndsWith · backslash before quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '%\\\\\\\\''' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird EndsWith · odd backslashes then quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '%a\\\\\\\\\\\\\\\\\\\\\\\\''b' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird EndsWith · unicode
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '%李小龍 ünï 😀' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird EndsWith · like metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '%100\\\\%\\\\_[x]' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird EndsWith · glob metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '%*?[a]\\\\\\\\' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird EndsWith · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Greater · plain
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` > 'ok' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Greater · single quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` > 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Greater · backslash before quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` > '\\\\''' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Greater · odd backslashes then quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` > 'a\\\\\\\\\\\\''b' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Greater · unicode
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` > '李小龍 ünï 😀' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Greater · like metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` > '100%_[x]' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Greater · glob metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` > '*?[a]\\\\' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Greater · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` > '' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird GreaterOrEqual · plain
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` >= 'ok' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird GreaterOrEqual · single quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` >= 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird GreaterOrEqual · backslash before quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` >= '\\\\''' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird GreaterOrEqual · odd backslashes then quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` >= 'a\\\\\\\\\\\\''b' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird GreaterOrEqual · unicode
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` >= '李小龍 ünï 😀' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird GreaterOrEqual · like metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` >= '100%_[x]' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird GreaterOrEqual · glob metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` >= '*?[a]\\\\' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird GreaterOrEqual · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` >= '' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Less · plain
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` < 'ok' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Less · single quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` < 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Less · backslash before quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` < '\\\\''' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Less · odd backslashes then quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` < 'a\\\\\\\\\\\\''b' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Less · unicode
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` < '李小龍 ünï 😀' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Less · like metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` < '100%_[x]' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Less · glob metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` < '*?[a]\\\\' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Less · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` < '' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird LessOrEqual · plain
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <= 'ok' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird LessOrEqual · single quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <= 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird LessOrEqual · backslash before quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <= '\\\\''' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird LessOrEqual · odd backslashes then quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <= 'a\\\\\\\\\\\\''b' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird LessOrEqual · unicode
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <= '李小龍 ünï 😀' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird LessOrEqual · like metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <= '100%_[x]' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird LessOrEqual · glob metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <= '*?[a]\\\\' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird LessOrEqual · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <= '' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird IsNull · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` IS NULL LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird IsNotNull · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` IS NOT NULL LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird IsEmpty · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` = '' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird IsNotEmpty · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <> '' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird InList · list
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` IN ('a', 'it''s', 'b') LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird InList · blank list
   (none)
 
 [mysql] we"ird NotInList · list
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` NOT IN ('a', 'it''s', 'b') LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird NotInList · blank list
   (none)
 
 [mysql] we"ird Between · range
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` BETWEEN '1' AND '9' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Between · dated range
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` BETWEEN '2024-01-01' AND '2024-12-31' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Between · half range
   (none)
 
 [mysql] we"ird Regex · plain
   |SELECT * FROM `public`.`accounts` WHERE REGEXP_LIKE(`we"ird`, 'ok') LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Regex · single quote
   |SELECT * FROM `public`.`accounts` WHERE REGEXP_LIKE(`we"ird`, 'it''s') LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Regex · backslash before quote
   |SELECT * FROM `public`.`accounts` WHERE REGEXP_LIKE(`we"ird`, '\\\\''') LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Regex · odd backslashes then quote
   |SELECT * FROM `public`.`accounts` WHERE REGEXP_LIKE(`we"ird`, 'a\\\\\\\\\\\\''b') LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Regex · unicode
   |SELECT * FROM `public`.`accounts` WHERE REGEXP_LIKE(`we"ird`, '李小龍 ünï 😀') LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Regex · like metacharacters
   |SELECT * FROM `public`.`accounts` WHERE REGEXP_LIKE(`we"ird`, '100%_[x]') LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Regex · glob metacharacters
   |SELECT * FROM `public`.`accounts` WHERE REGEXP_LIKE(`we"ird`, '*?[a]\\\\') LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mysql] we"ird Regex · empty
   |SELECT * FROM `public`.`accounts` WHERE REGEXP_LIKE(`we"ird`, '') LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] Name Equals · plain
   |SELECT * FROM `public`.`accounts` WHERE `Name` = 'ok' LIMIT 1000|
@@ -1969,396 +1969,396 @@ source: src/sql_snapshots.rs
 
 [mariadb] we"ird Equals · plain
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` = 'ok' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Equals · single quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Equals · backslash before quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` = '\\\\''' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Equals · odd backslashes then quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` = 'a\\\\\\\\\\\\''b' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Equals · unicode
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` = '李小龍 ünï 😀' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Equals · like metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` = '100%_[x]' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Equals · glob metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` = '*?[a]\\\\' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Equals · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` = '' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird NotEquals · plain
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <> 'ok' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird NotEquals · single quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <> 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird NotEquals · backslash before quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <> '\\\\''' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird NotEquals · odd backslashes then quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <> 'a\\\\\\\\\\\\''b' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird NotEquals · unicode
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <> '李小龍 ünï 😀' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird NotEquals · like metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <> '100%_[x]' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird NotEquals · glob metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <> '*?[a]\\\\' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird NotEquals · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <> '' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Contains · plain
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '%ok%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Contains · single quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '%it''s%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Contains · backslash before quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '%\\\\\\\\''%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Contains · odd backslashes then quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '%a\\\\\\\\\\\\\\\\\\\\\\\\''b%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Contains · unicode
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '%李小龍 ünï 😀%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Contains · like metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '%100\\\\%\\\\_[x]%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Contains · glob metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '%*?[a]\\\\\\\\%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Contains · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '%%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird NotContains · plain
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` NOT LIKE '%ok%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird NotContains · single quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` NOT LIKE '%it''s%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird NotContains · backslash before quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` NOT LIKE '%\\\\\\\\''%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird NotContains · odd backslashes then quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` NOT LIKE '%a\\\\\\\\\\\\\\\\\\\\\\\\''b%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird NotContains · unicode
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` NOT LIKE '%李小龍 ünï 😀%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird NotContains · like metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` NOT LIKE '%100\\\\%\\\\_[x]%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird NotContains · glob metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` NOT LIKE '%*?[a]\\\\\\\\%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird NotContains · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` NOT LIKE '%%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird StartsWith · plain
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE 'ok%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird StartsWith · single quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE 'it''s%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird StartsWith · backslash before quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '\\\\\\\\''%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird StartsWith · odd backslashes then quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE 'a\\\\\\\\\\\\\\\\\\\\\\\\''b%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird StartsWith · unicode
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '李小龍 ünï 😀%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird StartsWith · like metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '100\\\\%\\\\_[x]%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird StartsWith · glob metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '*?[a]\\\\\\\\%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird StartsWith · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird EndsWith · plain
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '%ok' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird EndsWith · single quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '%it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird EndsWith · backslash before quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '%\\\\\\\\''' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird EndsWith · odd backslashes then quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '%a\\\\\\\\\\\\\\\\\\\\\\\\''b' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird EndsWith · unicode
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '%李小龍 ünï 😀' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird EndsWith · like metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '%100\\\\%\\\\_[x]' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird EndsWith · glob metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '%*?[a]\\\\\\\\' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird EndsWith · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` LIKE '%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Greater · plain
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` > 'ok' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Greater · single quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` > 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Greater · backslash before quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` > '\\\\''' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Greater · odd backslashes then quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` > 'a\\\\\\\\\\\\''b' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Greater · unicode
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` > '李小龍 ünï 😀' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Greater · like metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` > '100%_[x]' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Greater · glob metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` > '*?[a]\\\\' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Greater · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` > '' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird GreaterOrEqual · plain
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` >= 'ok' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird GreaterOrEqual · single quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` >= 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird GreaterOrEqual · backslash before quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` >= '\\\\''' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird GreaterOrEqual · odd backslashes then quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` >= 'a\\\\\\\\\\\\''b' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird GreaterOrEqual · unicode
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` >= '李小龍 ünï 😀' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird GreaterOrEqual · like metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` >= '100%_[x]' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird GreaterOrEqual · glob metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` >= '*?[a]\\\\' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird GreaterOrEqual · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` >= '' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Less · plain
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` < 'ok' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Less · single quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` < 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Less · backslash before quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` < '\\\\''' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Less · odd backslashes then quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` < 'a\\\\\\\\\\\\''b' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Less · unicode
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` < '李小龍 ünï 😀' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Less · like metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` < '100%_[x]' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Less · glob metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` < '*?[a]\\\\' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Less · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` < '' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird LessOrEqual · plain
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <= 'ok' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird LessOrEqual · single quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <= 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird LessOrEqual · backslash before quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <= '\\\\''' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird LessOrEqual · odd backslashes then quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <= 'a\\\\\\\\\\\\''b' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird LessOrEqual · unicode
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <= '李小龍 ünï 😀' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird LessOrEqual · like metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <= '100%_[x]' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird LessOrEqual · glob metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <= '*?[a]\\\\' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird LessOrEqual · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <= '' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird IsNull · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` IS NULL LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird IsNotNull · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` IS NOT NULL LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird IsEmpty · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` = '' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird IsNotEmpty · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <> '' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird InList · list
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` IN ('a', 'it''s', 'b') LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird InList · blank list
   (none)
 
 [mariadb] we"ird NotInList · list
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` NOT IN ('a', 'it''s', 'b') LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird NotInList · blank list
   (none)
 
 [mariadb] we"ird Between · range
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` BETWEEN '1' AND '9' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Between · dated range
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` BETWEEN '2024-01-01' AND '2024-12-31' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Between · half range
   (none)
 
 [mariadb] we"ird Regex · plain
   |SELECT * FROM `public`.`accounts` WHERE REGEXP_INSTR(`we"ird`, 'ok') > 0 LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Regex · single quote
   |SELECT * FROM `public`.`accounts` WHERE REGEXP_INSTR(`we"ird`, 'it''s') > 0 LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Regex · backslash before quote
   |SELECT * FROM `public`.`accounts` WHERE REGEXP_INSTR(`we"ird`, '\\\\''') > 0 LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Regex · odd backslashes then quote
   |SELECT * FROM `public`.`accounts` WHERE REGEXP_INSTR(`we"ird`, 'a\\\\\\\\\\\\''b') > 0 LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Regex · unicode
   |SELECT * FROM `public`.`accounts` WHERE REGEXP_INSTR(`we"ird`, '李小龍 ünï 😀') > 0 LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Regex · like metacharacters
   |SELECT * FROM `public`.`accounts` WHERE REGEXP_INSTR(`we"ird`, '100%_[x]') > 0 LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Regex · glob metacharacters
   |SELECT * FROM `public`.`accounts` WHERE REGEXP_INSTR(`we"ird`, '*?[a]\\\\') > 0 LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mariadb] we"ird Regex · empty
   |SELECT * FROM `public`.`accounts` WHERE REGEXP_INSTR(`we"ird`, '') > 0 LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [sqlite] Name Equals · plain
   |SELECT * FROM "public"."accounts" WHERE "Name" = 'ok' LIMIT 1000|
@@ -5771,396 +5771,396 @@ source: src/sql_snapshots.rs
 
 [clickhouse] we"ird Equals · plain
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` = 'ok' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Equals · single quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` = 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Equals · backslash before quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` = '\\\\''' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Equals · odd backslashes then quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` = 'a\\\\\\\\\\\\''b' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Equals · unicode
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` = '李小龍 ünï 😀' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Equals · like metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` = '100%_[x]' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Equals · glob metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` = '*?[a]\\\\' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Equals · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` = '' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird NotEquals · plain
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <> 'ok' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird NotEquals · single quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <> 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird NotEquals · backslash before quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <> '\\\\''' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird NotEquals · odd backslashes then quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <> 'a\\\\\\\\\\\\''b' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird NotEquals · unicode
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <> '李小龍 ünï 😀' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird NotEquals · like metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <> '100%_[x]' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird NotEquals · glob metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <> '*?[a]\\\\' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird NotEquals · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <> '' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Contains · plain
   |SELECT * FROM `public`.`accounts` WHERE toString(`we"ird`) LIKE '%ok%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Contains · single quote
   |SELECT * FROM `public`.`accounts` WHERE toString(`we"ird`) LIKE '%it''s%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Contains · backslash before quote
   |SELECT * FROM `public`.`accounts` WHERE toString(`we"ird`) LIKE '%\\\\\\\\''%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Contains · odd backslashes then quote
   |SELECT * FROM `public`.`accounts` WHERE toString(`we"ird`) LIKE '%a\\\\\\\\\\\\\\\\\\\\\\\\''b%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Contains · unicode
   |SELECT * FROM `public`.`accounts` WHERE toString(`we"ird`) LIKE '%李小龍 ünï 😀%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Contains · like metacharacters
   |SELECT * FROM `public`.`accounts` WHERE toString(`we"ird`) LIKE '%100\\\\%\\\\_[x]%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Contains · glob metacharacters
   |SELECT * FROM `public`.`accounts` WHERE toString(`we"ird`) LIKE '%*?[a]\\\\\\\\%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Contains · empty
   |SELECT * FROM `public`.`accounts` WHERE toString(`we"ird`) LIKE '%%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird NotContains · plain
   |SELECT * FROM `public`.`accounts` WHERE toString(`we"ird`) NOT LIKE '%ok%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird NotContains · single quote
   |SELECT * FROM `public`.`accounts` WHERE toString(`we"ird`) NOT LIKE '%it''s%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird NotContains · backslash before quote
   |SELECT * FROM `public`.`accounts` WHERE toString(`we"ird`) NOT LIKE '%\\\\\\\\''%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird NotContains · odd backslashes then quote
   |SELECT * FROM `public`.`accounts` WHERE toString(`we"ird`) NOT LIKE '%a\\\\\\\\\\\\\\\\\\\\\\\\''b%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird NotContains · unicode
   |SELECT * FROM `public`.`accounts` WHERE toString(`we"ird`) NOT LIKE '%李小龍 ünï 😀%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird NotContains · like metacharacters
   |SELECT * FROM `public`.`accounts` WHERE toString(`we"ird`) NOT LIKE '%100\\\\%\\\\_[x]%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird NotContains · glob metacharacters
   |SELECT * FROM `public`.`accounts` WHERE toString(`we"ird`) NOT LIKE '%*?[a]\\\\\\\\%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird NotContains · empty
   |SELECT * FROM `public`.`accounts` WHERE toString(`we"ird`) NOT LIKE '%%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird StartsWith · plain
   |SELECT * FROM `public`.`accounts` WHERE toString(`we"ird`) LIKE 'ok%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird StartsWith · single quote
   |SELECT * FROM `public`.`accounts` WHERE toString(`we"ird`) LIKE 'it''s%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird StartsWith · backslash before quote
   |SELECT * FROM `public`.`accounts` WHERE toString(`we"ird`) LIKE '\\\\\\\\''%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird StartsWith · odd backslashes then quote
   |SELECT * FROM `public`.`accounts` WHERE toString(`we"ird`) LIKE 'a\\\\\\\\\\\\\\\\\\\\\\\\''b%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird StartsWith · unicode
   |SELECT * FROM `public`.`accounts` WHERE toString(`we"ird`) LIKE '李小龍 ünï 😀%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird StartsWith · like metacharacters
   |SELECT * FROM `public`.`accounts` WHERE toString(`we"ird`) LIKE '100\\\\%\\\\_[x]%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird StartsWith · glob metacharacters
   |SELECT * FROM `public`.`accounts` WHERE toString(`we"ird`) LIKE '*?[a]\\\\\\\\%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird StartsWith · empty
   |SELECT * FROM `public`.`accounts` WHERE toString(`we"ird`) LIKE '%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird EndsWith · plain
   |SELECT * FROM `public`.`accounts` WHERE toString(`we"ird`) LIKE '%ok' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird EndsWith · single quote
   |SELECT * FROM `public`.`accounts` WHERE toString(`we"ird`) LIKE '%it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird EndsWith · backslash before quote
   |SELECT * FROM `public`.`accounts` WHERE toString(`we"ird`) LIKE '%\\\\\\\\''' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird EndsWith · odd backslashes then quote
   |SELECT * FROM `public`.`accounts` WHERE toString(`we"ird`) LIKE '%a\\\\\\\\\\\\\\\\\\\\\\\\''b' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird EndsWith · unicode
   |SELECT * FROM `public`.`accounts` WHERE toString(`we"ird`) LIKE '%李小龍 ünï 😀' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird EndsWith · like metacharacters
   |SELECT * FROM `public`.`accounts` WHERE toString(`we"ird`) LIKE '%100\\\\%\\\\_[x]' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird EndsWith · glob metacharacters
   |SELECT * FROM `public`.`accounts` WHERE toString(`we"ird`) LIKE '%*?[a]\\\\\\\\' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird EndsWith · empty
   |SELECT * FROM `public`.`accounts` WHERE toString(`we"ird`) LIKE '%' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Greater · plain
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` > 'ok' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Greater · single quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` > 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Greater · backslash before quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` > '\\\\''' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Greater · odd backslashes then quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` > 'a\\\\\\\\\\\\''b' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Greater · unicode
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` > '李小龍 ünï 😀' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Greater · like metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` > '100%_[x]' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Greater · glob metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` > '*?[a]\\\\' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Greater · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` > '' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird GreaterOrEqual · plain
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` >= 'ok' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird GreaterOrEqual · single quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` >= 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird GreaterOrEqual · backslash before quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` >= '\\\\''' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird GreaterOrEqual · odd backslashes then quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` >= 'a\\\\\\\\\\\\''b' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird GreaterOrEqual · unicode
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` >= '李小龍 ünï 😀' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird GreaterOrEqual · like metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` >= '100%_[x]' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird GreaterOrEqual · glob metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` >= '*?[a]\\\\' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird GreaterOrEqual · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` >= '' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Less · plain
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` < 'ok' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Less · single quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` < 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Less · backslash before quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` < '\\\\''' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Less · odd backslashes then quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` < 'a\\\\\\\\\\\\''b' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Less · unicode
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` < '李小龍 ünï 😀' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Less · like metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` < '100%_[x]' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Less · glob metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` < '*?[a]\\\\' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Less · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` < '' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird LessOrEqual · plain
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <= 'ok' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird LessOrEqual · single quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <= 'it''s' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird LessOrEqual · backslash before quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <= '\\\\''' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird LessOrEqual · odd backslashes then quote
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <= 'a\\\\\\\\\\\\''b' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird LessOrEqual · unicode
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <= '李小龍 ünï 😀' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird LessOrEqual · like metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <= '100%_[x]' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird LessOrEqual · glob metacharacters
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <= '*?[a]\\\\' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird LessOrEqual · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <= '' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird IsNull · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` IS NULL LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird IsNotNull · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` IS NOT NULL LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird IsEmpty · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` = '' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird IsNotEmpty · empty
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` <> '' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird InList · list
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` IN ('a', 'it''s', 'b') LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird InList · blank list
   (none)
 
 [clickhouse] we"ird NotInList · list
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` NOT IN ('a', 'it''s', 'b') LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird NotInList · blank list
   (none)
 
 [clickhouse] we"ird Between · range
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` BETWEEN '1' AND '9' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Between · dated range
   |SELECT * FROM `public`.`accounts` WHERE `we"ird` BETWEEN '2024-01-01' AND '2024-12-31' LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Between · half range
   (none)
 
 [clickhouse] we"ird Regex · plain
   |SELECT * FROM `public`.`accounts` WHERE match(toString(`we"ird`), 'ok') LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Regex · single quote
   |SELECT * FROM `public`.`accounts` WHERE match(toString(`we"ird`), 'it''s') LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Regex · backslash before quote
   |SELECT * FROM `public`.`accounts` WHERE match(toString(`we"ird`), '\\\\''') LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Regex · odd backslashes then quote
   |SELECT * FROM `public`.`accounts` WHERE match(toString(`we"ird`), 'a\\\\\\\\\\\\''b') LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Regex · unicode
   |SELECT * FROM `public`.`accounts` WHERE match(toString(`we"ird`), '李小龍 ünï 😀') LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Regex · like metacharacters
   |SELECT * FROM `public`.`accounts` WHERE match(toString(`we"ird`), '100%_[x]') LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Regex · glob metacharacters
   |SELECT * FROM `public`.`accounts` WHERE match(toString(`we"ird`), '*?[a]\\\\') LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [clickhouse] we"ird Regex · empty
   |SELECT * FROM `public`.`accounts` WHERE match(toString(`we"ird`), '') LIMIT 1000|
-  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
 [mssql] Name Equals · plain
   |SELECT * FROM "public"."accounts" WHERE "Name" = N'ok' LIMIT 1000|

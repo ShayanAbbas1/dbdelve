@@ -2232,6 +2232,53 @@ mod tests {
     }
 
     #[test]
+    fn a_name_only_backticks_can_spell_still_browses_sorts_and_edits() {
+        // A dash is no bare name, and the grammar once read a backticked name
+        // only where a bare one would do: the tab spun forever (issue #248).
+        for engine in [Engine::MySql, Engine::MariaDb, Engine::ClickHouse] {
+            let preview = relation_sql(
+                engine,
+                "client-test",
+                "alerts",
+                "",
+                &[],
+                Some(PREVIEW_ROW_LIMIT),
+                0,
+            );
+            assert!(
+                sql::is_generated_select(engine, &preview),
+                "{preview} was refused on {engine:?}"
+            );
+            let sorted = relation_sql(
+                engine,
+                "client-test",
+                "alerts",
+                "",
+                &[SortKey::new("`id`", true)],
+                Some(PREVIEW_ROW_LIMIT),
+                0,
+            );
+            assert_eq!(
+                sorted,
+                "SELECT * FROM `client-test`.`alerts` ORDER BY `id` ASC LIMIT 1000"
+            );
+            let update = sql::update_row(
+                engine,
+                "client-test",
+                "alerts",
+                &[("level", crate::result_grid::NewValue::Value("high".into()))],
+                &[("id", "7")],
+                &[("id".to_owned(), "UInt32".to_owned())],
+            )
+            .unwrap();
+            assert!(
+                sql::is_generated_write_on(engine, &update),
+                "{update} was refused on {engine:?}"
+            );
+        }
+    }
+
+    #[test]
     fn plain_like_writes_no_escape_and_refuses_a_value_that_needs_one() {
         let predicate =
             |operator, value| bar_predicate(Engine::Generic, &bar(Some("c"), operator, value), &[]);

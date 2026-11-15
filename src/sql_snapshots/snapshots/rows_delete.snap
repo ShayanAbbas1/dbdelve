@@ -71,7 +71,7 @@ source: src/sql_snapshots.rs
 
 [mysql] awkward column
   |DELETE FROM `public`.`accounts` WHERE `we"ird` = '1'|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
 
 [mysql] empty keys
   (none)
@@ -102,7 +102,7 @@ source: src/sql_snapshots.rs
 
 [mysql] relation unicode
   |DELETE FROM `données`.`Ünïcødé 表` WHERE `id` = '7'|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
 
 [mysql] relation reserved
   |DELETE FROM `select`.`order` WHERE `id` = '7'|
@@ -114,11 +114,11 @@ source: src/sql_snapshots.rs
 
 [mysql] relation brackets and dots
   |DELETE FROM `[dbo]`.`a.b` WHERE `id` = '7'|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
 
 [mysql] relation backslash
   |DELETE FROM `back\\slash`.`trail\\` WHERE `id` = '7'|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
 
 [mariadb] id
   |DELETE FROM `public`.`accounts` WHERE `id` = '7'|
@@ -130,7 +130,7 @@ source: src/sql_snapshots.rs
 
 [mariadb] awkward column
   |DELETE FROM `public`.`accounts` WHERE `we"ird` = '1'|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
 
 [mariadb] empty keys
   (none)
@@ -161,7 +161,7 @@ source: src/sql_snapshots.rs
 
 [mariadb] relation unicode
   |DELETE FROM `données`.`Ünïcødé 表` WHERE `id` = '7'|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
 
 [mariadb] relation reserved
   |DELETE FROM `select`.`order` WHERE `id` = '7'|
@@ -173,11 +173,11 @@ source: src/sql_snapshots.rs
 
 [mariadb] relation brackets and dots
   |DELETE FROM `[dbo]`.`a.b` WHERE `id` = '7'|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
 
 [mariadb] relation backslash
   |DELETE FROM `back\\slash`.`trail\\` WHERE `id` = '7'|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
 
 [sqlite] id
   |DELETE FROM "public"."accounts" WHERE "id" = '7'|
@@ -425,7 +425,7 @@ source: src/sql_snapshots.rs
 
 [clickhouse] awkward column
   |DELETE FROM `public`.`accounts` WHERE `we"ird` = '1'|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
 
 [clickhouse] empty keys
   (none)
@@ -456,7 +456,7 @@ source: src/sql_snapshots.rs
 
 [clickhouse] relation unicode
   |DELETE FROM `données`.`Ünïcødé 表` WHERE `id` = '7'|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
 
 [clickhouse] relation reserved
   |DELETE FROM `select`.`order` WHERE `id` = '7'|
@@ -468,7 +468,7 @@ source: src/sql_snapshots.rs
 
 [clickhouse] relation brackets and dots
   |DELETE FROM `[dbo]`.`a.b` WHERE `id` = '7'|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
 
 [clickhouse] relation backslash
   |DELETE FROM `back\\\\slash`.`trail\\\\` WHERE `id` = '7'|

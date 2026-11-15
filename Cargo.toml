@@ -33,7 +33,7 @@ gpui-component = { version = "=0.8.0", features = ["tree-sitter-sql", "tree-sitt
 # so a bump changes what DBDelve sends to the server. It is a correctness
 # dependency, not a formatting one.
 tree-sitter = "=0.26.13"
-tree-sitter-sequel = "=0.3.11"
+tree-sitter-sequel = "=0.3.13"
 
 # The grammar `mql.rs` reads mongosh statements with: they are JavaScript
 # expressions, and this is what finds their boundaries, comments and regex

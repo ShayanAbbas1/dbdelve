@@ -3059,6 +3059,77 @@ fn a_mode_picked_while_connecting_is_the_one_the_session_holds(cx: &mut TestAppC
     });
 }
 
+/// A table whose own statement the gate cannot read says so where its rows
+/// would be, rather than spinning, and a visit does not ask again.
+#[gpui::test]
+fn a_relation_whose_query_dbdelve_cannot_read_says_so_once(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let directory = store::dbdelve_directory().unwrap();
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("profiles.toml"),
+            "active = \"echo\"\n\
+             [settings]\ncheck_for_updates = false\n\
+             [[profiles]]\nid = \"echo\"\nname = \"Echo\"\nhost = \"\"\ndatabase = \"\"\n\
+             user = \"\"\nengine = \"plugin:echo\"\nspeaks = \"mysql\"\n\
+             connection = \"DSN=echo\"\n",
+        )
+        .unwrap();
+
+        let (workspace, cx) = launch_with(cx, vec![crate::db::echo::plugin()]);
+        cx.executor().allow_parking();
+        workspace.update(cx, |workspace, cx| {
+            let index = workspace
+                .profiles
+                .iter()
+                .position(|profile| matches!(profile.config, ConnectionConfig::External(_)))
+                .unwrap();
+            if let ConnectionConfig::External(config) = &mut workspace.profiles[index].config {
+                config.password = "x".into();
+            }
+            workspace.activate(index, cx);
+        });
+        cx.run_until_parked();
+
+        // `x``y` is one name to MySQL and a name and an alias to the grammar.
+        let visit = |id: Option<u64>, cx: &mut VisualTestContext| {
+            let id = cx.update(|window, cx| {
+                workspace.update(cx, |workspace, cx| {
+                    let id = id.unwrap_or_else(|| {
+                        let opened = crate::session::OpenedObject::Relation {
+                            schema: "s".into(),
+                            name: "x`y".into(),
+                            kind: Default::default(),
+                            filter: String::new(),
+                            filters: Vec::new(),
+                        };
+                        workspace.open_object(opened, window, cx).unwrap()
+                    });
+                    workspace.activate_tab(crate::session::Tab::Object(id), window, cx);
+                    id
+                })
+            });
+            cx.run_until_parked();
+            cx.update(|_, cx| {
+                let profile = workspace.read(cx).profile().unwrap();
+                let tab = profile.session.objects.iter().find(|tab| tab.id == id);
+                let ObjectBody::Relation { query, .. } = &tab.unwrap().body else {
+                    panic!("x`y opened as its rows");
+                };
+                let QueryState::Failed(error) = query else {
+                    panic!("the refused tab is not failed");
+                };
+                assert!(error.message.contains("its own query"), "{}", error.message);
+                (id, profile.session.last_structure_request)
+            })
+        };
+        let (id, asked) = visit(None, cx);
+        assert_eq!(visit(Some(id), cx), (id, asked));
+
+        quit(workspace, cx);
+    });
+}
+
 /// A bar edit Generic refuses is put back, so the bars the tab saves stay the
 /// ones its filter ran from.
 #[gpui::test]
