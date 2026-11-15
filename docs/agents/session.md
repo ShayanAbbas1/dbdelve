@@ -234,6 +234,9 @@ The shape a change to the main pane has to fit (`session.rs`, with the
 - **A `QueryTab` owns its own editor, grid, `QueryState`, saved-query name
   (`open_query`) and `last_query`.** Do not reintroduce a single shared editor
   for anything.
+  Results visibility is per tab and not persisted. The first streamed result
+  reveals a hidden pane; hiding it again lasts through later batches while
+  fetching continues. Completion reveals readable results again.
 - **A selection holding more than one statement runs each of them in turn, one
   chip per result set, unless every one is a plain read, when they run at
   once.** `sql::queued_statements` splits it and `Queue` on

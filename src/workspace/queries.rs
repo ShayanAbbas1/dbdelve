@@ -2374,10 +2374,11 @@ impl Workspace {
                         // the clock has a tick of its own.
                         let began = results.read(cx).delegate().streamed_set();
                         if running && pour(&feed, &results, mode, engine, (&names, &widths, &column_view), cx) {
-                            // Rows still on their way are an answer too, and a
-                            // long stream would otherwise be read only once it
-                            // had ended.
-                            if let Some(profile) = workspace.issued_to(&id, generation) {
+                            // The first arrival reveals the stream; a later
+                            // explicit hide lasts until the run completes.
+                            if began.is_none()
+                                && let Some(profile) = workspace.issued_to(&id, generation)
+                            {
                                 profile.session.reveal_results(tab);
                             }
                             cx.notify();
