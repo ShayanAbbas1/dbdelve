@@ -195,6 +195,12 @@ pub struct StoredProfile {
     /// so it comes before `ssh`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_alive_seconds: Option<u32>,
+    /// Whole minutes without use after which this profile closes its
+    /// sessions. Absent is off, which is every profile written
+    /// before the setting existed; 0 reads as off. The unit is in the name so a
+    /// later change of unit is a rename. A scalar, so it comes before `ssh`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_timeout_minutes: Option<u32>,
     /// The session time zone this profile connects with: a name or an offset,
     /// checked when read. Absent leaves the server's own. A scalar, so it comes
     /// before `ssh`.
@@ -3530,6 +3536,7 @@ user = "shayan"
                 introspection_depth: None,
                 startup_script: None,
                 keep_alive_seconds: None,
+                idle_timeout_minutes: None,
                 time_zone: None,
                 driver_properties: Vec::new(),
                 ssh: None,
@@ -3598,6 +3605,7 @@ user = "shayan"
             introspection_depth: None,
             startup_script: None,
             keep_alive_seconds: None,
+            idle_timeout_minutes: None,
             time_zone: None,
             driver_properties: Vec::new(),
             ssh: None,
@@ -3754,6 +3762,7 @@ open_objects = []
             introspection_depth: None,
             startup_script: None,
             keep_alive_seconds: None,
+            idle_timeout_minutes: None,
             time_zone: None,
             driver_properties: Vec::new(),
             ssh: None,
@@ -3997,6 +4006,41 @@ open_objects = []
         let golden = include_str!("testdata/every-engine.resaved.toml");
         assert_eq!(resaved(include_str!("testdata/every-engine.toml")), golden);
         assert!(!golden.contains("keep_alive"));
+    }
+
+    #[test]
+    fn the_idle_timeout_round_trips_before_ssh() {
+        let mut profile = a_stored_profile();
+        profile.idle_timeout_minutes = Some(30);
+        profile.ssh = Some(SshTunnel {
+            host: "bastion".into(),
+            ..Default::default()
+        });
+        let text = written_alone(profile.clone());
+        let at = text
+            .find("idle_timeout_minutes = 30")
+            .expect("it is written");
+        let tunnel = text.find("[profiles.ssh]").expect("and the tunnel");
+        assert!(
+            at < tunnel,
+            "TOML cannot emit a scalar after a table, so it comes before `ssh`:\n{text}"
+        );
+        let decoded = decode_profiles(&text, &[]).expect("the file loads");
+        assert_eq!(decoded.profiles[0].idle_timeout_minutes, Some(30));
+        assert_eq!(
+            written_alone(decoded.profiles[0].clone()),
+            text,
+            "saving what was saved changes nothing"
+        );
+
+        let bare = written_alone(a_stored_profile());
+        assert!(
+            !bare.contains("idle_timeout"),
+            "a profile with none is written as it always was:\n{bare}"
+        );
+        let golden = include_str!("testdata/every-engine.resaved.toml");
+        assert_eq!(resaved(include_str!("testdata/every-engine.toml")), golden);
+        assert!(!golden.contains("idle_timeout"));
     }
 
     #[test]
@@ -4606,6 +4650,7 @@ folder = "Hot"
             introspection_depth: None,
             startup_script: None,
             keep_alive_seconds: None,
+            idle_timeout_minutes: None,
             time_zone: None,
             driver_properties: Vec::new(),
             ssh: None,
@@ -4701,6 +4746,7 @@ folder = "Hot"
             introspection_depth: None,
             startup_script: None,
             keep_alive_seconds: None,
+            idle_timeout_minutes: None,
             time_zone: None,
             driver_properties: Vec::new(),
             ssh: None,
@@ -4782,6 +4828,7 @@ folder = "Hot"
             introspection_depth: None,
             startup_script: None,
             keep_alive_seconds: None,
+            idle_timeout_minutes: None,
             time_zone: None,
             driver_properties: Vec::new(),
             ssh: None,
@@ -4909,6 +4956,7 @@ open_objects = []
             introspection_depth: None,
             startup_script: None,
             keep_alive_seconds: None,
+            idle_timeout_minutes: None,
             time_zone: None,
             driver_properties: Vec::new(),
             ssh: None,
@@ -5064,6 +5112,7 @@ open_objects = []
                     introspection_depth: None,
                     startup_script: None,
                     keep_alive_seconds: None,
+                    idle_timeout_minutes: None,
                     time_zone: None,
                     driver_properties: Vec::new(),
                     ssh: None,
@@ -5112,6 +5161,7 @@ open_objects = []
                     introspection_depth: None,
                     startup_script: None,
                     keep_alive_seconds: None,
+                    idle_timeout_minutes: None,
                     time_zone: None,
                     driver_properties: Vec::new(),
                     ssh: None,
@@ -5942,6 +5992,7 @@ open_objects = []
             introspection_depth: None,
             startup_script: None,
             keep_alive_seconds: None,
+            idle_timeout_minutes: None,
             time_zone: None,
             driver_properties: Vec::new(),
             ssh: None,
@@ -6570,6 +6621,7 @@ name = \"accounts\"
             introspection_depth: None,
             startup_script: None,
             keep_alive_seconds: None,
+            idle_timeout_minutes: None,
             time_zone: None,
             driver_properties: Vec::new(),
             ssh: None,
@@ -6707,6 +6759,7 @@ name = \"accounts\"
             introspection_depth: None,
             startup_script: None,
             keep_alive_seconds: None,
+            idle_timeout_minutes: None,
             time_zone: None,
             driver_properties: Vec::new(),
             ssh: None,

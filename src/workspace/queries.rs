@@ -2206,6 +2206,25 @@ impl Workspace {
             cx.notify();
             return;
         }
+        // An idle-closed profile stays in front with its tabs (the idle
+        // timer), so its next run is its reconnect: parked until the connect
+        // lands, where `run_waiting_files` hands it back to `execute_sql` and
+        // the mode gate judges it then. An explain, a refresh or an edit's
+        // read-back is not the user pressing Run and goes on to fail as it
+        // does with no connection.
+        if let (Some(index), Tab::Query(query), None, None, false) =
+            (self.active, tab, &refresh, &explain, keep_rows)
+            && self
+                .profiles
+                .get(index)
+                .is_some_and(|profile| matches!(profile.state, ProfileState::Idle))
+        {
+            let id = self.profiles[index].id.clone();
+            self.runs_on_connect.push((id, query, sql));
+            self.begin_connect(index, cx);
+            return;
+        }
+
         let verdict = sql::classify(self.engine(), &sql);
         let stopped = self
             .profile()
@@ -2722,6 +2741,9 @@ impl Workspace {
             }
             _ => None,
         };
+        // The user's own work, whichever profile the run belongs to: the one
+        // thing besides a catalog read that keeps an idle timeout away.
+        self.mark_activity(&id, cx);
         // Marked on the way out, like the history: a statement that failed
         // part way may still have opened a transaction.
         // What a lone COMMIT or ROLLBACK cleared, kept to put back when it
@@ -3134,6 +3156,11 @@ impl Workspace {
                 .map(|entry| answered(entry, &result, feed.is_some(), started.elapsed(), target));
             workspace
                 .update(cx, |workspace, cx| {
+                    // A landing for a profile since reconnected is not use of
+                    // the new connection.
+                    if workspace.issued_to(&id, generation).is_some() {
+                        workspace.mark_activity(&id, cx);
+                    }
                     // The plan is carried out of this block rather than stored
                     // inside it: `slot` holds the session borrowed, and the tab
                     // it belongs on has to be reached through the same session.

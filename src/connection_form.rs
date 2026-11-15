@@ -21,7 +21,7 @@ use crate::{
         SsmTunnel, Target, check_time_zone, odbc_string,
     },
     explorer::Shortcuts,
-    session::{Behaviour, Depth, MIN_KEEP_ALIVE, Profile},
+    session::{Behaviour, Depth, MAX_IDLE_TIMEOUT, MAX_KEEP_ALIVE, MIN_KEEP_ALIVE, Profile},
     sql::Mode,
     theme::ConnectionColor,
     ui::Status,
@@ -114,6 +114,7 @@ pub(crate) struct ConnectionForm {
     /// only under a target where `Target::keeps_alive`. Kept, not read, under
     /// any other.
     pub(crate) keep_alive: Entity<InputState>,
+    pub(crate) idle_timeout: Entity<InputState>,
     /// Which connect-time loads run, read on save for every target as the
     /// statement timeout is.
     pub(crate) depth: Depth,
@@ -428,6 +429,8 @@ impl ConnectionForm {
         }
         let keep_alive = cx.new(|cx| InputState::new(window, cx).placeholder("120"));
         keep_alive.update(cx, |input, cx| input.set_text_align(TextAlign::Right, cx));
+        let idle_timeout = cx.new(|cx| InputState::new(window, cx).placeholder("30"));
+        idle_timeout.update(cx, |input, cx| input.set_text_align(TextAlign::Right, cx));
 
         let mut subscriptions = vec![cx.subscribe_in(
             &url,
@@ -524,6 +527,7 @@ impl ConnectionForm {
             properties,
             statement_timeout,
             keep_alive,
+            idle_timeout,
             depth: Depth::default(),
             startup_script,
             error: None,
@@ -572,6 +576,17 @@ impl ConnectionForm {
                     .behaviour
                     .keep_alive
                     .map(|seconds| seconds.to_string())
+                    .unwrap_or_default(),
+                window,
+                cx,
+            );
+        });
+        form.idle_timeout.update(cx, |input, cx| {
+            input.set_value(
+                profile
+                    .behaviour
+                    .idle_timeout
+                    .map(|minutes| minutes.to_string())
                     .unwrap_or_default(),
                 window,
                 cx,
@@ -631,6 +646,17 @@ impl ConnectionForm {
                 cx,
             );
         });
+        form.idle_timeout.update(cx, |input, cx| {
+            input.set_value(
+                profile
+                    .behaviour
+                    .idle_timeout
+                    .map(|minutes| minutes.to_string())
+                    .unwrap_or_default(),
+                window,
+                cx,
+            );
+        });
         form.mode = starting_mode(Some(profile.mode));
         form.shortcuts = profile.shortcuts.duplicated();
         form.folds = profile.folds.clone();
@@ -650,6 +676,7 @@ impl ConnectionForm {
                 false => String::new(),
             },
             keep_alive: typed_keep_alive(self.target(), &self.keep_alive.read(cx).value())?,
+            idle_timeout: typed_idle_timeout(&self.idle_timeout.read(cx).value())?,
         })
     }
 
@@ -1352,8 +1379,8 @@ fn typed_time_zone(target: Target, text: &str) -> Result<Option<String>, String>
 }
 
 /// What the Keep-alive row says, where `target` draws it. Blank and 0 are off;
-/// anything else is whole seconds from [`MIN_KEEP_ALIVE`] up, and one that is
-/// not is the form's error. Text left in the row under a target that keeps no
+/// anything else is whole seconds from [`MIN_KEEP_ALIVE`] to
+/// [`MAX_KEEP_ALIVE`], and one that is not is the form's error. Text left in the row under a target that keeps no
 /// session is not read.
 fn typed_keep_alive(target: Target, text: &str) -> Result<Option<u32>, String> {
     let text = text.trim();
@@ -1362,9 +1389,27 @@ fn typed_keep_alive(target: Target, text: &str) -> Result<Option<u32>, String> {
     }
     match text.parse::<u32>() {
         Ok(0) => Ok(None),
-        Ok(seconds) if seconds >= MIN_KEEP_ALIVE => Ok(Some(seconds)),
+        Ok(seconds) if (MIN_KEEP_ALIVE..=MAX_KEEP_ALIVE).contains(&seconds) => Ok(Some(seconds)),
         _ => Err(format!(
-            "Keep-alive must be a whole number of seconds, {MIN_KEEP_ALIVE} or more."
+            "Keep-alive must be a whole number of seconds, from {MIN_KEEP_ALIVE} to {MAX_KEEP_ALIVE}."
+        )),
+    }
+}
+
+/// What the Idle timeout row says. Blank and 0 are off; anything else is whole
+/// minutes up to [`MAX_IDLE_TIMEOUT`], and one that is not is the form's error.
+/// Read for every target,
+/// since every engine's connection can be left unused.
+fn typed_idle_timeout(text: &str) -> Result<Option<u32>, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    match text.parse::<u32>() {
+        Ok(0) => Ok(None),
+        Ok(minutes) if minutes <= MAX_IDLE_TIMEOUT => Ok(Some(minutes)),
+        _ => Err(format!(
+            "Idle timeout must be a whole number of minutes, at most {MAX_IDLE_TIMEOUT}."
         )),
     }
 }
@@ -1620,7 +1665,24 @@ mod tests {
     }
 
     #[test]
-    fn a_keep_alive_that_is_not_a_whole_number_of_ten_or_more_seconds_is_refused() {
+    fn an_idle_timeout_that_is_not_a_whole_number_of_minutes_up_to_a_day_is_refused() {
+        assert_eq!(typed_idle_timeout(""), Ok(None));
+        assert_eq!(typed_idle_timeout("  "), Ok(None));
+        assert_eq!(typed_idle_timeout("0"), Ok(None), "0 reads as off");
+        for refused in ["half", "-5", "1.5", "4294967296"] {
+            let error = typed_idle_timeout(refused).expect_err(refused);
+            assert!(error.starts_with("Idle timeout"), "{refused}: {error}");
+        }
+        assert_eq!(typed_idle_timeout("1"), Ok(Some(1)));
+        assert_eq!(typed_idle_timeout(" 30 "), Ok(Some(30)));
+        assert_eq!(typed_idle_timeout("1440"), Ok(Some(1440)), "a day is kept");
+        let error = typed_idle_timeout("1441").expect_err("past a day");
+        assert!(error.starts_with("Idle timeout"), "{error}");
+        assert!(error.contains("1440"), "{error}");
+    }
+
+    #[test]
+    fn a_keep_alive_that_is_not_a_whole_number_of_seconds_from_ten_to_an_hour_is_refused() {
         let postgres = Target::built_in(Engine::Postgres);
         assert_eq!(typed_keep_alive(postgres, ""), Ok(None));
         assert_eq!(typed_keep_alive(postgres, "  "), Ok(None));
@@ -1631,6 +1693,14 @@ mod tests {
         }
         assert_eq!(typed_keep_alive(postgres, "10"), Ok(Some(10)));
         assert_eq!(typed_keep_alive(postgres, " 120 "), Ok(Some(120)));
+        assert_eq!(
+            typed_keep_alive(postgres, "3600"),
+            Ok(Some(3600)),
+            "an hour is kept"
+        );
+        let error = typed_keep_alive(postgres, "3601").expect_err("past an hour");
+        assert!(error.starts_with("Keep-alive"), "{error}");
+        assert!(error.contains("10") && error.contains("3600"), "{error}");
         // Not read where the row is not drawn, so text left in it by another
         // engine neither fails the save nor is stored.
         let sqlite = Target::built_in(Engine::Sqlite);
