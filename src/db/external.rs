@@ -785,15 +785,25 @@ fn graph_from(schema: &str, wire: WireGraph) -> Result<SchemaGraph, DbError> {
             ]);
         }
     }
-    let unique_keys = wire.unique_keys.iter().flat_map(|key| {
-        let kind = match key.primary {
-            true => "primary",
-            false => "unique",
-        };
-        key.columns
-            .iter()
-            .map(move |column| [&key.table, &key.name, column, kind].map(Some).to_vec())
-    });
+    // Grouped by position, not name: a driver may name a constraint and an
+    // index alike (Db2 names a primary key after another column's unique
+    // index), and only the flags a key sets are kept.
+    let positions: Vec<String> = (0..wire.unique_keys.len())
+        .map(|at| at.to_string())
+        .collect();
+    let unique_keys = wire
+        .unique_keys
+        .iter()
+        .zip(&positions)
+        .flat_map(|(key, at)| {
+            let kind = match key.primary {
+                true => "primary",
+                false => "unique",
+            };
+            key.columns
+                .iter()
+                .map(move |column| [&key.table, at, column, kind].map(Some).to_vec())
+        });
     let foreign_keys = wire.foreign_keys.iter().flat_map(|key| {
         let pairs = key.columns.iter().zip(&key.referenced_columns);
         pairs.map(|(column, referenced)| {
@@ -2455,6 +2465,40 @@ mod tests {
             connection.schema_graph("fail").unwrap_err().message,
             "no such schema"
         );
+    }
+
+    /// Db2 names a primary key after another column's unique index; read as
+    /// one key, neither column would be unique.
+    #[test]
+    fn unique_keys_named_alike_stay_apart() {
+        use dbdelve_plugin_protocol::{Column, GraphTable, UniqueKey};
+
+        let column = |name: &str| Column {
+            name: name.to_string(),
+            data_type: "BIGINT".to_string(),
+            nullable: false,
+            default: None,
+        };
+        let key = |column: &str, primary| UniqueKey {
+            table: "accounts".to_string(),
+            name: "SQL960".to_string(),
+            columns: vec![column.to_string()],
+            primary,
+        };
+        let wire = WireGraph {
+            tables: vec![GraphTable {
+                name: "accounts".to_string(),
+                columns: vec![column("id"), column("external_id")],
+            }],
+            unique_keys: vec![key("id", true), key("external_id", false)],
+            foreign_keys: Vec::new(),
+        };
+        let graph = graph_from("S", wire).unwrap();
+        let [id, external_id] = &graph.tables[0].columns[..] else {
+            panic!("two columns");
+        };
+        assert!(id.primary && id.unique);
+        assert!(!external_id.primary && external_id.unique);
     }
 
     /// A plugin from before `graph` draws nothing, and is never sent one.

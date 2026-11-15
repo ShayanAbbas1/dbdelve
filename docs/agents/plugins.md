@@ -115,15 +115,16 @@ unsupported }` from a plugin.
 - **`graph` is one schema for the ER diagram**: its base tables (never
   views) with their columns, every primary key, unique constraint and unique
   index (partial and expression indexes left out), and every foreign key
-  declared on those tables, each key's columns in key order and its name
-  distinct among its table's keys of that kind. The host turns the answer
-  into the three results `db::graph::assemble_schema_graph` takes, so a
-  plugin's graph is assembled exactly as a built-in's. Unlike the other
-  catalog requests it is cancelled as a query is and has no deadline (see
-  Cancel below). Whether a connection draws diagrams is asked of it
-  (`Connection::draws_diagrams`), not of `Target`: a plugin that did not offer
-  `graph` shows no diagram entry anywhere, and `schema_graph` refuses one
-  unsent.
+  declared on those tables, each key's columns in key order and a foreign
+  key's name distinct among its table's (a unique key's may repeat: Db2
+  names a primary key after another column's unique index). The host turns
+  the answer into the three results `db::graph::assemble_schema_graph`
+  takes, so a plugin's graph is assembled exactly as a built-in's. Unlike
+  the other catalog requests it is cancelled as a query is and has no
+  deadline (see Cancel below). Whether a connection draws diagrams is asked
+  of it (`Connection::draws_diagrams`), not of `Target`: a plugin that did
+  not offer `graph` shows no diagram entry anywhere, and `schema_graph`
+  refuses one unsent.
 - **The password travels only in `open`**, never in `prepare`, and in its own
   `Password` type whose `Debug` prints nothing, so no log of a request can carry
   it.

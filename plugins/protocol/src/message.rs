@@ -279,9 +279,8 @@ pub struct GraphTable {
     pub columns: Vec<Column>,
 }
 
-/// A key's `name` is distinct among its table's keys of the same kind, so
-/// two keys never read as one; where the driver names none, the plugin makes
-/// one up.
+/// A primary key, unique constraint or unique index. Its `name` may repeat
+/// another's: a driver may name a constraint and an index alike.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UniqueKey {
     pub table: String,
@@ -291,10 +290,11 @@ pub struct UniqueKey {
     pub primary: bool,
 }
 
-/// See [`UniqueKey`] for `name`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphKey {
     pub table: String,
+    /// Distinct among its table's foreign keys, so two never read as one;
+    /// where the driver names none, the plugin makes one up.
     pub name: String,
     /// In key order, paired by position with `referenced_columns`.
     pub columns: Vec<String>,
