@@ -21,7 +21,7 @@ use crate::{
         Target, odbc_string,
     },
     explorer::Shortcuts,
-    session::Profile,
+    session::{Behaviour, Depth, Profile},
     sql::Mode,
     theme::ConnectionColor,
     ui::Status,
@@ -104,6 +104,9 @@ pub(crate) struct ConnectionForm {
     /// Seconds, and blank is the same as 0: no limit. Every engine has one, so
     /// unlike the credential fields it is drawn whichever engine is selected.
     pub(crate) statement_timeout: Entity<InputState>,
+    /// Which connect-time loads run, read on save for every target as the
+    /// statement timeout is.
+    pub(crate) depth: Depth,
     /// An input to focus once it has been mounted.
     ///
     /// A picker can unmount the field the user was typing in, and a window with
@@ -486,6 +489,7 @@ impl ConnectionForm {
             srv: mongo.is_some_and(|mongo| mongo.srv),
             login_database: mongo.and_then(|mongo| mongo.login_database.clone()),
             statement_timeout,
+            depth: Depth::default(),
             error: None,
             test: None,
             notice: None,
@@ -522,6 +526,7 @@ impl ConnectionForm {
         let mut form = Self::new(Some(&profile.config), window, cx);
         form.editing = Some(profile.id.clone());
         form.color = profile.color;
+        form.depth = profile.behaviour.depth;
         // No `form.mode` here: the mode dropdown draws only on a fresh form and
         // `save_profile` has no mode to take, so copying it in was a write
         // nothing ever read. The titlebar picker is where an existing
@@ -561,6 +566,7 @@ impl ConnectionForm {
         }
         let mut form = Self::new(Some(&config), window, cx);
         form.color = profile.color;
+        form.depth = profile.behaviour.depth;
         form.mode = starting_mode(Some(profile.mode));
         form.shortcuts = profile.shortcuts.duplicated();
         form.folds = profile.folds.clone();
@@ -568,6 +574,12 @@ impl ConnectionForm {
             input.set_value(name, window, cx);
         });
         form
+    }
+
+    /// What the profile does with its connection, as the form has it. Applied
+    /// by `Workspace::set_behaviour` after the profile is saved.
+    pub(crate) fn behaviour(&self, _cx: &App) -> Result<Behaviour, String> {
+        Ok(Behaviour { depth: self.depth })
     }
 
     pub(crate) fn config(&self, cx: &App) -> Result<(String, ConnectionConfig), String> {
