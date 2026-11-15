@@ -120,8 +120,16 @@ the model for any other that must.
 
 - **One `canvas()`**, whose paint closure draws everything in the pane: dots,
   edges, cards, rows, text. Cards and rows are quads, edges are tessellated
-  `Path`s cached per edge and look, and zoom is our own transform over world
+  meshes cached per edge and look, and zoom is our own transform over world
   coordinates, never a scaled element.
+- **Few paths, few draw orders.** gpui batches primitives of one kind only
+  while their draw orders run unbroken, and every `Path` carries its own
+  vertex buffer. The edge meshes are merged into a handful of `Path`s a
+  frame, one per look and part (ink, hole, ring) in chunks of
+  `PATH_VERTICES`, and the dot grid and each card paint inside
+  `window.paint_layer`, so a full diagram is a few batches rather than
+  thousands. A crowded diagram (`CROWDED` edges) also flattens its
+  faded edges coarser, keeping a 5K frame under gpui's instance-buffer cap.
 - **Cull through the scene.** `diagram::index::Scene` files every card and
   edge segment in a uniform grid in world space; a frame asks it for
   `visible(world, zoom)` and paints only that, and a mouse move looks in one or
