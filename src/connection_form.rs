@@ -21,7 +21,7 @@ use crate::{
         SsmTunnel, Target, check_time_zone, odbc_string,
     },
     explorer::Shortcuts,
-    session::{Behaviour, Depth, Profile},
+    session::{Behaviour, Depth, MIN_KEEP_ALIVE, Profile},
     sql::Mode,
     theme::ConnectionColor,
     ui::Status,
@@ -110,6 +110,10 @@ pub(crate) struct ConnectionForm {
     /// Seconds, and blank is the same as 0: no limit. Every engine has one, so
     /// unlike the credential fields it is drawn whichever engine is selected.
     pub(crate) statement_timeout: Entity<InputState>,
+    /// Seconds between pings of the sessions the connection holds open, read
+    /// only under a target where `Target::keeps_alive`. Kept, not read, under
+    /// any other.
+    pub(crate) keep_alive: Entity<InputState>,
     /// Which connect-time loads run, read on save for every target as the
     /// statement timeout is.
     pub(crate) depth: Depth,
@@ -422,6 +426,8 @@ impl ConnectionForm {
         for seconds in [&statement_timeout, &password_expires] {
             seconds.update(cx, |input, cx| input.set_text_align(TextAlign::Right, cx));
         }
+        let keep_alive = cx.new(|cx| InputState::new(window, cx).placeholder("120"));
+        keep_alive.update(cx, |input, cx| input.set_text_align(TextAlign::Right, cx));
 
         let mut subscriptions = vec![cx.subscribe_in(
             &url,
@@ -517,6 +523,7 @@ impl ConnectionForm {
             time_zone,
             properties,
             statement_timeout,
+            keep_alive,
             depth: Depth::default(),
             startup_script,
             error: None,
@@ -558,6 +565,17 @@ impl ConnectionForm {
         form.depth = profile.behaviour.depth;
         form.startup_script.update(cx, |input, cx| {
             input.set_value(profile.behaviour.startup_script.clone(), window, cx);
+        });
+        form.keep_alive.update(cx, |input, cx| {
+            input.set_value(
+                profile
+                    .behaviour
+                    .keep_alive
+                    .map(|seconds| seconds.to_string())
+                    .unwrap_or_default(),
+                window,
+                cx,
+            );
         });
         // No `form.mode` here: the mode dropdown draws only on a fresh form and
         // `save_profile` has no mode to take, so copying it in was a write
@@ -602,6 +620,17 @@ impl ConnectionForm {
         form.startup_script.update(cx, |input, cx| {
             input.set_value(profile.behaviour.startup_script.clone(), window, cx);
         });
+        form.keep_alive.update(cx, |input, cx| {
+            input.set_value(
+                profile
+                    .behaviour
+                    .keep_alive
+                    .map(|seconds| seconds.to_string())
+                    .unwrap_or_default(),
+                window,
+                cx,
+            );
+        });
         form.mode = starting_mode(Some(profile.mode));
         form.shortcuts = profile.shortcuts.duplicated();
         form.folds = profile.folds.clone();
@@ -620,6 +649,7 @@ impl ConnectionForm {
                 true => self.startup_script.read(cx).value().to_string(),
                 false => String::new(),
             },
+            keep_alive: typed_keep_alive(self.target(), &self.keep_alive.read(cx).value())?,
         })
     }
 
@@ -1321,6 +1351,24 @@ fn typed_time_zone(target: Target, text: &str) -> Result<Option<String>, String>
     Ok(Some(zone.to_string()))
 }
 
+/// What the Keep-alive row says, where `target` draws it. Blank and 0 are off;
+/// anything else is whole seconds from [`MIN_KEEP_ALIVE`] up, and one that is
+/// not is the form's error. Text left in the row under a target that keeps no
+/// session is not read.
+fn typed_keep_alive(target: Target, text: &str) -> Result<Option<u32>, String> {
+    let text = text.trim();
+    if !target.keeps_alive() || text.is_empty() {
+        return Ok(None);
+    }
+    match text.parse::<u32>() {
+        Ok(0) => Ok(None),
+        Ok(seconds) if seconds >= MIN_KEEP_ALIVE => Ok(Some(seconds)),
+        _ => Err(format!(
+            "Keep-alive must be a whole number of seconds, {MIN_KEEP_ALIVE} or more."
+        )),
+    }
+}
+
 /// What the Driver properties row says, where `target` draws it: only a key
 /// the target lists is taken, and one it does not is refused by name. Text left
 /// in the row under a target that lists none is not read.
@@ -1569,6 +1617,25 @@ mod tests {
             driver: crate::db::Driver::Plugin(crate::store::tests::odbc_plugin()),
         };
         assert!(plugin.driver_properties().is_empty());
+    }
+
+    #[test]
+    fn a_keep_alive_that_is_not_a_whole_number_of_ten_or_more_seconds_is_refused() {
+        let postgres = Target::built_in(Engine::Postgres);
+        assert_eq!(typed_keep_alive(postgres, ""), Ok(None));
+        assert_eq!(typed_keep_alive(postgres, "  "), Ok(None));
+        assert_eq!(typed_keep_alive(postgres, "0"), Ok(None), "0 reads as off");
+        for refused in ["9", "ten", "-1", "1.5", "4294967296"] {
+            let error = typed_keep_alive(postgres, refused).expect_err(refused);
+            assert!(error.starts_with("Keep-alive"), "{refused}: {error}");
+        }
+        assert_eq!(typed_keep_alive(postgres, "10"), Ok(Some(10)));
+        assert_eq!(typed_keep_alive(postgres, " 120 "), Ok(Some(120)));
+        // Not read where the row is not drawn, so text left in it by another
+        // engine neither fails the save nor is stored.
+        let sqlite = Target::built_in(Engine::Sqlite);
+        assert_eq!(typed_keep_alive(sqlite, "9"), Ok(None));
+        assert_eq!(typed_keep_alive(sqlite, "120"), Ok(None));
     }
 
     #[test]

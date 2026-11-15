@@ -40,6 +40,11 @@ pub struct EngineSpec {
     /// A profile may carry a startup script, which its driver replays on every
     /// session it opens for the user.
     pub takes_startup_script: bool,
+    /// The engine keeps a session open between statements, which a ping can
+    /// keep from an idle cut-off by a proxy or load balancer. Follows the
+    /// `Connection::is_lost` table: an engine that redials on its own, or
+    /// speaks one request at a time, has nothing to keep.
+    pub keeps_alive: bool,
     /// The driver settings a profile may set on this engine, each mapped in
     /// the engine's own module. Never anything that carries the read-only
     /// hold, TLS or credentials: those have fields with their own gates.
@@ -905,6 +910,7 @@ pub(crate) const POSTGRES: EngineSpec = EngineSpec {
     takes_options: false,
     takes_service: true,
     takes_startup_script: true,
+    keeps_alive: true,
     driver_properties: &[Property::ApplicationName, Property::ConnectTimeout],
     resolves_srv: false,
     // `postgres` is an ordinary database people work in.
@@ -971,6 +977,7 @@ pub(crate) const MYSQL: EngineSpec = EngineSpec {
     takes_options: false,
     takes_service: false,
     takes_startup_script: true,
+    keeps_alive: true,
     driver_properties: &[Property::ApplicationName, Property::ConnectTimeout],
     resolves_srv: false,
     system_databases: &["information_schema", "mysql", "performance_schema", "sys"],
@@ -1043,6 +1050,7 @@ pub(crate) const MARIADB: EngineSpec = EngineSpec {
     takes_options: false,
     takes_service: false,
     takes_startup_script: true,
+    keeps_alive: true,
     driver_properties: &[Property::ApplicationName, Property::ConnectTimeout],
     resolves_srv: false,
     system_databases: &["information_schema", "mysql", "performance_schema", "sys"],
@@ -1121,6 +1129,7 @@ pub(crate) const SQLITE: EngineSpec = EngineSpec {
     takes_options: false,
     takes_service: false,
     takes_startup_script: true,
+    keeps_alive: false,
     driver_properties: &[],
     resolves_srv: false,
     system_databases: &[],
@@ -1178,6 +1187,7 @@ pub(crate) const TURSO: EngineSpec = EngineSpec {
     takes_options: false,
     takes_service: false,
     takes_startup_script: true,
+    keeps_alive: false,
     driver_properties: &[],
     resolves_srv: false,
     system_databases: &[],
@@ -1227,6 +1237,7 @@ pub(crate) const DUCKDB: EngineSpec = EngineSpec {
     takes_options: false,
     takes_service: false,
     takes_startup_script: true,
+    keeps_alive: false,
     driver_properties: &[],
     resolves_srv: false,
     system_databases: &[],
@@ -1293,6 +1304,7 @@ pub(crate) const SNOWFLAKE: EngineSpec = EngineSpec {
     takes_options: false,
     takes_service: false,
     takes_startup_script: false,
+    keeps_alive: false,
     driver_properties: &[],
     resolves_srv: false,
     // The account usage share every account has. `SNOWFLAKE_SAMPLE_DATA` is a
@@ -1365,6 +1377,7 @@ pub(crate) const SQL_SERVER: EngineSpec = EngineSpec {
     takes_options: false,
     takes_service: false,
     takes_startup_script: true,
+    keeps_alive: true,
     driver_properties: &[Property::ApplicationName],
     resolves_srv: false,
     system_databases: &["master", "tempdb", "model", "msdb"],
@@ -1448,6 +1461,7 @@ pub(crate) const MONGODB: EngineSpec = EngineSpec {
     takes_options: true,
     takes_service: false,
     takes_startup_script: false,
+    keeps_alive: false,
     driver_properties: &[],
     resolves_srv: true,
     system_databases: &["admin", "local", "config"],
@@ -1492,6 +1506,7 @@ pub(crate) const REDIS: EngineSpec = EngineSpec {
     takes_options: false,
     takes_service: false,
     takes_startup_script: false,
+    keeps_alive: true,
     driver_properties: &[],
     resolves_srv: false,
     system_databases: &[],
@@ -1538,6 +1553,7 @@ pub(crate) const CLICKHOUSE: EngineSpec = EngineSpec {
     takes_options: false,
     takes_service: false,
     takes_startup_script: false,
+    keeps_alive: false,
     driver_properties: &[],
     resolves_srv: false,
     system_databases: &["system", "INFORMATION_SCHEMA", "information_schema"],
@@ -1668,6 +1684,7 @@ pub(crate) const GENERIC: EngineSpec = EngineSpec {
     takes_options: false,
     takes_service: false,
     takes_startup_script: false,
+    keeps_alive: false,
     driver_properties: &[],
     resolves_srv: false,
     system_databases: &[],

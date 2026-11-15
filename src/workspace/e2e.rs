@@ -11990,3 +11990,254 @@ fn a_save_that_edits_the_script_and_reconnects_runs_the_new_script(cx: &mut Test
         quit(workspace, cx);
     });
 }
+
+/// What a keep-alive round must leave as it found it: what the user can see
+/// of the profile in front.
+fn user_visible_state(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) -> (
+    u64,
+    bool,
+    std::mem::Discriminant<CatalogState>,
+    String,
+    bool,
+    bool,
+) {
+    workspace.read_with(cx, |workspace, _| {
+        let profile = workspace.profile().expect("a profile is in front");
+        (
+            profile.generation,
+            matches!(profile.state, crate::session::ProfileState::Connected(_)),
+            std::mem::discriminant(&profile.catalog),
+            profile.session.notice.clone().unwrap_or_default(),
+            profile.session_changed,
+            profile.in_transaction,
+        )
+    })
+}
+
+fn keep_alive_every(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    seconds: Option<u32>,
+) {
+    workspace.update(cx, |workspace, cx| {
+        workspace.set_behaviour(
+            "e2e",
+            crate::session::Behaviour {
+                keep_alive: seconds,
+                ..crate::session::Behaviour::default()
+            },
+            cx,
+        );
+    });
+    cx.run_until_parked();
+}
+
+fn pings(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> usize {
+    workspace.read_with(cx, |workspace, _| workspace.pings)
+}
+
+fn keep_alive_armed(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> bool {
+    workspace.read_with(cx, |workspace, _| {
+        workspace
+            .profile()
+            .expect("a profile is in front")
+            .keep_alive_task
+            .is_some()
+    })
+}
+
+#[gpui::test]
+fn a_keep_alive_ping_is_sent_at_its_interval_and_is_not_activity(cx: &mut TestAppContext) {
+    use std::time::Duration;
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let before = user_visible_state(&workspace, cx);
+        keep_alive_every(&workspace, cx, Some(30));
+        assert!(keep_alive_armed(&workspace, cx), "an interval arms a timer");
+
+        cx.executor().advance_clock(Duration::from_secs(29));
+        cx.run_until_parked();
+        assert_eq!(pings(&workspace, cx), 0, "not before the interval");
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        assert_eq!(pings(&workspace, cx), 1);
+        assert!(
+            keep_alive_armed(&workspace, cx),
+            "and the next round is set"
+        );
+        cx.executor().advance_clock(Duration::from_secs(30));
+        cx.run_until_parked();
+        assert_eq!(pings(&workspace, cx), 2);
+        assert_eq!(
+            user_visible_state(&workspace, cx),
+            before,
+            "a ping changes nothing the user sees"
+        );
+
+        keep_alive_every(&workspace, cx, None);
+        assert!(
+            !keep_alive_armed(&workspace, cx),
+            "clearing it drops the timer"
+        );
+        cx.executor().advance_clock(Duration::from_secs(60));
+        cx.run_until_parked();
+        assert_eq!(pings(&workspace, cx), 2);
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_profile_without_keep_alive_arms_no_timer(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        assert!(!keep_alive_armed(&workspace, cx));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(600));
+        cx.run_until_parked();
+        assert_eq!(pings(&workspace, cx), 0);
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_keep_alive_round_is_skipped_inside_a_transaction(cx: &mut TestAppContext) {
+    use std::time::Duration;
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        keep_alive_every(&workspace, cx, Some(30));
+        let set = |in_transaction: bool,
+                   bound: bool,
+                   workspace: &Entity<Workspace>,
+                   cx: &mut VisualTestContext| {
+            workspace.update(cx, |workspace, _| {
+                let profile = workspace.profile_mut().expect("a profile is in front");
+                profile.in_transaction = in_transaction;
+                profile.bound_transactions.clear();
+                if bound {
+                    profile.bound_transactions.insert("other".to_string());
+                }
+            });
+        };
+
+        set(true, false, &workspace, cx);
+        cx.executor().advance_clock(Duration::from_secs(30));
+        cx.run_until_parked();
+        assert_eq!(
+            pings(&workspace, cx),
+            0,
+            "the user's transaction is left alone"
+        );
+        assert!(
+            keep_alive_armed(&workspace, cx),
+            "and the next round is set"
+        );
+
+        set(false, true, &workspace, cx);
+        cx.executor().advance_clock(Duration::from_secs(30));
+        cx.run_until_parked();
+        assert_eq!(pings(&workspace, cx), 0, "so is a bound session's");
+        assert!(keep_alive_armed(&workspace, cx));
+
+        set(false, false, &workspace, cx);
+        cx.executor().advance_clock(Duration::from_secs(30));
+        cx.run_until_parked();
+        assert_eq!(pings(&workspace, cx), 1, "cleared, the next round pings");
+
+        keep_alive_every(&workspace, cx, None);
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_failed_ping_stops_the_keep_alive_quietly(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        keep_alive_every(&workspace, cx, Some(30));
+        let generation = workspace.read_with(cx, |workspace, _| {
+            workspace
+                .profile()
+                .expect("a profile is in front")
+                .generation
+        });
+        let before = user_visible_state(&workspace, cx);
+        let lost = || crate::db::DbError {
+            message: "the connection is closed".to_string(),
+            position: None,
+        };
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.keep_alive_landed("e2e", generation + 1, Err(lost()), cx)
+        });
+        assert!(
+            keep_alive_armed(&workspace, cx),
+            "a stale landing changes nothing"
+        );
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.keep_alive_landed("e2e", generation, Err(lost()), cx)
+        });
+        assert!(
+            !keep_alive_armed(&workspace, cx),
+            "a failed ping stops the rounds"
+        );
+        assert_eq!(
+            user_visible_state(&workspace, cx),
+            before,
+            "and says nothing: the lost session is found on its next use"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_stored_keep_alive_is_kept_only_where_a_session_stays_open_and_at_ten_seconds_or_more(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        crate::IGNORE_ENVIRONMENT.set(true);
+        let postgres = |id: &str, extra: &str| {
+            format!(
+                "[[profiles]]\nid = {id:?}\nname = {id:?}\nhost = \"localhost\"\nport = 5432\n\
+                 database = \"app\"\nuser = \"app\"\nengine = \"postgres\"\n{extra}\n"
+            )
+        };
+        let profiles = [
+            postgres("kept", "keep_alive_seconds = 120"),
+            postgres("floor", "keep_alive_seconds = 10"),
+            postgres("low", "keep_alive_seconds = 9"),
+            postgres("none", ""),
+            sqlite_profile("file", "File", "keep_alive_seconds = 120"),
+        ]
+        .concat();
+        let (workspace, cx) = launch_with_profiles(cx, &profiles);
+        let restored: Vec<_> = workspace.read_with(cx, |workspace, cx| {
+            ["kept", "floor", "low", "none", "file"]
+                .map(|id| {
+                    let profile = workspace
+                        .profiles
+                        .iter()
+                        .find(|profile| profile.id == id)
+                        .expect("the profile is restored");
+                    (
+                        profile.behaviour.keep_alive,
+                        profile.stored(cx).keep_alive_seconds,
+                    )
+                })
+                .to_vec()
+        });
+        assert_eq!(
+            restored,
+            [
+                (Some(120), Some(120)),
+                (Some(10), Some(10)),
+                (None, None),
+                (None, None),
+                (None, None)
+            ]
+        );
+        quit(workspace, cx);
+    });
+}

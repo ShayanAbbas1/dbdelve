@@ -25,6 +25,7 @@ const FAKE: EngineSpec = EngineSpec {
     takes_options: false,
     takes_service: false,
     takes_startup_script: false,
+    keeps_alive: false,
     driver_properties: &[],
     resolves_srv: false,
     system_databases: &[],
