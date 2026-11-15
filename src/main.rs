@@ -64,21 +64,21 @@ use gpui_component::{
 
 use actions::{
     AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseAllTabs, CloseTab, CollapseAllSchemas,
-    CommandPalette, CopyCell, CopyDiagnostics, CopyPlan, CopyResults, CopyRow, CopyRows,
-    CopySelection, CustomRowLimit, CycleMode, DeleteRow, DiscardEdits, Disconnect, EditCell,
-    ExpandAllSchemas, ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen, GoToColumn,
+    CommandPalette, CommitTransaction, CopyCell, CopyDiagnostics, CopyPlan, CopyResults, CopyRow,
+    CopyRows, CopySelection, CustomRowLimit, CycleMode, DeleteRow, DiscardEdits, Disconnect,
+    EditCell, ExpandAllSchemas, ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen, GoToColumn,
     HideColumn, ImportConnections, ImportRows, ImportRowsFromClipboard, LimitTarget,
     MenuImportRowsFromClipboard, Minimize, MoveTabLeft, MoveTabRight, NewConnection, NewProject,
     NewQuery, NewRow, NextEdit, NextPage, NextProfile, NextResult, NextTab, OpenLogsFolder,
     OpenReference, OpenSettings, OpenSqlFiles, PreviousEdit, PreviousPage, PreviousProfile,
     PreviousResult, PreviousTab, Quit, RefreshConnection, RefreshRelation, RefuseEdit,
-    RemoveFilter, RequestWriteMode, ResetConfirmations, ResetEditorZoom, RunQuery, SaveQuery,
-    SaveQueryAs, SearchEverything, SelectDatabase, SelectTheme, SetDefault, SetDefaultRowLimit,
-    SetEmpty, SetFilterColumn, SetFilterOperator, SetFilterRaw, SetMode, SetNull, SetQueryLimit,
-    SetRowLimit, ShowAllColumns, ShowEditor, ShowMessages, ShowReferences, SortActiveColumn,
-    SortColumn, SubmitConnection, SwitchConnection, ToggleComment, ToggleFilterJoin,
-    ToggleNextJoin, TogglePinColumn, ToggleResults, ToggleRowEdit, ToggleRowPanel, ToggleSidebar,
-    ToggleStructure, ZoomEditorIn, ZoomEditorOut,
+    RemoveFilter, RequestWriteMode, ResetConfirmations, ResetEditorZoom, RollbackTransaction,
+    RunQuery, SaveQuery, SaveQueryAs, SearchEverything, SelectDatabase, SelectTheme, SetDefault,
+    SetDefaultRowLimit, SetEmpty, SetFilterColumn, SetFilterOperator, SetFilterRaw, SetMode,
+    SetNull, SetQueryLimit, SetRowLimit, ShowAllColumns, ShowEditor, ShowMessages, ShowReferences,
+    SortActiveColumn, SortColumn, SubmitConnection, SwitchConnection, ToggleAutoCommit,
+    ToggleComment, ToggleFilterJoin, ToggleNextJoin, TogglePinColumn, ToggleResults, ToggleRowEdit,
+    ToggleRowPanel, ToggleSidebar, ToggleStructure, ZoomEditorIn, ZoomEditorOut,
 };
 use completion::SchemaCompletions;
 use connection_form::{ConnectionForm, default_profile_name};
@@ -99,8 +99,7 @@ use result_grid::{NewValue, ResultGrid};
 use session::{
     ApplyReview, CatalogState, EditMode, Explained, Focus, InsertField, InsertForm, ObjectBody,
     ObjectTab, OpenedObject, Profile, ProfileState, QueryState, QueryTab, Refresh, RolesState,
-    Routines,
-    RowCount, Session, Sorting, StructureState, Tab, TabKey, insert_value, matching_tab,
+    Routines, RowCount, Session, Sorting, StructureState, Tab, TabKey, insert_value, matching_tab,
     relation_kind, restored_state, show_snapshot,
 };
 use sql::{Buffer, SortKey};
