@@ -1,0 +1,48 @@
+name: zizmor
+
+# Audits the workflows themselves for action references a moved tag can point
+# elsewhere, checkout tokens left on disk for an artifact step to pick up, and
+# permissions wider than the job that uses them. Findings go to the Security
+# tab. The second audit fails the run, because the SARIF upload never fails on
+# findings.
+#
+# Every action is pinned to the commit its release tag points at, with the
+# release in a trailing comment Dependabot reads; a tag moves, a commit does
+# not. No zizmor config file: hash-pinning is the default it enforces.
+on:
+  pull_request:
+    paths:
+      - ".github/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/**"
+
+# The job below names its own permissions, since job permissions replace these.
+permissions:
+  contents: read
+
+jobs:
+  zizmor:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Fork PRs get a read-only token, so the upload is skipped there; the
+      # gate below still runs and is the signal those PRs get.
+      - name: Audit and upload findings
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: zizmorcore/zizmor-action@45d7276c9ca790aabd705e31ca99c6185c3e76dd # v0.8.1
+
+      # Runs even when the upload above fails or is skipped. Any finding exits
+      # nonzero.
+      - name: Audit (gate)
+        if: ${{ !cancelled() }}
+        uses: zizmorcore/zizmor-action@45d7276c9ca790aabd705e31ca99c6185c3e76dd # v0.8.1
+        with:
+          advanced-security: false
