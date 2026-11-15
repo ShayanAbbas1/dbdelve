@@ -718,7 +718,9 @@ fn enter_opens_a_sidebar_row_and_its_structure_takes_the_keyboard(cx: &mut TestA
                     ObjectBody::Structure { grid, .. } => {
                         (true, grid.focus_handle(cx).is_focused(window))
                     }
-                    ObjectBody::Routine(_) => panic!("birds is a table"),
+                    ObjectBody::Routine(_) | ObjectBody::Diagram { .. } => {
+                        panic!("birds is a table")
+                    }
                 }
             })
         };
@@ -4070,6 +4072,1363 @@ fn the_default_chip_puts_a_typed_then_emptied_insert_field_back_out_of_the_state
         let sql = statement(cx);
         assert!(sql.contains("NULL") && !sql.contains("robin"), "{sql}");
 
+        quit(workspace, cx);
+    });
+}
+
+const DIAGRAM_SCHEMA: &str = "create table birds (id integer primary key, name text, latin text);
+     create table sightings (id integer primary key, bird integer not null references birds(id), seen_at text);";
+
+/// The diagram of `main`, opened from the palette and read.
+fn show_diagram(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) -> Entity<crate::diagram_view::DiagramView> {
+    cx.simulate_keystrokes("secondary-shift-p");
+    settle(cx);
+    cx.simulate_input("Show diagram of main");
+    settle(cx);
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    cx.update(|_, cx| {
+        match workspace
+            .read(cx)
+            .profile()
+            .and_then(|profile| profile.session.active_object())
+            .map(|tab| &tab.body)
+        {
+            Some(ObjectBody::Diagram { view, side, .. }) => {
+                assert!(side.is_none(), "the read landed and let its connection go");
+                view.clone()
+            }
+            _ => panic!("the diagram is in front"),
+        }
+    })
+}
+
+/// The tab in front, as `(name, is structure)`, when it is a relation's.
+fn front_relation(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) -> Option<(String, bool)> {
+    cx.update(|_, cx| {
+        let tab = workspace.read(cx).profile()?.session.active_object()?;
+        match tab.body {
+            ObjectBody::Relation { .. } => Some((tab.name.clone(), false)),
+            ObjectBody::Structure { .. } => Some((tab.name.clone(), true)),
+            _ => None,
+        }
+    })
+}
+
+#[gpui::test]
+fn the_palette_opens_a_diagram_that_takes_the_keyboard_and_escape_clears_its_focus(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, DIAGRAM_SCHEMA);
+        let view = show_diagram(&workspace, cx);
+        assert_eq!(
+            cx.update(|_, cx| {
+                let tab = workspace.read(cx).profile()?.session.active_object()?;
+                Some((tab.label().to_string(), tab.name.clone()))
+            }),
+            Some(("main".to_string(), String::new())),
+            "the strip names the tab after its schema, which its stored name leaves out"
+        );
+        let keyboard = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| view.read(cx).focus_handle().is_focused(window))
+        };
+        assert!(keyboard(cx), "the canvas holds the keyboard");
+
+        let birds = cx
+            .update(|_, cx| view.read(cx).table_on_screen("birds"))
+            .expect("the diagram drew the birds");
+        cx.simulate_click(birds, gpui::Modifiers::default());
+        settle(cx);
+        assert!(
+            cx.update(|_, cx| view.read(cx).has_focus()),
+            "a click focuses a card"
+        );
+
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+        assert!(
+            !cx.update(|_, cx| view.read(cx).has_focus()),
+            "escape clears it"
+        );
+        assert!(keyboard(cx), "and leaves the keyboard on the canvas");
+
+        quit(workspace, cx);
+    });
+}
+
+/// Zooms the diagram under the pointer at `at` with the wheel, as many
+/// events as `steps`.
+fn wheel_zoom(at: gpui::Point<gpui::Pixels>, steps: usize, cx: &mut VisualTestContext) {
+    for _ in 0..steps {
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: at,
+            delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(-40.0))),
+            modifiers: gpui::Modifiers::secondary_key(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        settle(cx);
+    }
+}
+
+#[gpui::test]
+fn a_wheel_zoom_is_written_once_the_wheel_stops_and_a_quit_writes_only_what_is_pending(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, DIAGRAM_SCHEMA);
+        let view = show_diagram(&workspace, cx);
+        let path = store::dbdelve_directory().unwrap().join("profiles.toml");
+        let written = || std::fs::read_to_string(&path).expect("profiles.toml is there");
+        let unsaved = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| workspace.profiles_unsaved)
+        };
+        let before = written();
+        let fitted = cx.update(|_, cx| view.read(cx).zoom());
+        let birds = cx
+            .update(|_, cx| view.read(cx).table_on_screen("birds"))
+            .expect("the diagram drew the birds");
+
+        wheel_zoom(birds, 3, cx);
+        assert_ne!(cx.update(|_, cx| view.read(cx).zoom()), fitted);
+        assert_eq!(written(), before, "not written on every event");
+        assert!(unsaved(cx));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(600));
+        settle(cx);
+        assert_ne!(written(), before, "written once the wheel stops");
+        assert!(!unsaved(cx));
+
+        // Another instance saved since; with nothing pending here, quitting
+        // leaves its file alone.
+        let theirs = format!("{}\n# theirs\n", written());
+        std::fs::write(&path, &theirs).unwrap();
+        quit(workspace, cx);
+        assert_eq!(written(), theirs);
+    });
+}
+
+#[gpui::test]
+fn a_quit_before_the_wheel_has_stopped_writes_the_zoom(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, DIAGRAM_SCHEMA);
+        let view = show_diagram(&workspace, cx);
+        let path = store::dbdelve_directory().unwrap().join("profiles.toml");
+        let before = std::fs::read_to_string(&path).unwrap();
+        let birds = cx
+            .update(|_, cx| view.read(cx).table_on_screen("birds"))
+            .expect("the diagram drew the birds");
+        wheel_zoom(birds, 2, cx);
+        quit(workspace, cx);
+        assert_ne!(std::fs::read_to_string(&path).unwrap(), before);
+    });
+}
+
+#[gpui::test]
+fn a_diagram_behind_another_tab_lets_its_render_caches_go_and_draws_again_when_shown(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, DIAGRAM_SCHEMA);
+        let view = show_diagram(&workspace, cx);
+        let caches =
+            |cx: &mut VisualTestContext| cx.update(|_, cx| view.read(cx).holds_render_caches());
+        assert!(caches(cx), "drawn from its caches");
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_relation_view(
+                "main".into(),
+                "birds".into(),
+                crate::db::RelationKind::Table,
+                false,
+                window,
+                cx,
+            );
+        });
+        settle(cx);
+        assert!(!caches(cx), "let go behind the birds' rows");
+
+        show_diagram(&workspace, cx);
+        assert!(caches(cx), "built again when shown");
+        let sightings = cx
+            .update(|_, cx| view.read(cx).table_on_screen("sightings"))
+            .expect("the diagram drew the sightings");
+        cx.simulate_click(sightings, gpui::Modifiers::default());
+        settle(cx);
+        assert_eq!(
+            cx.update(|_, cx| view.read(cx).focused_name()).as_deref(),
+            Some("sightings"),
+            "and a click finds its card"
+        );
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_diagram_read_outlived_by_a_reconnect_is_read_again_for_the_tab_in_front(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, DIAGRAM_SCHEMA);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_diagram("main".into(), None, window, cx);
+            // A reconnect landed while the read was out, and its own read
+            // was refused because this one still held the slot.
+            workspace.profile_mut().unwrap().generation += 1;
+        });
+        settle(cx);
+        let view = diagram_in_front(&workspace, cx).0;
+        assert!(
+            cx.update(|_, cx| view.read(cx).laid_out()).is_some(),
+            "the old answer was dropped and the diagram read again"
+        );
+        quit(workspace, cx);
+    });
+}
+
+/// A reconnect lets go of a read still out from the connection it replaces,
+/// which could stall there and hold the slot the new connection's read needs.
+#[gpui::test]
+fn a_reconnect_cancels_a_diagram_read_still_out_and_reads_again(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, DIAGRAM_SCHEMA);
+        let held = workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_diagram("main".into(), None, window, cx);
+            let index = workspace.active.unwrap();
+            workspace.reconnect(index, cx);
+            let tab = workspace
+                .profile()
+                .unwrap()
+                .session
+                .active_object()
+                .unwrap();
+            matches!(tab.body, ObjectBody::Diagram { side: Some(_), .. })
+        });
+        assert!(!held, "the old read let its slot go");
+        settle(cx);
+        let view = diagram_in_front(&workspace, cx).0;
+        assert!(
+            cx.update(|_, cx| view.read(cx).laid_out()).is_some(),
+            "and the diagram was read on the new connection"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_double_click_opens_a_diagram_cards_table_and_the_keyboard_the_focused_ones(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, DIAGRAM_SCHEMA);
+        let view = show_diagram(&workspace, cx);
+        let at = |name: &str, cx: &mut VisualTestContext| {
+            cx.update(|_, cx| view.read(cx).table_on_screen(name))
+                .expect("the diagram drew the table")
+        };
+
+        let birds = at("birds", cx);
+        cx.simulate_click(birds, gpui::Modifiers::default());
+        cx.simulate_event(gpui::MouseDownEvent {
+            position: birds,
+            modifiers: gpui::Modifiers::default(),
+            button: gpui::MouseButton::Left,
+            click_count: 2,
+            first_mouse: false,
+        });
+        cx.simulate_event(gpui::MouseUpEvent {
+            position: birds,
+            modifiers: gpui::Modifiers::default(),
+            button: gpui::MouseButton::Left,
+            click_count: 2,
+        });
+        settle(cx);
+        assert_eq!(
+            front_relation(&workspace, cx),
+            Some(("birds".to_string(), false)),
+            "a double-click opens the table's rows"
+        );
+
+        let view = show_diagram(&workspace, cx);
+        let sightings = cx
+            .update(|_, cx| view.read(cx).table_on_screen("sightings"))
+            .expect("the diagram drew the sightings");
+        cx.simulate_click(sightings, gpui::Modifiers::default());
+        settle(cx);
+        cx.simulate_keystrokes("secondary-enter");
+        settle(cx);
+        assert_eq!(
+            front_relation(&workspace, cx),
+            Some(("sightings".to_string(), true)),
+            "Run Query's chord gives way to the diagram's Open Structure"
+        );
+
+        let view = show_diagram(&workspace, cx);
+        assert!(
+            cx.update(|_, cx| view.read(cx).has_focus()),
+            "the diagram kept its focus while away"
+        );
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        assert_eq!(
+            front_relation(&workspace, cx),
+            Some(("sightings".to_string(), false)),
+            "enter opens the focused table's rows"
+        );
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_zoom_chords_zoom_a_diagram_and_its_views_and_keys_only_lay_it_out_again(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            &format!("{DIAGRAM_SCHEMA} create table weather (id integer primary key);"),
+        );
+        let view = show_diagram(&workspace, cx);
+        let zoom = |cx: &mut VisualTestContext| cx.update(|_, cx| view.read(cx).zoom());
+        let fitted = zoom(cx);
+
+        cx.simulate_keystrokes("secondary-=");
+        settle(cx);
+        assert!(zoom(cx) > fitted, "secondary-= zooms the diagram in");
+        cx.simulate_keystrokes("secondary-0");
+        settle(cx);
+        assert_eq!(zoom(cx), fitted, "secondary-0 fits it again");
+
+        let laid_out = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| view.read(cx).laid_out())
+                .expect("the diagram is laid out")
+        };
+        let sightings = cx
+            .update(|_, cx| view.read(cx).table_on_screen("sightings"))
+            .expect("the diagram drew the sightings");
+        cx.simulate_click(sightings, gpui::Modifiers::default());
+        settle(cx);
+        view.update(cx, |view, cx| view.show_neighbourhood(true, cx));
+        settle(cx);
+        let (mut names, _) = laid_out(cx);
+        names.sort();
+        assert_eq!(
+            names,
+            ["birds", "sightings"],
+            "the neighbourhood leaves the weather out"
+        );
+        assert!(
+            cx.update(|_, cx| view.read(cx).has_focus()),
+            "on the table it centres on"
+        );
+
+        view.update(cx, |view, cx| view.show_neighbourhood(false, cx));
+        settle(cx);
+        assert_eq!(laid_out(cx).0.len(), 3, "the schema view is back whole");
+
+        view.update(cx, |view, cx| view.toggle_keys_only(cx));
+        settle(cx);
+        assert!(laid_out(cx).1, "keys only lays the schema out again");
+        assert!(
+            cx.update(|_, cx| view.read(cx).has_focus()),
+            "keeping the focus on its table"
+        );
+
+        quit(workspace, cx);
+    });
+}
+
+/// The schema's layout at the new setting is overtaken by the neighbourhood,
+/// so the schema laid out at the old one must not come back from the stash.
+#[gpui::test]
+fn keys_only_switched_just_before_a_neighbourhood_holds_back_on_the_schema(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            &format!("{DIAGRAM_SCHEMA} create table weather (id integer primary key);"),
+        );
+        let view = show_diagram(&workspace, cx);
+        let sightings = cx
+            .update(|_, cx| view.read(cx).table_on_screen("sightings"))
+            .expect("the diagram drew the sightings");
+        cx.simulate_click(sightings, gpui::Modifiers::default());
+        settle(cx);
+        view.update(cx, |view, cx| {
+            view.toggle_keys_only(cx);
+            view.show_neighbourhood(true, cx);
+        });
+        settle(cx);
+        view.update(cx, |view, cx| view.show_neighbourhood(false, cx));
+        settle(cx);
+        let (names, keys_only) = cx
+            .update(|_, cx| view.read(cx).laid_out())
+            .expect("the diagram is laid out");
+        assert_eq!(names.len(), 3, "the schema view is back");
+        assert!(keys_only, "laid out at the setting the switch shows");
+
+        quit(workspace, cx);
+    });
+}
+
+/// A card of many columns zoomed out short of name blocks drew its key rows
+/// alone, with Keys only off, and its bottom edge could not open it.
+#[gpui::test]
+fn zoomed_out_a_card_draws_its_columns_and_its_bottom_edge_opens_it(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let notes: Vec<String> = (0..38).map(|note| format!("note_{note} text")).collect();
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            &format!(
+                "{DIAGRAM_SCHEMA} create table users (id integer primary key, \
+                 email text unique, bird integer references birds(id), {});",
+                notes.join(", ")
+            ),
+        );
+        let view = show_diagram(&workspace, cx);
+        assert!(
+            !cx.update(|_, cx| view.read(cx).laid_out()).unwrap().1,
+            "a small schema is laid out with every column"
+        );
+        let zoom = |cx: &mut VisualTestContext| cx.update(|_, cx| view.read(cx).zoom());
+        let users = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| view.read(cx).table_bounds("users"))
+                .expect("the diagram drew the users")
+        };
+        for _ in 0..40 {
+            let delta = match zoom(cx) {
+                zoom if zoom >= 0.8 => -40.0,
+                zoom if zoom < 0.6 => 40.0,
+                _ => break,
+            };
+            let position = users(cx).center();
+            cx.simulate_event(gpui::ScrollWheelEvent {
+                position,
+                delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(delta))),
+                modifiers: gpui::Modifiers::secondary_key(),
+                touch_phase: gpui::TouchPhase::Moved,
+            });
+            settle(cx);
+        }
+        let zoomed = zoom(cx);
+        assert!((0.6..0.8).contains(&zoomed), "{zoomed}");
+        assert_eq!(
+            cx.update(|_, cx| view.read(cx).rows_drawn("users")),
+            Some(crate::diagram::geometry::AUTO_ROWS - 1),
+            "every column up to the cap, not the three keys"
+        );
+
+        let before = users(cx);
+        let edge = gpui::point(before.center().x, before.bottom() - gpui::px(1.0));
+        let to = gpui::point(edge.x, edge.y + gpui::px(3.0 * 24.0 * zoomed));
+        let left = gpui::MouseButton::Left;
+        cx.simulate_mouse_down(edge, left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(to, left, gpui::Modifiers::default());
+        cx.simulate_mouse_up(to, left, gpui::Modifiers::default());
+        settle(cx);
+        let after = users(cx);
+        assert_eq!(after.origin, before.origin, "a resize, not a move");
+        assert!(
+            after.size.height > before.size.height + gpui::px(2.0 * 24.0 * zoomed),
+            "the bottom edge opened the card: {before:?} to {after:?}"
+        );
+
+        quit(workspace, cx);
+    });
+}
+
+/// From the sidebar, the chord that moves between a buffer and its rows
+/// puts the keyboard on a diagram's canvas, which has neither.
+#[gpui::test]
+fn toggle_results_focus_puts_the_keyboard_on_a_diagram_from_the_sidebar(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, DIAGRAM_SCHEMA);
+        let view = show_diagram(&workspace, cx);
+        let canvas = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| view.read(cx).focus_handle().is_focused(window))
+        };
+        cx.simulate_keystrokes("secondary-k e");
+        settle(cx);
+        assert!(!canvas(cx), "the sidebar took the keyboard");
+        cx.simulate_keystrokes("secondary-k r");
+        settle(cx);
+        assert!(canvas(cx), "the canvas has it back");
+
+        quit(workspace, cx);
+    });
+}
+
+/// The diagram tab in front, once read, and how many diagram tabs are open.
+fn diagram_in_front(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) -> (Entity<crate::diagram_view::DiagramView>, usize) {
+    cx.update(|_, cx| {
+        let session = &workspace.read(cx).profile().unwrap().session;
+        let open = (session.objects.iter())
+            .filter(|tab| matches!(tab.body, ObjectBody::Diagram { .. }))
+            .count();
+        match session.active_object().map(|tab| &tab.body) {
+            Some(ObjectBody::Diagram { view, side, .. }) => {
+                assert!(side.is_none(), "the read landed");
+                (view.clone(), open)
+            }
+            _ => panic!("a diagram is in front"),
+        }
+    })
+}
+
+/// A right-click on a sidebar row, then the `nth` item of the menu it opens.
+fn pick_from_row_menu(
+    workspace: &Entity<Workspace>,
+    row: &str,
+    nth: usize,
+    cx: &mut VisualTestContext,
+) {
+    let at = explorer_row(workspace, row, cx).center();
+    let none = gpui::Modifiers::default();
+    cx.simulate_mouse_down(at, gpui::MouseButton::Right, none);
+    cx.simulate_mouse_up(at, gpui::MouseButton::Right, none);
+    settle(cx);
+    for _ in 0..nth {
+        cx.simulate_keystrokes("down");
+    }
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+}
+
+#[gpui::test]
+fn the_sidebar_shows_a_schemas_diagram_and_a_tables_neighbourhood_in_one_tab(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            &format!("{DIAGRAM_SCHEMA} create table weather (id integer primary key);"),
+        );
+        let names = |view: &Entity<crate::diagram_view::DiagramView>,
+                     cx: &mut VisualTestContext| {
+            let (mut names, _) = cx
+                .update(|_, cx| view.read(cx).laid_out())
+                .expect("the diagram is laid out");
+            names.sort();
+            names
+        };
+
+        pick_from_row_menu(&workspace, &explorer::schema_row("main"), 1, cx);
+        let (view, open) = diagram_in_front(&workspace, cx);
+        assert_eq!(open, 1);
+        assert_eq!(names(&view, cx), ["birds", "sightings", "weather"]);
+
+        // Open Data, Open Structure, Show in Diagram.
+        pick_from_row_menu(&workspace, &explorer::relation_row("main", "birds"), 3, cx);
+        let (view, open) = diagram_in_front(&workspace, cx);
+        assert_eq!(open, 1, "the schema's diagram is reused");
+        assert_eq!(
+            names(&view, cx),
+            ["birds", "sightings"],
+            "showing the table's neighbourhood"
+        );
+        assert_eq!(
+            cx.update(|_, cx| view.read(cx).focused_name())
+                .as_deref()
+                .map(|name| name.to_string()),
+            Some("birds".to_string())
+        );
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_structure_tab_shows_its_tables_neighbourhood_and_a_double_click_there_opens_a_neighbour(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            &format!("{DIAGRAM_SCHEMA} create table weather (id integer primary key);"),
+        );
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_relation_view(
+                "main".into(),
+                "sightings".into(),
+                crate::db::RelationKind::Table,
+                true,
+                window,
+                cx,
+            );
+        });
+        settle(cx);
+        let button = cx
+            .debug_bounds("show-diagram")
+            .expect("the structure offers the diagram");
+        cx.simulate_click(button.center(), gpui::Modifiers::default());
+        settle(cx);
+        let (view, open) = diagram_in_front(&workspace, cx);
+        assert_eq!(open, 1);
+        let (mut names, _) = cx
+            .update(|_, cx| view.read(cx).laid_out())
+            .expect("the diagram is laid out");
+        names.sort();
+        assert_eq!(names, ["birds", "sightings"], "the neighbourhood");
+        assert_eq!(
+            cx.update(|_, cx| view.read(cx).focused_name())
+                .map(|name| name.to_string()),
+            Some("sightings".to_string()),
+            "centred on the table"
+        );
+        assert!(
+            cx.update(|window, cx| view.read(cx).focus_handle().is_focused(window)),
+            "and the canvas holds the keyboard"
+        );
+
+        let birds = cx
+            .update(|_, cx| view.read(cx).table_on_screen("birds"))
+            .expect("the neighbourhood drew the birds");
+        let none = gpui::Modifiers::default();
+        cx.simulate_click(birds, none);
+        cx.simulate_event(gpui::MouseDownEvent {
+            position: birds,
+            modifiers: none,
+            button: gpui::MouseButton::Left,
+            click_count: 2,
+            first_mouse: false,
+        });
+        cx.simulate_event(gpui::MouseUpEvent {
+            position: birds,
+            modifiers: none,
+            button: gpui::MouseButton::Left,
+            click_count: 2,
+        });
+        settle(cx);
+        assert_eq!(
+            front_relation(&workspace, cx),
+            Some(("birds".to_string(), false)),
+            "a double-click on a neighbour opens it, as in the schema view"
+        );
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn keys_only_switched_while_a_diagram_is_read_again_holds_once_the_read_lands(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, DIAGRAM_SCHEMA);
+        let view = show_diagram(&workspace, cx);
+        let read_again = |cx: &mut VisualTestContext| {
+            workspace.update(cx, |workspace, cx| {
+                let session = &mut workspace.profile_mut().unwrap().session;
+                let crate::session::Tab::Object(id) = session.active else {
+                    panic!("the diagram is in front");
+                };
+                let tab = session.objects.iter_mut().find(|tab| tab.id == id);
+                if let Some(ObjectBody::Diagram { stale, .. }) = tab.map(|tab| &mut tab.body) {
+                    *stale = true;
+                }
+                workspace.load_diagram(id, cx);
+            });
+        };
+        let shown = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                let view = view.read(cx);
+                (
+                    view.keys_only(),
+                    view.laid_out().map(|(_, keys_only)| keys_only),
+                )
+            })
+        };
+
+        read_again(cx);
+        view.update(cx, |view, cx| view.toggle_keys_only(cx));
+        settle(cx);
+        assert_eq!(
+            shown(cx),
+            (Some(true), Some(true)),
+            "the switch and the cards agree"
+        );
+
+        let birds = cx
+            .update(|_, cx| view.read(cx).table_on_screen("birds"))
+            .expect("the diagram drew the birds");
+        cx.simulate_click(birds, gpui::Modifiers::default());
+        settle(cx);
+        view.update(cx, |view, cx| view.show_neighbourhood(true, cx));
+        settle(cx);
+        read_again(cx);
+        view.update(cx, |view, cx| view.toggle_keys_only(cx));
+        settle(cx);
+        assert_eq!(shown(cx), (Some(false), Some(false)), "in a neighbourhood");
+        view.update(cx, |view, cx| view.show_neighbourhood(false, cx));
+        settle(cx);
+        assert_eq!(
+            shown(cx),
+            (Some(false), Some(false)),
+            "and in the schema view it goes back to"
+        );
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_refresh_reads_a_diagram_again_and_keeps_the_cards_the_user_moved(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            &format!("{DIAGRAM_SCHEMA} create table weather (id integer primary key);"),
+        );
+        let view = show_diagram(&workspace, cx);
+        let origin = |name: &str, cx: &mut VisualTestContext| {
+            cx.update(|_, cx| view.read(cx).table_origin(name))
+        };
+        let names = |cx: &mut VisualTestContext| {
+            let (mut names, _) = cx
+                .update(|_, cx| view.read(cx).laid_out())
+                .expect("the diagram is laid out");
+            names.sort();
+            names
+        };
+        let change = |sql: &str| {
+            let database = store::dbdelve_directory()
+                .expect("the test home has a data directory")
+                .join("e2e.db");
+            rusqlite::Connection::open(database)
+                .and_then(|connection| connection.execute_batch(sql))
+                .expect("the schema change must apply");
+        };
+
+        let before = origin("birds", cx);
+        let birds = cx
+            .update(|_, cx| view.read(cx).table_on_screen("birds"))
+            .expect("the diagram drew the birds");
+        let to = gpui::point(birds.x + gpui::px(40.0), birds.y + gpui::px(160.0));
+        let left = gpui::MouseButton::Left;
+        cx.simulate_mouse_down(birds, left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(to, left, gpui::Modifiers::default());
+        cx.simulate_mouse_up(to, left, gpui::Modifiers::default());
+        settle(cx);
+        let dragged = origin("birds", cx);
+        assert_ne!(dragged, before, "the drag moved the birds");
+        let sightings = cx
+            .update(|_, cx| view.read(cx).table_on_screen("sightings"))
+            .expect("the diagram drew the sightings");
+        cx.simulate_click(sightings, gpui::Modifiers::default());
+        settle(cx);
+
+        change(
+            "create table nests (id integer primary key, bird integer references birds(id));
+             drop table weather;",
+        );
+        cx.simulate_keystrokes("secondary-shift-r");
+        settle(cx);
+        assert_eq!(
+            names(cx),
+            ["birds", "nests", "sightings"],
+            "the diagram in front is read again"
+        );
+        assert_eq!(origin("birds", cx), dragged, "the card moved stays put");
+        assert_eq!(
+            cx.update(|_, cx| view.read(cx).focused_name()).as_deref(),
+            Some("sightings"),
+            "and the focus stays on its table"
+        );
+
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        assert_eq!(
+            front_relation(&workspace, cx),
+            Some(("sightings".to_string(), false))
+        );
+        change("create table eggs (id integer primary key, nest integer references nests(id));");
+        cx.simulate_keystrokes("secondary-shift-r");
+        settle(cx);
+        show_diagram(&workspace, cx);
+        assert_eq!(
+            names(cx),
+            ["birds", "eggs", "nests", "sightings"],
+            "one behind another tab is read again when it is shown"
+        );
+        assert_eq!(origin("birds", cx), dragged);
+        let view = show_diagram(&workspace, cx);
+        view.update(cx, |view, cx| view.toggle_keys_only(cx));
+        settle(cx);
+        assert_eq!(
+            cx.update(|_, cx| view.read(cx).table_origin("birds")),
+            dragged,
+            "keys only lays the rest out again around it"
+        );
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_diagram_card_resizes_from_its_corner_and_a_double_click_there_gives_its_size_back(
+    cx: &mut TestAppContext,
+) {
+    use crate::diagram::geometry::{CARD_WIDTH, card_height};
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, DIAGRAM_SCHEMA);
+        let view = show_diagram(&workspace, cx);
+        let size = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| view.read(cx).table_size("birds"))
+                .expect("the diagram drew the birds")
+        };
+        let corner = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| view.read(cx).table_corner_on_screen("birds"))
+                .expect("the diagram drew the birds")
+        };
+        assert_eq!(size(cx), (CARD_WIDTH, card_height(3)));
+        let zoom = cx.update(|_, cx| view.read(cx).zoom());
+
+        let from = corner(cx);
+        let to = gpui::point(
+            from.x + gpui::px(80.0 * zoom),
+            from.y - gpui::px(30.0 * zoom),
+        );
+        let left = gpui::MouseButton::Left;
+        cx.simulate_mouse_down(from, left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(to, left, gpui::Modifiers::default());
+        cx.simulate_mouse_up(to, left, gpui::Modifiers::default());
+        settle(cx);
+        let (width, height) = size(cx);
+        assert!((width - (CARD_WIDTH + 80.0)).abs() < 0.5, "wider: {width}");
+        assert_eq!(height, card_height(2), "a row shorter, in whole rows");
+        assert!(
+            !cx.update(|_, cx| view.read(cx).has_focus()),
+            "a resize focuses nothing"
+        );
+
+        // Keys only lists the birds' one key, which is shorter still.
+        view.update(cx, |view, cx| view.toggle_keys_only(cx));
+        settle(cx);
+        assert_eq!(
+            size(cx),
+            (width, card_height(1)),
+            "keys only keeps the width"
+        );
+        view.update(cx, |view, cx| view.toggle_keys_only(cx));
+        settle(cx);
+        assert_eq!(size(cx), (width, height), "and every column the height");
+
+        let corner = corner(cx);
+        cx.simulate_click(corner, gpui::Modifiers::default());
+        cx.simulate_event(gpui::MouseDownEvent {
+            position: corner,
+            modifiers: gpui::Modifiers::default(),
+            button: left,
+            click_count: 2,
+            first_mouse: false,
+        });
+        cx.simulate_event(gpui::MouseUpEvent {
+            position: corner,
+            modifiers: gpui::Modifiers::default(),
+            button: left,
+            click_count: 2,
+        });
+        settle(cx);
+        assert_eq!(size(cx), (CARD_WIDTH, card_height(3)), "its own size back");
+        assert_eq!(
+            front_relation(&workspace, cx),
+            None,
+            "a double-click on the corner opens no table"
+        );
+
+        quit(workspace, cx);
+    });
+}
+
+/// A second launch over the same home, as `launch` builds it, beside the
+/// first window.
+fn relaunch(cx: &mut VisualTestContext) -> (Entity<Workspace>, &mut VisualTestContext) {
+    let mut relaunched = None;
+    let (_, cx) = cx.cx.add_window_view(|window, cx| {
+        let entity = cx.new(|cx| Workspace::new(Vec::new(), window, cx));
+        relaunched = Some(entity.clone());
+        Root::new(entity, window, cx)
+    });
+    settle(cx);
+    (relaunched.expect("the window builds the workspace"), cx)
+}
+
+/// The diagram in front, once it is read.
+fn front_diagram(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) -> Entity<crate::diagram_view::DiagramView> {
+    cx.update(|_, cx| {
+        match workspace
+            .read(cx)
+            .profile()
+            .and_then(|profile| profile.session.active_object())
+            .map(|tab| &tab.body)
+        {
+            Some(ObjectBody::Diagram { view, side, .. }) => {
+                assert!(side.is_none(), "the read landed");
+                view.clone()
+            }
+            _ => panic!("the diagram came back in front"),
+        }
+    })
+}
+
+#[gpui::test]
+fn a_diagram_tab_comes_back_after_a_relaunch_as_it_was_left(cx: &mut TestAppContext) {
+    // CI's live job sets `PG*`, whose profile would be put in front on launch.
+    crate::IGNORE_ENVIRONMENT.set(true);
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            &format!("{DIAGRAM_SCHEMA} create table weather (id integer primary key);"),
+        );
+        let view = show_diagram(&workspace, cx);
+        let left = gpui::MouseButton::Left;
+        let none = gpui::Modifiers::default();
+        let birds = cx
+            .update(|_, cx| view.read(cx).table_on_screen("birds"))
+            .expect("the diagram drew the birds");
+        let to = gpui::point(birds.x + gpui::px(40.0), birds.y + gpui::px(160.0));
+        cx.simulate_mouse_down(birds, left, none);
+        cx.simulate_mouse_move(to, left, none);
+        cx.simulate_mouse_up(to, left, none);
+        let corner = cx
+            .update(|_, cx| view.read(cx).table_corner_on_screen("sightings"))
+            .expect("the diagram drew the sightings");
+        let to = gpui::point(corner.x + gpui::px(60.0), corner.y - gpui::px(30.0));
+        cx.simulate_mouse_down(corner, left, none);
+        cx.simulate_mouse_move(to, left, none);
+        cx.simulate_mouse_up(to, left, none);
+        settle(cx);
+        cx.simulate_keystrokes("secondary-=");
+        settle(cx);
+        let state = |view: &Entity<crate::diagram_view::DiagramView>,
+                     cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                let view = view.read(cx);
+                (
+                    view.table_origin("birds").expect("the birds are drawn"),
+                    view.table_size("sightings")
+                        .expect("the sightings are drawn"),
+                    view.zoom(),
+                )
+            })
+        };
+        let (origin, size, zoom) = state(&view, cx);
+        let arranged = store::read_diagram("e2e", None, "main");
+        assert_eq!(
+            arranged
+                .iter()
+                .map(|card| card.name.as_str())
+                .collect::<Vec<_>>(),
+            ["birds", "sightings"],
+            "the moved and the sized card, in a file of their own"
+        );
+        let saved =
+            std::fs::read_to_string(store::dbdelve_directory().unwrap().join("profiles.toml"))
+                .unwrap();
+        assert!(saved.contains("diagram = true"), "{saved}");
+        assert!(
+            !saved.contains("birds"),
+            "no card in profiles.toml:\n{saved}"
+        );
+
+        drop(workspace);
+        let (workspace, cx) = relaunch(cx);
+        let view = front_diagram(&workspace, cx);
+        let (restored_origin, restored_size, restored_zoom) = state(&view, cx);
+        let near = |a: f32, b: f32| (a - b).abs() < 0.01;
+        assert!(
+            near(restored_origin.0, origin.0) && near(restored_origin.1, origin.1),
+            "{restored_origin:?} is where {origin:?} was left"
+        );
+        assert!(near(restored_size.0, size.0) && restored_size.1 == size.1);
+        assert!(near(restored_zoom, zoom), "{restored_zoom} was {zoom}");
+
+        let sightings = cx
+            .update(|_, cx| view.read(cx).table_on_screen("sightings"))
+            .expect("the diagram drew the sightings");
+        cx.simulate_click(sightings, none);
+        settle(cx);
+        view.update(cx, |view, cx| view.show_neighbourhood(true, cx));
+        settle(cx);
+
+        drop(workspace);
+        let (workspace, cx) = relaunch(cx);
+        let view = front_diagram(&workspace, cx);
+        let (mut names, _) = cx
+            .update(|_, cx| view.read(cx).laid_out())
+            .expect("the diagram is laid out");
+        names.sort();
+        assert_eq!(names, ["birds", "sightings"], "back in the neighbourhood");
+        assert_eq!(
+            cx.update(|_, cx| view.read(cx).focused_name()).as_deref(),
+            Some("sightings"),
+            "centred on its table"
+        );
+        view.update(cx, |view, cx| view.show_neighbourhood(false, cx));
+        settle(cx);
+        let origin_now = cx
+            .update(|_, cx| view.read(cx).table_origin("birds"))
+            .unwrap();
+        assert!(
+            near(origin_now.0, origin.0) && near(origin_now.1, origin.1),
+            "the schema view behind it kept the moved card"
+        );
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn secondary_f_finds_a_table_in_a_diagram_and_escape_puts_the_field_away(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            &format!("{DIAGRAM_SCHEMA} create table weather (id integer primary key);"),
+        );
+        let view = show_diagram(&workspace, cx);
+        let canvas = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| view.read(cx).focus_handle().is_focused(window))
+        };
+        let focused = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| view.read(cx).focused_name())
+                .map(|name| name.to_string())
+        };
+
+        cx.simulate_keystrokes("secondary-f");
+        settle(cx);
+        assert!(
+            cx.update(|_, cx| view.read(cx).finding()),
+            "the field opens"
+        );
+        assert!(!canvas(cx), "and takes the keyboard");
+        cx.simulate_input("sight");
+        settle(cx);
+        assert_eq!(
+            focused(cx).as_deref(),
+            Some("sightings"),
+            "typing jumps to the match"
+        );
+
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+        assert!(
+            !cx.update(|_, cx| view.read(cx).finding()),
+            "escape closes the field"
+        );
+        assert!(canvas(cx), "handing the keyboard back to the canvas");
+        assert_eq!(
+            focused(cx).as_deref(),
+            Some("sightings"),
+            "with the match in focus"
+        );
+
+        cx.simulate_keystrokes("secondary-f");
+        settle(cx);
+        cx.simulate_input("i");
+        settle(cx);
+        let first = focused(cx);
+        cx.simulate_keystrokes("down");
+        settle(cx);
+        assert_ne!(focused(cx), first, "down moves to the next match");
+        cx.simulate_keystrokes("up");
+        settle(cx);
+        assert_eq!(focused(cx), first, "and up back");
+
+        cx.simulate_keystrokes("backspace");
+        cx.simulate_input("weath");
+        settle(cx);
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        assert!(
+            !cx.update(|_, cx| view.read(cx).finding()),
+            "enter picks the match"
+        );
+        assert_eq!(focused(cx).as_deref(), Some("weather"));
+        assert_eq!(
+            front_relation(&workspace, cx),
+            None,
+            "and opens nothing yet"
+        );
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        assert_eq!(
+            front_relation(&workspace, cx),
+            Some(("weather".to_string(), false)),
+            "the next enter opens it"
+        );
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_arrow_keys_walk_a_diagrams_cards_and_leave_the_find_field_its_own(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, DIAGRAM_SCHEMA);
+        let view = show_diagram(&workspace, cx);
+        let focused = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| view.read(cx).focused_name())
+                .map(|name| name.to_string())
+        };
+        assert_eq!(focused(cx), None);
+
+        cx.simulate_keystrokes("down");
+        settle(cx);
+        assert!(
+            focused(cx).is_some(),
+            "with nothing in focus, an arrow focuses the card nearest the middle"
+        );
+
+        cx.simulate_keystrokes("left");
+        settle(cx);
+        assert_eq!(
+            focused(cx).as_deref(),
+            Some("birds"),
+            "the referenced table"
+        );
+        cx.simulate_keystrokes("right");
+        settle(cx);
+        assert_eq!(
+            focused(cx).as_deref(),
+            Some("sightings"),
+            "the table that references it"
+        );
+        cx.simulate_keystrokes("right");
+        settle(cx);
+        assert_eq!(
+            focused(cx).as_deref(),
+            Some("sightings"),
+            "nothing further that way keeps the focus"
+        );
+
+        cx.simulate_keystrokes("secondary-f");
+        settle(cx);
+        cx.simulate_input("birds");
+        settle(cx);
+        assert_eq!(focused(cx).as_deref(), Some("birds"));
+        cx.simulate_keystrokes("right");
+        settle(cx);
+        assert_eq!(
+            focused(cx).as_deref(),
+            Some("birds"),
+            "an arrow in the field, even at the end of its text, never walks the cards"
+        );
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+        cx.simulate_keystrokes("right");
+        settle(cx);
+        assert_eq!(
+            focused(cx).as_deref(),
+            Some("sightings"),
+            "and the canvas takes it back with the keyboard"
+        );
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_diagrams_minimap_shows_once_it_overflows_and_a_press_on_it_moves_the_view(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            &format!("{DIAGRAM_SCHEMA} create table weather (id integer primary key);"),
+        );
+        let view = show_diagram(&workspace, cx);
+        let middle = |cx: &mut VisualTestContext| cx.update(|_, cx| view.read(cx).minimap_middle());
+        assert_eq!(
+            middle(cx),
+            None,
+            "no minimap while the whole scene is in view"
+        );
+
+        for _ in 0..12 {
+            cx.simulate_keystrokes("secondary-=");
+        }
+        settle(cx);
+        // Off the middle of the scene, onto the birds.
+        cx.simulate_keystrokes("secondary-f");
+        cx.simulate_input("birds");
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        let at = middle(cx).expect("zoomed in, the minimap shows");
+        let before = cx.update(|_, cx| view.read(cx).off_middle());
+        cx.simulate_click(at, gpui::Modifiers::default());
+        settle(cx);
+        let after = cx.update(|_, cx| view.read(cx).off_middle());
+        assert!(
+            after < 1.0 && after < before,
+            "a press there centres the view on it: {before} -> {after}"
+        );
+        assert!(
+            cx.update(|_, cx| view.read(cx).has_focus()),
+            "and leaves the focus alone"
+        );
+
+        quit(workspace, cx);
+    });
+}
+
+/// Opens the diagram toolbar's Export menu and picks its item `downs` down.
+fn pick_diagram_export(downs: usize, cx: &mut VisualTestContext) {
+    let bounds = cx
+        .debug_bounds("diagram-export")
+        .expect("the toolbar draws Export");
+    cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+    settle(cx);
+    for _ in 0..downs {
+        cx.simulate_keystrokes("down");
+    }
+    press(cx, "enter");
+}
+
+/// Waits for an export running off the UI thread to write `path`.
+fn exported_file(path: &std::path::Path, cx: &mut VisualTestContext) -> Vec<u8> {
+    for _ in 0..500 {
+        settle(cx);
+        if path.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    std::fs::read(path).expect("the file is written")
+}
+
+#[gpui::test]
+fn the_diagram_export_menu_writes_the_drawing_to_the_file_picked(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, DIAGRAM_SCHEMA);
+        cx.executor().allow_parking();
+        show_diagram(&workspace, cx);
+        let directory = store::dbdelve_directory().unwrap();
+
+        super::exports::SUGGESTED_NAMES.with_borrow_mut(Vec::clear);
+        pick_diagram_export(2, cx);
+        let path = directory.join("main.svg");
+        let chosen = path.clone();
+        cx.simulate_new_path_selection(|_| Some(chosen));
+        let svg = String::from_utf8(exported_file(&path, cx)).unwrap();
+        assert_eq!(
+            super::exports::SUGGESTED_NAMES.with_borrow(Clone::clone),
+            ["main.svg"],
+            "named after the schema"
+        );
+        assert!(svg.starts_with("<?xml"), "{svg}");
+        assert!(svg.contains(">birds</text>") && svg.contains(">sightings</text>"));
+        settle(cx);
+        let notice =
+            cx.update(|_, cx| workspace.read(cx).profile().unwrap().session.notice.clone());
+        assert_eq!(
+            notice,
+            Some(format!(
+                "Exported the diagram as SVG to {}.",
+                path.display()
+            ))
+        );
+
+        pick_diagram_export(3, cx);
+        let path = directory.join("main.png");
+        let chosen = path.clone();
+        cx.simulate_new_path_selection(|_| Some(chosen));
+        let png = exported_file(&path, cx);
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"), "a PNG");
+        // The extension typed decides, as it does for a result's export.
+        pick_diagram_export(2, cx);
+        let path = directory.join("typed.png");
+        let chosen = path.clone();
+        cx.simulate_new_path_selection(|_| Some(chosen));
+        assert!(exported_file(&path, cx).starts_with(b"\x89PNG"));
+        pick_diagram_export(4, cx);
+        let path = directory.join("main.mmd");
+        let chosen = path.clone();
+        cx.simulate_new_path_selection(|_| Some(chosen));
+        let text = String::from_utf8(exported_file(&path, cx)).unwrap();
+        assert!(text.starts_with("erDiagram\n"), "{text}");
+
+        // The palette asks for the same file, and a neighbourhood is named
+        // after the table in its middle too.
+        let view = show_diagram(&workspace, cx);
+        view.update(cx, |view, cx| view.centre_on("sightings", cx));
+        settle(cx);
+        super::exports::SUGGESTED_NAMES.with_borrow_mut(Vec::clear);
+        cx.simulate_keystrokes("secondary-shift-p");
+        settle(cx);
+        cx.simulate_input("Export diagram as SVG");
+        settle(cx);
+        cx.simulate_keystrokes("enter");
+        cx.simulate_new_path_selection(|_| None);
+        settle(cx);
+        assert_eq!(
+            super::exports::SUGGESTED_NAMES.with_borrow(Clone::clone),
+            ["main-sightings.svg"]
+        );
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn copy_as_mermaid_puts_the_diagram_on_the_clipboard_from_the_menu_and_the_palette(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, DIAGRAM_SCHEMA);
+        let view = show_diagram(&workspace, cx);
+        let expected = "erDiagram
+    \"birds\" {
+        INTEGER id PK
+        TEXT name
+        TEXT latin
+    }
+    \"sightings\" {
+        INTEGER id PK
+        INTEGER bird FK
+        TEXT seen_at
+    }
+    \"birds\" ||..o{ \"sightings\" : \"bird\"
+";
+        let copied = |cx: &mut VisualTestContext| {
+            cx.read_from_clipboard()
+                .and_then(|item| item.text())
+                .expect("the copy wrote the clipboard")
+        };
+
+        pick_diagram_export(1, cx);
+        assert_eq!(copied(cx), expected);
+        assert_eq!(
+            cx.update(|_, cx| workspace.read(cx).profile().unwrap().session.notice.clone()),
+            Some("Copied the diagram as Mermaid.".to_string())
+        );
+        assert!(
+            cx.update(|window, cx| view.read(cx).focus_handle().is_focused(window)),
+            "the menu hands the keyboard back to the canvas"
+        );
+
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(String::new()));
+        cx.simulate_keystrokes("secondary-shift-p");
+        settle(cx);
+        cx.simulate_input("Copy diagram as Mermaid");
+        settle(cx);
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        assert_eq!(copied(cx), expected);
         quit(workspace, cx);
     });
 }

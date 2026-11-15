@@ -17,12 +17,18 @@ use crate::sql::{Destructive, Mode};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// The rows on an object tab were read from what the server held then. Their
-/// statement is dbdelve's own, so it re-runs the moment the tab is looked at
-/// again -- a query tab holds SQL the user wrote and is theirs to re-run.
-fn mark_rows_stale(profile: &mut Profile) {
+/// How long [`Workspace::remember_profiles_soon`] waits after the last change.
+const PROFILES_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The rows on an object tab, and a diagram's tables and keys, were read from
+/// what the server held then. Their statements are dbdelve's own, so they run
+/// again the moment the tab is looked at -- a query tab holds SQL the user
+/// wrote and is theirs to re-run.
+fn mark_objects_stale(profile: &mut Profile) {
     for tab in &mut profile.session.objects {
-        if let ObjectBody::Relation { stale, .. } = &mut tab.body {
+        if let ObjectBody::Relation { stale, .. } | ObjectBody::Diagram { stale, .. } =
+            &mut tab.body
+        {
             *stale = true;
         }
     }
@@ -30,16 +36,43 @@ fn mark_rows_stale(profile: &mut Profile) {
 
 impl Workspace {
     pub(crate) fn remember_profiles(&mut self, cx: &mut Context<Self>) {
+        match self.save_profiles(cx) {
+            Ok(()) => self.profiles_unsaved = false,
+            Err(message) => self.note(message, cx),
+        }
+    }
+
+    /// [`Self::remember_profiles`] once things have been still for a moment,
+    /// for what changes with every event of a gesture (a diagram's wheel
+    /// zoom and pan), too often to write each. A quit before then writes it.
+    pub(crate) fn remember_profiles_soon(&mut self, cx: &mut Context<Self>) {
+        self.profiles_unsaved = true;
+        self.profiles_save = Some(cx.spawn(async move |workspace, cx| {
+            cx.background_executor().timer(PROFILES_SETTLE).await;
+            workspace
+                .update(cx, |workspace, cx| {
+                    if workspace.profiles_unsaved {
+                        workspace.remember_profiles(cx);
+                    }
+                })
+                .ok();
+        }));
+    }
+
+    /// Writes `profiles.toml` from what this session holds, as
+    /// [`Self::remember_profiles`] does, for a caller with nowhere to say
+    /// that it failed.
+    pub(crate) fn save_profiles(&self, cx: &App) -> Result<(), String> {
         // The file we could not read at startup is still the user's, and what
         // this session holds is not what they have -- so it must not flatten
         // it. The notice said nothing would be saved.
         if self.store_unreadable {
-            return;
+            return Ok(());
         }
         let profiles = self
             .profiles
             .iter()
-            .map(|profile| profile.stored())
+            .map(|profile| profile.stored(cx))
             .collect::<Vec<_>>();
         let active = self.profile().map(|profile| profile.id.clone());
         let picked = fonts(cx);
@@ -75,16 +108,14 @@ impl Workspace {
             custom_keybindings: Some(self.settings.custom_keybindings.clone()),
             theme_opacity: Some(self.settings.theme_opacity.clone()),
         };
-        if let Err(message) = store::save_profiles(&store::ProfileList {
+        store::save_profiles(&store::ProfileList {
             profiles,
             active,
             fonts: Some(fonts),
             settings: Some(settings),
             projects: self.projects.clone(),
             unavailable: self.unavailable.clone(),
-        }) {
-            self.note(message, cx);
-        }
+        })
     }
 
     pub(crate) fn restore_profile(
@@ -915,10 +946,11 @@ impl Workspace {
             );
             return;
         }
+        self.cancel_diagram_reads(index, cx);
         let Some(profile) = self.profiles.get_mut(index) else {
             return;
         };
-        mark_rows_stale(profile);
+        mark_objects_stale(profile);
         self.begin_connect(index, cx);
     }
 
@@ -1031,7 +1063,7 @@ impl Workspace {
                     }
                     profile.catalog = CatalogState::Loaded(catalog, routines);
                     profile.session.structure_requests.clear();
-                    mark_rows_stale(profile);
+                    mark_objects_stale(profile);
                     workspace.catalog_replaced(&id, generation, true, cx);
                     workspace.reload_front_object(&id, cx);
                     workspace.load_sizes(&id, generation, cx);
@@ -1253,6 +1285,9 @@ impl Workspace {
             self.stop_run(Tab::Object(object), cx);
             self.cancel_count(object, cx);
         }
+        if let Some(index) = self.active {
+            self.cancel_diagram_reads(index, cx);
+        }
         // A connect still on its way, and every answer issued to this one,
         // land on a generation that is no longer the profile's and are dropped.
         self.next_generation += 1;
@@ -1273,7 +1308,7 @@ impl Workspace {
         profile.in_transaction = false;
         profile.session_changed = false;
         profile.session.clear_prompts();
-        mark_rows_stale(profile);
+        mark_objects_stale(profile);
         let name = profile.name.clone();
         self.active = None;
         self.remember_profiles(cx);
@@ -1976,7 +2011,7 @@ impl Workspace {
         // the first moment there is anything to correct it from.
         if let CatalogState::Loaded(catalog, _) = &profile.catalog {
             for tab in &mut profile.session.objects {
-                if let ObjectKind::Relation(kind) = &mut tab.kind
+                if let Some(ObjectKind::Relation(kind)) = &mut tab.kind
                     && let Some(actual) = relation_kind(catalog, &tab.schema, &tab.name)
                 {
                     *kind = actual;
@@ -2491,6 +2526,7 @@ impl Workspace {
             store::delete_secrets(&id);
             let removed_queries = store::delete_queries(&id);
             let _ = store::delete_grids(&id);
+            let _ = store::delete_diagrams(&id);
             for project in &mut self.projects {
                 project.connections.retain(|member| member != &id);
             }
@@ -2530,6 +2566,7 @@ impl Workspace {
             store::delete_secrets(&removed.id);
             let removed_queries = store::delete_queries(&removed.id);
             let _ = store::delete_grids(&removed.id);
+            let _ = store::delete_diagrams(&removed.id);
             for project in &mut self.projects {
                 project.connections.retain(|member| member != &removed.id);
             }

@@ -159,6 +159,12 @@ fn engine_answers_per_engine() {
         answer(
             &mut out,
             engine,
+            "draws_diagrams",
+            Target::built_in(engine).draws_diagrams(),
+        );
+        answer(
+            &mut out,
+            engine,
             "edits_query_rows",
             Target::built_in(engine).edits_query_rows(),
         );

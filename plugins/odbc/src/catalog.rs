@@ -2,10 +2,11 @@
 //! included, is read as text through `raw::get_data`, since `KEY_SEQ`,
 //! `NULLABLE` and every NULL indicator cross the same SQLLEN a query's do.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use dbdelve_plugin_protocol::{
-    Column, ForeignKey, Index, Reference, Relation, RelationKind, Response, Schema, Structure,
+    Column, ForeignKey, Graph, GraphKey, GraphTable, Index, Reference, Relation, RelationKind,
+    Response, Schema, Structure, UniqueKey,
 };
 use odbc_api::handles::StatementImpl;
 use odbc_api::sys::{InfoType, SqlReturn};
@@ -94,6 +95,314 @@ pub fn references(
     Ok(Response::References {
         references: references_from(&rows, schema, relation),
     })
+}
+
+/// One schema's base tables and keys for the ER diagram: `SQLTables` and
+/// `SQLColumns` once for the schema, then three calls a table (see
+/// [`Each::table`]).
+pub fn graph(session: &Session, control: &Control, schema: &str) -> Result<Response, Response> {
+    let scope = Scope::of(session, schema);
+    let escape =
+        raw::info_string(session.handle(), InfoType::SearchPatternEscape).unwrap_or_default();
+    let pattern = scope.schema.map(|schema| escape_pattern(schema, &escape));
+    let listed = read(session, control, "SQLTables", 4, |statement| {
+        raw::tables(statement, pattern.as_deref(), "%")
+    })?;
+    let tables = tables_from(&listed, schema);
+    let columns = read(session, control, "SQLColumns", 13, |statement| {
+        raw::columns(statement, scope.catalog, pattern.as_deref(), "%")
+    })?;
+    let each = Each {
+        session,
+        control,
+        schema,
+        tables: &tables,
+    };
+    let keys = each.table("SQLPrimaryKeys", 6, 0, |statement, table| {
+        raw::primary_keys(statement, scope.catalog, scope.schema, table)
+    })?;
+    let statistics = each.table("SQLStatistics", 13, 0, |statement, table| {
+        raw::statistics(statement, scope.catalog, scope.schema, table)
+    })?;
+    let foreign = each.table("SQLForeignKeys", 12, 4, |statement, table| {
+        let foreign = [scope.catalog, scope.schema, Some(table)];
+        raw::foreign_keys(statement, [None, None, None], foreign)
+    })?;
+    Ok(Response::Graph(graph_from(
+        schema,
+        &tables,
+        &columns,
+        &keys,
+        &statistics,
+        &foreign,
+    )))
+}
+
+/// A catalog function asked about every table of one schema.
+struct Each<'a> {
+    session: &'a Session,
+    control: &'a Control,
+    schema: &'a str,
+    tables: &'a [String],
+}
+
+impl Each<'_> {
+    /// Columns `1..=last` of `call`'s rows for every table, one call a table,
+    /// keeping only the rows naming it (its `TABLE_CAT`-shaped column at
+    /// `at`). Never one call for the schema: ODBC makes the table name an
+    /// ordinary argument here, and the driver manager itself refuses a NULL
+    /// one with `HY009` before any driver sees it, while psqlODBC and Db2
+    /// answer `""` and `%` with no rows or an error, never every table.
+    /// Each call is published, so a Cancel stops the loop at the next.
+    ///
+    /// ponytail: three calls a table, one after another on the one session;
+    /// a driver-specific catalog query would read a schema in one, at the
+    /// cost of SQL the bridge would have to spell per driver.
+    fn table(
+        &self,
+        function: &str,
+        last: u16,
+        at: usize,
+        call: impl Fn(&StatementImpl, &str) -> SqlReturn,
+    ) -> Result<Vec<Row>, Response> {
+        let mut rows = Vec::new();
+        for table in self.tables {
+            let named = read(self.session, self.control, function, last, |statement| {
+                call(statement, table)
+            })?;
+            rows.extend(
+                named
+                    .into_iter()
+                    .filter(|row| names(row, at, self.schema, table)),
+            );
+        }
+        Ok(rows)
+    }
+}
+
+/// The schema's base tables in the order `SQLTables` lists them. Only
+/// `TABLE`: views, Db2's materialized query and temporary tables, system
+/// tables, aliases and the rest are not drawn.
+fn tables_from(rows: &[Row], schema: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    rows.iter()
+        .filter(|row| schema_of(row, 0) == schema && cell(row, 3).map(trim_name) == Some("TABLE"))
+        .map(|row| name(row, 2))
+        .filter(|table| seen.insert(table.clone()))
+        .collect()
+}
+
+/// The graph out of the catalog functions' rows, each already narrowed to
+/// `schema` by the call or filtered to it here.
+fn graph_from(
+    schema: &str,
+    tables: &[String],
+    columns: &[Row],
+    keys: &[Row],
+    statistics: &[Row],
+    foreign: &[Row],
+) -> Graph {
+    let mut drawn: Vec<GraphTable> = tables
+        .iter()
+        .map(|table| GraphTable {
+            name: table.clone(),
+            columns: Vec::new(),
+        })
+        .collect();
+    let at: HashMap<&str, usize> = tables
+        .iter()
+        .enumerate()
+        .map(|(index, table)| (table.as_str(), index))
+        .collect();
+    let mine = |row: &Row, catalog: usize| -> Option<usize> {
+        if schema_of(row, catalog) != schema {
+            return None;
+        }
+        at.get(name(row, catalog + 2).as_str()).copied()
+    };
+    for row in columns {
+        if let Some(table) = mine(row, 0) {
+            drawn[table].columns.push(Column {
+                name: name(row, 3),
+                data_type: data_type(
+                    cell(row, 5).unwrap_or_default(),
+                    cell(row, 4),
+                    cell(row, 6),
+                    cell(row, 8),
+                ),
+                nullable: cell(row, 10).map(str::trim) != Some(SQL_NO_NULLS),
+                default: None,
+            });
+        }
+    }
+
+    let mut primary = Groups::default();
+    for row in keys {
+        if let Some(table) = mine(row, 0) {
+            let key = (String::new(), name(row, 5));
+            primary.add(table, key, number(row, 4), name(row, 3));
+        }
+    }
+    let mut unique_keys: Vec<UniqueKey> = (primary.0.into_iter())
+        .map(|key| {
+            let (table, name, columns) = key.into_parts();
+            UniqueKey {
+                table: tables[table].clone(),
+                name,
+                columns,
+                primary: true,
+            }
+        })
+        .collect();
+
+    // An index whose column is not one of the table's is on an expression
+    // (the driver names the expression, or nothing), so it makes no column
+    // unique and is left out whole, as is one with a `FILTER_CONDITION`.
+    // ponytail: psqlODBC and Db2 leave that NULL even for a partial index,
+    // which then reads as a whole one; telling it apart would take per-driver
+    // SQL against the system catalog (plugins.md).
+    let mut indexes = Groups::default();
+    for row in statistics {
+        let Some(table) = mine(row, 0) else {
+            continue;
+        };
+        if cell(row, 6).map(str::trim) == Some(SQL_TABLE_STAT)
+            || cell(row, 3).map(str::trim) != Some("0")
+            || cell(row, 12).is_some_and(|filter| !filter.trim().is_empty())
+        {
+            continue;
+        }
+        let column = cell(row, 8)
+            .map(trim_name)
+            .filter(|column| {
+                drawn[table]
+                    .columns
+                    .iter()
+                    .any(|known| known.name == *column)
+            })
+            .map(str::to_string);
+        indexes.add(table, (name(row, 4), name(row, 5)), number(row, 7), column);
+    }
+    for index in indexes.0 {
+        let (table, name, columns) = index.into_parts();
+        let Some(columns) = columns.into_iter().collect::<Option<Vec<_>>>() else {
+            continue;
+        };
+        unique_keys.push(UniqueKey {
+            table: tables[table].clone(),
+            name,
+            columns,
+            primary: false,
+        });
+    }
+
+    Graph {
+        tables: drawn,
+        unique_keys,
+        foreign_keys: graph_keys_from(foreign, |row| mine(row, 4), tables),
+    }
+}
+
+/// Rows gathered into keys or indexes by their table, qualifier and name, in
+/// the order each was first seen.
+struct Groups<T>(Vec<Group<T>>, HashMap<(usize, String, String), usize>);
+
+impl<T> Default for Groups<T> {
+    fn default() -> Self {
+        Self(Vec::new(), HashMap::new())
+    }
+}
+
+impl<T> Groups<T> {
+    fn add(&mut self, table: usize, key: (String, String), position: u32, column: T) {
+        let Self(groups, by_name) = self;
+        let (qualifier, name) = key;
+        let at = *by_name
+            .entry((table, qualifier, name.clone()))
+            .or_insert_with(|| {
+                groups.push(Group {
+                    table,
+                    name,
+                    columns: Vec::new(),
+                });
+                groups.len() - 1
+            });
+        groups[at].columns.push((position, column));
+    }
+}
+
+struct Group<T> {
+    table: usize,
+    name: String,
+    /// Each with its position (`KEY_SEQ`, `ORDINAL_POSITION`).
+    columns: Vec<(u32, T)>,
+}
+
+impl<T> Group<T> {
+    /// Its table, its name and its columns in order.
+    fn into_parts(mut self) -> (usize, String, Vec<T>) {
+        self.columns.sort_by_key(|(position, _)| *position);
+        let columns = self.columns.into_iter().map(|(_, column)| column);
+        (self.table, self.name, columns.collect())
+    }
+}
+
+/// `SQLForeignKeys` asked from the foreign-key side, grouped into keys by
+/// `FK_NAME`, each key's columns in `KEY_SEQ` order. Where a driver leaves
+/// `FK_NAME` NULL, each unnamed `KEY_SEQ` 1 row starts a key of its own,
+/// unless its table also has an unnamed `KEY_SEQ` 2 or more, when which rows
+/// pair up cannot be told and none of that table's unnamed keys is drawn.
+/// A key into another catalog is left out, as Snowflake's into another
+/// database is: a graph's key names a schema and a table, and drawn by them
+/// it would point at a table of this catalog.
+fn graph_keys_from(
+    rows: &[Row],
+    mine: impl Fn(&Row) -> Option<usize>,
+    tables: &[String],
+) -> Vec<GraphKey> {
+    let rows: Vec<(usize, &Row)> = rows
+        .iter()
+        .filter(|row| !in_another_catalog(row))
+        .filter_map(|row| mine(row).map(|table| (table, row)))
+        .collect();
+    let unnamed_composite: HashSet<usize> = rows
+        .iter()
+        .filter(|(_, row)| name(row, 11).is_empty() && number(row, 8) > 1)
+        .map(|(table, _)| *table)
+        .collect();
+    let mut keys = Groups::default();
+    for (index, &(table, row)) in rows.iter().enumerate() {
+        let key_name = match name(row, 11) {
+            key_name if !key_name.is_empty() => key_name,
+            _ if unnamed_composite.contains(&table) => continue,
+            // Not a name any driver gives, so it cannot meet a named key.
+            _ => format!("\0{index}"),
+        };
+        keys.add(table, (String::new(), key_name), number(row, 8), row);
+    }
+    keys.0
+        .into_iter()
+        .map(|key| {
+            let (table, key_name, columns) = key.into_parts();
+            GraphKey {
+                table: tables[table].clone(),
+                name: key_name,
+                columns: columns.iter().map(|row| name(row, 7)).collect(),
+                referenced_schema: schema_of(columns[0], 0),
+                referenced_table: name(columns[0], 2),
+                referenced_columns: columns.iter().map(|row| name(row, 3)).collect(),
+            }
+        })
+        .collect()
+}
+
+/// Whether an `SQLForeignKeys` row's key points into a catalog other than
+/// its own table's, where the driver has schemas: without them the catalog
+/// is the schema the key names. A catalog a driver leaves NULL or blank on
+/// either side is taken to be the same one.
+fn in_another_catalog(row: &Row) -> bool {
+    let (referenced, own) = (name(row, 0), name(row, 4));
+    !name(row, 1).is_empty() && !referenced.is_empty() && !own.is_empty() && referenced != own
 }
 
 fn has_schemas(session: &Session) -> bool {
@@ -612,6 +921,330 @@ mod tests {
         );
         let unnamed: Vec<_> = read("").into_iter().map(|index| index.3).collect();
         assert_eq!(unnamed, [true, false, false]);
+    }
+
+    #[test]
+    fn only_the_schemas_base_tables_are_drawn_once_each() {
+        let rows = [
+            row(&[None, Some("S"), Some("ORDERS"), Some("TABLE")]),
+            row(&[
+                None,
+                Some("S  "),
+                Some("TOTALS"),
+                Some("MATERIALIZED QUERY TABLE"),
+            ]),
+            row(&[None, Some("S"), Some("V"), Some("VIEW")]),
+            row(&[None, Some("S"), Some("SYS"), Some("SYSTEM TABLE")]),
+            row(&[None, Some("OTHER"), Some("T"), Some("TABLE")]),
+            row(&[None, Some("S"), Some("ORDERS"), Some("TABLE")]),
+        ];
+        assert_eq!(tables_from(&rows, "S"), ["ORDERS"]);
+    }
+
+    fn column(table: &str, column: &str, type_name: &str, nullable: &str) -> Row {
+        row(&[
+            None,
+            Some("S"),
+            Some(table),
+            Some(column),
+            Some(if type_name == "VARCHAR" { "12" } else { "4" }),
+            Some(type_name),
+            Some("10"),
+            None,
+            Some("0"),
+            None,
+            Some(nullable),
+            None,
+            None,
+        ])
+    }
+
+    fn primary(table: &str, column: &str, sequence: &str, name: &str) -> Row {
+        row(&[
+            None,
+            Some("S"),
+            Some(table),
+            Some(column),
+            Some(sequence),
+            Some(name),
+        ])
+    }
+
+    fn statistic(
+        table: &str,
+        non_unique: &str,
+        name: &str,
+        position: &str,
+        column: Option<&str>,
+    ) -> Row {
+        row(&[
+            None,
+            Some("S"),
+            Some(table),
+            Some(non_unique),
+            Some("S"),
+            Some(name),
+            Some("3"),
+            Some(position),
+            column,
+        ])
+    }
+
+    fn foreign(
+        table: &str,
+        column: &str,
+        sequence: &str,
+        name: Option<&str>,
+        to: (&str, &str, &str),
+    ) -> Row {
+        let (schema, referenced, referenced_column) = to;
+        row(&[
+            None,
+            Some(schema),
+            Some(referenced),
+            Some(referenced_column),
+            None,
+            Some("S"),
+            Some(table),
+            Some(column),
+            Some(sequence),
+            None,
+            None,
+            name,
+        ])
+    }
+
+    /// The canned rows Db2's catalog functions give for a composite key and
+    /// a key into another schema, read into the graph `graph` answers with.
+    fn graph() -> Graph {
+        let tables = ["ORDERS".to_string(), "ITEMS".to_string(), "LOG".to_string()];
+        let columns = [
+            column("ORDERS", "ACCOUNT", "BIGINT", "0"),
+            column("ORDERS", "NUMBER", "INTEGER", "0"),
+            column("ORDERS", "CODE", "VARCHAR", "1"),
+            column("ITEMS", "ID", "INTEGER", "0"),
+            column("ITEMS", "NUMBER", "INTEGER", "1"),
+            column("ITEMS", "ACCOUNT", "BIGINT", "1"),
+            column("ITEMS", "OWNER", "BIGINT", "1"),
+            column("ITEMS", "A", "INTEGER", "1"),
+            column("ITEMS", "B", "INTEGER", "1"),
+            column("A_VIEW", "ID", "INTEGER", "1"),
+        ];
+        let keys = [
+            primary("ORDERS", "NUMBER", "2", "SQL2"),
+            primary("ORDERS", "ACCOUNT", "1", "SQL2"),
+            primary("ITEMS", "ID", "1", "SQL1"),
+        ];
+        let statistics = [
+            row(&[None, Some("S"), Some("ORDERS"), None, None, None, Some("0")]),
+            statistic("ORDERS", "0", "SQL1", "1", Some("CODE")),
+            statistic("ORDERS", "0", "SQL9", "2", Some("NUMBER")),
+            statistic("ORDERS", "0", "SQL9", "1", Some("ACCOUNT")),
+            statistic("ITEMS", "1", "BY_OWNER", "1", Some("OWNER")),
+            statistic("ITEMS", "0", "LOWER_A", "1", Some("LOWER(A)")),
+            statistic("ITEMS", "0", "NAMELESS", "1", None),
+            statistic("ITEMS", "0", "A_AND_EXPR", "1", Some("A")),
+            statistic("ITEMS", "0", "A_AND_EXPR", "2", Some("")),
+        ];
+        let foreign_keys = [
+            foreign(
+                "ITEMS",
+                "NUMBER",
+                "2",
+                Some("TO_ORDER"),
+                ("S", "ORDERS", "NUMBER"),
+            ),
+            foreign(
+                "ITEMS",
+                "ACCOUNT",
+                "1",
+                Some("TO_ORDER"),
+                ("S", "ORDERS", "ACCOUNT"),
+            ),
+            foreign(
+                "ITEMS",
+                "OWNER",
+                "1",
+                Some("TO_OWNER"),
+                ("BILLING", "OWNERS", "ID"),
+            ),
+            foreign("ITEMS", "A", "1", None, ("S", "LOG", "X")),
+            foreign("ITEMS", "B", "1", None, ("S", "LOG", "Y")),
+            foreign("A_VIEW", "ID", "1", Some("NOT_DRAWN"), ("S", "LOG", "X")),
+        ];
+        graph_from("S", &tables, &columns, &keys, &statistics, &foreign_keys)
+    }
+
+    #[test]
+    fn a_graph_holds_the_tables_columns_in_order_and_nothing_of_a_view() {
+        let graph = graph();
+        let tables: Vec<(&str, Vec<&str>)> = graph
+            .tables
+            .iter()
+            .map(|table| {
+                let columns = table.columns.iter().map(|column| column.name.as_str());
+                (table.name.as_str(), columns.collect())
+            })
+            .collect();
+        assert_eq!(
+            tables,
+            [
+                ("ORDERS", vec!["ACCOUNT", "NUMBER", "CODE"]),
+                ("ITEMS", vec!["ID", "NUMBER", "ACCOUNT", "OWNER", "A", "B"]),
+                ("LOG", vec![]),
+            ]
+        );
+        let code = &graph.tables[0].columns[2];
+        assert_eq!(
+            (code.data_type.as_str(), code.nullable),
+            ("VARCHAR(10)", true)
+        );
+        assert!(!graph.tables[0].columns[0].nullable);
+    }
+
+    /// Db2 names a primary key after another column's unique index, so a
+    /// name is no way to tell the key's own index; both are kept, and an
+    /// index on an expression, which the driver names by it or not at all,
+    /// is left out whole.
+    #[test]
+    fn unique_keys_follow_key_seq_and_leave_out_expressions_and_plain_indexes() {
+        let graph = graph();
+        let keys: Vec<(&str, &str, String, bool)> = graph
+            .unique_keys
+            .iter()
+            .map(|key| {
+                let columns = key.columns.join(",");
+                (key.table.as_str(), key.name.as_str(), columns, key.primary)
+            })
+            .collect();
+        let owned =
+            |table, name, columns: &str, primary| (table, name, columns.to_string(), primary);
+        assert_eq!(
+            keys,
+            [
+                owned("ORDERS", "SQL2", "ACCOUNT,NUMBER", true),
+                owned("ITEMS", "SQL1", "ID", true),
+                owned("ORDERS", "SQL1", "CODE", false),
+                owned("ORDERS", "SQL9", "ACCOUNT,NUMBER", false),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_filtered_index_is_left_out_and_a_qualifier_keeps_indexes_apart() {
+        let tables = ["T".to_string()];
+        let columns = [
+            column("T", "A", "INTEGER", "1"),
+            column("T", "B", "INTEGER", "1"),
+        ];
+        let index = |qualifier: &str, name: &str, column: &str, filter: Option<&str>| {
+            let mut row = statistic("T", "0", name, "1", Some(column));
+            row[4] = Some(qualifier.to_string());
+            row.extend([None, None, None, filter.map(str::to_string)]);
+            row
+        };
+        let statistics = [
+            index("S", "SAME", "A", None),
+            index("X", "SAME", "B", None),
+            index("S", "PARTIAL", "A", Some("(a > 0)")),
+        ];
+        let graph = graph_from("S", &tables, &columns, &[], &statistics, &[]);
+        let keys: Vec<Vec<String>> = graph
+            .unique_keys
+            .into_iter()
+            .map(|key| key.columns)
+            .collect();
+        assert_eq!(keys, [["A"], ["B"]]);
+    }
+
+    #[test]
+    fn foreign_keys_group_by_name_in_key_seq_order_wherever_they_point() {
+        let keys: Vec<(String, String, String, String)> = graph()
+            .foreign_keys
+            .into_iter()
+            .map(|key| {
+                (
+                    key.columns.join(","),
+                    key.referenced_schema,
+                    key.referenced_table,
+                    key.referenced_columns.join(","),
+                )
+            })
+            .collect();
+        let owned = |columns: &str, schema: &str, table: &str, referenced: &str| {
+            let owned = |text: &str| text.to_string();
+            (
+                owned(columns),
+                owned(schema),
+                owned(table),
+                owned(referenced),
+            )
+        };
+        assert_eq!(
+            keys,
+            [
+                owned("ACCOUNT,NUMBER", "S", "ORDERS", "ACCOUNT,NUMBER"),
+                owned("OWNER", "BILLING", "OWNERS", "ID"),
+                owned("A", "S", "LOG", "X"),
+                owned("B", "S", "LOG", "Y"),
+            ]
+        );
+        let names: Vec<String> = graph()
+            .foreign_keys
+            .into_iter()
+            .map(|key| key.name)
+            .collect();
+        assert_ne!(names[2], names[3], "two unnamed keys stay two");
+    }
+
+    #[test]
+    fn a_key_into_another_catalog_is_left_out() {
+        let tables = ["ITEMS".to_string(), "ACCOUNTS".to_string()];
+        let key = |name: &str, catalogs: (Option<&str>, Option<&str>), schema: &str| {
+            let mut row = foreign("ITEMS", "A", "1", Some(name), (schema, "ACCOUNTS", "ID"));
+            (row[0], row[4]) = (
+                catalogs.0.map(str::to_string),
+                catalogs.1.map(str::to_string),
+            );
+            row
+        };
+        let rows = [
+            key("ELSEWHERE", (Some("OTHER_DB"), Some("HERE")), "S"),
+            key(
+                "ELSEWHERE_STUB",
+                (Some("OTHER_DB"), Some("HERE")),
+                "BILLING",
+            ),
+            key("SAME", (Some("HERE  "), Some("HERE")), "S"),
+            key("UNNAMED", (None, None), "S"),
+            key("HALF", (Some("OTHER_DB"), None), "S"),
+            key("NO_SCHEMAS", (Some("OTHER_DB"), Some("HERE")), ""),
+        ];
+        let graph = graph_from("S", &tables, &[], &[], &[], &rows);
+        let keys: Vec<&str> = graph
+            .foreign_keys
+            .iter()
+            .map(|key| key.name.as_str())
+            .collect();
+        assert_eq!(keys, ["SAME", "UNNAMED", "HALF", "NO_SCHEMAS"]);
+        assert_eq!(graph.foreign_keys[3].referenced_schema, "OTHER_DB");
+    }
+
+    #[test]
+    fn unnamed_keys_of_a_table_with_an_unnamed_composite_are_not_drawn() {
+        let tables = ["ITEMS".to_string(), "LOG".to_string()];
+        let rows = [
+            foreign("ITEMS", "A", "1", None, ("S", "LOG", "X")),
+            foreign("ITEMS", "B", "2", None, ("S", "LOG", "Y")),
+            foreign("ITEMS", "C", "1", Some("NAMED"), ("S", "LOG", "Z")),
+        ];
+        let graph = graph_from("S", &tables, &[], &[], &[], &rows);
+        let keys: Vec<&str> = graph
+            .foreign_keys
+            .iter()
+            .map(|key| key.name.as_str())
+            .collect();
+        assert_eq!(keys, ["NAMED"]);
     }
 
     #[test]

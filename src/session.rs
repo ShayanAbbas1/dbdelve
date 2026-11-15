@@ -253,7 +253,7 @@ impl Profile {
         match self.session.active_object() {
             Some(tab) => match &self.catalog {
                 CatalogState::Loaded(catalog, _) => {
-                    crate::explorer::object_row(catalog, &tab.schema, &tab.name, tab.kind)
+                    crate::explorer::object_row(catalog, &tab.schema, &tab.name, tab.kind?)
                 }
                 _ => None,
             },
@@ -270,6 +270,18 @@ impl Profile {
         self.schema_refresh == Some(self.generation)
     }
 
+    /// Whether this profile's schemas can be drawn. Asked of the live
+    /// connection, because a plugin draws only once it offered `graph`,
+    /// which its target cannot know; a built-in answers by its target,
+    /// connected or not.
+    pub(crate) fn draws_diagrams(&self) -> bool {
+        let target = self.config.target();
+        match &self.state {
+            ProfileState::Connected(connection) => connection.draws_diagrams(target),
+            _ => target.draws_diagrams(),
+        }
+    }
+
     pub(crate) fn connection(&self) -> Option<Connection> {
         match &self.state {
             ProfileState::Connected(connection) => Some((**connection).clone()),
@@ -277,7 +289,7 @@ impl Profile {
         }
     }
 
-    pub(crate) fn stored(&self) -> store::StoredProfile {
+    pub(crate) fn stored(&self, cx: &gpui::App) -> store::StoredProfile {
         let engine = self.config.engine();
         // Tabs read back from disk that the catalog has not named yet are still
         // the truth about this profile: writing the live list instead would
@@ -289,7 +301,7 @@ impl Profile {
             .iter()
             .map(|tab| store::StoredObject {
                 active: active == Tab::Object(tab.id),
-                ..tab.stored(engine)
+                ..tab.stored(engine, cx)
             })
             .collect::<Vec<_>>();
         // Both lists, because a restore now opens the relations first and
@@ -1226,7 +1238,9 @@ impl Session {
             None => self.active_query_tab().map(|tab| tab.shown().0),
             Some(tab) => match &tab.body {
                 ObjectBody::Relation { query, .. } => Some(query),
-                ObjectBody::Routine(_) | ObjectBody::Structure { .. } => None,
+                ObjectBody::Routine(_)
+                | ObjectBody::Structure { .. }
+                | ObjectBody::Diagram { .. } => None,
             },
         }
     }
@@ -1243,7 +1257,9 @@ impl Session {
             None => self.active_query_tab().map(|tab| tab.shown().1),
             Some(tab) => match &tab.body {
                 ObjectBody::Relation { results, .. } => Some(results),
-                ObjectBody::Routine(_) | ObjectBody::Structure { .. } => None,
+                ObjectBody::Routine(_)
+                | ObjectBody::Structure { .. }
+                | ObjectBody::Diagram { .. } => None,
             },
         }
     }
@@ -1302,7 +1318,9 @@ impl Session {
             Tab::Query(id) => self.query_tab(id).map(|tab| &tab.results),
             Tab::Object(id) => match &self.objects.iter().find(|tab| tab.id == id)?.body {
                 ObjectBody::Relation { results, .. } => Some(results),
-                ObjectBody::Routine(_) | ObjectBody::Structure { .. } => None,
+                ObjectBody::Routine(_)
+                | ObjectBody::Structure { .. }
+                | ObjectBody::Diagram { .. } => None,
             },
         }
     }
@@ -1318,7 +1336,9 @@ impl Session {
                 .find(|tab| tab.id == id)
                 .and_then(|tab| match &tab.body {
                     ObjectBody::Relation { query, .. } => Some(query),
-                    ObjectBody::Routine(_) | ObjectBody::Structure { .. } => None,
+                    ObjectBody::Routine(_)
+                    | ObjectBody::Structure { .. }
+                    | ObjectBody::Diagram { .. } => None,
                 }),
         };
         matches!(state, Some(QueryState::Running { .. }))
@@ -1330,7 +1350,9 @@ impl Session {
             Tab::Query(id) => self.query_tab(id).map(|tab| &tab.sorting),
             Tab::Object(id) => match &self.objects.iter().find(|tab| tab.id == id)?.body {
                 ObjectBody::Relation { sorting, .. } => Some(sorting),
-                ObjectBody::Routine(_) | ObjectBody::Structure { .. } => None,
+                ObjectBody::Routine(_)
+                | ObjectBody::Structure { .. }
+                | ObjectBody::Diagram { .. } => None,
             },
         }
     }
@@ -1340,7 +1362,9 @@ impl Session {
             Tab::Query(id) => self.query_tab_mut(id).map(|tab| &mut tab.sorting),
             Tab::Object(id) => match &mut self.objects.iter_mut().find(|tab| tab.id == id)?.body {
                 ObjectBody::Relation { sorting, .. } => Some(sorting),
-                ObjectBody::Routine(_) | ObjectBody::Structure { .. } => None,
+                ObjectBody::Routine(_)
+                | ObjectBody::Structure { .. }
+                | ObjectBody::Diagram { .. } => None,
             },
         }
     }
@@ -1366,7 +1390,9 @@ impl Session {
             })
             .chain(self.objects.iter().filter_map(|tab| match &tab.body {
                 ObjectBody::Relation { results, .. } => Some(results),
-                ObjectBody::Routine(_) | ObjectBody::Structure { .. } => None,
+                ObjectBody::Routine(_)
+                | ObjectBody::Structure { .. }
+                | ObjectBody::Diagram { .. } => None,
             }))
     }
 
@@ -1384,7 +1410,9 @@ impl Session {
             }
             Tab::Object(id) => match &mut self.objects.iter_mut().find(|tab| tab.id == id)?.body {
                 ObjectBody::Relation { query, results, .. } => Some((query, results.clone())),
-                ObjectBody::Routine(_) | ObjectBody::Structure { .. } => None,
+                ObjectBody::Routine(_)
+                | ObjectBody::Structure { .. }
+                | ObjectBody::Diagram { .. } => None,
             },
         }
     }
@@ -1497,6 +1525,7 @@ pub(crate) enum Focus {
     Field(Entity<InputState>),
     Grid(Entity<TableState<ResultGrid>>),
     Structure(Entity<TableState<StructureGrid>>),
+    Diagram(gpui::FocusHandle),
     /// The window itself, for a surface with nothing in it to type into. Not a
     /// no-op: a keystroke only reaches the workspace along the focused
     /// element's dispatch path, so focusing nothing at all is what makes every
@@ -2417,19 +2446,32 @@ pub(crate) struct ObjectTab {
     /// A relation's name, or a routine's name with its argument types — which
     /// is the only thing that tells two overloads of one function apart.
     pub(crate) name: String,
-    pub(crate) kind: ObjectKind,
+    /// `None` for a diagram, which is no sidebar row and must never answer
+    /// for one.
+    pub(crate) kind: Option<ObjectKind>,
     pub(crate) body: ObjectBody,
 }
 
 impl ObjectTab {
     /// Whether New row is offered here: on a relation the engine inserts into.
     pub(crate) fn takes_inserts(&self, target: Target) -> bool {
-        matches!(self.kind, ObjectKind::Relation(kind) if target.takes_inserts(kind))
+        matches!(self.kind, Some(ObjectKind::Relation(kind)) if target.takes_inserts(kind))
     }
 
     /// Whether Import Rows is offered here.
     pub(crate) fn takes_imports(&self, target: Target) -> bool {
-        matches!(self.kind, ObjectKind::Relation(kind) if target.takes_imports(kind))
+        matches!(self.kind, Some(ObjectKind::Relation(kind)) if target.takes_imports(kind))
+    }
+
+    /// What the tab strip calls the tab: its relation's or routine's name, and
+    /// a diagram's schema, since a diagram's own name is kept blank.
+    pub(crate) fn label(&self) -> &str {
+        match &self.body {
+            ObjectBody::Diagram { .. } => &self.schema,
+            ObjectBody::Relation { .. } | ObjectBody::Routine(_) | ObjectBody::Structure { .. } => {
+                &self.name
+            }
+        }
     }
 
     /// The `WHERE` this tab reads the relation under, and `""` for a routine
@@ -2438,7 +2480,9 @@ impl ObjectTab {
     pub(crate) fn filter(&self) -> &str {
         match &self.body {
             ObjectBody::Relation { filter, .. } => filter,
-            ObjectBody::Routine(_) | ObjectBody::Structure { .. } => "",
+            ObjectBody::Routine(_) | ObjectBody::Structure { .. } | ObjectBody::Diagram { .. } => {
+                ""
+            }
         }
     }
 
@@ -2450,11 +2494,19 @@ impl ObjectTab {
                 .iter()
                 .map(stored_filter)
                 .collect(),
-            ObjectBody::Routine(_) | ObjectBody::Structure { .. } => Vec::new(),
+            ObjectBody::Routine(_) | ObjectBody::Structure { .. } | ObjectBody::Diagram { .. } => {
+                Vec::new()
+            }
         }
     }
 
-    pub(crate) fn stored(&self, engine: Engine) -> store::StoredObject {
+    pub(crate) fn stored(&self, engine: Engine, cx: &gpui::App) -> store::StoredObject {
+        let diagram_view = match &self.body {
+            ObjectBody::Diagram { view, .. } => Some(view.read(cx).stored()),
+            ObjectBody::Relation { .. } | ObjectBody::Routine(_) | ObjectBody::Structure { .. } => {
+                None
+            }
+        };
         store::StoredObject {
             schema: self.schema.clone(),
             name: self.name.clone(),
@@ -2462,17 +2514,21 @@ impl ObjectTab {
             filter_engine: (!self.filter().is_empty()).then(|| engine.as_str().to_string()),
             origin: match &self.body {
                 ObjectBody::Structure { origin, .. } => origin.clone(),
-                ObjectBody::Relation { .. } | ObjectBody::Routine(_) => None,
+                ObjectBody::Relation { .. }
+                | ObjectBody::Routine(_)
+                | ObjectBody::Diagram { .. } => None,
             },
             // Nothing writes the two-field rows an older build did; they are
             // read once on the way in and superseded by `bars` on this save.
             filters: Vec::new(),
             bars: self.filters(engine),
-            routine: matches!(self.kind, ObjectKind::Routine(_)),
+            routine: matches!(self.kind, Some(ObjectKind::Routine(_))),
             structure: matches!(self.body, ObjectBody::Structure { .. }),
+            diagram: diagram_view.is_some(),
+            diagram_view,
             kind: match self.kind {
-                ObjectKind::Relation(kind) => kind,
-                ObjectKind::Routine(_) => RelationKind::default(),
+                Some(ObjectKind::Relation(kind)) => kind,
+                Some(ObjectKind::Routine(_)) | None => RelationKind::default(),
             },
             active: false,
         }
@@ -2713,6 +2769,18 @@ pub(crate) enum ObjectBody {
         origin: Option<String>,
     },
     Routine(Routine),
+    /// A schema's ER diagram. One per schema: the table in focus and where
+    /// the cards are are the view's state, not the tab's identity.
+    Diagram {
+        view: Entity<crate::diagram_view::DiagramView>,
+        /// The side connection the read runs on while it runs, so closing the
+        /// tab can cancel it. Dropped when the read lands, so an open diagram
+        /// holds no connection.
+        side: Option<std::sync::Arc<crate::workspace::SideRead<Connection>>>,
+        /// Read before a Refresh or a reconnect, so read again the next time
+        /// the tab is looked at, with the old diagram on screen meanwhile.
+        stale: bool,
+    },
 }
 
 /// A relation's row count, each state carrying the filter it was asked under so

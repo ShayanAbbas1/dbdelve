@@ -9,8 +9,8 @@ use turso_sdk_kit::rsapi::{
 
 use super::sqlite::{Schema, render_real};
 use super::{
-    Catalog, Column, DbError, Engine, Fetch, QueryResult, Reference, RowBuilder, Stopped,
-    Structure, plain_error,
+    Catalog, Column, DbError, Engine, Fetch, QueryResult, Reference, RowBuilder, SchemaGraph,
+    Stopped, Structure, plain_error,
 };
 
 pub const INTERRUPTED: &str = "interrupted";
@@ -264,6 +264,10 @@ impl Connection {
     pub fn ddl(&self, schema: &str, relation: &str) -> Result<String, DbError> {
         self.schema().ddl(schema, relation)
     }
+
+    pub fn schema_graph(&self, schema: &str) -> Result<SchemaGraph, DbError> {
+        self.schema().schema_graph(schema)
+    }
 }
 
 fn render(value: &Value) -> Option<Cow<'_, str>> {
@@ -306,6 +310,22 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    #[test]
+    fn a_schema_graph_reads_keys_through_the_pragma_functions() {
+        let graph = memory(crate::db::sqlite::graph_fixture::GRAPH_FIXTURE)
+            .schema_graph("main")
+            .expect("the graph should read");
+        crate::db::sqlite::graph_fixture::assert_graph_fixture(&graph);
+    }
+
+    #[test]
+    fn a_graph_reads_a_descending_integer_key_as_nullable_and_a_key_beside_an_index_named_alike() {
+        let graph = memory(crate::db::sqlite::graph_fixture::EDGE_FIXTURE)
+            .schema_graph("main")
+            .expect("the graph should read");
+        crate::db::sqlite::graph_fixture::assert_edge_fixture(&graph);
     }
 
     #[test]

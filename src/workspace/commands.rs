@@ -718,6 +718,9 @@ impl Workspace {
             }
             Command::RecallStatement(sql) => self.recall_statement(sql, window, cx),
             Command::ShowStructure(structure) => self.show_structure(structure, window, cx),
+            Command::ShowDiagram { schema, centre } => {
+                self.open_diagram(schema, centre, window, cx)
+            }
             Command::RefreshRelation(id) => self.refresh_relation(id, cx),
             Command::CountRows(id) => self.count_rows(id, cx),
             Command::NextPage => self.turn_page(true, cx),
@@ -739,6 +742,8 @@ impl Workspace {
             Command::NextEdit => self.next_edit(&NextEdit, window, cx),
             Command::PreviousEdit => self.previous_edit(&PreviousEdit, window, cx),
             Command::ExportResults(format) => self.export_results(format, cx),
+            Command::ExportDiagram(file) => self.export_front_diagram(file, cx),
+            Command::CopyDiagramMermaid => self.copy_front_diagram_mermaid(cx),
             Command::CancelExport => self.cancel_export(cx),
             Command::CopyRow => self.copy_row(&CopyRow, window, cx),
             Command::CopyResults(format) => self.copy_results_as(format, cx),
@@ -841,7 +846,7 @@ impl Workspace {
             Command::CopyDdl => {
                 let front = self.profile().and_then(|profile| {
                     let tab = profile.session.active_object()?;
-                    match tab.kind {
+                    match tab.kind? {
                         ObjectKind::Relation(kind) => {
                             Some((tab.schema.clone(), tab.name.clone(), kind))
                         }

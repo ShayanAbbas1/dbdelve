@@ -956,6 +956,22 @@ impl Workspace {
             cx.notify();
             return;
         }
+        // The find field first, then the focus: each `escape` puts one away.
+        if let Some(ObjectBody::Diagram { view, .. }) = self
+            .profile()
+            .and_then(|profile| profile.session.active_object())
+            .map(|tab| &tab.body)
+        {
+            let (finding, focused) = (view.read(cx).finding(), view.read(cx).has_focus());
+            if finding || focused {
+                let view = view.clone();
+                view.update(cx, |view, cx| match finding {
+                    true => view.close_find(window, cx),
+                    false => view.clear_focus(cx),
+                });
+                return;
+            }
+        }
         // Nothing of dbdelve's is stacked over the tab, so the keystroke is not
         // ours. Handing it on is what lets the completion popup close and a
         // grid cell's input cancel its edit; this binding is unscoped and would
@@ -965,7 +981,7 @@ impl Workspace {
     }
 
     /// Between the buffer and the rows it ran: to whichever the keyboard is
-    /// not in. On an object tab, which has no buffer, to its grid.
+    /// not in. On an object tab, which has no buffer, to its grid or canvas.
     pub(crate) fn toggle_results_focus(
         &mut self,
         _: &ToggleResultsFocus,
@@ -995,6 +1011,7 @@ impl Workspace {
                 crate::result_grid::take_keyboard(table, window, cx)
             }),
             Focus::Structure(grid) => grid.focus_handle(cx).focus(window, cx),
+            Focus::Diagram(handle) => handle.focus(window, cx),
             Focus::Buffer(editor) => editor.focus_handle(cx).focus(window, cx),
             Focus::Field(_) | Focus::Window => return,
         }
@@ -1031,6 +1048,9 @@ impl Workspace {
                     .then(|| Focus::Grid(results.clone()))
             }
             ObjectBody::Structure { grid, .. } => Some(Focus::Structure(grid.clone())),
+            ObjectBody::Diagram { view, .. } => {
+                Some(Focus::Diagram(view.read(cx).focus_handle().clone()))
+            }
             ObjectBody::Routine(_) => None,
         }
     }

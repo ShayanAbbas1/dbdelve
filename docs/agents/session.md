@@ -507,6 +507,38 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   and is parsed again on restore: a typed `EXPLAIN`'s are the snapshot's own
   rows, the Explain command's are kept beside the grid's, which still hold the
   last real run. Whether the pane was showing it comes back too.
+- **A diagram tab comes back as it was left, and its arrangement lives
+  beside `profiles.toml`.** The tab is a `StoredObject` with `diagram = true`
+  and a `diagram_view` table (view, centre, Keys only, zoom and pan); the cards
+  the user moved or sized go to `diagrams/<profile>/d-<database>.<schema>.toml`
+  (`store::write_diagram`), written at the end of a drag, so that however many
+  there are they never grow the file that is moved aside when it breaks. Names
+  are values in it, never keys, and the file name escapes both as a grid key
+  does; a pair whose escaped name would pass 255 bytes with its staging
+  suffix keeps a prefix and ends in `~` and a hash of the whole. The database is the one a pin names (`Profile::shortcut_database`):
+  blank where the catalog lists every database as a schema or the profile has
+  one, and while it is not known nothing is read or written, so a same-named
+  schema in another database never takes the arrangement. It belongs to the
+  schema, not the tab: closing the tab or switching database and back keeps
+  it, a dropped table leaves it on the next write, and it goes with the
+  profile. One that will not read is no arrangement. The
+  restored tab reads its graph again when shown and applies both then. Zoom
+  and pan change on every wheel and pinch event, too often to write each, so
+  those (and the keyboard's and a layout's moves) mark the profiles unsaved
+  and write them half a second after the last
+  (`Workspace::remember_profiles_soon`, one timer, replaced by each event);
+  quit and window close write `profiles.toml` only while that is pending, so
+  a session that never moved a diagram never puts its copy over one another
+  instance saved since. Every way in
+  (the palette, a schema's or a table's sidebar menu, a Structure tab's
+  Diagram button) goes through `Workspace::open_diagram`, which fronts the
+  schema's one tab; a table's way in also shows its neighbourhood
+  (`DiagramView::centre_on`), held as the restored centre until the first
+  read lands. Each is offered where `Profile::draws_diagrams` says, which asks
+  the live connection: a plugin draws only once it offered `graph`, which its
+  `Target` cannot know. So a restored diagram stays pending until the profile
+  says it draws, which on a plugin is after connecting; on a connection that
+  does not, it stays pending and on disk rather than being dropped.
 - **`clip` reads only the window a cell shows, not the whole value.**
   `ResultGrid::shown` clips a cell as it is drawn, on the frame thread, for
   every visible cell of every frame. Nothing clipped is kept: a stored second

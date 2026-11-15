@@ -372,6 +372,13 @@ keyring = "4"
 # The bundled fonts; Lucide icon data and Simple Icons brand logos for the
 # engines, since gpui-component ships no icon files.
 guic-gpui-assets = "=0.2.0"
+# The diagram's PNG export (`diagram::png`): its SVG rasterized with the
+# bundled fonts above loaded, which gpui's own `SvgRenderer` cannot be given,
+# its font database being private. Pinned to the version gpui-pre resolves,
+# so the graph links one copy. `text` sets the labels; `system-fonts` stands
+# in for a family the user picked that is not bundled, and gpui turns both on
+# already, so they add nothing to the build.
+resvg = { version = "=0.46.0", default-features = false, features = ["text", "system-fonts"] }
 icondata_lu = "=0.1.0"
 icondata_si = "=0.1.0"
 icondata_core = "=0.1.0"
@@ -473,6 +480,12 @@ winresource = "=0.1.31"
 # regions and every renderer (Metal, DirectX, wgpu) draws them. Every change is
 # marked `dbdelve patch`, in gpui-pre and its renderer crates alike; re-apply
 # them on a gpui bump.
+#
+# The three renderers also gather a frame's path vertices without a Vec grown
+# by doubling: Metal writes them straight into its instance buffer, wgpu and
+# DirectX reserve the Vec at its size. A far zoom over a wide diagram draws
+# millions a frame, and macOS kept each frame's realloc'd block in the
+# footprint. Drop these once upstream sizes the buffer up front.
 # The vendored wgpu renderer is a member only so CI can run its tests, and the
 # plugin crates so they share this lockfile and target directory;
 # default-members stays the root package, so plain cargo commands are unchanged.

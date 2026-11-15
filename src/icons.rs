@@ -24,7 +24,7 @@ use crate::db::Syntax;
 /// The gpui-component widgets ask for their own paths — those are Lucide names
 /// too, so they resolve here as well. Add a row when something asks for one;
 /// an unlisted path simply draws nothing.
-const ICONS: [(&str, &IconData); 82] = [
+const ICONS: [(&str, &IconData); 85] = [
     ("icons/git-fork.svg", icondata_lu::LuGitFork),
     ("icons/chevron-down.svg", icondata_lu::LuChevronDown),
     ("icons/chevron-right.svg", icondata_lu::LuChevronRight),
@@ -96,9 +96,12 @@ const ICONS: [(&str, &IconData); 82] = [
     ),
     ("icons/keyboard.svg", icondata_lu::LuKeyboard),
     ("icons/link.svg", icondata_lu::LuLink),
+    ("icons/network.svg", icondata_lu::LuNetwork),
     ("icons/import.svg", icondata_lu::LuImport),
     ("icons/ban.svg", icondata_lu::LuBan),
     ("icons/rotate-ccw.svg", icondata_lu::LuRotateCcw),
+    ("icons/scan.svg", icondata_lu::LuScan),
+    ("icons/download.svg", icondata_lu::LuDownload),
     ("icons/engine-postgres.svg", icondata_si::SiPostgresql),
     ("icons/engine-mysql.svg", icondata_si::SiMysql),
     ("icons/engine-mariadb.svg", icondata_si::SiMariadb),
@@ -198,6 +201,9 @@ pub mod icon {
     pub const FUNCTION: &str = "icons/square-function.svg";
     pub const PROCEDURE: &str = "icons/square-play.svg";
     pub const STRUCTURE: &str = "icons/list-tree.svg";
+    pub const DIAGRAM: &str = "icons/network.svg";
+    pub const FIT: &str = "icons/scan.svg";
+    pub const EXPORT: &str = "icons/download.svg";
     pub const PLUS: &str = "icons/plus.svg";
     pub const CHECK: &str = "icons/check.svg";
     pub const CLOSE: &str = "icons/close.svg";
@@ -365,6 +371,9 @@ mod tests {
             icon::FUNCTION,
             icon::PROCEDURE,
             icon::STRUCTURE,
+            icon::DIAGRAM,
+            icon::FIT,
+            icon::EXPORT,
             icon::PLUS,
             icon::CHECK,
             icon::CLOSE,

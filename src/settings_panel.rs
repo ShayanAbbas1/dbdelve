@@ -812,6 +812,7 @@ fn render_control(
                             ("default-sorting", client as usize),
                             label,
                             client == client_sort,
+                            true,
                             t,
                         )
                         .on_click(cx.listener(

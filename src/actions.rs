@@ -242,5 +242,15 @@ actions!(
         SubmitConnection,
         Quit,
         Minimize,
+        OpenDiagramTable,
+        OpenDiagramStructure,
+        FindInDiagram,
+        DiagramFindNext,
+        DiagramFindPrevious,
+        DiagramFindPick,
+        DiagramFocusLeft,
+        DiagramFocusRight,
+        DiagramFocusUp,
+        DiagramFocusDown,
     ]
 );

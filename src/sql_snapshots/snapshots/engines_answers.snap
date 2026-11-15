@@ -24,6 +24,7 @@ source: src/sql_snapshots.rs
 [postgres] switches_database => |true|
 [postgres] switches_database_in_session => |false|
 [postgres] picks_schema => |true|
+[postgres] draws_diagrams => |true|
 [postgres] edits_query_rows => |false|
 [postgres] sort_clause => |an ORDER BY|
 [postgres] raw_filter_placeholder => |SQL…|
@@ -179,6 +180,7 @@ source: src/sql_snapshots.rs
 [mysql] switches_database => |true|
 [mysql] switches_database_in_session => |false|
 [mysql] picks_schema => |false|
+[mysql] draws_diagrams => |true|
 [mysql] edits_query_rows => |false|
 [mysql] sort_clause => |an ORDER BY|
 [mysql] raw_filter_placeholder => |SQL…|
@@ -334,6 +336,7 @@ source: src/sql_snapshots.rs
 [mariadb] switches_database => |true|
 [mariadb] switches_database_in_session => |false|
 [mariadb] picks_schema => |false|
+[mariadb] draws_diagrams => |true|
 [mariadb] edits_query_rows => |false|
 [mariadb] sort_clause => |an ORDER BY|
 [mariadb] raw_filter_placeholder => |SQL…|
@@ -489,6 +492,7 @@ source: src/sql_snapshots.rs
 [sqlite] switches_database => |false|
 [sqlite] switches_database_in_session => |false|
 [sqlite] picks_schema => |false|
+[sqlite] draws_diagrams => |true|
 [sqlite] edits_query_rows => |false|
 [sqlite] sort_clause => |an ORDER BY|
 [sqlite] raw_filter_placeholder => |SQL…|
@@ -644,6 +648,7 @@ source: src/sql_snapshots.rs
 [turso] switches_database => |false|
 [turso] switches_database_in_session => |false|
 [turso] picks_schema => |false|
+[turso] draws_diagrams => |true|
 [turso] edits_query_rows => |false|
 [turso] sort_clause => |an ORDER BY|
 [turso] raw_filter_placeholder => |SQL…|
@@ -799,6 +804,7 @@ source: src/sql_snapshots.rs
 [duckdb] switches_database => |true|
 [duckdb] switches_database_in_session => |true|
 [duckdb] picks_schema => |true|
+[duckdb] draws_diagrams => |true|
 [duckdb] edits_query_rows => |false|
 [duckdb] sort_clause => |an ORDER BY|
 [duckdb] raw_filter_placeholder => |SQL…|
@@ -954,6 +960,7 @@ source: src/sql_snapshots.rs
 [snowflake] switches_database => |true|
 [snowflake] switches_database_in_session => |false|
 [snowflake] picks_schema => |true|
+[snowflake] draws_diagrams => |true|
 [snowflake] edits_query_rows => |false|
 [snowflake] sort_clause => |an ORDER BY|
 [snowflake] raw_filter_placeholder => |SQL…|
@@ -1109,6 +1116,7 @@ source: src/sql_snapshots.rs
 [clickhouse] switches_database => |true|
 [clickhouse] switches_database_in_session => |false|
 [clickhouse] picks_schema => |false|
+[clickhouse] draws_diagrams => |false|
 [clickhouse] edits_query_rows => |true|
 [clickhouse] sort_clause => |an ORDER BY|
 [clickhouse] raw_filter_placeholder => |SQL…|
@@ -1264,6 +1272,7 @@ source: src/sql_snapshots.rs
 [mssql] switches_database => |true|
 [mssql] switches_database_in_session => |false|
 [mssql] picks_schema => |false|
+[mssql] draws_diagrams => |true|
 [mssql] edits_query_rows => |false|
 [mssql] sort_clause => |an ORDER BY|
 [mssql] raw_filter_placeholder => |SQL…|
@@ -1419,6 +1428,7 @@ source: src/sql_snapshots.rs
 [mongodb] switches_database => |true|
 [mongodb] switches_database_in_session => |false|
 [mongodb] picks_schema => |false|
+[mongodb] draws_diagrams => |false|
 [mongodb] edits_query_rows => |false|
 [mongodb] sort_clause => |a sort|
 [mongodb] raw_filter_placeholder => |{ status: "active" }|
@@ -1574,6 +1584,7 @@ source: src/sql_snapshots.rs
 [redis] switches_database => |true|
 [redis] switches_database_in_session => |false|
 [redis] picks_schema => |false|
+[redis] draws_diagrams => |false|
 [redis] edits_query_rows => |true|
 [redis] sort_clause => |a sort|
 [redis] raw_filter_placeholder => |user:*|
@@ -1729,6 +1740,7 @@ source: src/sql_snapshots.rs
 [generic] switches_database => |false|
 [generic] switches_database_in_session => |false|
 [generic] picks_schema => |false|
+[generic] draws_diagrams => |false|
 [generic] edits_query_rows => |false|
 [generic] sort_clause => |an ORDER BY|
 [generic] raw_filter_placeholder => |SQL…|

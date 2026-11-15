@@ -369,6 +369,11 @@ pub struct StoredObject {
     /// A relation's structure tab rather than its rows.
     #[serde(default)]
     pub structure: bool,
+    /// A schema's ER diagram, named by [`Self::schema`] alone: [`Self::name`]
+    /// is empty and [`Self::diagram_view`] holds the rest. Left out when
+    /// false, so every other tab is written as it always was.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub diagram: bool,
     /// A relation's kind, which the catalog would otherwise be the only source
     /// of -- and waiting for it is what kept a restored relation out of the tab
     /// strip. Meaningless for a routine.
@@ -411,6 +416,61 @@ pub struct StoredObject {
     /// a routine.
     #[serde(default)]
     pub bars: Vec<StoredFilter>,
+    /// A diagram tab's view. A table, so after [`Self::bars`]; one this build
+    /// cannot read costs only itself, and the diagram opens fitted.
+    #[serde(default, deserialize_with = "readable_or_none")]
+    pub diagram_view: Option<StoredDiagram>,
+}
+
+/// How a diagram tab was being looked at. Where its cards were moved and
+/// what sizes they were given are not here but in a file of their own per
+/// schema ([`write_diagram`]), so that however many there are, they never
+/// grow the file that is moved aside when it breaks.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct StoredDiagram {
+    /// The table the neighbourhood view centres on; absent, the schema view.
+    #[serde(default)]
+    pub centre: Option<String>,
+    /// Absent until the diagram was first read, when the size of the schema
+    /// decides it.
+    #[serde(default)]
+    pub keys_only: Option<bool>,
+    /// The zoom, and the pan `x`, `y` it goes with, in pixels. Absent until
+    /// the diagram was first drawn, which fits it to the view.
+    #[serde(default)]
+    pub zoom: Option<f64>,
+    #[serde(default)]
+    pub x: f64,
+    #[serde(default)]
+    pub y: f64,
+}
+
+/// A card of a diagram that the user moved or sized, by its table's schema
+/// and name; each part is absent where the layout's own stands. Names are
+/// values here, never keys or paths, so any name is safe.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct StoredCard {
+    pub schema: String,
+    pub name: String,
+    #[serde(default)]
+    pub x: Option<f64>,
+    #[serde(default)]
+    pub y: Option<f64>,
+    #[serde(default)]
+    pub width: Option<f64>,
+    #[serde(default)]
+    pub height: Option<f64>,
+}
+
+#[derive(Deserialize)]
+struct DiagramFile {
+    #[serde(default, deserialize_with = "readable_entries")]
+    cards: Vec<StoredCard>,
+}
+
+#[derive(Serialize)]
+struct DiagramFileOut<'a> {
+    cards: &'a [StoredCard],
 }
 
 /// One filter bar on disk (spec §2.4). Every field defaults, so a bar written
@@ -1771,6 +1831,59 @@ pub fn prune_grids(profile_id: &str, live: &HashSet<String>) {
     }
 }
 
+/// The cards of `schema`'s diagram the user moved or sized, in `database`,
+/// which is none where a schema names its database or a profile has only
+/// one. A file that is not there, will not read or will not parse is none:
+/// the diagram is laid out afresh, which is all a lost arrangement costs.
+pub fn read_diagram(profile_id: &str, database: Option<&str>, schema: &str) -> Vec<StoredCard> {
+    let Ok(path) = diagram_path(profile_id, database, schema) else {
+        return Vec::new();
+    };
+    let Ok(text) = fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    match toml::from_str::<DiagramFile>(&text) {
+        Ok(file) => file.cards,
+        // Not the parser's message: it quotes the file, table names and all.
+        Err(_) => {
+            tracing::debug!("a diagram's saved arrangement did not parse");
+            Vec::new()
+        }
+    }
+}
+
+/// Writes `schema`'s arranged cards in `database` atomically, or with none
+/// left, removes the file.
+pub fn write_diagram(
+    profile_id: &str,
+    database: Option<&str>,
+    schema: &str,
+    cards: &[StoredCard],
+) -> Result<(), String> {
+    let path = diagram_path(profile_id, database, schema)?;
+    if cards.is_empty() {
+        return match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!("Could not delete {}: {error}", path.display())),
+        };
+    }
+    let text = toml::to_string(&DiagramFileOut { cards })
+        .map_err(|error| format!("Could not encode the diagram: {error}"))?;
+    write_file(&path, &text)
+}
+
+/// Every diagram arrangement a profile kept, on its way out with the
+/// profile, for the reason [`delete_grids`] gives.
+pub fn delete_diagrams(profile_id: &str) -> Result<(), String> {
+    let directory = diagrams_directory(profile_id)?;
+    match fs::remove_dir_all(&directory) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Could not delete {}: {error}", directory.display())),
+    }
+}
+
 /// A snapshot nothing ever wrote has no file to remove.
 pub fn remove_grid(profile_id: &str, key: &str) -> Result<(), String> {
     let path = grid_path(profile_id, key)?;
@@ -1951,6 +2064,57 @@ fn grids_directory(profile_id: &str) -> Result<PathBuf, String> {
         return Err(format!("Profile id {reason}."));
     }
     Ok(dbdelve_directory()?.join("grids").join(profile_id))
+}
+
+fn diagrams_directory(profile_id: &str) -> Result<PathBuf, String> {
+    if let Some(reason) = unsafe_component(profile_id) {
+        return Err(format!("Profile id {reason}."));
+    }
+    Ok(dbdelve_directory()?.join("diagrams").join(profile_id))
+}
+
+/// A database's and a schema's names can hold anything, so each is escaped
+/// ([`escape_file_name`]), `.` included, and the `.` between them is the only
+/// one in the name. Behind a prefix that keeps empty names a file name.
+///
+/// Escaping can triple a name, so a pair too long for one file name (255 bytes
+/// on ext4 and APFS, staging name included) keeps a prefix of its key and ends
+/// in `~` and a hash of the whole key. Escaping never writes `~`, so no key
+/// that fits can meet one cut short, and a key that fits keeps the name it
+/// always had.
+fn diagram_path(profile_id: &str, database: Option<&str>, schema: &str) -> Result<PathBuf, String> {
+    let mut key = format!(
+        "d-{}.{}",
+        escape_file_name(database.unwrap_or_default()),
+        escape_file_name(schema)
+    );
+    if key.len() > DIAGRAM_STEM_LIMIT {
+        let digest = ring::digest::digest(&ring::digest::SHA256, key.as_bytes());
+        let hash = hex::encode(&digest.as_ref()[..16]);
+        key.truncate(DIAGRAM_STEM_LIMIT - "~".len() - hash.len());
+        key = format!("{key}~{hash}");
+    }
+    Ok(diagrams_directory(profile_id)?.join(format!("{key}.toml")))
+}
+
+/// [`write_file_with`] stages beside the file as `<stem>.tmp-<pid>-<n>`: a
+/// `u32` pid and a `u64` counter put at most 36 bytes after the stem.
+const DIAGRAM_STEM_LIMIT: usize = 255 - ".tmp-".len() - 10 - "-".len() - 20;
+
+/// Like [`escape_grid_key`], but upper-case letters are escaped too and the
+/// hex is lower-case, so nothing it writes has a letter to fold: on a
+/// case-insensitive file system (macOS, Windows) `"Sales"` and `"sales"`
+/// would otherwise share one file.
+fn escape_file_name(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'-' {
+            escaped.push(byte as char);
+        } else {
+            escaped.push_str(&format!("%{byte:02x}"));
+        }
+    }
+    escaped
 }
 
 fn grid_path(profile_id: &str, key: &str) -> Result<PathBuf, String> {
@@ -3195,6 +3359,8 @@ user = "shayan"
                     name: "accounts".into(),
                     routine: false,
                     structure: false,
+                    diagram: false,
+                    diagram_view: None,
                     kind: RelationKind::MaterializedView,
                     filter: String::new(),
                     filter_engine: None,
@@ -3208,6 +3374,8 @@ user = "shayan"
                     name: "total(integer)".into(),
                     routine: true,
                     structure: false,
+                    diagram: false,
+                    diagram_view: None,
                     kind: RelationKind::default(),
                     filter: String::new(),
                     filter_engine: None,
@@ -3382,6 +3550,8 @@ open_objects = []
                 name: "accounts".into(),
                 routine: false,
                 structure: false,
+                diagram: false,
+                diagram_view: None,
                 kind: RelationKind::Table,
                 filter: String::new(),
                 filters: Vec::new(),
@@ -3900,6 +4070,8 @@ folder = "Hot"
                 name: "accounts".into(),
                 routine: false,
                 structure: false,
+                diagram: false,
+                diagram_view: None,
                 kind: RelationKind::Table,
                 filter: String::new(),
                 filter_engine: None,
@@ -3983,6 +4155,8 @@ folder = "Hot"
                 name: "accounts".into(),
                 routine: false,
                 structure: false,
+                diagram: false,
+                diagram_view: None,
                 kind: RelationKind::Table,
                 filter: String::new(),
                 filter_engine: None,
@@ -4170,6 +4344,8 @@ open_objects = []
                 name: "accounts".into(),
                 routine: false,
                 structure: false,
+                diagram: false,
+                diagram_view: None,
                 kind: RelationKind::Table,
                 filter: String::new(),
                 filter_engine: None,
@@ -5002,6 +5178,8 @@ open_objects = []
                 name: "accounts".into(),
                 routine: false,
                 structure: false,
+                diagram: false,
+                diagram_view: None,
                 kind: RelationKind::Table,
                 filter: String::new(),
                 filter_engine: None,
@@ -5293,6 +5471,8 @@ name = \"accounts\"
             name: "customers".into(),
             routine: false,
             structure: true,
+            diagram: false,
+            diagram_view: None,
             kind: RelationKind::Table,
             filter: String::new(),
             filter_engine: None,
@@ -5313,6 +5493,241 @@ name = \"accounts\"
             .join("\n");
         let decoded: StoredObject = toml::from_str(&older).expect("an older object must decode");
         assert_eq!(decoded.origin, None);
+    }
+
+    #[test]
+    fn a_diagram_tab_survives_the_round_trip_in_profiles_toml_beside_a_relation() {
+        let relation = StoredObject {
+            schema: "public".into(),
+            name: "customers".into(),
+            routine: false,
+            structure: false,
+            diagram: false,
+            diagram_view: None,
+            kind: RelationKind::Table,
+            filter: String::new(),
+            filter_engine: None,
+            origin: None,
+            filters: Vec::new(),
+            active: false,
+            bars: vec![StoredFilter {
+                column: "id".into(),
+                value: "1".into(),
+                ..Default::default()
+            }],
+        };
+        let diagram = StoredObject {
+            name: String::new(),
+            diagram: true,
+            diagram_view: Some(StoredDiagram {
+                centre: Some("orders".into()),
+                keys_only: Some(true),
+                zoom: Some(0.75),
+                x: -120.5,
+                y: 40.0,
+            }),
+            active: true,
+            bars: Vec::new(),
+            ..relation.clone()
+        };
+        let mut profile = a_stored_profile();
+        profile.open_objects = vec![relation.clone(), diagram.clone()];
+
+        let text = written_alone(profile.clone());
+        let decoded = decode_profiles(&text, &[]).expect("profiles must decode");
+        assert_eq!(decoded.profiles, vec![profile]);
+        let relation_text = toml::to_string(&relation).expect("an object must encode");
+        assert!(
+            !relation_text.contains("diagram"),
+            "every other tab is written as before:\n{relation_text}"
+        );
+
+        let unreadable = text.replace("zoom = 0.75", "zoom = \"close\"");
+        assert_ne!(unreadable, text);
+        let decoded = decode_profiles(&unreadable, &[]).expect("a bad view costs only itself");
+        let restored = &decoded.profiles[0].open_objects[1];
+        assert!(restored.diagram && restored.active);
+        assert_eq!(restored.diagram_view, None);
+    }
+
+    #[test]
+    fn a_diagrams_arrangement_round_trips_in_a_file_of_its_own_whatever_the_names() {
+        with_home(|| {
+            let cards = vec![
+                StoredCard {
+                    schema: "public".into(),
+                    name: "orders".into(),
+                    x: Some(12.5),
+                    y: Some(-40.0),
+                    width: None,
+                    height: Some(82.0),
+                },
+                StoredCard {
+                    schema: "a/b.c".into(),
+                    name: "line \"items\"\n".into(),
+                    x: None,
+                    y: None,
+                    width: Some(301.25),
+                    height: None,
+                },
+            ];
+            // `a.b` + `c` and `a` + `b.c` must not meet on one file.
+            let diagrams = [
+                (None, "public"),
+                (None, ""),
+                (None, "../x"),
+                (None, ".hidden"),
+                (None, "a%2Eb"),
+                (Some("a.b"), "c"),
+                (Some("a"), "b.c"),
+                (Some("other"), "public"),
+                (Some("../y"), "public"),
+                (None, "Sales"),
+                (None, "sales"),
+                (Some("Shop"), "x"),
+                (Some("shop"), "x"),
+            ];
+            for (database, schema) in diagrams {
+                write_diagram("dev", database, schema, &cards).expect("an arrangement must write");
+            }
+            for (database, schema) in diagrams {
+                assert_eq!(
+                    read_diagram("dev", database, schema),
+                    cards,
+                    "{database:?} {schema:?}"
+                );
+            }
+            let directory = dbdelve_directory().unwrap().join("diagrams").join("dev");
+            assert_eq!(
+                fs::read_dir(&directory).unwrap().count(),
+                diagrams.len(),
+                "no two diagrams share a file and none lands outside"
+            );
+            let folded: HashSet<String> = fs::read_dir(&directory)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().to_lowercase())
+                .collect();
+            assert_eq!(
+                folded.len(),
+                diagrams.len(),
+                "nor would on a file system that folds case: {folded:?}"
+            );
+            assert_eq!(read_diagram("dev", None, "never"), Vec::new());
+
+            write_diagram("dev", Some("other"), "public", &[]).expect("none left removes the file");
+            assert_eq!(read_diagram("dev", Some("other"), "public"), Vec::new());
+            assert_eq!(
+                read_diagram("dev", None, "public"),
+                cards,
+                "the same schema in another database keeps its own"
+            );
+            assert_eq!(
+                fs::read_dir(&directory).unwrap().count(),
+                diagrams.len() - 1
+            );
+
+            delete_diagrams("dev").expect("the profile's arrangements must be removable");
+            assert!(!directory.exists(), "they go with the profile");
+            assert_eq!(read_diagram("dev", None, "a.b"), Vec::new());
+            delete_diagrams("dev").expect("none left is not a failure");
+        });
+    }
+
+    #[test]
+    fn an_arrangement_for_names_too_long_to_escape_into_a_file_name_still_saves() {
+        with_home(|| {
+            let card = StoredCard {
+                schema: "public".into(),
+                name: "orders".into(),
+                x: Some(1.0),
+                y: None,
+                width: None,
+                height: None,
+            };
+            let long = "S".repeat(63);
+            let other = format!("{}T", "S".repeat(62));
+            let diagrams = [
+                (Some(long.as_str()), long.as_str()),
+                (Some(long.as_str()), other.as_str()),
+                (None, long.as_str()),
+            ];
+            for (database, schema) in diagrams {
+                let path = diagram_path("dev", database, schema).unwrap();
+                let staging = path.with_extension(format!("tmp-{}-{}", u32::MAX, u64::MAX));
+                for name in [&path, &staging] {
+                    let length = name.file_name().unwrap().len();
+                    assert!(length <= 255, "{length} bytes: {}", name.display());
+                }
+                write_diagram("dev", database, schema, std::slice::from_ref(&card))
+                    .expect("an arrangement must write");
+            }
+            for (database, schema) in diagrams {
+                assert_eq!(read_diagram("dev", database, schema), vec![card.clone()]);
+            }
+            let directory = dbdelve_directory().unwrap().join("diagrams").join("dev");
+            assert_eq!(
+                fs::read_dir(&directory).unwrap().count(),
+                diagrams.len(),
+                "names alike up to the cut still get a file each"
+            );
+            assert_eq!(
+                diagram_path("dev", Some("Shop"), "public").unwrap(),
+                directory.join("d-%53hop.public.toml"),
+                "a name that fits keeps the name it always had"
+            );
+            delete_diagrams("dev").unwrap();
+        });
+    }
+
+    #[test]
+    fn an_arrangement_filed_by_schema_alone_is_never_taken_for_one_filed_by_database() {
+        with_home(|| {
+            let directory = dbdelve_directory().unwrap().join("diagrams").join("dev");
+            fs::create_dir_all(&directory).unwrap();
+            let text = toml::to_string(&DiagramFileOut {
+                cards: &[StoredCard {
+                    schema: "public".into(),
+                    name: "orders".into(),
+                    ..StoredCard::default()
+                }],
+            })
+            .unwrap();
+            fs::write(directory.join("d-public.toml"), &text).unwrap();
+            for database in [None, Some(""), Some("public")] {
+                assert_eq!(read_diagram("dev", database, "public"), Vec::new());
+                assert_eq!(read_diagram("dev", database, ""), Vec::new());
+            }
+            delete_diagrams("dev").unwrap();
+        });
+    }
+
+    #[test]
+    fn a_broken_arrangement_is_no_arrangement_and_a_bad_card_costs_itself() {
+        with_home(|| {
+            let card = StoredCard {
+                schema: "public".into(),
+                name: "orders".into(),
+                x: Some(1.0),
+                y: Some(2.0),
+                width: None,
+                height: None,
+            };
+            write_diagram("dev", None, "public", std::slice::from_ref(&card)).unwrap();
+            let path = diagram_path("dev", None, "public").unwrap();
+
+            fs::write(&path, "[[cards]\nschema = ").unwrap();
+            assert_eq!(read_diagram("dev", None, "public"), Vec::new());
+
+            let text = toml::to_string(&DiagramFileOut {
+                cards: std::slice::from_ref(&card),
+            })
+            .unwrap();
+            fs::write(&path, format!("{text}\n[[cards]]\nschema = 7\n")).unwrap();
+            assert_eq!(read_diagram("dev", None, "public"), vec![card]);
+
+            // The profiles file never reads it, so it cannot break that.
+            delete_diagrams("dev").unwrap();
+        });
     }
 
     #[test]
@@ -5359,6 +5774,8 @@ name = \"accounts\"
                     name: "customers".into(),
                     routine: false,
                     structure: false,
+                    diagram: false,
+                    diagram_view: None,
                     kind: RelationKind::Table,
                     filter: String::new(),
                     filter_engine: None,
@@ -5372,6 +5789,8 @@ name = \"accounts\"
                     name: "customers".into(),
                     routine: false,
                     structure: false,
+                    diagram: false,
+                    diagram_view: None,
                     kind: RelationKind::Table,
                     filter: r#""id" = '42'"#.into(),
                     filter_engine: Some("postgres".into()),
@@ -5415,6 +5834,8 @@ name = \"accounts\"
             name: "customers".into(),
             routine: false,
             structure: false,
+            diagram: false,
+            diagram_view: None,
             kind: RelationKind::Table,
             filter: r#"("state" = 'it''s ok') OR ("tier" LIKE '%2%' ESCAPE '\')"#.into(),
             filter_engine: Some("postgres".into()),
