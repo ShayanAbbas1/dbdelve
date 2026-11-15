@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use gpui::{App, AppContext, Context, Entity, SharedString, Subscription, Task, TextAlign, Window};
-use gpui_component::input::{InputEvent, InputState};
+use gpui_component::input::{InputEvent, InputState, TextareaState};
 
 use crate::{
     Workspace,
@@ -107,6 +107,10 @@ pub(crate) struct ConnectionForm {
     /// Which connect-time loads run, read on save for every target as the
     /// statement timeout is.
     pub(crate) depth: Depth,
+    /// SQL run on every session opened for this connection, where
+    /// `Target::takes_startup_script`. Kept, not read, under any other target,
+    /// as another engine's fields are.
+    pub(crate) startup_script: Entity<TextareaState>,
     /// An input to focus once it has been mounted.
     ///
     /// A picker can unmount the field the user was typing in, and a window with
@@ -227,6 +231,11 @@ impl ConnectionForm {
         };
 
         let url = cx.new(|cx| InputState::new(window, cx).placeholder("Paste a connection URL"));
+        let startup_script = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(3, 12)
+                .placeholder("SET search_path TO app, public;")
+        });
         let name = cx.new(|cx| {
             InputState::new(window, cx).default_value(value(
                 server
@@ -490,6 +499,7 @@ impl ConnectionForm {
             login_database: mongo.and_then(|mongo| mongo.login_database.clone()),
             statement_timeout,
             depth: Depth::default(),
+            startup_script,
             error: None,
             test: None,
             notice: None,
@@ -527,6 +537,9 @@ impl ConnectionForm {
         form.editing = Some(profile.id.clone());
         form.color = profile.color;
         form.depth = profile.behaviour.depth;
+        form.startup_script.update(cx, |input, cx| {
+            input.set_value(profile.behaviour.startup_script.clone(), window, cx);
+        });
         // No `form.mode` here: the mode dropdown draws only on a fresh form and
         // `save_profile` has no mode to take, so copying it in was a write
         // nothing ever read. The titlebar picker is where an existing
@@ -567,6 +580,9 @@ impl ConnectionForm {
         let mut form = Self::new(Some(&config), window, cx);
         form.color = profile.color;
         form.depth = profile.behaviour.depth;
+        form.startup_script.update(cx, |input, cx| {
+            input.set_value(profile.behaviour.startup_script.clone(), window, cx);
+        });
         form.mode = starting_mode(Some(profile.mode));
         form.shortcuts = profile.shortcuts.duplicated();
         form.folds = profile.folds.clone();
@@ -578,8 +594,14 @@ impl ConnectionForm {
 
     /// What the profile does with its connection, as the form has it. Applied
     /// by `Workspace::set_behaviour` after the profile is saved.
-    pub(crate) fn behaviour(&self, _cx: &App) -> Result<Behaviour, String> {
-        Ok(Behaviour { depth: self.depth })
+    pub(crate) fn behaviour(&self, cx: &App) -> Result<Behaviour, String> {
+        Ok(Behaviour {
+            depth: self.depth,
+            startup_script: match self.target().takes_startup_script() {
+                true => self.startup_script.read(cx).value().to_string(),
+                false => String::new(),
+            },
+        })
     }
 
     pub(crate) fn config(&self, cx: &App) -> Result<(String, ConnectionConfig), String> {
@@ -1391,6 +1413,37 @@ mod tests {
             String::new(),
             String::new(),
         ]
+    }
+
+    #[test]
+    fn session_rows_are_asked_of_the_target() {
+        use crate::db::{Driver, Engine, Target};
+
+        for engine in Engine::ALL {
+            let takes = matches!(
+                engine,
+                Engine::Postgres
+                    | Engine::MySql
+                    | Engine::MariaDb
+                    | Engine::SqlServer
+                    | Engine::Sqlite
+                    | Engine::Turso
+                    | Engine::DuckDb
+            );
+            assert_eq!(
+                Target::built_in(engine).takes_startup_script(),
+                takes,
+                "{engine:?}"
+            );
+        }
+        let plugin = Target {
+            engine: Engine::Postgres,
+            driver: Driver::Plugin(crate::store::tests::odbc_plugin()),
+        };
+        assert!(
+            !plugin.takes_startup_script(),
+            "a plugin owns its process, whatever dialect it speaks"
+        );
     }
 
     #[test]

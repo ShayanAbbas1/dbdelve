@@ -182,6 +182,12 @@ pub struct StoredProfile {
     /// costs this one field and nothing else. A scalar, so it comes before `ssh`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub introspection_depth: Option<String>,
+    /// User SQL run on connect and on every session beside it, gated first.
+    /// Plain text like the query history, not a secret store; a hand-edited
+    /// one is judged at every connect, never trusted from disk. A scalar, so
+    /// it comes before `ssh`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_script: Option<String>,
     /// The SSH tunnel this profile dials through, or absent for a direct
     /// connection -- which is every profile written before tunnels existed. A
     /// table, so it has to come after every scalar above. Nothing secret is in
@@ -3504,6 +3510,7 @@ user = "shayan"
                 include_databases: Vec::new(),
                 include_schemas: Vec::new(),
                 introspection_depth: None,
+                startup_script: None,
                 ssh: None,
                 open_queries: Vec::new(),
                 open_objects: Vec::new(),
@@ -3568,6 +3575,7 @@ user = "shayan"
             include_databases: Vec::new(),
             include_schemas: Vec::new(),
             introspection_depth: None,
+            startup_script: None,
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![
@@ -3720,6 +3728,7 @@ open_objects = []
             include_databases: Vec::new(),
             include_schemas: Vec::new(),
             introspection_depth: None,
+            startup_script: None,
             ssh: None,
             open_queries: Vec::new(),
             open_objects: Vec::new(),
@@ -3889,6 +3898,43 @@ open_objects = []
             !golden.contains("introspection_depth"),
             "the fixtures hold no such key"
         );
+    }
+
+    #[test]
+    fn the_startup_script_round_trips_before_ssh() {
+        let mut profile = a_stored_profile();
+        profile.startup_script =
+            Some("SET search_path TO app, public;\nSET TIME ZONE 'UTC';".into());
+        profile.ssh = Some(SshTunnel {
+            host: "bastion".into(),
+            ..Default::default()
+        });
+        let text = written_alone(profile.clone());
+        let script = text.find("startup_script").expect("the script is written");
+        let tunnel = text.find("[profiles.ssh]").expect("and the tunnel");
+        assert!(
+            script < tunnel,
+            "TOML cannot emit a scalar after a table, so it comes before `ssh`:\n{text}"
+        );
+        let decoded = decode_profiles(&text, &[]).expect("the file loads");
+        assert_eq!(
+            decoded.profiles[0].startup_script, profile.startup_script,
+            "a script comes back byte for byte"
+        );
+        assert_eq!(
+            written_alone(decoded.profiles[0].clone()),
+            text,
+            "saving what was saved changes nothing"
+        );
+
+        let bare = written_alone(a_stored_profile());
+        assert!(
+            !bare.contains("startup_script"),
+            "a profile with none is written as it always was:\n{bare}"
+        );
+        let golden = include_str!("testdata/every-engine.resaved.toml");
+        assert_eq!(resaved(include_str!("testdata/every-engine.toml")), golden);
+        assert!(!golden.contains("startup_script"));
     }
 
     #[test]
@@ -4449,6 +4495,7 @@ folder = "Hot"
             include_databases: Vec::new(),
             include_schemas: Vec::new(),
             introspection_depth: None,
+            startup_script: None,
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![StoredObject {
@@ -4540,6 +4587,7 @@ folder = "Hot"
             include_databases: Vec::new(),
             include_schemas: Vec::new(),
             introspection_depth: None,
+            startup_script: None,
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![StoredObject {
@@ -4617,6 +4665,7 @@ folder = "Hot"
             include_databases: Vec::new(),
             include_schemas: Vec::new(),
             introspection_depth: None,
+            startup_script: None,
             ssh: None,
             open_queries: Vec::new(),
             open_objects: Vec::new(),
@@ -4740,6 +4789,7 @@ open_objects = []
             include_databases: Vec::new(),
             include_schemas: Vec::new(),
             introspection_depth: None,
+            startup_script: None,
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![StoredObject {
@@ -4891,6 +4941,7 @@ open_objects = []
                     include_databases: Vec::new(),
                     include_schemas: Vec::new(),
                     introspection_depth: None,
+                    startup_script: None,
                     ssh: None,
                     open_queries: Vec::new(),
                     open_objects: Vec::new(),
@@ -4935,6 +4986,7 @@ open_objects = []
                     include_databases: Vec::new(),
                     include_schemas: Vec::new(),
                     introspection_depth: None,
+                    startup_script: None,
                     ssh: None,
                     open_queries: Vec::new(),
                     open_objects: Vec::new(),
@@ -5761,6 +5813,7 @@ open_objects = []
             include_databases: Vec::new(),
             include_schemas: Vec::new(),
             introspection_depth: None,
+            startup_script: None,
             ssh: None,
             open_queries: vec![
                 StoredQueryTab {
@@ -6385,6 +6438,7 @@ name = \"accounts\"
             include_databases: Vec::new(),
             include_schemas: Vec::new(),
             introspection_depth: None,
+            startup_script: None,
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![
@@ -6518,6 +6572,7 @@ name = \"accounts\"
             include_databases: Vec::new(),
             include_schemas: Vec::new(),
             introspection_depth: None,
+            startup_script: None,
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![object],
