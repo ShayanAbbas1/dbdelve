@@ -24,7 +24,7 @@ use super::editing::Short;
 use super::*;
 use crate::db::{Column, Feed, Fetch, QueryResult, Row};
 use crate::export::{FileAs, InsertTarget, Writer};
-use crate::session::{ExportProgress, Exporting, PendingExport, Refetch};
+use crate::session::{BoundSession, ExportProgress, Exporting, PendingExport, Refetch};
 use crate::sql::Destructive;
 use crate::ui::code_lines;
 
@@ -234,7 +234,7 @@ impl Workspace {
             &refetch,
             profile.mode,
             &profile.confirmed,
-            profile.in_turn().is_some(),
+            in_turn(profile, &refetch),
         ) {
             Some(reason) => Err(reason),
             None => Ok(refetch),
@@ -432,7 +432,7 @@ impl Workspace {
                 &refetch,
                 profile.mode,
                 &profile.confirmed,
-                profile.in_turn().is_some(),
+                in_turn(profile, &refetch),
             ),
         };
         let routed = profile.route(refetch.binding.clone());
@@ -740,6 +740,20 @@ fn relation_refetch(
         generated: true,
         binding: None,
     })
+}
+
+/// Whether a transaction or a session setting is open where `refetch`'s rows
+/// came from: the session of the database a bound relation was read over,
+/// which every tab bound to it shares, else the profile's own connection. One
+/// is never seen from the other.
+fn in_turn(profile: &Profile, refetch: &Refetch) -> bool {
+    match &refetch.binding {
+        Some(binding) => match profile.bound.get(&binding.database) {
+            Some(BoundSession::Open(session)) => session.changed(),
+            _ => false,
+        },
+        None => profile.in_turn().is_some(),
+    }
 }
 
 /// Why fetching every row of `refetch` again for an export is refused, or

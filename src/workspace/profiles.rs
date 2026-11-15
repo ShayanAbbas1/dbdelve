@@ -1191,6 +1191,8 @@ impl Workspace {
                         return;
                     }
                 }
+                // The tree reads the same list for its database rows.
+                workspace.rebuild_connections(cx);
                 // Moved to another connection while the list was coming: the
                 // palette would open over that one's databases. And
                 // `open_palette` toggles, so one already up -- a second press,
@@ -2347,7 +2349,8 @@ impl Workspace {
         let task = spawn_blocking(cx.background_executor(), {
             let session = session.clone();
             move || {
-                let result = session.connection.catalog();
+                let result = metadata_reader(&session.connection, session.in_transaction())
+                    .and_then(|reader| reader.catalog());
                 let lost = result.is_err() && session.connection.is_lost();
                 (result, lost)
             }
@@ -2424,7 +2427,10 @@ impl Workspace {
         };
         let task = spawn_blocking(cx.background_executor(), {
             let session = session.clone();
-            move || session.connection.routines()
+            move || {
+                metadata_reader(&session.connection, session.in_transaction())
+                    .and_then(|reader| reader.routines())
+            }
         });
         let (id, database) = (id.to_string(), database.to_string());
         cx.spawn(async move |workspace, cx| {
@@ -2511,7 +2517,10 @@ impl Workspace {
         }
         let task = spawn_blocking(cx.background_executor(), {
             let session = session.clone();
-            move || session.connection.sizes()
+            move || {
+                metadata_reader(&session.connection, session.in_transaction())
+                    .and_then(|reader| reader.sizes())
+            }
         });
         let (id, database) = (id.to_string(), database.to_string());
         cx.spawn(async move |workspace, cx| {
@@ -3150,6 +3159,17 @@ enum ProjectChoice {
     /// An existing project, or `None` for No project.
     In(Option<String>),
     New,
+}
+
+/// The connection a read of a database's metadata goes on: its session, or,
+/// while a tab's transaction is open on that session, one apart, as
+/// `refresh_schema` reads beside the profile's own. A failed read inside the
+/// transaction fails it on Postgres.
+fn metadata_reader(session: &Connection, in_transaction: bool) -> Result<Connection, DbError> {
+    match in_transaction {
+        true => session.apart(),
+        false => Ok(session.clone()),
+    }
 }
 
 /// The connection a stored profile describes and any notice it opens with, or,

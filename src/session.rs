@@ -16,7 +16,7 @@ use std::{
     rc::Rc,
     sync::{
         Arc, Mutex, PoisonError,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -375,6 +375,24 @@ impl Profile {
     pub(crate) fn drop_sessions(&mut self) {
         self.bound.clear();
         self.database_catalogs.clear();
+    }
+
+    /// Why an edit under `binding` is not sent, as far as is known before it
+    /// goes ([`Bound::write_refusal`]); [`Bound::edit`] asks again once it is
+    /// the edit's turn on the session.
+    pub(crate) fn bound_write_refusal(&self, binding: &Binding) -> Option<String> {
+        match self.bound.get(&binding.database) {
+            Some(BoundSession::Open(bound)) => bound.write_refusal(&binding.database),
+            _ => None,
+        }
+    }
+
+    /// The connection a Cancel for `tab` is sent over: the session its
+    /// statement runs on, which for a bound tab is not the profile's own. What
+    /// MongoDB keeps of a running statement, and ClickHouse's fallback, is on
+    /// that session and nowhere else.
+    pub(crate) fn connection_to_stop(&self, tab: Tab) -> Option<Connection> {
+        self.connection_for(tab).existing().cloned()
     }
 
     /// Where a run of `tab` goes. See [`Profile::route`].
@@ -913,6 +931,16 @@ pub(crate) struct ImportDialog {
 }
 
 impl ImportDialog {
+    /// The table as the dialog names it: with its database when that is not
+    /// the connection's own, where `public.t` of two databases would read the
+    /// same.
+    pub(crate) fn target_name(&self) -> String {
+        match &self.database {
+            Some(database) => format!("{database}.{}.{}", self.schema, self.table),
+            None => format!("{}.{}", self.schema, self.table),
+        }
+    }
+
     /// Where the import runs: on the session of its table's database, when
     /// that is not the connection's own.
     pub(crate) fn binding(&self) -> Option<Binding> {
@@ -1819,6 +1847,20 @@ pub(crate) struct Bound {
     /// on the profile's own connection. A line of its own, so a hold here
     /// waits behind nothing running on another session.
     pub(crate) holds: HoldLine,
+    /// Whether a statement of a tab's has left a transaction open on this
+    /// session, read off what was sent as [`Profile::in_transaction`] is.
+    /// Every tab bound to the database shares it, so a write of dbdelve's
+    /// from another tab would run inside it ([`Bound::edit`]).
+    transaction: AtomicBool,
+    /// Whether one has changed the session in a way that lasts as long as it
+    /// does, as [`Profile::session_changed`] says of the profile's own. The
+    /// binding is put back before each run; a `SET ROLE` is not.
+    settings: AtomicBool,
+    /// Taken by a statement of a tab's that opens or ends a transaction, for
+    /// as long as it runs, and by an edit of dbdelve's, which reads
+    /// `transaction` under it: an edit waiting its turn on the session cannot
+    /// be overtaken by a `BEGIN` it would then run inside.
+    turn: Mutex<()>,
 }
 
 impl Bound {
@@ -1826,6 +1868,79 @@ impl Bound {
         Arc::new(Self {
             connection,
             holds: HoldLine::default(),
+            transaction: AtomicBool::new(false),
+            settings: AtomicBool::new(false),
+            turn: Mutex::new(()),
+        })
+    }
+
+    pub(crate) fn in_transaction(&self) -> bool {
+        self.transaction.load(Ordering::SeqCst)
+    }
+
+    /// Whether a transaction or a changed setting means a session of its own
+    /// would not read what this one does.
+    pub(crate) fn changed(&self) -> bool {
+        self.in_transaction() || self.settings.load(Ordering::SeqCst)
+    }
+
+    /// Runs a statement of a tab's that leaves `transaction` (`sql::leaves`:
+    /// `Some(true)` opens one, `Some(false)` ends it) and, with `settings`,
+    /// changes the session. One that opens a transaction or changes a setting
+    /// is marked before it is sent, as one that fails part way may still have
+    /// done either; one that ends a transaction is marked once it has run, and
+    /// only if it succeeded. A COMMIT cancelled before it was sent leaves the
+    /// transaction open, and nothing in the error tells that from one the
+    /// server refused, so a failed one keeps edits refused until a ROLLBACK or
+    /// COMMIT goes through.
+    pub(crate) fn leave<T>(
+        &self,
+        transaction: Option<bool>,
+        settings: bool,
+        run: impl FnOnce() -> Result<T, DbError>,
+    ) -> Result<T, DbError> {
+        if settings {
+            self.settings.store(true, Ordering::SeqCst);
+        }
+        let Some(open) = transaction else {
+            return run();
+        };
+        let _turn = self.turn.lock().unwrap_or_else(PoisonError::into_inner);
+        if open {
+            self.transaction.store(true, Ordering::SeqCst);
+        }
+        let ran = run();
+        if !open && ran.is_ok() {
+            self.transaction.store(false, Ordering::SeqCst);
+        }
+        ran
+    }
+
+    /// Runs an edit of dbdelve's on this session, the session of `database`,
+    /// unless a transaction is open on it: the edit would run inside it and
+    /// read back as applied while nothing has committed it.
+    pub(crate) fn edit<T>(
+        &self,
+        database: &str,
+        run: impl FnOnce() -> Result<T, DbError>,
+    ) -> Result<T, DbError> {
+        let _turn = self.turn.lock().unwrap_or_else(PoisonError::into_inner);
+        match self.write_refusal(database) {
+            Some(message) => Err(DbError {
+                message,
+                position: None,
+            }),
+            None => run(),
+        }
+    }
+
+    /// Why an edit on this session of `database` is not sent; see
+    /// [`Bound::edit`].
+    pub(crate) fn write_refusal(&self, database: &str) -> Option<String> {
+        self.in_transaction().then(|| {
+            format!(
+                "Not sent: a transaction is open on the session of {database}, and the change would run inside it."
+            )
         })
     }
 }

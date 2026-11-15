@@ -2135,6 +2135,36 @@ mod tests {
         }
     }
 
+    /// The reads behind Show DDL, the diagram and an object tab's structure
+    /// name their schema, so a `USE` of a tab's own cannot send them to a table
+    /// of the same name in the database it named.
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_used_sessions_reads_name_their_schema() {
+        for engine in [Engine::MySql, Engine::MariaDb] {
+            let session = live(engine)
+                .on_database("information_schema")
+                .expect("a session should open");
+            session
+                .query("USE dbdelve_dev", Fetch::default())
+                .unwrap_or_else(|error| panic!("{engine:?}: {error}"));
+            let structure = session
+                .structure("information_schema", "SCHEMATA")
+                .unwrap_or_else(|error| panic!("{engine:?}: {error}"));
+            assert!(
+                structure
+                    .columns
+                    .iter()
+                    .any(|column| column.name == "SCHEMA_NAME"),
+                "{engine:?}"
+            );
+            let ddl = session
+                .ddl("information_schema", "SCHEMATA")
+                .unwrap_or_else(|error| panic!("{engine:?}: {error}"));
+            assert!(ddl.contains("SCHEMA_NAME"), "{engine:?}: {ddl}");
+        }
+    }
+
     fn live_profile(engine: Engine) -> super::super::Connection {
         super::super::Connection::MySql(live(engine))
     }

@@ -1680,6 +1680,38 @@ fn attach_other(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
 }
 
 #[gpui::test]
+fn select_database_lists_a_new_database_in_the_connections_tree(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_duckdb(cx, "mode = \"full\"");
+        let at =
+            connections_row(&workspace, cx, &connection_row("e2e")).expect("the connection shows");
+        click_connections_row(cx, at);
+        let other = store::dbdelve_directory()
+            .expect("the test home has a data directory")
+            .join("other.duckdb");
+        // Attached without the schema refresh that lists databases again, as
+        // a database created on the server is.
+        run_in_front(
+            &workspace,
+            cx,
+            &format!("ATTACH '{}' AS other", other.display()),
+        );
+        let shown = |cx: &mut VisualTestContext| {
+            connections_item(&workspace, cx, &database_row("e2e", "other")).is_some()
+        };
+        assert!(!shown(cx), "the tree has not been told of it yet");
+
+        cx.dispatch_action(crate::actions::SelectDatabase);
+        settle(cx);
+        assert!(
+            shown(cx),
+            "the fetch that fills the Select Database list shows the database too"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn an_attached_duckdb_database_expands_over_a_session_of_its_own(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = duckdb_with_other_attached(cx);
@@ -3070,6 +3102,51 @@ fn a_selection_failing_part_way_says_what_it_already_committed(cx: &mut TestAppC
 }
 
 #[gpui::test]
+fn a_selection_failing_inside_a_bound_tabs_transaction_says_nothing_was_committed(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = duckdb_with_other_attached(cx);
+        cx.executor().allow_parking();
+        new_query_here(&workspace, cx, Some("other"), None);
+        // Opened before the selection, on the session of `other`, which the
+        // profile's own flags know nothing of.
+        run_in_front(&workspace, cx, "BEGIN");
+        cx.update(|window, cx| {
+            let editor = workspace
+                .read(cx)
+                .profile()
+                .and_then(|profile| profile.session.active_query_tab())
+                .expect("the bound tab is in front")
+                .editor
+                .clone();
+            editor.update(cx, |input, cx| {
+                input.set_value(
+                    "create table probe (a integer); insert into probe values (1); \
+                     select * from nope; insert into probe values (2)",
+                    window,
+                    cx,
+                )
+            });
+        });
+        cx.simulate_keystrokes("secondary-a secondary-enter");
+        settle(cx);
+        let failed = workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("a profile is active");
+            let tab = profile.session.active_query_tab().expect("a query tab");
+            let last = tab.queue.as_ref().and_then(|queue| queue.done.last());
+            match &last.expect("a queue with results").state {
+                QueryState::Failed(error) => error.message.clone(),
+                _ => panic!("the third statement did not fail"),
+            }
+        });
+        assert!(!failed.contains("committed"), "{failed}");
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn stepping_to_the_next_result_keeps_the_keyboard_in_the_grid(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite(cx);
@@ -3397,6 +3474,66 @@ fn show_ddl_reads_another_databases_definition_over_its_session(cx: &mut TestApp
 }
 
 #[gpui::test]
+fn the_dialogs_of_another_databases_table_name_the_database(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = two_databases_each_holding_t(cx);
+        let heading = |database: Option<&str>, cx: &mut VisualTestContext| {
+            let database = database.map(str::to_string);
+            workspace.update(cx, |workspace, cx| {
+                workspace.show_ddl(
+                    database,
+                    "main".into(),
+                    "t".into(),
+                    ObjectKind::Relation(RelationKind::Table),
+                    cx,
+                )
+            });
+            settle(cx);
+            let heading = workspace.read_with(cx, |workspace, _| {
+                workspace.ddl_view.as_ref().map(|view| view.heading())
+            });
+            press(cx, "escape");
+            heading
+        };
+        assert_eq!(
+            heading(Some("other"), cx).as_deref(),
+            Some("Table other.main.t")
+        );
+        assert_eq!(
+            heading(None, cx).as_deref(),
+            Some("Table main.t"),
+            "a table of the connection's own database is named as it was"
+        );
+
+        let file = store::dbdelve_directory().unwrap().join("t.csv");
+        std::fs::write(&file, "name,id\nwren,2\n").unwrap();
+        let named = |database: Option<&str>, cx: &mut VisualTestContext| {
+            let (database, file) = (database.map(str::to_string), file.clone());
+            workspace.update_in(cx, |workspace, window, cx| {
+                let profile = workspace.profile().unwrap().id.clone();
+                workspace.open_import_file(
+                    profile,
+                    database,
+                    "main".into(),
+                    "t".into(),
+                    file,
+                    window,
+                    cx,
+                );
+            });
+            settle(cx);
+            workspace.read_with(cx, |workspace, _| {
+                let dialog = workspace.profile().unwrap().session.import_rows.as_ref();
+                dialog.map(|dialog| dialog.target_name())
+            })
+        };
+        assert_eq!(named(Some("other"), cx).as_deref(), Some("other.main.t"));
+        assert_eq!(named(None, cx).as_deref(), Some("main.t"));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn copy_ddl_reads_another_databases_definition_over_its_session(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = two_databases_each_holding_t(cx);
@@ -3424,6 +3561,108 @@ fn copy_ddl_reads_another_databases_definition_over_its_session(cx: &mut TestApp
             assert!(text.contains("CREATE TABLE t"), "{database:?}: {text}");
             assert_eq!(text.contains("extra"), has_extra, "{database:?}: {text}");
         }
+        quit(workspace, cx);
+    });
+}
+
+/// `other`'s `t` is the only one with `extra`, so a read that lands on the
+/// connection's own database after a bound tab's `USE` shows it without.
+#[gpui::test]
+fn a_use_in_a_bound_tab_moves_no_read_of_its_databases_objects(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = two_databases_each_holding_t(cx);
+        run_in_front(
+            &workspace,
+            cx,
+            "ALTER TABLE other.main.t ADD COLUMN extra TEXT",
+        );
+        new_query_here(&workspace, cx, Some("other"), None);
+        let leave = |cx: &mut VisualTestContext| {
+            run_in_front(&workspace, cx, "USE e2e");
+            assert_eq!(
+                answer_in_the_first_query_tab(&workspace, cx, "SELECT current_database()")
+                    .as_deref(),
+                Some("e2e"),
+                "the profile's own session is where it was"
+            );
+        };
+
+        leave(cx);
+        workspace.update(cx, |workspace, cx| {
+            workspace.show_ddl(
+                Some("other".into()),
+                "main".into(),
+                "t".into(),
+                ObjectKind::Relation(RelationKind::Table),
+                cx,
+            )
+        });
+        settle(cx);
+        let shown = ddl_text(&workspace, cx).expect("the dialog holds a definition");
+        assert!(shown.contains("extra"), "Show DDL after a USE: {shown}");
+        press(cx, "escape");
+
+        leave(cx);
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string("before".into()));
+        workspace.update(cx, |workspace, cx| {
+            workspace.copy_ddl(
+                Some("other".into()),
+                "main".into(),
+                "t".into(),
+                RelationKind::Table,
+                cx,
+            )
+        });
+        settle(cx);
+        let copied = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .unwrap_or_default();
+        assert!(copied.contains("extra"), "Copy DDL after a USE: {copied}");
+
+        leave(cx);
+        workspace.update(cx, |workspace, cx| {
+            workspace.show_ddl(
+                Some("other".into()),
+                "main".into(),
+                "t".into(),
+                ObjectKind::Relation(RelationKind::Table),
+                cx,
+            )
+        });
+        settle(cx);
+        let shown = workspace.read_with(cx, |workspace, _| {
+            match workspace
+                .ddl_view
+                .as_ref()
+                .and_then(|view| view.sections.first())
+                .map(|section| &section.text)
+            {
+                Some(super::DdlText::Ready(text)) => text.clone(),
+                _ => panic!("the definition has not loaded"),
+            }
+        });
+        assert!(shown.contains("extra"), "Show DDL after a USE: {shown}");
+        press(cx, "escape");
+
+        leave(cx);
+        click_t_under(&workspace, cx, "other");
+        workspace.read_with(cx, |workspace, _| {
+            let tab = workspace
+                .profile()
+                .unwrap()
+                .session
+                .active_object()
+                .unwrap();
+            let ObjectBody::Relation { structure, .. } = &tab.body else {
+                panic!("a relation tab");
+            };
+            let crate::StructureState::Loaded(structure) = structure else {
+                panic!("the structure has not loaded");
+            };
+            let names: Vec<_> = structure.columns.iter().map(|c| c.name.as_str()).collect();
+            assert_eq!(names, ["name", "id", "extra"], "the structure after a USE");
+        });
         quit(workspace, cx);
     });
 }
@@ -9107,6 +9346,157 @@ fn an_edit_applied_in_a_bound_tab_writes_to_its_database(cx: &mut TestAppContext
     });
 }
 
+/// Applies `INSERT INTO u VALUES (7)` from the tab in front as an edit does,
+/// and reads back what the tab holds once it lands.
+fn apply_insert_from_the_front_tab(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) -> QueryState {
+    use crate::session::Refresh;
+    let tab = workspace.read_with(cx, |workspace, _| {
+        workspace.profile().unwrap().session.active
+    });
+    workspace.update(cx, |workspace, cx| {
+        workspace.execute_unchecked(
+            "INSERT INTO u VALUES (7)".into(),
+            tab,
+            Some(Refresh::Statement("SELECT count(*) FROM u".into())),
+            false,
+            None,
+            None,
+            cx,
+        );
+    });
+    settle(cx);
+    query_tab(workspace, cx, |tab, _, _| tab.query.clone())
+}
+
+#[gpui::test]
+fn an_edit_is_refused_while_a_transaction_is_open_on_its_databases_session(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = duckdb_with_other_attached(cx);
+        new_query_here(&workspace, cx, Some("other"), None);
+        run_in_front(&workspace, cx, "BEGIN");
+
+        // A second tab bound to `other` shares the session the BEGIN is on:
+        // an edit applied there would join a transaction nothing shows.
+        new_query_here(&workspace, cx, Some("other"), None);
+        match apply_insert_from_the_front_tab(&workspace, cx) {
+            QueryState::Failed(error) => assert!(
+                error.message.contains("Not sent") && error.message.contains("transaction"),
+                "{}",
+                error.message
+            ),
+            _ => panic!("an edit must not join another tab's open transaction"),
+        }
+
+        // Ending it from either tab frees the session, and nothing was written.
+        run_in_front(&workspace, cx, "ROLLBACK");
+        run_in_front(&workspace, cx, "SELECT count(*) FROM u");
+        assert_eq!(answer(&workspace, cx).as_deref(), Some("0"));
+        assert!(
+            matches!(
+                apply_insert_from_the_front_tab(&workspace, cx),
+                QueryState::Complete { .. }
+            ),
+            "the edit runs once the transaction has ended"
+        );
+        assert_eq!(answer(&workspace, cx).as_deref(), Some("1"));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn an_edit_issued_before_a_transaction_opened_on_its_session_is_refused_when_its_turn_comes(
+    cx: &mut TestAppContext,
+) {
+    use crate::session::Refresh;
+    store::tests::with_home(|| {
+        let (workspace, cx) = duckdb_with_other_attached(cx);
+        new_query_here(&workspace, cx, Some("other"), None);
+        run_in_front(&workspace, cx, "SELECT count(*) FROM u");
+        let tab = workspace.read_with(cx, |workspace, _| {
+            workspace.profile().unwrap().session.active
+        });
+        // Nothing is open when the edit is issued; another tab's BEGIN takes
+        // the session before the edit's turn there comes.
+        workspace.update(cx, |workspace, cx| {
+            workspace.execute_unchecked(
+                "INSERT INTO u VALUES (7)".into(),
+                tab,
+                Some(Refresh::Statement("SELECT count(*) FROM u".into())),
+                false,
+                None,
+                None,
+                cx,
+            );
+            let Some(crate::session::BoundSession::Open(session)) =
+                workspace.profile().unwrap().bound.get("other")
+            else {
+                panic!("the read opened a session for `other`");
+            };
+            _ = session.leave(Some(true), false, || Ok::<_, crate::db::DbError>(()));
+        });
+        settle(cx);
+        query_tab(&workspace, cx, |tab, _, _| match &tab.query {
+            QueryState::Failed(error) => assert!(
+                error.message.contains("Not sent") && error.message.contains("transaction"),
+                "{}",
+                error.message
+            ),
+            _ => panic!("an edit must not join a transaction opened while it waited"),
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_write_waiting_on_its_session_to_open_is_not_sent_once_the_mode_is_read_only(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = duckdb_with_other_attached(cx);
+        new_query_here(&workspace, cx, Some("other"), None);
+        workspace.read_with(cx, |workspace, _| {
+            assert!(
+                workspace.profile().unwrap().bound.is_empty(),
+                "no session is open for `other`, so the run opens one"
+            );
+        });
+        let tab = workspace.read_with(cx, |workspace, _| {
+            workspace.profile().unwrap().session.active
+        });
+        // Issued under Full, with the session still to open: the mode is
+        // switched before the run's landing finds it open.
+        workspace.update(cx, |workspace, cx| {
+            workspace.execute_unchecked(
+                "INSERT INTO u VALUES (7)".into(),
+                tab,
+                None,
+                false,
+                None,
+                None,
+                cx,
+            );
+            workspace.set_mode(crate::sql::Mode::ReadOnly, cx);
+        });
+        settle(cx);
+        query_tab(&workspace, cx, |tab, _, _| match &tab.query {
+            QueryState::Failed(error) => assert!(
+                error.message.contains("Not sent") && error.message.contains("Read-only"),
+                "{}",
+                error.message
+            ),
+            _ => panic!("a write must not reach a session the mode no longer admits"),
+        });
+        run_in_front(&workspace, cx, "SELECT count(*) FROM u");
+        assert_eq!(answer(&workspace, cx).as_deref(), Some("0"));
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn every_row_of_a_bound_tabs_result_is_not_fetched_on_the_profiles_own_session(
     cx: &mut TestAppContext,
@@ -9540,6 +9930,74 @@ fn an_export_of_another_databases_table_reads_it_there(cx: &mut TestAppContext) 
         let written = std::fs::read_to_string(&path).expect("the export wrote its file");
         assert!(written.contains("other"), "{written}");
         assert!(!written.contains("own"), "{written}");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn an_export_of_another_databases_table_minds_only_that_databases_transaction(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = two_databases_each_holding_t(cx);
+        click_t_under(&workspace, cx, "other");
+        workspace.update(cx, |workspace, _| {
+            workspace.profile_mut().unwrap().in_transaction = true;
+        });
+        assert!(
+            workspace.read_with(cx, |workspace, _| workspace.refetch().is_ok()),
+            "a transaction on the connection's own session is not where the rows came from"
+        );
+        workspace.update(cx, |workspace, _| {
+            let profile = workspace.profile_mut().unwrap();
+            profile.in_transaction = false;
+            let Some(crate::session::BoundSession::Open(session)) = profile.bound.get("other")
+            else {
+                panic!("the rows were read over a session of `other`'s own");
+            };
+            _ = session.leave(Some(true), false, || Ok::<_, crate::db::DbError>(()));
+        });
+        assert!(
+            workspace.read_with(cx, |workspace, _| workspace.refetch().is_err()),
+            "a transaction on the session the rows came from refuses the export"
+        );
+        // A COMMIT that failed, one cancelled before it was sent among them,
+        // may have left the transaction open; one that went through has not.
+        workspace.update(cx, |workspace, _| {
+            let Some(crate::session::BoundSession::Open(session)) =
+                workspace.profile().unwrap().bound.get("other")
+            else {
+                panic!("the session of `other` is still open");
+            };
+            _ = session.leave(Some(false), false, || {
+                Err::<(), _>(crate::db::DbError {
+                    message: "Cancelled before it was sent.".into(),
+                    position: None,
+                })
+            });
+            assert!(session.in_transaction());
+            _ = session.leave(Some(false), false, || Ok::<_, crate::db::DbError>(()));
+            assert!(!session.in_transaction());
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn an_export_of_another_databases_table_is_refused_once_a_tab_changed_a_setting_on_its_session(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = two_databases_each_holding_t(cx);
+        // A setting the binding does not put back lasts on the session, and a
+        // session of the export's own would not read under it.
+        new_query_here(&workspace, cx, Some("other"), None);
+        run_in_front(&workspace, cx, "SET threads = 2");
+        click_t_under(&workspace, cx, "other");
+        assert!(
+            workspace.read_with(cx, |workspace, _| workspace.refetch().is_err()),
+            "a setting changed on the session the rows came from refuses the export"
+        );
         quit(workspace, cx);
     });
 }

@@ -3756,6 +3756,45 @@ mod tests {
         clean();
     }
 
+    /// The reads behind Show DDL, the diagram and an object tab's structure
+    /// name their schema, so a search path a tab's own text set cannot send
+    /// them to another relation of the same name.
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_bound_sessions_reads_name_their_schema_whatever_its_search_path_is() {
+        let plain = Connection::open(&live_config()).expect("connection should open");
+        let clean = || {
+            plain
+                .query(
+                    "DROP SCHEMA IF EXISTS dbdelve_read_a CASCADE",
+                    Fetch::default(),
+                )
+                .expect("the probe schema should drop");
+        };
+        clean();
+        plain
+            .query(
+                "CREATE SCHEMA dbdelve_read_a; CREATE TABLE dbdelve_read_a.t (only_in_a text)",
+                Fetch::default(),
+            )
+            .expect("the probe table should be created");
+        let session = plain
+            .on_database(&live_config().database)
+            .expect("a session should open");
+        session
+            .query("SET search_path TO pg_catalog", Fetch::default())
+            .expect("the path moves");
+        let columns = session
+            .structure("dbdelve_read_a", "t")
+            .expect("structure reads");
+        assert_eq!(columns.columns[0].name, "only_in_a");
+        let ddl = session
+            .ddl("dbdelve_read_a", "t", RelationKind::Table)
+            .expect("the definition reads");
+        assert!(ddl.contains("only_in_a"), "{ddl}");
+        clean();
+    }
+
     #[test]
     #[ignore = "requires a local Postgres server configured through PG*"]
     fn live_a_runs_notices_come_back_with_it_and_only_with_it() {

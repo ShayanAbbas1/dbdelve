@@ -4502,6 +4502,45 @@ mod tests {
         assert!(!sizes.contains_key("account_overview"));
     }
 
+    /// A session reads the database it was opened on and no statement moves
+    /// it: `db.getSiblingDB` names another for one statement, and `use` is not
+    /// a statement of the language at all. So a statement another tab ran
+    /// cannot carry a bound run, or an edit applied from a bound tab's grid,
+    /// to another database.
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MONGO_URL"]
+    fn live_a_bound_run_stays_in_its_database_whatever_ran_before_it() {
+        let session = crate::db::Connection::MongoDb(live().on_database("dbdelve_archive"));
+        let cancel = crate::db::CancelToken::alongside();
+        let rows = |statement: &str| {
+            session
+                .query_bound(None, statement, &cancel, Fetch::default())
+                .unwrap_or_else(|error| panic!("{statement}: {}", error.message))
+                .rows
+                .len()
+        };
+        assert_eq!(rows("db.closed_accounts.find()"), 2);
+
+        assert_eq!(
+            rows("db.getSiblingDB('dbdelve_dev').accounts.countDocuments()"),
+            1
+        );
+        let moved = session
+            .query_bound(None, "use dbdelve_dev", &cancel, Fetch::default())
+            .expect_err("`use` is not a statement a session can be moved by");
+        assert!(!moved.message.is_empty());
+        assert_eq!(rows("db.closed_accounts.find()"), 2);
+
+        let edit = session
+            .generated_bound(None, "db.closed_accounts.find()", &cancel, None, None)
+            .expect("the read runs");
+        assert_eq!(
+            edit.rows.len(),
+            2,
+            "an unqualified read is still the session's"
+        );
+    }
+
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_MONGO_URL"]
     fn live_structure_round_trip() {

@@ -2594,6 +2594,35 @@ mod tests {
 
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
+    fn live_a_cancel_stops_an_edit_running_on_a_bound_session() {
+        let session = crate::db::Connection::Redis(
+            live().on_database("db1").expect("the session should open"),
+        );
+        // The token a bound run is issued: it stops only what its own
+        // statement has registered the session for.
+        let cancel = crate::db::CancelToken::alongside();
+        let started = Instant::now();
+        let error = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(500));
+                session
+                    .cancel(&cancel)
+                    .expect("the kill should reach the server");
+            });
+            session
+                .generated_bound(None, "BLPOP live:never 5", &cancel, None, None)
+                .expect_err("a cancelled run is an error")
+        });
+        assert!(
+            is_cancel(crate::db::Target::built_in(Engine::Redis), &error),
+            "{}",
+            error.message
+        );
+        assert!(started.elapsed() < Duration::from_secs(4));
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
     fn live_the_development_database_is_fully_seeded() {
         let connection = live();
         assert_eq!(cells(&ran(&connection, "DBSIZE")), [some(&["214"])]);

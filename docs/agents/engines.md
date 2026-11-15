@@ -440,6 +440,29 @@ Decided, and not to be re-litigated:
     name is none. Snowflake: the config with the database set and no schema.
     MongoDB: the same client reading the database, with its own statements in
     flight.
+  A session is shared by every tab bound to its database, and a `USE` of one
+  moves it for all, so nothing is left to what the last statement did. A bound
+  statement (`Connection::query_bound`) and the reads dbdelve makes for those
+  tabs put the session back on its database first, in the same hold of it as
+  what follows, through the driver's own calls and never in the user's text; a
+  failure to put it back means the statement was not sent. Per engine:
+  - Postgres, MySQL, MariaDB, DuckDB and Redis re-apply the database (and the
+    schema, where the engine picks one) before every bound statement. DuckDB's
+    session also does before a definition, structure, sequence or catalog read,
+    which name `current_database()`. The profile's own DuckDB connection never
+    does: its catalog follows the user's `USE`.
+  - ClickHouse sends `USE` again before a bound user statement, on the same
+    `session_id` and with `session_check`, so a session the server let go of
+    is reported rather than quietly replaced. dbdelve's own statements and
+    reads carry no session and name the database.
+  - SQL Server needs no re-apply: `held_to_database` restores the session's
+    database inside the run of any batch that mentions `USE`, and the run says
+    so. Snowflake needs none: nothing a statement does stays between requests,
+    each names its database, and what dbdelve wrote names its schema and is
+    sent none. MongoDB needs none: a session's database is fixed, `getSiblingDB`
+    names another for one statement, and `use` is not a statement.
+  - Postgres, MySQL and MariaDB reads of a definition or structure name their
+    schema; Redis's structure is the same whatever it is on.
   Every one is held to reads when the profile is Read-only, inside the open
   before it is stored and again on every mode change (`Profile::sessions_to_hold`).
   The cost is one server connection per database in use -- about two on
