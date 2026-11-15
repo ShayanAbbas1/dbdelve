@@ -2541,6 +2541,17 @@ impl ResultGrid {
             .map_or(Cow::Borrowed(value), Cow::Owned)
     }
 
+    /// What a binary cell's [`Self::edit_seed`] is made from besides the
+    /// value fetched, `None` on any other cell.
+    pub fn binary_seed_key(
+        &self,
+        row: usize,
+        col: usize,
+    ) -> Option<(Option<BinaryForm>, Option<&NewValue>)> {
+        self.holds_binary(row, col)
+            .then(|| (self.parsed_as(col), self.pending_value(row, col)))
+    }
+
     /// Text a binary cell's input was seeded with as fetched, typed back.
     /// Compared before the form reads it: a value that is not bytes (text
     /// in a SQLite blob column) seeds as itself, and could read as bytes
