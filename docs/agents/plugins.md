@@ -236,7 +236,9 @@ tested.
   three calls per table, which no fixed deadline fits, so it waits as a query
   does and any Cancel on its connection stops it, `CANCEL_DEADLINE` and all.
   It belongs to no run either, but it runs alone on a connection of its own
-  (`apart`), so a Cancel there can only be for it.
+  (`apart`), so a Cancel there can only be for it. One that comes before the
+  request is sent (a diagram closed just as its connection opened) is kept,
+  and refuses the read unsent, as a run's does.
 - **A crash is a reported reset, never a replay.** On a violation, EOF or exit
   every pending request gets "The ODBC plugin stopped (exit status: 139). The
   connection was reset: any open transaction, temporary tables and session

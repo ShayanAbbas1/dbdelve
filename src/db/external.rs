@@ -124,7 +124,18 @@ pub struct Connection {
     tunnel: Option<Arc<Tunnel>>,
     /// The `graph` request in flight, which any Cancel on this connection
     /// stops ([`Self::schema_graph`]).
-    graph: Arc<Mutex<Option<u64>>>,
+    graph: Arc<Mutex<GraphRead>>,
+}
+
+/// Where a connection's `graph` read is, for a Cancel to find.
+#[derive(Default)]
+enum GraphRead {
+    #[default]
+    Idle,
+    Sent(u64),
+    /// A Cancel came with nothing sent: the read that follows is refused
+    /// unsent, as a run's query asked to stop before it went out is.
+    Cancelled,
 }
 
 impl Connection {
@@ -349,7 +360,9 @@ impl Connection {
     /// driver that reads keys a table at a time takes as long as the schema
     /// is large, and any Cancel on this connection stops it with the query's
     /// own deadline behind it. The read is no run's, and runs alone on a
-    /// connection of its own ([`Self::apart`]), so a Cancel here is for it.
+    /// connection of its own ([`Self::apart`]), so a Cancel here is for it,
+    /// even one that comes before the request goes out, which refuses it
+    /// unsent.
     pub fn schema_graph(&self, schema: &str) -> Result<SchemaGraph, DbError> {
         if !self.draws_diagrams() {
             return Err(failure(format!(
@@ -363,12 +376,16 @@ impl Connection {
         };
         let (in_flight, answers) = {
             let mut graph = self.graph.lock().unwrap_or_else(PoisonError::into_inner);
+            if matches!(*graph, GraphRead::Cancelled) {
+                *graph = GraphRead::Idle;
+                return Err(failure("Cancelled before it was sent.".into()));
+            }
             let sent = self.host.request(request)?;
-            *graph = Some(sent.0.id);
+            *graph = GraphRead::Sent(sent.0.id);
             sent
         };
         let answer = answers.recv();
-        *self.graph.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        *self.graph.lock().unwrap_or_else(PoisonError::into_inner) = GraphRead::Idle;
         drop(in_flight);
         match answer {
             Ok(Routed::Control(Response::Graph(wire))) => graph_from(schema, wire),
@@ -536,8 +553,10 @@ impl Connection {
         for id in run.handles.iter().filter_map(|handle| handle.parse().ok()) {
             self.host.cancel(id);
         }
-        if let Some(id) = *self.graph.lock().unwrap_or_else(PoisonError::into_inner) {
-            self.host.cancel(id);
+        let mut graph = self.graph.lock().unwrap_or_else(PoisonError::into_inner);
+        match *graph {
+            GraphRead::Sent(id) => self.host.cancel(id),
+            GraphRead::Idle | GraphRead::Cancelled => *graph = GraphRead::Cancelled,
         }
         Ok(())
     }
@@ -2546,6 +2565,21 @@ mod tests {
         );
         assert!(!connection.is_lost());
         assert!(connection.schema_graph("main").is_ok());
+    }
+
+    /// The window between a diagram's connection opening and its read going
+    /// out: a Cancel there is kept, and the read never sent, so it cannot run
+    /// on with no deadline behind it.
+    #[test]
+    fn a_cancel_before_a_graph_read_is_sent_refuses_it_unsent() {
+        let connection = open_with(&[]).unwrap();
+        connection.cancel(&CancelToken::default()).unwrap();
+        let started = Instant::now();
+        let error = connection.schema_graph("sleep").unwrap_err();
+        assert_eq!(error.message, "Cancelled before it was sent.");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(!connection.is_lost());
+        assert!(connection.schema_graph("main").is_ok(), "kept for one read");
     }
 
     #[test]
