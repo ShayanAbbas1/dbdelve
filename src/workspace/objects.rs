@@ -191,8 +191,13 @@ impl Workspace {
             return;
         }
         let (schema, relation) = (tab.schema.clone(), tab.name.clone());
-        let (query, stale) = match &tab.body {
-            ObjectBody::Relation { query, stale, .. } => (query, *stale),
+        let (query, stale, sent) = match &tab.body {
+            ObjectBody::Relation {
+                query,
+                stale,
+                sent_from,
+                ..
+            } => (query, *stale, sent_from.is_some()),
             // Asked for once per connection, and again only after a failure.
             ObjectBody::Structure { structure, .. } => {
                 let asked = self
@@ -209,6 +214,11 @@ impl Workspace {
         // checked against the server, so it gets exactly one run -- and its
         // structure, which no snapshot keeps.
         if !stale && !matches!(query, QueryState::Idle | QueryState::Failed(_)) {
+            return;
+        }
+        // Failed with nothing sent is `requery_relation` refusing the tab's
+        // statement, which a visit would only refuse again.
+        if matches!(query, QueryState::Failed(_)) && !sent {
             return;
         }
 
@@ -265,7 +275,10 @@ impl Workspace {
         if let Some(sentence) = crate::filter::refusal(engine, &crate::filter::filter_bars(filters))
         {
             *stale = false;
-            self.note(sentence.to_string(), cx);
+            match refuse(query, sentence) {
+                Some(note) => self.note(note, cx),
+                None => cx.notify(),
+            }
             return;
         }
         // Discarded, not cancelled: on most engines a cancel stops whatever
@@ -300,10 +313,14 @@ impl Workspace {
             // load the structure and try again on every visit to the tab, for
             // a filter refused every time.
             *stale = false;
-            self.note(
-                "dbdelve will not run a filter it cannot read as one query.".into(),
-                cx,
-            );
+            let refusal = match filter.is_empty() {
+                true => "dbdelve cannot read its own query for this table, so it will not run it.",
+                false => "dbdelve will not run a filter it cannot read as one query.",
+            };
+            match refuse(query, refusal) {
+                Some(note) => self.note(note, cx),
+                None => cx.notify(),
+            }
             return;
         };
 
@@ -1769,6 +1786,23 @@ fn columns_with_defaults(engine: Engine, columns: &[ColumnDefinition]) -> Vec<St
         .filter(|column| column.default.is_some())
         .map(|column| column.name.clone())
         .collect()
+}
+
+/// Why a relation tab's statement did not run, as the note to show over the
+/// rows it keeps, so a filter can be corrected rather than retyped. With no
+/// rows to keep the refusal is the tab's answer instead, and `None`: an idle
+/// tab would spin forever.
+fn refuse(query: &mut QueryState, refusal: &str) -> Option<String> {
+    match query {
+        QueryState::Idle | QueryState::Failed(_) => {
+            *query = QueryState::Failed(DbError {
+                message: refusal.into(),
+                position: None,
+            });
+            None
+        }
+        _ => Some(refusal.into()),
+    }
 }
 
 fn loaded(result: Result<Structure, DbError>) -> StructureState {
