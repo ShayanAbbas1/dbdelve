@@ -57,6 +57,11 @@ const FADED_AT: f32 = 0.15;
 /// and lyon's default of a tenth costs several times the vertices, built
 /// again every frame the edges are all on screen.
 const TOLERANCE: f32 = 0.4;
+/// How far an edge of a diagram of more than [`CROWDED`] may stray zoomed out
+/// to [`FADED_AT`] and beyond, where it is a faded hairline among thousands
+/// and its curves a few pixels across: see [`tolerance`].
+const FAR_TOLERANCE: f32 = 1.5;
+const CROWDED: usize = 4000;
 const LIT_EDGE_WIDTH: f32 = 1.75;
 /// A card's inner padding, in world units.
 const CARD_PAD: f32 = 10.0;
@@ -2971,12 +2976,30 @@ fn screen_point(world: Point, zoom: f32) -> gpui::Point<Pixels> {
 /// many run through it. At [`geometry::NAMES_BELOW`] and above they are
 /// drawn whole, which is what the contrast floors hold.
 fn resting_edge(zoom: f32) -> (f32, f32) {
-    let faded =
-        ((geometry::NAMES_BELOW - zoom) / (geometry::NAMES_BELOW - FADED_AT)).clamp(0.0, 1.0);
+    let faded = faded(zoom);
     (
         1.0 - (1.0 - FADED) * faded,
         EDGE_WIDTH - (EDGE_WIDTH - HAIRLINE) * faded,
     )
+}
+
+/// How far past [`geometry::NAMES_BELOW`] towards [`FADED_AT`] a zoom is,
+/// from 0 to 1.
+fn faded(zoom: f32) -> f32 {
+    ((geometry::NAMES_BELOW - zoom) / (geometry::NAMES_BELOW - FADED_AT)).clamp(0.0, 1.0)
+}
+
+/// How far a tessellated edge of a diagram of `edges` may stray from its
+/// curve at a zoom, in screen pixels. Zoomed out over a diagram of more than
+/// [`CROWDED`], the flattening eases from [`TOLERANCE`] to [`FAR_TOLERANCE`]
+/// as the edges fade: at the finer one, a fitted 6,000-table schema took more
+/// vertices than GPUI's 256 MB of instance data holds on a 5K display, and
+/// nothing was drawn. A smaller diagram is drawn as it always was.
+fn tolerance(zoom: f32, edges: usize) -> f32 {
+    match edges > CROWDED {
+        true => TOLERANCE + (FAR_TOLERANCE - TOLERANCE) * faded(zoom),
+        false => TOLERANCE,
+    }
 }
 
 /// An edge's colour under the focus and hover at a zoom. A lit edge keeps
@@ -2997,7 +3020,8 @@ fn edge_mesh(layout: &Layout, edge: u32, detail: Detail, zoom: f32, lit: bool) -
         true => LIT_EDGE_WIDTH,
         false => resting_edge(zoom).1,
     });
-    let stroke = || stroke(width);
+    let tolerance = tolerance(zoom, layout.edges.len());
+    let stroke = || stroke(width, tolerance);
     let mut mesh = EdgeMesh::default();
     let [ink, holes, rings] = &mut mesh.0;
     let mut line = stroke();
@@ -3118,12 +3142,12 @@ fn merged_path(meshes: &[&Mesh], by: gpui::Point<Pixels>) -> Path<Pixels> {
     path
 }
 
-/// A stroke `width` wide, flattened to [`TOLERANCE`].
-fn stroke(width: Pixels) -> PathBuilder {
+/// A stroke `width` wide, flattened to `tolerance` pixels.
+fn stroke(width: Pixels, tolerance: f32) -> PathBuilder {
     PathBuilder::stroke(width).with_style(PathStyle::Stroke(
         StrokeOptions::default()
             .with_line_width(f32::from(width))
-            .with_tolerance(TOLERANCE),
+            .with_tolerance(tolerance),
     ))
 }
 
@@ -3314,7 +3338,7 @@ mod tests {
             builder.build().unwrap().vertices.len()
         };
         let width = px(EDGE_WIDTH);
-        let ours = vertices(stroke(width));
+        let ours = vertices(stroke(width, TOLERANCE));
         let lyons = vertices(PathBuilder::stroke(width));
         assert!(
             5 * ours <= 3 * lyons,
@@ -3382,6 +3406,26 @@ mod tests {
             (merged.windows(2))
                 .all(|pair| rank(pair[0].0, pair[0].1) <= rank(pair[1].0, pair[1].1)),
             "every lit edge over those at rest, and every hole over the ink"
+        );
+    }
+
+    /// A small diagram is flattened as finely at every zoom; a crowded one
+    /// zoomed out coarser, to stay well inside the 256 MB of instance data
+    /// GPUI's renderers take a frame, of which a path vertex is 104 bytes.
+    #[test]
+    fn a_crowded_diagram_zoomed_out_takes_a_fraction_of_a_frames_vertices() {
+        assert_eq!(tolerance(geometry::MIN_ZOOM, CROWDED), TOLERANCE);
+        assert_eq!(tolerance(geometry::NAMES_BELOW, CROWDED + 1), TOLERANCE);
+        assert_eq!(tolerance(geometry::MIN_ZOOM, CROWDED + 1), FAR_TOLERANCE);
+        let (meshes, _) = far_edges();
+        assert!(meshes.len() > CROWDED);
+        let vertices: usize = (meshes.iter().flat_map(|mesh| &mesh.0))
+            .map(|mesh| mesh.vertices.len())
+            .sum();
+        assert!(
+            vertices * 104 < 256 << 20,
+            "{vertices} vertices for {} edges",
+            meshes.len()
         );
     }
 
