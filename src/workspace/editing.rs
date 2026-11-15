@@ -4,6 +4,7 @@
 //! impl live in as many modules as it has concerns; they moved out whole.
 
 use super::*;
+use crate::actions::StepPastEdge;
 use crate::session::{
     AfterEdits, ReviewSlot, StaleEdit, StaleResume, insert_placeholder, refreshing,
 };
@@ -59,8 +60,10 @@ impl Workspace {
                 let Some(tab) = profile.session.objects.iter().find(|tab| tab.id == id) else {
                     return;
                 };
-                let structure = match &tab.body {
-                    ObjectBody::Relation { structure, .. } => structure,
+                let (structure, results) = match &tab.body {
+                    ObjectBody::Relation {
+                        structure, results, ..
+                    } => (structure, results),
                     ObjectBody::Structure { .. }
                     | ObjectBody::Routine(_)
                     | ObjectBody::Diagram { .. } => return,
@@ -78,6 +81,18 @@ impl Workspace {
                     );
                     return;
                 };
+                // A Draft view of a table whose rows are written back keeps
+                // the row in the grid, where it is typed in place and read in
+                // the draft's review; every other view takes the form.
+                if matches!(active, Tab::Object(_))
+                    && profile.session.edit_mode(active) == EditMode::Draft
+                    && self.target().row_edits()
+                    && results.read(cx).delegate().insert_target().is_some()
+                {
+                    let results = results.clone();
+                    self.add_grid_row(active, results, cx);
+                    return;
+                }
                 let columns: Vec<(String, String)> = structure
                     .columns
                     .iter()
@@ -138,6 +153,41 @@ impl Workspace {
             profile.session.reveal_results(active);
         }
         cx.notify();
+    }
+
+    /// Insert in a Draft view: a new row at the end of the grid, the ring on
+    /// its first cell. Nothing is sent and nothing is asked; the row is part of
+    /// the draft, and `apply_edits` writes it.
+    ///
+    /// Held back as staging a cell is: not while a review holds the draft, and
+    /// not while the tab's rows are still being read, which would put the row
+    /// above rows that have not arrived.
+    fn add_grid_row(
+        &mut self,
+        tab: Tab,
+        results: Entity<gpui_component::table::TableState<ResultGrid>>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(profile) = self.profile() else {
+            return;
+        };
+        if !profile.session.may_stage_into(tab) {
+            return;
+        }
+        if profile.session.running(tab) {
+            self.note(
+                "The rows are still being read, so no row was added.".into(),
+                cx,
+            );
+            return;
+        }
+        if !self.confirm_stale(StaleResume::NewRow, cx) {
+            return;
+        }
+        results.update(cx, |table, cx| {
+            crate::result_grid::add_row_at_end(table, cx);
+            cx.notify();
+        });
     }
 
     /// Typing is the latest word, so it turns a NULL off.
@@ -877,16 +927,17 @@ impl Workspace {
         // and one it can has this column alone refused.
         // A snapshot written before edit targets were kept has none, so it
         // would read as untraceable too.
-        let (traced, snapshot, reason, bytes) = {
+        let (marked, traced, snapshot, reason, bytes) = {
             let grid = results.read(cx).delegate();
             (
+                grid.is_marked(row),
                 grid.row_editable(row),
                 grid.captured().is_some(),
                 grid.read_only_reason().map(str::to_string),
                 grid.bytes_refusal(row, col),
             )
         };
-        if let Some(bytes) = bytes {
+        if let Some(bytes) = bytes.filter(|_| !marked) {
             self.note(bytes.into(), cx);
             return;
         }
@@ -903,6 +954,7 @@ impl Workspace {
             });
         self.note(
             match (traced, reason, wrote, snapshot) {
+                _ if marked => "This row is marked for deletion.".into(),
                 (true, _, _, _) => "This column cannot be edited.".into(),
                 // The engine's own word on why, where it gave one.
                 (false, Some(reason), _, _) => reason,
@@ -932,8 +984,9 @@ impl Workspace {
     }
 
     /// The empty string, which is a different write from a `NULL` and the one
-    /// an input cannot produce: committing an emptied input on a cell that came
-    /// back empty is the no-op `set_pending` drops.
+    /// an input cannot produce: an input closed as it opened records nothing
+    /// (`ResultGrid::commit_text`), and a NULL or a staged keyword opens empty,
+    /// so this action is the one way to write the empty string over them.
     pub(crate) fn set_empty(&mut self, _: &SetEmpty, window: &mut Window, cx: &mut Context<Self>) {
         self.stage_value(NewValue::Value(gpui::SharedString::default()), window, cx);
     }
@@ -1268,6 +1321,7 @@ impl Workspace {
                 None => self.stage_and_refocus(cell, value, window, cx),
             },
             StaleResume::Delete => self.delete_row(&DeleteRow, window, cx),
+            StaleResume::NewRow => self.new_row(&NewRow, window, cx),
         }
         cx.notify();
     }
@@ -1340,6 +1394,18 @@ impl Workspace {
             .is_some_and(|form| form.tab == profile.session.active)
         {
             self.note("Close the new row form before deleting a row.".into(), cx);
+            return;
+        }
+        // In a Draft view of a table whose rows are written back, Delete row
+        // marks the rows in the grid, where the mark is part of the draft and
+        // `apply_edits` writes it. Every other view reviews the one `DELETE`.
+        if matches!(tab, Tab::Object(_))
+            && profile.session.edit_mode(tab) == EditMode::Draft
+            && target.row_edits()
+            && let Some(results) = profile.session.active_results().cloned()
+            && results.read(cx).delegate().insert_target().is_some()
+        {
+            self.toggle_row_marks(tab, results, cx);
             return;
         }
         // Browsing surfaces only. A query tab's grid is a view of the user's own
@@ -1426,6 +1492,45 @@ impl Workspace {
             });
         }
         cx.notify();
+    }
+
+    /// Delete row in a Draft view: toggle the deletion mark of the rows picked.
+    /// Nothing is sent and nothing is asked; the mark is part of the draft.
+    ///
+    /// Held back as staging a cell is: not while a review holds the draft, whose
+    /// statement a mark would no longer describe.
+    fn toggle_row_marks(
+        &mut self,
+        tab: Tab,
+        results: Entity<gpui_component::table::TableState<ResultGrid>>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(profile) = self.profile() else {
+            return;
+        };
+        if !profile.session.may_stage_into(tab) {
+            return;
+        }
+        if !self.confirm_stale(StaleResume::Delete, cx) {
+            return;
+        }
+        let unnameable = results.read(cx).delegate().read_only_reason().map_or_else(
+            || {
+                "dbdelve cannot name this row by its primary key, so it will not delete it."
+                    .to_string()
+            },
+            str::to_string,
+        );
+        let marked = results.update(cx, |table, cx| {
+            let grid = table.delegate_mut();
+            let rows = grid.selected_draft_rows();
+            let marked = grid.toggle_marks(&rows);
+            table.refresh(cx);
+            marked
+        });
+        if !marked {
+            self.note(unnameable, cx);
+        }
     }
 
     /// `cmd+c` on the active cell, whole value and all.
@@ -1703,9 +1808,11 @@ impl Workspace {
     ///
     /// Switching into Row is refused while the grid holds staged edits: they
     /// are a batch for one review, and one switch must not turn them into
-    /// sends, one row at a time, that nobody reviewed. Cell edits carry
-    /// between Classic and Draft with no prompt, since both review the same
-    /// `UPDATE`s. Leaving Row over edited rows sends them first, as any action
+    /// sends, one row at a time, that nobody reviewed. Switching into Classic
+    /// is refused while the grid holds an added row or a delete mark, which a
+    /// Classic view has no way to show or apply. Cell edits carry between
+    /// Classic and Draft with no prompt, since both review the same `UPDATE`s.
+    /// Leaving Row over edited rows sends them first, as any action
     /// that leaves them would (`held_for_edits`), and does not switch if one is
     /// refused.
     pub(crate) fn pick_edit_mode(
@@ -1723,7 +1830,7 @@ impl Workspace {
             return;
         };
         let tab = profile.session.active;
-        let Some(results) = profile.session.results(tab) else {
+        let Some(results) = profile.session.results(tab).cloned() else {
             return;
         };
         let current = profile.session.edit_mode(tab);
@@ -1731,16 +1838,27 @@ impl Workspace {
             return;
         }
         let staged = results.read(cx).delegate().pending_count();
+        let holds_rows = results.read(cx).delegate().holds_rows();
         // Leaving Row sends the dirty row first and switches when it lands.
         if current == EditMode::Row && self.held_for_edits(tab, AfterEdits::EditMode(mode), cx) {
             return;
         }
-        if mode == EditMode::Row && staged > 0 {
-            let edits = match staged {
-                1 => "1 edit".to_string(),
-                count => format!("{count} edits"),
+        if (mode == EditMode::Row && staged > 0) || (mode == EditMode::Classic && holds_rows) {
+            // Cells alone are edits; a row added makes the draft's size a
+            // count of changes.
+            let noun = if holds_rows { "change" } else { "edit" };
+            let size = match staged {
+                1 => format!("1 {noun}"),
+                count => format!("{count} {noun}s"),
             };
-            self.note(format!("The draft has {edits}{}", Self::DRAFT_REFUSAL), cx);
+            self.note(
+                format!(
+                    "The draft has {size}{}{} mode.",
+                    Self::DRAFT_REFUSAL,
+                    mode.label()
+                ),
+                cx,
+            );
             return;
         }
         if let Some(slot) = self
@@ -1748,24 +1866,33 @@ impl Workspace {
             .and_then(|profile| profile.session.edit_mode_mut(tab))
         {
             *slot = mode;
+            results.update(cx, |table, cx| {
+                table
+                    .delegate_mut()
+                    .set_row_washes(mode != EditMode::Classic);
+                table.refresh(cx);
+            });
             self.clear_draft_refusal();
             cx.notify();
         }
     }
 
-    /// What the notice says after how many edits the draft holds, when a
-    /// switch to Row is refused over them.
-    const DRAFT_REFUSAL: &str = ", so the view was not switched to Row mode.";
+    /// What the notice says between how many edits the draft holds and the
+    /// mode a refused switch was headed for.
+    const DRAFT_REFUSAL: &str = ", so the view was not switched to ";
 
     /// Takes the draft's refusal down once what it reported is over: the draft
-    /// is gone or the view is in Row mode. Only that notice goes; whatever else
-    /// the bar says, such as the row a Row send just wrote, is not this call's.
+    /// is gone or the view is in the mode it asked for. Only that notice goes;
+    /// whatever else the bar says, such as the row a Row send just wrote, is
+    /// not this call's.
     fn clear_draft_refusal(&mut self) {
         let Some(profile) = self.profile_mut() else {
             return;
         };
         if profile.session.notice.as_deref().is_some_and(|notice| {
-            notice.starts_with("The draft has ") && notice.ends_with(Self::DRAFT_REFUSAL)
+            notice.starts_with("The draft has ")
+                && notice.contains(Self::DRAFT_REFUSAL)
+                && notice.ends_with(" mode.")
         }) {
             profile.session.notice = None;
         }
@@ -1973,27 +2100,28 @@ impl Workspace {
         cx.notify();
     }
 
-    /// What a ring move off an edited row does, called after every move the
-    /// grid made ([`ResultGrid::take_left_row`]): in a Row view the row left is
-    /// sent, in a Draft view the mark is dropped and nothing is said. The one
-    /// caller of [`Self::save_row`] besides Save.
+    /// What a ring move does about the input it closed and the row it left,
+    /// called after every move the grid made ([`ResultGrid::take_left_row`]).
+    /// The closed input is staged first, in every view and on every grid
+    /// ([`ResultGrid::commit_closed_input`]); a Row view then sends the row
+    /// left, and a Draft view sends nothing and says nothing. The one caller of
+    /// [`Self::save_row`] besides Save.
     ///
     /// A grid that is not a relation tab's of the profile in front (a query
-    /// tab's, or one of a profile behind) has no mode to ask and drops the mark.
+    /// tab's, or one of a profile behind) has no mode to ask: what was typed is
+    /// staged and the mark dropped.
     pub(crate) fn flush_left_row(
         &mut self,
         grid: &Entity<gpui_component::table::TableState<ResultGrid>>,
         cx: &mut Context<Self>,
     ) {
-        // Both taken first and whatever comes of them, so a grid with no Row
-        // view to ask does not hold either for a later move.
-        let (left, closed, ring) = grid.update(cx, |table, cx| {
+        // The input is staged and the left row taken first and whatever comes
+        // of them, so a grid with no Row view to ask does not hold either for a
+        // later move.
+        let (left, ring) = grid.update(cx, |table, cx| {
             let grid = table.delegate_mut();
-            (
-                grid.take_left_row(),
-                grid.take_closed_input(cx),
-                grid.active().map(|(row, _)| row),
-            )
+            grid.commit_closed_input(cx);
+            (grid.take_left_row(), grid.active().map(|(row, _)| row))
         });
         let Some(row) = left.filter(|row| Some(*row) != ring) else {
             return;
@@ -2015,18 +2143,20 @@ impl Workspace {
         if mode != EditMode::Row {
             return;
         }
-        // What was typed in a cell the ring was moved off the row of is staged
-        // with the row's other edits. A mode that refuses the write leaves it
-        // unstaged.
-        if let Some((closed_row, col, text)) = closed
-            && closed_row == row
-        {
-            grid.update(cx, |table, _| {
-                table
-                    .delegate_mut()
-                    .set_pending(row, col, NewValue::Value(text))
-            });
-        }
+        self.send_row_if_idle(tab, grid, row, ring, cx);
+    }
+
+    /// The send both ways of leaving a Row view's row end in: nothing when the
+    /// row holds no edit, and a note, the row staying staged, while the tab's
+    /// last send is still running.
+    fn send_row_if_idle(
+        &mut self,
+        tab: u64,
+        grid: &Entity<gpui_component::table::TableState<ResultGrid>>,
+        row: usize,
+        to: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
         if !grid.read(cx).delegate().row_has_pending(row) {
             return;
         }
@@ -2039,7 +2169,49 @@ impl Workspace {
             self.note("The previous row is still being saved.".into(), cx);
             return;
         }
-        self.save_row(tab, row, ring, None, cx);
+        self.save_row(tab, row, to, None, cx);
+    }
+
+    /// A step key at the grid's edge with a cell's input open
+    /// ([`result_grid::commit_and_step`] found no cell to step to). In a Row view
+    /// the key is the row losing the keyboard, which there is leaving the row:
+    /// the input commits by Enter's rule and the row is sent as a ring move off
+    /// it sends it, with no `to` because the ring did not move. The ring stays
+    /// on the cell and the grid has the keyboard; the cell is not reopened. A
+    /// mode that refuses the write raises the Read-write prompt as Enter does
+    /// and sends nothing.
+    ///
+    /// A Classic or Draft view (a query tab is Draft) returns before any
+    /// commit: the input stays open and nothing is staged. Click-away is what
+    /// keeps that text.
+    pub(crate) fn step_past_edge(
+        &mut self,
+        _: &StepPastEdge,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((tab, grid)) = self.profile().and_then(|profile| {
+            let tab = profile.session.active_object()?;
+            match &tab.body {
+                ObjectBody::Relation {
+                    results,
+                    edit_mode: EditMode::Row,
+                    ..
+                } => Some((tab.id, results.clone())),
+                _ => None,
+            }
+        }) else {
+            return;
+        };
+        let Some(row) = grid.read(cx).delegate().active().map(|(row, _)| row) else {
+            return;
+        };
+        if !grid.update(cx, |table, cx| {
+            result_grid::commit_from_input(table, window, cx)
+        }) {
+            return;
+        }
+        self.send_row_if_idle(tab, &grid, row, None, cx);
     }
 
     /// Turn the grid's pending edits into SQL and put it where the user can read
@@ -2085,6 +2257,13 @@ impl Workspace {
             return;
         }
         let own_review = profile.session.apply_review_covers(tab);
+        // A draft holding an added row or a marked one is written by the
+        // draft's own writer, for a relation tab alone: only there can a row be
+        // added or marked.
+        if matches!(tab, Tab::Object(_)) && results.read(cx).delegate().holds_rows() {
+            self.apply_draft(tab, &results, window, cx);
+            return;
+        }
         let pending = results.read(cx).delegate().pending_updates();
         // Nothing partial runs: a batch missing one of its rows is not the
         // change the user made.
@@ -2128,6 +2307,87 @@ impl Workspace {
                     cx.notify();
                 }
             }
+        }
+    }
+
+    /// Write the draft of relation tab `tab`, which holds an added row, as one
+    /// batch and put it in an `Apply draft` review. Nothing runs here: Run in
+    /// the review is the ask (`AGENTS.md` rule 1).
+    ///
+    /// The batch passes both checks a generated draft is held to before it is
+    /// shown: the gate's read of its shape and the key check's read of which
+    /// table and key every `DELETE` names, against the rows marked.
+    fn apply_draft(
+        &mut self,
+        tab: Tab,
+        results: &Entity<gpui_component::table::TableState<ResultGrid>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let engine = self.engine();
+        let target = self.target();
+        let (inserts, updates, deletes, marks, keys, relation) = {
+            let grid = results.read(cx).delegate();
+            (
+                grid.draft_inserts(),
+                grid.pending_updates(),
+                grid.draft_deletes(),
+                grid.marked_count(),
+                grid.key_columns(),
+                grid.insert_target(),
+            )
+        };
+        let inserts = match inserts {
+            Ok(inserts) => inserts,
+            Err(row) => {
+                self.note(
+                    format!(
+                        "The added row {} holds no value, so the draft was not applied.",
+                        row + 1
+                    ),
+                    cx,
+                );
+                return;
+            }
+        };
+        let Some((schema, table, _)) = relation else {
+            return;
+        };
+        let batch = match sql::draft_batch(engine, &deletes, &updates, &inserts) {
+            Ok(batch) => batch,
+            Err(message) => {
+                self.note(message, cx);
+                return;
+            }
+        };
+        // Failing either check is dbdelve disagreeing with itself, a bug in
+        // dbdelve rather than a user error, so it is said and not run.
+        let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+        if !sql::is_generated_write_on(engine, &batch)
+            || sql::draft_deletes_match(engine, &batch, &keys, &schema, &table) != Some(marks)
+        {
+            self.note(
+                "dbdelve refused to run a statement it wrote itself: it is not a draft of \
+                 one-row deletes, updates and inserts."
+                    .into(),
+                cx,
+            );
+            return;
+        }
+        if !self.review_slot_free(tab, true, window, cx) {
+            return;
+        }
+        let notes = target.review_notes(&batch);
+        if let Some(profile) = self.profile_mut() {
+            profile.session.apply_review = Some(ApplyReview {
+                tab,
+                title: "Apply draft",
+                notes,
+                sql: batch,
+                error: None,
+                edits: true,
+            });
+            cx.notify();
         }
     }
 

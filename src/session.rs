@@ -799,8 +799,8 @@ pub(crate) struct ApplyReview {
     /// What the last run of `sql` came to when it failed or was refused,
     /// drawn where the statement is. Cleared when it runs again.
     pub(crate) error: Option<String>,
-    /// Whether `sql` is the grid's pending edits, which a successful run
-    /// clears. An `INSERT` or a `DELETE` sends none of them.
+    /// Whether `sql` is the grid's draft, which a successful run clears. An
+    /// `INSERT` or a `DELETE` of the New row form or Delete row sends none of it.
     pub(crate) edits: bool,
 }
 
@@ -1119,6 +1119,7 @@ pub(crate) enum StaleResume {
     /// than the active one.
     Stage((usize, usize), NewValue),
     Delete,
+    NewRow,
 }
 
 impl Session {

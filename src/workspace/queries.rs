@@ -25,6 +25,14 @@ impl Workspace {
         self.pending_edit_count(cx) > 0
     }
 
+    /// Whether the draft in front holds a row added in the grid, so its size
+    /// is a count of changes and not of edited cells.
+    pub(crate) fn draft_holds_rows(&self, cx: &App) -> bool {
+        self.profile()
+            .and_then(|profile| profile.session.active_results())
+            .is_some_and(|results| results.read(cx).delegate().holds_rows())
+    }
+
     pub(crate) fn pending_edit_count(&self, cx: &App) -> usize {
         self.profile()
             .and_then(|profile| profile.session.active_results())
@@ -56,6 +64,27 @@ impl Workspace {
                     grid.delegate()
                         .active()
                         .is_some_and(|(row, _)| grid.delegate().row_key(row).is_some())
+                })
+        })
+    }
+
+    /// Whether the selection of a Draft view of a table holds a row that Delete
+    /// row can mark: an added row, which it removes, or a row named by its
+    /// primary key. Read off the grid for the reason
+    /// [`Workspace::has_nameable_row`] is.
+    pub(crate) fn has_markable_row(&self, cx: &App) -> bool {
+        self.profile().is_some_and(|profile| {
+            let tab = profile.session.active;
+            matches!(tab, Tab::Object(_))
+                && profile.session.edit_mode(tab) == EditMode::Draft
+                && profile.config.target().row_edits()
+                && profile.session.active_results().is_some_and(|results| {
+                    let grid = results.read(cx).delegate();
+                    grid.insert_target().is_some()
+                        && grid
+                            .selected_draft_rows()
+                            .into_iter()
+                            .any(|row| row >= grid.fetched_rows() || grid.row_key(row).is_some())
                 })
         })
     }
@@ -2461,10 +2490,11 @@ impl Workspace {
                 table.delegate().column_view(),
             )
         };
-        // What the batch carries, read now: on success only these cells are
-        // cleared, so an edit staged while it is out stays. A lent slot's grid
-        // is the one in front of the batch by here. Nothing can be staged
-        // between the batch's writing and this read: a review holds the grid
+        // What the batch carries, read now: on a query tab only these cells
+        // are cleared on success, so an edit staged while it is out stays; a
+        // relation tab's reviewed draft clears whole (see the landing). A lent
+        // slot's grid is the one in front of the batch by here. Nothing can be
+        // staged between the batch's writing and this read: a review holds the grid
         // against staging (`may_stage_into`), the buffer append sends in the
         // call that wrote it, and a batch the mode gate parks waits under
         // Read-only, where `set_pending` refuses. So every staged cell is in
@@ -2957,6 +2987,10 @@ impl Workspace {
                         // this field -- but the mode a result lands under has to
                         // be the mode at landing time, not a stale default.
                         let mode = profile.mode;
+                        // A Classic view paints no row washes; a query tab
+                        // answers Draft and keeps them.
+                        let row_washes =
+                            profile.session.edit_mode(tab) != crate::session::EditMode::Classic;
                         // Read before `slot` for the same reason. A view sorted
                         // in memory is sorted again as its rows land: a page
                         // turn or a re-run hands them back in the server's order.
@@ -3111,16 +3145,32 @@ impl Workspace {
                                 if let Some((rows_id, rows)) = &sent {
                                     results.update(cx, |table, cx| {
                                         let grid = table.delegate_mut();
-                                        // ponytail: the sent cells are matched
-                                        // by row index and value under an
-                                        // unchanged `rows_id`, so a sort in
-                                        // memory during the round trip leaves
-                                        // them staged (applying them again
-                                        // writes the same values); the upgrade
-                                        // is to match them by the row's key.
-                                        if grid.rows_id() == *rows_id {
-                                            for (row, cells) in rows {
-                                                grid.clear_sent(*row, cells);
+                                        match tab {
+                                            // A reviewed relation tab's apply
+                                            // sent the whole draft, cells and
+                                            // added rows: the review held the
+                                            // grid against staging while it was
+                                            // out (`may_stage_into`), and a
+                                            // sort in memory only permuted what
+                                            // it held. So the whole draft goes,
+                                            // whatever `rows_id` now is, and an
+                                            // added row is not left staged to
+                                            // be sent twice.
+                                            Tab::Object(_) => grid.discard_pending(),
+                                            // ponytail: the sent cells are
+                                            // matched by row index and value
+                                            // under an unchanged `rows_id`, so
+                                            // a sort in memory during the round
+                                            // trip leaves them staged (applying
+                                            // them again writes the same
+                                            // values); the upgrade is to match
+                                            // them by the row's key.
+                                            Tab::Query(_) => {
+                                                if grid.rows_id() == *rows_id {
+                                                    for (row, cells) in rows {
+                                                        grid.clear_sent(*row, cells);
+                                                    }
+                                                }
                                             }
                                         }
                                         table.refresh(cx);
@@ -3227,6 +3277,7 @@ impl Workspace {
                                         .with_client_sort(client_keys.as_deref())
                                         .with_layout(&carried_names, &carried_widths)
                                         .with_column_view(&column_view);
+                                    table.delegate_mut().set_row_washes(row_washes);
                                     // Streamed rows are the finished result's
                                     // first rows, in order, so what was picked
                                     // out of them as they came still names
@@ -3603,7 +3654,7 @@ impl Workspace {
 
     /// Said after an edit send succeeded over a grid that still holds edits,
     /// which the re-read would have dropped unseen.
-    const EDITS_KEPT: &str =
+    pub(super) const EDITS_KEPT: &str =
         "The change was applied. The rows were not read again: this tab has unapplied edits.";
 
     /// A run's outcome into the history of the profile that sent it, by id

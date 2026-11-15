@@ -1,0 +1,431 @@
+---
+source: src/sql_snapshots.rs
+---
+
+[postgres] mixed bracketed
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |DELETE FROM "public"."accounts" WHERE "id" = '8';|
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '5';|
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '6';|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', 'a');|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('10', 'b');|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] one delete
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] one update
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '5';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] one insert
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', 'a');|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] marks only
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |DELETE FROM "public"."accounts" WHERE "id" = '8';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] adds only
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', 'a');|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('10', 'b');|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] an insert holding a null
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[postgres] empty
+  error: |There are no edits to apply.|
+
+[mysql] mixed bracketed
+  |BEGIN;|
+  |DELETE FROM `public`.`accounts` WHERE `id` = '7';|
+  |DELETE FROM `public`.`accounts` WHERE `id` = '8';|
+  |UPDATE `public`.`accounts` SET `Name` = 'it''s' WHERE `id` = '5';|
+  |UPDATE `public`.`accounts` SET `Name` = 'it''s' WHERE `id` = '6';|
+  |INSERT INTO `public`.`accounts` (`id`, `Name`) VALUES ('9', 'a');|
+  |INSERT INTO `public`.`accounts` (`id`, `Name`) VALUES ('10', 'b');|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] one delete
+  |DELETE FROM `public`.`accounts` WHERE `id` = '7';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] one update
+  |UPDATE `public`.`accounts` SET `Name` = 'it''s' WHERE `id` = '5';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] one insert
+  |INSERT INTO `public`.`accounts` (`id`, `Name`) VALUES ('9', 'a');|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] marks only
+  |BEGIN;|
+  |DELETE FROM `public`.`accounts` WHERE `id` = '7';|
+  |DELETE FROM `public`.`accounts` WHERE `id` = '8';|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] adds only
+  |BEGIN;|
+  |INSERT INTO `public`.`accounts` (`id`, `Name`) VALUES ('9', 'a');|
+  |INSERT INTO `public`.`accounts` (`id`, `Name`) VALUES ('10', 'b');|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] an insert holding a null
+  |INSERT INTO `public`.`accounts` (`id`, `Name`) VALUES ('9', NULL);|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mysql] empty
+  error: |There are no edits to apply.|
+
+[mariadb] mixed bracketed
+  |BEGIN;|
+  |DELETE FROM `public`.`accounts` WHERE `id` = '7';|
+  |DELETE FROM `public`.`accounts` WHERE `id` = '8';|
+  |UPDATE `public`.`accounts` SET `Name` = 'it''s' WHERE `id` = '5';|
+  |UPDATE `public`.`accounts` SET `Name` = 'it''s' WHERE `id` = '6';|
+  |INSERT INTO `public`.`accounts` (`id`, `Name`) VALUES ('9', 'a');|
+  |INSERT INTO `public`.`accounts` (`id`, `Name`) VALUES ('10', 'b');|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] one delete
+  |DELETE FROM `public`.`accounts` WHERE `id` = '7';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] one update
+  |UPDATE `public`.`accounts` SET `Name` = 'it''s' WHERE `id` = '5';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] one insert
+  |INSERT INTO `public`.`accounts` (`id`, `Name`) VALUES ('9', 'a');|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] marks only
+  |BEGIN;|
+  |DELETE FROM `public`.`accounts` WHERE `id` = '7';|
+  |DELETE FROM `public`.`accounts` WHERE `id` = '8';|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] adds only
+  |BEGIN;|
+  |INSERT INTO `public`.`accounts` (`id`, `Name`) VALUES ('9', 'a');|
+  |INSERT INTO `public`.`accounts` (`id`, `Name`) VALUES ('10', 'b');|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] an insert holding a null
+  |INSERT INTO `public`.`accounts` (`id`, `Name`) VALUES ('9', NULL);|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mariadb] empty
+  error: |There are no edits to apply.|
+
+[sqlite] mixed bracketed
+  |BEGIN;|
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |DELETE FROM "public"."accounts" WHERE "id" = '8';|
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '5';|
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '6';|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', 'a');|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('10', 'b');|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] one delete
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] one update
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '5';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] one insert
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', 'a');|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] marks only
+  |BEGIN;|
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |DELETE FROM "public"."accounts" WHERE "id" = '8';|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] adds only
+  |BEGIN;|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', 'a');|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('10', 'b');|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] an insert holding a null
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[sqlite] empty
+  error: |There are no edits to apply.|
+
+[turso] mixed bracketed
+  |BEGIN;|
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |DELETE FROM "public"."accounts" WHERE "id" = '8';|
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '5';|
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '6';|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', 'a');|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('10', 'b');|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] one delete
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] one update
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '5';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] one insert
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', 'a');|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] marks only
+  |BEGIN;|
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |DELETE FROM "public"."accounts" WHERE "id" = '8';|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] adds only
+  |BEGIN;|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', 'a');|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('10', 'b');|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] an insert holding a null
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[turso] empty
+  error: |There are no edits to apply.|
+
+[duckdb] mixed bracketed
+  |BEGIN;|
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |DELETE FROM "public"."accounts" WHERE "id" = '8';|
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '5';|
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '6';|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', 'a');|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('10', 'b');|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] one delete
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] one update
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '5';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] one insert
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', 'a');|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] marks only
+  |BEGIN;|
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |DELETE FROM "public"."accounts" WHERE "id" = '8';|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] adds only
+  |BEGIN;|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', 'a');|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('10', 'b');|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] an insert holding a null
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[duckdb] empty
+  error: |There are no edits to apply.|
+
+[snowflake] mixed bracketed
+  |BEGIN;|
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |DELETE FROM "public"."accounts" WHERE "id" = '8';|
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '5';|
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '6';|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', 'a');|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('10', 'b');|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] one delete
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] one update
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '5';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] one insert
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', 'a');|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] marks only
+  |BEGIN;|
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |DELETE FROM "public"."accounts" WHERE "id" = '8';|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] adds only
+  |BEGIN;|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', 'a');|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('10', 'b');|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] an insert holding a null
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[snowflake] empty
+  error: |There are no edits to apply.|
+
+[clickhouse] mixed bracketed
+  |DELETE FROM `public`.`accounts` WHERE `id` = '7';|
+  |DELETE FROM `public`.`accounts` WHERE `id` = '8';|
+  |UPDATE `public`.`accounts` SET `Name` = 'it''s' WHERE `id` = '5';|
+  |UPDATE `public`.`accounts` SET `Name` = 'it''s' WHERE `id` = '6';|
+  |INSERT INTO `public`.`accounts` (`id`, `Name`) VALUES ('9', 'a');|
+  |INSERT INTO `public`.`accounts` (`id`, `Name`) VALUES ('10', 'b');|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] one delete
+  |DELETE FROM `public`.`accounts` WHERE `id` = '7';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] one update
+  |UPDATE `public`.`accounts` SET `Name` = 'it''s' WHERE `id` = '5';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] one insert
+  |INSERT INTO `public`.`accounts` (`id`, `Name`) VALUES ('9', 'a');|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] marks only
+  |DELETE FROM `public`.`accounts` WHERE `id` = '7';|
+  |DELETE FROM `public`.`accounts` WHERE `id` = '8';|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] adds only
+  |INSERT INTO `public`.`accounts` (`id`, `Name`) VALUES ('9', 'a');|
+  |INSERT INTO `public`.`accounts` (`id`, `Name`) VALUES ('10', 'b');|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] an insert holding a null
+  |INSERT INTO `public`.`accounts` (`id`, `Name`) VALUES ('9', NULL);|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[clickhouse] empty
+  error: |There are no edits to apply.|
+
+[mssql] mixed bracketed
+  |BEGIN TRANSACTION;|
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |DELETE FROM "public"."accounts" WHERE "id" = '8';|
+  |UPDATE "public"."accounts" SET "Name" = N'it''s' WHERE "id" = '5';|
+  |UPDATE "public"."accounts" SET "Name" = N'it''s' WHERE "id" = '6';|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', N'a');|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('10', N'b');|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] one delete
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] one update
+  |UPDATE "public"."accounts" SET "Name" = N'it''s' WHERE "id" = '5';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] one insert
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', N'a');|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] marks only
+  |BEGIN TRANSACTION;|
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |DELETE FROM "public"."accounts" WHERE "id" = '8';|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] adds only
+  |BEGIN TRANSACTION;|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', N'a');|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('10', N'b');|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] an insert holding a null
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mssql] empty
+  error: |There are no edits to apply.|
+
+[generic] mixed bracketed
+  |BEGIN;|
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |DELETE FROM "public"."accounts" WHERE "id" = '8';|
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '5';|
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '6';|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', 'a');|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('10', 'b');|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[generic] one delete
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[generic] one update
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '5';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[generic] one insert
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', 'a');|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[generic] marks only
+  |BEGIN;|
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |DELETE FROM "public"."accounts" WHERE "id" = '8';|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[generic] adds only
+  |BEGIN;|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', 'a');|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('10', 'b');|
+  |COMMIT;|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[generic] an insert holding a null
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[generic] empty
+  error: |There are no edits to apply.|

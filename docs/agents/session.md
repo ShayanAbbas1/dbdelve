@@ -531,7 +531,8 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   default, is how editing worked before a view had a mode: cell edits are held
   until Save shows their `UPDATE`s (the buffer on a query tab, the review on a
   table). `Draft` holds every edit until Apply goes through the review; `Row`
-  sends a row's `UPDATE` as the row is left or saved, with no dialog
+  sends a row's `UPDATE` as the row is left (a ring move off it, or a step key
+  past the grid's edge from a cell's input) or saved, with no dialog
   (`AGENTS.md` hard rule 1 says what that send still passes). It lives on a
   relation tab beside `sorting`, is switched from the status bar's
   `Edit: <mode>` menu (`actions::SetEditMode`) or the palette, starts from the
@@ -553,8 +554,22 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   The one writer of a Row send is `Workspace::save_row`; Save and the funnel
   are its callers. The funnel is `ResultGrid::take_left_row`, which marks the
   row the ring leaves while it holds edits or an input, and
-  `Workspace::flush_left_row`, which consumes the mark in the grid's selection
-  events and sends only in a Row view. The send is `Refresh::Row`: it writes
+  `Workspace::flush_left_row`, which runs on the grid's `SelectRow`,
+  `ClearSelection` and `SelectColumn` events. It first stages the text of an
+  input the move closed (`ResultGrid::commit_closed_input`) in every view and on
+  a query tab's grid alike, and sends only in a Row view. Every close of a
+  cell's input (Enter, Tab, Shift-Tab, Up or Down, a Row view's edge key, a click
+  away) commits by `ResultGrid::commit_text`, where text equal to the input's
+  seed (`edit_seed`) is nothing typed, on every row: an untouched input leaves a
+  NULL, a staged NULL or DEFAULT (each seeds empty) and an added row's untouched
+  cell alone, stages nothing, sends nothing in a Row view and asks nothing of
+  the mode. The empty string over a NULL is written by `SetEmpty`
+  (`Set Value to Empty` in the cell menu where `offers_empty` holds,
+  `Set cell to empty` in the palette). A step key
+  at the grid's edge with an input open is handed to the workspace as
+  `StepPastEdge`: in a Row view it commits the input and sends the row, the ring
+  left on the cell, and in a Draft view or on a query tab it leaves the input
+  open. The send is `Refresh::Row`: it writes
   the `UPDATE` and, in the same background task, reads the row back by its key
   (`sql::row_read`). The landing replaces that row where it stands
   (`ResultGrid::replace_row`) and clears the cells that were sent
@@ -601,6 +616,26 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   An `UPDATE` matches on the key alone, in both modes. A row changed on the
   server since it was fetched is overwritten, and nothing detects it: a stale
   edit (`StaleEdit`) is not drift detection.
+- **A draft holds added rows and marks.** In a Draft view of a relation tab on a
+  `Target::row_edits()` target, `NewRow` (Insert) adds a grid row and
+  `DeleteRow` toggles a mark on the selected rows (the palette's `Mark row for
+  deletion`, offered while `has_markable_row` holds, else `Delete row…`). A
+  Classic view keeps the insert form and the one-row `DELETE` review, and
+  paints no whole-row washes (`ResultGrid::set_row_washes`); a switch into
+  Classic is refused while the grid holds an added row or a mark. Added
+  rows live beside `pending` (`ResultGrid`'s added rows) and are never sorted
+  or written into a `sort`; marks follow their rows through a sort. Deleting an
+  added row removes it. The count is cells, added rows and marks together, and
+  it drives the Apply/Discard cluster and the status bar's `N pending changes`,
+  the palette, the switch refusals and the requery prompt. Apply opens one
+  review titled `Apply draft`, whose text is `DELETE`s before `UPDATE`s before
+  `INSERT`s (`sql::draft_batch`), gated as a whole and checked for key and table
+  by `sql::draft_deletes_match` and against `marked_count`, so a dropped mark
+  refuses the draft. A successful reviewed relation-tab apply clears the whole
+  draft and re-reads; a failure keeps all of it and applies nothing.
+  A row is washed by its state in the theme's added, updated and deleted
+  tokens, and its gutter carries the `debug_selector` `row-added-N`,
+  `row-updated-N` or `row-deleted-N` for a test to find.
 - **An edit send keeps the grid, on a transactional SQL engine.** Where the
   target answers `Target::row_edits()`, a statement dbdelve sends for a grid
   edit (an Apply edits batch, an Insert, a Delete row) leaves the rows, the
@@ -610,9 +645,11 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   shown in the review (`ApplyReview::error`) or, with none over the tab, in the
   tab's notice, never as `Failed`. A success clears the cells it sent, read off
   the grid when it was sent (`ApplyReview::edits` says whether a reviewed send
-  carried the draft), and re-reads; when edits remain (an Insert or Delete over
-  a draft, an edit staged while the batch was in flight) it keeps them and does
-  not re-read. On every other target (ClickHouse, MongoDB, Redis, Generic SQL,
+  carried the draft), and re-reads; when edits remain (a query tab's Insert or
+  Delete over a draft, an edit staged while the batch was in flight) it keeps
+  them and does not re-read. On a relation tab an Insert or Delete row over a
+  draft is Row mode's case, or a Draft view's added row or mark (the next
+  bullet), never a send. A reviewed relation-tab apply clears the whole draft. On every other target (ClickHouse, MongoDB, Redis, Generic SQL,
   a plugin, Snowflake, Turso) an edit send clears the grid as it starts and a failure
   is `QueryState::Failed`: a batch with no transaction that failed part way has
   already applied some of a draft, and keeping it would send those rows again.

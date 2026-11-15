@@ -749,6 +749,127 @@ pub(super) fn binary_edits_round_trip(
     assert!(grid(BinaryForm::Hex).editable(0, 1), "{at}");
 }
 
+/// A mixed draft, written by `sql::draft_batch` and gated as the apply gates
+/// it, run on the subject as one transaction: the deleted key is free for an
+/// insert in the same batch, and a batch that fails part-way leaves what its
+/// `DELETE` named in place.
+pub(super) fn generated_draft_round_trip(subject: &Subject) {
+    let scenario = "generated_draft_round_trip";
+    let at = format!("{scenario} on {:?}", subject.target.engine);
+    let engine = subject.target.engine;
+    if !subject.target.row_edits() {
+        return;
+    }
+    let (schema, relation, key) = (subject.schema, subject.relation, subject.key);
+    let label = subject.columns[1];
+    let structure = subject
+        .connection
+        .structure(schema, relation)
+        .unwrap_or_else(|error| panic!("{at}: {error}"));
+    let types: Vec<(String, String)> = structure
+        .columns
+        .iter()
+        .map(|column| (column.name.clone(), column.data_type.clone()))
+        .collect();
+    let generated = |sql: &str| {
+        subject
+            .connection
+            .generated(sql, &CancelToken::default(), None, None)
+    };
+    let delete = |id: &str| sql::DraftDelete {
+        schema: schema.into(),
+        table: relation.into(),
+        keys: vec![(key.into(), id.into())],
+        null_keys: Vec::new(),
+        types: types.clone(),
+    };
+    let insert = |id: &str, text: &str| sql::DraftInsert {
+        schema: schema.into(),
+        table: relation.into(),
+        columns: vec![
+            (key.into(), Some(id.into())),
+            (label.into(), Some(text.into())),
+        ],
+        types: types.clone(),
+    };
+    let apply = |draft: &str| {
+        assert!(sql::is_generated_write_on(engine, draft), "{at}: {draft}");
+        generated(draft)
+    };
+
+    let cleanup: Vec<(&str, String)> = ["901", "902"]
+        .into_iter()
+        .filter_map(|id| {
+            sql::delete_row(engine, schema, relation, &[(key, id)], &types)
+                .map(|statement| (id, statement))
+        })
+        .collect();
+    let _cleanup = Cleanup {
+        connection: &subject.connection,
+        statements: cleanup
+            .iter()
+            .map(|(_, statement)| statement.clone())
+            .collect(),
+        rollback: true,
+        read_write: false,
+    };
+    // An engine that names rows by every value refuses a delete that matches none.
+    for (id, statement) in &cleanup {
+        if !subject.label_of(scenario, id).is_empty() {
+            generated(statement).unwrap_or_else(|error| panic!("{at}: `{statement}`: {error}"));
+        }
+    }
+
+    let first = sql::insert_row(
+        engine,
+        schema,
+        relation,
+        &[(key, Some("901")), (label, Some("inserted"))],
+        &types,
+    )
+    .unwrap_or_else(|error| panic!("{at}: insert_row: {error}"));
+    generated(&first).unwrap_or_else(|error| panic!("{at}: `{first}`: {error}"));
+
+    // The delete runs first, so the key it frees is the key an insert takes.
+    let replace = sql::draft_batch(
+        engine,
+        &[delete("901")],
+        &[],
+        &[insert("901", "replaced"), insert("902", "added")],
+    )
+    .unwrap_or_else(|error| panic!("{at}: draft_batch: {error}"));
+    apply(&replace).unwrap_or_else(|error| panic!("{at}: `{replace}`: {error}"));
+    assert_eq!(
+        subject.label_of(scenario, "901"),
+        [Some("replaced".to_string())],
+        "{at}"
+    );
+    assert_eq!(
+        subject.label_of(scenario, "902"),
+        [Some("added".to_string())],
+        "{at}"
+    );
+
+    // An insert that meets a duplicate key fails the batch, and the bracket
+    // takes the delete back with it.
+    let collide = sql::draft_batch(engine, &[delete("901")], &[], &[insert("902", "again")])
+        .unwrap_or_else(|error| panic!("{at}: draft_batch: {error}"));
+    assert!(
+        apply(&collide).is_err(),
+        "{at}: the duplicate key was accepted: {collide}"
+    );
+    assert_eq!(
+        subject.label_of(scenario, "901"),
+        [Some("replaced".to_string())],
+        "{at}: the failed draft's delete stayed applied"
+    );
+    assert_eq!(
+        subject.label_of(scenario, "902"),
+        [Some("added".to_string())],
+        "{at}"
+    );
+}
+
 /// What DBDelve writes for a browsing surface, run on the subject: a paged
 /// preview, a header sort spliced into it, a count, and every filter operator
 /// the engine offers, each passing the gate and narrowing the fixture to the

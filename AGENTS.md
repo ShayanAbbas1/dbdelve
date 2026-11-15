@@ -52,7 +52,9 @@ require it, stop and raise it instead.
    It never writes `DROP` or `TRUNCATE` into a buffer or onto the wire. It
    writes `DELETE` only as the explicit deletion of one named row, by primary
    key (on an engine without unique keys, by all of the row's values as read, and
-   only when exactly one row matches), shown before it runs (`sql::delete_row`).
+   only when exactly one row matches), shown before it runs (`sql::delete_row`),
+   or as one `DELETE` per row the user marked in a reviewed draft, each naming
+   that row's key.
    The explorer's Copy DROP and Copy TRUNCATE put text on the clipboard and
    nothing else. It never writes into a statement it cannot parse whole: `sql::with_order_by` refuses rather
    than guessing at a clause boundary, because a corrupted statement is worse
@@ -75,10 +77,11 @@ require it, stop and raise it instead.
    edited, deliberately. An engine without unique keys is the one exception: a
    row is named by all of its values as read, and a write runs only when exactly
    one row matches, checked by an exactly-one-row `COUNT(*)` with the identical
-   predicate before each write. **Multi-row deletion is not admitted.** When it is
-   wanted, the path is one `DELETE` per row, each naming its own key, inside
-   the `BEGIN`/`COMMIT` multi-row edits use, never one predicate covering
-   several.
+   predicate before each write. **Multi-row deletion by predicate is not
+   admitted.** A reviewed draft may carry one `DELETE` per marked row, each
+   naming its own key and table, checked against the parse tree
+   (`sql::draft_deletes_match`) and counted against the marks, inside the
+   `BEGIN`/`COMMIT` multi-row edits use, never one predicate covering several.
 
 3. **No environment-specific behaviour.** No vendor binary names in error
    strings, no assumption that a loopback host means plaintext, no hardcoded

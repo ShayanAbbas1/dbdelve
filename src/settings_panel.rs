@@ -192,10 +192,10 @@ fn setting_rows() -> Vec<SettingRow> {
             "When a new table tab sends its edits. Classic holds cell edits \
              until Save, which shows the UPDATE statements first; New row \
              opens a form and Delete row shows the one DELETE. Draft holds \
-             every edit until Apply, which shows the statements first. Row \
-             sends a row's UPDATE when the row is left or saved, with no \
-             dialog. Tabs already open keep theirs; each can be switched from \
-             its status bar.",
+             every edit, added row and deleted row until Apply, which shows \
+             the statements first. Row sends a row's UPDATE when the row is \
+             left or saved, with no dialog. Tabs already open keep theirs; \
+             each can be switched from its status bar.",
             &["edit", "row", "draft", "classic", "save"],
         ),
         row(
