@@ -552,21 +552,99 @@ impl Workspace {
         }
     }
 
+    /// Every chip the strip draws, left to right: the connection's index and
+    /// the tab behind the chip. In complex mode every connection's, in the
+    /// order the profiles are kept; in simple mode the front one's.
+    pub(crate) fn strip_chips(&self) -> Vec<(usize, Tab)> {
+        let complex = self.view_mode() == ViewMode::Complex;
+        self.profiles
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| complex || Some(*index) == self.active)
+            .flat_map(|(index, profile)| {
+                profile
+                    .session
+                    .strip_tabs()
+                    .into_iter()
+                    .map(move |tab| (index, tab))
+            })
+            .collect()
+    }
+
+    /// Where the tab in front sits in the strip as it is drawn: in complex
+    /// mode that is after every chip of the connections listed before its
+    /// own, which the strip's one scroller counts too.
+    pub(crate) fn front_chip(&self) -> Option<usize> {
+        let front = (self.active?, self.profile()?.session.active);
+        self.strip_chips().iter().position(|chip| *chip == front)
+    }
+
+    /// The connection at `index` in front, if it is not already: what a
+    /// chip's click, middle click and close button each start with, so that
+    /// the gate, the mode and the engine of whatever runs next are that
+    /// connection's, and so that a tab id, which two connections can share,
+    /// means the tab on the connection in front.
+    fn bring_forward(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.active != Some(index) {
+            self.activate(index, cx);
+        }
+    }
+
+    /// A chip was clicked: its connection comes to the front first, then its
+    /// tab.
+    pub(crate) fn activate_chip(
+        &mut self,
+        index: usize,
+        tab: Tab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.bring_forward(index, cx);
+        // `activate` leaves the connection in front on its own tab; a click
+        // on a chip of the one already in front lands here with nothing to
+        // bring forward.
+        if self.active == Some(index) {
+            self.activate_tab(tab, window, cx);
+        }
+    }
+
+    /// A chip's close: asked about on the connection that owns the tab, after
+    /// bringing it forward, so `ask_before_close` looks at the right tab.
+    pub(crate) fn close_chip(
+        &mut self,
+        index: usize,
+        tab: Tab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.bring_forward(index, cx);
+        if self.active == Some(index) {
+            self.ask_before_close(tab, window, cx);
+        }
+    }
+
     pub(crate) fn cycle_tab(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session) = self.profile().map(|profile| &profile.session) else {
+        let Some(front) = self.active else {
             return;
         };
         // Cycling walks the strip left to right, wherever the chips were
-        // dragged to.
-        let tabs = session.strip_tabs();
-        if tabs.len() < 2 {
+        // dragged to, and in complex mode across connections: stepping onto
+        // another connection's chip brings that connection forward.
+        let chips = self.strip_chips();
+        if chips.len() < 2 {
             return;
         }
-        let Some(index) = tabs.iter().position(|tab| *tab == session.active) else {
+        let Some(current) = self
+            .profile()
+            .map(|profile| (front, profile.session.active))
+        else {
             return;
         };
-        let next = tabs[(index as isize + step).rem_euclid(tabs.len() as isize) as usize];
-        self.activate_tab(next, window, cx);
+        let Some(at) = chips.iter().position(|chip| *chip == current) else {
+            return;
+        };
+        let (index, tab) = chips[(at as isize + step).rem_euclid(chips.len() as isize) as usize];
+        self.activate_chip(index, tab, window, cx);
     }
 
     /// A chip has been picked up. The chips are what the strip last drew, so
@@ -667,11 +745,7 @@ impl Workspace {
         if !session.move_active_tab(step) {
             return;
         }
-        if let Some(index) = session
-            .strip_order()
-            .iter()
-            .position(|key| session.tab_of(key) == Some(session.active))
-        {
+        if let Some(index) = self.front_chip() {
             crate::scroller::scroll_to("tab-strip", "", index, cx);
         }
         cx.notify();

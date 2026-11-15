@@ -1690,6 +1690,7 @@ impl Render for Workspace {
         // take it -- which is what closing the palette asks for just before a
         // row of it opens the form. The ask waits for the form to close.
         let form_open = self.form.is_some();
+        let front_chip = self.front_chip();
         let take_focus = self.profile_mut().and_then(|profile| {
             if form_open {
                 return None;
@@ -1708,12 +1709,7 @@ impl Render for Workspace {
             // it, one-shot the same way: a tab just opened or activated off
             // screen is a tab the strip should show, not one it leaves the
             // user to go scroll for.
-            if let Some(index) = profile
-                .session
-                .strip_order()
-                .iter()
-                .position(|key| profile.session.tab_of(key) == Some(profile.session.active))
-            {
+            if let Some(index) = front_chip {
                 crate::scroller::scroll_to("tab-strip", "", index, cx);
             }
             // Whatever the surface in front is: a keystroke reaches the
@@ -2493,6 +2489,9 @@ impl Render for Workspace {
             .flex_col()
             .child(div().flex_1().min_h_0().child(views::render_main_content(
                 profile,
+                &self.profiles,
+                self.view_mode(),
+                self.settings.color_titlebar,
                 self.editor_size(),
                 (self.chrome_zoom, self.editor_zoom, self.grid_zoom),
                 &self.row_panel,

@@ -132,6 +132,25 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   shows that profile's own tree, its own database and schema and not the
   tab's binding. The profile's own database and schema do not move: a tab's
   binding is where its statements run, not where the connection is.
+- **In complex mode the tab strip lists every connection's tabs**
+  (`Workspace::strip_chips`; `views::render_tab_strip`): connections in the
+  order the profiles are kept, each one's chips in its own strip order. A chip
+  names its connection, and for a bound tab its database
+  (`views::chip_context`, `Binding::label`); in simple mode the strip is the
+  front connection's alone and only a bound chip says where it runs. A chip of
+  a connection that is not in front is clicked through
+  `Workspace::activate_chip`, which brings the connection forward and then the
+  tab, so the gate, the mode and the engine of what runs next are that
+  connection's; a middle click or the close button does the same
+  (`close_chip`), because a close acts on the front connection and two
+  connections' tab ids collide. Next Tab and Previous Tab walk the whole strip
+  and bring a connection forward when they step onto its chip. A coloured
+  connection's chips carry its colour only while `color_titlebar` is on: a bar
+  in its swatch on every chip, the front chip's ground its band (legibility:
+  `a_tinted_tab_chip_reads_in_every_theme`). Only the front connection's chips
+  drag, because the strip's bounds and glide are keyed by `TabKey`, which is
+  per connection (`ponytail:` in `render_tab_strip`: key them by connection and
+  tab to lift it); another connection's chip is reordered after a click.
 - **The titlebar's project and connection open the palette on Connections**
   (`Workspace::open_connections`, also `SwitchConnection`, no default chord);
   there is no switcher panel of its own. That scope is a tree

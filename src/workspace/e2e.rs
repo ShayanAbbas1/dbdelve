@@ -9271,3 +9271,316 @@ fn select_database_closes_only_the_own_databases_object_tabs(cx: &mut TestAppCon
         quit(workspace, cx);
     });
 }
+
+/// `a` in front and `b` behind it, both connected and each on its one query
+/// tab, over one SQLite file.
+fn a_in_front_of_b<'a>(
+    cx: &'a mut TestAppContext,
+    settings: &str,
+) -> (Entity<Workspace>, &'a mut VisualTestContext) {
+    a_in_front_of_b_with(cx, settings, "")
+}
+
+/// `a_in_front_of_b`, `b` with `extra` among its scalar keys.
+fn a_in_front_of_b_with<'a>(
+    cx: &'a mut TestAppContext,
+    settings: &str,
+    extra: &str,
+) -> (Entity<Workspace>, &'a mut VisualTestContext) {
+    // Left alone, CI's live job puts a connection from `PG*` among these.
+    crate::IGNORE_ENVIRONMENT.set(true);
+    let (workspace, cx) = launch_connections(
+        cx,
+        "create table birds (name text);",
+        settings,
+        &format!(
+            "{}{}",
+            sqlite_profile("a", "Birds", ""),
+            sqlite_profile("b", "Flocks", extra)
+        ),
+    );
+    cx.simulate_resize(gpui::size(gpui::px(1024.), gpui::px(900.)));
+    activate_by_id(&workspace, cx, "b");
+    activate_by_id(&workspace, cx, "a");
+    (workspace, cx)
+}
+
+/// The strip's chips, left to right, by connection id.
+fn strip_chips(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Vec<(String, Tab)> {
+    workspace.read_with(cx, |workspace, _| {
+        workspace
+            .strip_chips()
+            .into_iter()
+            .map(|(index, tab)| (workspace.profiles[index].id.clone(), tab))
+            .collect()
+    })
+}
+
+fn chip_part(
+    cx: &mut VisualTestContext,
+    part: &str,
+    profile: &str,
+    tab: Tab,
+) -> Option<gpui::Bounds<gpui::Pixels>> {
+    // `debug_bounds` takes a `'static` selector; a test's few chips can leak.
+    cx.debug_bounds(crate::views::chip_selector(part, profile, tab).leak())
+}
+
+fn new_query_tab(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
+    cx.update(|window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            workspace.new_query(&crate::actions::NewQuery, window, cx);
+        });
+    });
+    settle(cx);
+}
+
+#[gpui::test]
+fn the_strip_in_complex_mode_lists_every_connections_tabs_and_a_foreign_chip_brings_its_connection_forward(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = a_in_front_of_b(cx, "view_mode = \"complex\"");
+        new_query_tab(&workspace, cx);
+        let chips = strip_chips(&workspace, cx);
+        assert_eq!(
+            chips.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+            ["a", "a", "b"],
+            "a's two tabs, then b's one"
+        );
+        let lefts: Vec<_> = chips
+            .iter()
+            .map(|(id, tab)| {
+                chip_part(cx, "", id, *tab)
+                    .unwrap_or_else(|| panic!("the chip of {id} {tab:?} is not drawn"))
+                    .left()
+            })
+            .collect();
+        assert!(lefts.windows(2).all(|pair| pair[0] < pair[1]), "{lefts:?}");
+        for (id, tab) in &chips {
+            assert!(
+                chip_part(cx, "context", id, *tab).is_some(),
+                "the chip of {id} {tab:?} names its connection"
+            );
+        }
+        workspace.read_with(cx, |workspace, _| {
+            let context = |index: usize, tab: Tab| {
+                crate::views::chip_context(&workspace.profiles[index], tab, true)
+            };
+            assert_eq!(context(1, chips[2].1).as_deref(), Some("Flocks"));
+            assert_eq!(context(0, chips[0].1).as_deref(), Some("Birds"));
+        });
+
+        let (id, tab) = chips[2].clone();
+        let at = chip_part(cx, "", &id, tab).unwrap().center();
+        cx.simulate_click(at, gpui::Modifiers::default());
+        settle(cx);
+        assert_eq!(front_profile(&workspace, cx), "b");
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.profile().unwrap().session.active, tab);
+        });
+        assert_eq!(
+            strip_chips(&workspace, cx),
+            chips,
+            "a's tabs are still listed"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_bound_tabs_chip_names_its_connection_and_binding(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = duckdb_with_other_attached(cx);
+        new_query_here(&workspace, cx, Some("other"), None);
+        let chips = strip_chips(&workspace, cx);
+        let (bound, plain) = (chips[1].clone(), chips[0].clone());
+        let context = |cx: &mut VisualTestContext, complex: bool| {
+            workspace.read_with(cx, |workspace, _| {
+                let profile = &workspace.profiles[0];
+                (
+                    crate::views::chip_context(profile, bound.1, complex),
+                    crate::views::chip_context(profile, plain.1, complex),
+                )
+            })
+        };
+        assert_eq!(
+            context(cx, true),
+            (Some("E2E · other".into()), Some("E2E".into()))
+        );
+        assert!(chip_part(cx, "context", &bound.0, bound.1).is_some());
+        assert!(chip_part(cx, "context", &plain.0, plain.1).is_some());
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_view_mode(ViewMode::Simple, cx)
+        });
+        settle(cx);
+        assert_eq!(context(cx, false), (Some("other".into()), None));
+        assert!(
+            chip_part(cx, "context", &bound.0, bound.1).is_some(),
+            "a bound chip says where it runs in simple mode"
+        );
+        assert!(
+            chip_part(cx, "context", &plain.0, plain.1).is_none(),
+            "an unbound chip says nothing in simple mode"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_strip_in_simple_mode_is_the_front_connections_alone(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = a_in_front_of_b(cx, "");
+        new_query_tab(&workspace, cx);
+        let chips = strip_chips(&workspace, cx);
+        assert_eq!(
+            chips.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+            ["a", "a"]
+        );
+        for (id, tab) in &chips {
+            assert!(chip_part(cx, "", id, *tab).is_some());
+            assert!(chip_part(cx, "context", id, *tab).is_none());
+        }
+        let behind = workspace.read_with(cx, |workspace, _| {
+            workspace.profiles[1].session.strip_tabs()
+        });
+        assert!(!behind.is_empty(), "b has a tab to leave out");
+        for tab in behind {
+            assert!(chip_part(cx, "", "b", tab).is_none());
+        }
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn only_the_front_connections_chips_can_be_dragged(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = a_in_front_of_b(cx, "view_mode = \"complex\"");
+        let dragging = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| workspace.tab_strip.drag.is_some())
+        };
+        // Pressed and moved, not yet let go, which is when a drag is in hand.
+        let pick_up = |cx: &mut VisualTestContext, id: &str, tab: Tab| {
+            let from = chip_part(cx, "", id, tab)
+                .expect("the chip is drawn")
+                .center();
+            let none = gpui::Modifiers::default();
+            cx.simulate_mouse_down(from, gpui::MouseButton::Left, none);
+            for at in [
+                from + gpui::point(gpui::px(0.), gpui::px(8.)),
+                from + gpui::point(gpui::px(12.), gpui::px(8.)),
+            ] {
+                cx.simulate_mouse_move(at, gpui::MouseButton::Left, none);
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+            }
+            let held = dragging(cx);
+            // Let go well below the chip: over it, the press would be a click
+            // and bring its connection forward.
+            let off = from + gpui::point(gpui::px(12.), gpui::px(300.));
+            cx.simulate_mouse_move(off, gpui::MouseButton::Left, none);
+            cx.simulate_mouse_up(off, gpui::MouseButton::Left, none);
+            settle(cx);
+            held
+        };
+        let chips = strip_chips(&workspace, cx);
+        let (a, b) = (chips[0].clone(), chips[1].clone());
+        assert_eq!((a.0.as_str(), b.0.as_str()), ("a", "b"));
+
+        assert!(pick_up(cx, &a.0, a.1), "the front connection's chip drags");
+        assert!(
+            !pick_up(cx, &b.0, b.1),
+            "another connection's chip is not dragged"
+        );
+        assert_eq!(front_profile(&workspace, cx), "a");
+
+        let at = chip_part(cx, "", &b.0, b.1).unwrap().center();
+        cx.simulate_click(at, gpui::Modifiers::default());
+        settle(cx);
+        assert_eq!(front_profile(&workspace, cx), "b");
+        assert!(pick_up(cx, &b.0, b.1), "once in front, its chip drags");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_coloured_connections_chips_follow_the_titlebar_setting(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) =
+            a_in_front_of_b_with(cx, "view_mode = \"complex\"", "color = \"red\"");
+        new_query_tab(&workspace, cx);
+        let chips = strip_chips(&workspace, cx);
+        assert_eq!(chips.len(), 3);
+        let tinted = |cx: &mut VisualTestContext| -> Vec<bool> {
+            chips
+                .iter()
+                .map(|(id, tab)| chip_part(cx, "tint", id, *tab).is_some())
+                .collect()
+        };
+        assert_eq!(tinted(cx), [false, false, true], "b is coloured, a is not");
+
+        workspace.update(cx, |workspace, cx| workspace.set_color_titlebar(false, cx));
+        settle(cx);
+        assert_eq!(tinted(cx), [false, false, false]);
+
+        workspace.update(cx, |workspace, cx| workspace.set_color_titlebar(true, cx));
+        settle(cx);
+        assert_eq!(tinted(cx), [false, false, true]);
+
+        // The colour is complex mode's: simple mode draws b's chips as before.
+        activate_by_id(&workspace, cx, "b");
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_view_mode(ViewMode::Simple, cx)
+        });
+        settle(cx);
+        let (id, tab) = chips[2].clone();
+        assert!(chip_part(cx, "", &id, tab).is_some());
+        assert!(chip_part(cx, "tint", &id, tab).is_none());
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_tab_chords_walk_every_connections_tabs_in_complex_mode(cx: &mut TestAppContext) {
+    use crate::actions::{NextTab, PreviousTab};
+    store::tests::with_home(|| {
+        let (workspace, cx) = a_in_front_of_b(cx, "view_mode = \"complex\"");
+        new_query_tab(&workspace, cx);
+        let chips = strip_chips(&workspace, cx);
+        assert_eq!(chips.len(), 3);
+        let at = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                (
+                    workspace.profile().unwrap().id.clone(),
+                    workspace.profile().unwrap().session.active,
+                )
+            })
+        };
+        let next = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                workspace.update(cx, |workspace, cx| workspace.next_tab(&NextTab, window, cx));
+            });
+            settle(cx);
+        };
+        let previous = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                workspace.update(cx, |workspace, cx| {
+                    workspace.previous_tab(&PreviousTab, window, cx)
+                });
+            });
+            settle(cx);
+        };
+        // a is in front on its last tab.
+        assert_eq!(at(cx), chips[1]);
+        next(cx);
+        assert_eq!(at(cx), chips[2], "b's first tab, and b in front");
+        // The end of the strip wraps to its start.
+        next(cx);
+        assert_eq!(at(cx), chips[0]);
+        previous(cx);
+        assert_eq!(at(cx), chips[2]);
+        previous(cx);
+        assert_eq!(at(cx), chips[1], "back on a");
+        quit(workspace, cx);
+    });
+}
