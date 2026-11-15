@@ -47,6 +47,7 @@ pub(crate) fn object_icon(kind: ObjectKind) -> &'static str {
         ObjectKind::Relation(RelationKind::Dictionary) => icon::TABLE,
         ObjectKind::Routine(RoutineKind::Function) => icon::FUNCTION,
         ObjectKind::Routine(RoutineKind::Procedure) => icon::PROCEDURE,
+        ObjectKind::Sequence => icon::SEQUENCE,
     }
 }
 

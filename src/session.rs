@@ -2894,7 +2894,10 @@ impl ObjectTab {
             diagram_view,
             kind: match self.kind {
                 Some(ObjectKind::Relation(kind)) => kind,
-                Some(ObjectKind::Routine(_)) | None => RelationKind::default(),
+                // A sequence opens no tab, so this is never stored.
+                Some(ObjectKind::Routine(_) | ObjectKind::Sequence) | None => {
+                    RelationKind::default()
+                }
             },
             active: false,
         }
@@ -3854,7 +3857,7 @@ mod tests {
                 members: vec![
                     entry(None, None, Some("table")),
                     entry(None, None, Some("view")),
-                    entry(None, None, Some("sequence")),
+                    entry(None, None, Some("trigger")),
                     entry(Some("daily"), None, None),
                 ],
             },

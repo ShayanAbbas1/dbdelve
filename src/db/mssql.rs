@@ -87,6 +87,25 @@ FROM sys.sequences
 ORDER BY 1, 2
 ";
 
+// The definition and not the sequence's position: `current_value` is not read.
+// `cache_size` is null for the server's default cache, which is its own clause.
+const SEQUENCE_PARTS_SQL: &str = "
+SELECT CASE WHEN TYPE_NAME(system_type_id) IN (N'decimal', N'numeric')
+            THEN TYPE_NAME(system_type_id) + N'(' + CAST(precision AS nvarchar(5))
+                 + N',' + CAST(scale AS nvarchar(5)) + N')'
+            ELSE TYPE_NAME(system_type_id) END AS data_type,
+       CAST(start_value AS nvarchar(100)) AS start_value,
+       CAST(increment AS nvarchar(100)) AS increment,
+       CAST(minimum_value AS nvarchar(100)) AS minimum_value,
+       CAST(maximum_value AS nvarchar(100)) AS maximum_value,
+       CASE WHEN is_cycling = 1 THEN N'yes' ELSE N'no' END AS cycle,
+       CASE WHEN is_cached = 0 THEN N'NO CACHE'
+            WHEN cache_size IS NULL THEN N'CACHE'
+            ELSE N'CACHE ' + CAST(cache_size AS nvarchar(20)) END AS cache
+FROM sys.sequences
+WHERE object_id = {object}
+";
+
 // `COALESCE` throughout because the assembler refuses a null, and these are
 // null for reasons that are not errors: a procedure returns nothing, and
 // `OBJECT_DEFINITION` is null for an encrypted module or a user without
@@ -1341,6 +1360,29 @@ impl Connection {
         assemble_sequences(self.internal_query(SEQUENCES_SQL)?)
     }
 
+    /// `CREATE SEQUENCE` for `schema.name`, composed from `sys.sequences`.
+    pub fn sequence_ddl(&self, schema: &str, name: &str) -> Result<String, DbError> {
+        let parts = self.internal_query(&structure_sql(SEQUENCE_PARTS_SQL, schema, name))?;
+        let row = parts
+            .rows
+            .first()
+            .ok_or_else(|| plain_error(format!("{schema} has no sequence {name}.")))?;
+        let cell = |column| required_cell(&parts, row, column);
+        Ok(compose_sequence(
+            schema,
+            name,
+            &SequenceParts {
+                data_type: cell("data_type")?,
+                start: cell("start_value")?,
+                increment: cell("increment")?,
+                minimum: cell("minimum_value")?,
+                maximum: cell("maximum_value")?,
+                cycle: cell("cycle")? == "yes",
+                cache: cell("cache")?,
+            },
+        ))
+    }
+
     pub fn references(&self, schema: &str, relation: &str) -> Result<Vec<Reference>, DbError> {
         assemble_references(&self.internal_query(&structure_sql(
             REFERENCES_SQL,
@@ -2121,6 +2163,34 @@ fn structure_sql(template: &str, schema: &str, relation: &str) -> String {
     template.replace("{object}", &object)
 }
 
+/// What `sys.sequences` says of a sequence's definition, each as text.
+struct SequenceParts<'a> {
+    data_type: &'a str,
+    start: &'a str,
+    increment: &'a str,
+    minimum: &'a str,
+    maximum: &'a str,
+    cycle: bool,
+    /// `NO CACHE`, `CACHE`, or `CACHE n`.
+    cache: &'a str,
+}
+
+/// SQL Server has no function that writes a sequence out, so the statement is
+/// composed from `sys.sequences`, every name quoted.
+fn compose_sequence(schema: &str, name: &str, parts: &SequenceParts) -> String {
+    format!(
+        "CREATE SEQUENCE {} AS {} START WITH {} INCREMENT BY {} MINVALUE {} MAXVALUE {} {} {};",
+        Engine::SqlServer.qualified(schema, name),
+        parts.data_type,
+        parts.start,
+        parts.increment,
+        parts.minimum,
+        parts.maximum,
+        if parts.cycle { "CYCLE" } else { "NO CYCLE" },
+        parts.cache,
+    )
+}
+
 /// A literal for a value bound for a column of `data_type`, where the type
 /// changes how it is spelled, or `None` for the plain literal.
 ///
@@ -2431,6 +2501,108 @@ mod tests {
 
     fn live() -> Connection {
         Connection::open(&live_config()).expect("connection should open")
+    }
+
+    #[test]
+    fn a_composed_sequence_quotes_names_whatever_they_hold() {
+        let parts = SequenceParts {
+            data_type: "bigint",
+            start: "5",
+            increment: "2",
+            minimum: "1",
+            maximum: "1000",
+            cycle: true,
+            cache: "NO CACHE",
+        };
+        assert_eq!(
+            compose_sequence("we\"ird]", "t\u{ef}cket no", &parts),
+            // As `quote_identifier` spells a name: double quotes, which the
+            // server reads under its default `QUOTED_IDENTIFIER ON`, as the
+            // table statements do.
+            "CREATE SEQUENCE \"we\"\"ird]\".\"t\u{ef}cket no\" AS bigint START WITH 5 \
+             INCREMENT BY 2 MINVALUE 1 MAXVALUE 1000 CYCLE NO CACHE;"
+        );
+        let parts = SequenceParts {
+            cycle: false,
+            cache: "CACHE 50",
+            ..parts
+        };
+        assert!(compose_sequence("s", "n", &parts).ends_with(" NO CYCLE CACHE 50;"));
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_composed_sequence_recreates_it() {
+        const SCHEMA: &str = "dbdelve_sequence_probe";
+        let connection = live();
+        // A plain sequence, whose cache the server leaves null, a cached one and
+        // a decimal one, whose precision the type's name alone drops.
+        let probes = [
+            ("t\u{ef}cket no", "AS int INCREMENT BY 3 START WITH 7"),
+            ("cached", "AS bigint CACHE 25"),
+            ("wide", "AS decimal(9, 0) NO CACHE CYCLE"),
+        ];
+        let drop = |connection: &Connection| {
+            let sequences: String = probes
+                .iter()
+                .map(|(name, _)| {
+                    format!(
+                        "DROP SEQUENCE IF EXISTS {SCHEMA}.{}; ",
+                        Engine::SqlServer.quote_identifier(name)
+                    )
+                })
+                .collect();
+            connection
+                .query(
+                    &format!("{sequences}DROP SCHEMA IF EXISTS {SCHEMA}"),
+                    Fetch::default(),
+                )
+                .expect("the probes should drop");
+        };
+        let row = |connection: &Connection, name: &str| {
+            connection
+                .internal_query(&structure_sql(SEQUENCE_PARTS_SQL, SCHEMA, name))
+                .expect("the sequence row is read")
+                .rows
+        };
+        drop(&connection);
+        // `CREATE SCHEMA` must open its own batch.
+        connection
+            .query(&format!("CREATE SCHEMA {SCHEMA}"), Fetch::default())
+            .expect("the probe schema should be created");
+        for (name, options) in probes {
+            connection
+                .query(
+                    &format!(
+                        "CREATE SEQUENCE {SCHEMA}.{} {options}",
+                        Engine::SqlServer.quote_identifier(name)
+                    ),
+                    Fetch::default(),
+                )
+                .expect("the probe sequence should be created");
+            let before = row(&connection, name);
+            let ddl = connection
+                .sequence_ddl(SCHEMA, name)
+                .expect("the definition is read");
+            connection
+                .query(
+                    &format!(
+                        "DROP SEQUENCE {SCHEMA}.{}",
+                        Engine::SqlServer.quote_identifier(name)
+                    ),
+                    Fetch::default(),
+                )
+                .expect("the probe sequence should drop");
+            let recreated = connection.query(&ddl, Fetch::default());
+            let after = row(&connection, name);
+            if recreated.is_err() || after != before {
+                drop(&connection);
+            }
+            recreated.expect(&ddl);
+            assert_eq!(before.len(), 1, "{name} exists");
+            assert_eq!(after, before, "{ddl}");
+        }
+        drop(&connection);
     }
 
     /// The compose server as the bastion sees it, by service name and the port

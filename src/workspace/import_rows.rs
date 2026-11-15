@@ -138,6 +138,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if self.import_slot_free(cx) {
+            let database = self.elsewhere(database);
             self.prompt_import_file(database, schema, table, window, cx);
         }
     }

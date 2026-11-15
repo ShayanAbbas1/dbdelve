@@ -11,21 +11,22 @@
 use std::{collections::HashMap, ops::Range, sync::Arc};
 
 use gpui::{Entity, SharedString, StyledText};
-use gpui_component::{
-    menu::PopupMenuItem,
-    tree::{TreeEvent, TreeState},
-};
+use gpui_component::tree::{TreeEvent, TreeState};
 
+use super::forms::{MenuRow, explorer_menu, is_shortcut_row, node_items, shortcut_row_menu};
 use super::profiles::{database_content, explorer_content};
 use super::*;
 use crate::db::{Levels, Syntax};
 use crate::explorer::{
-    Member, PINNED_GROUP, QUERIES_GROUP, Shortcut, folds, is_schema_row, saved_query,
+    ExplorerLeaf, Member, PINNED_GROUP, QUERIES_GROUP, Shortcut, folds, is_schema_row, saved_query,
     schema_row_name,
 };
 use crate::icons::{queries_group_icon, saved_query_icon};
 use crate::session::Binding;
-use crate::sidebar::{self as model, Content, Listed, Node, schema_row_is_a_database, shown_size};
+use crate::sidebar::{
+    self as model, Content, Listed, Node, NodeKind, SelectedNode, node_actions,
+    schema_row_is_a_database, shown_size,
+};
 use crate::ui::{Status, row_icon_tinted, status_dot};
 
 /// The id of the row of `profile`'s front tab in the connections tree, if
@@ -66,35 +67,25 @@ fn status_name(status: Status) -> &'static str {
     }
 }
 
-/// What New Query Here on the row `id` opens a tab on: the connection, and the
-/// database and schema it binds, or `None` where the row offers none. A
-/// connection row names no database, so its tab is an ordinary one; a database
-/// row binds that database; a schema row binds by its connection's levels
-/// ([`Binding::for_schema_row`]), and where that is no binding (a connection
-/// that switches no database, or a schema whose database is not known) its tab
-/// is an ordinary one too. Only a row that is not one of those offers nothing.
-fn new_query_here_at(
-    nodes: &HashMap<String, Node>,
-    targets: &HashMap<String, Target>,
-    id: &str,
-) -> Option<(String, Option<String>, Option<String>)> {
-    match nodes.get(id)? {
-        Node::Connection { profile } => Some((profile.clone(), None, None)),
-        Node::Database { profile, database } => {
-            Some((profile.clone(), Some(database.clone()), None))
+/// The database and schema a New Query Here on `node` binds, by the shape of
+/// its connection ([`Binding::for_schema_row`]): a connection row names no
+/// database, so its tab is an ordinary one; a database row binds that
+/// database; a schema row binds by its connection's levels, and where that is
+/// no binding (a connection that switches no database, or a schema whose
+/// database is not known) its tab is an ordinary one too.
+pub(crate) fn new_query_binding(
+    node: &SelectedNode,
+    target: Target,
+) -> (Option<String>, Option<String>) {
+    match node.kind {
+        NodeKind::Database => (Some(node.name.clone()), None),
+        NodeKind::Schema => {
+            match Binding::for_schema_row(target, node.database.as_deref(), &node.name) {
+                Some(binding) => (Some(binding.database), binding.schema),
+                None => (None, None),
+            }
         }
-        Node::Row { .. } => {
-            let scoped = model::unscoped(id)?;
-            let row = schema_row_name(scoped.inner)?;
-            let target = *targets.get(scoped.profile)?;
-            let binding = Binding::for_schema_row(target, scoped.database, row);
-            Some((
-                scoped.profile.to_string(),
-                binding.as_ref().map(|binding| binding.database.clone()),
-                binding.and_then(|binding| binding.schema),
-            ))
-        }
-        Node::Group | Node::Notice => None,
+        _ => (None, None),
     }
 }
 
@@ -278,6 +269,88 @@ impl Workspace {
         });
     }
 
+    /// What a row of one connection's own rows is: the object its leaf opens,
+    /// resolved against the catalog that listed it, or the schema it names.
+    /// `database` is the one the connections tree lists it under.
+    pub(crate) fn row_node(
+        &self,
+        profile: &str,
+        database: Option<&str>,
+        inner: &str,
+        leaf: Option<ExplorerLeaf>,
+    ) -> Option<SelectedNode> {
+        let (schema, name, kind) = match leaf {
+            Some(leaf) => {
+                let (schema, name, kind) = self.object_in(profile, database, leaf.target)?;
+                (Some(schema), name, kind)
+            }
+            None => (None, schema_row_name(inner)?.to_string(), NodeKind::Schema),
+        };
+        Some(SelectedNode {
+            profile: profile.to_string(),
+            database: database.map(str::to_string),
+            kind,
+            name,
+            schema,
+            leaf,
+        })
+    }
+
+    /// The node the sidebar has selected, in whichever tree is drawn.
+    pub(crate) fn selected_node(&self, cx: &App) -> Option<SelectedNode> {
+        if self.view_mode() == model::ViewMode::Complex {
+            let id = self.connections.tree.read(cx).selected_item()?.id.clone();
+            return self.connections_node(&id);
+        }
+        let profile = self.profile()?;
+        let id = profile
+            .session
+            .explorer_tree
+            .read(cx)
+            .selected_item()?
+            .id
+            .clone();
+        let leaf = profile.session.explorer_leaves.get(id.as_ref()).copied();
+        self.row_node(&profile.id, None, &id, leaf)
+    }
+
+    /// What the connections tree's row `id` is, if it is a node an action
+    /// applies to: a connection, a database, a schema or an object.
+    pub(crate) fn connections_node(&self, id: &str) -> Option<SelectedNode> {
+        let named = |profile: &str, database: Option<&str>, kind, name: String| {
+            Some(SelectedNode {
+                profile: profile.to_string(),
+                database: database.map(str::to_string),
+                kind,
+                name,
+                schema: None,
+                leaf: None,
+            })
+        };
+        match self.connections.nodes.get(id)? {
+            Node::Connection { profile } => {
+                let name = self
+                    .profiles
+                    .iter()
+                    .find(|found| found.id == *profile)?
+                    .name
+                    .clone();
+                named(profile, None, NodeKind::Connection, name)
+            }
+            Node::Database { profile, database } => named(
+                profile,
+                Some(database),
+                NodeKind::Database,
+                database.clone(),
+            ),
+            Node::Row { leaf } => {
+                let scoped = model::unscoped(id)?;
+                self.row_node(scoped.profile, scoped.database, scoped.inner, *leaf)
+            }
+            Node::Group | Node::Notice => None,
+        }
+    }
+
     /// New Query Here: a query tab on `profile`, which comes to the front
     /// first, so the gate, the mode and the engine its statements meet are
     /// that connection's. Bound to `database` and `schema` where the
@@ -298,6 +371,13 @@ impl Workspace {
         if self.active != Some(index) {
             self.activate(index, cx);
         }
+        // The connection's own database row is its own session, as an object
+        // of it is; a schema of it is still bound, which a tab needs to run in
+        // a schema of its own.
+        let database = match schema {
+            None => self.elsewhere(database),
+            Some(_) => database,
+        };
         let binding = Binding::for_target(
             self.profiles[index].config.target(),
             database.as_deref(),
@@ -447,12 +527,7 @@ impl Workspace {
             })
             .collect();
         let menu_workspace = workspace.clone();
-        let menu_nodes = nodes.clone();
-        let menu_targets: HashMap<String, Target> = self
-            .profiles
-            .iter()
-            .map(|profile| (profile.id.clone(), profile.config.target()))
-            .collect();
+        let menu_shortcuts = shortcuts.clone();
         let (density, show_host, show_sizes) = (
             self.settings.density,
             self.settings.show_host,
@@ -720,23 +795,71 @@ impl Workspace {
                 });
             })
         })
-        .context_menu(move |_, entry, menu, _, _| {
+        .context_menu(move |_, entry, menu, window, cx| {
             let id = entry.item().id.as_str();
-            let Some((profile, database, schema)) =
-                new_query_here_at(&menu_nodes, &menu_targets, id)
-            else {
+            let Some(entity) = menu_workspace.upgrade() else {
                 return menu;
             };
-            let workspace = menu_workspace.clone();
-            menu.item(
-                PopupMenuItem::new("New Query Here").on_click(move |_, window, cx| {
-                    let (profile, database, schema) =
-                        (profile.clone(), database.clone(), schema.clone());
-                    _ = workspace.update(cx, |workspace, cx| {
-                        workspace.new_query_here(&profile, database, schema, window, cx);
-                    });
-                }),
-            )
+            let state = entity.read(cx);
+            let shortcut = menu_shortcuts.get(id).cloned();
+            let Some(node) = state.connections_node(id) else {
+                // A saved query, a folder, the Pinned group or a pin whose
+                // object is gone: the menu simple mode draws for it, but for
+                // a Rename…, whose field only simple mode's tree draws.
+                let Some(scoped) = model::unscoped(id) else {
+                    return menu;
+                };
+                let Some(profile) = state.profiles.iter().find(|p| p.id == scoped.profile) else {
+                    return menu;
+                };
+                if !is_shortcut_row(scoped.inner, shortcut.as_ref()) {
+                    return menu;
+                }
+                let (profile, shortcuts) = (profile.id.clone(), profile.shortcuts.clone());
+                let row = SharedString::from(scoped.inner.to_string());
+                return shortcut_row_menu(
+                    menu,
+                    row,
+                    shortcut.as_ref(),
+                    &shortcuts,
+                    &profile,
+                    &menu_workspace,
+                    false,
+                    window,
+                    cx,
+                );
+            };
+            let inner = model::unscoped(id).map(|scoped| scoped.inner.to_string());
+            match node.kind {
+                NodeKind::Connection | NodeKind::Database => {
+                    let Some(target) = state
+                        .profiles
+                        .iter()
+                        .find(|found| found.id == node.profile)
+                        .map(|found| found.config.target())
+                    else {
+                        return menu;
+                    };
+                    let actions = node_actions(node.kind, &node.name, target);
+                    node_items(menu, &node, actions, &menu_workspace)
+                }
+                // A row of one connection's own rows: the menu simple mode
+                // draws for it.
+                _ => explorer_menu(
+                    menu,
+                    MenuRow {
+                        id: inner.unwrap_or_default().into(),
+                        label: entry.item().label.clone(),
+                        profile: node.profile.clone(),
+                        database: node.database.clone(),
+                        leaf: node.leaf,
+                        shortcut,
+                    },
+                    &menu_workspace,
+                    window,
+                    cx,
+                ),
+            }
         });
         let t = *theme(cx);
         div()
@@ -813,74 +936,64 @@ fn unsearched_line(unsearched: usize) -> Option<String> {
 mod tests {
     use super::*;
     use crate::db::Engine;
-    use crate::sidebar::{connection_row, database_row, scoped_row};
+
+    fn node(kind: NodeKind, database: Option<&str>, name: &str) -> SelectedNode {
+        SelectedNode {
+            profile: "p".into(),
+            database: database.map(str::to_string),
+            kind,
+            name: name.into(),
+            schema: None,
+            leaf: None,
+        }
+    }
 
     fn offered(
         engine: Engine,
         database: Option<&str>,
         row: &str,
-    ) -> Option<(String, Option<String>, Option<String>)> {
-        let id = scoped_row("p", database, row);
-        let nodes = HashMap::from([(id.clone(), Node::Row { leaf: None })]);
-        let targets = HashMap::from([("p".to_string(), Target::built_in(engine))]);
-        new_query_here_at(&nodes, &targets, &id)
+    ) -> (Option<String>, Option<String>) {
+        new_query_binding(
+            &node(NodeKind::Schema, database, row),
+            Target::built_in(engine),
+        )
     }
 
     #[test]
     fn a_connection_row_opens_an_ordinary_tab_and_a_database_row_a_bound_one() {
-        let targets = HashMap::from([("p".to_string(), Target::built_in(Engine::Postgres))]);
-        let nodes = HashMap::from([
-            (
-                connection_row("p"),
-                Node::Connection {
-                    profile: "p".into(),
-                },
-            ),
-            (
-                database_row("p", "app"),
-                Node::Database {
-                    profile: "p".into(),
-                    database: "app".into(),
-                },
-            ),
-        ]);
+        let target = Target::built_in(Engine::Postgres);
         assert_eq!(
-            new_query_here_at(&nodes, &targets, &connection_row("p")),
-            Some(("p".into(), None, None)),
+            new_query_binding(&node(NodeKind::Connection, None, "Prod"), target),
+            (None, None),
             "a connection row names no database"
         );
         assert_eq!(
-            new_query_here_at(&nodes, &targets, &database_row("p", "app")),
-            Some(("p".into(), Some("app".into()), None))
+            new_query_binding(&node(NodeKind::Database, Some("app"), "app"), target),
+            (Some("app".into()), None)
         );
     }
 
     #[test]
     fn a_schema_row_binds_by_the_levels_of_its_connection_and_by_its_id_not_its_label() {
         assert_eq!(
-            offered(Engine::Postgres, Some("app"), "schema-we ird/name"),
-            Some(("p".into(), Some("app".into()), Some("we ird/name".into()))),
+            offered(Engine::Postgres, Some("app"), "we ird/name"),
+            (Some("app".into()), Some("we ird/name".into())),
             "a schema under the database it sits in, spelled as the server listed it"
         );
         assert_eq!(
-            offered(Engine::MySql, None, "schema-shop"),
-            Some(("p".into(), Some("shop".into()), None)),
+            offered(Engine::MySql, None, "shop"),
+            (Some("shop".into()), None),
             "MySQL lists a database as a schema"
         );
         assert_eq!(
-            offered(Engine::Sqlite, None, "schema-main"),
-            Some(("p".into(), None, None)),
+            offered(Engine::Sqlite, None, "main"),
+            (None, None),
             "a target with no database to switch opens an ordinary tab"
         );
         assert_eq!(
-            offered(Engine::Postgres, None, "schema-public"),
-            Some(("p".into(), None, None)),
+            offered(Engine::Postgres, None, "public"),
+            (None, None),
             "so does a schema whose database is not known"
-        );
-        assert_eq!(
-            offered(Engine::Postgres, Some("app"), "category-Tables-public"),
-            None,
-            "only a schema row offers it"
         );
     }
 }

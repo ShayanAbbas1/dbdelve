@@ -1196,13 +1196,14 @@ impl Workspace {
     }
 
     /// Move the profile in front onto another database on its server, leaving
-    /// behind what it held of this one ([`Self::leave_database`]).
+    /// behind what it held of this one ([`Self::leave_database`]). Whether it
+    /// is on it now, or on its way: a refusal is the notice it set.
     pub(crate) fn set_database(
         &mut self,
         name: String,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         self.clear_notice();
         if let Some(running) = self
             .profile()
@@ -1212,33 +1213,33 @@ impl Workspace {
                 format!("An import into {running} is running, so the database was not switched."),
                 cx,
             );
-            return;
+            return false;
         }
         let Some(profile) = self.profile() else {
-            return;
+            return false;
         };
         let Some(configured) = profile.config.database() else {
-            return;
+            return false;
         };
         // As the profile would store it: Redis lists `db3` and stores `3`.
         let mut asked = profile.config.clone();
         asked.set_database(name.clone());
         let unmoved = asked.database() == Some(configured);
         if unmoved || already_on(configured, profile.databases.current.as_deref(), &name) {
-            return;
+            return true;
         }
         if let Some(edited) = self.unapplied_edits(cx) {
             self.note(format!("{edited}, so the database was not switched."), cx);
-            return;
+            return false;
         }
 
         self.leave_database(window, cx);
 
         let Some(index) = self.active else {
-            return;
+            return false;
         };
         let Some(profile) = self.profile_mut() else {
-            return;
+            return false;
         };
         // The database a DuckDB file opens as is held as none picked, so the
         // profile still opens on it once the file is renamed.
@@ -1261,6 +1262,7 @@ impl Workspace {
             true => self.use_database(index, left, cx),
             false => self.reconnect(index, cx),
         }
+        true
     }
 
     /// Which grid of the profile in front holds cell edits nobody applied,
@@ -1592,16 +1594,17 @@ impl Workspace {
     /// Make `name` the profile's active schema, on the sessions it has open
     /// and the ones it opens later, without a reconnect: tabs, results and
     /// staged edits all stay. A statement running holds the session, so the
-    /// `SET` waits for it rather than cancelling it.
-    pub(crate) fn set_schema(&mut self, name: String, cx: &mut Context<Self>) {
+    /// `SET` waits for it rather than cancelling it. Whether it is the active
+    /// schema now, or on its way: a refusal is the notice it set.
+    pub(crate) fn set_schema(&mut self, name: String, cx: &mut Context<Self>) -> bool {
         self.clear_notice();
         let Some(profile) = self.profile() else {
-            return;
+            return false;
         };
         // Not `active_schema`: picking the one shown while none is stored
         // still pins it, whatever the role's own `search_path` says.
         if profile.config.schema() == Some(name.as_str()) {
-            return;
+            return true;
         }
         // A connect in flight was handed the config before this, and the
         // reconnect that would hand it the new one can be refused.
@@ -1610,7 +1613,7 @@ impl Workspace {
                 "The connection is still opening, so the schema was not switched.".into(),
                 cx,
             );
-            return;
+            return false;
         }
         // A `SET` inside the user's transaction is undone by their ROLLBACK,
         // which would leave the titlebar naming a schema the session left.
@@ -1626,10 +1629,10 @@ impl Workspace {
                 "A transaction is open on this connection, so the schema was not switched.".into(),
                 cx,
             );
-            return;
+            return false;
         }
         let Some(profile) = self.profile_mut() else {
-            return;
+            return false;
         };
         // The schema left behind was open only for being the active one, and
         // would otherwise close under the user.
@@ -1646,7 +1649,7 @@ impl Workspace {
         self.rebuild_explorer_opening(&id, true, Some(picked), cx);
         cx.notify();
         let Some(connection) = connection else {
-            return;
+            return true;
         };
         // Recorded here, in the order the switches were made, so that
         // whichever thread applies last applies the latest.
@@ -1673,6 +1676,7 @@ impl Workspace {
             });
         })
         .detach();
+        true
     }
 
     pub(crate) fn open_connection_form(
@@ -2170,6 +2174,23 @@ impl Workspace {
         self.list_databases(id, generation, cx);
         for database in open {
             self.load_database_catalog(id, database, generation, cx);
+        }
+    }
+
+    /// Read `database`, another database of `id`'s server, again over its open
+    /// session. With none open it is a first read, which opens one.
+    pub(crate) fn reload_database(&mut self, id: &str, database: String, cx: &mut Context<Self>) {
+        let Some(profile) = self.profiles.iter().find(|found| found.id == id) else {
+            return;
+        };
+        match profile.bound.get(&database) {
+            Some(BoundSession::Open(_)) => {
+                let generation = profile.generation;
+                self.load_database_catalog(id, database, generation, cx);
+            }
+            // Already on its way: its answer is the fresh one.
+            Some(BoundSession::Opening) => {}
+            None => self.open_database(id, database, cx),
         }
     }
 
