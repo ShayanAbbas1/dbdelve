@@ -464,6 +464,13 @@ pub struct SqlSpec {
     pub row_terms: bool,
     /// How a grid edit writes bytes, `None` where it writes none.
     pub binary_literal: Option<BinaryLiteral>,
+    /// Whether the write gate reads `c IS NULL` beside equalities in a one-row
+    /// predicate, for a row named by every value on an engine whose drafts are
+    /// verified: the apply re-reads the row and counts what the write changed,
+    /// so a predicate matching two rows is caught inside the transaction.
+    /// ClickHouse reads the same term under [`SqlSpec::row_terms`] and needs no
+    /// second switch. A plugin that speaks one of these dialects reads it too.
+    pub null_terms: bool,
     /// What completion offers beside the catalog: the functions and value
     /// expressions the dialect has built in.
     pub builtins: &'static [Builtin],
@@ -508,6 +515,7 @@ impl SqlSpec {
         transactions: true,
         row_terms: false,
         binary_literal: None,
+        null_terms: false,
         builtins: &[],
     };
 
@@ -888,6 +896,7 @@ pub(crate) const POSTGRES: EngineSpec = EngineSpec {
         ..Hints::DEFAULT
     },
     sql: SqlSpec {
+        null_terms: true,
         params: Params::Dollar,
         // One simple-query submission is already one implicit transaction.
         implicit_transaction: true,
@@ -946,6 +955,7 @@ pub(crate) const MYSQL: EngineSpec = EngineSpec {
     type_wrappers: &[],
     hints: Hints::DEFAULT,
     sql: SqlSpec {
+        null_terms: true,
         identifier_quote: IdentifierQuote::Backtick,
         // Unless `NO_BACKSLASH_ESCAPES` is set, which is not dbdelve's to know
         // or to set.
@@ -1012,6 +1022,7 @@ pub(crate) const MARIADB: EngineSpec = EngineSpec {
     type_wrappers: &[],
     hints: Hints::DEFAULT,
     sql: SqlSpec {
+        null_terms: true,
         identifier_quote: IdentifierQuote::Backtick,
         backslash_escapes: true,
         // Refused even into a `timestamp`, which MariaDB reads in the
@@ -1084,6 +1095,7 @@ pub(crate) const SQLITE: EngineSpec = EngineSpec {
     type_wrappers: &[],
     hints: Hints::DEFAULT,
     sql: SqlSpec {
+        null_terms: true,
         nul_text: NulText::PipedChar,
         boolean_literal: BooleanLiteral::OneZero,
         truncate: Truncate::DeleteFrom,
@@ -1189,6 +1201,7 @@ pub(crate) const DUCKDB: EngineSpec = EngineSpec {
         ..Hints::DEFAULT
     },
     sql: SqlSpec {
+        null_terms: true,
         nul_text: NulText::PipedChr,
         skip_duplicates: SkipDuplicates::OnConflictDoNothing {
             needs_unique_key: true,
@@ -1321,6 +1334,7 @@ pub(crate) const SQL_SERVER: EngineSpec = EngineSpec {
     type_wrappers: &[],
     hints: Hints::DEFAULT,
     sql: SqlSpec {
+        null_terms: true,
         nul_text: NulText::AddedNchar,
         national_strings: true,
         boolean_literal: BooleanLiteral::OneZero,

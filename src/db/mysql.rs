@@ -29,11 +29,12 @@ use ::mysql::{Conn, OptsBuilder, SslOpts, Value};
 
 use super::tunnel::{Tunnel, tunnelled};
 use super::{
-    Catalog, Column, DbError, EditTarget, Engine, Fetch, GraphCancel, Index, IndexKind,
-    QueryResult, Reference, RowBuilder, Schema, SchemaGraph, ServerConfig, Sizes, SslMode, Stopped,
-    Structure, assemble_catalog, assemble_databases, assemble_foreign_keys, assemble_references,
-    assemble_schema_graph, assemble_sequences, assemble_sizes, assemble_structure, non_utf8_error,
-    optional_cell, plain_error, required_cell,
+    ApplyOutcome, ApplyStage, Catalog, Column, DbError, EditTarget, Engine, Fetch, GraphCancel,
+    Index, IndexKind, QueryResult, Reference, RowBuilder, RowMatch, Schema, SchemaGraph, Sending,
+    ServerConfig, Sizes, SslMode, StepKind, Stopped, Structure, VerifiedStep, assemble_catalog,
+    assemble_databases, assemble_foreign_keys, assemble_references, assemble_schema_graph,
+    assemble_sequences, assemble_sizes, assemble_structure, non_utf8_error, optional_cell,
+    plain_error, required_cell,
 };
 
 /// Without this the driver waits out the OS SYN retry budget, so a host that
@@ -339,6 +340,47 @@ WHERE TABLE_SCHEMA = {schema}
   AND INDEX_NAME = 'PRIMARY'
 ORDER BY SEQ_IN_INDEX
 ";
+
+/// What a table with no primary key is edited by: each of its columns, the type
+/// the catalog names and whether the server computes it. Answers for a base
+/// table alone; a view has no row of its own to name by its values.
+///
+/// `{data_type}` is [`edit_columns_sql`]'s to fill: the catalog's own type name,
+/// except where the engine hides a type behind another.
+const EDIT_COLUMNS_SQL: &str = "
+SELECT c.COLUMN_NAME AS column_name,
+       {data_type} AS data_type,
+       IF(c.EXTRA LIKE '%VIRTUAL GENERATED%' OR c.EXTRA LIKE '%STORED GENERATED%',
+          'yes', 'no') AS is_generated
+FROM information_schema.COLUMNS AS c
+JOIN information_schema.TABLES AS t
+  ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME
+WHERE c.TABLE_SCHEMA = {schema}
+  AND c.TABLE_NAME = {relation}
+  AND t.TABLE_TYPE = 'BASE TABLE'
+ORDER BY c.ORDINAL_POSITION
+";
+
+/// [`EDIT_COLUMNS_SQL`] for `engine`.
+///
+/// MariaDB has no JSON type: `JSON` is a `LONGTEXT` with a `json_valid` check
+/// of the column's own name, and the catalog's `DATA_TYPE` says `longtext`. The
+/// check is what tells such a column from text, so it is reported as `json`.
+fn edit_columns_sql(engine: Engine) -> String {
+    let data_type = match engine {
+        Engine::MariaDb => {
+            "IF(c.DATA_TYPE = 'longtext' AND EXISTS (
+                SELECT 1 FROM information_schema.CHECK_CONSTRAINTS AS k
+                WHERE k.CONSTRAINT_SCHEMA = c.TABLE_SCHEMA
+                  AND k.TABLE_NAME = c.TABLE_NAME
+                  AND k.CONSTRAINT_NAME = c.COLUMN_NAME
+                  AND k.CHECK_CLAUSE LIKE 'json\\_valid(%'
+            ), 'json', c.DATA_TYPE)"
+        }
+        _ => "c.DATA_TYPE",
+    };
+    EDIT_COLUMNS_SQL.replace("{data_type}", data_type)
+}
 
 /// The key-part rows of [`STRUCTURE_INDEXES_SQL`] as one index per name. The
 /// definition names the plain columns alone, as it always has.
@@ -742,6 +784,63 @@ impl Connection {
         self.run(sql, true, fetch, true)
     }
 
+    /// Applies `steps` as one verified sequence on this session, under one
+    /// acquisition of its lock, so no other tab's statement runs between the
+    /// re-reads and the writes: see [`super::run_verified`]. Every statement
+    /// goes through [`Self::ran`], so none takes the lock again.
+    ///
+    /// An `UPDATE`'s count is the rows it matched ([`matched_count`]): the
+    /// server's own count is the rows it changed, and a row already holding the
+    /// value would count none. An `INSERT`'s and a `DELETE`'s is the count as
+    /// reported.
+    ///
+    /// `bound` puts the session back on its own database first, under the same
+    /// lock, as [`Self::query_bound`] does.
+    pub fn apply_verified(
+        &self,
+        steps: &[VerifiedStep],
+        proceed: &dyn Fn() -> bool,
+        bound: bool,
+    ) -> ApplyOutcome {
+        let failed = |error| ApplyOutcome::Failed {
+            stage: ApplyStage::Begin,
+            error,
+        };
+        let mut connection = match self.connection.lock() {
+            Ok(connection) => connection,
+            Err(_) => {
+                return failed(plain_error(
+                    "The connection is unavailable after an earlier internal failure.".into(),
+                ));
+            }
+        };
+        // Registers the run, so a Cancel finds the session, and checks for one
+        // that came first, as `run` does before it touches the session.
+        if !proceed() {
+            return failed(plain_error("Cancelled before it was sent.".into()));
+        }
+        if bound && let Err(error) = connection.select_db(&self.server.database) {
+            return failed(super::unplaced(query_error(&error)));
+        }
+        // Asked of the held connection when a statement fails, and read by the
+        // lost test, which cannot take the lock `send` holds: only an error at
+        // `COMMIT` with the session gone is an outcome nobody can know.
+        let gone = std::cell::Cell::new(false);
+        let mut send = |sql: &str, sending: Sending| {
+            let update = sending == Sending::Write(StepKind::Update);
+            let result = self
+                .ran(&mut connection, sql, false, Fetch::default(), update)
+                .map(|(result, _)| result);
+            if result.is_err() {
+                gone.set(connection.ping().is_err());
+            }
+            result
+        };
+        super::run_verified(self.engine, steps, &mut send, proceed, &|_| false, &|_| {
+            gone.get()
+        })
+    }
+
     /// dbdelve's own SQL. Its rows are never editable, so it does not pay for the
     /// round trip that reads a primary key.
     fn internal_query(&self, sql: &str) -> Result<QueryResult, DbError> {
@@ -813,6 +912,37 @@ impl Connection {
                 .map_err(|error| super::unplaced(query_error(&error)))?;
         }
 
+        let (mut result, probed) = match self.ran(&mut connection, sql, editable, fetch, false) {
+            Ok(ran) => ran,
+            Err(error) => return Err(rolled_back(&mut connection, sql, error)),
+        };
+
+        // The connection mutex is not reentrant and `edit_target` runs a catalog
+        // query through it, so the lock has to go before the question is asked.
+        drop(held);
+        drop(connection);
+        if editable {
+            (result.edit, result.read_only_reason) = self.edit_target(&probed);
+        }
+
+        Ok(result)
+    }
+
+    /// The part of [`Self::run`] that works under the held connection, for the
+    /// verified apply, which holds it across several statements and so cannot
+    /// take its lock again. The lock, the binding and the question of which
+    /// table the columns belong to stay with the callers.
+    ///
+    /// `update` reads the count as the rows the statement *matched*
+    /// ([`matched_count`]) and not the ones it changed, for an `UPDATE` step.
+    fn ran(
+        &self,
+        connection: &mut Conn,
+        sql: &str,
+        editable: bool,
+        fetch: Fetch,
+        update: bool,
+    ) -> Result<(QueryResult, Vec<ProbedColumn>), DbError> {
         let mut result = QueryResult::default();
         let mut probed = Vec::new();
         // How long the kept rows took, once there were as many as the limit.
@@ -857,8 +987,13 @@ impl Connection {
                 // command has rows to have affected.
                 if columns.is_empty() {
                     // Read first: draining the set moves the driver past its
-                    // OK packet, after which the count reads as zero.
-                    result.rows_affected = Some(set.affected_rows());
+                    // OK packet, after which the count reads as zero and the
+                    // info as empty.
+                    let affected = set.affected_rows();
+                    result.rows_affected = match update {
+                        true => matched_count(affected, &set.info_str()),
+                        false => Some(affected),
+                    };
                     warned = set.warnings();
                     for row in &mut set {
                         row.map_err(|error| query_error(&error))?;
@@ -947,44 +1082,52 @@ impl Connection {
                     ));
                 }
                 if connection.warnings() > 0 {
-                    result.messages.extend(warnings(&mut connection));
+                    result.messages.extend(warnings(connection));
                 }
             }
             Ok(())
         };
 
-        if let Err(error) = submit() {
-            return Err(rolled_back(&mut connection, sql, error));
-        }
-
-        // The connection mutex is not reentrant and `edit_target` runs a catalog
-        // query through it, so the lock has to go before the question is asked.
-        drop(held);
-        drop(connection);
-        if editable {
-            result.edit = self.edit_target(&probed);
-        }
-
-        Ok(result)
+        submit()?;
+        Ok((result, probed))
     }
 
-    /// Which table these columns can be written back to, if any.
+    /// Which table these columns can be written back to, if any, and when the
+    /// answer is no for a reason the user can act on, that reason.
     ///
-    /// Every step is allowed to answer "no": a join, a computed column, a table
-    /// without a primary key, a key the select omitted. A failure answers "no"
-    /// too — this runs after the user's statement already succeeded, and a
-    /// catalog query that was refused must not turn that success into an error.
-    fn edit_target(&self, probed: &[ProbedColumn]) -> Option<EditTarget> {
-        let (schema, table) = sole_table(probed)?;
+    /// Every step is allowed to answer "no": a join, a computed column, a key
+    /// the select omitted. A failure answers "no" too — this runs after the
+    /// user's statement already succeeded, and a catalog query that was refused
+    /// must not turn that success into an error.
+    fn edit_target(&self, probed: &[ProbedColumn]) -> (Option<EditTarget>, Option<String>) {
+        let Some((schema, table)) = sole_table(probed) else {
+            return (None, None);
+        };
         // ponytail: one catalog round trip per result set, no cache. A map from
         // table to key held on the connection is the upgrade path if the trip
         // shows up in query timings.
-        let key = self
-            .internal_query(&structure_sql(PRIMARY_KEY_SQL, &schema, &table))
-            .ok()?;
-        let key = column_of(&key, "column_name").ok()?;
-
-        resolve_edit_target(probed, &schema, &table, &key)
+        let Ok(key) = self.internal_query(&structure_sql(PRIMARY_KEY_SQL, &schema, &table)) else {
+            return (None, None);
+        };
+        let Ok(key) = column_of(&key, "column_name") else {
+            return (None, None);
+        };
+        if !key.is_empty() {
+            return (resolve_edit_target(probed, &schema, &table, &key), None);
+        }
+        // No primary key: the table's rows are named by every column, which
+        // takes the columns' types.
+        let Ok(catalog) = self.internal_query(&structure_sql(
+            &edit_columns_sql(self.engine),
+            &schema,
+            &table,
+        )) else {
+            return (None, None);
+        };
+        match table_columns(&catalog) {
+            Some(columns) => resolve_keyless_target(probed, &schema, &table, &columns),
+            None => (None, None),
+        }
     }
 
     pub fn databases(&self) -> Result<super::Databases, DbError> {
@@ -1351,6 +1494,142 @@ fn graph_sql(template: &str, schema: &str) -> String {
         .replace("{schema}", &Engine::MySql.quote_literal(schema))
 }
 
+/// One column of a table as [`EDIT_COLUMNS_SQL`] describes it.
+struct TableColumn {
+    name: String,
+    /// The catalog's type name, which [`is_matchable`] is asked about.
+    data_type: String,
+    /// Computed by the server: matched, never set.
+    generated: bool,
+}
+
+/// The table's columns in order, or `None` where the catalog said none (a view,
+/// or a table that is not there) or an answer was malformed.
+fn table_columns(result: &QueryResult) -> Option<Vec<TableColumn>> {
+    let columns = result
+        .rows
+        .iter()
+        .map(|row| {
+            Some(TableColumn {
+                name: required_cell(result, row, "column_name").ok()?.to_string(),
+                data_type: required_cell(result, row, "data_type").ok()?.to_string(),
+                generated: required_cell(result, row, "is_generated").ok()? == "yes",
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    (!columns.is_empty()).then_some(columns)
+}
+
+/// Whether `=` against a column's value rendered as text finds it, for the
+/// type [`EDIT_COLUMNS_SQL`] names. Fail closed: only types the compose servers
+/// were seen to match, MySQL's and MariaDB's alike, are listed.
+///
+/// ponytail: a type is added when
+/// `tests::live_every_listed_type_matches_its_row_by_its_rendered_text_on_mysql`
+/// and `_on_mariadb` both exercise it. Left off: `float` and `json`, whose `=`
+/// against their own text finds nothing (a `FLOAT` is held as a single and
+/// compared as a double; a `JSON` value is never equal to a string), so a
+/// matched row would read as gone; the byte types (`binary`, `varbinary`, the
+/// blobs, `bit`), which the grid renders as `0x…` and the writer quotes as that
+/// text; and `geometry` and `vector`, never exercised.
+fn is_matchable(data_type: &str) -> bool {
+    matches!(
+        data_type,
+        "tinyint"
+            | "smallint"
+            | "mediumint"
+            | "int"
+            | "bigint"
+            | "decimal"
+            | "double"
+            | "char"
+            | "varchar"
+            | "tinytext"
+            | "text"
+            | "mediumtext"
+            | "longtext"
+            | "date"
+            | "time"
+            | "datetime"
+            | "timestamp"
+            | "year"
+            | "enum"
+            | "set"
+    )
+}
+
+/// The target of a result set over a table with no primary key: every column
+/// of the table names the row, a NULL as `IS NULL`, the computed columns
+/// matched but never set. Or the reason it cannot be, when the user can do
+/// something about it.
+///
+/// Never a unique index, and never some of the columns: a column left out of
+/// the `WHERE` matches rows the user is not looking at, so a column that cannot
+/// be matched by its value, or that the result omits, makes the whole result
+/// read-only.
+fn resolve_keyless_target(
+    probed: &[ProbedColumn],
+    schema: &str,
+    table: &str,
+    columns: &[TableColumn],
+) -> (Option<EditTarget>, Option<String>) {
+    let column_of = |column: &ProbedColumn| column.table.as_ref().and(column.column.clone());
+    // As for a key: two result columns reading one table column are the two
+    // sides of a self-join, and a column computed beside the real ones is no
+    // table's row.
+    let mut origins = HashSet::new();
+    if !probed
+        .iter()
+        .map(column_of)
+        .all(|column| column.is_some_and(|column| origins.insert(column)))
+    {
+        return (None, None);
+    }
+    let refusal = |what: String| {
+        Some(format!(
+            "A table without a primary key is edited by matching every column, and {what}."
+        ))
+    };
+    if let Some(column) = columns
+        .iter()
+        .find(|column| !is_matchable(&column.data_type))
+    {
+        return (
+            None,
+            refusal(format!(
+                "{} ({}) cannot be matched by its value",
+                column.name, column.data_type
+            )),
+        );
+    }
+    let mut keys = Vec::new();
+    let mut fixed = Vec::new();
+    for column in columns {
+        let Some(at) = probed
+            .iter()
+            .position(|probed| column_of(probed).as_deref() == Some(column.name.as_str()))
+        else {
+            return (
+                None,
+                refusal(format!("{} is not in the result", column.name)),
+            );
+        };
+        keys.push(at);
+        if column.generated {
+            fixed.push(at);
+        }
+    }
+    let target = EditTarget {
+        schema: schema.to_string(),
+        table: table.to_string(),
+        columns: probed.iter().map(column_of).collect(),
+        keys,
+        row_match: RowMatch::EveryColumn { fixed },
+        ..Default::default()
+    };
+    (Some(target), None)
+}
+
 fn structure_sql(template: &str, schema: &str, relation: &str) -> String {
     super::structure_sql(Engine::MySql, template, schema, relation)
 }
@@ -1500,6 +1779,31 @@ fn rolled_back(connection: &mut Conn, sql: &str, error: DbError) -> DbError {
     }
 }
 
+/// The rows an `UPDATE` matched, which is not what `affected_rows` says:
+/// that counts the rows that *changed*, so a statement that writes the value a
+/// row already holds counts none, and a count of none cannot be told from a
+/// statement that matched nothing. The OK packet's info text carries the
+/// matched count, as three integers (matched, changed, warnings) in the
+/// server's language, which `lc_messages` sets: Russian and Japanese keep the
+/// words different and the order the same. It is read by position, never by
+/// label.
+///
+/// The changed number must be what the server affected. A locale that
+/// reorders the numbers then fails that check and refuses the count, rather
+/// than being believed. Text that is not three integers, or one no `u64`
+/// holds, is not read, and the affected count stands only when it names a row.
+fn matched_count(affected: u64, info: &str) -> Option<u64> {
+    let numbers: Option<Vec<u64>> = info
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|run| !run.is_empty())
+        .map(|run| run.parse().ok())
+        .collect();
+    match numbers.as_deref() {
+        Some(&[matched, changed, _warnings]) => (changed == affected).then_some(matched),
+        _ => (affected > 0).then_some(affected),
+    }
+}
+
 /// Prefer the server's own message. It is written for humans and already says
 /// the useful part; the driver's wrapper adds an error code and a SQLSTATE that
 /// mostly repeat it.
@@ -1513,7 +1817,10 @@ fn describe(error: &::mysql::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{ColumnDefinition, ForeignKey, IndexKind, RelationKind, RoutineKind};
+    use crate::db::{
+        ColumnDefinition, FetchedCell, ForeignKey, IndexKind, RelationKind, RoutineKind,
+        VerifiedStep,
+    };
 
     /// The server the `live_` tests talk to, from `dbdelve_MYSQL_URL` or
     /// `dbdelve_MARIADB_URL`.
@@ -1539,6 +1846,41 @@ mod tests {
         .expect("connection should open")
     }
 
+    #[test]
+    fn a_mysql_count_is_the_matched_number_read_by_position_and_refuses_when_changed_disagrees() {
+        // Matched, changed and warnings, in that order, whatever the language.
+        let english = "Rows matched: 1  Changed: 0  Warnings: 0";
+        let russian = "Совпало записей: 1  Изменено: 0  Предупреждений: 0";
+        let japanese = "該当した行: 1  変更: 0  警告: 0";
+        for info in [english, russian, japanese] {
+            assert_eq!(matched_count(0, info), Some(1), "{info}");
+        }
+        // A changed row is a matched one, and the changed count must be what
+        // the server said it affected.
+        let changed = "Rows matched: 1  Changed: 1  Warnings: 0";
+        assert_eq!(matched_count(1, changed), Some(1));
+        assert_eq!(matched_count(0, changed), None);
+        // Two rows matched is two, never read as one, whether or not the
+        // second differs.
+        let two = "Rows matched: 2  Changed: 1  Warnings: 0";
+        assert_eq!(matched_count(1, two), Some(2));
+        assert_eq!(matched_count(2, two), None);
+        assert_eq!(
+            matched_count(0, "Rows matched: 0  Changed: 0  Warnings: 0"),
+            Some(0)
+        );
+        // No text to read: the affected count stands when it names a row, and
+        // none at all is a count that cannot be told from a miss.
+        assert_eq!(matched_count(0, ""), None);
+        assert_eq!(matched_count(1, ""), Some(1));
+        // Not three numbers: not the text this reads.
+        assert_eq!(matched_count(1, "Records: 1  Duplicates: 0"), Some(1));
+        assert_eq!(matched_count(0, "Records: 1  Duplicates: 0"), None);
+        // A run of digits no `u64` holds is not a count.
+        let long = "Rows matched: 99999999999999999999999  Changed: 1  Warnings: 0";
+        assert_eq!(matched_count(1, long), Some(1));
+        assert_eq!(matched_count(0, long), None);
+    }
     /// The compose database as the bastion sees it, by service name and the
     /// port inside the network.
     fn live_tunnelled() -> ServerConfig {
@@ -1787,6 +2129,178 @@ mod tests {
                 &[],
             ),
             None
+        );
+    }
+
+    fn keyless(columns: &[(&str, &str, bool)]) -> Vec<TableColumn> {
+        columns
+            .iter()
+            .map(|(name, data_type, generated)| TableColumn {
+                name: (*name).to_string(),
+                data_type: (*data_type).to_string(),
+                generated: *generated,
+            })
+            .collect()
+    }
+
+    /// A result over `sightings` carrying these columns, in this order.
+    fn sightings(columns: &[&str]) -> Vec<ProbedColumn> {
+        probed(
+            &columns
+                .iter()
+                .map(|column| (Some("sightings"), Some(*column)))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    #[test]
+    fn a_table_without_a_primary_key_is_matched_by_every_column_or_read_only_with_a_reason() {
+        use crate::db::RowMatch;
+        let table = keyless(&[
+            ("bird", "varchar", false),
+            ("place", "text", false),
+            ("seen", "int", false),
+            ("weight", "double", false),
+            ("at", "datetime", false),
+        ]);
+        let whole = sightings(&["bird", "place", "seen", "weight", "at"]);
+        let (target, reason) = resolve_keyless_target(&whole, "dbdelve_dev", "sightings", &table);
+        let target = target.expect("every column is of a listed type");
+        assert_eq!(target.schema, "dbdelve_dev");
+        assert_eq!(target.table, "sightings");
+        assert_eq!(target.keys, [0, 1, 2, 3, 4]);
+        assert_eq!(
+            target.columns,
+            ["bird", "place", "seen", "weight", "at"].map(|name| Some(name.to_string()))
+        );
+        assert_eq!(target.row_match, RowMatch::EveryColumn { fixed: vec![] });
+        assert_eq!(reason, None);
+
+        // Table order, whatever order the result lists them in.
+        let (reordered, _) = resolve_keyless_target(
+            &sightings(&["place", "bird", "seen", "weight", "at"]),
+            "dbdelve_dev",
+            "sightings",
+            &table,
+        );
+        assert_eq!(reordered.expect("reordered").keys, [1, 0, 2, 3, 4]);
+
+        // A column the server computes is matched and never set.
+        let (computed, _) = resolve_keyless_target(
+            &sightings(&["bird", "place", "label"]),
+            "dbdelve_dev",
+            "sightings",
+            &keyless(&[
+                ("bird", "varchar", false),
+                ("place", "varchar", false),
+                ("label", "varchar", true),
+            ]),
+        );
+        assert_eq!(
+            computed.expect("a computed column is matched").row_match,
+            RowMatch::EveryColumn { fixed: vec![2] }
+        );
+
+        let refused = |column: &str| {
+            Some(format!(
+                "A table without a primary key is edited by matching every column, \
+                 and {column} cannot be matched by its value."
+            ))
+        };
+        // FLOAT and JSON find nothing by `=` against their own text; the rest are
+        // types no test matched.
+        for data_type in [
+            "float",
+            "json",
+            "bit",
+            "geometry",
+            "point",
+            "blob",
+            "binary",
+            "varbinary",
+            "tinyblob",
+            "mediumblob",
+            "longblob",
+            "vector",
+            "null",
+            "",
+        ] {
+            let (target, reason) = resolve_keyless_target(
+                &sightings(&["bird", "shape"]),
+                "dbdelve_dev",
+                "sightings",
+                &keyless(&[("bird", "varchar", false), ("shape", data_type, false)]),
+            );
+            assert!(target.is_none(), "{data_type}");
+            assert_eq!(
+                reason,
+                refused(&format!("shape ({data_type})")),
+                "{data_type}"
+            );
+        }
+        for data_type in [
+            "tinyint",
+            "smallint",
+            "mediumint",
+            "int",
+            "bigint",
+            "decimal",
+            "double",
+            "char",
+            "varchar",
+            "tinytext",
+            "text",
+            "mediumtext",
+            "longtext",
+            "date",
+            "time",
+            "datetime",
+            "timestamp",
+            "year",
+            "enum",
+            "set",
+        ] {
+            let (target, reason) = resolve_keyless_target(
+                &sightings(&["one"]),
+                "dbdelve_dev",
+                "sightings",
+                &keyless(&[("one", data_type, false)]),
+            );
+            assert!(target.is_some(), "{data_type}");
+            assert_eq!(reason, None, "{data_type}");
+        }
+
+        // A column the result leaves out would be left out of the WHERE.
+        let (target, reason) =
+            resolve_keyless_target(&sightings(&["bird"]), "dbdelve_dev", "sightings", &table);
+        assert!(target.is_none());
+        assert_eq!(
+            reason,
+            Some(
+                "A table without a primary key is edited by matching every column, \
+                 and place is not in the result."
+                    .to_string()
+            )
+        );
+        // Computed beside real columns, and a self-join, are no table's rows.
+        let one = keyless(&[("bird", "varchar", false)]);
+        assert_eq!(
+            resolve_keyless_target(
+                &probed(&[(Some("sightings"), Some("bird")), (None, None)]),
+                "dbdelve_dev",
+                "sightings",
+                &one,
+            ),
+            (None, None)
+        );
+        assert_eq!(
+            resolve_keyless_target(
+                &sightings(&["bird", "bird"]),
+                "dbdelve_dev",
+                "sightings",
+                &one
+            ),
+            (None, None)
         );
     }
 
@@ -3252,6 +3766,323 @@ mod tests {
         );
     }
 
+    /// A one-step verified `UPDATE` through the server's own session, on a row
+    /// of `conformance` of this test's alone.
+    fn live_a_same_value_update_counts_its_matched_row_in_any_server_language(engine: Engine) {
+        use crate::db::{ApplyOutcome, CancelToken, StepKind, conformance::verified_steps};
+
+        let connection = live_profile(engine);
+        let table = engine.qualified("dbdelve_dev", "conformance");
+        let run = |sql: &str| {
+            connection
+                .query(sql, &CancelToken::default(), Fetch::default())
+                .unwrap_or_else(|error| panic!("{engine:?}: `{sql}` failed: {error}"))
+        };
+        let delete = format!("DELETE FROM {table} WHERE id = 921");
+        run(&delete);
+        run(&format!(
+            "INSERT INTO {table} (id, label) VALUES (921, {})",
+            engine.quote_literal("same")
+        ));
+        let row = run(&format!("SELECT * FROM {table} WHERE id = 921"));
+        let before: Vec<FetchedCell> = row
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(index, column)| FetchedCell {
+                column: column.name.clone(),
+                text: row.rows[0].get(index).map(str::to_string),
+                cell_type: None,
+                column_type: column.data_type.clone(),
+            })
+            .collect();
+        let write = |id: u32| {
+            format!(
+                "UPDATE {table} SET {} = {} WHERE {} = '{id}'",
+                engine.quote_identifier("label"),
+                engine.quote_literal("same"),
+                engine.quote_identifier("id"),
+            )
+        };
+        let steps = verified_steps(engine, &write(921), vec![(StepKind::Update, before)]);
+        // The re-read still finds the row, so the write is what counts: it
+        // names a row that is not there.
+        let missing = VerifiedStep {
+            sql: write(929),
+            ..steps[0].clone()
+        };
+        for locale in ["en_US", "ru_RU", "ja_JP"] {
+            run(&format!("SET SESSION lc_messages = '{locale}'"));
+            let outcome = connection.apply_verified(&steps, &CancelToken::default());
+            assert!(
+                matches!(outcome, ApplyOutcome::Applied { affected: 1, .. }),
+                "{engine:?} in {locale}: {outcome:?}"
+            );
+            let outcome =
+                connection.apply_verified(std::slice::from_ref(&missing), &CancelToken::default());
+            assert_eq!(
+                outcome,
+                ApplyOutcome::Miscounted {
+                    step: 0,
+                    count: Some(0)
+                },
+                "{engine:?} in {locale}"
+            );
+        }
+        run("SET SESSION lc_messages = 'en_US'");
+        run(&delete);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MYSQL_URL"]
+    fn live_a_same_value_update_counts_its_matched_row_in_any_server_language_on_mysql() {
+        live_a_same_value_update_counts_its_matched_row_in_any_server_language(Engine::MySql);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MARIADB_URL"]
+    fn live_a_same_value_update_counts_its_matched_row_in_any_server_language_on_mariadb() {
+        live_a_same_value_update_counts_its_matched_row_in_any_server_language(Engine::MariaDb);
+    }
+
+    /// Drops scratch tables when a test ends, panicking or not.
+    struct Scratch<'a>(&'a Connection, &'a [&'a str]);
+
+    impl Scratch<'_> {
+        fn drop_all(&self) {
+            for name in self.1 {
+                let _ = self.0.query(
+                    &format!("DROP TABLE IF EXISTS {name}; DROP VIEW IF EXISTS {name}"),
+                    Fetch::default(),
+                );
+            }
+        }
+    }
+
+    impl Drop for Scratch<'_> {
+        fn drop(&mut self) {
+            self.drop_all();
+        }
+    }
+
+    /// One column of each listed type, with a value that shows how it renders.
+    const TYPE_SAMPLES: &[(&str, &str)] = &[
+        ("tinyint", "-5"),
+        ("tinyint unsigned", "250"),
+        ("smallint", "-300"),
+        ("mediumint", "-8388608"),
+        ("int", "42"),
+        ("int unsigned", "4000000000"),
+        ("bigint", "9007199254740993"),
+        ("bigint unsigned", "18446744073709551615"),
+        ("decimal(10,2)", "-12.50"),
+        ("double", "0.30000000000000004"),
+        ("char(3)", "'ab'"),
+        ("varchar(32)", "'h''e llo, \\\\ {a: 1}'"),
+        ("varchar(32)", "''"),
+        ("tinytext", "'tiny'"),
+        ("text", "'tab\\there\\nnewline \u{fc}n\u{ef}'"),
+        ("mediumtext", "'medium'"),
+        ("longtext", "'long'"),
+        ("date", "'2024-02-29'"),
+        ("time(6)", "'12:34:56.123456'"),
+        ("time", "'-838:59:59'"),
+        ("datetime(6)", "'2024-02-29 12:34:56.123456'"),
+        ("timestamp(6) NULL", "'2024-06-01 00:00:00.5'"),
+        ("year", "2024"),
+        ("enum('a','b')", "'b'"),
+        ("set('x','y')", "'x,y'"),
+    ];
+
+    /// Types left off the list because `=` against the text the grid renders for
+    /// them finds nothing, on the engines it holds on: a `FLOAT` is compared to
+    /// the text as a double, which it is not, a `JSON` value is never equal to a
+    /// string, and the byte types render as `0x…` and are written back as that
+    /// text. MariaDB's `JSON` is a `LONGTEXT` the catalog query tells by its
+    /// check; the text equals itself there, and the type is left off all the
+    /// same.
+    const UNMATCHED_SAMPLES: &[(&str, &str, &[Engine])] = &[
+        ("float", "0.1", &[Engine::MySql, Engine::MariaDb]),
+        ("json", "'{\"a\": [1,   2]}'", &[Engine::MySql]),
+        ("bit(8)", "b'101'", &[Engine::MySql, Engine::MariaDb]),
+        ("binary(4)", "0x6162", &[Engine::MySql, Engine::MariaDb]),
+        (
+            "varbinary(8)",
+            "0xdeadbeef",
+            &[Engine::MySql, Engine::MariaDb],
+        ),
+        ("tinyblob", "0x00ff", &[Engine::MySql, Engine::MariaDb]),
+        ("blob", "0x00ff", &[Engine::MySql, Engine::MariaDb]),
+        ("mediumblob", "0x00ff", &[Engine::MySql, Engine::MariaDb]),
+        ("longblob", "0x00ff", &[Engine::MySql, Engine::MariaDb]),
+    ];
+
+    /// Types left off the list that nothing was matched with: the grid is
+    /// read-only and says which column is why.
+    const UNLISTED_SAMPLES: &[(&str, &str)] = &[("geometry", "ST_GeomFromText('POINT(1 2)')")];
+
+    fn live_every_listed_type_matches_its_row_by_its_rendered_text(engine: Engine) {
+        let connection = live(engine);
+        let scratch = Scratch(
+            &connection,
+            &[
+                "dbdelve_keyless_types",
+                "dbdelve_keyless_probe",
+                "dbdelve_keyless_view",
+            ],
+        );
+        scratch.drop_all();
+        let run = |sql: &str| connection.query(sql, Fetch::default());
+        let columns: Vec<String> = TYPE_SAMPLES
+            .iter()
+            .enumerate()
+            .map(|(index, (declared, _))| format!("c{index} {declared}"))
+            .collect();
+        let values: Vec<&str> = TYPE_SAMPLES.iter().map(|(_, value)| *value).collect();
+        run(&format!(
+            "CREATE TABLE dbdelve_keyless_types ({})",
+            columns.join(", ")
+        ))
+        .expect("the scratch table is built");
+        run(&format!(
+            "INSERT INTO dbdelve_keyless_types VALUES ({})",
+            values.join(", ")
+        ))
+        .expect("the scratch row is inserted");
+
+        let read = run("SELECT * FROM dbdelve_keyless_types").expect("the row reads");
+        let edit = read.edit.clone().unwrap_or_else(|| {
+            panic!(
+                "every column is of a listed type: {:?}",
+                read.read_only_reason
+            )
+        });
+        assert_eq!(
+            edit.row_match,
+            crate::db::RowMatch::EveryColumn { fixed: vec![] }
+        );
+        assert_eq!(edit.keys.len(), TYPE_SAMPLES.len());
+        let count = |column: &str, literal: &str| {
+            run(&format!(
+                "SELECT COUNT(*) FROM dbdelve_keyless_types WHERE {} = {literal}",
+                engine.quote_identifier(column)
+            ))
+            .map(|result| result.rows[0].get(0).unwrap_or("NULL").to_string())
+            .map_err(|error| error.message)
+        };
+        for (index, (declared, value)) in TYPE_SAMPLES.iter().enumerate() {
+            let column = &read.columns[index];
+            let rendered = read.rows[0].get(index).expect("a value");
+            // The literal the keyless WHERE writes for it.
+            let literal = engine.quote_value(rendered, column.data_type.as_deref());
+            assert_eq!(
+                count(&column.name, &literal).as_deref(),
+                Ok("1"),
+                "{declared}: {value} -> {rendered}"
+            );
+        }
+
+        for (declared, value, finds_nothing) in UNMATCHED_SAMPLES {
+            let scratch = Scratch(&connection, &["dbdelve_keyless_probe"]);
+            scratch.drop_all();
+            run(&format!(
+                "CREATE TABLE dbdelve_keyless_probe (c {declared})"
+            ))
+            .expect("the scratch table is built");
+            run(&format!(
+                "INSERT INTO dbdelve_keyless_probe VALUES ({value})"
+            ))
+            .expect("the scratch row is inserted");
+            let read = run("SELECT * FROM dbdelve_keyless_probe").expect("the row reads");
+            assert!(read.edit.is_none(), "{declared}");
+            let kind = declared.split('(').next().unwrap_or(declared);
+            assert!(
+                read.read_only_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains(&format!("c ({kind})"))),
+                "{declared}: {:?}",
+                read.read_only_reason
+            );
+            if finds_nothing.contains(&engine) {
+                let rendered = read.rows[0].get(0).expect("a value");
+                let counted = run(&format!(
+                    "SELECT COUNT(*) FROM dbdelve_keyless_probe WHERE c = {}",
+                    engine.quote_literal(rendered)
+                ))
+                .map(|result| result.rows[0].get(0).unwrap_or("NULL").to_string())
+                .map_err(|error| error.message);
+                assert_ne!(counted.as_deref(), Ok("1"), "{declared}: {rendered}");
+            }
+        }
+
+        for (declared, value) in UNLISTED_SAMPLES {
+            let scratch = Scratch(&connection, &["dbdelve_keyless_probe"]);
+            scratch.drop_all();
+            run(&format!(
+                "CREATE TABLE dbdelve_keyless_probe (c {declared})"
+            ))
+            .expect("the scratch table is built");
+            run(&format!(
+                "INSERT INTO dbdelve_keyless_probe VALUES ({value})"
+            ))
+            .expect("the scratch row is inserted");
+            let read = run("SELECT * FROM dbdelve_keyless_probe").expect("the row reads");
+            assert!(read.edit.is_none(), "{declared}");
+            let kind = declared.split('(').next().unwrap_or(declared);
+            assert!(
+                read.read_only_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains(&format!("c ({kind})"))),
+                "{declared}: {:?}",
+                read.read_only_reason
+            );
+        }
+
+        // A column the server computes is matched and never set; a default it
+        // computes is an ordinary column. A unique index is no primary key.
+        scratch.drop_all();
+        run("CREATE TABLE dbdelve_keyless_probe (
+                a int NOT NULL UNIQUE,
+                g int AS (a + 1) STORED,
+                v int AS (a + 2) VIRTUAL,
+                d datetime DEFAULT CURRENT_TIMESTAMP,
+                x int DEFAULT (3)
+            )")
+        .expect("the table is built");
+        run("INSERT INTO dbdelve_keyless_probe (a, x) VALUES (1, 4)").expect("a row");
+        let computed = run("SELECT * FROM dbdelve_keyless_probe").expect("the row reads");
+        assert_eq!(
+            computed
+                .edit
+                .expect("a unique index alone is no key")
+                .row_match,
+            crate::db::RowMatch::EveryColumn { fixed: vec![1, 2] },
+            "{:?}",
+            computed.read_only_reason
+        );
+        scratch.drop_all();
+
+        // A view over a table with no primary key names no row of its own.
+        run("CREATE TABLE dbdelve_keyless_probe (c int)").expect("the table is built");
+        run("CREATE VIEW dbdelve_keyless_view AS SELECT c FROM dbdelve_keyless_probe")
+            .expect("the view is built");
+        let viewed = run("SELECT * FROM dbdelve_keyless_view").expect("the view reads");
+        assert!(viewed.edit.is_none());
+        assert_eq!(viewed.read_only_reason, None);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MYSQL_URL"]
+    fn live_every_listed_type_matches_its_row_by_its_rendered_text_on_mysql() {
+        live_every_listed_type_matches_its_row_by_its_rendered_text(Engine::MySql);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MARIADB_URL"]
+    fn live_every_listed_type_matches_its_row_by_its_rendered_text_on_mariadb() {
+        live_every_listed_type_matches_its_row_by_its_rendered_text(Engine::MariaDb);
+    }
+
     fn conformance_subject(engine: Engine) -> crate::db::conformance::Subject {
         use crate::db::conformance::{COLUMNS, Fixture, Subject, sql_find, sql_read};
         Subject {
@@ -3309,6 +4140,8 @@ mod tests {
         read_only_session_refuses_a_write,
         generated_writes_round_trip,
         generated_draft_round_trip,
+        verified_draft_round_trip,
+        verified_keyless_round_trip,
     );
 
     crate::db::conformance::suite!(
@@ -3327,6 +4160,8 @@ mod tests {
         read_only_session_refuses_a_write,
         generated_writes_round_trip,
         generated_draft_round_trip,
+        verified_draft_round_trip,
+        verified_keyless_round_trip,
     );
 
     #[test]

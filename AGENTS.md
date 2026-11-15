@@ -31,11 +31,13 @@ require it, stop and raise it instead.
    Row mode, always where the user can read it before it runs: on a view the
    server sorts, a header sort
    splices its `ORDER BY` into the buffer (one sorted in memory reorders its
-   rows and writes nothing); grid edits are appended to the buffer (`sql::appended_statement`),
-   or shown in a review dialog on an object tab, which has no buffer, and on
-   a query tab of an engine whose rows are named by every value, or of a
-   plugin, whose writes must run behind their guard
-   (`Target::reviews_query_edits`); Import
+   rows and writes nothing); grid edits on a query tab are appended to the buffer
+   (`sql::appended_statement`) only where the target neither guards nor
+   verifies them (`Target::reviews_query_apply`); elsewhere, and always on an
+   object tab, which has no buffer, they are shown in a review dialog: on a
+   query tab of an engine whose rows are named by every value, or of a plugin,
+   whose writes must run behind their guard, and on one of an engine whose
+   apply is verified, which a copy in the buffer would run without; Import
    Rows shows every statement before any runs; Explain prefixes a copy, never
    the buffer; Format Query rewrites on command only, at the token level
    (`sqlformat`, or `mql::format` on MongoDB), never an AST round-trip, which
@@ -51,11 +53,11 @@ require it, stop and raise it instead.
 
    It never writes `DROP` or `TRUNCATE` into a buffer or onto the wire. It
    writes `DELETE` only as the explicit deletion of one named row, by primary
-   key (on an engine without unique keys, by all of the row's values as read, and
-   only when exactly one row matches), shown before it runs (`sql::delete_row`),
+   key (on a table with no primary key, by all of the row's values as read, a
+   NULL as `IS NULL`, and only when exactly one row matches), shown before it
+   runs (`sql::delete_row`),
    or as one `DELETE` per row the user marked in a reviewed draft, each naming
-   that row's key.
-   The explorer's Copy DROP and Copy TRUNCATE put text on the clipboard and
+   that row's key. The explorer's Copy DROP and Copy TRUNCATE put text on the clipboard and
    nothing else. It never writes into a statement it cannot parse whole: `sql::with_order_by` refuses rather
    than guessing at a clause boundary, because a corrupted statement is worse
    than an unsorted grid.
@@ -73,15 +75,19 @@ require it, stop and raise it instead.
 
    A cell is editable only when DBDelve can name its row by primary key; when
    it cannot, the grid stays read-only and says why, and never guesses at a
-   predicate. A table without a primary key can be inserted into and not
-   edited, deliberately. An engine without unique keys is the one exception: a
-   row is named by all of its values as read, and a write runs only when exactly
-   one row matches, checked by an exactly-one-row `COUNT(*)` with the identical
-   predicate before each write. **Multi-row deletion by predicate is not
-   admitted.** A reviewed draft may carry one `DELETE` per marked row, each
-   naming its own key and table, checked against the parse tree
-   (`sql::draft_deletes_match`) and counted against the marks, inside the
-   `BEGIN`/`COMMIT` multi-row edits use, never one predicate covering several.
+   predicate. The one exception is a table with no primary key, on Postgres,
+   MySQL, MariaDB, SQLite, DuckDB, SQL Server and ClickHouse: a row is named by
+   all of its values as read, a NULL as `IS NULL`, and a write runs only when
+   exactly one row matches (on the six, the re-read and the count inside the
+   apply's transaction; on ClickHouse, an exactly-one-row `COUNT(*)` with the
+   identical predicate before each write). A column that cannot be matched by
+   equality leaves the grid read-only and says why; it is never left out of the
+   `WHERE`, and no unique key, rowid or subset of the columns stands in for the
+   rest. **Multi-row deletion by predicate is not admitted.**
+   A reviewed draft may carry one `DELETE` per marked row, each naming its own
+   key and table, checked against the parse tree (`sql::draft_deletes_match`)
+   and counted against the marks, inside the `BEGIN`/`COMMIT` multi-row edits
+   use, never one predicate covering several.
 
 3. **No environment-specific behaviour.** No vendor binary names in error
    strings, no assumption that a loopback host means plaintext, no hardcoded

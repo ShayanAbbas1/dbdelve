@@ -560,6 +560,23 @@ impl Engine {
         }
     }
 
+    /// Whether a connection to this engine verifies an apply: has an arm of
+    /// [`Connection::apply_verified`]. An explicit arm per engine for the reason
+    /// [`Engine::transaction_start`] has one: the engines without one keep
+    /// [`Connection::generated`], and one added later must be decided here.
+    pub fn verifies_applies(self) -> bool {
+        match self {
+            Self::Sqlite
+            | Self::DuckDb
+            | Self::Postgres
+            | Self::MySql
+            | Self::MariaDb
+            | Self::SqlServer
+            | Self::MongoDb => true,
+            Self::Turso | Self::Snowflake | Self::ClickHouse | Self::Redis | Self::Generic => false,
+        }
+    }
+
     /// Whether `SET column = DEFAULT` is an assignment this engine accepts.
     ///
     /// Where it is not, the gesture has to be withheld rather than attempted.
@@ -1813,6 +1830,87 @@ impl Connection {
             }),
             _ => self.generated(sql, cancel, feed, limit),
         }
+    }
+
+    /// Applies `steps` as one verified sequence held on this session: each
+    /// `UPDATE`'s and `DELETE`'s row read again and compared with the row as it
+    /// was fetched before anything is written, each write counted, then
+    /// `COMMIT` (see [`run_verified`]). Registered in `cancel`, so a Cancel
+    /// finds the session and a Cancel between statements rolls the sequence
+    /// back.
+    ///
+    /// An explicit arm per connection, no wildcard: one that does not answer
+    /// [`Engine::verifies_applies`] answers [`ApplyOutcome::Failed`] with
+    /// nothing sent, and it is `Target::verifies_applies` that keeps an edit
+    /// from being routed here.
+    pub(crate) fn apply_verified(
+        &self,
+        steps: &[VerifiedStep],
+        cancel: &CancelToken,
+    ) -> ApplyOutcome {
+        self.apply_verified_on(steps, cancel, None)
+    }
+
+    /// [`Self::apply_verified`] for a tab bound to this session's database:
+    /// where [`Self::generated_bound`] puts the session back first (MySQL,
+    /// MariaDB and DuckDB), the apply does too, under the lock it holds for
+    /// the whole sequence, so an edit writes to the database its rows came
+    /// from whichever way a `USE` has moved the session since. Every other
+    /// engine that verifies an apply needs nothing put back, for the reasons
+    /// [`Self::generated_bound`] gives.
+    pub(crate) fn apply_verified_bound(
+        &self,
+        schema: Option<&str>,
+        steps: &[VerifiedStep],
+        cancel: &CancelToken,
+    ) -> ApplyOutcome {
+        self.apply_verified_on(steps, cancel, Some(schema))
+    }
+
+    /// `bound` is the schema to put the session back on first, itself `None`
+    /// for its own default, when the apply is a bound tab's.
+    fn apply_verified_on(
+        &self,
+        steps: &[VerifiedStep],
+        cancel: &CancelToken,
+        bound: Option<Option<&str>>,
+    ) -> ApplyOutcome {
+        // ponytail: `running_on` lets go of the session only once the engine
+        // has released its lock, so a Cancel in that gap reaches whatever took
+        // the session next, as before `Fetch::let_go`. Closing it means handing
+        // `let_go` to each engine's apply to call under its own lock.
+        running_on(cancel, self, |held, _| {
+            // The first ask registers the run and checks for a Cancel that came
+            // first; every later one only checks.
+            let registered = std::cell::Cell::new(false);
+            let proceed = || match registered.replace(true) {
+                false => held(),
+                true => {
+                    !cancel
+                        .0
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .asked
+                }
+            };
+            match self {
+                Self::Sqlite(connection) => connection.apply_verified(steps, &proceed),
+                Self::DuckDb(connection) => connection.apply_verified(steps, &proceed, bound),
+                Self::Postgres(connection) => connection.apply_verified(steps, &proceed),
+                Self::MySql(connection) => {
+                    connection.apply_verified(steps, &proceed, bound.is_some())
+                }
+                Self::SqlServer(connection) => connection.apply_verified(steps, &proceed),
+                // Each statement registers its own run in `cancel`, as `query`
+                // does, so this arm never asks `proceed`.
+                Self::MongoDb(connection) => connection.apply_verified(steps, cancel),
+                Self::Turso(_)
+                | Self::Snowflake(_)
+                | Self::ClickHouse(_)
+                | Self::Redis(_)
+                | Self::External(_) => unverifiable(),
+            }
+        })
     }
 
     /// [`Connection::query`] on a connection of its own, opened the way this
@@ -3467,6 +3565,384 @@ pub(super) fn assemble_sequences(result: QueryResult) -> Result<Catalog, DbError
     })
 }
 
+/// What one statement of a verified apply writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StepKind {
+    Insert,
+    Update,
+    Delete,
+}
+
+impl StepKind {
+    /// The keyword a generated statement of this kind opens with.
+    pub(crate) fn keyword(self) -> &'static str {
+        match self {
+            Self::Insert => "INSERT",
+            Self::Update => "UPDATE",
+            Self::Delete => "DELETE",
+        }
+    }
+}
+
+/// One column of a row as it was fetched: the text the grid held, by the real
+/// column's name and not by position, copied by value when the review was
+/// written, since an in-memory sort can move rows while a review is open.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FetchedCell {
+    pub column: String,
+    /// `None` for a NULL.
+    pub text: Option<String>,
+    /// The cell's own type where the result types each cell, as MongoDB's
+    /// does; `None` on every SQL engine, whose columns are typed whole.
+    pub cell_type: Option<String>,
+    /// The fetched column's [`Column::data_type`]. Never compared: an arm's
+    /// skip predicate reads it to leave out a cell the grid renders after the
+    /// fetch.
+    pub column_type: Option<String>,
+}
+
+/// One statement of a verified apply, with what proves the row it writes is
+/// still the row the user read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct VerifiedStep {
+    /// One statement [`crate::sql::generated_writes`] cut out of the gated
+    /// text, without its bracket.
+    pub sql: String,
+    pub kind: StepKind,
+    /// The read of the row an `UPDATE` or a `DELETE` names, taken inside the
+    /// apply's transaction before any write ([`crate::sql::row_reread`]).
+    /// `None` for an `INSERT`, which has no row to read.
+    pub reread: Option<String>,
+    /// The row as it was fetched, empty for an `INSERT`.
+    pub before: Vec<FetchedCell>,
+    /// A read of the row, run after this statement's write inside the same
+    /// transaction, so a Row-mode send shows what the server now holds.
+    pub read_back: Option<String>,
+}
+
+/// Where a verified apply stopped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ApplyStage {
+    Begin,
+    Reread(usize),
+    Write(usize),
+    /// The second read of a `DELETE`'s row that counted none.
+    Confirm(usize),
+    ReadBack(usize),
+    Commit,
+}
+
+/// How a row differs from the row as it was fetched.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Drift {
+    /// It is there, and a column differs or is missing.
+    Changed,
+    /// The re-read returned no row.
+    Gone,
+    /// The re-read returned this many rows, where one was named.
+    Ambiguous(usize),
+}
+
+/// What a statement of a verified apply is, handed to the arm's statement
+/// closure with the statement so an arm reads a write's count by its kind and
+/// leaves a bracket's or a read's alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Sending {
+    Bracket,
+    Read,
+    Write(StepKind),
+}
+
+/// What a verified apply came to.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ApplyOutcome {
+    /// Every statement counted the one row it was written for, and the
+    /// transaction committed. `affected` is the rows written, all together.
+    /// `read_back` is the last step's read-back, when it had one, boxed so the
+    /// outcomes that carry no rows stay small.
+    Applied {
+        affected: u64,
+        read_back: Option<Box<QueryResult>>,
+    },
+    /// No write was sent: these steps' rows are not the rows that were read.
+    Drifted(Vec<(usize, Drift)>),
+    /// A statement counted another number of rows than the one it names; the
+    /// whole sequence was rolled back. An `UPDATE` and an `INSERT` must count
+    /// one. A `DELETE` must count one, or none when a second read of its row
+    /// inside the transaction finds it gone, which an earlier `DELETE` of the
+    /// draft taking it along would leave; none with the row still there is a
+    /// statement something skipped. `count` is `None` when the driver gave no
+    /// count at all.
+    ///
+    /// The count is the server's own for that statement, and SQLite's
+    /// `changes()` excludes what a trigger or a foreign key wrote, so a
+    /// trigger's own writes never raise a count.
+    ///
+    /// MongoDB has no transaction to roll back. There, a `Miscounted` and a
+    /// `Failed` at [`ApplyStage::Write`] or [`ApplyStage::ReadBack`] mean the
+    /// steps before `step` (or, at a read-back, up to and including it) were
+    /// applied and none after it was sent; `Drifted` and a `Failed` at
+    /// [`ApplyStage::Begin`] or [`ApplyStage::Reread`] wrote nothing. It never
+    /// answers `Unknown`: there is no `COMMIT` to lose.
+    Miscounted { step: usize, count: Option<u64> },
+    /// The server refused something before `COMMIT`, or the apply refused to
+    /// send: nothing the apply opened stayed applied.
+    ///
+    /// On MongoDB, which has no transaction to roll back, that is not so:
+    /// see [`ApplyOutcome::Miscounted`].
+    Failed { stage: ApplyStage, error: DbError },
+    /// `COMMIT` was sent and its answer did not come back: whether it landed
+    /// is not known.
+    Unknown(DbError),
+}
+
+/// Compares the row as it was fetched with the row read again.
+///
+/// The re-read must hold exactly one row: none is [`Drift::Gone`], more is
+/// [`Drift::Ambiguous`]. Each fetched cell is matched to the re-read's column
+/// of the same name, never by position, and compared whole and byte for byte:
+/// NULL equals NULL and nothing else, and no trimming, case folding or number
+/// form is applied, so a difference the user cannot see still refuses. A cell
+/// the re-read lacks is a difference, a column the fetch did not hold is not
+/// compared, and a cell `skipped` names is left out. Where both sides type the
+/// cell, a different type is a different value.
+pub(crate) fn drift(
+    before: &[FetchedCell],
+    reread: &QueryResult,
+    skipped: impl Fn(&FetchedCell) -> bool,
+) -> Option<Drift> {
+    match reread.rows.as_slice() {
+        [] => return Some(Drift::Gone),
+        [_] => {}
+        rows => return Some(Drift::Ambiguous(rows.len())),
+    }
+    let row = &reread.rows[0];
+    let changed = before.iter().filter(|cell| !skipped(cell)).any(|cell| {
+        let Some(col) = reread
+            .columns
+            .iter()
+            .position(|column| column.name == cell.column)
+        else {
+            return true;
+        };
+        let typed = reread.cell_types.first().and_then(|types| types.get(col));
+        row.get(col) != cell.text.as_deref()
+            || cell
+                .cell_type
+                .as_deref()
+                .zip(typed)
+                .is_some_and(|(fetched, now)| fetched != *now)
+    });
+    changed.then_some(Drift::Changed)
+}
+
+/// The sequence of a verified apply, held on one session: every re-read, then
+/// the compare, then each write with its count, then `COMMIT`. The one place
+/// its rules live; an arm hands it closures over the session it already holds.
+///
+/// It opens a transaction of its own and every exit before `COMMIT` sends
+/// `ROLLBACK`, so nothing it opened stays half applied. Never inside the
+/// user's: the caller refuses an apply while one is open on the connection.
+///
+/// Every statement is gated again here, whoever built the steps: each write by
+/// [`crate::sql::is_generated_write_on`] as the one statement it must be, and
+/// each read by [`crate::sql::is_generated_select`], before anything is sent.
+///
+/// `send` runs one statement on the held session. `proceed` is asked before
+/// each statement and says no once a Cancel has come. `skipped` and `lost` are
+/// the arm's: a fetched cell the grid rendered after the fetch and so cannot
+/// be compared, and whether an error at `COMMIT` means the session is gone.
+///
+/// Every re-read runs before the first write, so the draft's own cascades and
+/// triggers do not show as drift.
+// ponytail: there is no `FOR UPDATE` on the re-read (the pinned grammar cannot
+// parse it), so the compare sees a change made between the fetch and the
+// apply, not one made in the milliseconds between the re-read and the write.
+// The count still sees a row that vanished in that window; a value changed in
+// it is overwritten. The upgrade is a locking read once the grammar reads it.
+pub(super) fn run_verified(
+    engine: Engine,
+    steps: &[VerifiedStep],
+    send: &mut dyn FnMut(&str, Sending) -> Result<QueryResult, DbError>,
+    proceed: &dyn Fn() -> bool,
+    skipped: &dyn Fn(&FetchedCell) -> bool,
+    lost: &dyn Fn(&DbError) -> bool,
+) -> ApplyOutcome {
+    let refused = |message: &str| ApplyOutcome::Failed {
+        stage: ApplyStage::Begin,
+        error: plain_error(message.into()),
+    };
+    if steps.is_empty() {
+        return refused("There are no statements to apply.");
+    }
+    for step in steps {
+        let writes_one = matches!(
+            crate::sql::generated_writes(engine, &step.sql).as_deref(),
+            Some([one]) if *one == step.sql
+        );
+        let names_kind = step
+            .sql
+            .get(..step.kind.keyword().len())
+            .is_some_and(|word| word.eq_ignore_ascii_case(step.kind.keyword()));
+        let reads = match (step.kind, &step.reread) {
+            (StepKind::Insert, None) => true,
+            (StepKind::Insert, Some(_)) | (StepKind::Update | StepKind::Delete, None) => false,
+            (StepKind::Update | StepKind::Delete, Some(read)) => {
+                crate::sql::is_generated_select(engine, read)
+            }
+        };
+        let reads_back = step
+            .read_back
+            .as_deref()
+            .is_none_or(|read| crate::sql::is_generated_select(engine, read));
+        if !writes_one || !names_kind || !reads || !reads_back {
+            return refused(
+                "dbdelve refused to run a statement it wrote itself: the draft and its \
+                 statements do not match.",
+            );
+        }
+    }
+    // Statements go one at a time, so even an engine whose one submission is
+    // atomic (`Engine::transaction_start` answers `None` there) needs a `BEGIN`.
+    let opening = engine.transaction_start().unwrap_or("BEGIN");
+    if !crate::sql::is_transaction_bracket(opening) {
+        return refused("The apply could not be verified on this connection.");
+    }
+
+    // The error of a rollback is not the apply's to report: the session it
+    // would have ended may be the thing that failed.
+    let roll_back = |send: &mut dyn FnMut(&str, Sending) -> Result<QueryResult, DbError>| {
+        let _ = send("ROLLBACK", Sending::Bracket);
+    };
+    let cancelled = || plain_error("Cancelled before it was sent.".into());
+
+    if !proceed() {
+        return ApplyOutcome::Failed {
+            stage: ApplyStage::Begin,
+            error: plain_error("Cancelled before it was sent.".into()),
+        };
+    }
+    if let Err(error) = send(opening, Sending::Bracket) {
+        return ApplyOutcome::Failed {
+            stage: ApplyStage::Begin,
+            error,
+        };
+    }
+
+    let mut drifted = Vec::new();
+    for (index, step) in steps.iter().enumerate() {
+        let Some(read) = &step.reread else {
+            continue;
+        };
+        if !proceed() {
+            roll_back(send);
+            return ApplyOutcome::Failed {
+                stage: ApplyStage::Reread(index),
+                error: cancelled(),
+            };
+        }
+        match send(read, Sending::Read) {
+            Ok(result) => {
+                drifted.extend(drift(&step.before, &result, skipped).map(|drift| (index, drift)))
+            }
+            Err(error) => {
+                roll_back(send);
+                return ApplyOutcome::Failed {
+                    stage: ApplyStage::Reread(index),
+                    error,
+                };
+            }
+        }
+    }
+    if !drifted.is_empty() {
+        roll_back(send);
+        return ApplyOutcome::Drifted(drifted);
+    }
+
+    let (mut affected, mut read_back) = (0, None);
+    for (index, step) in steps.iter().enumerate() {
+        if !proceed() {
+            roll_back(send);
+            return ApplyOutcome::Failed {
+                stage: ApplyStage::Write(index),
+                error: cancelled(),
+            };
+        }
+        let count = match send(&step.sql, Sending::Write(step.kind)) {
+            Ok(result) => result.rows_affected,
+            Err(error) => {
+                roll_back(send);
+                return ApplyOutcome::Failed {
+                    stage: ApplyStage::Write(index),
+                    error,
+                };
+            }
+        };
+        let counted = match (step.kind, count) {
+            (_, Some(1)) => true,
+            // A `DELETE` an earlier one of the draft took the row of counts
+            // none, and so does one something skipped. The second read of its
+            // row tells them apart: "cascaded" is observed, not inferred.
+            (StepKind::Delete, Some(0)) => {
+                let Some(read) = &step.reread else {
+                    roll_back(send);
+                    return ApplyOutcome::Miscounted { step: index, count };
+                };
+                if !proceed() {
+                    roll_back(send);
+                    return ApplyOutcome::Failed {
+                        stage: ApplyStage::Confirm(index),
+                        error: cancelled(),
+                    };
+                }
+                match send(read, Sending::Read) {
+                    Ok(result) => result.rows.is_empty(),
+                    Err(error) => {
+                        roll_back(send);
+                        return ApplyOutcome::Failed {
+                            stage: ApplyStage::Confirm(index),
+                            error,
+                        };
+                    }
+                }
+            }
+            _ => false,
+        };
+        if !counted {
+            roll_back(send);
+            return ApplyOutcome::Miscounted { step: index, count };
+        }
+        affected += count.unwrap_or_default();
+        if let Some(read) = &step.read_back {
+            match send(read, Sending::Read) {
+                Ok(result) => read_back = Some(Box::new(result)),
+                Err(error) => {
+                    roll_back(send);
+                    return ApplyOutcome::Failed {
+                        stage: ApplyStage::ReadBack(index),
+                        error,
+                    };
+                }
+            }
+        }
+    }
+
+    if let Err(error) = send("COMMIT", Sending::Bracket) {
+        if lost(&error) {
+            return ApplyOutcome::Unknown(error);
+        }
+        roll_back(send);
+        return ApplyOutcome::Failed {
+            stage: ApplyStage::Commit,
+            error,
+        };
+    }
+    ApplyOutcome::Applied {
+        affected,
+        read_back,
+    }
+}
+
 pub(super) fn assemble_catalog(
     relations: QueryResult,
     routines: QueryResult,
@@ -3824,6 +4300,17 @@ pub(super) fn plain_error(message: String) -> DbError {
     }
 }
 
+/// What a connection with no arm of [`Connection::apply_verified`] answers:
+/// nothing was sent.
+fn unverifiable() -> ApplyOutcome {
+    ApplyOutcome::Failed {
+        stage: ApplyStage::Begin,
+        error: plain_error(
+            "The apply could not be verified on this connection, so nothing was sent.".into(),
+        ),
+    }
+}
+
 /// The statement that asks the server to hold this session to reads, or to
 /// let go of that hold -- the server-side backstop behind `sql::gate`'s
 /// client-side one. `None` where the engine has no session-level switch to
@@ -4070,6 +4557,338 @@ mod tests {
         });
         assert_eq!(sent, [true, false]);
         assert!(graph.read(|held| held()));
+    }
+
+    #[test]
+    fn a_write_that_reports_no_count_is_miscounted_and_rolled_back() {
+        let step = VerifiedStep {
+            sql: r#"UPDATE "main"."t" SET "a" = 'x' WHERE "id" = '1'"#.into(),
+            kind: StepKind::Update,
+            reread: Some(r#"SELECT * FROM "main"."t" WHERE "id" = '1'"#.into()),
+            before: vec![fetched("id", Some("1"))],
+            read_back: None,
+        };
+        let mut sent = Vec::new();
+        let mut send = |sql: &str, _: Sending| {
+            sent.push(sql.to_string());
+            Ok(match sql.starts_with("SELECT") {
+                true => reread(&["id"], &[&[Some("1")]]),
+                false => QueryResult::default(),
+            })
+        };
+        assert_eq!(
+            run_verified(
+                Engine::Sqlite,
+                &[step],
+                &mut send,
+                &|| true,
+                &|_| false,
+                &|_| false
+            ),
+            ApplyOutcome::Miscounted {
+                step: 0,
+                count: None
+            }
+        );
+        assert_eq!(sent.first().map(String::as_str), Some("BEGIN"));
+        assert_eq!(sent.last().map(String::as_str), Some("ROLLBACK"));
+        assert!(!sent.iter().any(|sql| sql == "COMMIT"), "{sent:?}");
+    }
+
+    fn update_step() -> VerifiedStep {
+        VerifiedStep {
+            sql: r#"UPDATE "public"."t" SET "a" = 'x' WHERE "id" = '1'"#.into(),
+            kind: StepKind::Update,
+            reread: Some(r#"SELECT * FROM "public"."t" WHERE "id" = '1'"#.into()),
+            before: vec![fetched("id", Some("1"))],
+            read_back: None,
+        }
+    }
+
+    #[test]
+    fn a_cancel_between_statements_rolls_the_sequence_back() {
+        let sent = std::cell::RefCell::new(Vec::<String>::new());
+        let mut send = |sql: &str, _: Sending| {
+            sent.borrow_mut().push(sql.to_string());
+            Ok(match sql.starts_with("SELECT") {
+                true => reread(&["id"], &[&[Some("1")]]),
+                false => QueryResult::default(),
+            })
+        };
+        // A Cancel comes once the re-read has gone out.
+        let proceed = || !sent.borrow().iter().any(|sql| sql.starts_with("SELECT"));
+        let outcome = run_verified(
+            Engine::Postgres,
+            &[update_step()],
+            &mut send,
+            &proceed,
+            &|_| false,
+            &|_| false,
+        );
+        assert_eq!(
+            outcome,
+            ApplyOutcome::Failed {
+                stage: ApplyStage::Write(0),
+                error: plain_error("Cancelled before it was sent.".into()),
+            }
+        );
+        assert_eq!(
+            sent.into_inner(),
+            [
+                "BEGIN",
+                r#"SELECT * FROM "public"."t" WHERE "id" = '1'"#,
+                "ROLLBACK"
+            ],
+            "no write went out, and the transaction the apply opened was ended"
+        );
+
+        // A write the server stopped while it ran fails at that write.
+        let sent = std::cell::RefCell::new(Vec::<String>::new());
+        let mut send = |sql: &str, _: Sending| {
+            sent.borrow_mut().push(sql.to_string());
+            match sql.split_whitespace().next() {
+                Some("SELECT") => Ok(reread(&["id"], &[&[Some("1")]])),
+                Some("UPDATE") => Err(plain_error(
+                    "canceling statement due to user request".into(),
+                )),
+                _ => Ok(QueryResult::default()),
+            }
+        };
+        let outcome = run_verified(
+            Engine::Postgres,
+            &[update_step()],
+            &mut send,
+            &|| true,
+            &|_| false,
+            &|_| false,
+        );
+        assert_eq!(
+            outcome,
+            ApplyOutcome::Failed {
+                stage: ApplyStage::Write(0),
+                error: plain_error("canceling statement due to user request".into()),
+            }
+        );
+        assert_eq!(sent.borrow().last().map(String::as_str), Some("ROLLBACK"));
+    }
+
+    #[test]
+    fn a_lost_session_at_commit_is_an_unknown_outcome_and_before_it_is_not_applied() {
+        // Answers every statement but `failing`, which gets the error.
+        let run = |failing: &str, lost: bool| {
+            let sent = std::cell::RefCell::new(Vec::<String>::new());
+            let mut send = |sql: &str, _: Sending| {
+                sent.borrow_mut().push(sql.to_string());
+                match sql {
+                    _ if sql.starts_with(failing) => {
+                        Err(plain_error("the connection closed".into()))
+                    }
+                    _ if sql.starts_with("SELECT") => Ok(reread(&["id"], &[&[Some("1")]])),
+                    _ if sql.starts_with("UPDATE") => Ok(QueryResult {
+                        rows_affected: Some(1),
+                        ..QueryResult::default()
+                    }),
+                    _ => Ok(QueryResult::default()),
+                }
+            };
+            let outcome = run_verified(
+                Engine::Postgres,
+                &[update_step()],
+                &mut send,
+                &|| true,
+                &|_| false,
+                &|_| lost,
+            );
+            (outcome, sent.into_inner())
+        };
+        let error = || plain_error("the connection closed".into());
+
+        let (outcome, _) = run("SELECT", true);
+        assert_eq!(
+            outcome,
+            ApplyOutcome::Failed {
+                stage: ApplyStage::Reread(0),
+                error: error()
+            },
+            "a lost session before the write is not applied"
+        );
+        let (outcome, _) = run("UPDATE", true);
+        assert_eq!(
+            outcome,
+            ApplyOutcome::Failed {
+                stage: ApplyStage::Write(0),
+                error: error()
+            },
+            "a lost session at the write is not applied either"
+        );
+        let (outcome, sent) = run("COMMIT", true);
+        assert_eq!(outcome, ApplyOutcome::Unknown(error()));
+        assert_eq!(
+            sent.last().map(String::as_str),
+            Some("COMMIT"),
+            "nothing is sent after a COMMIT whose answer did not come"
+        );
+        let (outcome, sent) = run("COMMIT", false);
+        assert_eq!(
+            outcome,
+            ApplyOutcome::Failed {
+                stage: ApplyStage::Commit,
+                error: error()
+            },
+            "a COMMIT the server refused on a live session was not applied"
+        );
+        assert_eq!(sent.last().map(String::as_str), Some("ROLLBACK"));
+    }
+
+    #[test]
+    fn only_the_engines_with_an_arm_verify_an_apply() {
+        for engine in Engine::ALL {
+            assert_eq!(
+                engine.verifies_applies(),
+                matches!(
+                    engine,
+                    Engine::Sqlite
+                        | Engine::DuckDb
+                        | Engine::Postgres
+                        | Engine::MySql
+                        | Engine::MariaDb
+                        | Engine::SqlServer
+                        | Engine::MongoDb
+                ),
+                "{engine:?}"
+            );
+        }
+    }
+
+    fn fetched(column: &str, text: Option<&str>) -> FetchedCell {
+        FetchedCell {
+            column: column.into(),
+            text: text.map(Into::into),
+            cell_type: None,
+            column_type: None,
+        }
+    }
+
+    fn reread(columns: &[&str], rows: &[&[Option<&str>]]) -> QueryResult {
+        QueryResult {
+            columns: columns
+                .iter()
+                .map(|name| Column {
+                    name: (*name).into(),
+                    data_type: None,
+                })
+                .collect(),
+            rows: rows
+                .iter()
+                .map(|cells| Row::new(cells.iter().copied()).unwrap())
+                .collect(),
+            ..QueryResult::default()
+        }
+    }
+
+    #[test]
+    fn a_fetched_row_matches_its_reread_by_column_name_and_a_changed_or_missing_one_is_drift() {
+        let before = [fetched("id", Some("7")), fetched("name", Some("wren"))];
+        let same = |result: &QueryResult| drift(&before, result, |_| false);
+
+        assert_eq!(
+            same(&reread(&["id", "name"], &[&[Some("7"), Some("wren")]])),
+            None
+        );
+        assert_eq!(
+            same(&reread(&["name", "id"], &[&[Some("wren"), Some("7")]])),
+            None,
+            "another column order is the same row"
+        );
+        assert_eq!(
+            same(&reread(
+                &["id", "name", "added_since"],
+                &[&[Some("7"), Some("wren"), Some("x")]]
+            )),
+            None,
+            "a column the manifest does not hold is not compared"
+        );
+        assert_eq!(
+            drift(
+                &[fetched("note", None)],
+                &reread(&["note"], &[&[None]]),
+                |_| false
+            ),
+            None,
+            "NULL equals NULL"
+        );
+        // Whole, byte for byte: no trimming, no case folding.
+        for changed in ["wren ", "Wren", "", "wrens"] {
+            assert_eq!(
+                same(&reread(&["id", "name"], &[&[Some("7"), Some(changed)]])),
+                Some(Drift::Changed),
+                "{changed:?}"
+            );
+        }
+        assert_eq!(
+            same(&reread(&["id", "name"], &[&[Some("7"), None]])),
+            Some(Drift::Changed),
+            "a value turned NULL"
+        );
+        assert_eq!(
+            drift(
+                &[fetched("note", None)],
+                &reread(&["note"], &[&[Some("")]]),
+                |_| false
+            ),
+            Some(Drift::Changed),
+            "a NULL turned the empty string"
+        );
+        assert_eq!(
+            same(&reread(&["id"], &[&[Some("7")]])),
+            Some(Drift::Changed),
+            "a manifest column the re-read lacks"
+        );
+        assert_eq!(same(&reread(&["id", "name"], &[])), Some(Drift::Gone));
+        assert_eq!(
+            same(&reread(
+                &["id", "name"],
+                &[&[Some("7"), Some("wren")], &[Some("7"), Some("wren")]]
+            )),
+            Some(Drift::Ambiguous(2))
+        );
+
+        // A cell the arm's predicate names is not compared.
+        let spatial = [
+            fetched("id", Some("7")),
+            fetched("geom", Some("POINT(1 2)")),
+        ];
+        assert_eq!(
+            drift(
+                &spatial,
+                &reread(&["id", "geom"], &[&[Some("7"), Some("0101")]]),
+                |cell| cell.column == "geom"
+            ),
+            None
+        );
+
+        // Where both sides type the cell, a different type is a different value.
+        let typed = FetchedCell {
+            cell_type: Some("int".into()),
+            ..fetched("n", Some("1"))
+        };
+        let mut result = reread(&["n"], &[&[Some("1")]]);
+        result.cell_types = vec![vec!["double"]];
+        assert_eq!(
+            drift(std::slice::from_ref(&typed), &result, |_| false),
+            Some(Drift::Changed)
+        );
+        result.cell_types = vec![vec!["int"]];
+        assert_eq!(
+            drift(std::slice::from_ref(&typed), &result, |_| false),
+            None
+        );
+        result.cell_types = Vec::new();
+        assert_eq!(
+            drift(std::slice::from_ref(&typed), &result, |_| false),
+            None,
+            "an untyped side is not compared by type"
+        );
     }
 
     #[test]

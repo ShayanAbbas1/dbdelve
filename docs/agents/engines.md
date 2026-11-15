@@ -101,6 +101,49 @@ Decided, and not to be re-litigated:
   order** (`sql::draft_batch`), so a key a draft deletes is free for an insert
   in the same submission, and it is bracketed on the engines that bracket and
   one implicit transaction on Postgres, like `sql::update_batch`.
+- **A verified Draft apply reads counts and cells the way each engine reports
+  them** (`Connection::apply_verified`; the sequence is `db::run_verified`).
+  Postgres counts the rows a statement matched, so a same-value `UPDATE` counts
+  one, and a `BEFORE` row trigger returning NULL or a rule `DO INSTEAD NOTHING`
+  counts none: the write is refused and the sequence rolled back, and the row
+  keeps what the trigger left it. Postgres's text carries no bracket, so the
+  apply sends its own `BEGIN`, and none of its
+  statements is described, because a refused describe aborts the transaction.
+  Spatial cells (`geometry`, `geography`) are left out of the compare: the grid
+  shows the WKT it rendered after the fetch, the re-read returns the server's
+  EWKB, and the two are different text for one value, so a change confined to a
+  spatial column is not seen while the key and the count still hold. An error at
+  `COMMIT` is an unknown outcome only when the session is gone (`Unknown`); one
+  on a live session, and any error before `COMMIT`, is a failure that rolled back.
+  DuckDB counts the rows a statement matched too (its `Count` column), takes no
+  lock beyond its own connection's, and raises a write-write conflict at the
+  statement that met it, so a conflict is a failure at that write.
+  MySQL and MariaDB count the rows a statement *changed* by default, so a
+  same-value `UPDATE` counts none and cannot be told from one that matched
+  nothing. The verified apply reads an `UPDATE`'s matched count from the OK
+  packet's info text, by position and never by label (`lc_messages` translates
+  it; the numbers keep the order matched, changed, warnings), and cross-checks
+  the changed number against the affected count: a text that is not three
+  integers, or whose changed number disagrees, is not believed, and the
+  affected count stands only when it names a row. An `INSERT`'s and a
+  `DELETE`'s count is the one reported. `CLIENT_FOUND_ROWS` stays off, because
+  it would change the counts shown for the user's own statements and the
+  import's Skip summary. The apply sends its own `BEGIN` under the one lock. An
+  error at `COMMIT` is an unknown outcome only when a ping finds the session
+  gone.
+  SQL Server runs every statement of the apply through the same `execute` a
+  grid's edits use (`Origin::Generated`) on one held session. A write's count is
+  the `SELECT @@ROWCOUNT` asked right after that write, never after a bracket
+  or a later statement, which would read none; a re-read is projected by
+  `readable_preview` as the grid's preview was, so a CLR or `sql_variant` column
+  is not refused and not a false drift. The count is the outer statement's: an
+  `INSTEAD OF` trigger that writes nothing still counts 1, and an `AFTER`
+  trigger's writes are not counted, so on SQL Server the count does not prove the
+  write (the re-read before it still catches a changed or missing row). An
+  error at `COMMIT` is an unknown outcome only when it is a reset session
+  (`stop()`'s `The connection was reset: …`: a Cancel or the statement
+  timeout reaching the `COMMIT`); a reset before `COMMIT` is a failure, the server having rolled
+  the transaction back with the session.
 - **A batch that fails part way is rolled back, and the error says which state
   the data is in.** Without that the brackets produce a third state, neither
   applied nor discarded, and rendered as applied, because the refresh `SELECT`
@@ -612,6 +655,72 @@ Decided, and not to be re-litigated:
   preflight before the next statement, leave `@@ROWCOUNT` and `@@ERROR` at
   their own values, not the user's last statement's (known limitation: an
   `sp_executesql` wrapper does not shield them).
+- **A Postgres, DuckDB, MySQL, MariaDB or SQL Server table with no primary key
+  is edited by every value when all its columns are of a listed type**
+  (`RowMatch::EveryColumn`, the gate and the writers as `docs/agents/gates.md`
+  has them). The result must carry every real column of the table (generated
+  ones are matched, never set, and so are `fixed`; on SQL Server so are
+  identity and rowversion columns); a unique index names no row, so DuckDB's
+  seeded `contacts` and `tally` are edited by every column too. A column of
+  another type, or one the result leaves out, makes the grid read-only with
+  `A table without a primary key is edited by matching every column, and <column>
+  (<type>) cannot be matched by its value.` The lists fail closed, each type on
+  one only because a test matched it by the text the grid renders, written back
+  as the writer writes it, on the engine's own server:
+  `postgres::tests::live_every_listed_type_matches_its_row_by_its_rendered_text`,
+  `duckdb::tests::every_listed_type_matches_its_row_by_its_rendered_text`,
+  `mysql::tests::live_every_listed_type_matches_its_row_by_its_rendered_text_on_mysql`
+  and `_on_mariadb`, and
+  `mssql::tests::live_every_listed_type_matches_its_row_by_its_rendered_text`,
+  which also pin the types left off.
+  - Postgres lists `bpchar`, `varchar`, `text`, `int2`, `int4`, `int8`,
+    `numeric`, `float4`, `float8`, `bool`, `jsonb`, `money`, `interval`,
+    `uuid`, `date`, `time`, `timetz`, `timestamp` and `timestamptz`, by the
+    catalog's `typname`, schema-qualified for a type that is not a built-in.
+    Left off: `bytea` (rendered as `\x…` and quoted as that text, which reads
+    as those bytes only while `standard_conforming_strings` is on), `json`,
+    `xml`, `point` and `polygon` (no `=`
+    of their own: `operator does not exist`), `box`, `circle` and `path` (an
+    `=` that compares size, so a row is found with others it is not), `line`
+    and `lseg`, the PostGIS types (the grid shows a WKT with no SRID),
+    `cidr`, and every array, range, enum and domain. Only an ordinary table
+    qualifies; a view or a foreign table has no rows to write back.
+  - DuckDB lists `TINYINT` to `UHUGEINT`, `BOOLEAN`, `VARCHAR`, `FLOAT`,
+    `DOUBLE`, `DECIMAL`, `DATE`, `TIME`, `TIMESTAMP`, `TIMESTAMP WITH TIME
+    ZONE`, `TIME WITH TIME ZONE`, `INTERVAL`, `UUID`, `JSON`, `BIT`,
+    `INTEGER[]` and `BIGINT[]`, by `duckdb_columns().data_type`. Left off,
+    because the pinned engine does not find them by their rendered text: `BLOB`
+    (rendered as hex, which reads back as its characters), lists of text,
+    structs and maps (rendered unquoted, so a comma splits a value and a struct
+    or a map does not read back); and, never exercised, enums, fixed-size
+    arrays, `BIGNUM`, unions and the `TIMESTAMP_*` variants. A `TIME` of
+    `24:00:00` renders as an error text and is found by nothing, which refuses
+    the write rather than naming another row.
+  - MySQL and MariaDB share one list, by the catalog's `DATA_TYPE`: `tinyint`,
+    `smallint`, `mediumint`, `int`, `bigint`, `decimal`, `double`, `char`,
+    `varchar`, `tinytext`, `text`, `mediumtext`, `longtext`, `date`, `time`,
+    `datetime`, `timestamp`, `year`, `enum` and `set`. Left off: `float` and
+    `json`, because an `=` against their own rendered text matches nothing (a
+    `FLOAT` is held as a single and compared as a double, a JSON value is never
+    equal to a string), so a row that is there would read as gone; the byte
+    types (`binary`, `varbinary`, the blobs, `bit`), which the grid renders as
+    `0x…` and the writer quotes as that text, which finds nothing; and
+    `geometry` and `vector`, never exercised. MariaDB has no JSON type: its
+    `JSON` is a `LONGTEXT` with a `json_valid` check named for the column, and
+    the catalog query reports such a column as `json`, so it is left off there
+    too. Only a base table qualifies; a view has no rows to write back.
+  - SQL Server lists `tinyint`, `smallint`, `int`, `bigint`, `decimal`,
+    `numeric`, `real`, `float`, `money`, `smallmoney`, `bit`, `char`,
+    `varchar`, `nchar`, `nvarchar`, `date`, `time`, `datetime`, `datetime2`,
+    `smalldatetime`, `datetimeoffset`, `uniqueidentifier`, `binary` and
+    `varbinary`, by `TYPE_NAME` of the column's user type. Left off: `xml`,
+    `text`, `ntext` and `image` (no `=`: the server answers the comparison with
+    an error, which inside the apply's transaction would be a failed write),
+    `geography`, `geometry`, `hierarchyid` and `sql_variant` (the driver
+    cannot read them: a statement that returns one is not run, and a table's
+    preview reads it as text, which leaves that grid read-only naming the
+    column), `timestamp` (rowversion), and an alias type. Only a user table
+    qualifies.
 - **The Structure tab reads more than one privilege level can see.** An alias
   type's `TYPE_NAME(user_type_id)` is null when the login cannot see it, and
   falls back to `TYPE_NAME(system_type_id)`, its base type. A computed column's
@@ -703,7 +812,8 @@ Decided, and not to be re-litigated:
   and every connection it hands out (`alongside`, so `query_alongside` and
   `apart` too) runs the `USE` before anything else. Nothing picked runs
   nothing, and the session's `search_path` stays DuckDB's own. **A
-  DuckDB result is editable only as a plain select of one keyed table**: the
+  DuckDB result is editable only as a plain select of one table, named by its
+  primary key or by every column (see the keyless bullet above)**: the
   driver names no column's table, so `sql::table_read` reads the statement
   for one base table (no join, subquery, table function, CTE, set operation,
   `DISTINCT`, grouping, window clause or renaming alias) whose columns are
@@ -751,6 +861,31 @@ Decided, and not to be re-litigated:
   which row did and that the rows before it applied. Nothing is rolled back.
   Import Rows offers no All or nothing either (`Engine::all_or_nothing`), so
   each chunk's `insertMany` is kept as it lands.
+- **A MongoDB apply is verified one statement at a time, and not atomically**
+  (`Connection::apply_verified`'s MongoDB arm). The dev server is a standalone one, so there is no session
+  transaction to wrap a draft in (it is deferred until a replica set is the
+  target) and no bracket: `Target::ordered_edits()` is true for it. Each
+  `updateOne` and `deleteOne` carries the `find` of its `_id`
+  (`mql::browse::row_reread`); the document is read again by that `_id` and
+  compared with the document as the grid fetched it by field name and `$type`
+  tag, a field fetched as missing having to still be missing (a null is not a
+  missing field) and a field the fetch did not hold counting as a change
+  (`document_drift`), before any statement is sent. Then the statements go in
+  order, `deleteOne`s, `updateOne`s, `insertOne`s, and each is counted by the
+  server's own `n`: a matched count on an update, so a same-value `updateOne`
+  counts one. The first failure or count other than one stops the rest unsent,
+  and the ones before it stay applied. The workspace therefore removes the rows
+  that applied from the draft by identity (`ResultGrid::drop_applied`, by `_id`
+  or by place among the added rows) and keeps the rest, where a transactional
+  engine keeps the whole draft after a rollback. Row mode is offered where
+  `Target::keeps_edits()` holds, so a MongoDB collection tab has it: leaving an
+  edited document sends one verified step, the `updateOne` with its re-read and
+  its read-back both the `find` of the `_id`, which an `updateOne` never
+  changes. A document another client changes between the re-read and the write
+  is overwritten, since there is no transaction to hold it (the count still
+  sees one that vanished); a query tab never offers Row. A Row send's read-back
+  that fails after its `updateOne` landed is told as written with the read
+  failing (`read_back_after_write`), never as a refusal that keeps the edits.
 - **A missing field is not a null.** A document may lack a field another has, and
   the grid says so: a missing cell renders empty with no `NULL` label, a null
   renders `NULL`, and a snapshot keeps the difference.

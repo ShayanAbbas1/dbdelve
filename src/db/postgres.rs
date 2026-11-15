@@ -19,11 +19,12 @@ use crate::tls;
 use super::ssh::{self, Bridged, SocketBridge};
 use super::tunnel::{Tunnel, tunnelled};
 use super::{
-    Catalog, Column, DbError, EditTarget, Engine, Feed, Fetch, GraphCancel, QueryResult, Reference,
-    RelationKind, Row, RowBuilder, SchemaGraph, ServerConfig, Sizes, Stopped, Structure,
-    assemble_catalog, assemble_databases, assemble_foreign_keys, assemble_references,
-    assemble_schema_graph, assemble_sequences, assemble_sizes, assemble_structure, create_table,
-    non_utf8_error, optional_cell, plain_error, required_cell, terminated,
+    ApplyOutcome, ApplyStage, Catalog, Column, DbError, EditTarget, Engine, Feed, Fetch,
+    GraphCancel, QueryResult, Reference, RelationKind, Row, RowBuilder, RowMatch, SchemaGraph,
+    Sending, ServerConfig, Sizes, Stopped, Structure, VerifiedStep, assemble_catalog,
+    assemble_databases, assemble_foreign_keys, assemble_references, assemble_schema_graph,
+    assemble_sequences, assemble_sizes, assemble_structure, create_table, non_utf8_error,
+    optional_cell, plain_error, required_cell, terminated,
 };
 
 mod pgpass;
@@ -493,26 +494,41 @@ ORDER BY class.relname, table_constraint.conname, key.key_position
 
 // Keyed by oid rather than by name: two schemas can hold a table of the same
 // name, and the row description says exactly which one the server read.
-const PRIMARY_KEY_SQL: &str = "
+//
+// A table with no primary key answers too, every `in_primary_key` 'no', so that
+// it can be named by every column; a view, a foreign table and the rest have
+// nothing to write back to and answer nothing. The type is the bare name for
+// a built-in and schema-qualified for any other, so a user's `int4` is not
+// taken for the built-in one.
+const EDIT_COLUMNS_SQL: &str = "
 SELECT
     namespace.nspname AS schema_name,
     class.relname AS table_name,
     attribute.attnum AS attribute_number,
     attribute.attname AS column_name,
     CASE WHEN attribute.attnum = ANY (index_entry.indkey) THEN 'yes' ELSE 'no' END
-        AS in_primary_key
--- An inner join on the primary index is what makes a table without one
--- return nothing, which is the same answer as a table DBDelve cannot identify
--- rows in.
-FROM pg_catalog.pg_index AS index_entry
-JOIN pg_catalog.pg_class AS class
-    ON class.oid = index_entry.indrelid
+        AS in_primary_key,
+    CASE WHEN type_namespace.nspname = 'pg_catalog' THEN type.typname::text
+         ELSE type_namespace.nspname || '.' || type.typname END AS type_name,
+    -- `attgenerated` is new in 12, so it is read through the row as JSON, where
+    -- an older server has no such key rather than no such column: NULL makes
+    -- this say 'no', which is right there. 'v' is PostgreSQL 18's virtual column.
+    CASE WHEN to_jsonb(attribute) ->> 'attgenerated' IN ('s', 'v') THEN 'yes' ELSE 'no' END
+        AS is_generated
+FROM pg_catalog.pg_class AS class
 JOIN pg_catalog.pg_namespace AS namespace
     ON namespace.oid = class.relnamespace
 JOIN pg_catalog.pg_attribute AS attribute
     ON attribute.attrelid = class.oid
-WHERE index_entry.indrelid = {oid}
+JOIN pg_catalog.pg_type AS type
+    ON type.oid = attribute.atttypid
+JOIN pg_catalog.pg_namespace AS type_namespace
+    ON type_namespace.oid = type.typnamespace
+LEFT JOIN pg_catalog.pg_index AS index_entry
+    ON index_entry.indrelid = class.oid
     AND index_entry.indisprimary
+WHERE class.oid = {oid}
+    AND (index_entry.indrelid IS NOT NULL OR class.relkind = 'r')
     AND attribute.attnum > 0
     AND NOT attribute.attisdropped
 ORDER BY attribute.attnum
@@ -1336,24 +1352,22 @@ impl Connection {
         self.run(sql, false, Fetch::default(), None)
     }
 
-    /// `bound` is the schema to put the session back on first, itself `None`
-    /// for its own default, when the run is a bound tab's.
-    fn run(
+    /// Sends `sql` on the session `client` holds and reads what comes back, with
+    /// the number of commands the submission held. The lock-free core of
+    /// [`Connection::run`], which is also what a verified apply sends every
+    /// statement of its sequence through under the one lock it holds. It does
+    /// no describe of its own: a refused `Parse` aborts an open transaction.
+    ///
+    /// `bound` is [`Connection::run`]'s, already applied by the caller: it only
+    /// says whether streamed rows may be typed on the side session.
+    fn ran(
         &self,
+        client: &mut Client,
         sql: &str,
         typed: bool,
         fetch: Fetch,
         bound: Option<Option<&str>>,
-    ) -> Result<QueryResult, DbError> {
-        let mut client = self.client.lock().map_err(|_| DbError {
-            message: "The connection is unavailable after an earlier internal failure.".into(),
-            position: None,
-        })?;
-        let held = fetch.hold()?;
-        if let Some(schema) = bound {
-            set_search_path(&mut client, schema).map_err(super::unplaced)?;
-        }
-
+    ) -> Result<(QueryResult, usize), DbError> {
         // Timed from here, not from the call: one client serialises a profile's
         // queries, and time spent waiting behind the catalog load is not time
         // the server spent on this statement.
@@ -1362,7 +1376,7 @@ impl Connection {
             client: inner,
             driver,
             ..
-        } = &mut *client;
+        } = client;
         let failed = |error: Error| query_error(&error, sql);
         driver.notices.clear();
         let mut messages = Box::pin(
@@ -1400,6 +1414,81 @@ impl Connection {
         if typed {
             result.messages = notices;
         }
+        Ok((result, commands))
+    }
+
+    /// Applies `steps` as one verified sequence on this session, under one
+    /// acquisition of its lock, so no other tab's statement runs between the
+    /// re-reads and the writes: see [`super::run_verified`]. Every statement goes through [`Self::ran`] untyped, so no
+    /// describe runs inside the transaction. A count is the command tag's, the
+    /// rows the statement matched, so a write a `BEFORE` row trigger or a rule
+    /// skipped counts none. `proceed` says no once a Cancel has come.
+    pub fn apply_verified(
+        &self,
+        steps: &[VerifiedStep],
+        proceed: &dyn Fn() -> bool,
+    ) -> ApplyOutcome {
+        let failed = |error| ApplyOutcome::Failed {
+            stage: ApplyStage::Begin,
+            error,
+        };
+        let mut client = match self.client.lock() {
+            Ok(client) => client,
+            Err(_) => {
+                return failed(plain_error(
+                    "The connection is unavailable after an earlier internal failure.".into(),
+                ));
+            }
+        };
+        // Registers the run, so a Cancel finds the session, and checks for one
+        // that came first, as `run` does before it touches the session.
+        if !proceed() {
+            return failed(plain_error("Cancelled before it was sent.".into()));
+        }
+        // Read off the held client after each statement and handed to the
+        // lost test, which cannot take the lock `send` holds: only an error at
+        // `COMMIT` with the socket gone is an outcome nobody can know.
+        let closed = std::cell::Cell::new(false);
+        let mut send = |sql: &str, _: Sending| {
+            let result = self
+                .ran(&mut client, sql, false, Fetch::default(), None)
+                .map(|(result, _)| result);
+            closed.set(client.client.is_closed());
+            result
+        };
+        // ponytail: a spatial cell is left out of the compare. The grid shows
+        // it as the WKT it rendered after the fetch, and an untyped re-read
+        // returns the server's EWKB, so the two cannot be compared as text.
+        // A change confined to a spatial column is not seen; the key and the
+        // count still hold. The upgrade is a re-read that renders the same way.
+        super::run_verified(
+            Engine::Postgres,
+            steps,
+            &mut send,
+            proceed,
+            &|cell| cell.column_type.as_deref().is_some_and(is_spatial),
+            &|_| closed.get(),
+        )
+    }
+
+    /// `bound` is the schema to put the session back on first, itself `None`
+    /// for its own default, when the run is a bound tab's.
+    fn run(
+        &self,
+        sql: &str,
+        typed: bool,
+        fetch: Fetch,
+        bound: Option<Option<&str>>,
+    ) -> Result<QueryResult, DbError> {
+        let mut client = self.client.lock().map_err(|_| DbError {
+            message: "The connection is unavailable after an earlier internal failure.".into(),
+            position: None,
+        })?;
+        let held = fetch.hold()?;
+        if let Some(schema) = bound {
+            set_search_path(&mut client, schema).map_err(super::unplaced)?;
+        }
+        let (mut result, commands) = self.ran(&mut client, sql, typed, fetch, bound)?;
 
         // Types are learned after the statement ran, and only from a single
         // statement that returned columns. A refused `Parse` is an error
@@ -1435,7 +1524,7 @@ impl Connection {
         // query through it, so the lock has to go before the question is asked.
         drop(held);
         drop(client);
-        result.edit = self.edit_target(&probed);
+        (result.edit, result.read_only_reason) = self.edit_target(&probed);
 
         Ok(result)
     }
@@ -1447,15 +1536,22 @@ impl Connection {
     /// A failure answers "no" too — this runs after the user's statement
     /// already succeeded, and a catalog query refused inside a transaction the
     /// user has aborted must not turn that success into an error.
-    fn edit_target(&self, probed: &[ProbedColumn]) -> Option<EditTarget> {
-        let table = sole_table(probed)?;
-        let catalog = self
-            .internal_query(&PRIMARY_KEY_SQL.replace("{oid}", &table.to_string()))
-            .ok()?;
+    fn edit_target(&self, probed: &[ProbedColumn]) -> (Option<EditTarget>, Option<String>) {
+        let Some(table) = sole_table(probed) else {
+            return (None, None);
+        };
+        let Ok(catalog) =
+            self.internal_query(&EDIT_COLUMNS_SQL.replace("{oid}", &table.to_string()))
+        else {
+            return (None, None);
+        };
         // ponytail: one catalog round trip per result set, no cache. A map from
         // oid to key held on the connection is the upgrade path if the trip
         // shows up in query timings.
-        resolve_edit_target(probed, &keyed_table(&catalog)?)
+        match keyed_table(&catalog) {
+            Some(table) => edit_outcome(probed, &table),
+            None => (None, None),
+        }
     }
 
     /// `ask` on the side session, opened if there is none or the last one
@@ -1806,8 +1902,17 @@ fn sole_table(probed: &[ProbedColumn]) -> Option<u32> {
 struct KeyedTable {
     schema: String,
     table: String,
-    columns: Vec<(i16, String)>,
+    columns: Vec<TableColumn>,
     key: Vec<i16>,
+}
+
+struct TableColumn {
+    attribute: i16,
+    name: String,
+    /// [`EDIT_COLUMNS_SQL`]'s `type_name`.
+    type_name: String,
+    /// A generated column: matched, never set.
+    generated: bool,
 }
 
 fn keyed_table(result: &QueryResult) -> Option<KeyedTable> {
@@ -1826,16 +1931,150 @@ fn keyed_table(result: &QueryResult) -> Option<KeyedTable> {
             .ok()?
             .parse()
             .ok()?;
-        keyed.columns.push((
+        keyed.columns.push(TableColumn {
             attribute,
-            required_cell(result, row, "column_name").ok()?.to_string(),
-        ));
+            name: required_cell(result, row, "column_name").ok()?.to_string(),
+            type_name: required_cell(result, row, "type_name").ok()?.to_string(),
+            generated: required_cell(result, row, "is_generated").ok()? == "yes",
+        });
         if required_cell(result, row, "in_primary_key").ok()? == "yes" {
             keyed.key.push(attribute);
         }
     }
 
     Some(keyed)
+}
+
+/// What a result over `table` can be written back to, and when the answer is
+/// no for a reason the user can act on, that reason: a table with a primary
+/// key is named by it, one without by every column.
+fn edit_outcome(
+    probed: &[ProbedColumn],
+    table: &KeyedTable,
+) -> (Option<EditTarget>, Option<String>) {
+    if !table.key.is_empty() {
+        return (resolve_edit_target(probed, table), None);
+    }
+    resolve_keyless_target(probed, table)
+}
+
+/// Whether `=` against a column's value rendered as text finds it, for the
+/// type [`EDIT_COLUMNS_SQL`] names. Fail closed: only types the compose server
+/// was seen to match are listed.
+///
+/// ponytail: a type is added when
+/// `tests::live_every_listed_type_matches_its_row_by_its_rendered_text`
+/// exercises it. Left off: `json`, `xml`, `point` and `polygon` (no `=` of their
+/// own), `box`, `circle` and `path` (an `=` that compares size, so a row would
+/// match others it is not), `line` and `lseg` with them (never exercised), the
+/// PostGIS types (a rendering that loses the SRID), `bytea` (rendered as
+/// `\x…` and quoted as that text, which reads as those bytes only while
+/// `standard_conforming_strings` is on), and arrays, ranges, enums and domains.
+fn is_matchable(type_name: &str) -> bool {
+    matches!(
+        type_name,
+        "bpchar"
+            | "varchar"
+            | "text"
+            | "int2"
+            | "int4"
+            | "int8"
+            | "numeric"
+            | "float4"
+            | "float8"
+            | "bool"
+            | "jsonb"
+            | "money"
+            | "interval"
+            | "uuid"
+            | "date"
+            | "time"
+            | "timetz"
+            | "timestamp"
+            | "timestamptz"
+    )
+}
+
+/// The target of a result set over a table with no primary key: every column
+/// of the table names the row, a NULL as `IS NULL`, the generated columns
+/// matched but never set. Or the reason it cannot be, when the user can do
+/// something about it.
+///
+/// Never a unique index, and never some of the columns: a column left out of
+/// the `WHERE` matches rows the user is not looking at, so a column that cannot
+/// be matched by its value, or that the result omits, makes the whole result
+/// read-only.
+fn resolve_keyless_target(
+    probed: &[ProbedColumn],
+    table: &KeyedTable,
+) -> (Option<EditTarget>, Option<String>) {
+    let attribute_of = |column: &ProbedColumn| column.table.and(column.attribute);
+    // As for a key: two result columns reading one table column are the two
+    // sides of a self-join, and a column computed beside the real ones is no
+    // table's row.
+    let mut origins = HashSet::new();
+    if !probed
+        .iter()
+        .map(attribute_of)
+        .all(|attribute| attribute.is_some_and(|attribute| origins.insert(attribute)))
+    {
+        return (None, None);
+    }
+    let refusal = |what: String| {
+        Some(format!(
+            "A table without a primary key is edited by matching every column, and {what}."
+        ))
+    };
+    if let Some(column) = table
+        .columns
+        .iter()
+        .find(|column| !is_matchable(&column.type_name))
+    {
+        return (
+            None,
+            refusal(format!(
+                "{} ({}) cannot be matched by its value",
+                column.name, column.type_name
+            )),
+        );
+    }
+    let mut keys = Vec::new();
+    let mut fixed = Vec::new();
+    for column in &table.columns {
+        let Some(at) = probed
+            .iter()
+            .position(|probed| attribute_of(probed) == Some(column.attribute))
+        else {
+            return (
+                None,
+                refusal(format!("{} is not in the result", column.name)),
+            );
+        };
+        keys.push(at);
+        if column.generated {
+            fixed.push(at);
+        }
+    }
+    let columns = probed
+        .iter()
+        .map(|probed| {
+            let attribute = attribute_of(probed)?;
+            table
+                .columns
+                .iter()
+                .find(|column| column.attribute == attribute)
+                .map(|column| column.name.clone())
+        })
+        .collect();
+    let target = EditTarget {
+        schema: table.schema.clone(),
+        table: table.table.clone(),
+        columns,
+        keys,
+        row_match: RowMatch::EveryColumn { fixed },
+        ..Default::default()
+    };
+    (Some(target), None)
 }
 
 /// The probe's provenance decided against one table's catalog entry.
@@ -1884,8 +2123,8 @@ fn resolve_edit_target(probed: &[ProbedColumn], table: &KeyedTable) -> Option<Ed
                 table
                     .columns
                     .iter()
-                    .find(|(number, _)| *number == attribute)
-                    .map(|(_, name)| name.clone())
+                    .find(|column| column.attribute == attribute)
+                    .map(|column| column.name.clone())
             })
             .collect(),
         keys,
@@ -2286,7 +2525,10 @@ fn io_source(error: &tokio_postgres::Error) -> Option<&std::io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{ForeignKey, IndexKind, RelationKind, RoutineKind, SslMode, result, rows};
+    use crate::db::{
+        ApplyOutcome, CancelToken, Drift, FetchedCell, ForeignKey, IndexKind, RelationKind,
+        RoutineKind, SslMode, StepKind, result, rows,
+    };
 
     fn config() -> ServerConfig {
         ServerConfig {
@@ -2303,6 +2545,27 @@ mod tests {
             ssh: None,
             schema: None,
         }
+    }
+
+    /// `attgenerated` is new in PostgreSQL 12: named bare, a server before it
+    /// refuses the query, the refusal is swallowed, and every result set there
+    /// loses its edit target.
+    #[test]
+    fn every_catalog_query_a_result_set_or_table_open_runs_reads_attgenerated_through_the_row_as_json()
+     {
+        for (name, sql) in [
+            ("EDIT_COLUMNS_SQL", EDIT_COLUMNS_SQL),
+            ("STRUCTURE_COLUMNS_SQL", STRUCTURE_COLUMNS_SQL),
+        ] {
+            assert!(
+                !sql.contains("attribute.attgenerated"),
+                "{name} reads attgenerated on the attribute alias directly"
+            );
+        }
+        assert!(
+            EDIT_COLUMNS_SQL.contains("to_jsonb(attribute) ->> 'attgenerated'"),
+            "EDIT_COLUMNS_SQL does not read attgenerated through the row as JSON"
+        );
     }
 
     /// The server the `live_` tests talk to, from the standard `PG*` variables.
@@ -2463,7 +2726,12 @@ mod tests {
             table: "accounts".into(),
             columns: columns
                 .iter()
-                .map(|(attribute, name, _)| (*attribute, (*name).to_string()))
+                .map(|(attribute, name, _)| TableColumn {
+                    attribute: *attribute,
+                    name: (*name).to_string(),
+                    type_name: "text".into(),
+                    generated: false,
+                })
                 .collect(),
             key: columns
                 .iter()
@@ -3891,7 +4159,517 @@ mod tests {
         read_only_session_refuses_a_write,
         generated_writes_round_trip,
         generated_draft_round_trip,
+        verified_draft_round_trip,
+        verified_keyless_round_trip,
     );
+
+    /// Drops a scratch table and its trigger function when a test ends, panicking or not.
+    struct ScratchTable<'a>(&'a crate::db::Connection, &'static str);
+
+    impl ScratchTable<'_> {
+        fn drop_all(&self) {
+            for sql in [
+                format!("DROP TABLE IF EXISTS {} CASCADE", self.1),
+                format!("DROP FUNCTION IF EXISTS {}_fn()", self.1),
+            ] {
+                let _ = self
+                    .0
+                    .query(&sql, &CancelToken::default(), Fetch::default());
+            }
+        }
+    }
+
+    impl Drop for ScratchTable<'_> {
+        fn drop(&mut self) {
+            self.drop_all();
+        }
+    }
+
+    /// The cells of the one row `select` reads, as the grid would hold them
+    /// after a fetch of its own.
+    fn read_cells(connection: &crate::db::Connection, select: &str) -> Vec<FetchedCell> {
+        let result = connection
+            .query(select, &CancelToken::default(), Fetch::default())
+            .unwrap_or_else(|error| panic!("`{select}`: {error}"));
+        let row = result.rows.first().expect("the row is there to read");
+        result
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(index, column)| FetchedCell {
+                column: column.name.clone(),
+                text: row.get(index).map(str::to_string),
+                cell_type: None,
+                column_type: column.data_type.clone(),
+            })
+            .collect()
+    }
+
+    fn keyless(columns: &[(i16, &str, &str, bool)]) -> KeyedTable {
+        KeyedTable {
+            schema: "public".into(),
+            table: "sightings".into(),
+            columns: columns
+                .iter()
+                .map(|(attribute, name, type_name, generated)| TableColumn {
+                    attribute: *attribute,
+                    name: (*name).to_string(),
+                    type_name: (*type_name).to_string(),
+                    generated: *generated,
+                })
+                .collect(),
+            key: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_table_without_a_primary_key_is_matched_by_every_column_or_read_only_with_a_reason() {
+        use crate::db::RowMatch;
+        let table = keyless(&[
+            (1, "bird", "text", false),
+            (2, "place", "varchar", false),
+            (3, "seen", "int4", false),
+            (4, "weight", "float8", false),
+            (5, "tag", "uuid", false),
+        ]);
+        let whole = probed(&[
+            ("text", Some(42), Some(1)),
+            ("varchar", Some(42), Some(2)),
+            ("int4", Some(42), Some(3)),
+            ("float8", Some(42), Some(4)),
+            ("uuid", Some(42), Some(5)),
+        ]);
+        let (target, reason) = edit_outcome(&whole, &table);
+        let target = target.expect("every column is of a listed type");
+        assert_eq!(target.keys, [0, 1, 2, 3, 4]);
+        assert_eq!(target.row_match, RowMatch::EveryColumn { fixed: vec![] });
+        assert_eq!(reason, None);
+
+        // Table order, whatever order the result lists them in.
+        let (reordered, _) = edit_outcome(
+            &probed(&[
+                ("varchar", Some(42), Some(2)),
+                ("text", Some(42), Some(1)),
+                ("int4", Some(42), Some(3)),
+                ("float8", Some(42), Some(4)),
+                ("uuid", Some(42), Some(5)),
+            ]),
+            &table,
+        );
+        assert_eq!(reordered.expect("reordered").keys, [1, 0, 2, 3, 4]);
+
+        let (tagged, _) = edit_outcome(
+            &probed(&[
+                ("text", Some(42), Some(1)),
+                ("text", Some(42), Some(2)),
+                ("text", Some(42), Some(3)),
+            ]),
+            &keyless(&[
+                (1, "bird", "text", false),
+                (2, "place", "text", false),
+                (3, "label", "text", true),
+            ]),
+        );
+        assert_eq!(
+            tagged.expect("a generated column is matched").row_match,
+            RowMatch::EveryColumn { fixed: vec![2] }
+        );
+
+        let refused = |column: &str| {
+            Some(format!(
+                "A table without a primary key is edited by matching every column, \
+                 and {column} cannot be matched by its value."
+            ))
+        };
+        // `bytea`, whose literal reads as its bytes only under one setting, the
+        // types with no `=` of their own, an `=` that compares size, and the
+        // ones PostGIS adds.
+        for type_name in [
+            "bytea",
+            "json",
+            "xml",
+            "point",
+            "polygon",
+            "box",
+            "circle",
+            "line",
+            "lseg",
+            "path",
+            "cidr",
+            "public.geometry",
+            "public.geography",
+            "_int4",
+            "int4range",
+            "public.mood",
+        ] {
+            let (target, reason) = edit_outcome(
+                &probed(&[("text", Some(42), Some(1)), (type_name, Some(42), Some(2))]),
+                &keyless(&[(1, "bird", "text", false), (2, "shape", type_name, false)]),
+            );
+            assert!(target.is_none(), "{type_name}");
+            assert_eq!(
+                reason,
+                refused(&format!("shape ({type_name})")),
+                "{type_name}"
+            );
+        }
+        for type_name in [
+            "bpchar",
+            "varchar",
+            "text",
+            "int2",
+            "int4",
+            "int8",
+            "numeric",
+            "float4",
+            "float8",
+            "bool",
+            "jsonb",
+            "money",
+            "interval",
+            "uuid",
+            "date",
+            "time",
+            "timetz",
+            "timestamp",
+            "timestamptz",
+        ] {
+            let (target, reason) = edit_outcome(
+                &probed(&[(type_name, Some(42), Some(1))]),
+                &keyless(&[(1, "one", type_name, false)]),
+            );
+            assert!(target.is_some(), "{type_name}");
+            assert_eq!(reason, None, "{type_name}");
+        }
+
+        // A column the result leaves out would be left out of the WHERE.
+        let (target, reason) = edit_outcome(&probed(&[("text", Some(42), Some(1))]), &table);
+        assert!(target.is_none());
+        assert_eq!(
+            reason,
+            Some(
+                "A table without a primary key is edited by matching every column, \
+                 and place is not in the result."
+                    .to_string()
+            )
+        );
+        // Computed beside real columns, and a self-join, are no table's rows.
+        let one = keyless(&[(1, "bird", "text", false)]);
+        assert_eq!(
+            edit_outcome(
+                &probed(&[("text", Some(42), Some(1)), ("int4", None, None)]),
+                &one
+            ),
+            (None, None)
+        );
+        assert_eq!(
+            edit_outcome(
+                &probed(&[("text", Some(42), Some(1)), ("text", Some(42), Some(1))]),
+                &one
+            ),
+            (None, None)
+        );
+
+        let (keyed, reason) = edit_outcome(
+            &probed(&[("int4", Some(42), Some(1)), ("text", Some(42), Some(3))]),
+            &keyed(&[(1, "id", true), (3, "name", false)]),
+        );
+        assert_eq!(keyed.expect("keyed").row_match, RowMatch::Key);
+        assert_eq!(reason, None);
+    }
+
+    /// One column of each listed type, with a value that shows how it renders.
+    const TYPE_SAMPLES: &[(&str, &str)] = &[
+        ("char(3)", "'ab'"),
+        ("varchar(32)", "'h''e llo, \\ {a: 1}'"),
+        ("text", "E'tab\\there\\nnewline \u{fc}n\u{ef}'"),
+        ("smallint", "-300"),
+        ("integer", "42"),
+        ("bigint", "9007199254740993"),
+        ("numeric(10,2)", "-12.50"),
+        ("numeric", "'NaN'"),
+        ("real", "0.1"),
+        ("double precision", "0.30000000000000004"),
+        ("double precision", "'NaN'"),
+        ("double precision", "'Infinity'"),
+        ("boolean", "true"),
+        ("jsonb", "'{\"a\": [1,   2], \"b\": null}'"),
+        ("money", "1234.5"),
+        ("interval", "'1 year 2 months 3 days 04:05:06.789'"),
+        ("uuid", "'8F1F4D3A-1B2C-4D5E-8F90-123456789ABC'"),
+        ("date", "'2024-02-29'"),
+        ("date", "'infinity'"),
+        ("time", "'12:34:56.123456'"),
+        ("time with time zone", "'12:34:56+02'"),
+        ("timestamp", "'2024-02-29 12:34:56.123456'"),
+        ("timestamp with time zone", "'2024-06-01 00:00:00-07'"),
+        ("timestamp with time zone", "'-infinity'"),
+    ];
+
+    /// Types left off the list whose own `=` cannot compare their rows, or
+    /// finds a row again with another that is not it. `line` and `lseg` are
+    /// left off as well, with no such finding: an `lseg` is found by its ends.
+    const UNMATCHED_SAMPLES: &[(&str, &[&str])] = &[
+        ("json", &["'{\"a\": 1}'"]),
+        ("xml", &["'<a/>'"]),
+        ("point", &["'(1,2)'"]),
+        ("polygon", &["'((0,0),(1,1),(1,0))'"]),
+        ("box", &["'(2,2),(0,0)'", "'(4,1),(0,0)'"]),
+        ("circle", &["'<(0,0),1>'", "'<(5,5),1>'"]),
+        ("path", &["'[(0,0),(1,1)]'", "'[(5,5),(9,9)]'"]),
+    ];
+
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_every_listed_type_matches_its_row_by_its_rendered_text() {
+        let connection = live_profile();
+        let run = |sql: &str| connection.query(sql, &CancelToken::default(), Fetch::default());
+        let scratch = ScratchTable(&connection, "dbdelve_keyless_types");
+        scratch.drop_all();
+        let columns: Vec<String> = TYPE_SAMPLES
+            .iter()
+            .enumerate()
+            .map(|(index, (declared, _))| format!("c{index} {declared}"))
+            .collect();
+        let values: Vec<&str> = TYPE_SAMPLES.iter().map(|(_, value)| *value).collect();
+        run(&format!(
+            "CREATE TABLE dbdelve_keyless_types ({}); INSERT INTO dbdelve_keyless_types VALUES ({})",
+            columns.join(", "),
+            values.join(", ")
+        ))
+        .expect("the scratch table is built");
+
+        let read = run("SELECT * FROM dbdelve_keyless_types").expect("the row reads");
+        let edit = read.edit.clone().unwrap_or_else(|| {
+            panic!(
+                "every column is of a listed type: {:?}",
+                read.read_only_reason
+            )
+        });
+        assert_eq!(
+            edit.row_match,
+            crate::db::RowMatch::EveryColumn { fixed: vec![] }
+        );
+        assert_eq!(edit.keys.len(), TYPE_SAMPLES.len());
+        for (index, (declared, value)) in TYPE_SAMPLES.iter().enumerate() {
+            let column = &read.columns[index];
+            let rendered = read.rows[0].get(index).expect("a value");
+            let literal = Engine::Postgres.quote_value(rendered, column.data_type.as_deref());
+            let counted = run(&format!(
+                "SELECT COUNT(*) FROM dbdelve_keyless_types WHERE {} = {literal}",
+                Engine::Postgres.quote_identifier(&column.name)
+            ))
+            .map(|result| result.rows[0].get(0).unwrap_or("NULL").to_string())
+            .map_err(|error| error.message);
+            assert_eq!(
+                counted.as_deref(),
+                Ok("1"),
+                "{declared}: {value} -> {rendered}"
+            );
+        }
+
+        for (declared, rows) in UNMATCHED_SAMPLES {
+            let table = "dbdelve_keyless_probe";
+            let scratch = ScratchTable(&connection, table);
+            scratch.drop_all();
+            let inserts: Vec<String> = rows.iter().map(|row| format!("({row})")).collect();
+            run(&format!(
+                "CREATE TABLE {table} (c {declared}); INSERT INTO {table} VALUES {}",
+                inserts.join(", ")
+            ))
+            .expect("the scratch table is built");
+            let read = run(&format!("SELECT * FROM {table}")).expect("the rows read");
+            assert!(read.edit.is_none(), "{declared}");
+            assert!(
+                read.read_only_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains(&format!("c ({declared})"))),
+                "{declared}: {:?}",
+                read.read_only_reason
+            );
+            let rendered = read.rows[0].get(0).expect("a value");
+            let counted = run(&format!(
+                "SELECT COUNT(*) FROM {table} WHERE c = {}",
+                Engine::Postgres.quote_literal(rendered)
+            ))
+            .map(|result| result.rows[0].get(0).unwrap_or("NULL").to_string())
+            .map_err(|error| error.message);
+            assert_ne!(counted.as_deref(), Ok("1"), "{declared}: {rendered}");
+        }
+    }
+
+    fn typed(columns: &[(&str, &str)]) -> Vec<(String, String)> {
+        columns
+            .iter()
+            .map(|(column, kind)| ((*column).to_string(), (*kind).to_string()))
+            .collect()
+    }
+
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_a_verified_update_a_trigger_skipped_is_refused_and_rolled_back() {
+        let connection = live_profile();
+        let table = "verified_trigger_skip";
+        let scratch = ScratchTable(&connection, table);
+        scratch.drop_all();
+        connection
+            .query(
+                &format!(
+                    "CREATE TABLE {table} (id integer PRIMARY KEY, label text);
+                     CREATE FUNCTION {table}_fn() RETURNS trigger LANGUAGE plpgsql AS $$
+                     BEGIN IF OLD.id = 1 THEN RETURN NULL; END IF; RETURN NEW; END $$;
+                     CREATE TRIGGER skip BEFORE UPDATE ON {table}
+                         FOR EACH ROW EXECUTE FUNCTION {table}_fn();
+                     INSERT INTO {table} VALUES (1, 'one'), (2, 'two')"
+                ),
+                &CancelToken::default(),
+                Fetch::default(),
+            )
+            .expect("the scratch table is built");
+        let types = typed(&[("id", "int4"), ("label", "text")]);
+        let batch = crate::sql::draft_batch(
+            Engine::Postgres,
+            &[crate::sql::DraftDelete {
+                schema: "public".into(),
+                table: table.into(),
+                keys: vec![("id".into(), "2".into())],
+                null_keys: Vec::new(),
+                types: types.clone(),
+            }],
+            &[crate::result_grid::PendingRow {
+                schema: "public".into(),
+                table: table.into(),
+                sets: vec![(
+                    "label".into(),
+                    crate::result_grid::NewValue::Value("changed".into()),
+                )],
+                keys: vec![("id".into(), "1".into())],
+                types,
+                ..crate::result_grid::PendingRow::default()
+            }],
+            &[],
+        )
+        .expect("the draft is written");
+        let read = |id: u32| {
+            read_cells(
+                &connection,
+                &format!("SELECT * FROM {table} WHERE id = {id}"),
+            )
+        };
+        let steps = crate::db::conformance::verified_steps(
+            Engine::Postgres,
+            &batch,
+            vec![(StepKind::Delete, read(2)), (StepKind::Update, read(1))],
+        );
+
+        assert_eq!(
+            connection.apply_verified(&steps, &CancelToken::default()),
+            ApplyOutcome::Miscounted {
+                step: 1,
+                count: Some(0)
+            }
+        );
+        let left = connection
+            .query(
+                &format!("SELECT id, label FROM {table} ORDER BY id"),
+                &CancelToken::default(),
+                Fetch::default(),
+            )
+            .expect("the table is read");
+        let rows: Vec<_> = left
+            .rows
+            .iter()
+            .map(|row| {
+                (
+                    row.get(0).map(str::to_string),
+                    row.get(1).map(str::to_string),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (Some("1".into()), Some("one".into())),
+                (Some("2".into()), Some("two".into()))
+            ],
+            "the deleted row came back with the rollback"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_a_spatial_cell_rendered_after_the_fetch_is_not_compared() {
+        let connection = live_profile();
+        let table = "verified_spatial_cell";
+        let scratch = ScratchTable(&connection, table);
+        scratch.drop_all();
+        connection
+            .query(
+                &format!(
+                    "CREATE TABLE {table} (id integer PRIMARY KEY, label text, geom geometry);
+                     INSERT INTO {table} VALUES (1, 'a', ST_GeomFromText('POINT(1 2)'))"
+                ),
+                &CancelToken::default(),
+                Fetch::default(),
+            )
+            .expect("the scratch table is built");
+        let draft = |label: &str| {
+            crate::sql::draft_batch(
+                Engine::Postgres,
+                &[],
+                &[crate::result_grid::PendingRow {
+                    schema: "public".into(),
+                    table: table.into(),
+                    sets: vec![(
+                        "label".into(),
+                        crate::result_grid::NewValue::Value(label.to_string().into()),
+                    )],
+                    keys: vec![("id".into(), "1".into())],
+                    types: typed(&[("id", "int4"), ("label", "text"), ("geom", "geometry")]),
+                    ..crate::result_grid::PendingRow::default()
+                }],
+                &[],
+            )
+            .expect("the draft is written")
+        };
+        let read = || read_cells(&connection, &format!("SELECT * FROM {table} WHERE id = 1"));
+        let apply = |before: Vec<FetchedCell>, label: &str| {
+            let steps = crate::db::conformance::verified_steps(
+                Engine::Postgres,
+                &draft(label),
+                vec![(StepKind::Update, before)],
+            );
+            connection.apply_verified(&steps, &CancelToken::default())
+        };
+
+        // What the grid shows is the WKT its own render made; the re-read
+        // inside the apply comes back as the server writes it.
+        let held = read();
+        let geom = held.iter().find(|cell| cell.column == "geom").unwrap();
+        assert_eq!(geom.column_type.as_deref(), Some("geometry"));
+        assert!(
+            geom.text
+                .as_deref()
+                .is_some_and(|text| text.starts_with("POINT")),
+            "{geom:?}"
+        );
+        assert!(
+            matches!(apply(held, "b"), ApplyOutcome::Applied { affected: 1, .. }),
+            "an unchanged row with a spatial cell applies"
+        );
+
+        let mut stale = read();
+        stale
+            .iter_mut()
+            .find(|cell| cell.column == "label")
+            .unwrap()
+            .text = Some("stale".into());
+        assert_eq!(
+            apply(stale, "c"),
+            ApplyOutcome::Drifted(vec![(0, Drift::Changed)]),
+            "a changed non-spatial cell is still compared"
+        );
+    }
 
     #[test]
     #[ignore = "requires a local Postgres server configured through PG*"]
@@ -4844,8 +5622,38 @@ mod tests {
 
     #[test]
     #[ignore = "requires a local Postgres server configured through PG*"]
-    fn live_a_table_without_a_primary_key_is_not_editable() {
-        // There is no predicate that names one of two identical rows.
+    fn live_a_generated_column_of_a_table_without_a_primary_key_is_matched_and_never_set() {
+        // A generated column cannot be written, so it is still matched on but
+        // named in `fixed`, and the write leaves it out.
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        connection
+            .query(
+                "CREATE TEMP TABLE dbdelve_generated (value integer, \
+                 doubled integer GENERATED ALWAYS AS (value * 2) STORED, label text)",
+                Fetch::default(),
+            )
+            .expect("the temporary table should be created");
+
+        let result = connection
+            .query(
+                "SELECT label, value, doubled FROM dbdelve_generated",
+                Fetch::default(),
+            )
+            .expect("query should succeed");
+
+        let edit = result.edit.expect("every column is of a listed type");
+        assert_eq!(edit.keys, [1, 2, 0]);
+        assert_eq!(
+            edit.row_match,
+            crate::db::RowMatch::EveryColumn { fixed: vec![2] }
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_a_table_without_a_primary_key_is_edited_by_every_column() {
+        // There is no predicate that names one of two identical rows, so the
+        // rows are named by every value and a write is counted.
         let connection = Connection::open(&live_config()).expect("connection should open");
         connection
             .query(
@@ -4855,10 +5663,15 @@ mod tests {
             .expect("the temporary table should be created");
 
         let result = connection
-            .query("SELECT value, label FROM dbdelve_unkeyed", Fetch::default())
+            .query("SELECT label, value FROM dbdelve_unkeyed", Fetch::default())
             .expect("query should succeed");
 
-        assert!(result.edit.is_none());
+        let edit = result.edit.expect("both columns are of a listed type");
+        assert_eq!(edit.keys, [1, 0]);
+        assert_eq!(
+            edit.row_match,
+            crate::db::RowMatch::EveryColumn { fixed: vec![] }
+        );
     }
 
     #[test]

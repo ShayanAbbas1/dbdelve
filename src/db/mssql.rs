@@ -34,10 +34,11 @@ use tracing::span;
 
 use super::tunnel::{Tunnel, tunnelled};
 use super::{
-    Catalog, Cell, Column, DbError, EditTarget, Engine, Fetch, GraphCancel, QueryResult, Reference,
-    RelationKind, Row, SchemaGraph, ServerConfig, SslMode, Stopped, Structure, assemble_catalog,
-    assemble_databases, assemble_foreign_keys, assemble_references, assemble_schema_graph,
-    assemble_sequences, assemble_structure, create_table, plain_error, required_cell, terminated,
+    ApplyOutcome, ApplyStage, Catalog, Cell, Column, DbError, EditTarget, Engine, Fetch,
+    GraphCancel, QueryResult, Reference, RelationKind, Row, RowMatch, SchemaGraph, Sending,
+    ServerConfig, SslMode, Stopped, Structure, VerifiedStep, assemble_catalog, assemble_databases,
+    assemble_foreign_keys, assemble_references, assemble_schema_graph, assemble_sequences,
+    assemble_structure, create_table, plain_error, required_cell, terminated,
 };
 
 const DATABASES_SQL: &str = "
@@ -452,6 +453,20 @@ JOIN sys.index_columns AS ic ON ic.object_id = i.object_id AND ic.index_id = i.i
 JOIN sys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
 WHERE i.object_id = {object} AND i.is_primary_key = 1
 ORDER BY ic.key_ordinal
+";
+
+// What a table with no primary key is edited by: each of its columns and the
+// type the catalog names. `sys.tables` is what keeps a view out: its rows are
+// no table's, and it has no primary key to have been refused for. A column
+// that is an alias type reports the alias, which is on no list, or its base
+// type where the login cannot see the alias.
+const EDIT_COLUMNS_SQL: &str = "
+SELECT c.name AS column_name,
+       COALESCE(TYPE_NAME(c.user_type_id), TYPE_NAME(c.system_type_id)) AS data_type
+FROM sys.tables AS t
+JOIN sys.columns AS c ON c.object_id = t.object_id
+WHERE t.object_id = {object}
+ORDER BY c.column_id
 ";
 
 // Mode 2 describes a view as the view, as a cursor would, rather than seeing
@@ -1005,6 +1020,65 @@ impl Connection {
         self.run(sql, Origin::Generated, fetch, true)
     }
 
+    /// A draft applied as one verified sequence on the session's lock, taken
+    /// once (see [`super::run_verified`]). Every statement goes through
+    /// [`Self::execute`] as [`Origin::Generated`], the way a grid's preview
+    /// and edits do: a re-read is previewed by [`readable_preview`], so a CLR
+    /// or `sql_variant` column reads as the grid's cell did and is neither
+    /// refused nor a false drift; `BEGIN TRANSACTION` and `COMMIT` go out
+    /// bare, as `execute` sends a bracket; and a write's count is the
+    /// `SELECT @@ROWCOUNT` `execute` asks right after it, before anything
+    /// else is sent, since a bracket or a later statement would reset it.
+    ///
+    /// Counted in `in_flight` as [`Self::run`] is, so a Cancel finds it. No
+    /// binding is put back for a bound tab: a session a `USE` moved is moved
+    /// back before any run returns ([`held_to_database`]).
+    pub fn apply_verified(
+        &self,
+        steps: &[VerifiedStep],
+        proceed: &dyn Fn() -> bool,
+    ) -> ApplyOutcome {
+        let failed = |error| ApplyOutcome::Failed {
+            stage: ApplyStage::Begin,
+            error,
+        };
+        let mut guard = match self.acquire(true) {
+            Ok(guard) => guard,
+            Err(error) => return failed(error),
+        };
+        // Registers the run, so a Cancel finds the session, and checks for one
+        // that came first.
+        if !proceed() {
+            return failed(plain_error("Cancelled before it was sent.".into()));
+        }
+        let mut send = |sql: &str, _: Sending| {
+            // A statement that reset the session leaves a fresh one, or none
+            // when the reconnect failed; only a `ROLLBACK` follows, whose
+            // error the sequence does not report.
+            if guard.is_none() {
+                return Err(plain_error(
+                    "The connection is unavailable after it was reset.".into(),
+                ));
+            }
+            self.run_held(&mut guard, sql, Origin::Generated, Fetch::default(), true)
+                .and_then(|(result, _)| kept_transaction(sql, result))
+        };
+        // ponytail: a write's count is the outer statement's `@@ROWCOUNT`. An
+        // `INSTEAD OF` trigger that writes nothing still counts 1, and an
+        // `AFTER` trigger's writes are not counted, with or without `SET
+        // NOCOUNT ON`, so on SQL Server the count does not prove the write. The
+        // re-read before it still catches a changed or missing row. The
+        // upgrade is a read-back of the row after each write.
+        super::run_verified(
+            Engine::SqlServer,
+            steps,
+            &mut send,
+            proceed,
+            &|_| false,
+            &lost_session,
+        )
+    }
+
     /// dbdelve's own SQL. Its rows are never editable, so it does not pay for
     /// the describe that would say where they came from.
     fn internal_query(&self, sql: &str) -> Result<QueryResult, DbError> {
@@ -1020,6 +1094,22 @@ impl Connection {
         fetch: Fetch,
         cancellable: bool,
     ) -> Result<QueryResult, DbError> {
+        let mut guard = self.acquire(cancellable)?;
+        let (mut result, probed) = self.run_held(&mut guard, sql, origin, fetch, cancellable)?;
+        if !probed.is_empty() {
+            drop(guard);
+            (result.edit, result.read_only_reason) = self.edit_target(&probed);
+        }
+        Ok(result)
+    }
+
+    /// The session's lock, taken for a run, with a session behind it: one
+    /// stopped earlier whose reconnect failed is opened again here.
+    /// `cancellable` counts the wait in the queue a Cancel reads.
+    fn acquire(
+        &self,
+        cancellable: bool,
+    ) -> Result<std::sync::MutexGuard<'_, Option<Session>>, DbError> {
         if cancellable {
             self.in_flight().queued += 1;
         }
@@ -1036,7 +1126,7 @@ impl Connection {
             in_flight.queued -= 1;
             std::mem::take(&mut in_flight.cancel_queued)
         };
-        let mut guard = locked.map_err(|_| DbError {
+        let guard = locked.map_err(|_| DbError {
             message: "The connection is unavailable after an earlier internal failure.".into(),
             position: None,
         })?;
@@ -1046,7 +1136,23 @@ impl Connection {
             ));
         }
         connected?;
-        let session = guard.as_mut().expect("connected above");
+        Ok(guard)
+    }
+
+    /// One statement on the session `guard` holds, with Cancel and the timeout
+    /// reaching it, and what each does to the session settled: a stopped or
+    /// lost session is closed and replaced before this returns. The columns
+    /// are those [`Self::edit_target`] asks about, which the caller does once
+    /// it has let go of the lock.
+    fn run_held(
+        &self,
+        guard: &mut Option<Session>,
+        sql: &str,
+        origin: Origin,
+        fetch: Fetch,
+        cancellable: bool,
+    ) -> Result<(QueryResult, Vec<ProbedColumn>), DbError> {
+        let session = guard.as_mut().expect("acquired with a session");
 
         let held = if cancellable {
             // Under the lock Cancel takes, so a Cancel either finds the
@@ -1101,10 +1207,10 @@ impl Connection {
                         // error or as rows a cancel cut short, and the reset
                         // is said beside it.
                         Ok(mut result) => {
-                            let reset = self
-                                .stop(&mut guard, format!("The statement finished, but {after}"));
+                            let reset =
+                                self.stop(guard, format!("The statement finished, but {after}"));
                             result.notice = Some(reset.message);
-                            return Ok(result);
+                            return Ok((result, Vec::new()));
                         }
                         Err(error) => {
                             format!("{}\n\nThe statement failed, but {after}", error.message)
@@ -1112,18 +1218,13 @@ impl Connection {
                     }
                 }
             };
-            return Err(self.stop(&mut guard, what));
+            return Err(self.stop(guard, what));
         }
 
         let Some(Ran { result, probed }) = ran else {
             unreachable!("a run that did not finish was stopped or lost the session")
         };
-        let mut result = result?;
-        if !probed.is_empty() {
-            drop(guard);
-            result.edit = self.edit_target(&probed);
-        }
-        Ok(result)
+        Ok((result?, probed))
     }
 
     /// The statement and every round trip that belongs to it, all inside the
@@ -1305,8 +1406,6 @@ impl Connection {
         if self.alongside {
             return plain_error(what);
         }
-        let lost = "The connection was reset: the server rolled back any transaction that was \
-                    open, and temporary tables and SET options are gone with the session.";
         let reconnected = match self.connect() {
             Ok(fresh) => {
                 *session = Some(fresh);
@@ -1314,30 +1413,47 @@ impl Connection {
             }
             Err(error) => format!("Reconnecting failed: {}", error.message),
         };
-        plain_error(format!("{what} {lost} {reconnected}"))
+        plain_error(format!("{what} {RESET} {reconnected}"))
     }
 
-    /// Which table these rows can be written back to, if any.
+    /// Which table these rows can be written back to, if any, and when the
+    /// answer is no for a reason the user can act on, that reason.
     ///
     /// Every step is allowed to answer "no": an undescribable statement, a
-    /// join, a computed column, a table without a primary key, a key the select
-    /// omitted. A failure answers "no" too -- this runs after the user's
-    /// statement already succeeded, and must not turn that into an error.
-    fn edit_target(&self, probed: &[ProbedColumn]) -> Option<EditTarget> {
-        let (schema, table) = sole_table(probed)?;
+    /// join, a computed column, a key the select omitted. A failure answers
+    /// "no" too -- this runs after the user's statement already succeeded, and
+    /// must not turn that into an error.
+    fn edit_target(&self, probed: &[ProbedColumn]) -> (Option<EditTarget>, Option<String>) {
+        let Some((schema, table)) = sole_table(probed) else {
+            return (None, None);
+        };
         // ponytail: one catalog round trip per result set, no cache. A map from
         // table to key held on the connection is the upgrade path if the trip
         // shows up in query timings.
-        let key = self
-            .internal_query(&structure_sql(PRIMARY_KEY_SQL, &schema, &table))
-            .ok()?;
-        let key = key
+        let Ok(key) = self.internal_query(&structure_sql(PRIMARY_KEY_SQL, &schema, &table)) else {
+            return (None, None);
+        };
+        let Ok(key) = key
             .rows
             .iter()
             .map(|row| required_cell(&key, row, "column_name").map(str::to_string))
             .collect::<Result<Vec<_>, _>>()
-            .ok()?;
-        resolve_edit_target(probed, &schema, &table, &key)
+        else {
+            return (None, None);
+        };
+        if !key.is_empty() {
+            return (resolve_edit_target(probed, &schema, &table, &key), None);
+        }
+        // No primary key: the table's rows are named by every column, which
+        // takes the columns' types.
+        let Ok(catalog) = self.internal_query(&structure_sql(EDIT_COLUMNS_SQL, &schema, &table))
+        else {
+            return (None, None);
+        };
+        match table_columns(&catalog) {
+            Some(columns) => resolve_keyless_target(probed, &schema, &table, &columns),
+            None => (None, None),
+        }
     }
 
     pub fn databases(&self) -> Result<super::Databases, DbError> {
@@ -2152,6 +2268,143 @@ fn resolve_edit_target(
     })
 }
 
+/// One column of a table as [`EDIT_COLUMNS_SQL`] describes it.
+struct TableColumn {
+    name: String,
+    /// The catalog's type name, which [`is_matchable`] is asked about.
+    data_type: String,
+}
+
+/// The table's columns in order, or `None` where the catalog said none (a view,
+/// or a table that is not there) or an answer was malformed.
+fn table_columns(result: &QueryResult) -> Option<Vec<TableColumn>> {
+    let columns = result
+        .rows
+        .iter()
+        .map(|row| {
+            Some(TableColumn {
+                name: required_cell(result, row, "column_name").ok()?.to_string(),
+                data_type: required_cell(result, row, "data_type").ok()?.to_string(),
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    (!columns.is_empty()).then_some(columns)
+}
+
+/// Whether `=` against a column's value rendered as text finds it, for the
+/// type [`EDIT_COLUMNS_SQL`] names. Fail closed: only types the compose server
+/// was seen to match are listed.
+///
+/// ponytail: a type is added when
+/// `tests::live_every_listed_type_matches_its_row_by_its_rendered_text`
+/// exercises it. Left off: `xml`, `text`, `ntext` and `image`, which have no `=`
+/// (the server answers a comparison with an error, mid-transaction); `geography`,
+/// `geometry`, `hierarchyid` and `sql_variant`, which this driver cannot read;
+/// `timestamp` (rowversion) and any alias type, never exercised.
+fn is_matchable(data_type: &str) -> bool {
+    matches!(
+        data_type,
+        "tinyint"
+            | "smallint"
+            | "int"
+            | "bigint"
+            | "decimal"
+            | "numeric"
+            | "real"
+            | "float"
+            | "money"
+            | "smallmoney"
+            | "bit"
+            | "char"
+            | "varchar"
+            | "nchar"
+            | "nvarchar"
+            | "date"
+            | "time"
+            | "datetime"
+            | "datetime2"
+            | "smalldatetime"
+            | "datetimeoffset"
+            | "uniqueidentifier"
+            | "binary"
+            | "varbinary"
+    )
+}
+
+/// The target of a result set over a table with no primary key: every column
+/// of the table names the row, a NULL as `IS NULL`, the computed, identity and
+/// rowversion columns matched but never set. Or the reason it cannot be, when
+/// the user can do something about it.
+///
+/// Never a unique index, and never some of the columns: a column left out of
+/// the `WHERE` matches rows the user is not looking at, so a column that cannot
+/// be matched by its value, or that the result omits, makes the whole result
+/// read-only.
+fn resolve_keyless_target(
+    probed: &[ProbedColumn],
+    schema: &str,
+    table: &str,
+    columns: &[TableColumn],
+) -> (Option<EditTarget>, Option<String>) {
+    let refusal = |what: String| {
+        Some(format!(
+            "A table without a primary key is edited by matching every column, and {what}."
+        ))
+    };
+    // Before the shape of the result: a column the driver cannot read is sent
+    // as an expression, and the table is still the one it is a column of.
+    if let Some(column) = columns
+        .iter()
+        .find(|column| !is_matchable(&column.data_type))
+    {
+        return (
+            None,
+            refusal(format!(
+                "{} ({}) cannot be matched by its value",
+                column.name, column.data_type
+            )),
+        );
+    }
+    let column_of = |column: &ProbedColumn| column.table.as_ref().and(column.column.clone());
+    // As for a key: two result columns reading one table column are the two
+    // sides of a self-join, and a column computed beside the real ones is no
+    // table's row.
+    let mut origins = HashSet::new();
+    if !probed
+        .iter()
+        .map(column_of)
+        .all(|column| column.is_some_and(|column| origins.insert(column)))
+    {
+        return (None, None);
+    }
+    let mut keys = Vec::new();
+    let mut fixed = Vec::new();
+    for column in columns {
+        let Some(at) = probed
+            .iter()
+            .position(|probed| column_of(probed).as_deref() == Some(column.name.as_str()))
+        else {
+            return (
+                None,
+                refusal(format!("{} is not in the result", column.name)),
+            );
+        };
+        keys.push(at);
+        if !probed[at].writable {
+            fixed.push(at);
+        }
+    }
+    let target = EditTarget {
+        schema: schema.to_string(),
+        table: table.to_string(),
+        columns: probed.iter().map(column_of).collect(),
+        keys,
+        row_match: RowMatch::EveryColumn { fixed },
+        ..Default::default()
+    };
+    (Some(target), None)
+}
+
 /// A relation name is user data and can contain a quote. `QUOTENAME` brackets
 /// it for `OBJECT_ID`, which reads brackets whatever `QUOTED_IDENTIFIER` says.
 fn structure_sql(template: &str, schema: &str, relation: &str) -> String {
@@ -2407,14 +2660,34 @@ fn held_to_database(session: &mut Session, database: &str) -> Result<(), DbError
     )))
 }
 
-/// Say what a failed statement did to the transactions open around it.
-///
-/// `SET XACT_ABORT ON` is what makes a generated batch's brackets atomic:
-/// without it a constraint violation ends only its own statement, the batch
-/// carries on, and the `COMMIT` dbdelve wrote commits the rows before it. It is
-/// the session's default too, so a failing statement of the user's ends a
-/// transaction they began earlier. T-SQL has no nested transactions, so either
-/// takes every open level with it -- which the counts before and after tell.
+/// What a reset session says of itself, in the error [`Connection::stop`]
+/// returns.
+const RESET: &str = "The connection was reset: the server rolled back any transaction that was \
+                     open, and temporary tables and SET options are gone with the session.";
+
+/// Whether `error` is [`Connection::stop`]'s: the session the statement ran on
+/// was closed and replaced, so whether a `COMMIT` that was on its way landed is
+/// not known. A [`Connection`] opened beside one ([`Connection::alongside`])
+/// says no such thing, and never runs a verified apply.
+fn lost_session(error: &DbError) -> bool {
+    error.message.contains(RESET)
+}
+
+/// `result` of `sql` as a verified sequence may take it. A statement that
+/// finished but whose count round trip then reset the session returns whole,
+/// with the reset said in its notice, and the server has rolled the
+/// transaction back with the session: whatever the sequence sends next would
+/// run on its own, so it is an error, not a write. A `COMMIT` that finished
+/// stands whatever came after it.
+fn kept_transaction(sql: &str, result: QueryResult) -> Result<QueryResult, DbError> {
+    match &result.notice {
+        Some(notice) if sql != "COMMIT" && notice.contains(RESET) => {
+            Err(plain_error(notice.clone()))
+        }
+        _ => Ok(result),
+    }
+}
+
 fn transaction_outcome(
     session: &mut Session,
     sql: &str,
@@ -3013,6 +3286,180 @@ mod tests {
                 &["id".to_string()],
             )
             .is_none()
+        );
+    }
+
+    fn keyless(columns: &[(&str, &str)]) -> Vec<TableColumn> {
+        columns
+            .iter()
+            .map(|(name, data_type)| TableColumn {
+                name: (*name).to_string(),
+                data_type: (*data_type).to_string(),
+            })
+            .collect()
+    }
+
+    /// A result over `sightings` carrying these columns, in this order.
+    fn sightings(columns: &[&str]) -> Vec<ProbedColumn> {
+        probed(
+            &columns
+                .iter()
+                .map(|column| (Some("sightings"), Some(*column)))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    #[test]
+    fn a_table_without_a_primary_key_is_matched_by_every_column_or_read_only_with_a_reason() {
+        use crate::db::RowMatch;
+        let table = keyless(&[
+            ("bird", "nvarchar"),
+            ("place", "varchar"),
+            ("seen", "int"),
+            ("weight", "float"),
+            ("at", "datetime2"),
+        ]);
+        let whole = sightings(&["bird", "place", "seen", "weight", "at"]);
+        let (target, reason) = resolve_keyless_target(&whole, "dbo", "sightings", &table);
+        let target = target.expect("every column is of a listed type");
+        assert_eq!(target.schema, "dbo");
+        assert_eq!(target.table, "sightings");
+        assert_eq!(target.keys, [0, 1, 2, 3, 4]);
+        assert_eq!(
+            target.columns,
+            ["bird", "place", "seen", "weight", "at"].map(|name| Some(name.to_string()))
+        );
+        assert_eq!(target.row_match, RowMatch::EveryColumn { fixed: vec![] });
+        assert_eq!(reason, None);
+
+        // Table order, whatever order the result lists them in.
+        let (reordered, _) = resolve_keyless_target(
+            &sightings(&["place", "bird", "seen", "weight", "at"]),
+            "dbo",
+            "sightings",
+            &table,
+        );
+        assert_eq!(reordered.expect("reordered").keys, [1, 0, 2, 3, 4]);
+
+        // A computed, identity or rowversion column is matched and never set.
+        let mut columns = sightings(&["bird", "label", "n"]);
+        columns[1].writable = false;
+        let (computed, _) = resolve_keyless_target(
+            &columns,
+            "dbo",
+            "sightings",
+            &keyless(&[("bird", "nvarchar"), ("label", "nvarchar"), ("n", "int")]),
+        );
+        let computed = computed.expect("a computed column is matched");
+        assert_eq!(computed.row_match, RowMatch::EveryColumn { fixed: vec![1] });
+        assert_eq!(computed.keys, [0, 1, 2]);
+
+        let refused = |column: &str| {
+            Some(format!(
+                "A table without a primary key is edited by matching every column, \
+                 and {column} cannot be matched by its value."
+            ))
+        };
+        // The types `=` errors on, the CLR ones the driver cannot read at all,
+        // and rowversion, which no test matched.
+        for data_type in [
+            "xml",
+            "text",
+            "ntext",
+            "image",
+            "geography",
+            "geometry",
+            "hierarchyid",
+            "sql_variant",
+            "timestamp",
+            "sysname",
+            "",
+        ] {
+            let (target, reason) = resolve_keyless_target(
+                &sightings(&["bird", "shape"]),
+                "dbo",
+                "sightings",
+                &keyless(&[("bird", "nvarchar"), ("shape", data_type)]),
+            );
+            assert!(target.is_none(), "{data_type}");
+            assert_eq!(
+                reason,
+                refused(&format!("shape ({data_type})")),
+                "{data_type}"
+            );
+        }
+        // A column the preview reads as text for the driver is computed beside
+        // the real ones, and the table's own type is still what is said.
+        let (target, reason) = resolve_keyless_target(
+            &probed(&[(Some("sightings"), Some("bird")), (None, None)]),
+            "dbo",
+            "sightings",
+            &keyless(&[("bird", "nvarchar"), ("shape", "geography")]),
+        );
+        assert!(target.is_none());
+        assert_eq!(reason, refused("shape (geography)"));
+        for data_type in [
+            "tinyint",
+            "smallint",
+            "int",
+            "bigint",
+            "decimal",
+            "numeric",
+            "real",
+            "float",
+            "money",
+            "smallmoney",
+            "bit",
+            "char",
+            "varchar",
+            "nchar",
+            "nvarchar",
+            "date",
+            "time",
+            "datetime",
+            "datetime2",
+            "smalldatetime",
+            "datetimeoffset",
+            "uniqueidentifier",
+            "binary",
+            "varbinary",
+        ] {
+            let (target, reason) = resolve_keyless_target(
+                &sightings(&["one"]),
+                "dbo",
+                "sightings",
+                &keyless(&[("one", data_type)]),
+            );
+            assert!(target.is_some(), "{data_type}");
+            assert_eq!(reason, None, "{data_type}");
+        }
+
+        // A column the result leaves out would be left out of the WHERE.
+        let (target, reason) =
+            resolve_keyless_target(&sightings(&["bird"]), "dbo", "sightings", &table);
+        assert!(target.is_none());
+        assert_eq!(
+            reason,
+            Some(
+                "A table without a primary key is edited by matching every column, \
+                 and place is not in the result."
+                    .to_string()
+            )
+        );
+        // Computed beside real columns, and a self-join, are no table's rows.
+        let one = keyless(&[("bird", "nvarchar")]);
+        assert_eq!(
+            resolve_keyless_target(
+                &probed(&[(Some("sightings"), Some("bird")), (None, None)]),
+                "dbo",
+                "sightings",
+                &one,
+            ),
+            (None, None)
+        );
+        assert_eq!(
+            resolve_keyless_target(&sightings(&["bird", "bird"]), "dbo", "sightings", &one),
+            (None, None)
         );
     }
 
@@ -5428,6 +5875,8 @@ mod tests {
         read_only_session_refuses_a_write,
         generated_writes_round_trip,
         generated_draft_round_trip,
+        verified_draft_round_trip,
+        verified_keyless_round_trip,
     );
 
     #[test]
@@ -5440,5 +5889,486 @@ mod tests {
             "dbo",
             "varbinary(16)",
         );
+    }
+
+    /// Drops scratch tables and views when a test ends, panicking or not.
+    struct Scratch<'a>(&'a Connection, &'a [&'a str]);
+
+    impl Scratch<'_> {
+        fn drop_all(&self) {
+            for name in self.1 {
+                for kind in ["VIEW", "TABLE"] {
+                    let _ = self.0.query(
+                        &format!("DROP {kind} IF EXISTS dbo.{name}"),
+                        Fetch::default(),
+                    );
+                }
+            }
+        }
+    }
+
+    impl Drop for Scratch<'_> {
+        fn drop(&mut self) {
+            self.drop_all();
+        }
+    }
+
+    /// One column of each listed type, with a value that shows how it renders.
+    const TYPE_SAMPLES: &[(&str, &str)] = &[
+        ("tinyint", "200"),
+        ("smallint", "-300"),
+        ("int", "42"),
+        ("bigint", "9007199254740993"),
+        ("decimal(10,2)", "-12.50"),
+        ("numeric(5,1)", "3.5"),
+        ("real", "0.1"),
+        ("float", "0.30000000000000004"),
+        ("money", "1234.5"),
+        ("smallmoney", "-3.25"),
+        ("bit", "1"),
+        ("char(3)", "'ab'"),
+        ("varchar(32)", "'h''e llo, \\ {a: 1}'"),
+        ("nchar(3)", "N'ab'"),
+        ("nvarchar(64)", "N'h''e llo, \u{fc}n\u{ef} \u{2603} {a: 1}'"),
+        ("nvarchar(max)", "N'long'"),
+        ("varchar(max)", "'long'"),
+        ("date", "'2024-02-29'"),
+        ("time(6)", "'12:34:56.123456'"),
+        ("datetime", "'2024-02-29 12:34:56.123'"),
+        ("datetime2(6)", "'2024-02-29 12:34:56.123456'"),
+        ("smalldatetime", "'2024-02-29 12:34:00'"),
+        ("datetimeoffset(3)", "'2024-06-01 00:00:00.500 -07:00'"),
+        ("uniqueidentifier", "'8F1F4D3A-1B2C-4D5E-8F90-123456789ABC'"),
+        ("binary(4)", "0x61626364"),
+        ("varbinary(8)", "0xdeadbeef"),
+        ("varbinary(max)", "0x00ff"),
+    ];
+
+    /// Types left off the list because they have no `=` of their own, which the
+    /// server answers with an error rather than a count. The CLR types and
+    /// `sql_variant` are left off with them, and cannot be read by this driver
+    /// to be exercised.
+    const UNMATCHED_SAMPLES: &[(&str, &str)] = &[
+        ("xml", "'<a/>'"),
+        ("text", "'abc'"),
+        ("ntext", "N'abc'"),
+        ("image", "0x00ff"),
+    ];
+
+    /// Types left off the list that nothing was matched with: the grid is
+    /// read-only and says which column is why.
+    const UNLISTED_SAMPLES: &[(&str, &str)] = &[("sysname", "N'x'")];
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_every_listed_type_matches_its_row_by_its_rendered_text() {
+        let connection = live();
+        let scratch = Scratch(
+            &connection,
+            &[
+                "dbdelve_keyless_types",
+                "dbdelve_keyless_probe",
+                "dbdelve_keyless_view",
+            ],
+        );
+        scratch.drop_all();
+        let run = |sql: &str| connection.query(sql, Fetch::default());
+        let columns: Vec<String> = TYPE_SAMPLES
+            .iter()
+            .enumerate()
+            .map(|(index, (declared, _))| format!("c{index} {declared}"))
+            .collect();
+        let values: Vec<&str> = TYPE_SAMPLES.iter().map(|(_, value)| *value).collect();
+        run(&format!(
+            "CREATE TABLE dbo.dbdelve_keyless_types ({})",
+            columns.join(", ")
+        ))
+        .expect("the scratch table is built");
+        run(&format!(
+            "INSERT INTO dbo.dbdelve_keyless_types VALUES ({})",
+            values.join(", ")
+        ))
+        .expect("the scratch row is inserted");
+
+        let read = run("SELECT * FROM dbo.dbdelve_keyless_types").expect("the row reads");
+        let edit = read.edit.clone().unwrap_or_else(|| {
+            panic!(
+                "every column is of a listed type: {:?}",
+                read.read_only_reason
+            )
+        });
+        assert_eq!(
+            edit.row_match,
+            crate::db::RowMatch::EveryColumn { fixed: vec![] }
+        );
+        assert_eq!(edit.keys.len(), TYPE_SAMPLES.len());
+        for (index, (declared, value)) in TYPE_SAMPLES.iter().enumerate() {
+            let column = &read.columns[index];
+            let rendered = read.rows[0].get(index).expect("a value");
+            // The literal the keyless WHERE writes for it.
+            let literal = Engine::SqlServer.quote_value(rendered, column.data_type.as_deref());
+            let counted = run(&format!(
+                "SELECT COUNT(*) FROM dbo.dbdelve_keyless_types WHERE {} = {literal}",
+                Engine::SqlServer.quote_identifier(&column.name)
+            ))
+            .map(|result| result.rows[0].get(0).unwrap_or("NULL").to_string())
+            .map_err(|error| error.message);
+            assert_eq!(
+                counted.as_deref(),
+                Ok("1"),
+                "{declared}: {value} -> {rendered}"
+            );
+        }
+
+        for (declared, value) in UNMATCHED_SAMPLES.iter().chain(UNLISTED_SAMPLES) {
+            scratch.drop_all();
+            run(&format!(
+                "CREATE TABLE dbo.dbdelve_keyless_probe (c {declared})"
+            ))
+            .expect("the scratch table is built");
+            run(&format!(
+                "INSERT INTO dbo.dbdelve_keyless_probe VALUES ({value})"
+            ))
+            .expect("the scratch row is inserted");
+            let read = run("SELECT * FROM dbo.dbdelve_keyless_probe").expect("the row reads");
+            assert!(read.edit.is_none(), "{declared}");
+            let kind = declared.split('(').next().unwrap_or(declared);
+            assert!(
+                read.read_only_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains(&format!("c ({kind})"))),
+                "{declared}: {:?}",
+                read.read_only_reason
+            );
+        }
+        for (declared, _) in UNMATCHED_SAMPLES {
+            scratch.drop_all();
+            run(&format!(
+                "CREATE TABLE dbo.dbdelve_keyless_probe (c {declared})"
+            ))
+            .expect("the scratch table is built");
+            run("INSERT INTO dbo.dbdelve_keyless_probe VALUES (NULL)").expect("a row");
+            let counted = run(&format!(
+                "SELECT COUNT(*) FROM dbo.dbdelve_keyless_probe WHERE c = {}",
+                Engine::SqlServer.quote_literal("abc")
+            ))
+            .map(|result| result.rows[0].get(0).unwrap_or("NULL").to_string());
+            assert!(counted.is_err(), "{declared} has an `=`: {counted:?}");
+        }
+
+        // A column the server computes is matched and never set; a unique
+        // index is no primary key.
+        scratch.drop_all();
+        run("CREATE TABLE dbo.dbdelve_keyless_probe (
+                a int NOT NULL UNIQUE,
+                i int IDENTITY(1,1),
+                k AS (a + 1),
+                p AS (a + 2) PERSISTED,
+                n int
+            )")
+        .expect("the table is built");
+        run("INSERT INTO dbo.dbdelve_keyless_probe (a, n) VALUES (1, 4)").expect("a row");
+        let computed = run("SELECT * FROM dbo.dbdelve_keyless_probe").expect("the row reads");
+        assert_eq!(
+            computed
+                .edit
+                .expect("a unique index alone is no key")
+                .row_match,
+            crate::db::RowMatch::EveryColumn {
+                fixed: vec![1, 2, 3]
+            },
+            "{:?}",
+            computed.read_only_reason
+        );
+        scratch.drop_all();
+
+        // A view over a table with no primary key names no row of its own.
+        run("CREATE TABLE dbo.dbdelve_keyless_probe (c int)").expect("the table is built");
+        run("CREATE VIEW dbo.dbdelve_keyless_view AS SELECT c FROM dbo.dbdelve_keyless_probe")
+            .expect("the view is built");
+        let viewed = run("SELECT * FROM dbo.dbdelve_keyless_view").expect("the view reads");
+        assert!(viewed.edit.is_none());
+        assert_eq!(viewed.read_only_reason, None);
+    }
+
+    /// Drops a scratch table when a test ends, panicking or not.
+    struct ScratchTable<'a>(&'a crate::db::Connection, &'static str);
+
+    impl ScratchTable<'_> {
+        fn drop_all(&self) {
+            let _ = self.0.query(
+                &format!("DROP TABLE IF EXISTS dbo.{}", self.1),
+                &crate::db::CancelToken::default(),
+                Fetch::default(),
+            );
+        }
+    }
+
+    impl Drop for ScratchTable<'_> {
+        fn drop(&mut self) {
+            self.drop_all();
+        }
+    }
+
+    #[test]
+    fn a_reset_at_commit_is_an_unknown_outcome_and_before_it_is_not_applied() {
+        use crate::db::{StepKind, run_verified};
+
+        let reset = |what: &str| plain_error(format!("{what} {RESET} dbdelve reconnected."));
+        let steps = [VerifiedStep {
+            sql: "UPDATE \"dbo\".\"t\" SET \"a\" = N'x' WHERE \"id\" = '1'".into(),
+            kind: StepKind::Update,
+            reread: Some("SELECT * FROM \"dbo\".\"t\" WHERE \"id\" = '1'".into()),
+            before: Vec::new(),
+            read_back: None,
+        }];
+        // Fails the one statement `at`, the way the arm's send closure would
+        // answer it, and counts every other as the one row it wrote.
+        let fails = |at: &str, error: DbError| {
+            let mut sent = Vec::new();
+            let outcome = run_verified(
+                Engine::SqlServer,
+                &steps,
+                &mut |sql, _| {
+                    sent.push(sql.to_string());
+                    match (sql == at, sql.starts_with("SELECT")) {
+                        (true, _) => Err(error.clone()),
+                        (false, true) => Ok(QueryResult {
+                            rows: vec![Row::new([Some("1")]).unwrap()],
+                            ..QueryResult::default()
+                        }),
+                        (false, false) => Ok(QueryResult {
+                            rows_affected: Some(1),
+                            ..QueryResult::default()
+                        }),
+                    }
+                },
+                &|| true,
+                &|_| false,
+                &lost_session,
+            );
+            (outcome, sent)
+        };
+
+        let error = reset("Cancel arrived.");
+        assert_eq!(
+            fails("COMMIT", error.clone()).0,
+            ApplyOutcome::Unknown(error.clone()),
+            "the answer to a COMMIT sent on a session that was reset is lost"
+        );
+        let (outcome, sent) = fails(&steps[0].sql, error.clone());
+        assert_eq!(
+            outcome,
+            ApplyOutcome::Failed {
+                stage: ApplyStage::Write(0),
+                error
+            },
+            "a reset before COMMIT rolled the transaction back"
+        );
+        assert!(!sent.iter().any(|sql| sql == "COMMIT"), "{sent:?}");
+        let server = plain_error("Violation of PRIMARY KEY constraint.".into());
+        assert_eq!(
+            fails("COMMIT", server.clone()).0,
+            ApplyOutcome::Failed {
+                stage: ApplyStage::Commit,
+                error: server
+            },
+            "a COMMIT the server refused on a live session was not applied"
+        );
+
+        // A write that finished but whose count round trip reset the session
+        // lost the transaction with it, so it is no write of this sequence.
+        let after_reset = |sql: &str, notice: &str| {
+            kept_transaction(
+                sql,
+                QueryResult {
+                    notice: Some(notice.into()),
+                    ..QueryResult::default()
+                },
+            )
+        };
+        let notice = format!("The statement finished, but Cancel arrived after that. {RESET}");
+        assert!(after_reset(&steps[0].sql, &notice).is_err());
+        assert!(after_reset("BEGIN TRANSACTION", &notice).is_err());
+        assert!(
+            after_reset("COMMIT", &notice).is_ok(),
+            "a COMMIT that finished stands, whatever came after it"
+        );
+        assert!(
+            after_reset(&steps[0].sql, "(1 row affected)").is_ok(),
+            "a message the server sent is not a reset"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_an_instead_of_trigger_that_writes_nothing_still_counts_its_row() {
+        use crate::db::{
+            ApplyOutcome, CancelToken, FetchedCell, StepKind, conformance::verified_steps,
+        };
+
+        let connection =
+            crate::db::Connection::open(crate::db::ConnectionConfig::SqlServer(live_config()))
+                .expect("connection should open");
+        let table = "verified_instead_of";
+        let scratch = ScratchTable(&connection, table);
+        scratch.drop_all();
+        let run = |sql: &str| {
+            connection
+                .query(sql, &CancelToken::default(), Fetch::default())
+                .unwrap_or_else(|error| panic!("`{sql}`: {error}"))
+        };
+        run(&format!(
+            "CREATE TABLE dbo.{table} (id int PRIMARY KEY, label nvarchar(50));
+             INSERT INTO dbo.{table} VALUES (1, N'one')"
+        ));
+        run(&format!(
+            "CREATE TRIGGER dbo.{table}_skip ON dbo.{table} INSTEAD OF UPDATE AS BEGIN SET NOCOUNT ON; END"
+        ));
+        let row = run(&format!("SELECT * FROM dbo.{table} WHERE id = 1"));
+        let before: Vec<FetchedCell> = row
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(index, column)| FetchedCell {
+                column: column.name.clone(),
+                text: row.rows[0].get(index).map(str::to_string),
+                cell_type: None,
+                column_type: column.data_type.clone(),
+            })
+            .collect();
+        let write =
+            format!("UPDATE \"dbo\".\"{table}\" SET \"label\" = N'changed' WHERE \"id\" = '1'");
+        let steps = verified_steps(Engine::SqlServer, &write, vec![(StepKind::Update, before)]);
+
+        // The documented limit: the outer statement's count is 1, though the
+        // trigger wrote nothing.
+        let outcome = connection.apply_verified(&steps, &CancelToken::default());
+        assert!(
+            matches!(outcome, ApplyOutcome::Applied { affected: 1, .. }),
+            "{outcome:?}"
+        );
+        let label = run(&format!("SELECT label FROM dbo.{table} WHERE id = 1"));
+        assert_eq!(
+            label.rows[0].get(0),
+            Some("one"),
+            "the trigger kept the row"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_each_write_of_a_verified_sequence_is_counted_apart() {
+        use crate::db::{
+            ApplyOutcome, CancelToken, FetchedCell, StepKind, VerifiedStep,
+            conformance::verified_steps,
+        };
+
+        let connection =
+            crate::db::Connection::open(crate::db::ConnectionConfig::SqlServer(live_config()))
+                .expect("connection should open");
+        let table = "verified_counted_apart";
+        let scratch = ScratchTable(&connection, table);
+        scratch.drop_all();
+        let run = |sql: &str| {
+            connection
+                .query(sql, &CancelToken::default(), Fetch::default())
+                .unwrap_or_else(|error| panic!("`{sql}`: {error}"))
+        };
+        let fill = || {
+            run(&format!(
+                "DELETE FROM dbo.{table}; INSERT INTO dbo.{table} VALUES (1, N'one'), (2, N'two')"
+            ))
+        };
+        run(&format!(
+            "CREATE TABLE dbo.{table} (id int PRIMARY KEY, label nvarchar(50))"
+        ));
+        fill();
+        let read = |id: u32| -> Vec<FetchedCell> {
+            let row = run(&format!("SELECT * FROM dbo.{table} WHERE id = {id}"));
+            row.columns
+                .iter()
+                .enumerate()
+                .map(|(index, column)| FetchedCell {
+                    column: column.name.clone(),
+                    text: row.rows[0].get(index).map(str::to_string),
+                    cell_type: None,
+                    column_type: column.data_type.clone(),
+                })
+                .collect()
+        };
+        let types: Vec<(String, String)> = [("id", "int"), ("label", "nvarchar")]
+            .iter()
+            .map(|(column, kind)| ((*column).to_string(), (*kind).to_string()))
+            .collect();
+        let batch = sql::draft_batch(
+            Engine::SqlServer,
+            &[sql::DraftDelete {
+                schema: "dbo".into(),
+                table: table.into(),
+                keys: vec![("id".into(), "2".into())],
+                null_keys: Vec::new(),
+                types: types.clone(),
+            }],
+            &[PendingRow {
+                schema: "dbo".into(),
+                table: table.into(),
+                sets: vec![("label".into(), NewValue::Value("changed".into()))],
+                keys: vec![("id".into(), "1".into())],
+                types,
+                ..PendingRow::default()
+            }],
+            &[],
+        )
+        .expect("the draft is written");
+        let steps = verified_steps(
+            Engine::SqlServer,
+            &batch,
+            vec![(StepKind::Delete, read(2)), (StepKind::Update, read(1))],
+        );
+        let rows = || {
+            run(&format!("SELECT id, label FROM dbo.{table} ORDER BY id"))
+                .rows
+                .iter()
+                .map(|row| {
+                    (
+                        row.get(0).map(str::to_string),
+                        row.get(1).map(str::to_string),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // The re-read still finds row 1, so the write is what counts: it names
+        // a row that is not there. The `DELETE` before it counted one and a
+        // bracket after it would read none, and the update's count is neither.
+        let update = steps[1].sql.clone();
+        let missing = VerifiedStep {
+            sql: update.replace("= '1'", "= '999'"),
+            ..steps[1].clone()
+        };
+        assert_ne!(missing.sql, update, "{update}");
+        assert_eq!(
+            connection.apply_verified(&[steps[0].clone(), missing], &CancelToken::default()),
+            ApplyOutcome::Miscounted {
+                step: 1,
+                count: Some(0)
+            }
+        );
+        assert_eq!(
+            rows(),
+            [
+                (Some("1".into()), Some("one".into())),
+                (Some("2".into()), Some("two".into()))
+            ],
+            "the deleted row came back with the rollback"
+        );
+
+        let outcome = connection.apply_verified(&steps, &CancelToken::default());
+        assert!(
+            matches!(outcome, ApplyOutcome::Applied { affected: 2, .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(rows(), [(Some("1".into()), Some("changed".into()))]);
     }
 }

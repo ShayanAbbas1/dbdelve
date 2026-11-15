@@ -387,6 +387,17 @@ impl Profile {
         }
     }
 
+    /// Whether a transaction the user opened is open on the session `tab`'s
+    /// statements run on, which a verified apply's own `BEGIN` and `COMMIT`
+    /// would end: the profile's own for a tab of its database, the bound
+    /// session's for a tab bound to another.
+    pub(crate) fn transaction_open_for(&self, tab: Tab) -> bool {
+        match self.binding_of(tab) {
+            Some(binding) => self.bound_write_refusal(&binding).is_some(),
+            None => self.in_transaction,
+        }
+    }
+
     /// The connection a Cancel for `tab` is sent over: the session its
     /// statement runs on, which for a bound tab is not the profile's own. What
     /// MongoDB keeps of a running statement, and ClickHouse's fallback, is on
@@ -784,6 +795,13 @@ pub(crate) struct Session {
     pub(crate) last_structure_request: u64,
 }
 
+/// What a verified apply is refused with while a transaction the user opened
+/// is open on the connection, at review and at Run alike: the apply opens and
+/// ends a transaction of its own, and its `BEGIN` and `COMMIT` would end the
+/// user's (MySQL and MariaDB commit it at the `START TRANSACTION`).
+pub(crate) const APPLY_IN_TRANSACTION: &str =
+    "A transaction is open on this connection; the edits were not applied.";
+
 /// A generated statement waiting to be read and run.
 pub(crate) struct ApplyReview {
     /// The tab the edits came from, so the modal is shown over that surface
@@ -802,6 +820,25 @@ pub(crate) struct ApplyReview {
     /// Whether `sql` is the grid's draft, which a successful run clears. An
     /// `INSERT` or a `DELETE` of the New row form or Delete row sends none of it.
     pub(crate) edits: bool,
+    /// What a run of `sql` is verified against, when its target verifies an
+    /// apply (`Target::verifies_applies`). Kept for as long as the review is
+    /// open, since a refusal leaves it open and the next Run verifies again.
+    pub(crate) verify: Option<Verification>,
+}
+
+/// The rows a reviewed draft was written from, as they were fetched: one step
+/// for each statement of the batch, in the order the batch holds them, built
+/// when the review is written and handed to the apply with the run.
+#[derive(Clone)]
+pub(crate) struct Verification {
+    pub(crate) steps: Vec<crate::db::VerifiedStep>,
+    /// What each step's row is called in what the apply says of it, `rows[i]`
+    /// for step `i`: the key's `name = value` terms, or `added row N`.
+    pub(crate) rows: Vec<String>,
+    /// The draft row each step was written for, by what names it, `identities[i]`
+    /// for step `i` (`ResultGrid::draft_identities`). Empty for the one step of
+    /// a Row send or a form, whose failure applies nothing.
+    pub(crate) identities: Vec<crate::result_grid::StepRow>,
 }
 
 impl ApplyReview {
@@ -2429,11 +2466,11 @@ pub(crate) enum EditMode {
 
 impl EditMode {
     /// This mode, but `Draft` where the target does not offer Row: Row is
-    /// offered exactly where `Target::row_edits` holds, the targets whose edit
-    /// send keeps the grid, so a Row send is never made on one that clears it.
-    /// Classic and Draft are offered on every target.
+    /// offered exactly where `Target::keeps_edits` holds, the targets whose edit
+    /// send keeps the grid and is verified, so a Row send is never made on one
+    /// that clears it. Classic and Draft are offered on every target.
     pub(crate) fn on(self, target: Target) -> Self {
-        match (self, target.row_edits()) {
+        match (self, target.keeps_edits()) {
             (Self::Row, false) => Self::Draft,
             (mode, _) => mode,
         }
@@ -2907,9 +2944,12 @@ fn apply_refresh<G: Clone + PartialEq>(
             (queue.lane(finished.start) == Some(queue.showing)).then(|| Refresh::Earlier {
                 index: queue.showing,
                 sql: finished.sql.clone(),
+                verify: None,
             })
         }
-        None => last_query.cloned().map(Refresh::Statement),
+        None => last_query
+            .cloned()
+            .map(|sql| Refresh::Statement { sql, verify: None }),
     }
 }
 
@@ -3683,29 +3723,40 @@ pub(crate) fn restored_state(grid: &store::StoredGrid) -> QueryState {
 
 /// What runs once a generated batch has succeeded.
 pub(crate) enum Refresh {
-    /// The query tab's stashed `SELECT`.
-    Statement(String),
+    /// The query tab's stashed `SELECT`. `verify` is what an applied edit's run
+    /// is checked against (see `Relation`); `None` for the tab's own re-run.
+    Statement {
+        sql: String,
+        verify: Option<Verification>,
+    },
     /// A queue's earlier result, `index` in `done`, which the batch runs in:
     /// it is lent the slot as the batch starts, and `sql`, its own statement,
     /// reads it again there. On the profile's own connection rather than one
     /// of its own, which would see neither the session's settings and
     /// temporary tables nor a transaction the batch wrote into, and in its
     /// own grid, so the last result is never blanked for it.
-    Earlier { index: usize, sql: String },
+    Earlier {
+        index: usize,
+        sql: String,
+        verify: Option<Verification>,
+    },
     /// `Earlier`'s re-read, which gives the slot back once it lands. That run
     /// is the user's statement and not dbdelve's, so it keeps the row limit.
     Return,
     /// A relation tab, refreshed the way its own controls refresh it — so it
-    /// picks up whatever sort and row limit the tab is now set to.
-    Relation(u64),
-    /// A Row-mode send of one row's `UPDATE`, which is followed in the same
-    /// task by `read`, the row read back by its key, landing in `row` of the
-    /// grid whose rows are `rows_id`. No refresh of the relation follows: the
-    /// row is replaced where it stands.
+    /// picks up whatever sort and row limit the tab is now set to. `verify` is
+    /// what a reviewed draft's run is checked against, which a run held by the
+    /// mode prompt keeps with it.
+    Relation {
+        id: u64,
+        verify: Option<Verification>,
+    },
+    /// A Row-mode send of one row's `UPDATE`, whose verified step reads the row
+    /// back by its key, landing in `row` of the grid whose rows are `rows_id`.
+    /// No refresh of the relation follows: the row is replaced where it stands.
     Row {
         row: usize,
         rows_id: u64,
-        read: String,
         /// The cells that went with the send, by column, which the landing
         /// clears: an edit staged on the row while it was out is not among them.
         sent: Vec<(usize, NewValue)>,
@@ -3716,10 +3767,24 @@ pub(crate) enum Refresh {
         /// What the user asked for that this row had to be saved before: a page
         /// turn, a sort, a tab switch. Carried out only when the send lands.
         then: Option<AfterEdits>,
+        /// The row's one verified step: the row read again and compared before
+        /// the `UPDATE`, the write counted, and the row read back inside the
+        /// same transaction. A Row send without one is refused
+        /// (`Workspace::execute_unchecked`).
+        verify: Option<Verification>,
     },
 }
 
 impl Refresh {
+    /// The refresh of a query tab's edit, carrying what the run is checked
+    /// against. Any other refresh is returned as it is.
+    pub(crate) fn verified(mut self, check: Option<Verification>) -> Self {
+        if let Self::Statement { verify, .. } | Self::Earlier { verify, .. } = &mut self {
+            *verify = check;
+        }
+        self
+    }
+
     /// The action a Row send was carrying, for a send that is dropped before
     /// it runs: its owner puts back what the action had changed.
     pub(crate) fn into_parked(self) -> Option<AfterEdits> {
@@ -4284,6 +4349,7 @@ mod tests {
             notes: Vec::new(),
             error: None,
             edits: true,
+            verify: None,
         }
     }
 
@@ -4609,6 +4675,47 @@ mod tests {
             for mode in [EditMode::Classic, EditMode::Draft] {
                 assert_eq!(mode.on(Target::built_in(engine)), mode, "{engine:?}");
             }
+        }
+    }
+
+    #[test]
+    fn row_mode_is_offered_on_mongodb_through_the_target_predicate() {
+        assert_eq!(
+            EditMode::Row.on(Target::built_in(Engine::MongoDb)),
+            EditMode::Row
+        );
+        for engine in [
+            Engine::Redis,
+            Engine::ClickHouse,
+            Engine::Snowflake,
+            Engine::Turso,
+        ] {
+            assert_eq!(
+                EditMode::Row.on(Target::built_in(engine)),
+                EditMode::Draft,
+                "{engine:?}"
+            );
+        }
+        let odbc = Box::leak(Box::new(crate::db::Plugin {
+            id: "odbc".into(),
+            name: "ODBC".into(),
+            version: "1".into(),
+            executable: "dbdelve-odbc".into(),
+        }));
+        let plugin = Target {
+            engine: Engine::Postgres,
+            driver: crate::db::Driver::Plugin(odbc),
+        };
+        assert_eq!(EditMode::Row.on(plugin), EditMode::Draft);
+        for engine in Engine::ALL
+            .into_iter()
+            .filter(|engine| Target::built_in(*engine).row_edits())
+        {
+            assert_eq!(
+                EditMode::Row.on(Target::built_in(engine)),
+                EditMode::Row,
+                "{engine:?}"
+            );
         }
     }
 
@@ -5006,18 +5113,18 @@ mod tests {
         let last = Some("SELECT 40".to_string());
         assert!(matches!(
             apply_refresh(Some(&finished_queue(0)), &12, last.as_ref()),
-            Some(Refresh::Earlier { index: 0, sql }) if sql == "SELECT 0"
+            Some(Refresh::Earlier { index: 0, sql, .. }) if sql == "SELECT 0"
         ));
         // A batch's later set has no statement of its own to ask again, and
         // the slot's is not it.
         assert!(apply_refresh(Some(&finished_queue(1)), &12, last.as_ref()).is_none());
         assert!(matches!(
             apply_refresh(Some(&finished_queue(2)), &12, last.as_ref()),
-            Some(Refresh::Statement(sql)) if sql == "SELECT 40"
+            Some(Refresh::Statement { sql, .. }) if sql == "SELECT 40"
         ));
         assert!(matches!(
             apply_refresh(None::<&Queue<usize>>, &12, last.as_ref()),
-            Some(Refresh::Statement(_))
+            Some(Refresh::Statement { .. })
         ));
         assert!(apply_refresh(Some(&finished_queue(2)), &12, None).is_none());
     }
