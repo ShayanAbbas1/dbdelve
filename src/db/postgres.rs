@@ -19,7 +19,7 @@ use crate::tls;
 use super::ssh::{self, Bridged, SocketBridge};
 use super::tunnel::{Tunnel, tunnelled};
 use super::{
-    Catalog, Column, DbError, EditTarget, Engine, Feed, Fetch, QueryResult, Reference,
+    Catalog, Column, DbError, EditTarget, Engine, Feed, Fetch, GraphCancel, QueryResult, Reference,
     RelationKind, Row, RowBuilder, SchemaGraph, ServerConfig, Sizes, Stopped, Structure,
     assemble_catalog, assemble_databases, assemble_foreign_keys, assemble_references,
     assemble_schema_graph, assemble_sizes, assemble_structure, create_table, non_utf8_error,
@@ -985,6 +985,8 @@ pub struct Connection {
     /// (AGENTS.md, hard rule 4). Shared between clones, so a schema set on one
     /// reaches the sessions any of them opens later.
     server: Arc<Mutex<ServerConfig>>,
+    /// A Cancel for this session's schema graph read ([`Self::schema_graph`]).
+    graph: GraphCancel,
 }
 
 #[derive(Clone)]
@@ -1123,6 +1125,7 @@ impl Connection {
             client: Arc::new(Mutex::new(client)),
             route,
             server: Arc::new(Mutex::new(server.clone())),
+            graph: GraphCancel::default(),
         })
     }
 
@@ -1198,6 +1201,7 @@ impl Connection {
     /// request was delivered, never that anything stopped -- what the query
     /// eventually returned is the only account dbdelve gives of that.
     pub fn cancel(&self) -> Result<(), DbError> {
+        self.graph.ask();
         if let Route::Tunnel(tunnel) = &self.route {
             tunnel.dial()?;
         }
@@ -1499,11 +1503,23 @@ impl Connection {
         Ok(structure)
     }
 
+    /// A Cancel stops it before any of its statements as well as during one:
+    /// one that reaches the session while it is idle between them is dropped
+    /// by the server, and would let the rest run.
     pub fn schema_graph(&self, schema: &str) -> Result<SchemaGraph, DbError> {
-        let columns = self.internal_query(&schema_sql(GRAPH_COLUMNS_SQL, schema))?;
-        let unique_keys = self.internal_query(&schema_sql(GRAPH_UNIQUE_KEYS_SQL, schema))?;
-        let foreign_keys = self.internal_query(&schema_sql(GRAPH_FOREIGN_KEYS_SQL, schema))?;
-        assemble_schema_graph(schema, &columns, &unique_keys, &foreign_keys)
+        self.graph.read(|held| {
+            let query = |template| {
+                let held = Fetch {
+                    held: Some(held),
+                    ..Fetch::default()
+                };
+                self.run(&schema_sql(template, schema), false, held)
+            };
+            let columns = query(GRAPH_COLUMNS_SQL)?;
+            let unique_keys = query(GRAPH_UNIQUE_KEYS_SQL)?;
+            let foreign_keys = query(GRAPH_FOREIGN_KEYS_SQL)?;
+            assemble_schema_graph(schema, &columns, &unique_keys, &foreign_keys)
+        })
     }
 
     /// A view's options are its `WITH (…)`, its check option among them.
@@ -3389,6 +3405,24 @@ mod tests {
 
     #[test]
     #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_a_cancel_before_a_schema_graph_read_drops_it_unsent() {
+        // The server drops a cancel request that finds the session idle, so a
+        // Cancel that came before the read, or between its statements, is
+        // kept for it.
+        let side = Connection::open(&live_config())
+            .and_then(|profile| profile.alongside())
+            .expect("a side connection should open");
+        side.cancel().expect("the cancel request should send");
+        let error = side
+            .schema_graph("public")
+            .expect_err("the read should be dropped");
+        assert_eq!(error.message, "Cancelled before it was sent.");
+        // Not read again here: the server can deliver the cancel request late
+        // enough to stop whatever this session runs next.
+    }
+
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
     fn live_a_cancel_on_its_own_connection_stops_a_schema_graph_read() {
         // The read takes no lock a user's statement would hold, so a lock on
         // the catalog its key statement reads is what keeps it running long
@@ -3418,8 +3452,8 @@ mod tests {
             .expect("the dev role is a superuser");
         let reader = super::super::Connection::Postgres(side.clone());
         let read = std::thread::spawn(move || reader.schema_graph("public"));
-        // Cancelled once it waits on the lock: a cancel that reaches an idle
-        // session is not kept for the statement after it.
+        // Cancelled once it waits on the lock, so the cancel stops a running
+        // statement rather than refusing the next one unsent.
         let waiting = format!(
             "SELECT 1 FROM pg_catalog.pg_stat_activity \
              WHERE pid = {pid} AND wait_event_type = 'Lock'"

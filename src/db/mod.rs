@@ -13,6 +13,7 @@
 //! engine's catalog SQL aliases its columns to names chosen here rather than to
 //! its own.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -127,6 +128,28 @@ impl CancelToken {
             .collect();
         running.asked = true;
         Some(connections)
+    }
+}
+
+/// A Cancel kept for a schema graph read on Postgres, MySQL and SQL Server,
+/// whose several statements leave the session idle before and between them:
+/// a Cancel that lands there stops nothing, so the read's next statement
+/// takes it from here and is dropped unsent ([`Fetch::held`]). One with no
+/// read under way is kept for the next, as a plugin keeps one.
+#[derive(Clone, Default)]
+struct GraphCancel(Arc<AtomicBool>);
+
+impl GraphCancel {
+    fn ask(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    /// Runs a graph read whose statements are each held by `held`. A Cancel
+    /// that came while it ran was for it, so none outlives it.
+    fn read<T>(&self, read: impl FnOnce(&dyn Fn() -> bool) -> T) -> T {
+        let read = read(&|| !self.0.load(Ordering::SeqCst));
+        self.0.store(false, Ordering::SeqCst);
+        read
     }
 }
 
@@ -3600,6 +3623,24 @@ pub(crate) fn spawn(command: &mut std::process::Command) -> std::io::Result<std:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cancel_before_or_between_a_graph_reads_statements_holds_back_the_rest() {
+        let graph = GraphCancel::default();
+        graph.ask();
+        assert_eq!(graph.read(|held| [held(), held()]), [false, false]);
+        assert!(
+            graph.read(|held| held()),
+            "none outlives the read it was for"
+        );
+        let sent = graph.read(|held| {
+            let first = held();
+            graph.ask();
+            [first, held()]
+        });
+        assert_eq!(sent, [true, false]);
+        assert!(graph.read(|held| held()));
+    }
 
     #[test]
     fn a_bounded_feed_holds_a_push_past_its_bound_until_rows_are_taken() {

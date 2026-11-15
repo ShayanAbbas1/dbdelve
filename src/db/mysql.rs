@@ -29,9 +29,9 @@ use ::mysql::{Conn, OptsBuilder, SslOpts, Value};
 
 use super::tunnel::{Tunnel, tunnelled};
 use super::{
-    Catalog, Column, DbError, EditTarget, Engine, Fetch, Index, IndexKind, QueryResult, Reference,
-    RowBuilder, Schema, SchemaGraph, ServerConfig, Sizes, SslMode, Stopped, Structure,
-    assemble_catalog, assemble_databases, assemble_foreign_keys, assemble_references,
+    Catalog, Column, DbError, EditTarget, Engine, Fetch, GraphCancel, Index, IndexKind,
+    QueryResult, Reference, RowBuilder, Schema, SchemaGraph, ServerConfig, Sizes, SslMode, Stopped,
+    Structure, assemble_catalog, assemble_databases, assemble_foreign_keys, assemble_references,
     assemble_schema_graph, assemble_sizes, assemble_structure, non_utf8_error, optional_cell,
     plain_error, required_cell,
 };
@@ -603,6 +603,8 @@ pub struct Connection {
     /// this one is busy reading its rows. Opened the first time it is needed
     /// and kept, so a run does not pay for a connect.
     side: Arc<Mutex<Option<Conn>>>,
+    /// A Cancel for this session's schema graph read ([`Self::schema_graph`]).
+    graph: GraphCancel,
 }
 
 impl Connection {
@@ -624,6 +626,7 @@ impl Connection {
                 tunnel,
                 address,
                 side: Arc::default(),
+                graph: GraphCancel::default(),
             })
         })
     }
@@ -639,6 +642,7 @@ impl Connection {
         Ok(Self {
             connection_id: connection.connection_id(),
             connection: Arc::new(Mutex::new(connection)),
+            graph: GraphCancel::default(),
             ..self.clone()
         })
     }
@@ -667,6 +671,7 @@ impl Connection {
     /// regardless of whether this socket is still open. Leaving it unbounded
     /// only trades that for a background thread hung forever with no report.
     pub fn cancel(&self) -> Result<(), DbError> {
+        self.graph.ask();
         let server = &self.server;
         let dial = self.dial()?;
         let (mut connection, _) = open(server, self.engine, dial, false, |dial| {
@@ -965,6 +970,7 @@ impl Connection {
             tunnel: self.tunnel.clone(),
             address: self.address,
             side: Arc::default(),
+            graph: GraphCancel::default(),
         };
         assemble_sizes(
             side.internal_query(
@@ -1002,11 +1008,23 @@ impl Connection {
         Ok(structure)
     }
 
+    /// A Cancel stops it before any of its statements as well as during one:
+    /// a `KILL QUERY` that reaches the session while it is idle between them
+    /// stops nothing, and would let the rest run.
     pub fn schema_graph(&self, schema: &str) -> Result<SchemaGraph, DbError> {
-        let columns = self.internal_query(&graph_sql(GRAPH_COLUMNS_SQL, schema))?;
-        let unique_keys = self.internal_query(&graph_sql(GRAPH_UNIQUE_KEYS_SQL, schema))?;
-        let foreign_keys = self.internal_query(&graph_sql(GRAPH_FOREIGN_KEYS_SQL, schema))?;
-        assemble_schema_graph(schema, &columns, &unique_keys, &foreign_keys)
+        self.graph.read(|held| {
+            let query = |template| {
+                let held = Fetch {
+                    held: Some(held),
+                    ..Fetch::default()
+                };
+                self.run(&graph_sql(template, schema), false, held)
+            };
+            let columns = query(GRAPH_COLUMNS_SQL)?;
+            let unique_keys = query(GRAPH_UNIQUE_KEYS_SQL)?;
+            let foreign_keys = query(GRAPH_FOREIGN_KEYS_SQL)?;
+            assemble_schema_graph(schema, &columns, &unique_keys, &foreign_keys)
+        })
     }
 
     /// `SHOW CREATE TABLE` answers for a view too, with its `CREATE VIEW` in
@@ -2019,6 +2037,23 @@ mod tests {
         assert!(error.message.contains("interrupt"), "{}", error.message);
     }
 
+    fn live_a_cancel_before_a_schema_graph_read_drops_it_unsent(engine: Engine) {
+        // A `KILL QUERY` on an idle session stops nothing, so a Cancel that
+        // came before the read, or between its statements, is kept for it.
+        let side = live(engine)
+            .alongside()
+            .expect("a side connection should open");
+        side.cancel().expect("the KILL QUERY should send");
+        let error = side
+            .schema_graph("dbdelve_dev")
+            .expect_err("the read should be dropped");
+        assert_eq!(error.message, "Cancelled before it was sent.");
+        assert!(
+            side.schema_graph("dbdelve_dev").is_ok(),
+            "kept for one read"
+        );
+    }
+
     fn live_a_statement_timeout_bounds_a_select_and_a_write_only_on_mariadb(engine: Engine) {
         let config = live_config(engine);
         let connection = Connection::open(
@@ -2941,5 +2976,6 @@ mod tests {
         live_a_schema_graph_reads_the_seeds_keys_back,
         live_a_unique_index_on_a_prefix_makes_its_column_unique,
         live_a_cancel_on_its_own_connection_stops_a_catalog_statement,
+        live_a_cancel_before_a_schema_graph_read_drops_it_unsent,
     );
 }

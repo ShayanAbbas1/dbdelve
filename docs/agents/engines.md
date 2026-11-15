@@ -192,7 +192,12 @@ Decided, and not to be re-litigated:
   (`Connection::apart`) is the exception there: `schema_graph` registers it
   with Cancel, while it stays `Origin::Internal` for everything else, because
   closing that connection takes no session of the user's
-  (`live_a_cancel_on_its_own_connection_stops_a_schema_graph_read`). A
+  (`live_a_cancel_on_its_own_connection_stops_a_schema_graph_read`). Its
+  several statements leave the session idle before and between them, where a
+  Postgres cancel request or a MySQL `KILL QUERY` stops nothing and SQL Server
+  has nothing running to close, so on those three a Cancel is also kept
+  (`db::GraphCancel`) and the read's next statement is dropped unsent
+  (`live_a_cancel_before_a_schema_graph_read_drops_it_unsent`). A
   statement still waiting for the connection mutex behind one that is
   running, or for SQL Server's reconnect, is cancelled before it is ever sent
   (`InFlight::cancel_queued`, checked in

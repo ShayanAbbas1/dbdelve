@@ -34,7 +34,7 @@ use tracing::span;
 
 use super::tunnel::{Tunnel, tunnelled};
 use super::{
-    Catalog, Cell, Column, DbError, EditTarget, Engine, Fetch, QueryResult, Reference,
+    Catalog, Cell, Column, DbError, EditTarget, Engine, Fetch, GraphCancel, QueryResult, Reference,
     RelationKind, Row, SchemaGraph, ServerConfig, SslMode, Stopped, Structure, assemble_catalog,
     assemble_databases, assemble_foreign_keys, assemble_references, assemble_schema_graph,
     assemble_structure, create_table, plain_error, required_cell, terminated,
@@ -796,6 +796,9 @@ pub struct Connection {
     /// good rather than reconnecting, and has no session of the user's to
     /// report lost.
     alongside: bool,
+    /// A Cancel for this session's schema graph read ([`Self::schema_graph`]),
+    /// asked and taken under [`Self::in_flight`]'s lock.
+    graph: GraphCancel,
 }
 
 impl Connection {
@@ -807,6 +810,7 @@ impl Connection {
                 server: server.clone(),
                 tunnel,
                 alongside: false,
+                graph: GraphCancel::default(),
             };
             let mut session = connection.connect()?;
             // Asked even when the profile names one, for the server's spelling
@@ -883,6 +887,7 @@ impl Connection {
             session: Arc::new(Mutex::new(None)),
             in_flight: Arc::default(),
             alongside: true,
+            graph: GraphCancel::default(),
             ..self.clone()
         }
     }
@@ -901,6 +906,7 @@ impl Connection {
     /// says so and reconnects.
     pub fn cancel(&self) -> Result<(), DbError> {
         let mut in_flight = self.in_flight();
+        self.graph.ask();
         if !in_flight.running {
             // Waiting behind a catalog load: stopping the load would let the
             // statement run anyway.
@@ -980,7 +986,10 @@ impl Connection {
         let session = guard.as_mut().expect("connected above");
 
         if cancellable {
+            // Under the lock Cancel takes, so a Cancel either finds the
+            // statement running or keeps it from being sent.
             let mut in_flight = self.in_flight();
+            fetch.hold()?;
             in_flight.running = true;
             in_flight.stopped = false;
         }
@@ -1290,22 +1299,28 @@ impl Connection {
 
     /// Cancel stops it only on a connection of its own ([`Self::alongside`]):
     /// there the reset takes no session of the user's with it, while on the
-    /// profile's connection it is a catalog load like any other.
+    /// profile's connection it is a catalog load like any other. There it
+    /// stops it between its statements too, where nothing is running to stop.
     pub fn schema_graph(&self, schema: &str) -> Result<SchemaGraph, DbError> {
-        let query = |template: &str| {
-            self.run(
-                &template
-                    .replace("{type}", TYPE_SQL)
-                    .replace("{schema}", &Engine::SqlServer.quote_literal(schema)),
-                Origin::Internal,
-                Fetch::default(),
-                self.alongside,
-            )
-        };
-        let columns = query(GRAPH_COLUMNS_SQL)?;
-        let unique_keys = query(GRAPH_UNIQUE_KEYS_SQL)?;
-        let foreign_keys = query(GRAPH_FOREIGN_KEYS_SQL)?;
-        assemble_schema_graph(schema, &columns, &unique_keys, &foreign_keys)
+        self.graph.read(|held| {
+            let query = |template: &str| {
+                self.run(
+                    &template
+                        .replace("{type}", TYPE_SQL)
+                        .replace("{schema}", &Engine::SqlServer.quote_literal(schema)),
+                    Origin::Internal,
+                    Fetch {
+                        held: Some(held),
+                        ..Fetch::default()
+                    },
+                    self.alongside,
+                )
+            };
+            let columns = query(GRAPH_COLUMNS_SQL)?;
+            let unique_keys = query(GRAPH_UNIQUE_KEYS_SQL)?;
+            let foreign_keys = query(GRAPH_FOREIGN_KEYS_SQL)?;
+            assemble_schema_graph(schema, &columns, &unique_keys, &foreign_keys)
+        })
     }
 
     fn structure_for(&self, schema: &str, relation: &str, ddl: bool) -> Result<Structure, DbError> {
@@ -4906,6 +4921,28 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_cancel_before_a_schema_graph_read_drops_it_unsent() {
+        // Between its statements nothing is running for Cancel to close, so a
+        // Cancel then, or before the first, is kept for the next.
+        let side = live().alongside();
+        side.query("SELECT 1", Fetch::default()).unwrap();
+        side.cancel().unwrap();
+        let error = side
+            .schema_graph("dbo")
+            .expect_err("the read should be dropped");
+        assert_eq!(error.message, "Cancelled before it was sent.");
+        assert!(side.schema_graph("dbo").is_ok(), "kept for one read");
+
+        let profile = live();
+        profile.cancel().unwrap();
+        assert!(
+            profile.schema_graph("dbo").is_ok(),
+            "on the profile's connection it is a catalog load Cancel leaves alone"
+        );
+    }
+
+    #[test]
     fn a_cancel_while_a_side_connection_signs_in_stops_its_schema_graph_read() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -4918,6 +4955,7 @@ mod tests {
             .unwrap(),
             tunnel: None,
             alongside: true,
+            graph: GraphCancel::default(),
         };
         let reader = side.clone();
         let read = std::thread::spawn(move || reader.schema_graph("dbo"));
@@ -4947,6 +4985,7 @@ mod tests {
             .unwrap(),
             tunnel: None,
             alongside: false,
+            graph: GraphCancel::default(),
         };
         let user = connection.clone();
         let run = std::thread::spawn(move || user.query("SELECT 1", Fetch::default()));
