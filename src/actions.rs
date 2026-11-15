@@ -7,7 +7,9 @@
 use gpui::{Action, actions};
 use serde::Deserialize;
 
-use crate::{db::ExplainMode, export::RowsAs, filter::Operator, import::Source, sql::Mode};
+use crate::{
+    db::ExplainMode, export::RowsAs, filter::Operator, import::Source, session::EditMode, sql::Mode,
+};
 
 /// A header click. The column is the one in the grid; which statement it
 /// belongs to is whatever surface is in front, because that is the grid the
@@ -123,6 +125,13 @@ pub(crate) struct CustomRowLimit {
 #[action(namespace = dbdelve, no_json)]
 pub(crate) struct SetQueryLimit {
     pub(crate) rows: Option<usize>,
+}
+
+/// How the view in front sends its edits, picked from the status bar's menu.
+#[derive(Clone, PartialEq, Eq, Deserialize, Action)]
+#[action(namespace = dbdelve, no_json)]
+pub(crate) struct SetEditMode {
+    pub(crate) mode: EditMode,
 }
 
 /// Ask the server how it would run the statement under the cursor. The mode

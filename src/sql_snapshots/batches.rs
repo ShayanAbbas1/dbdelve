@@ -3,7 +3,7 @@ use super::{
     statement_with,
 };
 use crate::{
-    db::{Engine, UpdateSpelling},
+    db::{Engine, Target, UpdateSpelling},
     import_rows::{Json, Value},
     redis_cmd::edit::{INTEGER, STRING},
     result_grid::{NewValue, PendingRow},
@@ -604,4 +604,47 @@ fn appended_statements_per_engine() {
         }
     }
     check("batches_appended", &out);
+}
+
+/// A Row send writes its `UPDATE` through the draft's writers over one row, so
+/// it is one statement wherever Row mode is offered, and the read of its row is
+/// cut from the gated text: there is a read exactly where the gate admits the
+/// write, and it passes the select gate. Engines are the ones whose target
+/// answers `row_edits`, never a list of this test's own.
+///
+/// A relation whose name the gate does not read is refused as a draft's apply
+/// refuses it (`dbdelve refused to run a statement it wrote itself`), and sends
+/// nothing; `plain`, `reserved` and `mixed case` are admitted everywhere, which
+/// keeps the loop from passing by refusing every name.
+#[test]
+fn a_row_sends_update_is_one_gated_statement_wherever_row_mode_is_offered() {
+    let engines: Vec<_> = Engine::ALL
+        .into_iter()
+        .filter(|engine| Target::built_in(*engine).row_edits())
+        .collect();
+    assert!(engines.len() > 1, "{engines:?}");
+    for engine in engines {
+        let types = column_types_of(engine);
+        for (case, schema, table) in RELATIONS {
+            let sets = [("Name", set("it's")), ("payload", NewValue::Default)];
+            let row = [pending(schema, table, &sets, &KEY, &types)];
+            let at = format!("{engine:?} {case}");
+            let text = sql::update_batch(engine, &row).unwrap_or_else(|why| panic!("{at}: {why}"));
+            assert_eq!(
+                sql::Buffer::for_engine(engine, &text).statements().len(),
+                1,
+                "{at}: {text}"
+            );
+            assert!(!sql::is_transaction_bracket(&text), "{at}: {text}");
+            let admitted = sql::is_generated_write_on(engine, &text);
+            let read = sql::row_read(engine, &text);
+            assert_eq!(read.is_some(), admitted, "{at}: {text}");
+            if let Some(read) = read {
+                assert!(sql::is_generated_select(engine, &read), "{at}: {read}");
+            }
+            if ["plain", "reserved", "mixed case"].contains(&case) {
+                assert!(admitted, "{at}: {text}");
+            }
+        }
+    }
 }

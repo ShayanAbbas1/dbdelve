@@ -9,6 +9,7 @@ use gpui_component::input::{CompletionProvider, EditorState};
 
 use super::*;
 use crate::filter::{refusal, shape_value};
+use crate::session::AfterEdits;
 
 impl Workspace {
     /// Run a relation's statement again. The rows are a snapshot, and this is
@@ -21,6 +22,12 @@ impl Workspace {
     /// stale one are not a fresh answer. A structure tab holds nothing else,
     /// so the structure is all it refreshes.
     pub(crate) fn refresh_relation(&mut self, id: u64, cx: &mut Context<Self>) {
+        // First, before the notice, the structure load, the count and `stale`
+        // change: a refresh asked of a tab holding edits and then cancelled
+        // would leave the next visit re-reading it.
+        if self.held_for_edits(Tab::Object(id), AfterEdits::Refresh, cx) {
+            return;
+        }
         self.clear_notice();
         if let Some((schema, relation)) = self
             .profile()
@@ -92,14 +99,24 @@ impl Workspace {
     /// state there is: the expression is derived here rather than kept beside
     /// them, so the controls on screen and the statement that ran cannot
     /// disagree.
-    pub(crate) fn apply_filter(&mut self, id: u64, cx: &mut Context<Self>) {
-        self.clear_notice();
+    ///
+    /// `before` is the bars as they were when the caller changed them: put
+    /// back by Cancel if the tab's edits are what stops the filter running.
+    pub(crate) fn apply_filter(
+        &mut self,
+        id: u64,
+        before: Option<Vec<FilterRow>>,
+        cx: &mut Context<Self>,
+    ) {
         let engine = self.engine();
         let Some(derived) = self.profile().and_then(|profile| {
             let tab = profile.session.objects.iter().find(|tab| tab.id == id)?;
             match &tab.body {
                 ObjectBody::Relation {
-                    filters, structure, ..
+                    filters,
+                    structure,
+                    filter,
+                    ..
                 } => {
                     let columns = match structure {
                         StructureState::Loaded(structure) => structure.columns.as_slice(),
@@ -108,7 +125,7 @@ impl Workspace {
                     let bars = filter_bars(filters);
                     Some(match refusal(engine, &bars) {
                         Some(sentence) => Err(sentence),
-                        None => Ok(derived_filter(engine, &bars, columns)),
+                        None => Ok((derived_filter(engine, &bars, columns), filter.clone())),
                     })
                 }
                 ObjectBody::Routine(_)
@@ -118,10 +135,18 @@ impl Workspace {
         }) else {
             return;
         };
-        let derived = match derived {
+        let (derived, current) = match derived {
             Ok(derived) => derived,
             Err(sentence) => return self.note(sentence.to_string(), cx),
         };
+        // A filter the tab already has runs nothing, as `changed_filter` will
+        // say, so it asks nothing either.
+        if current.trim() != derived.trim()
+            && self.held_for_edits(Tab::Object(id), AfterEdits::Filter { before }, cx)
+        {
+            return;
+        }
+        self.clear_notice();
         self.requery_relation(
             id,
             move |filter, _, _, offset| changed_filter(filter, offset, &derived),
@@ -150,7 +175,7 @@ impl Workspace {
                 }
                 self.note(sentence.to_string(), cx);
             }
-            _ => self.apply_filter(id, cx),
+            (_, before) => self.apply_filter(id, before, cx),
         }
     }
 
@@ -356,8 +381,9 @@ impl Workspace {
         let Some(filters) = self.filter_rows_mut(id) else {
             return;
         };
+        let before = filters.clone();
         filters.clear();
-        self.apply_filter(id, cx);
+        self.apply_filter(id, Some(before), cx);
         cx.notify();
     }
 

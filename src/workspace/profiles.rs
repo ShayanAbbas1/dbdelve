@@ -11,7 +11,7 @@ use crate::connection_form::{ConnectionTest, Reported, duplicate_profile_name, k
 use crate::db::{ExternalConfig, PasswordCommand, Plugin};
 use crate::explorer::Shortcuts;
 use crate::import::{self, Source};
-use crate::session::{Bound, BoundSession, STALE_ROWS, restored_shortcuts};
+use crate::session::{Bound, BoundSession, EditMode, STALE_ROWS, restored_shortcuts};
 use crate::sidebar::OPEN_ROWS_CAP;
 use crate::sql::{Destructive, Mode};
 
@@ -152,6 +152,8 @@ impl Workspace {
             sidebar_density: Some(self.settings.density.slug().into()),
             sidebar_show_host: Some(self.settings.show_host),
             sidebar_show_sizes: Some(self.settings.show_sizes),
+            edit_mode: (self.settings.edit_mode != EditMode::default())
+                .then(|| self.settings.edit_mode.slug().into()),
             custom_keybindings: Some(self.settings.custom_keybindings.clone()),
             theme_opacity: Some(self.settings.theme_opacity.clone()),
         };
@@ -976,6 +978,14 @@ impl Workspace {
         profile.name = name;
         profile.color = color;
         profile.config = config;
+        // The tabs stay open on the new target, so a view in a mode it does
+        // not offer is put in the one it does, as a new tab's is.
+        let target = profile.config.target();
+        for tab in &mut profile.session.objects {
+            if let ObjectBody::Relation { edit_mode, .. } = &mut tab.body {
+                *edit_mode = edit_mode.on(target);
+            }
+        }
 
         // Only what was typed. A blank field is not an instruction to forget the
         // stored password.

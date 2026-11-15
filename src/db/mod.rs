@@ -59,6 +59,8 @@ pub use graph::{GraphColumn, KeyTarget, SchemaGraph};
 pub use graph::{GraphKey, GraphTable};
 pub use password_command::{PasswordCommand, loggable_error};
 pub use plugin::Plugin;
+#[cfg(test)]
+pub(crate) use snowflake::mock as snowflake_mock;
 pub use ssh::askpass;
 
 pub use mongo::MongoConfig;

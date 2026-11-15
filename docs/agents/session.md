@@ -527,6 +527,120 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   must not reach the server unasked. Rows are reordered in place rather than
   through a display permutation, so every row index in the grid names the row
   on screen; pending edits move with their rows.
+- **A view's edit mode is its own (`session::EditMode`).** `Classic`, the
+  default, is how editing worked before a view had a mode: cell edits are held
+  until Save shows their `UPDATE`s (the buffer on a query tab, the review on a
+  table). `Draft` holds every edit until Apply goes through the review; `Row`
+  sends a row's `UPDATE` as the row is left or saved, with no dialog
+  (`AGENTS.md` hard rule 1 says what that send still passes). It lives on a
+  relation tab beside `sorting`, is switched from the status bar's
+  `Edit: <mode>` menu (`actions::SetEditMode`) or the palette, starts from the
+  Default edit mode setting (`StoredSettings::edit_mode`, `Classic` unless
+  chosen, and the only part of this that is persisted; a slug this build
+  cannot read is `Classic`), and the menu is offered on every target whose
+  relations are edited (`Target::edits_relations()`). Row is among its modes
+  only where `Target::row_edits()` holds (`EditMode::on` turns Row into Draft
+  anywhere else, and `EditMode::offered` is what it leaves): Postgres, MySQL,
+  MariaDB, SQLite, DuckDB and SQL Server. A Snowflake or Turso table has no
+  menu, for the reason in the next bullet. A profile saved onto another
+  target puts each open table in a mode that target offers
+  (`Workspace::save_profile`). Staged edits are never turned into Row sends by
+  a switch: a switch into Row is refused
+  while the grid holds edits, so a multi-row draft is not sent unreviewed one
+  row at a time (`Workspace::set_edit_mode`). Cell edits carry between Classic
+  and Draft.
+
+  The one writer of a Row send is `Workspace::save_row`; Save and the funnel
+  are its callers. The funnel is `ResultGrid::take_left_row`, which marks the
+  row the ring leaves while it holds edits or an input, and
+  `Workspace::flush_left_row`, which consumes the mark in the grid's selection
+  events and sends only in a Row view. The send is `Refresh::Row`: it writes
+  the `UPDATE` and, in the same background task, reads the row back by its key
+  (`sql::row_read`). The landing replaces that row where it stands
+  (`ResultGrid::replace_row`) and clears the cells that were sent
+  (`clear_sent`), so a cell staged while the send was out stays staged. The
+  grid knows the cells that are out (`ResultGrid::begin_send` to `end_send`):
+  one put back to its fetched value meanwhile stays staged, since the landing
+  writes the sent value over it, and is dropped if the send is refused; Esc
+  leaves that row alone until the server answers. A vanished or unreadable
+  row has its sent cells cleared all the same and reads the table again
+  instead, unless a row of the tab still holds edits: that read would send
+  them, and nothing is sent without the user's act, so those rows are kept,
+  the tab is marked stale and the status line says the rows were not read
+  again. A read-back is
+  checked with `sql::is_generated_select` where it runs; one that fails the
+  gate is not run and leaves the tab stale. A send is refused while a review
+  covers the tab, and a tab sends one row at a time.
+
+  A refused send (the server's, the gate's, or a mode that stopped it) never
+  sets `Failed`. The row keeps its edits and is marked with the message
+  (`ResultGrid::send_failure`, drawn on its number), the ring goes back to it
+  (`result_grid::snap_back`) unless the user has moved on, and Esc puts the row
+  back as fetched (`Workspace::revert_active_row`).
+
+  Every action that would replace or leave the rows saves the dirty row first
+  and goes ahead only when that save lands: a page turn, row limit, sort,
+  filter, refresh, tab switch, tab close, a switch to Draft. This is
+  `Workspace::held_for_edits`' Row branch, so a Row view meets the discard
+  prompt the next bullets describe only over a row the server has refused. The
+  action travels with the send as data (`Refresh::Row::then`, an `AfterEdits`)
+  and is released by the landing into `Session::resume_after`, which render
+  drains through `Workspace::resume_released`; only a write that landed releases
+  it, and every other way it can be dropped (a refused or stopped send, a
+  closed connection, a landing behind another connection, an action already
+  waiting, the prompts being cleared) restores what the action had already
+  changed (`Session::put_back`).
+
+  A row the server refused stays marked until it is edited, reverted or sent,
+  so an action that meets the mark does not send the row again: it raises the
+  Discard / Cancel prompt (`PendingDiscard::row`). Discard drops that row's
+  edits alone and carries the action out, which sends any other dirty row
+  first; Cancel keeps everything. The refusal's notice says Esc puts the row
+  back.
+
+  An `UPDATE` matches on the key alone, in both modes. A row changed on the
+  server since it was fetched is overwritten, and nothing detects it: a stale
+  edit (`StaleEdit`) is not drift detection.
+- **An edit send keeps the grid, on a transactional SQL engine.** Where the
+  target answers `Target::row_edits()`, a statement dbdelve sends for a grid
+  edit (an Apply edits batch, an Insert, a Delete row) leaves the rows, the
+  ring and the pending edits where they are until the server answers, because
+  the error pane that `QueryState::Failed` draws would cover the rows the
+  edits are staged on. A failure or a refusal puts the tab's state back and is
+  shown in the review (`ApplyReview::error`) or, with none over the tab, in the
+  tab's notice, never as `Failed`. A success clears the cells it sent, read off
+  the grid when it was sent (`ApplyReview::edits` says whether a reviewed send
+  carried the draft), and re-reads; when edits remain (an Insert or Delete over
+  a draft, an edit staged while the batch was in flight) it keeps them and does
+  not re-read. On every other target (ClickHouse, MongoDB, Redis, Generic SQL,
+  a plugin, Snowflake, Turso) an edit send clears the grid as it starts and a failure
+  is `QueryState::Failed`: a batch with no transaction that failed part way has
+  already applied some of a draft, and keeping it would send those rows again.
+  Snowflake and Turso are out of the Row-mode set (no Draft or Row control on
+  their tables) because their results are never editable: Snowflake's keys are
+  not enforced, and Turso's driver names no column's table.
+- **A requery over a draft asks first.** An action that would replace a grid's
+  rows over cell edits nobody has applied asks Discard / Cancel and does
+  nothing until answered. `Workspace::held_for_edits` is the one guard,
+  `session::AfterEdits` what it parks on `PendingDiscard` (the action's own
+  values, as data, never a closure), and `resume_after_edits` runs it once
+  Discard has emptied every grid the question read (`Session::tab_grids`: the
+  slot, a lent slot and each finished result of a queue). It stands in
+  `requery_relation` (page turn, Go to page, row limit, a relation's header
+  sort, the filter bars), `refresh_relation` (Refresh, Run on an object tab,
+  the palette), `apply_filter`, `set_view_sorting`, a query tab's header sort,
+  `run_query` and `rerun_queued`. It is asked on every target whatever the send
+  does there, because a requery replaces a draft the same way on all of them,
+  and it is asked before any state moves: `requery_relation` asks its `change`
+  of copies, the others at their own entry, and a filter bar changed by its
+  caller is put back on Cancel (`AfterEdits::Filter { before }`, also when
+  `clear_prompts` drops the prompt). An action that would change nothing, or a
+  sort done in memory, asks nothing. While the tab's edits are in flight the
+  action is neither run nor parked and the status line says so. A stale or
+  restored tab with edits is not reloaded on a visit (`load_relation` returns,
+  leaving `stale` set). `execute_and_then` is the fallback: a run with no
+  refresh and no explain over a grid holding edits is not sent and the tab's
+  notice says so, so a path nobody guarded costs a notice, not a draft.
 - **`queries` can be empty.** Any buffer can be closed, the last one
   included, and a profile with no tab open shows an empty pane and relaunches
   that way. A new connection, and one written before buffers were tabs, opens
@@ -541,7 +655,7 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   explicit Delete (the sidebar row's menu, or "Delete saved query…" in the
   palette, both through one dialog) removes it. Deleting a query whose tab is
   open closes that tab, its text with it; a tab holding cell edits nobody
-  applied asks first, as any close does (`PendingDiscard::deleting`), and the
+  applied asks first, as any close does (`AfterEdits::Close { deleting }`), and the
   file stays until it is told. A file already removed outside the app counts
   as deleted, so its stale library row and open tab can still be removed.
   Rename… on a sidebar row turns the row into a field

@@ -1182,6 +1182,42 @@ pub fn row_guard(engine: Engine, statement: &str) -> Option<String> {
     is_generated_select(engine, &guard).then_some(guard)
 }
 
+/// `SELECT * FROM <t> WHERE <p>` for one generated `UPDATE`: the read that
+/// brings back the row it wrote, so the grid shows what the server now holds
+/// and not what was typed (a column's affinity, a default, a trigger).
+///
+/// `<t>` and `<p>` are cut from the tree the write gate reads, never from the
+/// generator's word, and only from a statement the gate admits whose predicate
+/// is a conjunction of one-row terms. The assignments are not inspected: the
+/// gate has already read them, and a `DEFAULT` among them is no reason to leave
+/// the row unread. `None` for anything else -- more than one statement, a
+/// statement that is not an `UPDATE` -- and for a read [`is_generated_select`]
+/// does not admit: a caller that gets no read sends nothing.
+///
+/// ClickHouse's `ALTER TABLE … UPDATE` is read as the update it is, so it has a
+/// read too; no Row send is made there (`Target::row_edits`).
+pub(crate) fn row_read(engine: Engine, statement: &str) -> Option<String> {
+    if engine.syntax() != Syntax::Sql {
+        return None;
+    }
+    let spec = &engine.spec().sql;
+    if is_transaction_bracket(statement) || !generated_write(spec, statement) {
+        return None;
+    }
+    let text = as_written(spec, statement)?;
+    let tree = parse_gated(&text, spec)?;
+    let [one] = only_statement(&tree.root_node())?;
+    let (table, _, filter) = update_parts(one)?;
+    let predicate = predicate_of(filter)?;
+    row_columns(spec, predicate, &text)?;
+    let read = format!(
+        "SELECT * FROM {} WHERE {}",
+        text.get(table.byte_range())?,
+        text.get(predicate.byte_range())?
+    );
+    is_generated_select(engine, &read).then_some(read)
+}
+
 /// Whether `sql` is a `SELECT` dbdelve could have written: exactly one root
 /// statement, a query, with nothing destructive anywhere under it.
 ///
@@ -1418,14 +1454,12 @@ fn one_row_delete(statement: Node) -> Option<(Node, Node)> {
     Some((*relation, predicate_of(*filter)?))
 }
 
-/// The table and the predicate of `UPDATE <t> SET <c> = <v>, … WHERE <p>`
-/// where each `<v>` is a literal or `NULL` and no column is set twice, and
-/// nothing else in `statement`: no alias, `FROM`, `RETURNING` or expression.
-fn one_row_update<'tree>(
-    spec: &SqlSpec,
+/// The table, the assignments and the `where` node of `UPDATE <t> SET … WHERE …`
+/// and nothing else in `statement`: no alias, `FROM` or `RETURNING`. What the
+/// assignments hold, and what the `where` holds, are the callers' to read.
+fn update_parts<'tree>(
     statement: Node<'tree>,
-    sql: &str,
-) -> Option<(Node<'tree>, Node<'tree>)> {
+) -> Option<(Node<'tree>, Vec<Node<'tree>>, Node<'tree>)> {
     let mut cursor = statement.walk();
     let parts: Vec<_> = statement.named_children(&mut cursor).collect();
     let [update] = parts.as_slice() else {
@@ -1453,9 +1487,20 @@ fn one_row_update<'tree>(
     {
         return None;
     }
+    Some((*table, assignments.to_vec(), *filter))
+}
 
+/// The table and the predicate of `UPDATE <t> SET <c> = <v>, … WHERE <p>`
+/// where each `<v>` is a literal or `NULL` and no column is set twice, and
+/// nothing else in `statement`: no alias, `FROM`, `RETURNING` or expression.
+fn one_row_update<'tree>(
+    spec: &SqlSpec,
+    statement: Node<'tree>,
+    sql: &str,
+) -> Option<(Node<'tree>, Node<'tree>)> {
+    let (table, assignments, filter) = update_parts(statement)?;
     let mut columns = Vec::new();
-    for assignment in assignments {
+    for assignment in &assignments {
         let mut cursor = assignment.walk();
         let sides: Vec<_> = assignment.children(&mut cursor).collect();
         let [left, equals, right] = sides.as_slice() else {
@@ -1470,9 +1515,9 @@ fn one_row_update<'tree>(
         columns.push(column_name(*left, sql)?);
     }
     distinct(&columns)?;
-    let predicate = predicate_of(*filter)?;
+    let predicate = predicate_of(filter)?;
     row_columns(spec, predicate, sql)?;
-    Some((*table, predicate))
+    Some((table, predicate))
 }
 
 /// The predicate of a `where` node holding nothing but `WHERE <p>`.
@@ -7220,6 +7265,66 @@ mod tests {
             assert_eq!(row_guard(Engine::Postgres, refused), None, "{refused}");
         }
         assert_eq!(row_guard(Engine::MongoDb, "db.t.deleteOne({_id: 1})"), None);
+    }
+
+    #[test]
+    fn a_row_read_is_cut_from_the_gated_update() {
+        use crate::db::Target;
+
+        let engines: Vec<_> = Engine::ALL
+            .into_iter()
+            .filter(|engine| Target::built_in(*engine).row_edits())
+            .collect();
+        assert!(engines.len() > 1, "{engines:?}");
+        for engine in engines {
+            for sets in [
+                vec![("name", set("wren")), ("note", set("it's"))],
+                vec![("name", set("wren")), ("note", NewValue::Default)],
+                vec![("name", NewValue::Null), ("note", set("x"))],
+            ] {
+                for keys in [vec![("id", "7")], vec![("id", "7"), ("rev", "2")]] {
+                    let row = pending_row(&sets, &keys);
+                    let update = update_batch(engine, std::slice::from_ref(&row)).unwrap();
+                    let predicate = update
+                        .trim_end_matches(';')
+                        .rsplit_once(" WHERE ")
+                        .unwrap()
+                        .1
+                        .to_string();
+                    let table = engine.spec().qualified("public", "accounts");
+                    let read = row_read(engine, &update)
+                        .unwrap_or_else(|| panic!("{engine:?} read nothing of {update}"));
+                    assert_eq!(
+                        read,
+                        format!("SELECT * FROM {table} WHERE {predicate}"),
+                        "{engine:?}"
+                    );
+                    assert!(is_generated_select(engine, &read), "{engine:?} {read}");
+                }
+            }
+        }
+
+        let engine = Engine::Postgres;
+        let one = pending_row(&[("name", set("a"))], &[("id", "1")]);
+        let two = pending_row(&[("name", set("b"))], &[("id", "2")]);
+        let batch = update_batch(engine, &[one, two]).unwrap();
+        let delete = delete_row(engine, "public", "accounts", &[("id", "1")], &[]).unwrap();
+        let insert = insert_row(engine, "public", "accounts", &[("name", Some("a"))], &[]).unwrap();
+        for refused in [
+            batch.as_str(),
+            delete.as_str(),
+            insert.as_str(),
+            "UPDATE t SET a = a + 1 WHERE id = 1",
+            "UPDATE t SET a = '1' WHERE id > '7'",
+            "SELECT * FROM t WHERE id = '7'",
+            "BEGIN",
+        ] {
+            assert_eq!(row_read(engine, refused), None, "{refused}");
+        }
+        assert_eq!(
+            row_read(Engine::MongoDb, "db.t.updateOne({_id: 1}, {$set: {a: 1}})"),
+            None
+        );
     }
 
     fn set(value: &str) -> NewValue {

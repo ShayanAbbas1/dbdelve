@@ -867,6 +867,7 @@ impl Workspace {
             Command::NodeAction(node, action) => self.run_node_action(&node, action, window, cx),
             Command::SelectionAction(action) => self.run_selection_action(action, window, cx),
             Command::SetViewSorting(client) => self.set_view_sorting(client, window, cx),
+            Command::SetEditMode(mode) => self.set_edit_mode(mode, cx),
             Command::FollowForeignKey => self.follow_foreign_key(&FollowForeignKey, window, cx),
             // The button only adds the bar, and the pointer that pressed it
             // goes on to click into it; the keyboard has to be put there.

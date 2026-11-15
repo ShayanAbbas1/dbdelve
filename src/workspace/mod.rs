@@ -31,6 +31,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::export::ClipboardFormat;
 use gpui_component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
+use gpui_component::tooltip::Tooltip;
 
 pub(crate) use diagrams::{SideRead, drawn_in_diagrams};
 pub(crate) use import_dialog::PreviewGrid;
@@ -80,6 +81,9 @@ pub(crate) struct Settings {
     /// holds rather than by asking the server again. Off by default, which is
     /// how every tab sorted before this was a choice.
     pub(crate) client_sort: bool,
+    /// The edit mode a new table tab starts in. Classic by default, which is
+    /// how editing worked before a view had a mode.
+    pub(crate) edit_mode: EditMode,
     /// Whether completing a relation writes it as `schema.relation`, for
     /// databases whose search path does not reach every schema.
     pub(crate) qualify_completions: bool,
@@ -140,6 +144,7 @@ impl Default for Settings {
             check_for_updates: true,
             color_titlebar: true,
             client_sort: false,
+            edit_mode: EditMode::Classic,
             qualify_completions: false,
             alias_completions: true,
             run_unreadable: false,
@@ -680,6 +685,8 @@ impl Workspace {
                     stored_settings.check_for_updates.unwrap_or(true);
                 workspace.settings.color_titlebar = stored_settings.color_titlebar.unwrap_or(true);
                 workspace.settings.client_sort = stored_settings.client_sort.unwrap_or(false);
+                workspace.settings.edit_mode =
+                    EditMode::from_slug(stored_settings.edit_mode.as_deref());
                 workspace.settings.qualify_completions =
                     stored_settings.qualify_completions.unwrap_or(false);
                 workspace.settings.alias_completions =
@@ -1363,6 +1370,17 @@ impl Workspace {
         cx.notify();
     }
 
+    /// The edit mode a new table tab starts in. Not applied to the tabs already
+    /// open, each of which holds its own.
+    pub(crate) fn set_default_edit_mode(&mut self, mode: EditMode, cx: &mut Context<Self>) {
+        if self.settings.edit_mode == mode {
+            return;
+        }
+        self.settings.edit_mode = mode;
+        self.remember_profiles(cx);
+        cx.notify();
+    }
+
     pub(crate) fn set_run_unreadable(&mut self, run: bool, cx: &mut Context<Self>) {
         if self.settings.run_unreadable == run {
             return;
@@ -1662,12 +1680,14 @@ impl Render for Workspace {
         if self.form.is_some() && self.settings_open {
             self.drop_settings(window, cx);
         }
-        // Both deferred to render for the `&mut Window` a background task
-        // does not have: a connect finds the picked database gone, and the
+        // All three deferred to render for the `&mut Window` a background task
+        // does not have: a connect finds the picked database gone, the
         // catalog that names these tabs resolves, off-thread, and neither a
-        // tab can be closed nor a grid built without a window.
+        // tab can be closed nor a grid built without a window, and a row send
+        // that landed releases the action it was sent for.
         self.leave_database_left_behind(window, cx);
         self.restore_objects(window, cx);
+        self.resume_released(window, cx);
         self.sync_page_input(window, cx);
         self.sync_row_panel_filter(window, cx);
         self.sync_row_panel_inputs(window, cx);
@@ -1986,6 +2006,8 @@ impl Render for Workspace {
         let paging =
             running.or_else(|| views::render_paging(profile, self.custom_limit.as_ref(), cx));
         let view_sorting = views::render_view_sorting(profile, cx);
+        let edit_mode = views::render_edit_mode(profile, cx);
+        let apply_label = views::apply_label(views::view_edit_mode(profile));
         let hidden_columns = views::render_hidden_columns(profile, cx);
         let relation = profile
             .session
@@ -2250,6 +2272,7 @@ impl Render for Workspace {
             || notice.is_some()
             || paging.is_some()
             || view_sorting.is_some()
+            || edit_mode.is_some()
             || hidden_columns.is_some()
             || query_status.is_some()
             || refreshable_snapshot
@@ -2257,8 +2280,12 @@ impl Render for Workspace {
             || structure_copies.is_some()
             || has_pending;
 
+        // The narrowest a notice is cut to before the bar gives way elsewhere.
+        const NOTICE_MIN_WIDTH: f32 = 120.;
+
         let results_status = bar_has_content.then(|| {
             div()
+                .debug_selector(|| "status-bar".into())
                 .h(px(layout::chrome(layout::STATUS_HEIGHT)))
                 .flex_shrink_0()
                 .border_t_1()
@@ -2271,10 +2298,17 @@ impl Render for Workspace {
                 .px(px(layout::SPACE_MD))
                 .bg(t.data_glass())
                 .children(inline_status)
+                // What a keystroke will do to the database, kept whole outside
+                // the side that gives way, so the bar cuts the Sort menu first.
+                .children(edit_mode)
+                // Clips what it has no room for, so it never draws over what
+                // follows it.
                 .child(
                     div()
+                        .debug_selector(|| "status-left".into())
                         .flex_1()
                         .min_w_0()
+                        .overflow_hidden()
                         .flex()
                         .items_center()
                         .gap(px(layout::SPACE_SM))
@@ -2289,14 +2323,24 @@ impl Render for Workspace {
                         }))
                         .children(count_control)
                         .children(export_status)
+                        // Whatever width the rest leaves, so a notice is cut
+                        // only when the bar is full, and then its tooltip has
+                        // all of it.
                         .children(notice.map(|notice| {
+                            let whole = one_line(&notice);
                             div()
-                                .min_w_0()
+                                .id("status-notice")
+                                .debug_selector(|| "status-notice".into())
+                                .flex_1()
+                                .min_w(px(layout::chrome(NOTICE_MIN_WIDTH)))
                                 .overflow_hidden()
                                 .text_ellipsis()
                                 .whitespace_nowrap()
                                 .text_color(t.text_muted)
-                                .child(one_line(&notice))
+                                .child(whole.clone())
+                                .tooltip(move |window, cx| {
+                                    Tooltip::new(whole.clone()).build(window, cx)
+                                })
                         })),
                 )
                 // Between two sides that share the free space equally, so
@@ -2471,30 +2515,43 @@ impl Render for Workspace {
                                     ),
                                 )
                                 .into_any_element()
-                        }))
-                        .children(has_pending.then(|| {
+                        })),
+                )
+                // Against the edge and never narrowed: a full bar takes its
+                // room from the status and the two sides above before it
+                // reaches the buttons that apply or drop the pending edits.
+                .children(has_pending.then(|| {
+                    div()
+                        .debug_selector(|| "status-pending".into())
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .gap(px(layout::SPACE_SM))
+                        .child(
                             button("discard-edits", "Discard", Tone::Quiet, Control::Compact, t)
+                                .debug_selector(|| "discard-edits".into())
                                 .on_click(move |_, window, cx| {
                                     _ = discard_workspace.update(cx, |workspace, cx| {
                                         workspace.discard_edits(&DiscardEdits, window, cx);
                                     });
-                                })
-                        }))
-                        .children(has_pending.then(|| {
+                                }),
+                        )
+                        .child(
                             button(
                                 "apply-edits",
-                                "Apply edits",
+                                apply_label,
                                 Tone::Primary,
                                 Control::Compact,
                                 t,
                             )
+                            .debug_selector(|| "apply-edits".into())
                             .on_click(move |_, window, cx| {
                                 _ = apply_workspace.update(cx, |workspace, cx| {
                                     workspace.apply_edits(&ApplyEdits, window, cx);
                                 });
-                            })
-                        })),
-                )
+                            }),
+                        )
+                }))
         });
 
         let content = div()
@@ -2649,6 +2706,7 @@ impl Render for Workspace {
                     .on_action(cx.listener(Self::copy_plan_action))
                     .on_action(cx.listener(Self::set_row_limit))
                     .on_action(cx.listener(Self::set_query_limit))
+                    .on_action(cx.listener(Self::pick_edit_mode))
                     .on_action(cx.listener(Self::custom_row_limit))
                     .on_action(cx.listener(Self::refresh_active_relation))
                     .on_action(cx.listener(Self::next_page))
