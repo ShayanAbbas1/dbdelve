@@ -2211,7 +2211,8 @@ impl DiagramView {
 
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             if !t.is_glass {
-                paint_dots(bounds, transform, t, window);
+                // The dots never overlap, so they share one draw order.
+                window.paint_layer(bounds, |window| paint_dots(bounds, transform, t, window));
             }
 
             let canvas_tone: Hsla = t.panel_glass().into();
@@ -2255,233 +2256,242 @@ impl DiagramView {
                     Detail::Keys => 8.0,
                     Detail::Names => 6.0,
                 });
-                if !t.is_glass && detail != Detail::Names {
-                    window.paint_drop_shadows(
-                        card_bounds,
-                        radius.into(),
-                        &[BoxShadow {
-                            color: t.scrim().into(),
-                            offset: point(px(0.0), px(2.0)),
-                            blur_radius: px(8.0),
-                            spread_radius: px(-2.0),
-                            inset: false,
-                        }],
-                    );
-                }
-                let focused = focus == Some(card);
-                window.paint_quad(quad(
-                    card_bounds,
-                    radius,
-                    Hsla::from(t.overlay_glass()),
-                    px(match focused {
-                        true => 2.0,
-                        false => 1.0,
-                    }),
-                    match focused {
-                        true => Hsla::from(t.accent),
-                        false => Hsla::from(t.border),
-                    },
-                    BorderStyle::Solid,
-                ));
-                let header_height = match detail {
-                    Detail::Names => rect.height * zoom,
-                    _ => HEADER_HEIGHT * zoom,
-                };
-                let header = Bounds {
-                    origin: top_left,
-                    size: size(card_bounds.size.width, px(header_height)),
-                };
-                window.paint_quad(quad(
-                    header,
-                    gpui::Corners {
-                        top_left: radius,
-                        top_right: radius,
-                        bottom_left: match detail {
-                            Detail::Names => radius,
-                            _ => px(0.0),
-                        },
-                        bottom_right: match detail {
-                            Detail::Names => radius,
-                            _ => px(0.0),
-                        },
-                    },
-                    Hsla::from(t.element_hover),
-                    px(0.0),
-                    Hsla::from(t.border),
-                    BorderStyle::Solid,
-                ));
-
-                let pad = CARD_PAD * zoom;
-                let name_size = geometry::text_size(zoom, layout::chrome(layout::TEXT_MD));
-                let (title, title_ellipsis) = label(
-                    lines,
-                    stamp,
-                    &inks,
-                    ready.name(card),
-                    Pen::new(Face::Title, name_size, dimmed),
-                    window,
-                );
-                let room = header.size.width - px(2.0 * pad);
-                let title_fit = fit(&title, &title_ellipsis, room);
-                if detail != Detail::Names || title_fit.shows(MIN_NAME_CHARS, starts(&title)) {
-                    paint_label(
-                        &title,
-                        &title_ellipsis,
-                        title_fit,
-                        point(header.origin.x + px(pad), header.origin.y),
-                        header.size.height,
-                        window,
-                        cx,
-                    );
-                }
-                if detail == Detail::Names
-                    && title_fit != Fit::Whole
-                    && hover == Some(Hover::Card(card))
-                {
-                    unnamed = Some((card, card_bounds));
-                }
-
-                let Subject::Table(table) = layout.cards[card as usize].subject else {
-                    continue;
-                };
-                let columns = &ready.graph.tables[table as usize].columns;
-                let type_size = geometry::text_size(zoom, layout::grid(layout::TEXT_SM));
-                let (column_pen, type_pen) = (
-                    Pen::new(Face::Column, name_size, dimmed),
-                    Pen::new(Face::Type, type_size, dimmed),
-                );
-                for row in layout.rows(card, detail) {
-                    let column = &columns[row.column as usize];
-                    let row_bounds = Bounds {
-                        origin: to_screen(Point::new(row.rect.x, row.rect.y)),
-                        size: size(px(row.rect.width * zoom), px(row.rect.height * zoom)),
-                    };
-                    if washed.contains(&(card, row.column)) {
-                        window.paint_quad(quad(
-                            row_bounds,
-                            px(0.0),
-                            Hsla::from(inks.accent.alpha(JOINED_ROW_WASH)),
-                            px(0.0),
-                            Hsla::from(t.border),
-                            BorderStyle::Solid,
-                        ));
+                // One draw order for the whole card, rather than a lookup in the
+                // scene's bounds for each quad and glyph. Its parts are drawn in
+                // kind order at that order (shadow, quads, then text and icons)
+                // and quads in the order painted, which is how they stack.
+                window.paint_layer(card_bounds, |window| {
+                    if !t.is_glass && detail != Detail::Names {
+                        window.paint_drop_shadows(
+                            card_bounds,
+                            radius.into(),
+                            &[BoxShadow {
+                                color: t.scrim().into(),
+                                offset: point(px(0.0), px(2.0)),
+                                blur_radius: px(8.0),
+                                spread_radius: px(-2.0),
+                                inset: false,
+                            }],
+                        );
                     }
-                    let icon_size = (name_size * 0.9).min(row.rect.height * zoom * 0.7);
-                    let icon_at = point(
-                        row_bounds.origin.x + px(pad),
-                        row_bounds.origin.y + (row_bounds.size.height - px(icon_size)) / 2.0,
-                    );
-                    let marker = match (column.primary, column.foreign) {
-                        (true, _) => Some((icon::PRIMARY_KEY, inks.accent)),
-                        (false, true) => Some((icon::LINK, inks.syntax_type)),
-                        _ => None,
+                    let focused = focus == Some(card);
+                    window.paint_quad(quad(
+                        card_bounds,
+                        radius,
+                        Hsla::from(t.overlay_glass()),
+                        px(match focused {
+                            true => 2.0,
+                            false => 1.0,
+                        }),
+                        match focused {
+                            true => Hsla::from(t.accent),
+                            false => Hsla::from(t.border),
+                        },
+                        BorderStyle::Solid,
+                    ));
+                    let header_height = match detail {
+                        Detail::Names => rect.height * zoom,
+                        _ => HEADER_HEIGHT * zoom,
                     };
-                    if let Some((path, colour)) = marker {
-                        let colour: Hsla = match dimmed {
-                            true => colour.alpha(DIM).into(),
-                            false => colour.into(),
-                        };
-                        let _ = window.paint_svg(
-                            Bounds {
-                                origin: icon_at,
-                                size: size(px(icon_size), px(icon_size)),
+                    let header = Bounds {
+                        origin: top_left,
+                        size: size(card_bounds.size.width, px(header_height)),
+                    };
+                    window.paint_quad(quad(
+                        header,
+                        gpui::Corners {
+                            top_left: radius,
+                            top_right: radius,
+                            bottom_left: match detail {
+                                Detail::Names => radius,
+                                _ => px(0.0),
                             },
-                            SharedString::from(path),
-                            None,
-                            TransformationMatrix::unit(),
-                            colour,
+                            bottom_right: match detail {
+                                Detail::Names => radius,
+                                _ => px(0.0),
+                            },
+                        },
+                        Hsla::from(t.element_hover),
+                        px(0.0),
+                        Hsla::from(t.border),
+                        BorderStyle::Solid,
+                    ));
+
+                    let pad = CARD_PAD * zoom;
+                    let name_size = geometry::text_size(zoom, layout::chrome(layout::TEXT_MD));
+                    let (title, title_ellipsis) = label(
+                        lines,
+                        stamp,
+                        &inks,
+                        ready.name(card),
+                        Pen::new(Face::Title, name_size, dimmed),
+                        window,
+                    );
+                    let room = header.size.width - px(2.0 * pad);
+                    let title_fit = fit(&title, &title_ellipsis, room);
+                    if detail != Detail::Names || title_fit.shows(MIN_NAME_CHARS, starts(&title)) {
+                        paint_label(
+                            &title,
+                            &title_ellipsis,
+                            title_fit,
+                            point(header.origin.x + px(pad), header.origin.y),
+                            header.size.height,
+                            window,
                             cx,
                         );
                     }
-                    let name_x = icon_at.x + px(icon_size + ICON_GAP * zoom);
-                    let right = row_bounds.origin.x + row_bounds.size.width - px(pad);
-                    let mut room = right - name_x;
-                    let (name, name_ellipsis) =
-                        label(lines, stamp, &inks, column.name.clone(), column_pen, window);
-                    if detail.types() {
-                        let type_label = match column.nullable {
-                            true => ready.nullable_types[column.type_label as usize].clone(),
-                            false => ready.graph.types[column.type_label as usize].clone(),
+                    if detail == Detail::Names
+                        && title_fit != Fit::Whole
+                        && hover == Some(Hover::Card(card))
+                    {
+                        unnamed = Some((card, card_bounds));
+                    }
+
+                    let Subject::Table(table) = layout.cards[card as usize].subject else {
+                        return;
+                    };
+                    let columns = &ready.graph.tables[table as usize].columns;
+                    let type_size = geometry::text_size(zoom, layout::grid(layout::TEXT_SM));
+                    let (column_pen, type_pen) = (
+                        Pen::new(Face::Column, name_size, dimmed),
+                        Pen::new(Face::Type, type_size, dimmed),
+                    );
+                    for row in layout.rows(card, detail) {
+                        let column = &columns[row.column as usize];
+                        let row_bounds = Bounds {
+                            origin: to_screen(Point::new(row.rect.x, row.rect.y)),
+                            size: size(px(row.rect.width * zoom), px(row.rect.height * zoom)),
                         };
-                        let (label, label_ellipsis) =
-                            label(lines, stamp, &inks, type_label, type_pen, window);
-                        let gap = ICON_GAP * zoom;
-                        let label_room = geometry::type_room(
-                            f32::from(room),
-                            f32::from(name.width()),
-                            f32::from(label.width()),
-                            gap,
+                        if washed.contains(&(card, row.column)) {
+                            window.paint_quad(quad(
+                                row_bounds,
+                                px(0.0),
+                                Hsla::from(inks.accent.alpha(JOINED_ROW_WASH)),
+                                px(0.0),
+                                Hsla::from(t.border),
+                                BorderStyle::Solid,
+                            ));
+                        }
+                        let icon_size = (name_size * 0.9).min(row.rect.height * zoom * 0.7);
+                        let icon_at = point(
+                            row_bounds.origin.x + px(pad),
+                            row_bounds.origin.y + (row_bounds.size.height - px(icon_size)) / 2.0,
                         );
-                        let label_fit = fit(&label, &label_ellipsis, px(label_room));
-                        let drawn = px(label_fit
-                            .width(f32::from(label.width()), f32::from(label_ellipsis.width())));
+                        let marker = match (column.primary, column.foreign) {
+                            (true, _) => Some((icon::PRIMARY_KEY, inks.accent)),
+                            (false, true) => Some((icon::LINK, inks.syntax_type)),
+                            _ => None,
+                        };
+                        if let Some((path, colour)) = marker {
+                            let colour: Hsla = match dimmed {
+                                true => colour.alpha(DIM).into(),
+                                false => colour.into(),
+                            };
+                            let _ = window.paint_svg(
+                                Bounds {
+                                    origin: icon_at,
+                                    size: size(px(icon_size), px(icon_size)),
+                                },
+                                SharedString::from(path),
+                                None,
+                                TransformationMatrix::unit(),
+                                colour,
+                                cx,
+                            );
+                        }
+                        let name_x = icon_at.x + px(icon_size + ICON_GAP * zoom);
+                        let right = row_bounds.origin.x + row_bounds.size.width - px(pad);
+                        let mut room = right - name_x;
+                        let (name, name_ellipsis) =
+                            label(lines, stamp, &inks, column.name.clone(), column_pen, window);
+                        if detail.types() {
+                            let type_label = match column.nullable {
+                                true => ready.nullable_types[column.type_label as usize].clone(),
+                                false => ready.graph.types[column.type_label as usize].clone(),
+                            };
+                            let (label, label_ellipsis) =
+                                label(lines, stamp, &inks, type_label, type_pen, window);
+                            let gap = ICON_GAP * zoom;
+                            let label_room = geometry::type_room(
+                                f32::from(room),
+                                f32::from(name.width()),
+                                f32::from(label.width()),
+                                gap,
+                            );
+                            let label_fit = fit(&label, &label_ellipsis, px(label_room));
+                            let drawn = px(label_fit.width(
+                                f32::from(label.width()),
+                                f32::from(label_ellipsis.width()),
+                            ));
+                            paint_label(
+                                &label,
+                                &label_ellipsis,
+                                label_fit,
+                                point(right - drawn, row_bounds.origin.y),
+                                row_bounds.size.height,
+                                window,
+                                cx,
+                            );
+                            if drawn > px(0.0) {
+                                room -= drawn + px(gap);
+                            }
+                        }
                         paint_label(
-                            &label,
-                            &label_ellipsis,
-                            label_fit,
-                            point(right - drawn, row_bounds.origin.y),
+                            &name,
+                            &name_ellipsis,
+                            fit(&name, &name_ellipsis, room),
+                            point(name_x, row_bounds.origin.y),
                             row_bounds.size.height,
                             window,
                             cx,
                         );
-                        if drawn > px(0.0) {
-                            room -= drawn + px(gap);
+                    }
+                    if let Some(more) = layout.more(card, detail) {
+                        let row_bounds = Bounds {
+                            origin: to_screen(Point::new(more.rect.x, more.rect.y)),
+                            size: size(px(more.rect.width * zoom), px(more.rect.height * zoom)),
+                        };
+                        // A key into a column the cut hid ends here, so this row
+                        // is what lights for it.
+                        if washed.iter().any(|&(washed_card, column)| {
+                            washed_card == card
+                                && layout.row_of(card, column, detail) == Some(more.row)
+                        }) {
+                            window.paint_quad(quad(
+                                row_bounds,
+                                px(0.0),
+                                Hsla::from(inks.accent.alpha(JOINED_ROW_WASH)),
+                                px(0.0),
+                                Hsla::from(t.border),
+                                BorderStyle::Solid,
+                            ));
                         }
+                        let text = more_labels
+                            .entry(more.hidden)
+                            .or_insert_with(|| format!("+{} more", more.hidden).into())
+                            .clone();
+                        let (line, ellipsis) = label(
+                            lines,
+                            stamp,
+                            &inks,
+                            text,
+                            Pen::new(Face::More, name_size, dimmed),
+                            window,
+                        );
+                        let icon_size = (name_size * 0.9).min(more.rect.height * zoom * 0.7);
+                        let x = row_bounds.origin.x + px(pad + icon_size + ICON_GAP * zoom);
+                        let room = row_bounds.origin.x + row_bounds.size.width - px(pad) - x;
+                        paint_label(
+                            &line,
+                            &ellipsis,
+                            fit(&line, &ellipsis, room),
+                            point(x, row_bounds.origin.y),
+                            row_bounds.size.height,
+                            window,
+                            cx,
+                        );
                     }
-                    paint_label(
-                        &name,
-                        &name_ellipsis,
-                        fit(&name, &name_ellipsis, room),
-                        point(name_x, row_bounds.origin.y),
-                        row_bounds.size.height,
-                        window,
-                        cx,
-                    );
-                }
-                if let Some(more) = layout.more(card, detail) {
-                    let row_bounds = Bounds {
-                        origin: to_screen(Point::new(more.rect.x, more.rect.y)),
-                        size: size(px(more.rect.width * zoom), px(more.rect.height * zoom)),
-                    };
-                    // A key into a column the cut hid ends here, so this row
-                    // is what lights for it.
-                    if washed.iter().any(|&(washed_card, column)| {
-                        washed_card == card && layout.row_of(card, column, detail) == Some(more.row)
-                    }) {
-                        window.paint_quad(quad(
-                            row_bounds,
-                            px(0.0),
-                            Hsla::from(inks.accent.alpha(JOINED_ROW_WASH)),
-                            px(0.0),
-                            Hsla::from(t.border),
-                            BorderStyle::Solid,
-                        ));
-                    }
-                    let text = more_labels
-                        .entry(more.hidden)
-                        .or_insert_with(|| format!("+{} more", more.hidden).into())
-                        .clone();
-                    let (line, ellipsis) = label(
-                        lines,
-                        stamp,
-                        &inks,
-                        text,
-                        Pen::new(Face::More, name_size, dimmed),
-                        window,
-                    );
-                    let icon_size = (name_size * 0.9).min(more.rect.height * zoom * 0.7);
-                    let x = row_bounds.origin.x + px(pad + icon_size + ICON_GAP * zoom);
-                    let room = row_bounds.origin.x + row_bounds.size.width - px(pad) - x;
-                    paint_label(
-                        &line,
-                        &ellipsis,
-                        fit(&line, &ellipsis, room),
-                        point(x, row_bounds.origin.y),
-                        row_bounds.size.height,
-                        window,
-                        cx,
-                    );
-                }
+                });
             }
             if let Some((card, under)) = unnamed {
                 let size = layout::chrome(layout::TEXT_MD);
