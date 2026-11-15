@@ -81,6 +81,12 @@ pub(crate) struct Profile {
     /// queue's reads would not see. Read off what was sent, not asked of the
     /// server; cleared by a `COMMIT` or `ROLLBACK`, and on connect.
     pub(crate) in_transaction: bool,
+    /// Every statement the next `COMMIT` or `ROLLBACK` on the connection's
+    /// session ends: the user's statements and dbdelve's edits applied on that
+    /// session, but never dbdelve's reads, for the Auto prompt to list. Held in memory only and never written to the
+    /// history file, `profiles.toml` or any log, since it is SQL text that
+    /// ends with its session. Emptied with [`Profile::in_transaction`].
+    pub(crate) transaction_statements: Vec<String>,
     /// Whether each of the user's statements commits on its own. Off means
     /// dbdelve keeps a transaction open for them, opening it by writing a
     /// `BEGIN` into the buffer where they can read it -- never onto the wire
@@ -196,6 +202,48 @@ impl Profile {
         })
     }
 
+    /// Keeps `sql`, which was just sent on the connection's own session, in
+    /// [`Profile::transaction_statements`] when the next `COMMIT` or
+    /// `ROLLBACK` will end it. `transaction` is what `sql::Leaves` says the
+    /// submission does to the transaction: `Some(false)` ends one and empties
+    /// the record, `Some(true)` leaves one open and starts the record again
+    /// with what this submission runs after its last end when the open
+    /// transaction really ended, and
+    /// `None` appends only while one is open. Called before [`Profile::in_transaction`] is
+    /// updated for the same submission, because it reads whether a
+    /// transaction was open before it.
+    pub(crate) fn record_sent(&mut self, sql: &str, transaction: Option<bool>) {
+        match transaction {
+            Some(false) => self.transaction_statements.clear(),
+            // The record must hold everything the next COMMIT ends, so it
+            // restarts only when the open transaction really ended: none was
+            // open, this submission ends one before opening the next, or the
+            // engine commits at a BEGIN. Where that cannot be told, it
+            // appends: a list showing a statement already committed is wrong
+            // on the safe side, and one dropping a statement still to be
+            // committed is not.
+            Some(true) => {
+                let engine = self.config.engine();
+                if crate::sql::ends_transaction(engine, sql) {
+                    // Only what follows the last end belongs to the new
+                    // transaction: the `COMMIT;` Manual sends ahead of its
+                    // `BEGIN;` closed the one before.
+                    let rest = crate::sql::after_last_end(engine, sql);
+                    self.transaction_statements = match rest.is_empty() {
+                        true => Vec::new(),
+                        false => vec![rest.to_string()],
+                    };
+                } else if !self.in_transaction || engine.begin_ends_open_transaction() {
+                    self.transaction_statements = vec![sql.to_string()];
+                } else {
+                    self.transaction_statements.push(sql.to_string());
+                }
+            }
+            None if self.in_transaction => self.transaction_statements.push(sql.to_string()),
+            None => {}
+        }
+    }
+
     /// Why a queue of reads on this connection runs in turn rather than at
     /// once, said to the user when one does.
     pub(crate) fn in_turn(&self) -> Option<&'static str> {
@@ -286,6 +334,22 @@ impl Profile {
             ProfileState::Connected(connection) => connection.draws_diagrams(target),
             _ => target.draws_diagrams(),
         }
+    }
+
+    /// Why an edit of dbdelve's is not sent on the connection's own session:
+    /// a transaction of the user's is open on it and the batch brackets itself
+    /// (`sql::update_batch` on MySQL, MariaDB, SQLite and SQL Server), so its
+    /// `COMMIT` would end the user's -- and on MySQL and MariaDB its opening
+    /// `START TRANSACTION` would commit it first. A single statement carries
+    /// no bracket and joins the transaction, as the user's own would.
+    pub(crate) fn own_write_refusal(&self, sql: &str) -> Option<String> {
+        (self.in_transaction && crate::sql::ends_transaction(self.config.engine(), sql)).then(
+            || {
+                "Not sent: a transaction is open on this connection, and the batch of edits \
+                 would end it with a COMMIT of its own."
+                    .into()
+            },
+        )
     }
 
     pub(crate) fn connection(&self) -> Option<Connection> {
@@ -572,6 +636,13 @@ pub(crate) struct Session {
     /// The tab a close is asking about, because it holds cell edits nobody
     /// has applied.
     pub(crate) pending_discard: Option<PendingDiscard>,
+    /// The question turning auto-commit back on asks while a transaction is
+    /// open: commit it, roll it back, or leave it.
+    pub(crate) auto_commit_prompt: Option<AutoCommitPrompt>,
+    /// The tab the Auto dialog's COMMIT or ROLLBACK is running in. Auto is
+    /// read only once that statement lands, because the switch is not
+    /// allowed to say Auto over a transaction the server still holds.
+    pub(crate) auto_after_end: Option<Tab>,
     pub(crate) notice: Option<String>,
     /// What a statement's run cost beyond its result (`QueryResult::notice`),
     /// said only while the tab it ran on is in front, under any `notice`.
@@ -1042,6 +1113,8 @@ impl Session {
             query_rename: None,
             query_rename_needs_focus: false,
             pending_discard: None,
+            auto_commit_prompt: None,
+            auto_after_end: None,
             notice,
             tab_notice: None,
             apply_review: None,
@@ -1465,6 +1538,7 @@ impl Session {
         self.query_rename = None;
         self.query_rename_needs_focus = false;
         self.pending_discard = None;
+        self.auto_commit_prompt = None;
         self.naming = false;
         self.save_name_needs_focus = false;
         // A stopped statement must not survive a tab or profile switch and get
@@ -1520,6 +1594,12 @@ pub(crate) enum PendingDelete {
 pub(crate) struct PendingDiscard {
     pub(crate) tab: Tab,
     pub(crate) deleting: Option<String>,
+}
+
+/// The question Auto asks while a transaction is open, and whether its list
+/// of the statements that transaction has run is open.
+pub(crate) struct AutoCommitPrompt {
+    pub(crate) statements_shown: bool,
 }
 
 /// What takes focus when a surface comes to the front. A buffer, a field and a

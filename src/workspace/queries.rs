@@ -2114,6 +2114,13 @@ impl Workspace {
         let generation = profile.generation;
         let read_only = profile.mode == Mode::ReadOnly;
         let alongside = lane.is_some();
+        let edit = matches!(
+            refresh,
+            Some(Refresh::Statement(_) | Refresh::Earlier { .. } | Refresh::Relation(_))
+        );
+        // An edit of dbdelve's on the connection's own session: not sent when
+        // its own brackets would end the user's open transaction.
+        let refusal = edit.then(|| profile.own_write_refusal(&sql)).flatten();
         // A statement the user typed as an `EXPLAIN` is theirs, run and kept in
         // the history as typed; only its answer goes where the Explain
         // command's does. Not in a queue, where every result holds a grid.
@@ -2330,12 +2337,35 @@ impl Workspace {
         };
         // Marked on the way out, like the history: a statement that failed
         // part way may still have opened a transaction.
+        // What a lone COMMIT or ROLLBACK cleared, kept to put back when it
+        // fails where the engine keeps the transaction (SQLite's
+        // `SQLITE_BUSY`): it is read off what was sent, not off what the
+        // server did.
+        let mut ended = None;
         if !generated && let Some(profile) = self.issued_to(&id, generation) {
-            let leaves = sql::leaves(engine, explained.as_deref().unwrap_or(&sql));
+            let text = explained.as_deref().unwrap_or(&sql);
+            let leaves = sql::leaves(engine, text);
+            if leaves.transaction == Some(false)
+                && profile.in_transaction
+                && sql::after_last_end(engine, text).is_empty()
+            {
+                ended = Some(std::mem::take(&mut profile.transaction_statements));
+            }
+            profile.record_sent(&sql, leaves.transaction);
             if let Some(open) = leaves.transaction {
                 profile.in_transaction = open;
             }
             profile.session_changed |= leaves.settings;
+        }
+        // An edit dbdelve applies on the connection's own session runs inside
+        // the user's open transaction and is committed or rolled back with it,
+        // so the prompt that ends it lists it. Its reads stay out.
+        if generated
+            && edit
+            && refusal.is_none()
+            && let Some(profile) = self.issued_to(&id, generation)
+        {
+            profile.record_sent(&sql, None);
         }
         // A plan is never cut short: its rows are the plan, not data.
         let limit = match tab {
@@ -2420,10 +2450,14 @@ impl Workspace {
                 reads_only,
                 held: None,
             };
-            let result = match (generated, alongside) {
-                (true, _) => connection.generated(&sql, &cancel, fed.as_ref(), preview_limit),
-                (false, false) => connection.query(&sql, &cancel, fetch),
-                (false, true) => connection.query_alongside(&sql, &cancel, fetch, read_only),
+            let result = match (refusal, generated, alongside) {
+                (Some(message), _, _) => Err(DbError {
+                    message,
+                    position: None,
+                }),
+                (None, true, _) => connection.generated(&sql, &cancel, fed.as_ref(), preview_limit),
+                (None, false, false) => connection.query(&sql, &cancel, fetch),
+                (None, false, true) => connection.query_alongside(&sql, &cancel, fetch, read_only),
             };
             // A connection of the lane's own that failed is gone with it, and
             // says nothing about the profile's.
@@ -2528,6 +2562,29 @@ impl Workspace {
                                     .and_then(|query| query.queue.as_mut())
                             {
                                 queue.remaining.clear();
+                            }
+                        }
+                        // Settled here, before a tab closed under the run can
+                        // end the block: whether the end really ended anything
+                        // is only known now.
+                        let ended_ok = result.is_ok();
+                        // Put back only where the engine says the failed end
+                        // left the transaction open; a guess would keep a
+                        // flag no COMMIT could clear, or offer a Roll Back
+                        // for work the server had already rolled back.
+                        if let Some(statements) = ended
+                            && !lost
+                            && result.as_ref().err().is_some_and(|error| {
+                                engine.failed_end_keeps_transaction(&error.message)
+                            })
+                        {
+                            profile.in_transaction = true;
+                            profile.transaction_statements = statements;
+                        }
+                        if profile.session.auto_after_end == Some(tab) {
+                            profile.session.auto_after_end = None;
+                            if ended_ok {
+                                profile.auto_commit = true;
                             }
                         }
                         let Some((state, results)) = profile.session.slot_at(tab, lane.as_ref())

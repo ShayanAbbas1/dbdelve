@@ -6101,3 +6101,665 @@ fn ssm_wrong_executable_offers_picker_before_installation_guide(cx: &mut TestApp
         quit(workspace, cx);
     });
 }
+
+/// The SQLite profile of `launch_on_sqlite_holding` over an empty table `t`,
+/// in Full so the tests' own writes run without a prompt.
+fn launch_on_a_writable_t(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext) {
+    let (workspace, cx) = launch_on_sqlite_holding(cx, "create table t (id integer);");
+    workspace.update(cx, |workspace, cx| {
+        workspace.set_mode(crate::sql::Mode::Full, cx)
+    });
+    settle(cx);
+    (workspace, cx)
+}
+
+/// Runs `sql` in the query tab in front, and waits for the answer.
+fn run_in_front(workspace: &Entity<Workspace>, cx: &mut VisualTestContext, sql: &str) {
+    cx.update(|window, cx| {
+        let editor = workspace
+            .read(cx)
+            .profile()
+            .and_then(|profile| profile.session.active_query_tab())
+            .expect("a connected profile opens on a query tab")
+            .editor
+            .clone();
+        editor.update(cx, |input, cx| input.set_value(sql, window, cx));
+    });
+    cx.dispatch_action(crate::actions::RunQuery);
+    settle(cx);
+    query_tab(workspace, cx, |tab, _, _| match &tab.query {
+        QueryState::Complete { .. } => {}
+        QueryState::Failed(error) => panic!("{sql} failed: {error}"),
+        _ => panic!("{sql} never completed"),
+    });
+}
+
+/// What the profile in front has recorded of the statements its open
+/// transaction has run on the connection's own session.
+fn recorded_statements(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Vec<String> {
+    workspace.read_with(cx, |workspace, _| {
+        workspace
+            .profile()
+            .expect("a profile is in front")
+            .transaction_statements
+            .clone()
+    })
+}
+
+/// The transaction state of the profile in front: its auto-commit switch, an
+/// open transaction, and how many statements its history holds.
+fn transaction_state(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) -> (bool, bool, usize) {
+    workspace.read_with(cx, |workspace, _| {
+        let profile = workspace.profile().expect("a profile is in front");
+        (
+            profile.auto_commit,
+            profile.in_transaction,
+            profile.session.history.len(),
+        )
+    })
+}
+
+/// The first cell of the result in the query tab in front.
+fn answer(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Option<String> {
+    query_tab(workspace, cx, |tab, _, cx| {
+        let grid = tab.results.read(cx);
+        let result = grid.delegate().result();
+        result.rows.first()?.get(0).map(str::to_string)
+    })
+}
+
+/// Which of `selectors` are drawn.
+fn drawn(cx: &mut VisualTestContext, selectors: &[&'static str]) -> Vec<bool> {
+    selectors
+        .iter()
+        .map(|selector| cx.debug_bounds(selector).is_some())
+        .collect()
+}
+
+/// Clicks the control drawn under `selector` where it is, as a person does.
+fn click_selector(cx: &mut VisualTestContext, selector: &'static str) {
+    let bounds = cx
+        .debug_bounds(selector)
+        .unwrap_or_else(|| panic!("{selector} is not drawn"));
+    cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+    settle(cx);
+}
+
+/// The last statement of `text`, split on the terminator and trimmed.
+fn last_statement(text: &str) -> String {
+    text.split(';')
+        .map(str::trim)
+        .rfind(|statement| !statement.is_empty())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Flips the auto-commit switch, as its chord does.
+fn toggle_auto_commit(cx: &mut VisualTestContext) {
+    cx.dispatch_action(crate::actions::ToggleAutoCommit);
+    settle(cx);
+}
+
+/// The connection holding Manual's transaction open with `statement` run in
+/// it.
+fn manual_with_open_transaction(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    statement: &str,
+) {
+    toggle_auto_commit(cx);
+    let (auto_commit, open, _) = transaction_state(workspace, cx);
+    assert!(!auto_commit && open, "the BEGIN ran");
+    run_in_front(workspace, cx, statement);
+}
+
+/// Applies `sql` from the tab in front as an edit does, reading back
+/// `SELECT count(*) FROM t` once it lands.
+fn apply_from_the_front_tab(workspace: &Entity<Workspace>, cx: &mut VisualTestContext, sql: &str) {
+    use crate::session::Refresh;
+    let tab = workspace.read_with(cx, |workspace, _| {
+        workspace.profile().unwrap().session.active
+    });
+    workspace.update(cx, |workspace, cx| {
+        workspace.execute_unchecked(
+            sql.into(),
+            tab,
+            Some(Refresh::Statement("SELECT count(*) FROM t".into())),
+            false,
+            None,
+            None,
+            cx,
+        );
+    });
+    settle(cx);
+}
+
+#[gpui::test]
+fn the_open_transactions_statements_are_recorded_from_its_begin_to_its_end(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        assert!(
+            recorded_statements(&workspace, cx).is_empty(),
+            "nothing is open at the start"
+        );
+
+        run_in_front(&workspace, cx, "BEGIN");
+        assert_eq!(recorded_statements(&workspace, cx), ["BEGIN"], "the BEGIN");
+        run_in_front(&workspace, cx, "INSERT INTO t VALUES (1)");
+        run_in_front(&workspace, cx, "SELECT count(*) FROM t");
+        assert_eq!(
+            recorded_statements(&workspace, cx),
+            [
+                "BEGIN",
+                "INSERT INTO t VALUES (1)",
+                "SELECT count(*) FROM t"
+            ],
+            "the statements after the BEGIN, in order"
+        );
+
+        run_in_front(&workspace, cx, "COMMIT");
+        assert!(
+            recorded_statements(&workspace, cx).is_empty(),
+            "the COMMIT ended the transaction"
+        );
+        run_in_front(&workspace, cx, "SELECT 1");
+        assert!(
+            recorded_statements(&workspace, cx).is_empty(),
+            "a statement outside a transaction is not recorded"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_begin_inside_an_open_transaction_keeps_its_statements_unless_the_transaction_ended(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        run_in_front(&workspace, cx, "BEGIN");
+        run_in_front(&workspace, cx, "INSERT INTO t VALUES (1)");
+        assert_eq!(recorded_statements(&workspace, cx).len(), 2);
+
+        // As a BEGIN the server warns about and ignores would arrive: the
+        // transaction it sits in is still open, and its COMMIT still ends
+        // everything before it.
+        workspace.update(cx, |workspace, _| {
+            workspace
+                .profile_mut()
+                .unwrap()
+                .record_sent("BEGIN", Some(true));
+        });
+        assert_eq!(
+            recorded_statements(&workspace, cx),
+            ["BEGIN", "INSERT INTO t VALUES (1)", "BEGIN"],
+            "a BEGIN that ends nothing is appended"
+        );
+
+        // A COMMIT and a BEGIN in one submission: the open transaction ended.
+        workspace.update(cx, |workspace, _| {
+            workspace
+                .profile_mut()
+                .unwrap()
+                .record_sent("COMMIT;\n\nBEGIN;", Some(true));
+        });
+        assert_eq!(
+            recorded_statements(&workspace, cx),
+            ["BEGIN;"],
+            "a submission that ends one and opens the next starts the record again \
+             with the new transaction's BEGIN, not the COMMIT that closed the old"
+        );
+        run_in_front(&workspace, cx, "ROLLBACK");
+        assert!(recorded_statements(&workspace, cx).is_empty());
+
+        // Manual's own reopen, as the controls send it.
+        toggle_auto_commit(cx);
+        assert_eq!(recorded_statements(&workspace, cx), ["BEGIN"], "Manual");
+        run_in_front(&workspace, cx, "INSERT INTO t VALUES (2)");
+        assert_eq!(recorded_statements(&workspace, cx).len(), 2);
+        cx.dispatch_action(crate::actions::CommitTransaction);
+        settle(cx);
+        assert_eq!(
+            recorded_statements(&workspace, cx),
+            ["BEGIN;"],
+            "Manual's COMMIT and reopen leave only the BEGIN that opened the next transaction"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn an_edit_joins_the_recorded_transaction_only_while_one_is_open_and_a_reconnect_empties_it(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        let apply = |cx: &mut VisualTestContext| {
+            apply_from_the_front_tab(&workspace, cx, "INSERT INTO t VALUES (7)");
+            query_tab(&workspace, cx, |tab, _, _| match &tab.query {
+                QueryState::Complete { .. } => {}
+                _ => panic!("the edit never completed"),
+            });
+        };
+        apply(cx);
+        assert!(
+            recorded_statements(&workspace, cx).is_empty(),
+            "an edit with no transaction open is committed on its own, and not listed"
+        );
+
+        run_in_front(&workspace, cx, "BEGIN");
+        apply(cx);
+        assert_eq!(
+            recorded_statements(&workspace, cx),
+            [
+                "BEGIN",
+                "INSERT INTO t VALUES (7)",
+                // The tab's own statement run again to show the change: the
+                // user's statement through the user's path, as the history has it.
+                "SELECT count(*) FROM t"
+            ],
+            "an edit applied inside the open transaction is committed with it, so it is listed"
+        );
+
+        workspace.update(cx, |workspace, cx| workspace.begin_connect(0, cx));
+        assert!(
+            recorded_statements(&workspace, cx).is_empty(),
+            "a connect leaves nothing of the transaction it replaces"
+        );
+        settle(cx);
+        assert!(!transaction_state(&workspace, cx).1);
+
+        run_in_front(&workspace, cx, "BEGIN");
+        assert_eq!(recorded_statements(&workspace, cx), ["BEGIN"]);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.disconnect(&Disconnect, window, cx);
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = &workspace.profiles[0];
+            assert!(
+                profile.transaction_statements.is_empty() && !profile.in_transaction,
+                "a disconnect empties the record with the transaction"
+            );
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn auto_from_manual_asks_to_commit_or_roll_back_and_lists_the_transactions_statements(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        manual_with_open_transaction(&workspace, cx, "INSERT INTO t VALUES (7)");
+
+        let before = (
+            buffer(&workspace, cx),
+            transaction_state(&workspace, cx),
+            recorded_statements(&workspace, cx),
+        );
+        toggle_auto_commit(cx);
+        assert_eq!(
+            front_dialog(&workspace, cx),
+            Some("end-transaction"),
+            "Auto over an open transaction asks"
+        );
+        assert_eq!(
+            drawn(
+                cx,
+                &[
+                    "end-transaction-0",
+                    "end-transaction-1",
+                    "end-transaction-2",
+                    "end-transaction-statement-0"
+                ]
+            ),
+            [true, true, true, false],
+            "Commit, Roll back and Cancel are drawn, the statements collapsed"
+        );
+        assert_eq!(ringed_button(&workspace, cx), 2, "the ring opens on Cancel");
+        assert_eq!(
+            (
+                buffer(&workspace, cx),
+                transaction_state(&workspace, cx),
+                recorded_statements(&workspace, cx)
+            ),
+            before,
+            "raising the question sends nothing"
+        );
+
+        click_selector(cx, "end-transaction-statements");
+        assert_eq!(
+            drawn(
+                cx,
+                &[
+                    "end-transaction-statement-0",
+                    "end-transaction-statement-1",
+                    "end-transaction-statement-2"
+                ]
+            ),
+            [true, true, false],
+            "the toggle shows one block per statement"
+        );
+        assert_eq!(
+            recorded_statements(&workspace, cx),
+            ["BEGIN", "INSERT INTO t VALUES (7)"]
+        );
+
+        click_selector(cx, "end-transaction-0");
+        assert_eq!(front_dialog(&workspace, cx), None, "the answer closes it");
+        assert_eq!(
+            last_statement(&buffer(&workspace, cx)),
+            "COMMIT",
+            "a bare COMMIT, with no BEGIN after it"
+        );
+        let (auto_commit, open, _) = transaction_state(&workspace, cx);
+        assert!(auto_commit && !open, "the switch reads Auto, nothing open");
+        assert!(recorded_statements(&workspace, cx).is_empty());
+        run_in_front(&workspace, cx, "SELECT count(*) FROM t");
+        assert_eq!(
+            answer(&workspace, cx).as_deref(),
+            Some("1"),
+            "the INSERT was committed"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_auto_prompt_leaves_auto_off_when_its_commit_is_not_sent(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        manual_with_open_transaction(&workspace, cx, "INSERT INTO t VALUES (7)");
+        toggle_auto_commit(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("end-transaction"));
+
+        // A run that cannot start: a real disconnect would clear the prompt.
+        workspace.update(cx, |workspace, _| {
+            workspace.profile_mut().unwrap().state = ProfileState::Idle;
+        });
+        click_selector(cx, "end-transaction-0");
+        assert_eq!(front_dialog(&workspace, cx), None);
+        let (auto_commit, open, _) = transaction_state(&workspace, cx);
+        assert!(
+            !auto_commit && open,
+            "the switch did not move to Auto over a transaction still open"
+        );
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(
+                workspace.profile().unwrap().session.notice.as_deref(),
+                Some("The COMMIT was not sent, so auto-commit is still off.")
+            );
+        });
+        query_tab(&workspace, cx, |tab, _, _| match &tab.query {
+            QueryState::Failed(error) => {
+                assert_eq!(error.message, "The connection is not open.")
+            }
+            _ => panic!("the run was refused"),
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_auto_prompt_rolls_back_or_cancels_and_cancelling_changes_nothing(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        manual_with_open_transaction(&workspace, cx, "INSERT INTO t VALUES (8)");
+        let before = (
+            buffer(&workspace, cx),
+            transaction_state(&workspace, cx),
+            recorded_statements(&workspace, cx),
+        );
+        assert_eq!((before.1.0, before.1.1), (false, true));
+
+        let unchanged = |cx: &mut VisualTestContext, how: &str| {
+            assert_eq!(
+                front_dialog(&workspace, cx),
+                None,
+                "{how}: the dialog closes"
+            );
+            assert_eq!(
+                (
+                    buffer(&workspace, cx),
+                    transaction_state(&workspace, cx),
+                    recorded_statements(&workspace, cx)
+                ),
+                before,
+                "{how}: nothing changed"
+            );
+        };
+
+        toggle_auto_commit(cx);
+        click_selector(cx, "end-transaction-2");
+        unchanged(cx, "Cancel");
+
+        toggle_auto_commit(cx);
+        press(cx, "escape");
+        unchanged(cx, "Escape");
+
+        toggle_auto_commit(cx);
+        press(cx, "enter");
+        unchanged(cx, "Enter on the opening ring");
+
+        toggle_auto_commit(cx);
+        click_selector(cx, "end-transaction-1");
+        assert_eq!(front_dialog(&workspace, cx), None, "Roll back closes it");
+        assert_eq!(
+            last_statement(&buffer(&workspace, cx)),
+            "ROLLBACK",
+            "a bare ROLLBACK, with no BEGIN after it"
+        );
+        let (auto_commit, open, _) = transaction_state(&workspace, cx);
+        assert!(auto_commit && !open, "Roll back: Auto, nothing open");
+        assert!(recorded_statements(&workspace, cx).is_empty());
+        run_in_front(&workspace, cx, "SELECT count(*) FROM t");
+        assert_eq!(
+            answer(&workspace, cx).as_deref(),
+            Some("0"),
+            "the INSERT was discarded"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_auto_prompt_arms_nothing_when_the_transaction_ended_under_its_dialog(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        manual_with_open_transaction(&workspace, cx, "INSERT INTO t VALUES (7)");
+        toggle_auto_commit(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("end-transaction"));
+
+        // Ended between the dialog being drawn and the answer arriving: the
+        // dialog stops drawing once the transaction is gone, so the answer is
+        // given directly.
+        workspace.update(cx, |workspace, _| {
+            workspace.profile_mut().unwrap().in_transaction = false;
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.end_transaction_for_auto("COMMIT", window, cx);
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().unwrap();
+            assert_eq!(
+                profile.session.auto_after_end, None,
+                "nothing was sent, so nothing waits on it"
+            );
+            assert!(!profile.auto_commit, "Auto stays off");
+        });
+
+        // A later success does not turn auto-commit on behind the user.
+        run_in_front(&workspace, cx, "SELECT 1");
+        let (auto_commit, _, _) = transaction_state(&workspace, cx);
+        assert!(!auto_commit, "the next statement's success reads nothing");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_batch_that_brackets_itself_is_not_sent_into_the_users_open_transaction(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        // As `sql::update_batch` writes a multi-row apply on SQLite.
+        let batch =
+            "BEGIN TRANSACTION;\nINSERT INTO t VALUES (8);\nINSERT INTO t VALUES (9);\nCOMMIT;";
+        manual_with_open_transaction(&workspace, cx, "INSERT INTO t VALUES (7)");
+        let (auto_commit, open, _) = transaction_state(&workspace, cx);
+        let listed = recorded_statements(&workspace, cx);
+
+        apply_from_the_front_tab(&workspace, cx, batch);
+        query_tab(&workspace, cx, |tab, _, _| match &tab.query {
+            QueryState::Failed(error) => assert_eq!(
+                error.message,
+                "Not sent: a transaction is open on this connection, and the batch of edits \
+                 would end it with a COMMIT of its own."
+            ),
+            _ => panic!("the batch was not refused"),
+        });
+        let (auto_commit_now, open_now, _) = transaction_state(&workspace, cx);
+        assert_eq!(
+            (
+                auto_commit_now,
+                open_now,
+                recorded_statements(&workspace, cx)
+            ),
+            (auto_commit, open, listed),
+            "a refused batch changes nothing and is not listed"
+        );
+        run_in_front(&workspace, cx, "SELECT count(*) FROM t");
+        assert_eq!(
+            answer(&workspace, cx).as_deref(),
+            Some("1"),
+            "only the user's own INSERT ran"
+        );
+        run_in_front(&workspace, cx, "ROLLBACK");
+        toggle_auto_commit(cx);
+        assert!(transaction_state(&workspace, cx).0, "Auto, nothing open");
+
+        apply_from_the_front_tab(&workspace, cx, batch);
+        query_tab(&workspace, cx, |tab, _, _| match &tab.query {
+            QueryState::Complete { .. } => {}
+            _ => panic!("the batch never completed with no transaction open"),
+        });
+        assert_eq!(answer(&workspace, cx).as_deref(), Some("2"));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_multi_row_edit_joins_the_users_open_transaction_without_brackets_of_its_own(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            "create table birds (id integer primary key, name text); \
+             insert into birds values (1, 'wren'), (2, 'tit');",
+        );
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_mode(crate::sql::Mode::Full, cx)
+        });
+        run_in_front(&workspace, cx, "BEGIN");
+        assert!(transaction_state(&workspace, cx).1, "the BEGIN ran");
+        run_in_front(&workspace, cx, "select * from birds order by id");
+        let grid = query_tab(&workspace, cx, |tab, _, _| tab.results.clone());
+        grid.update(cx, |grid, _| {
+            for (row, name) in [(0, "robin"), (1, "jay")] {
+                assert!(grid.delegate_mut().set_pending(
+                    row,
+                    1,
+                    crate::result_grid::NewValue::Value(name.into())
+                ));
+            }
+        });
+        cx.dispatch_action(crate::actions::ApplyEdits);
+        settle(cx);
+        workspace.update(cx, |workspace, cx| workspace.run_apply_review(cx));
+        settle(cx);
+
+        assert!(
+            transaction_state(&workspace, cx).1,
+            "the batch did not end the user's transaction"
+        );
+        let batch = recorded_statements(&workspace, cx)
+            .into_iter()
+            .find(|statement| statement.contains("UPDATE"))
+            .expect("the batch is listed in the open transaction");
+        assert_eq!(batch.matches("UPDATE").count(), 2, "{batch}");
+        assert!(
+            !batch.contains("BEGIN") && !batch.contains("COMMIT"),
+            "{batch}"
+        );
+
+        run_in_front(&workspace, cx, "ROLLBACK");
+        run_in_front(
+            &workspace,
+            cx,
+            "select count(*) from birds where name in ('wren', 'tit')",
+        );
+        assert_eq!(
+            answer(&workspace, cx).as_deref(),
+            Some("2"),
+            "the edits rolled back with the transaction they joined"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_failed_commit_from_the_auto_prompt_does_not_keep_a_stale_open_flag(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        manual_with_open_transaction(&workspace, cx, "INSERT INTO t VALUES (7)");
+
+        // Ended straight on the session, so the profile still reads the
+        // transaction as open and the COMMIT the dialog sends has none to end
+        // and fails.
+        let session = workspace
+            .read_with(cx, |workspace, _| {
+                workspace.profile().and_then(|profile| profile.connection())
+            })
+            .expect("the profile is connected");
+        session
+            .query("ROLLBACK", &CancelToken::default(), Fetch::default())
+            .expect("the session ends its transaction");
+
+        toggle_auto_commit(cx);
+        click_selector(cx, "end-transaction-0");
+        assert_eq!(front_dialog(&workspace, cx), None);
+        query_tab(&workspace, cx, |tab, _, _| {
+            assert!(
+                matches!(tab.query, QueryState::Failed(_)),
+                "the COMMIT failed"
+            )
+        });
+        let (auto_commit, open, _) = transaction_state(&workspace, cx);
+        assert!(
+            !auto_commit && !open,
+            "a COMMIT that failed because none was active is not read as leaving one open"
+        );
+        assert!(
+            recorded_statements(&workspace, cx).is_empty(),
+            "the list of a transaction no longer read as open is not put back"
+        );
+
+        // A second attempt settles: nothing is open to ask about.
+        toggle_auto_commit(cx);
+        assert_eq!(front_dialog(&workspace, cx), None);
+        let (auto_commit, open, _) = transaction_state(&workspace, cx);
+        assert!(auto_commit && !open, "Auto is reached");
+        quit(workspace, cx);
+    });
+}

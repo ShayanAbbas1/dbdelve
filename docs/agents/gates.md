@@ -71,9 +71,32 @@ where the user can read it:
   spells the `BEGIN`, and is not `Engine::transaction_start`: that one answers
   whether a *generated* batch needs brackets, and says `None` for Postgres,
   where one submission is already one implicit transaction. Turning
-  auto-commit back on while a transaction is open is refused rather than
-  resolved, since dbdelve does not get to choose between committing the
-  user's work and discarding it.
+  auto-commit back on while a transaction is open is asked, not refused. A
+  dialog lists the statements the transaction has run on the connection's own
+  session and offers Commit, Roll Back or Cancel. On Commit or Roll Back it
+  appends a plain `COMMIT` or `ROLLBACK` to the buffer, runs it from there and
+  opens no next transaction, then the switch reads on once that statement has
+  succeeded (`Session::auto_after_end`); one that fails leaves auto-commit
+  off, and puts the transaction and its list back only where the engine keeps
+  a transaction whose end failed (`Engine::failed_end_keeps_transaction`:
+  SQLite, unless it says none was active), because a profile reading "open"
+  over a session that is not is a flag no `COMMIT` can clear. dbdelve still never
+  picks between committing the user's work and discarding it: the user does,
+  and Cancel leaves both alone. Manual's own Commit and Roll Back keep sending
+  the next `BEGIN` with them, for the reason above, so the dialog's end is the
+  only one that leaves manual-commit mode. The list is held in memory only
+  (`Profile::transaction_statements`) and is never written to disk. A
+  submission that ends the transaction and opens the next lists only what
+  follows its last end (`sql::after_last_end`), so Manual's `COMMIT;` and
+  `BEGIN;` leave the `BEGIN;` alone. A generated multi-row edit batch brackets
+  itself on MySQL, MariaDB, SQLite and SQL Server, and its `COMMIT` would end
+  the user's open transaction (MySQL and MariaDB commit it at the batch's
+  `START TRANSACTION`). So while `Profile::in_transaction` is set, an edit on
+  the connection's own session is written without brackets
+  (`sql::update_batch_joining`) and joins the open transaction, committed or
+  rolled back with it, as a single-statement edit always has. A bracketed
+  batch that still reaches the run (written before the transaction opened) is
+  not sent: `Profile::own_write_refusal` says `Not sent: …`.
 - **Format Query** rewrites the buffer on command only, through
   `sqlformat`'s token-level reformatter (on MongoDB, `mql::format`'s
   bracket-depth layout over the tree-sitter tokens, refused unless the
