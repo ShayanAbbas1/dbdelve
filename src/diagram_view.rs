@@ -14,9 +14,9 @@ use gpui::{
     AppContext, BorderStyle, Bounds, BoxShadow, ContentMask, Context, CursorStyle, DispatchPhase,
     Entity, EventEmitter, FocusHandle, Focusable, Font, FontWeight, Hitbox, HitboxBehavior, Hsla,
     InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement, Path, PathBuilder, PathStyle, PinchEvent, Pixels, Render, ScrollWheelEvent,
-    ShapedLine, SharedString, StatefulInteractiveElement, StrokeOptions, Styled, Subscription,
-    TextAlign, TextRun, TransformationMatrix, WeakEntity, Window, canvas, div, point,
+    ParentElement, Path, PathBuilder, PathStyle, PathVertex, PinchEvent, Pixels, Render,
+    ScrollWheelEvent, ShapedLine, SharedString, StatefulInteractiveElement, StrokeOptions, Styled,
+    Subscription, TextAlign, TextRun, TransformationMatrix, WeakEntity, Window, canvas, div, point,
     prelude::FluentBuilder, px, quad, size,
 };
 
@@ -495,16 +495,54 @@ struct Stamp {
     grid: SharedString,
 }
 
-/// One tessellated part of an edge, and what it is filled with.
-type Piece = (Path<Pixels>, Paint);
-
-/// What a cached path is filled with.
+/// A part of an edge's drawing, by what it is filled with and when it is
+/// painted: every edge's ink, then every circle's hole over it, then the
+/// circles' rings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Paint {
+enum Part {
+    /// The line and its marks' strokes.
     Ink,
     /// The canvas tone, so a mark's circle is hollow over the edge it sits on.
     Hole,
+    Ring,
 }
+
+const PARTS: [Part; 3] = [Part::Ink, Part::Hole, Part::Ring];
+
+/// The order the looks are painted in, so a lit edge is never under another.
+const LOOKS: [EdgeLook; 3] = [EdgeLook::Dimmed, EdgeLook::Plain, EdgeLook::Lit];
+/// The most vertices a path of merged edges holds. A buffer of more is one of
+/// macOS's large allocations, and the allocator keeps those freed in the
+/// footprint until a later one asks for the same size: a frame's buffers of
+/// millions, a little longer or shorter as the view pans, would grow it by
+/// hundreds of megabytes a frame. Buffers of up to a few megabytes are
+/// reused. GPUI copies each path twice on its way to the renderer, and the
+/// copies are cut the same.
+const PATH_VERTICES: usize = 1 << 17;
+
+/// Triangles tessellated at a zoom with no pan, and the box they fill.
+#[derive(Default)]
+struct Mesh {
+    vertices: Vec<PathVertex<Pixels>>,
+    bounds: Bounds<Pixels>,
+}
+
+impl Mesh {
+    fn add(&mut self, path: Path<Pixels>) {
+        if path.vertices.is_empty() {
+            return;
+        }
+        self.bounds = match self.vertices.is_empty() {
+            true => path.bounds,
+            false => self.bounds.union(&path.bounds),
+        };
+        self.vertices.extend(path.vertices);
+    }
+}
+
+/// One edge and its marks, a mesh per [`Part`].
+#[derive(Default)]
+struct EdgeMesh([Mesh; 3]);
 
 pub struct DiagramView {
     focus_handle: FocusHandle,
@@ -526,9 +564,10 @@ pub struct DiagramView {
     /// "+N more" by N, made once each so a frame formats none.
     more_labels: HashMap<usize, SharedString>,
     stamp: Option<Stamp>,
-    /// Edges tessellated at `paths_zoom`, with no pan: panning offsets a copy,
-    /// which `paint_path` makes anyway, and only a zoom tessellates again.
-    paths: HashMap<(u32, EdgeLook), Vec<Piece>>,
+    /// Edges tessellated at `paths_zoom`, with no pan, by whether they are
+    /// lit: panning offsets a copy, which merging them makes anyway, and only
+    /// a zoom tessellates again.
+    paths: HashMap<(u32, bool), EdgeMesh>,
     paths_zoom: f32,
     /// Keys only as asked for: the switch shows it at once, while the layout
     /// it asks for may still be on its way.
@@ -2166,23 +2205,28 @@ impl DiagramView {
             }
 
             let canvas_tone: Hsla = t.panel_glass().into();
-            for &edge in &visible.edges {
-                let look = edge_look(layout, focus, hover, edge);
-                let colour = edge_colour(t, look, zoom);
-                let pan = point(
-                    origin.x + px(transform.pan.x),
-                    origin.y + px(transform.pan.y),
-                );
-                let pieces = paths
-                    .entry((edge, look))
-                    .or_insert_with(|| edge_paths(layout, edge, detail, zoom, look));
-                for (path, paint) in pieces.iter() {
-                    let fill = match paint {
-                        Paint::Ink => colour,
-                        Paint::Hole => canvas_tone,
-                    };
-                    window.paint_path(translated(path, pan), fill);
-                }
+            let looks: Vec<(u32, EdgeLook)> = (visible.edges.iter())
+                .map(|&edge| (edge, edge_look(layout, focus, hover, edge)))
+                .collect();
+            for &(edge, look) in &looks {
+                let lit = look == EdgeLook::Lit;
+                paths
+                    .entry((edge, lit))
+                    .or_insert_with(|| edge_mesh(layout, edge, detail, zoom, lit));
+            }
+            let meshes: Vec<(EdgeLook, &EdgeMesh)> = (looks.iter())
+                .map(|&(edge, look)| (look, &paths[&(edge, look == EdgeLook::Lit)]))
+                .collect();
+            let pan = point(
+                origin.x + px(transform.pan.x),
+                origin.y + px(transform.pan.y),
+            );
+            for (look, part, path) in merged_edges(&meshes, pan) {
+                let fill = match part {
+                    Part::Hole => canvas_tone,
+                    Part::Ink | Part::Ring => edge_colour(t, look, zoom),
+                };
+                window.paint_path(path, fill);
             }
 
             let washed = joined_rows(ready, focus, hover);
@@ -2946,17 +2990,16 @@ fn edge_colour(t: Theme, look: EdgeLook, zoom: f32) -> Hsla {
     }
 }
 
-/// An edge and its marks tessellated at `zoom` with no pan, in the order they
-/// are painted: the line, the marks' strokes, then each circle's hole and its
-/// ring.
-fn edge_paths(layout: &Layout, edge: u32, detail: Detail, zoom: f32, look: EdgeLook) -> Vec<Piece> {
+/// An edge and its marks tessellated at `zoom` with no pan.
+fn edge_mesh(layout: &Layout, edge: u32, detail: Detail, zoom: f32, lit: bool) -> EdgeMesh {
     let shape = layout.edge_path(edge, detail, zoom);
-    let width = px(match look {
-        EdgeLook::Lit => LIT_EDGE_WIDTH,
-        EdgeLook::Plain | EdgeLook::Dimmed => resting_edge(zoom).1,
+    let width = px(match lit {
+        true => LIT_EDGE_WIDTH,
+        false => resting_edge(zoom).1,
     });
     let stroke = || stroke(width);
-    let mut pieces = Vec::new();
+    let mut mesh = EdgeMesh::default();
+    let [ink, holes, rings] = &mut mesh.0;
     let mut line = stroke();
     for segment in &shape.segments {
         match *segment {
@@ -2973,7 +3016,9 @@ fn edge_paths(layout: &Layout, edge: u32, detail: Detail, zoom: f32, look: EdgeL
             ),
         }
     }
-    pieces.extend(line.build().ok().map(|path| (path, Paint::Ink)));
+    if let Ok(path) = line.build() {
+        ink.add(path);
+    }
     let mut strokes = stroke();
     let mut circles = Vec::new();
     for mark in &shape.marks {
@@ -2998,16 +3043,79 @@ fn edge_paths(layout: &Layout, edge: u32, detail: Detail, zoom: f32, look: EdgeL
             ),
         }
     }
-    pieces.extend(strokes.build().ok().map(|path| (path, Paint::Ink)));
+    if let Ok(path) = strokes.build() {
+        ink.add(path);
+    }
     for ring in circles {
         let mut hole = PathBuilder::fill();
         hole.add_polygon(&ring, true);
-        pieces.extend(hole.build().ok().map(|path| (path, Paint::Hole)));
+        if let Ok(path) = hole.build() {
+            holes.add(path);
+        }
         let mut outline = stroke();
         outline.add_polygon(&ring, true);
-        pieces.extend(outline.build().ok().map(|path| (path, Paint::Ink)));
+        if let Ok(path) = outline.build() {
+            rings.add(path);
+        }
     }
-    pieces
+    mesh
+}
+
+/// The visible edges as the few paths they are painted in, offset `by` the
+/// pan: per look, in [`LOOKS`] order, its ink, its holes and its rings. A path
+/// a part rather than one an edge, because each path is a primitive the scene
+/// files and the renderer copies, and a far zoom shows thousands of edges. A
+/// part is cut into paths of at most [`PATH_VERTICES`] vertices, each filed in
+/// the scene on its own, so overlapping ones are drawn in turn: GPUI takes
+/// paths sharing a draw order to have disjoint bounds.
+fn merged_edges(
+    edges: &[(EdgeLook, &EdgeMesh)],
+    by: gpui::Point<Pixels>,
+) -> Vec<(EdgeLook, Part, Path<Pixels>)> {
+    let mut merged = Vec::new();
+    for look in LOOKS {
+        for (index, part) in PARTS.into_iter().enumerate() {
+            let meshes: Vec<&Mesh> = (edges.iter())
+                .filter(|(of, _)| *of == look)
+                .map(|(_, mesh)| &mesh.0[index])
+                .filter(|mesh| !mesh.vertices.is_empty())
+                .collect();
+            let mut rest = meshes.as_slice();
+            while !rest.is_empty() {
+                let mut count = 0;
+                let taken = (rest.iter())
+                    .take_while(|mesh| {
+                        count += mesh.vertices.len();
+                        count <= PATH_VERTICES
+                    })
+                    .count()
+                    .max(1);
+                let (chunk, after) = rest.split_at(taken);
+                rest = after;
+                merged.push((look, part, merged_path(chunk, by)));
+            }
+        }
+    }
+    merged
+}
+
+/// `meshes` as one path, offset `by` the pan, its vertices allocated once at
+/// their size.
+fn merged_path(meshes: &[&Mesh], by: gpui::Point<Pixels>) -> Path<Pixels> {
+    let mut path = Path::new(point(px(0.0), px(0.0)));
+    path.vertices = Vec::with_capacity(meshes.iter().map(|mesh| mesh.vertices.len()).sum());
+    path.bounds = meshes[0].bounds;
+    for mesh in meshes {
+        path.vertices
+            .extend(mesh.vertices.iter().map(|vertex| PathVertex {
+                xy_position: vertex.xy_position + by,
+                st_position: vertex.st_position,
+                content_mask: vertex.content_mask,
+            }));
+        path.bounds = path.bounds.union(&mesh.bounds);
+    }
+    path.bounds.origin += by;
+    path
 }
 
 /// A stroke `width` wide, flattened to [`TOLERANCE`].
@@ -3017,15 +3125,6 @@ fn stroke(width: Pixels) -> PathBuilder {
             .with_line_width(f32::from(width))
             .with_tolerance(TOLERANCE),
     ))
-}
-
-fn translated(path: &Path<Pixels>, by: gpui::Point<Pixels>) -> Path<Pixels> {
-    let mut path = path.clone();
-    path.bounds.origin += by;
-    for vertex in &mut path.vertices {
-        vertex.xy_position += by;
-    }
-    path
 }
 
 /// The faint dot grid behind an opaque theme's cards, in world space so it
@@ -3220,6 +3319,69 @@ mod tests {
         assert!(
             5 * ours <= 3 * lyons,
             "{ours} vertices against lyon's {lyons}"
+        );
+    }
+
+    /// A wide schema's edges at the farthest zoom, the many at rest and a
+    /// few lit, half of them from a nullable key and so marked with a circle.
+    fn far_edges() -> (Vec<EdgeMesh>, Vec<EdgeLook>) {
+        let keys: Vec<(u32, u32)> = (1..3000).flat_map(|t| [(t, t / 4), (t, t / 2)]).collect();
+        let mut graph = crate::diagram::tests::graph(3000, &keys);
+        for table in graph.tables.iter_mut().step_by(2) {
+            for column in &mut table.columns[1..] {
+                column.nullable = true;
+            }
+        }
+        let layout = layout::schema(&graph, false);
+        let zoom = geometry::MIN_ZOOM;
+        let detail = layout.detail(zoom);
+        (0..layout.edges.len() as u32)
+            .map(|edge| {
+                let lit = edge % 100 == 0;
+                let look = match lit {
+                    true => EdgeLook::Lit,
+                    false => EdgeLook::Plain,
+                };
+                (edge_mesh(&layout, edge, detail, zoom, lit), look)
+            })
+            .unzip()
+    }
+
+    #[test]
+    fn edges_are_painted_as_a_few_paths_a_look_and_part_in_order() {
+        let (meshes, looks) = far_edges();
+        let edges: Vec<(EdgeLook, &EdgeMesh)> = looks.iter().copied().zip(&meshes).collect();
+        let merged = merged_edges(&edges, point(px(0.0), px(0.0)));
+        let vertices: usize = (meshes.iter().flat_map(|mesh| &mesh.0))
+            .map(|mesh| mesh.vertices.len())
+            .sum();
+        assert_eq!(
+            merged
+                .iter()
+                .map(|(.., path)| path.vertices.len())
+                .sum::<usize>(),
+            vertices
+        );
+        assert!(
+            merged.len() <= 2 * PARTS.len() + vertices / PATH_VERTICES,
+            "{} paths for {} edges",
+            merged.len(),
+            edges.len()
+        );
+        assert!(
+            (merged.iter()).all(|(.., path)| path.vertices.len() <= PATH_VERTICES),
+            "a path holds no more than a buffer that is reused"
+        );
+        let rank = |look: EdgeLook, part: Part| {
+            (
+                LOOKS.iter().position(|&of| of == look),
+                PARTS.iter().position(|&of| of == part),
+            )
+        };
+        assert!(
+            (merged.windows(2))
+                .all(|pair| rank(pair[0].0, pair[0].1) <= rank(pair[1].0, pair[1].1)),
+            "every lit edge over those at rest, and every hole over the ink"
         );
     }
 
