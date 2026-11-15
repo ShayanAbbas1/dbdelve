@@ -1583,14 +1583,19 @@ impl DiagramView {
         let seen = self.transform.world_rect(screen);
         let focus = self.focus;
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
-            for index in 0..layout.cards.len() as u32 {
-                let rect = layout.card_rect(index, Detail::Columns, 1.0);
-                let fill = match focus == Some(index) {
-                    true => focused,
-                    false => card,
-                };
-                window.paint_quad(gpui::fill(minimap.to_screen(rect), fill));
-            }
+            // Every card as one draw order, stacked as painted: thousands of
+            // blocks packed into the minimap would each look through all the
+            // ones before them for an order of their own.
+            window.paint_layer(bounds, |window| {
+                for index in 0..layout.cards.len() as u32 {
+                    let rect = layout.card_rect(index, Detail::Columns, 1.0);
+                    let fill = match focus == Some(index) {
+                        true => focused,
+                        false => card,
+                    };
+                    window.paint_quad(gpui::fill(minimap.to_screen(rect), fill));
+                }
+            });
             window.paint_quad(quad(
                 minimap.to_screen(seen),
                 px(2.0),
