@@ -217,8 +217,9 @@ impl Workspace {
             return;
         }
         // Failed with nothing sent is `requery_relation` refusing the tab's
-        // statement, which a visit would only refuse again.
-        if matches!(query, QueryState::Failed(_)) && !sent {
+        // statement, which a visit would only refuse again. A stale one was
+        // marked by a reconnect, whose dialect may now read it.
+        if !stale && matches!(query, QueryState::Failed(_)) && !sent {
             return;
         }
 
