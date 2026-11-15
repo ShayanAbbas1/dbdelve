@@ -1567,6 +1567,11 @@ impl ResultGrid {
     }
 
     pub fn set_binary_form(&mut self, col: usize, form: BinaryForm) {
+        // The menu holds the index it opened on, and a result streamed in
+        // since may have fewer columns, as the header's other entries allow.
+        if col >= self.result.columns.len() {
+            return;
+        }
         self.binary_forms.retain(|(parsed, _)| *parsed != col);
         if form != BinaryForm::Hex || !self.engine.shows_bytes_as_hex() {
             self.binary_forms.push((col, form));
@@ -4842,6 +4847,11 @@ mod tests {
             ResultGrid::restored(&grid.stored(), Mode::ReadWrite).with_engine(db::Engine::Postgres);
         assert_eq!(restored.binary_form(1), Some(BinaryForm::Text));
         assert_eq!(restored.shown(0, 1).as_deref(), Some("hello"));
+
+        // A menu opened on a wider result than the one now held.
+        grid.set_binary_form(9, BinaryForm::Base64);
+        assert!(grid.parsed_as(9).is_none());
+        grid.column_view();
 
         // Hex is how the bytes arrive here, so picking it parses nothing.
         grid.set_binary_form(1, BinaryForm::Hex);
