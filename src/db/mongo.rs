@@ -428,6 +428,19 @@ pub struct Connection {
 }
 
 impl Connection {
+    /// A session on `database`, for the (connection, database) pair: the
+    /// same client and login, reading `database` where this one reads its
+    /// own, so the one never follows the other. The statements in flight are
+    /// its own to stop. It carries no read-only hold; the gate holds every
+    /// statement to reads here.
+    pub(super) fn on_database(&self, database: &str) -> Self {
+        Self {
+            database: database.to_string(),
+            stops: Arc::default(),
+            ..self.clone()
+        }
+    }
+
     pub fn open(config: &MongoConfig) -> Result<Self, DbError> {
         if config.server.ssm.is_some() {
             return Err(plain_error("SSM is not supported on MongoDB: its background connections cannot check tunnel liveness before opening sockets.".into()));
@@ -4367,6 +4380,38 @@ mod tests {
         // with exactly the ones it holds a role on.
         assert_eq!(databases.names, ["dbdelve_archive", "dbdelve_dev"]);
         assert_eq!(databases.current.as_deref(), Some("dbdelve_dev"));
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MONGO_URL"]
+    fn live_a_session_on_another_database_reads_there() {
+        let profile = live();
+        // The app user holds a role on this one besides the profile's own.
+        let session = profile.on_database("dbdelve_archive");
+        let scratch = Scratch(&session, format!("dbdelve_test_{}", ObjectId::new()));
+        ran(
+            &session,
+            &format!("db.getCollection('{}').insertOne({{ _id: 1 }})", scratch.1),
+        );
+
+        let listed = |connection: &Connection| {
+            connection
+                .catalog()
+                .expect("catalog should load")
+                .schemas
+                .iter()
+                .flat_map(|schema| schema.relations.iter())
+                .any(|relation| relation.name == scratch.1)
+        };
+        assert!(listed(&session), "the session lists what it wrote");
+        assert!(
+            !listed(&profile),
+            "the profile's own database does not hold it"
+        );
+        assert_eq!(
+            profile.databases().unwrap().current.as_deref(),
+            Some("dbdelve_dev")
+        );
     }
 
     #[test]

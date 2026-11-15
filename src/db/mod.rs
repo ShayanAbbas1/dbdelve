@@ -1701,6 +1701,29 @@ impl Connection {
         }
     }
 
+    /// A session for the (connection, `database`) pair, which the connections
+    /// tree reads that database's catalog over and a tab bound to it will run
+    /// on. Built from this live connection -- its resolved password and its
+    /// tunnel -- and never from the profile's config, and sharing no mutable
+    /// state with it: moving the session's database moves nothing here. It
+    /// carries no read-only hold of its own; the caller applies it before the
+    /// session is stored (`set_read_only`).
+    pub fn on_database(&self, database: &str) -> Result<Self, DbError> {
+        match self {
+            Self::DuckDb(connection) => connection.on_database(database).map(Self::DuckDb),
+            Self::MySql(connection) => connection.on_database(database).map(Self::MySql),
+            Self::Redis(connection) => connection.on_database(database).map(Self::Redis),
+            Self::Snowflake(connection) => Ok(Self::Snowflake(connection.on_database(database))),
+            Self::MongoDb(connection) => Ok(Self::MongoDb(connection.on_database(database))),
+            Self::Postgres(connection) => connection.on_database(database).map(Self::Postgres),
+            Self::SqlServer(connection) => connection.on_database(database).map(Self::SqlServer),
+            Self::ClickHouse(connection) => connection.on_database(database).map(Self::ClickHouse),
+            Self::Sqlite(_) | Self::Turso(_) | Self::External(_) => Err(plain_error(
+                "This connection has no other database to open a session on.".into(),
+            )),
+        }
+    }
+
     /// Open now what the first run would otherwise wait on opening.
     pub fn warm(&self) {
         if let Self::Postgres(connection) = self {

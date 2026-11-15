@@ -658,6 +658,28 @@ impl Connection {
         })
     }
 
+    /// A session on `database`, for the (connection, database) pair: a new
+    /// connection from this one's live server config -- its resolved password
+    /// and its tunnel -- with the database replaced, selected by the driver's
+    /// own handshake and not a `USE` statement. It shares no mutable state
+    /// with this connection: `alongside` shares the `side` session a cancel
+    /// reads through, and this has one of its own. It carries no read-only
+    /// hold of its own; the caller applies it.
+    pub fn on_database(&self, database: &str) -> Result<Self, DbError> {
+        let server = ServerConfig {
+            database: database.to_string(),
+            ..self.server.clone()
+        };
+        let connection = connect(&server, self.engine, self.dial()?)?;
+        Ok(Self {
+            connection_id: connection.connection_id(),
+            server,
+            connection: Arc::new(Mutex::new(connection)),
+            side: Arc::default(),
+            ..self.clone()
+        })
+    }
+
     /// A round trip, unlike Postgres's check: the driver keeps no closed flag.
     /// `COM_PING` is answered inside a failed transaction too, so a statement
     /// that merely errored is not mistaken for a dropped session.
@@ -1923,6 +1945,88 @@ mod tests {
         let started = Instant::now();
         let _ = connection.query("SELECT SLEEP(30)", Fetch::default());
         assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    /// A session on another database is held to reads when it is asked to be,
+    /// from the moment it exists; one that was not asked is not.
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_session_on_another_database_is_held_to_reads_when_asked() {
+        for engine in [Engine::MySql, Engine::MariaDb] {
+            let plain = live(engine);
+            let clean = || {
+                plain
+                    .query("DROP TABLE IF EXISTS dbdelve_held_probe", Fetch::default())
+                    .unwrap_or_else(|error| panic!("{engine:?}: {error}"));
+            };
+            clean();
+            for statement in [
+                "CREATE TABLE dbdelve_held_probe (id int)",
+                "INSERT INTO dbdelve_held_probe VALUES (1)",
+            ] {
+                plain
+                    .query(statement, Fetch::default())
+                    .unwrap_or_else(|error| panic!("{engine:?}: {statement}: {error}"));
+            }
+
+            let profile = live_profile(engine);
+            let unheld = profile
+                .on_database("dbdelve_dev")
+                .expect("a session should open");
+            let write = |session: &super::super::Connection| {
+                session.query(
+                    "INSERT INTO dbdelve_held_probe VALUES (2)",
+                    &crate::db::CancelToken::default(),
+                    Fetch::default(),
+                )
+            };
+            write(&unheld).unwrap_or_else(|error| panic!("{engine:?}: unheld: {error}"));
+
+            let held = profile
+                .on_database("dbdelve_dev")
+                .expect("a session should open");
+            held.set_read_only(true).expect("the hold should take");
+            let refusal = write(&held)
+                .err()
+                .unwrap_or_else(|| panic!("{engine:?}: a held session accepted a write"));
+            assert!(
+                refusal.message.contains("READ ONLY"),
+                "{engine:?}, the server's own words: {}",
+                refusal.message
+            );
+            clean();
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_session_on_another_database_is_on_it() {
+        for engine in [Engine::MySql, Engine::MariaDb] {
+            let profile = live_profile(engine);
+            let database = |connection: &super::super::Connection| {
+                connection
+                    .query(
+                        "SELECT DATABASE()",
+                        &crate::db::CancelToken::default(),
+                        Fetch::default(),
+                    )
+                    .unwrap_or_else(|error| panic!("{engine:?}: {error}"))
+                    .rows[0]
+                    .iter()
+                    .next()
+                    .flatten()
+                    .map(str::to_string)
+            };
+            let session = profile
+                .on_database("information_schema")
+                .expect("a session should open");
+            assert_eq!(database(&session).as_deref(), Some("information_schema"));
+            assert_eq!(
+                database(&profile).as_deref(),
+                Some("dbdelve_dev"),
+                "{engine:?}: the profile's own connection is where it was"
+            );
+        }
     }
 
     fn live_profile(engine: Engine) -> super::super::Connection {

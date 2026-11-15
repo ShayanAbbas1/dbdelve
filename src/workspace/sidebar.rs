@@ -13,7 +13,7 @@ use std::{collections::HashMap, ops::Range, sync::Arc};
 use gpui::{Entity, SharedString, StyledText};
 use gpui_component::tree::{TreeEvent, TreeState};
 
-use super::profiles::explorer_content;
+use super::profiles::{database_content, explorer_content};
 use super::*;
 use crate::db::{Levels, Syntax};
 use crate::explorer::{
@@ -160,6 +160,25 @@ impl Workspace {
                             Content::Loaded(explorer_content(profile, narrowed))
                         }
                     },
+                    databases: match (&profile.state, &profile.catalog) {
+                        (ProfileState::Connected(_), CatalogState::Loaded(..))
+                            if levels.lists_other_databases() =>
+                        {
+                            model::other_databases(&profile.databases.names, database.as_deref())
+                                .into_iter()
+                                .map(|name| {
+                                    // A name the filter matches keeps its rows
+                                    // whole, as the connection's own does.
+                                    let narrowed = match model::database_kept_whole(filter, name) {
+                                        true => "",
+                                        false => filter,
+                                    };
+                                    (name.to_string(), database_content(profile, name, narrowed))
+                                })
+                                .collect()
+                        }
+                        _ => Vec::new(),
+                    },
                     levels,
                     database,
                 }
@@ -197,17 +216,49 @@ impl Workspace {
     /// Anything else lands here too (a reveal opens every ancestor of its
     /// row, a second expand repeats the first), and does nothing.
     pub(crate) fn expand_node(&mut self, id: &SharedString, cx: &mut Context<Self>) {
-        let Some(Node::Connection { profile }) = self.connections.nodes.get(id.as_str()) else {
-            return;
-        };
-        let Some(index) = self.profiles.iter().position(|p| &p.id == profile) else {
-            return;
-        };
-        if matches!(
-            self.profiles[index].state,
-            ProfileState::Idle | ProfileState::Failed(_)
-        ) {
-            self.begin_connect(index, cx);
+        match self.connections.nodes.get(id.as_str()) {
+            Some(Node::Connection { profile }) => {
+                let profile = profile.clone();
+                let Some(index) = self.profiles.iter().position(|p| p.id == profile) else {
+                    return;
+                };
+                if matches!(
+                    self.profiles[index].state,
+                    ProfileState::Idle | ProfileState::Failed(_)
+                ) {
+                    self.begin_connect(index, cx);
+                    return;
+                }
+                // Connected before the tree was in complex mode, or before
+                // the server said what it holds: listed once, here.
+                let profile = &self.profiles[index];
+                if matches!(profile.catalog, CatalogState::Loaded(..))
+                    && profile.databases.names.is_empty()
+                {
+                    let (id, generation) = (profile.id.clone(), profile.generation);
+                    self.list_databases(&id, generation, cx);
+                }
+            }
+            Some(Node::Database { profile, database }) => {
+                let (profile, database) = (profile.clone(), database.clone());
+                let Some(profile) = self.profiles.iter().find(|p| p.id == profile) else {
+                    return;
+                };
+                // The connection's own database is read over its own
+                // session; another is read over one of its own, opened on its
+                // first expand and again after a failure to open it.
+                let own = profile.active_database().as_deref() == Some(database.as_str());
+                let reading = profile.bound.contains_key(&database)
+                    || matches!(
+                        profile.database_catalogs.get(&database),
+                        Some(CatalogState::Loading | CatalogState::Loaded(..))
+                    );
+                if !own && !reading {
+                    let id = profile.id.clone();
+                    self.open_database(&id, database, cx);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -320,7 +371,7 @@ impl Workspace {
                     highlighted(label, matched, t),
                     ListItem::new(index).text_color(t.text),
                 ),
-                Some(Node::Group | Node::Connection { .. } | Node::Database) => (
+                Some(Node::Group | Node::Connection { .. } | Node::Database { .. }) => (
                     highlighted(label, matched, t),
                     ListItem::new(index)
                         .text_color(t.text)
@@ -363,7 +414,7 @@ impl Workspace {
             let heading = match node {
                 Some(Node::Group) => Some(icon::PROJECT),
                 Some(Node::Connection { .. }) => target.map(|(logo, ..)| *logo),
-                Some(Node::Database) => Some(icon::DATABASE),
+                Some(Node::Database { .. }) => Some(icon::DATABASE),
                 _ if inner == Some(QUERIES_GROUP) => {
                     target.map(|(_, syntax, _)| queries_group_icon(*syntax))
                 }

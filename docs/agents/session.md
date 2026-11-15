@@ -51,6 +51,17 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   open and the others folded, each launch; a fold the user makes is kept for
   the session, and a rebuild for another front group opens that one. A switch
   moves no tab, binding or connection.
+  On a shape that draws databases over its schemas or objects
+  (`Levels::lists_other_databases`), the server's other databases are listed
+  once per connection into `profile.databases` (`Workspace::list_databases`)
+  and each is a row folded until first expanded. Expanding one opens a session
+  for that (profile, database) from the live connection
+  (`Connection::on_database`, `Workspace::open_database`), registered in
+  `profile.bound` with its catalog in `profile.database_catalogs`. The session
+  takes the Read-only hold inside the open, before it is stored; a mode change
+  reaches every one (`Profile::sessions_to_hold`, `set_mode`); all of them end
+  with the connection they were opened from (`Profile::drop_sessions`). The
+  agent keeps its own lanes and reaches none of them.
 - **The titlebar's project and connection open the palette on Connections**
   (`Workspace::open_connections`, also `SwitchConnection`, no default chord);
   there is no switcher panel of its own. That scope is a tree

@@ -11,7 +11,7 @@ use crate::connection_form::{ConnectionTest, Reported, duplicate_profile_name, k
 use crate::db::{ExternalConfig, PasswordCommand, Plugin};
 use crate::explorer::Shortcuts;
 use crate::import::{self, Source};
-use crate::session::{STALE_ROWS, restored_shortcuts};
+use crate::session::{BoundSession, STALE_ROWS, restored_shortcuts};
 use crate::sql::{Destructive, Mode};
 
 use std::collections::BTreeMap;
@@ -54,6 +54,25 @@ pub(super) fn explorer_content(profile: &Profile, filter: &str) -> explorer::Exp
         explorer.extend(build_explorer_tree(catalog, filter));
     }
     explorer
+}
+
+/// What another database of `profile`'s server has got to, under `filter`:
+/// its schemas, without the connection's shortcuts and saved queries, which
+/// belong to the connection.
+pub(super) fn database_content(
+    profile: &Profile,
+    database: &str,
+    filter: &str,
+) -> crate::sidebar::Content {
+    use crate::sidebar::Content;
+    match profile.database_catalogs.get(database) {
+        None => Content::Unloaded,
+        Some(CatalogState::Loading) => Content::Loading,
+        Some(CatalogState::Failed(message)) => Content::Failed(message.clone()),
+        Some(CatalogState::Loaded(catalog, _)) => {
+            Content::Loaded(build_explorer_tree(catalog, filter))
+        }
+    }
 }
 
 impl Workspace {
@@ -264,6 +283,8 @@ impl Workspace {
             catalog: CatalogState::Loading,
             schema_refresh: None,
             databases: Databases::default(),
+            bound: HashMap::new(),
+            database_catalogs: HashMap::new(),
             left_database: false,
             shortcuts: restored_shortcuts(&stored.folders, &stored.pins),
             folds: stored.folds,
@@ -325,6 +346,8 @@ impl Workspace {
             catalog: CatalogState::Loading,
             schema_refresh: None,
             databases: Databases::default(),
+            bound: HashMap::new(),
+            database_catalogs: HashMap::new(),
             left_database: false,
             shortcuts: Shortcuts::default(),
             folds: BTreeMap::new(),
@@ -1094,6 +1117,7 @@ impl Workspace {
                     workspace.catalog_replaced(&id, generation, true, cx);
                     workspace.reload_front_object(&id, cx);
                     workspace.load_sizes(&id, generation, cx);
+                    workspace.reload_databases(&id, generation, cx);
                     if complete && workspace.profile().is_some_and(|front| front.id == id) {
                         workspace.confirm("Schema refreshed.".into(), cx);
                     }
@@ -1331,6 +1355,7 @@ impl Workspace {
             "disconnected"
         );
         profile.generation = generation;
+        profile.drop_sessions();
         profile.state = ProfileState::Idle;
         profile.in_transaction = false;
         profile.session_changed = false;
@@ -1459,6 +1484,7 @@ impl Workspace {
             return;
         };
         profile.generation = generation;
+        profile.drop_sessions();
         profile.catalog = CatalogState::Loading;
         profile.session.structure_requests.clear();
         let id = profile.id.clone();
@@ -1812,6 +1838,7 @@ impl Workspace {
             return;
         };
         profile.generation = generation;
+        profile.drop_sessions();
         let attempt = crate::db::ConnectAttempt::default();
         profile.state = ProfileState::Connecting {
             _attempt: attempt.guard(),
@@ -2023,8 +2050,287 @@ impl Workspace {
                     cx.notify();
                     workspace.load_routines(&id, generation, cx);
                     workspace.load_sizes(&id, generation, cx);
+                    workspace.list_databases(&id, generation, cx);
                 })
                 .ok();
+        })
+        .detach();
+    }
+
+    /// Ask the server which databases it holds, into `profile.databases`, for
+    /// the connections tree to list beside the connection's own. Only where
+    /// the tree is in complex mode and the shape lists other databases, once
+    /// per connection and again on a refresh; Select Database asks for itself.
+    ///
+    /// A failure is said on the profile and leaves the tree as it was: the
+    /// connection's own database is still all there to read.
+    pub(crate) fn list_databases(&mut self, id: &str, generation: u64, cx: &mut Context<Self>) {
+        if self.view_mode() != crate::sidebar::ViewMode::Complex {
+            return;
+        }
+        let Some(profile) = self.issued_to(id, generation) else {
+            return;
+        };
+        if !profile.config.target().levels().lists_other_databases() {
+            return;
+        }
+        let Some(connection) = profile.connection() else {
+            return;
+        };
+        let engine = profile.config.engine();
+        let listing = spawn_blocking(cx.background_executor(), move || {
+            connection.databases(engine)
+        });
+        let id = id.to_string();
+        cx.spawn(async move |workspace, cx| {
+            let result = listing.await;
+            _ = workspace.update(cx, |workspace, cx| {
+                let Some(profile) = workspace.issued_to(&id, generation) else {
+                    return;
+                };
+                match result {
+                    Ok(databases) => profile.databases = databases,
+                    Err(error) => profile.session.notice = Some(error.message),
+                }
+                workspace.rebuild_connections(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// A refresh read the profile's own catalog again: list the databases
+    /// again, and read again every other database whose session is open, so
+    /// what the tree shows of them is no older than what it shows of the
+    /// connection's own.
+    fn reload_databases(&mut self, id: &str, generation: u64, cx: &mut Context<Self>) {
+        let Some(profile) = self.issued_to(id, generation) else {
+            return;
+        };
+        let open: Vec<String> = profile
+            .bound
+            .iter()
+            .filter(|(_, session)| matches!(session, BoundSession::Open(_)))
+            .map(|(database, _)| database.clone())
+            .collect();
+        self.list_databases(id, generation, cx);
+        for database in open {
+            self.load_database_catalog(id, database, generation, cx);
+        }
+    }
+
+    /// Open a session for `database`, which is another database of the
+    /// profile's server, from the live connection, and read its catalog over
+    /// it. Does nothing when one is open or opening. The session is held to
+    /// reads inside the open, before it is stored, when the profile is
+    /// Read-only, so it never exists unheld; a mode that changed while it
+    /// opened drops it and opens another under the new one.
+    pub(crate) fn open_database(&mut self, id: &str, database: String, cx: &mut Context<Self>) {
+        let Some(profile) = self.profiles.iter_mut().find(|profile| profile.id == id) else {
+            return;
+        };
+        if profile.bound.contains_key(&database) {
+            return;
+        }
+        let Some(connection) = profile.connection() else {
+            return;
+        };
+        let (generation, mode) = (profile.generation, profile.mode);
+        profile
+            .bound
+            .insert(database.clone(), BoundSession::Opening);
+        profile
+            .database_catalogs
+            .insert(database.clone(), CatalogState::Loading);
+        #[cfg(test)]
+        self.opened.push(database.clone());
+        self.rebuild_connections(cx);
+
+        let opening = spawn_blocking(cx.background_executor(), {
+            let database = database.clone();
+            move || {
+                let session = connection.on_database(&database)?;
+                // Only Read-only asks the server for anything, as at connect:
+                // a session that fails to take the hold it was promised is
+                // dropped, not handed back looking held.
+                if mode == Mode::ReadOnly {
+                    session.set_read_only(true)?;
+                }
+                Ok::<_, DbError>(session)
+            }
+        });
+        let id = id.to_string();
+        cx.spawn(async move |workspace, cx| {
+            let result = opening.await;
+            _ = workspace.update(cx, |workspace, cx| {
+                let Some(profile) = workspace.issued_to(&id, generation) else {
+                    return;
+                };
+                match result {
+                    Ok(session) => {
+                        // Held as the mode it set out under was. A mode
+                        // picked meanwhile found no session to hold.
+                        if (profile.mode == Mode::ReadOnly) != (mode == Mode::ReadOnly) {
+                            profile.bound.remove(&database);
+                            workspace.open_database(&id, database, cx);
+                            return;
+                        }
+                        profile
+                            .bound
+                            .insert(database.clone(), BoundSession::Open(Box::new(session)));
+                        workspace.load_database_catalog(&id, database, generation, cx);
+                    }
+                    Err(error) => {
+                        profile.bound.remove(&database);
+                        profile
+                            .database_catalogs
+                            .insert(database, CatalogState::Failed(error.message));
+                        workspace.rebuild_connections(cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Read the catalog of `database` over its open session, then its
+    /// routines and sizes, each landing into `profile.database_catalogs` as
+    /// the profile's own do into `profile.catalog`. A session that has been
+    /// dropped meanwhile takes its answer with it.
+    pub(crate) fn load_database_catalog(
+        &mut self,
+        id: &str,
+        database: String,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(connection) = self.session_for(id, &database, generation) else {
+            return;
+        };
+        let task = spawn_blocking(cx.background_executor(), move || {
+            let result = connection.catalog();
+            let lost = result.is_err() && connection.is_lost();
+            (result, lost)
+        });
+        let id = id.to_string();
+        cx.spawn(async move |workspace, cx| {
+            let (result, lost) = task.await;
+            _ = workspace.update(cx, |workspace, cx| {
+                if workspace.session_for(&id, &database, generation).is_none() {
+                    return;
+                }
+                let Some(profile) = workspace.issued_to(&id, generation) else {
+                    return;
+                };
+                match result {
+                    Ok(catalog) => {
+                        profile.database_catalogs.insert(
+                            database.clone(),
+                            CatalogState::Loaded(catalog, Routines::Loading),
+                        );
+                        workspace.rebuild_connections(cx);
+                        workspace.load_database_routines(&id, &database, generation, cx);
+                        workspace.load_database_sizes(&id, &database, generation, cx);
+                    }
+                    Err(error) => {
+                        // Nothing sent on a lost session can succeed: the
+                        // next expand opens another.
+                        if lost {
+                            profile.bound.remove(&database);
+                        }
+                        profile
+                            .database_catalogs
+                            .insert(database, CatalogState::Failed(error.message));
+                        workspace.rebuild_connections(cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The open session for `database` of the profile `id`, if the profile
+    /// is still on `generation`.
+    fn session_for(&mut self, id: &str, database: &str, generation: u64) -> Option<Connection> {
+        match self.issued_to(id, generation)?.bound.get(database)? {
+            BoundSession::Open(connection) => Some((**connection).clone()),
+            BoundSession::Opening => None,
+        }
+    }
+
+    fn load_database_routines(
+        &mut self,
+        id: &str,
+        database: &str,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(connection) = self.session_for(id, database, generation) else {
+            return;
+        };
+        let task = spawn_blocking(cx.background_executor(), move || connection.routines());
+        let (id, database) = (id.to_string(), database.to_string());
+        cx.spawn(async move |workspace, cx| {
+            let result = task.await;
+            _ = workspace.update(cx, |workspace, cx| {
+                let Some(profile) = workspace.issued_to(&id, generation) else {
+                    return;
+                };
+                // Only onto a catalog that loaded, as the profile's own.
+                let Some(CatalogState::Loaded(catalog, routines)) =
+                    profile.database_catalogs.get_mut(&database)
+                else {
+                    return;
+                };
+                match result {
+                    Ok(loaded) => {
+                        catalog.merge(loaded);
+                        *routines = Routines::Loaded;
+                    }
+                    Err(error) => {
+                        *routines = Routines::Failed;
+                        profile.session.notice = Some(error.message);
+                    }
+                }
+                workspace.rebuild_connections(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Dropped without a word when it fails, as the profile's own are.
+    fn load_database_sizes(
+        &mut self,
+        id: &str,
+        database: &str,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(connection) = self.session_for(id, database, generation) else {
+            return;
+        };
+        let task = spawn_blocking(cx.background_executor(), move || connection.sizes());
+        let (id, database) = (id.to_string(), database.to_string());
+        cx.spawn(async move |workspace, cx| {
+            let Ok(sizes) = task.await else {
+                return;
+            };
+            _ = workspace.update(cx, |workspace, cx| {
+                let Some(profile) = workspace.issued_to(&id, generation) else {
+                    return;
+                };
+                let Some(CatalogState::Loaded(catalog, _)) =
+                    profile.database_catalogs.get_mut(&database)
+                else {
+                    return;
+                };
+                catalog.set_sizes(&sizes);
+                workspace.rebuild_connections(cx);
+                cx.notify();
+            });
         })
         .detach();
     }
