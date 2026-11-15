@@ -15,8 +15,8 @@ on:
         type: boolean
         default: false
 
-permissions:
-  contents: write
+# Only the job that publishes needs the token; it asks for its own write.
+permissions: {}
 
 concurrency:
   group: release
@@ -30,6 +30,8 @@ jobs:
       prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # Before any build, so a release that cannot go out fails in seconds
       # instead of after every asset has been built.
       - id: version
@@ -65,6 +67,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # The same list the README tells a Linux user to install before building
       # from source, plus unixodbc-dev for the ODBC bridge to link against.
@@ -100,6 +104,8 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # bundle.sh also builds the ODBC bridge; unixODBC compiles from source
       # into it with the runner's C compiler, so nothing is installed here.
@@ -135,6 +141,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # The hosted image already has MSVC, the Windows SDK (GPUI's shaders)
       # and rc.exe (the icon resource). Inno Setup is only for wrapping the
@@ -159,6 +167,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: dist
@@ -215,8 +225,12 @@ jobs:
     needs: [version, sign]
     if: inputs.publish
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: dist
@@ -268,6 +282,8 @@ jobs:
         with:
           repository: ShayanAbbas1/homebrew-dbdelve
           token: ${{ secrets.TAP_TOKEN }}
+          # The next step pushes to the tap, so the token has to stay persisted.
+          persist-credentials: true
           path: tap
 
       - run: |
