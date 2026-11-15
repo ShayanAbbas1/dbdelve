@@ -2542,7 +2542,10 @@ impl ResultGrid {
     }
 
     /// What a binary cell's [`Self::edit_seed`] is made from besides the
-    /// value fetched, `None` on any other cell.
+    /// value fetched, `None` on any other cell: an input seeded from the same
+    /// is seeded alike, without decoding the whole value again to find out.
+    /// The fetched value is not in it, since a refresh that changes it
+    /// changes `rows_id` and the row panel builds its inputs again.
     pub fn binary_seed_key(
         &self,
         row: usize,

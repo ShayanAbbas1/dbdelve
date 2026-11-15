@@ -148,8 +148,9 @@ pub struct RowInput {
     /// staged, and a cell changed elsewhere refills an input nobody is typing
     /// in.
     pub seed: SharedString,
-    /// [`ResultGrid::binary_seed_key`] as `seed` was made: a draft typed in
-    /// one form is never read in another.
+    /// [`ResultGrid::binary_seed_key`] as `seed` was made: a binary cell's
+    /// seed is decoded again only when it changes, and a draft typed in one
+    /// form is never read in another.
     pub binary: Option<(Option<result_grid::BinaryForm>, Option<NewValue>)>,
 }
 

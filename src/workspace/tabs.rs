@@ -299,6 +299,19 @@ impl Workspace {
                         return field.is_some().then_some((col, None));
                     }
                     let binary = grid.binary_seed_key(row, col);
+                    // A binary seed decodes the whole value, so it is made
+                    // again only when what it is made from changed.
+                    if binary.is_some()
+                        && field.as_ref().is_some_and(|field| {
+                            field
+                                .binary
+                                .as_ref()
+                                .map(|(form, pending)| (*form, pending.as_ref()))
+                                == binary
+                        })
+                    {
+                        return None;
+                    }
                     let seed = grid.edit_seed(row, col);
                     let binary = binary.map(|(form, pending)| (form, pending.cloned()));
                     (field
