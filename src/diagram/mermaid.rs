@@ -132,7 +132,7 @@ fn entity(name: &str) -> String {
         .collect();
     match inside.trim() {
         "" => "_".to_string(),
-        inside => inside.to_string(),
+        inside => undirected(inside.to_string()),
     }
 }
 
@@ -192,7 +192,34 @@ fn quoted(text: &str) -> String {
             c => c,
         });
     }
-    out
+    undirected(out)
+}
+
+/// Mermaid takes a line holding `direction`, white space and `TB`, `BT`,
+/// `RL` or `LR`, case blind and anywhere on it, for a direction statement
+/// before it reads a string, so the space after such a `direction` is
+/// spelled `_`.
+fn undirected(text: String) -> String {
+    // JavaScript's `\s`, which a byte-order mark is in and Unicode's white
+    // space is not.
+    let space = |c: &char| c.is_whitespace() || *c == '\u{feff}';
+    let mut chars: Vec<char> = text.chars().collect();
+    for at in 0..chars.len() {
+        let word: String = chars[at..].iter().take(9).collect();
+        if !word.eq_ignore_ascii_case("direction") {
+            continue;
+        }
+        let gap = chars[at + 9..].iter().take_while(|c| space(c)).count();
+        let way: String = chars[at + 9 + gap..].iter().take(2).collect();
+        if gap > 0
+            && ["tb", "bt", "rl", "lr"]
+                .iter()
+                .any(|d| way.eq_ignore_ascii_case(d))
+        {
+            chars[at + 9] = '_';
+        }
+    }
+    chars.into_iter().collect()
 }
 
 #[cfg(test)]
@@ -269,6 +296,33 @@ mod tests {
             text.contains(" \"x%_{init:{'theme':'dark'}}%_\"\n"),
             "{text}"
         );
+    }
+
+    /// Mermaid's lexer reads any line with `direction LR` in it as a
+    /// direction statement, the whole line, quotes or not.
+    #[test]
+    fn a_name_holding_a_direction_does_not_take_its_line() {
+        let mut graph = graph(2, &[(1, 0)]);
+        graph.tables[0].name = "direction LR".into();
+        graph.tables[1].name = "Direction\u{a0}\ttb_and_more".into();
+        graph.tables[1].columns[1].name = "sort direction rl".into();
+        let text = mermaid(&graph, &schema(&graph, false));
+        assert!(text.contains("    \"direction_LR\" {\n"), "{text}");
+        assert!(
+            text.contains("    \"Direction_ tb_and_more\" {\n"),
+            "{text}"
+        );
+        assert!(text.contains(" : \"sort direction_rl\"\n"), "{text}");
+        let lexed_as_direction = |line: &str| {
+            let line = line.to_ascii_lowercase();
+            line.match_indices("direction").any(|(at, _)| {
+                let rest = &line[at + "direction".len()..];
+                let way = rest.trim_start_matches(|c: char| c.is_whitespace());
+                way.len() < rest.len()
+                    && ["tb", "bt", "rl", "lr"].iter().any(|d| way.starts_with(d))
+            })
+        };
+        assert!(!text.lines().any(lexed_as_direction), "{text}");
     }
 
     /// Mermaid strips an entity's quotes, so `_` and `"_"` are one entity.
