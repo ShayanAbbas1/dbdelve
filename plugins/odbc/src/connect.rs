@@ -1,7 +1,7 @@
 use std::mem::ManuallyDrop;
 use std::ops::Deref;
 
-use dbdelve_plugin_protocol::{REFERENCES, Response, WRITE};
+use dbdelve_plugin_protocol::{GRAPH, REFERENCES, Response, WRITE};
 use odbc_api::handles::{self, SqlResult, SqlText, StatementImpl};
 use odbc_api::sys::{AttrOdbcVersion, InfoType};
 
@@ -171,7 +171,7 @@ impl Session {
             raw::info_string(&self.handle, kind)
                 .ok_or_else(|| failure::from(self.handle(), "SQLGetInfo"))
         };
-        let mut optional = vec![REFERENCES.to_string()];
+        let mut optional = vec![REFERENCES.to_string(), GRAPH.to_string()];
         if raw::transactions(&self.handle) {
             optional.push(WRITE.to_string());
         }

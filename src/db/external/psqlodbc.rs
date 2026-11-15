@@ -405,3 +405,72 @@ fn live_external_through_a_tunnel() {
     let result = run(&connection, "SELECT 1 AS one");
     assert_eq!(result.rows[0].get(0), Some("1"));
 }
+
+/// The seed's keys through the bridge's `graph`, as every built-in's graph
+/// test reads them: the view left out, the composite key whole and in key
+/// order, and the key from `archive` drawn as a stub.
+#[test]
+#[ignore = "needs a Postgres and psqlODBC: set dbdelve_ODBC_POSTGRES, _USER and _PASSWORD"]
+fn live_psqlodbc_a_schema_graph_reads_the_seeds_keys_back() {
+    use crate::db::graph::seed;
+
+    let connection = open();
+    assert!(connection.draws_diagrams(target()));
+    assert!(
+        !target().draws_diagrams(),
+        "the plugin's target never draws"
+    );
+    let graph = connection
+        .schema_graph("public")
+        .expect("the graph should read");
+    assert!(
+        graph
+            .tables
+            .iter()
+            .all(|table| table.name.as_ref() != "account_overview"),
+        "a view is not drawn"
+    );
+    seed::assert_keys_read_back(&graph);
+    let archive = connection
+        .schema_graph("archive")
+        .expect("the graph should read");
+    seed::assert_archive_points_at_accounts(&archive, "public");
+}
+
+/// A lock on the catalog psqlODBC reads keys from holds the read until a
+/// Cancel on its own connection, under no run's token, ends it. psqlODBC runs
+/// its catalog functions on a statement of its own, which `SQLCancel` on the
+/// bridge's does not reach, so the read ends at the host's cancel deadline,
+/// the side plugin killed; a driver whose call the cancel reaches answers
+/// it sooner.
+#[test]
+#[ignore = "needs a Postgres and psqlODBC: set dbdelve_ODBC_POSTGRES, _USER and _PASSWORD"]
+fn live_psqlodbc_a_cancel_on_its_own_connection_ends_a_schema_graph_read() {
+    use dbdelve_plugin_protocol::limits::CANCEL_DEADLINE;
+
+    let locker = open();
+    let side = open().apart().expect("a side connection should open");
+    run(&locker, "BEGIN");
+    run(
+        &locker,
+        "LOCK TABLE pg_catalog.pg_constraint IN ACCESS EXCLUSIVE MODE",
+    );
+    let canceller = side.clone();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(500));
+        canceller.cancel(&CancelToken::default()).unwrap();
+    });
+    let started = Instant::now();
+    let error = side
+        .schema_graph("public")
+        .expect_err("the read should be ended");
+    let took = started.elapsed();
+    run(&locker, "ROLLBACK");
+    assert!(
+        error.message == crate::db::external::CANCELLED
+            || error.message.contains("did not answer a cancel"),
+        "{}",
+        error.message
+    );
+    assert!(took < CANCEL_DEADLINE + Duration::from_secs(2), "{took:?}");
+}

@@ -435,6 +435,24 @@ driver printing to stdout would corrupt them (`ponytail:` not on Windows).
   any type holding `VIEW`; `TABLE`, `MATERIALIZED QUERY TABLE` and `GLOBAL
   TEMPORARY TABLE` are tables; system tables, aliases, synonyms and nicknames
   are left out.
+- **`graph`** reads `SQLTables` and `SQLColumns` once for the schema (pattern
+  arguments), then `SQLPrimaryKeys`, `SQLStatistics` and `SQLForeignKeys`
+  once per base table: 2 + 3N calls in one request. Never one call for the
+  schema: those three take the table name as an ordinary argument. The driver
+  manager refuses a NULL one with `HY009` before any driver sees it, and
+  neither driver tested reads `""` or `%` as every table: psqlODBC answers
+  them with no rows or "No Table specified", Db2 with no rows or `CLI0124E`.
+  A base table is `TABLE_TYPE` `TABLE` only. Each call is published, so a
+  Cancel lands in it where the driver allows and stops the loop at the next
+  call otherwise; psqlODBC runs its catalog functions on a statement of its
+  own, which `SQLCancel` on the bridge's does not reach, so there a Cancel of
+  a call held on the server ends at the host's cancel deadline, the side
+  plugin killed. A unique index counts only with `NON_UNIQUE` 0, no
+  `FILTER_CONDITION`, and every column one of the table's: an expression
+  index names its expression, or nothing, in `COLUMN_NAME`. psqlODBC and Db2
+  leave `FILTER_CONDITION` NULL, so through them a partial unique index flags
+  its column. ODBC has no word for a partition, so one a driver lists as a
+  `TABLE` is drawn as a card of its own (not checked live).
 
 ### The driver manager, per platform
 
