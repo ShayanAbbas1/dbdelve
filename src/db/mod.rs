@@ -2201,6 +2201,28 @@ impl Connection {
         }
     }
 
+    /// The statement that would create the sequence `schema.name`, for
+    /// reading: nothing dbdelve does runs it, and no current value is read.
+    /// Apart from [`Self::ddl`], which takes a [`RelationKind`] a sequence is
+    /// not.
+    pub fn sequence_ddl(&self, schema: &str, name: &str) -> Result<String, DbError> {
+        match self {
+            Self::Postgres(connection) => connection.sequence_ddl(schema, name),
+            Self::MySql(connection) => connection.sequence_ddl(schema, name),
+            Self::SqlServer(connection) => connection.sequence_ddl(schema, name),
+            Self::DuckDb(connection) => connection.sequence_ddl(schema, name),
+            Self::Snowflake(connection) => connection.sequence_ddl(schema, name),
+            Self::Sqlite(_)
+            | Self::Turso(_)
+            | Self::ClickHouse(_)
+            | Self::MongoDb(_)
+            | Self::Redis(_)
+            | Self::External(_) => Err(plain_error(
+                "This connection lists no sequences to show a definition of.".into(),
+            )),
+        }
+    }
+
     /// Ask the server to stop the statement running under `cancel` -- on
     /// Postgres, MySQL and SQLite, whatever this connection is running.
     ///

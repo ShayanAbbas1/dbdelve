@@ -1024,6 +1024,15 @@ impl Connection {
         assemble_sequences(sequences)
     }
 
+    /// MariaDB's `SHOW CREATE SEQUENCE`, whose second column is the statement,
+    /// as [`Self::ddl`] reads `SHOW CREATE TABLE`'s. MySQL has no sequences.
+    pub fn sequence_ddl(&self, schema: &str, name: &str) -> Result<String, DbError> {
+        if self.engine != Engine::MariaDb {
+            return Err(plain_error("MySQL has no sequences.".into()));
+        }
+        self.show_create("SEQUENCE", schema, name)
+    }
+
     /// On a connection of its own, as [`Self::cancel`] is, so opening every
     /// table for its statistics never holds the mutex a user's query waits on.
     /// The side connection is dropped on return.
@@ -1097,16 +1106,22 @@ impl Connection {
     /// `SHOW CREATE TABLE` answers for a view too, with its `CREATE VIEW` in
     /// the same second column.
     pub fn ddl(&self, schema: &str, relation: &str) -> Result<String, DbError> {
+        self.show_create("TABLE", schema, relation)
+    }
+
+    /// `SHOW CREATE {what}` for `schema.name`, the statement being the second
+    /// column.
+    fn show_create(&self, what: &str, schema: &str, name: &str) -> Result<String, DbError> {
         let shown = self.internal_query(&format!(
-            "SHOW CREATE TABLE {}",
-            self.engine.qualified(schema, relation)
+            "SHOW CREATE {what} {}",
+            self.engine.qualified(schema, name)
         ))?;
         shown
             .rows
             .first()
             .and_then(|row| row.get(1))
             .map(|definition| format!("{definition};"))
-            .ok_or_else(|| plain_error(format!("{schema}.{relation} has no definition to show.")))
+            .ok_or_else(|| plain_error(format!("{schema}.{name} has no definition to show.")))
     }
 }
 
@@ -3039,6 +3054,51 @@ mod tests {
 
         drop(&connection);
         assert_eq!(listed, vec!["dbdelve_sequence_probe_ticket".to_string()]);
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_mariadb_shows_a_sequences_create_statement() {
+        let connection = live(Engine::MariaDb);
+        let drop = |connection: &Connection| {
+            connection
+                .query(
+                    "DROP SEQUENCE IF EXISTS dbdelve_sequence_probe_ticket",
+                    Fetch::default(),
+                )
+                .expect("the probe sequence should drop");
+        };
+        drop(&connection);
+        connection
+            .query(
+                "CREATE SEQUENCE dbdelve_sequence_probe_ticket START WITH 5 INCREMENT BY 2",
+                Fetch::default(),
+            )
+            .expect("the probe sequence should be created");
+        connection
+            .query(
+                "SELECT NEXTVAL(dbdelve_sequence_probe_ticket)",
+                Fetch::default(),
+            )
+            .expect("the counter moves");
+        let database = live_config(Engine::MariaDb).database;
+        let ddl = connection.sequence_ddl(&database, "dbdelve_sequence_probe_ticket");
+        drop(&connection);
+        let ddl = ddl.expect("the definition is read");
+        assert!(ddl.starts_with("CREATE SEQUENCE"), "{ddl}");
+        assert!(ddl.contains("dbdelve_sequence_probe_ticket"), "{ddl}");
+        assert!(ddl.ends_with(';'), "{ddl}");
+        assert!(
+            ddl.to_lowercase().contains("start with 5"),
+            "the statement carries the start and not the counter: {ddl}"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_mysql_shows_no_sequence_definition() {
+        let connection = live(Engine::MySql);
+        assert!(connection.sequence_ddl("dbdelve_dev", "anything").is_err());
     }
 
     #[test]

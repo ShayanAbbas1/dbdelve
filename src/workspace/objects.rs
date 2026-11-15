@@ -5,8 +5,14 @@
 
 use super::*;
 
+use super::sidebar::new_query_binding;
 use crate::db::{ColumnDefinition, Structure};
-use crate::session::{Explained, Finished, Queue, Routed, TabKey};
+use crate::session::{Binding, Explained, Finished, Queue, Routed, TabKey};
+use crate::sidebar::{NodeAction, NodeKind, SelectedNode, schema_row_is_a_database};
+
+/// A definition being read: the connection it was asked of, by id and
+/// generation, and the read itself.
+type DdlRead = (String, u64, gpui::Task<Result<String, DbError>>);
 
 impl Workspace {
     pub(crate) fn open_explorer_target(
@@ -591,41 +597,228 @@ impl Workspace {
         );
     }
 
-    pub(crate) fn relation_at(
+    /// The object `target` names in the catalog `profile` read for `database`
+    /// (`None` for its own): its schema, its name as the catalog lists it, and
+    /// what kind of node it is.
+    pub(crate) fn object_in(
         &self,
+        profile: &str,
+        database: Option<&str>,
         target: ExplorerTarget,
-    ) -> Option<(String, String, RelationKind)> {
-        let ExplorerTarget::Relation {
-            schema_index,
-            relation_index,
-        } = target
-        else {
-            return None;
+    ) -> Option<(String, String, NodeKind)> {
+        let profile = self.profiles.iter().find(|found| found.id == profile)?;
+        let catalog = catalog_in(profile, database)?;
+        match target {
+            ExplorerTarget::Relation {
+                schema_index,
+                relation_index,
+            } => {
+                let schema = catalog.schemas.get(schema_index)?;
+                let relation = schema.relations.get(relation_index)?;
+                Some((
+                    schema.name.clone(),
+                    relation.name.clone(),
+                    NodeKind::Relation(relation.kind),
+                ))
+            }
+            ExplorerTarget::Routine {
+                schema_index,
+                routine_index,
+            } => {
+                let schema = catalog.schemas.get(schema_index)?;
+                let routine = schema.routines.get(routine_index)?;
+                Some((schema.name.clone(), routine.name.clone(), NodeKind::Routine))
+            }
+            ExplorerTarget::Sequence {
+                schema_index,
+                sequence_index,
+            } => {
+                let schema = catalog.schemas.get(schema_index)?;
+                let sequence = schema.sequences.get(sequence_index)?;
+                Some((schema.name.clone(), sequence.clone(), NodeKind::Sequence))
+            }
+        }
+    }
+
+    /// What `action` does to `node`, from a menu or the palette alike. The
+    /// node's connection comes to the front first, so the gate, the mode and
+    /// the engine anything it sends meets are that connection's. Nothing here
+    /// sends a statement dbdelve writes: a definition is the driver's own read
+    /// and a refresh its own catalog read.
+    pub(crate) fn run_node_action(
+        &mut self,
+        node: &SelectedNode,
+        action: NodeAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            NodeAction::CopyName(name) => cx.write_to_clipboard(ClipboardItem::new_string(name)),
+            NodeAction::ShowDdl => {
+                if !self.make_front(&node.profile, cx) {
+                    return;
+                }
+                match (node.kind, node.schema.clone(), node.leaf) {
+                    (NodeKind::Relation(kind), Some(schema), _) => self.show_ddl(
+                        node.database.clone(),
+                        schema,
+                        node.name.clone(),
+                        ObjectKind::Relation(kind),
+                        cx,
+                    ),
+                    (NodeKind::Sequence, Some(schema), _) => self.show_ddl(
+                        node.database.clone(),
+                        schema,
+                        node.name.clone(),
+                        ObjectKind::Sequence,
+                        cx,
+                    ),
+                    (NodeKind::Routine, _, Some(leaf)) => match node.database.clone() {
+                        Some(database) => {
+                            self.open_object_on(&node.profile, database, leaf.target, window, cx)
+                        }
+                        None => self.open_explorer_target(leaf.target, window, cx),
+                    },
+                    _ => {}
+                }
+            }
+            NodeAction::NewQueryHere => {
+                if !self.make_front(&node.profile, cx) {
+                    return;
+                }
+                match self.view_mode() {
+                    ViewMode::Complex => {
+                        let target = self.target();
+                        let (database, schema) = new_query_binding(node, target);
+                        self.new_query_here(&node.profile, database, schema, window, cx);
+                    }
+                    // Simple mode has one active schema for every tab, so it
+                    // moves before the tab opens, and a move that is refused
+                    // leaves no tab on the schema it did not reach.
+                    ViewMode::Simple => {
+                        let moved = match node.kind {
+                            NodeKind::Schema => {
+                                let is_database = schema_row_is_a_database(self.target().levels());
+                                self.move_to_schema_row(node.name.clone(), is_database, window, cx)
+                            }
+                            _ => true,
+                        };
+                        if moved {
+                            self.open_query_tab(None, window, cx);
+                        }
+                    }
+                }
+            }
+            NodeAction::Refresh => {
+                if !self.make_front(&node.profile, cx) {
+                    return;
+                }
+                // Another database is read over its own session, and only it:
+                // the connection's own catalog is not asked again for it.
+                match self.elsewhere(node.database.clone()) {
+                    Some(database) => self.reload_database(&node.profile, database, cx),
+                    None => self.refresh_schema(cx),
+                }
+            }
+        }
+    }
+
+    /// Move the connection in front onto the schema row `name`, which is a
+    /// database where `is_database`. Whether it is there now: a refusal is the
+    /// notice it set, and nothing moved.
+    pub(crate) fn move_to_schema_row(
+        &mut self,
+        name: String,
+        is_database: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match is_database {
+            true => self.set_database(name, window, cx),
+            false if self.target().picks_schema() => self.set_schema(name, cx),
+            // A target that picks no schema has nothing to move.
+            false => true,
+        }
+    }
+
+    /// Bring the connection `id` in front, as acting on one of its rows
+    /// does. Whether there is one.
+    pub(crate) fn make_front(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
+        let Some(index) = self.profiles.iter().position(|found| found.id == id) else {
+            return false;
         };
-        let schema = self.catalog()?.schemas.get(schema_index)?;
-        let relation = schema.relations.get(relation_index)?;
-        Some((schema.name.clone(), relation.name.clone(), relation.kind))
+        if self.active != Some(index) {
+            self.activate(index, cx);
+        }
+        true
+    }
+
+    /// `database` as an object's own database says it: `None` for the
+    /// profile's own, which is the profile's connection and not a session of
+    /// its own, where asking it for itself by name would open a second one.
+    fn elsewhere(&self, database: Option<String>) -> Option<String> {
+        let own = self.profile()?.active_database();
+        database.filter(|database| own.as_ref() != Some(database))
+    }
+
+    /// Ask for `schema.name`'s definition over the connection of its
+    /// database, `None` for the profile's own: another database's is read over
+    /// that database's session, which a read with none open opens first.
+    /// Nothing is sent but the driver's own DDL read.
+    fn read_ddl(
+        &mut self,
+        database: Option<String>,
+        schema: String,
+        name: String,
+        kind: ObjectKind,
+        cx: &mut Context<Self>,
+    ) -> Option<DdlRead> {
+        let profile = self.profile()?;
+        // The own database is the profile's own connection, not a session of
+        // its own: asking it for itself by name would open a second one.
+        let database =
+            database.filter(|database| profile.active_database().as_ref() != Some(database));
+        let routed = profile.route(database.map(|database| Binding {
+            database,
+            schema: None,
+        }));
+        if !routed.is_available() {
+            return None;
+        }
+        let (profile_id, generation) = (profile.id.clone(), profile.generation);
+        let task = self.run_routed(
+            &profile_id,
+            generation,
+            routed,
+            move |connection| match kind {
+                ObjectKind::Relation(kind) => connection.ddl(&schema, &name, kind),
+                ObjectKind::Sequence => connection.sequence_ddl(&schema, &name),
+                // A routine's definition is its tab, which `run_node_action`
+                // opens; nothing asks for one here.
+                ObjectKind::Routine(_) => Err(DbError {
+                    message: "A routine's definition is shown in its own tab.".into(),
+                    position: None,
+                }),
+            },
+            cx,
+        );
+        Some((profile_id, generation, task))
     }
 
     pub(crate) fn copy_ddl(
         &mut self,
+        database: Option<String>,
         schema: String,
         relation: String,
         kind: RelationKind,
         cx: &mut Context<Self>,
     ) {
         self.clear_notice();
-        let Some(profile) = self.profile() else {
+        let Some((profile_id, generation, task)) =
+            self.read_ddl(database, schema, relation, ObjectKind::Relation(kind), cx)
+        else {
             return;
         };
-        let Some(connection) = profile.connection() else {
-            return;
-        };
-        let profile_id = profile.id.clone();
-        let generation = profile.generation;
-        let task = spawn_blocking(cx.background_executor(), move || {
-            connection.ddl(&schema, &relation, kind)
-        });
 
         cx.spawn(async move |workspace, cx| {
             let result = task.await;
@@ -647,6 +840,111 @@ impl Workspace {
                 .ok();
         })
         .detach();
+    }
+
+    /// Open the `Show DDL` dialog over `schema.relation` of `database` (`None`
+    /// for the profile's own): the text is read over that database's
+    /// connection and drawn read-only. It is not a buffer, so nothing in it
+    /// can be run. A relation or a sequence; a routine's definition is its
+    /// tab and is not shown here.
+    pub(crate) fn show_ddl(
+        &mut self,
+        database: Option<String>,
+        schema: String,
+        relation: String,
+        kind: ObjectKind,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_notice();
+        let kind_name = crate::palette::kind_label(kind);
+        let title = format!(
+            "{}{} {schema}.{relation}",
+            kind_name[..1].to_uppercase(),
+            &kind_name[1..]
+        );
+        let shown = relation.clone();
+        let Some((profile_id, generation, task)) =
+            self.read_ddl(database, schema, relation, kind, cx)
+        else {
+            return;
+        };
+        self.last_ddl_request += 1;
+        let request = self.last_ddl_request;
+        self.ddl_view = Some(DdlView {
+            profile: profile_id.clone(),
+            name: shown,
+            title,
+            text: DdlText::Loading,
+            request,
+        });
+        cx.notify();
+
+        cx.spawn(async move |workspace, cx| {
+            let result = task.await;
+            workspace
+                .update(cx, |workspace, cx| {
+                    if workspace.issued_to(&profile_id, generation).is_none() {
+                        return;
+                    }
+                    // Closed, or put up for another object, since: that answer
+                    // is not this dialog's.
+                    let Some(view) = workspace
+                        .ddl_view
+                        .as_mut()
+                        .filter(|view| view.request == request)
+                    else {
+                        return;
+                    };
+                    view.text = match result {
+                        Ok(ddl) => DdlText::Ready(ddl),
+                        Err(error) => {
+                            DdlText::Failed(format!("Could not read the definition: {error}"))
+                        }
+                    };
+                    cx.notify();
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    /// The `Show DDL` dialog, when it is the front connection's: one left up
+    /// for a connection that is no longer in front is not drawn and `escape`
+    /// does not stop at it.
+    pub(crate) fn ddl_view_in_front(&self) -> Option<&DdlView> {
+        let profile = self.profile()?;
+        self.ddl_view
+            .as_ref()
+            .filter(|view| view.profile == profile.id)
+    }
+
+    /// Close the dialog and hand the keyboard back. Answers whether it was
+    /// drawn, so `escape` is only spent on a dialog that was.
+    pub(crate) fn close_ddl_view(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.ddl_view_in_front().is_none() {
+            return false;
+        }
+        self.ddl_view = None;
+        self.refocus_front();
+        cx.notify();
+        true
+    }
+
+    /// Put the shown definition on the clipboard. Nothing when there is none
+    /// to put there: still loading, failed, or empty.
+    pub(crate) fn copy_shown_ddl(&mut self, cx: &mut Context<Self>) {
+        let Some(DdlView {
+            text: DdlText::Ready(text),
+            ..
+        }) = self.ddl_view_in_front()
+        else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+        self.confirm("Copied the CREATE statement.".into(), cx);
     }
 
     pub(crate) fn load_structure(
@@ -1843,6 +2141,21 @@ enum Reopened {
     Diagram(String, store::StoredDiagram),
 }
 
+/// The catalog `profile` has read for `database`: its own for `None` or its
+/// own database's name, another database's from the session opened on it.
+pub(crate) fn catalog_in<'a>(profile: &'a Profile, database: Option<&str>) -> Option<&'a Catalog> {
+    let state = match database {
+        Some(database) if profile.active_database().as_deref() != Some(database) => {
+            profile.database_catalogs.get(database)?
+        }
+        _ => &profile.catalog,
+    };
+    match state {
+        CatalogState::Loaded(catalog, _) => Some(catalog),
+        _ => None,
+    }
+}
+
 /// The object `target` names in `catalog`, ready to open.
 fn opened_from(catalog: &Catalog, target: ExplorerTarget) -> Option<OpenedObject> {
     match target {
@@ -1872,6 +2185,8 @@ fn opened_from(catalog: &Catalog, target: ExplorerTarget) -> Option<OpenedObject
                 routine: routine.clone(),
             })
         }
+        // A sequence is listed and nothing more: it has no tab to open (D-24).
+        ExplorerTarget::Sequence { .. } => None,
     }
 }
 

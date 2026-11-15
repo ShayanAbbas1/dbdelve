@@ -24,7 +24,7 @@ use crate::db::Syntax;
 /// The gpui-component widgets ask for their own paths — those are Lucide names
 /// too, so they resolve here as well. Add a row when something asks for one;
 /// an unlisted path simply draws nothing.
-const ICONS: [(&str, &IconData); 85] = [
+const ICONS: [(&str, &IconData); 86] = [
     ("icons/git-fork.svg", icondata_lu::LuGitFork),
     ("icons/chevron-down.svg", icondata_lu::LuChevronDown),
     ("icons/chevron-right.svg", icondata_lu::LuChevronRight),
@@ -62,6 +62,7 @@ const ICONS: [(&str, &IconData); 85] = [
     ("icons/list-tree.svg", icondata_lu::LuListTree),
     ("icons/square-function.svg", icondata_lu::LuSquareFunction),
     ("icons/square-play.svg", icondata_lu::LuSquarePlay),
+    ("icons/list-ordered.svg", icondata_lu::LuListOrdered),
     ("icons/play.svg", icondata_lu::LuPlay),
     ("icons/square-pen.svg", icondata_lu::LuSquarePen),
     ("icons/history.svg", icondata_lu::LuHistory),
@@ -200,6 +201,7 @@ pub mod icon {
     pub const FOREIGN_TABLE: &str = "icons/globe.svg";
     pub const FUNCTION: &str = "icons/square-function.svg";
     pub const PROCEDURE: &str = "icons/square-play.svg";
+    pub const SEQUENCE: &str = "icons/list-ordered.svg";
     pub const STRUCTURE: &str = "icons/list-tree.svg";
     pub const DIAGRAM: &str = "icons/network.svg";
     pub const FIT: &str = "icons/scan.svg";
@@ -370,6 +372,7 @@ mod tests {
             icon::FOREIGN_TABLE,
             icon::FUNCTION,
             icon::PROCEDURE,
+            icon::SEQUENCE,
             icon::STRUCTURE,
             icon::DIAGRAM,
             icon::FIT,

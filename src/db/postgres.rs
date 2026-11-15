@@ -165,6 +165,19 @@ WHERE schemaname <> 'information_schema'
 ORDER BY 1, 2
 ";
 
+// The definition and not the sequence's position: `last_value` is not read.
+const SEQUENCE_PARTS_SQL: &str = "
+SELECT data_type::text AS data_type,
+       increment_by::text AS increment_by,
+       min_value::text AS min_value,
+       max_value::text AS max_value,
+       start_value::text AS start_value,
+       cache_size::text AS cache_size,
+       cycle::text AS cycle
+FROM pg_catalog.pg_sequences
+WHERE schemaname = {schema} AND sequencename = {relation}
+";
+
 const ROUTINES_SQL: &str = "
 SELECT
     namespace.nspname AS schema_name,
@@ -1567,6 +1580,29 @@ impl Connection {
         assemble_sequences(self.internal_query(SEQUENCES_SQL)?)
     }
 
+    /// `CREATE SEQUENCE` for `schema.name`, composed from `pg_sequences`.
+    pub fn sequence_ddl(&self, schema: &str, name: &str) -> Result<String, DbError> {
+        let parts = self.internal_query(&structure_sql(SEQUENCE_PARTS_SQL, schema, name))?;
+        let row = parts
+            .rows
+            .first()
+            .ok_or_else(|| plain_error(format!("{schema} has no sequence {name}.")))?;
+        let cell = |column| required_cell(&parts, row, column);
+        Ok(compose_sequence(
+            schema,
+            name,
+            &SequenceParts {
+                data_type: cell("data_type")?,
+                increment: cell("increment_by")?,
+                minimum: cell("min_value")?,
+                maximum: cell("max_value")?,
+                start: cell("start_value")?,
+                cache: cell("cache_size")?,
+                cycle: cell("cycle")? == "true",
+            },
+        ))
+    }
+
     /// On a connection of its own, opened exactly as this one was, so a size
     /// waiting on a relation's lock never holds the mutex a user's query waits
     /// on. The side connection is dropped on return.
@@ -1870,6 +1906,34 @@ fn structure_sql(template: &str, schema: &str, relation: &str) -> String {
             "{relation}",
             &super::Engine::Postgres.quote_literal(relation),
         )
+}
+
+/// What `pg_sequences` says of a sequence's definition, each as text.
+struct SequenceParts<'a> {
+    data_type: &'a str,
+    increment: &'a str,
+    minimum: &'a str,
+    maximum: &'a str,
+    start: &'a str,
+    cache: &'a str,
+    cycle: bool,
+}
+
+/// Postgres has no `pg_get_*def` for a sequence, so the statement is written
+/// out of what `pg_sequences` holds, every name quoted.
+fn compose_sequence(schema: &str, name: &str, parts: &SequenceParts) -> String {
+    format!(
+        "CREATE SEQUENCE {} AS {} INCREMENT BY {} MINVALUE {} MAXVALUE {} START WITH {} \
+         CACHE {} {};",
+        Engine::Postgres.qualified(schema, name),
+        parts.data_type,
+        parts.increment,
+        parts.minimum,
+        parts.maximum,
+        parts.start,
+        parts.cache,
+        if parts.cycle { "CYCLE" } else { "NO CYCLE" },
+    )
 }
 
 /// A result read off the wire, held across the reads [`Connection::run`]
@@ -2267,6 +2331,80 @@ mod tests {
             ssh: None,
             schema: None,
         }
+    }
+
+    #[test]
+    fn a_composed_sequence_quotes_names_whatever_they_hold() {
+        let parts = SequenceParts {
+            data_type: "bigint",
+            increment: "2",
+            minimum: "1",
+            maximum: "1000",
+            start: "5",
+            cache: "10",
+            cycle: true,
+        };
+        assert_eq!(
+            compose_sequence("we \"ird\"", "t\u{ef}cket no", &parts),
+            "CREATE SEQUENCE \"we \"\"ird\"\"\".\"t\u{ef}cket no\" AS bigint INCREMENT BY 2 \
+             MINVALUE 1 MAXVALUE 1000 START WITH 5 CACHE 10 CYCLE;"
+        );
+        let parts = SequenceParts {
+            cycle: false,
+            ..parts
+        };
+        assert!(compose_sequence("s", "n", &parts).ends_with(" NO CYCLE;"));
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_composed_sequence_recreates_it() {
+        const SCHEMA: &str = "dbdelve_sequence_probe";
+        // A double quote, a space and letters outside ASCII.
+        const NAME: &str = "t\"\u{ef}cket no";
+        let quoted = Engine::Postgres.quote_identifier(NAME);
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        let clean = |connection: &Connection| {
+            connection
+                .query(
+                    &format!("DROP SCHEMA IF EXISTS {SCHEMA} CASCADE"),
+                    Fetch::default(),
+                )
+                .expect("the probe schema should drop");
+        };
+        // The columns `compose_sequence` writes, as they stand on the server.
+        let row = |connection: &Connection| {
+            let result = connection
+                .internal_query(&structure_sql(SEQUENCE_PARTS_SQL, SCHEMA, NAME))
+                .expect("the sequence row is read");
+            result.rows
+        };
+        clean(&connection);
+        connection
+            .query(
+                &format!(
+                    "CREATE SCHEMA {SCHEMA}; \
+                     CREATE SEQUENCE {SCHEMA}.{quoted} AS integer INCREMENT 3 START 7"
+                ),
+                Fetch::default(),
+            )
+            .expect("the probe sequence should be created");
+        let before = row(&connection);
+        let ddl = connection
+            .sequence_ddl(SCHEMA, NAME)
+            .expect("the definition is read");
+        connection
+            .query(
+                &format!("DROP SEQUENCE {SCHEMA}.{quoted}"),
+                Fetch::default(),
+            )
+            .expect("the probe sequence should drop");
+        let recreated = connection.query(&ddl, Fetch::default());
+        let after = row(&connection);
+        clean(&connection);
+        recreated.expect(&ddl);
+        assert_eq!(before.len(), 1, "the probe sequence exists");
+        assert_eq!(after, before, "{ddl}");
     }
 
     /// The compose database as the bastion sees it, by service name and the

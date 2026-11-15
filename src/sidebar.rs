@@ -12,7 +12,7 @@ use std::{collections::HashMap, ops::Range};
 
 use gpui_component::tree::TreeItem;
 
-use crate::db::Levels;
+use crate::db::{Levels, RelationKind, Target};
 use crate::explorer::{Builder, ExplorerLeaf, ExplorerTree, Shortcut, is_schema_row, saved_query};
 use crate::store::StoredProject;
 
@@ -363,6 +363,75 @@ pub(crate) enum Node {
     Row {
         leaf: Option<ExplorerLeaf>,
     },
+}
+
+/// What the sidebar's row is, as far as an action on it needs to know.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NodeKind {
+    Connection,
+    Database,
+    Schema,
+    Relation(RelationKind),
+    Routine,
+    Sequence,
+}
+
+/// One thing a node offers, from its menu and the palette alike.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum NodeAction {
+    NewQueryHere,
+    /// The name as the catalog lists it, so what is copied is what is read.
+    CopyName(String),
+    ShowDdl,
+    Refresh,
+}
+
+/// What a node of `kind` named `name` offers, in the order its menu lists
+/// them. The one list both trees' menus and the palette read, as
+/// [`crate::explorer::relation_copies`] is for the copies.
+pub(crate) fn node_actions(kind: NodeKind, name: &str, target: Target) -> Vec<NodeAction> {
+    let copy = NodeAction::CopyName(name.to_string());
+    match kind {
+        NodeKind::Connection | NodeKind::Database | NodeKind::Schema => {
+            vec![NodeAction::NewQueryHere, copy, NodeAction::Refresh]
+        }
+        // A target with no definition to write out has none to show.
+        NodeKind::Relation(_) | NodeKind::Sequence if target.copies_ddl() => {
+            vec![copy, NodeAction::ShowDdl]
+        }
+        NodeKind::Relation(_) | NodeKind::Sequence => vec![copy],
+        NodeKind::Routine => vec![copy, NodeAction::ShowDdl],
+    }
+}
+
+impl NodeAction {
+    /// What a menu and the palette call it.
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            NodeAction::NewQueryHere => "New Query Here",
+            NodeAction::CopyName(_) => "Copy Name",
+            NodeAction::ShowDdl => "Show DDL",
+            NodeAction::Refresh => "Refresh",
+        }
+    }
+}
+
+/// A node of either tree, with what an action on it needs: the connection it
+/// belongs to, which comes to the front first, and where it sits in it. A
+/// palette row carries one, so what it acts on is what it was built for and
+/// not whatever the sidebar has selected when it is confirmed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SelectedNode {
+    pub(crate) profile: String,
+    /// The database the connections tree lists the node under, as its row id
+    /// says it; `None` in simple mode, and on a connection's own row.
+    pub(crate) database: Option<String>,
+    pub(crate) kind: NodeKind,
+    /// As the catalog lists it, never quoted or qualified.
+    pub(crate) name: String,
+    /// The schema an object is in.
+    pub(crate) schema: Option<String>,
+    pub(crate) leaf: Option<ExplorerLeaf>,
 }
 
 /// The rows, and what each stands for, by row id.
@@ -2209,5 +2278,48 @@ mod tests {
         for mode in [ViewMode::Simple, ViewMode::Complex] {
             assert_eq!(ViewMode::from_slug(Some(mode.slug())), mode);
         }
+    }
+
+    #[test]
+    fn each_node_offers_the_actions_its_target_allows() {
+        use crate::db::Engine;
+        let on = |kind, engine| node_actions(kind, "birds", Target::built_in(engine));
+        let table = NodeKind::Relation(RelationKind::Table);
+        let copy = || NodeAction::CopyName("birds".into());
+        assert_eq!(on(table, Engine::Postgres), [copy(), NodeAction::ShowDdl]);
+        assert_eq!(
+            on(table, Engine::Redis),
+            [copy()],
+            "a target with no definition to write offers none to show"
+        );
+        assert_eq!(
+            on(NodeKind::Sequence, Engine::Postgres),
+            [copy(), NodeAction::ShowDdl]
+        );
+        assert_eq!(
+            on(NodeKind::Routine, Engine::Postgres),
+            [copy(), NodeAction::ShowDdl]
+        );
+        for kind in [NodeKind::Connection, NodeKind::Database, NodeKind::Schema] {
+            assert_eq!(
+                on(kind, Engine::Postgres),
+                [NodeAction::NewQueryHere, copy(), NodeAction::Refresh],
+                "{kind:?} has no definition of its own"
+            );
+        }
+    }
+
+    #[test]
+    fn a_sequence_offers_copy_name_and_show_ddl() {
+        use crate::db::Engine;
+        assert_eq!(
+            node_actions(NodeKind::Sequence, "s", Target::built_in(Engine::DuckDb)),
+            [NodeAction::CopyName("s".into()), NodeAction::ShowDdl]
+        );
+        assert_eq!(
+            node_actions(NodeKind::Sequence, "s", Target::built_in(Engine::Redis)),
+            [NodeAction::CopyName("s".into())],
+            "a target with no definition to write offers none to show"
+        );
     }
 }

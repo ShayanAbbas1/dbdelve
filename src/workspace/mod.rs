@@ -395,6 +395,13 @@ pub(crate) struct Workspace {
     /// The theme in force when the theme picker opened, while it is open. The
     /// installed one is only a preview until a row is confirmed.
     pub(crate) theme_before_preview: Option<Theme>,
+    /// The `Show DDL` dialog: one object's definition, read-only. Only the
+    /// relation menu's Show DDL opens it and only its own Close and `escape`
+    /// end it.
+    pub(crate) ddl_view: Option<DdlView>,
+    /// Numbers each Show DDL read, so an answer that comes back after the
+    /// dialog was closed, or put up for another object, is not drawn.
+    pub(crate) last_ddl_request: u64,
     /// The opacity field in the settings panel. Kept here rather than built
     /// with the card, because an input is state the user is part-way through
     /// typing into and a fresh one every frame would swallow the keystroke.
@@ -568,6 +575,8 @@ impl Workspace {
             palette_recents: Vec::new(),
             collapsed_projects: HashSet::new(),
             theme_before_preview: None,
+            ddl_view: None,
+            last_ddl_request: 0,
             opacity_input,
             #[cfg(test)]
             held: Vec::new(),
@@ -2060,7 +2069,7 @@ impl Render for Workspace {
             let insert = engine.syntax() == db::Syntax::Sql
                 && matches!(structure, StructureState::Loaded(loaded) if !loaded.columns.is_empty());
             Some((
-                connected.then(|| (tab.schema.clone(), tab.name.clone(), kind)),
+                connected.then(|| (tab.schema.clone(), tab.name.clone(), kind, tab.database.clone())),
                 insert,
             ))
         });
@@ -2212,7 +2221,7 @@ impl Render for Workspace {
                                 .flex()
                                 .items_center()
                                 .gap(px(layout::SPACE_SM))
-                                .children(ddl.map(|(schema, relation, kind)| {
+                                .children(ddl.map(|(schema, relation, kind, database)| {
                                     button(
                                         "copy-create",
                                         "Copy CREATE",
@@ -2222,10 +2231,14 @@ impl Render for Workspace {
                                     )
                                     .on_click(
                                         move |_, _, cx| {
-                                            let (schema, relation) =
-                                                (schema.clone(), relation.clone());
+                                            let (schema, relation, database) = (
+                                                schema.clone(),
+                                                relation.clone(),
+                                                database.clone(),
+                                            );
                                             _ = ddl_workspace.update(cx, |workspace, cx| {
-                                                workspace.copy_ddl(schema, relation, kind, cx);
+                                                workspace
+                                                    .copy_ddl(database, schema, relation, kind, cx);
                                             });
                                         },
                                     )
@@ -2585,6 +2598,7 @@ impl Render for Workspace {
             .child(self.beside_settings(main_pane, cx))
             .children(self.dialog_layer(
                 [
+                    ("show-ddl", self.render_show_ddl(cx)),
                     ("apply-review", self.render_apply_review(cx)),
                     ("import-rows", self.render_import_rows(window, cx)),
                     ("delete", self.render_delete_confirmation(cx)),
@@ -2601,6 +2615,25 @@ impl Render for Workspace {
             .children(self.palette.clone())
             .children(self.render_reference_popup(cx))
     }
+}
+
+/// What the `Show DDL` dialog shows, and which object it was asked about: the
+/// answer lands only while the view still names the same request.
+pub(crate) struct DdlView {
+    /// The connection the object belongs to, by id.
+    pub(crate) profile: String,
+    pub(crate) name: String,
+    pub(crate) title: String,
+    pub(crate) text: DdlText,
+    pub(crate) request: u64,
+}
+
+/// The definition as the dialog has it.
+pub(crate) enum DdlText {
+    Loading,
+    /// Empty when the server returned no definition.
+    Ready(String),
+    Failed(String),
 }
 
 /// A relation a reference arrow lists, by its index into the structure's

@@ -395,6 +395,27 @@ Decided, and not to be re-litigated:
     account.
   - MariaDB: `information_schema.TABLES` where `TABLE_TYPE = 'SEQUENCE'`; a
     server before 10.3 answers no rows. MySQL has none and sends no statement.
+
+  Show DDL on a sequence reads its definition through `Connection::sequence_ddl`
+  (`Connection::ddl` takes a `RelationKind`, which a sequence is not), drawn and
+  copied and never run. No current value is read by the composed ones, and
+  every name in a composed statement or a lookup goes through
+  `quote_identifier` or `quote_literal`:
+  - Postgres has no `pg_get_*def` for a sequence, so `CREATE SEQUENCE` is
+    composed from `pg_sequences` (`data_type`, `increment_by`, `min_value`,
+    `max_value`, `start_value`, `cache_size`, `cycle`; not `last_value`).
+  - SQL Server composes it from `sys.sequences` (type, `start_value`,
+    `increment`, `minimum_value`, `maximum_value`, `is_cycling`, `is_cached`
+    and `cache_size`; not `current_value`), the `sql_variant` columns cast to
+    text and a `decimal`'s precision and scale kept.
+  - DuckDB composes it from `duckdb_sequences()`. Its `sql` column is not used:
+    it writes `START` as the counter's current value, so it moves with every
+    `nextval`.
+  - Snowflake asks `GET_DDL('SEQUENCE', ..)`; written against the documented
+    function and not run against an account, so whether its `START WITH` is the
+    original start or the counter's next value is not verified (the ignored live
+    test advances the counter and asserts the start).
+  - MariaDB asks `SHOW CREATE SEQUENCE`; MySQL has none and the call is refused.
 - **Sessions on other databases.** A database of a server other than the
   profile's gets one session per (profile, database), opened lazily the first
   time it is expanded by `Connection::on_database` and sharing nothing mutable

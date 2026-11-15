@@ -1214,11 +1214,6 @@ impl Connection {
     /// Named from the database down, like a `SHOW`, so the answer does not
     /// hang on which database the request's field resolves a schema in.
     pub fn ddl(&self, schema: &str, relation: &str, kind: RelationKind) -> Result<String, DbError> {
-        let name = format!(
-            "{}.{}",
-            Engine::Snowflake.qualified(&self.config.stored_database(), schema),
-            Engine::Snowflake.quote_identifier(relation)
-        );
         let kind = match kind {
             RelationKind::View | RelationKind::MaterializedView => "VIEW",
             RelationKind::Table
@@ -1226,6 +1221,25 @@ impl Connection {
             | RelationKind::ForeignTable
             | RelationKind::Dictionary => "TABLE",
         };
+        self.get_ddl(kind, schema, relation)
+    }
+
+    /// `GET_DDL('SEQUENCE', ..)`, named from the database down like
+    /// [`Self::ddl`]. Whether its `START WITH` is the original start or the
+    /// counter's next value is not verified against an account;
+    /// `live_a_sequences_ddl_comes_from_get_ddl` advances the counter first to
+    /// settle it.
+    pub fn sequence_ddl(&self, schema: &str, name: &str) -> Result<String, DbError> {
+        self.get_ddl("SEQUENCE", schema, name)
+    }
+
+    /// `kind` is one of `GET_DDL`'s object types, a fixed word and not a name.
+    fn get_ddl(&self, kind: &str, schema: &str, name: &str) -> Result<String, DbError> {
+        let name = format!(
+            "{}.{}",
+            Engine::Snowflake.qualified(&self.config.stored_database(), schema),
+            Engine::Snowflake.quote_identifier(name)
+        );
         let result = self.internal_query(&format!(
             "SELECT GET_DDL('{kind}', {})",
             Engine::Snowflake.quote_literal(&name)
@@ -2125,6 +2139,39 @@ mod tests {
             )
             .expect("runs");
         assert_eq!(shown.rows[0].get(0), Some("INFORMATION_SCHEMA"));
+    }
+
+    #[test]
+    #[ignore = "requires a Snowflake account configured through DBDELVE_SNOWFLAKE_*"]
+    fn live_a_sequences_ddl_comes_from_get_ddl() {
+        let connection = Connection::open(&live_config()).expect("connects");
+        let drop = |connection: &Connection| {
+            connection
+                .query("DROP SCHEMA IF EXISTS dbdelve_sequence_probe")
+                .expect("the probe schema should drop");
+        };
+        drop(&connection);
+        connection
+            .query("CREATE SCHEMA dbdelve_sequence_probe")
+            .expect("the probe schema should be created");
+        connection
+            .query("CREATE SEQUENCE dbdelve_sequence_probe.ticket START 5 INCREMENT 2")
+            .expect("the probe sequence should be created");
+        for _ in 0..2 {
+            connection
+                .query("SELECT dbdelve_sequence_probe.ticket.NEXTVAL")
+                .expect("the counter moves");
+        }
+        // Unquoted names are folded to upper case by the server.
+        let ddl = connection.sequence_ddl("DBDELVE_SEQUENCE_PROBE", "TICKET");
+        drop(&connection);
+        let ddl = ddl.expect("the definition is read");
+        assert!(ddl.to_uppercase().contains("CREATE"), "{ddl}");
+        assert!(ddl.contains("TICKET"), "{ddl}");
+        assert!(
+            ddl.to_uppercase().contains("START WITH 5"),
+            "the statement carries the start and not the counter: {ddl}"
+        );
     }
 
     #[test]
