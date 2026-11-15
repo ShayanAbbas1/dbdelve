@@ -719,7 +719,8 @@ fn fake_cli() -> Option<i32> {
         let _ = std::io::stdout().flush();
     }
     if behavior == "exit" {
-        thread::sleep(Duration::from_millis(150));
+        // Long enough for a loaded runner to read readiness before the exit.
+        thread::sleep(Duration::from_millis(1000));
         return Some(1);
     }
     for stream in listener.incoming() {
