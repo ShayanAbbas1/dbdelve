@@ -719,6 +719,19 @@ fn set_search_path_sql(schema: &str) -> String {
     )
 }
 
+/// The profile's startup statements on `client`, in the order written, rows
+/// discarded. The first error stops the rest.
+fn replay(client: &mut Client, startup: &[String]) -> Result<(), DbError> {
+    let Client { client, driver, .. } = client;
+    startup.iter().try_for_each(|statement| {
+        driver
+            .block_on(client.simple_query(statement))
+            .and_then(|done| done)
+            .map(|_| ())
+            .map_err(|error| query_error(&error, statement))
+    })
+}
+
 /// A `SET` after connecting rather than a startup option: PgBouncer and other
 /// poolers refuse a connection that sends `options` at all.
 fn set_search_path(client: &mut Client, schema: &str) -> Result<(), DbError> {
@@ -739,16 +752,46 @@ fn set_search_path(client: &mut Client, schema: &str) -> Result<(), DbError> {
     }
 }
 
-/// The session's own `search_path` again, as the role, database or server set
-/// it: where a session opened with no schema picked starts.
-fn reset_search_path(client: &mut Client) -> Result<(), DbError> {
-    let reset = "RESET search_path";
+/// What puts a session back on the `search_path` a bound run with no schema
+/// expects: the one it held once its startup script ran, or the one the role,
+/// database or server gave it where no script ran. The captured text is the
+/// server's own stored value, which it already accepted, so it is set back
+/// verbatim. No transaction guard, as `RESET` carried none: a bound no-schema
+/// transaction must keep running.
+fn put_back_search_path_sql(after_startup: Option<&str>) -> String {
+    match after_startup {
+        None => "RESET search_path".into(),
+        Some(path) => {
+            let path = path.replace('\\', r"\\").replace('\'', "''");
+            format!("SELECT pg_catalog.set_config('search_path', E'{path}', false)")
+        }
+    }
+}
+
+fn put_back_search_path(client: &mut Client, after_startup: Option<&str>) -> Result<(), DbError> {
+    let put_back = put_back_search_path_sql(after_startup);
     let Client { client, driver, .. } = client;
     driver
-        .block_on(client.simple_query(reset))
+        .block_on(client.simple_query(&put_back))
         .and_then(|done| done)
         .map(|_| ())
-        .map_err(|error| query_error(&error, reset))
+        .map_err(|error| query_error(&error, &put_back))
+}
+
+/// The `search_path` `client` holds now, for putting a session back on what a
+/// startup script left. A failed read fails the open like the script's own
+/// error: a connect never promises a `search_path` it cannot put back.
+fn read_search_path(client: &mut Client) -> Result<Option<String>, DbError> {
+    let read = "SELECT pg_catalog.current_setting('search_path')";
+    let Client { client, driver, .. } = client;
+    let messages = driver
+        .block_on(client.simple_query(read))
+        .and_then(|done| done)
+        .map_err(|error| query_error(&error, read))?;
+    Ok(messages.into_iter().find_map(|message| match message {
+        SimpleQueryMessage::Row(row) => row.get(0).map(str::to_string),
+        _ => None,
+    }))
 }
 
 /// The server's own name, which TLS verifies, dialled at the tunnel's address
@@ -1023,6 +1066,14 @@ pub struct Connection {
     server: Arc<Mutex<ServerConfig>>,
     /// A Cancel for this session's schema graph read ([`Self::schema_graph`]).
     graph: GraphCancel,
+    /// The statements the profile's gated startup script came to, replayed in
+    /// [`Self::connect`] on every session opened for the user. Empty until
+    /// [`Self::with_startup`] sets it.
+    startup: Arc<[String]>,
+    /// The `search_path` this session held once its startup script ran on it.
+    /// A bound run that picks no schema puts the session back on it. `None`
+    /// where no script ran, and `RESET` does the job there.
+    after_startup_search_path: Option<String>,
 }
 
 #[derive(Clone)]
@@ -1043,10 +1094,10 @@ impl Connection {
         match &server.ssh {
             Some(ssh) if server.host.starts_with('/') => {
                 let bridge = SocketBridge::new(ssh, &socket_path(server))?;
-                Self::connect(server, Route::Socket(Arc::new(bridge)))
+                Self::connect(server, Route::Socket(Arc::new(bridge)), &[])
             }
             _ => tunnelled(server, DEFAULT_PORT, |tunnel| {
-                Self::connect(server, tunnel.map_or(Route::Direct, Route::Tunnel))
+                Self::connect(server, tunnel.map_or(Route::Direct, Route::Tunnel), &[])
             }),
         }
     }
@@ -1062,11 +1113,11 @@ impl Connection {
         std::thread::spawn(move || this.aside(Duration::ZERO, |_| Some(())));
     }
 
-    fn connect(server: &ServerConfig, route: Route) -> Result<Self, DbError> {
-        server.forgetting_on_failure(Engine::Postgres, Self::sign_in(server, route))
+    fn connect(server: &ServerConfig, route: Route, startup: &[String]) -> Result<Self, DbError> {
+        server.forgetting_on_failure(Engine::Postgres, Self::sign_in(server, route, startup))
     }
 
-    fn sign_in(server: &ServerConfig, route: Route) -> Result<Self, DbError> {
+    fn sign_in(server: &ServerConfig, route: Route, startup: &[String]) -> Result<Self, DbError> {
         let connector = tls::connector(server.sslmode, server.root_certificate.as_deref())
             .map_err(|message| DbError {
                 message,
@@ -1150,6 +1201,12 @@ impl Connection {
         if let Some(schema) = &server.schema {
             set_search_path(&mut client, schema)?;
         }
+        // After the schema pick, so a `search_path` the script sets wins.
+        replay(&mut client, startup)?;
+        let after_startup_search_path = match startup.is_empty() {
+            true => None,
+            false => read_search_path(&mut client)?,
+        };
 
         Ok(Self {
             cancel: client.client.cancel_token(),
@@ -1162,7 +1219,31 @@ impl Connection {
             route,
             server: Arc::new(Mutex::new(server.clone())),
             graph: GraphCancel::default(),
+            startup: startup.into(),
+            after_startup_search_path,
         })
+    }
+
+    /// Runs `statements` now on this session and keeps them for every session
+    /// this connection opens from here on. The first error stops the rest.
+    pub fn with_startup(mut self, statements: Vec<String>) -> Result<Self, DbError> {
+        let mut client = self.client.lock().map_err(|_| DbError {
+            message: "The connection is unavailable after an earlier internal failure.".into(),
+            position: None,
+        })?;
+        replay(&mut client, &statements)?;
+        let after_startup = match statements.is_empty() {
+            true => None,
+            false => read_search_path(&mut client)?,
+        };
+        drop(client);
+        self.after_startup_search_path = after_startup;
+        self.startup = statements.into();
+        // One opened before the script was known has not run it.
+        if let Ok(mut side) = self.side.lock() {
+            *side = None;
+        }
+        Ok(self)
     }
 
     fn server(&self) -> ServerConfig {
@@ -1220,7 +1301,7 @@ impl Connection {
         Ok(Self {
             side: self.side.clone(),
             server: self.server.clone(),
-            ..Self::connect(&self.server(), self.route.clone())?
+            ..Self::connect(&self.server(), self.route.clone(), &self.startup)?
         })
     }
 
@@ -1241,7 +1322,28 @@ impl Connection {
                 ..self.server()
             },
             self.route.clone(),
+            &self.startup,
         )
+    }
+
+    /// This side session with its bound back after the startup script ran on
+    /// it: the script is the user's text and may `SET statement_timeout` away
+    /// the 2 seconds the connection string gave it, which bounds every
+    /// describe and size read on it. In the same milliseconds the startup
+    /// option sends.
+    fn with_side_bound(self) -> Result<Self, DbError> {
+        if !self.startup.is_empty() {
+            let bound = format!(
+                "SET statement_timeout = {}",
+                u64::from(SIDE_TIMEOUT_SECONDS) * 1_000
+            );
+            let mut client = self.client.lock().map_err(|_| DbError {
+                message: "The connection is unavailable after an earlier internal failure.".into(),
+                position: None,
+            })?;
+            replay(&mut client, &[bound])?;
+        }
+        Ok(self)
     }
 
     /// A poisoned mutex counts: every later statement would fail on it too.
@@ -1299,8 +1401,9 @@ impl Connection {
     }
 
     /// [`Self::query`] for a tab bound to this session's database: `schema`
-    /// goes first on the `search_path`, or the session's own default is put
-    /// back where the tab binds none, before the statement and under the lock
+    /// goes first on the `search_path`, or the session is put back on the one
+    /// it held after its startup script ran (its own default where it ran
+    /// none) where the tab binds none, before the statement and under the lock
     /// that runs it. A statement of another tab, or one of the user's own,
     /// may have moved it since, and two tabs bound to different schemas of one
     /// database share this session, so applying and running as two
@@ -1352,7 +1455,10 @@ impl Connection {
         fetch.hold()?;
         match bound {
             Some(Some(schema)) => set_search_path(&mut client, schema).map_err(super::unplaced)?,
-            Some(None) => reset_search_path(&mut client).map_err(super::unplaced)?,
+            Some(None) => {
+                put_back_search_path(&mut client, self.after_startup_search_path.as_deref())
+                    .map_err(super::unplaced)?
+            }
             None => {}
         }
 
@@ -1479,7 +1585,9 @@ impl Connection {
                 statement_timeout: SIDE_TIMEOUT_SECONDS,
                 ..self.server()
             };
-            *side = Self::connect(&server, self.route.clone()).ok();
+            *side = Self::connect(&server, self.route.clone(), &self.startup)
+                .and_then(|side| side.with_side_bound())
+                .ok();
         }
         ask(side.as_ref()?)
     }
@@ -1607,7 +1715,7 @@ impl Connection {
     /// waiting on a relation's lock never holds the mutex a user's query waits
     /// on. The side connection is dropped on return.
     pub fn sizes(&self) -> Result<Sizes, DbError> {
-        let side = Self::connect(&self.server(), self.route.clone())?;
+        let side = Self::connect(&self.server(), self.route.clone(), &self.startup)?;
         assemble_sizes(side.internal_query(SIZES_SQL)?)
     }
 
@@ -2331,6 +2439,132 @@ mod tests {
             ssh: None,
             schema: None,
         }
+    }
+
+    /// A counter the script bumps, so a session that ran it twice reads 2.
+    const STARTUP_COUNT: &str = "SELECT current_setting('dbdelve.n', true)";
+
+    fn startup_script() -> Vec<String> {
+        vec![
+            "SELECT set_config('dbdelve.n', \
+             (COALESCE(NULLIF(current_setting('dbdelve.n', true), ''), '0')::int + 1)::text, false)"
+                .into(),
+            "SET search_path TO pg_catalog".into(),
+        ]
+    }
+
+    fn cell(connection: &Connection, sql: &str) -> Option<String> {
+        let result = connection
+            .query(sql, Fetch::default())
+            .expect("the statement runs");
+        result.rows[0].get(0).map(str::to_string)
+    }
+
+    #[test]
+    fn a_bound_run_with_no_schema_puts_back_the_search_path_the_script_left() {
+        assert_eq!(put_back_search_path_sql(None), "RESET search_path");
+        assert_eq!(
+            put_back_search_path_sql(Some("pg_catalog")),
+            "SELECT pg_catalog.set_config('search_path', E'pg_catalog', false)"
+        );
+        // Neither character may end the `E''` literal early.
+        assert_eq!(
+            put_back_search_path_sql(Some(r#""it's", "a\b""#)),
+            r#"SELECT pg_catalog.set_config('search_path', E'"it''s", "a\\b"', false)"#
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_the_startup_script_holds_on_every_user_session() {
+        let scripted = Connection::open(&live_config())
+            .and_then(|connection| connection.with_startup(startup_script()))
+            .expect("the script runs");
+        assert_eq!(cell(&scripted, STARTUP_COUNT).as_deref(), Some("1"));
+        let beside = scripted.alongside().expect("a session beside it opens");
+        assert_eq!(cell(&beside, STARTUP_COUNT).as_deref(), Some("1"));
+        assert_eq!(
+            cell(&beside, "SHOW search_path").as_deref(),
+            Some("pg_catalog")
+        );
+        let database = scripted.current_database().to_string();
+        let other = scripted.on_database(&database).expect("a session opens");
+        assert_eq!(cell(&other, STARTUP_COUNT).as_deref(), Some("1"));
+        // A bound tab that picks no schema keeps the script's `search_path`; one
+        // that picks a schema overrides it, and the next no-schema run is back.
+        let bound = |connection: &Connection, schema: Option<&str>| {
+            let result = connection
+                .query_bound(schema, "SHOW search_path", Fetch::default())
+                .expect("the bound run works");
+            result.rows[0].get(0).map(str::to_string)
+        };
+        assert_eq!(bound(&other, None).as_deref(), Some("pg_catalog"));
+        assert_eq!(
+            bound(&other, Some("public")).as_deref(),
+            Some("\"public\", \"$user\", public")
+        );
+        assert_eq!(bound(&other, None).as_deref(), Some("pg_catalog"));
+        assert_eq!(cell(&other, STARTUP_COUNT).as_deref(), Some("1"));
+        let unscripted = Connection::open(&live_config())
+            .and_then(|connection| connection.on_database(&database))
+            .expect("a session opens");
+        assert_eq!(
+            bound(&unscripted, None).as_deref(),
+            Some("\"$user\", public")
+        );
+        let side = scripted
+            .aside(Duration::from_secs(10), |side| {
+                Some(cell(side, STARTUP_COUNT))
+            })
+            .expect("the side session opens");
+        assert_eq!(side.as_deref(), Some("1"));
+        let sizes = Connection::connect(
+            &scripted.server(),
+            scripted.route.clone(),
+            &scripted.startup,
+        )
+        .expect("a session opens");
+        assert_eq!(cell(&sizes, STARTUP_COUNT).as_deref(), Some("1"));
+        // A reused session is not replayed again.
+        assert_eq!(cell(&scripted, STARTUP_COUNT).as_deref(), Some("1"));
+
+        // The schema is picked first, so the script's own `search_path` wins.
+        let picked = ServerConfig {
+            schema: Some("public".into()),
+            ..live_config()
+        };
+        let scripted = Connection::open(&picked)
+            .and_then(|connection| connection.with_startup(startup_script()))
+            .expect("the script runs");
+        assert_eq!(
+            cell(&scripted, "SHOW search_path").as_deref(),
+            Some("pg_catalog")
+        );
+        let beside = scripted.alongside().expect("a session beside it opens");
+        assert_eq!(
+            cell(&beside, "SHOW search_path").as_deref(),
+            Some("pg_catalog")
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_script_cannot_lift_the_side_sessions_bound() {
+        let scripted = Connection::open(&live_config())
+            .and_then(|connection| {
+                connection.with_startup(vec!["SET statement_timeout = 0".into()])
+            })
+            .expect("the script runs");
+        assert_eq!(
+            cell(&scripted, "SHOW statement_timeout").as_deref(),
+            Some("0")
+        );
+        let side = scripted
+            .aside(Duration::from_secs(10), |side| {
+                Some(cell(side, "SHOW statement_timeout"))
+            })
+            .expect("the side session opens");
+        assert_eq!(side.as_deref(), Some("2s"));
     }
 
     #[test]

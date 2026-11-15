@@ -1,7 +1,7 @@
 //! What the mode prompt does when it is answered, and the one place a
 //! connection's mode changes.
 
-use super::*;
+use super::{profiles::script_refused, *};
 use crate::session::{PendingRun, Resume};
 use crate::sql::Stop;
 
@@ -10,6 +10,28 @@ impl Workspace {
     /// caller (the grid's own cache, the titlebar picker) is one more thing
     /// that would have to be told separately if this were not the one door.
     pub(crate) fn set_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
+        let Some(profile) = self.profile_mut() else {
+            return;
+        };
+        // The drivers replay the connect-time startup statements on every
+        // later session, so a script the lowered mode refuses must not stay on
+        // the live connection: the profile reconnects, and that connect fails
+        // saying so. A connect under way has no connection to re-gate; its
+        // landing checks the script again (`begin_connect`).
+        let regate =
+            mode < profile.mode && profile.connection().is_some() && script_refused(profile, mode);
+        let id = profile.id.clone();
+        if regate && let Some(running) = self.running_import_into(&id) {
+            // `reconnect` declines to interrupt an import, and a mode lowered
+            // without it would show less than the open sessions ran under.
+            self.note(
+                format!(
+                    "The mode was not changed: an import into {running} is running and the startup script needs the higher mode."
+                ),
+                cx,
+            );
+            return;
+        }
         let Some(profile) = self.profile_mut() else {
             return;
         };
@@ -100,6 +122,9 @@ impl Workspace {
                 }
             })
             .detach();
+        }
+        if regate && let Some(index) = self.active {
+            self.reconnect(index, cx);
         }
     }
 

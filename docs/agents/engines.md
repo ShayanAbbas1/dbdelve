@@ -275,6 +275,13 @@ Decided, and not to be re-litigated:
   good. The run's first rows are held for the describe for up to a second
   (`Feed::await_types`), so they are first shown by type rather than restyled
   once it answers.
+- **A startup script is replayed once on every session DBDelve opens for the
+  user** (`Connection::with_startup`), in each driver's own funnel: after the
+  schema pick on Postgres, as ordinary statements after the connect and never in
+  `init` on MySQL and MariaDB, in every login on SQL Server. The Postgres side
+  session re-asserts its 2-second bound after it. Behind PgBouncer in
+  transaction pooling only tracked parameters survive between statements, so a
+  script's other `SET`s do not, and `search_path` does only from Postgres 18.
 - **SQL Server's Cancel closes the connection** (a read stopped at the row
   limit does not: that is `SET ROWCOUNT`). tiberius cannot send TDS's
   attention signal, and `KILL` needs `ALTER ANY CONNECTION`, which an ordinary

@@ -539,6 +539,8 @@ impl Profile {
             mode: Some(self.mode.slug().to_string()),
             introspection_depth: (self.behaviour.depth != Depth::default())
                 .then(|| self.behaviour.depth.slug().to_string()),
+            startup_script: Some(self.behaviour.startup_script.clone())
+                .filter(|script| !script.trim().is_empty()),
             confirmed: self
                 .confirmed
                 .iter()
@@ -1941,6 +1943,9 @@ impl Depth {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Behaviour {
     pub(crate) depth: Depth,
+    /// The user's text, as typed. Gated on every use and never stored gated: a
+    /// mode lowered since it was written is judged at the next connect.
+    pub(crate) startup_script: String,
 }
 
 /// Which surface the main pane is showing, and what a run targets. Both kinds

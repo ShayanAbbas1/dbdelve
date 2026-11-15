@@ -140,6 +140,13 @@ impl Target {
         ) && self.engine != Engine::MongoDb
     }
 
+    /// Whether a profile can carry a startup script: DBDelve's own driver
+    /// replays it on every session it opens for the user, and a plugin's
+    /// process is its own.
+    pub fn takes_startup_script(self) -> bool {
+        self.driver == Driver::BuiltIn && self.engine.spec().takes_startup_script
+    }
+
     /// Whether a profile's SSH tunnel may end at a Unix socket on the SSH host,
     /// opened as another OS user: a Host starting with `/` is its directory.
     pub fn reaches_socket_over_ssh(self) -> bool {

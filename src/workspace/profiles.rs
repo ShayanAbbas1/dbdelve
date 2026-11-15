@@ -256,6 +256,7 @@ impl Workspace {
             session.notice = Some(message);
         }
         let id = stored.id.clone();
+        let takes_script = config.target().takes_startup_script();
         self.profiles.push(Profile {
             id: stored.id,
             name: stored.name,
@@ -282,6 +283,12 @@ impl Workspace {
                     .introspection_depth
                     .as_deref()
                     .and_then(Depth::from_slug)
+                    .unwrap_or_default(),
+                // An engine with no row has no way to show or change it, and
+                // nothing would run it.
+                startup_script: stored
+                    .startup_script
+                    .filter(|_| takes_script)
                     .unwrap_or_default(),
             },
             confirmed: stored
@@ -821,6 +828,26 @@ impl Workspace {
                 return;
             }
         };
+        // As Test connection and every connect will judge it: under the mode
+        // the profile has, which for a new one is the form's.
+        let (script_mode, script_confirmed) = editing
+            .as_deref()
+            .and_then(|id| self.profiles.iter().find(|profile| profile.id == id))
+            .map_or((mode, Vec::new()), |profile| {
+                (profile.mode, profile.confirmed.clone())
+            });
+        if let Err(error) = sql::startup_statements(
+            config.engine(),
+            script_mode,
+            &script_confirmed,
+            &behaviour.startup_script,
+        ) {
+            if let Some(form) = &mut self.form {
+                form.error = Some(error);
+            }
+            cx.notify();
+            return;
+        }
         if let Some(editing) = editing.as_deref()
             && let Some(profile) = self.profiles.iter().find(|profile| profile.id == editing)
         {
@@ -891,10 +918,23 @@ impl Workspace {
             return;
         }
         let depth_changed = profile.behaviour.depth != behaviour.depth;
+        let script_changed = profile.behaviour.startup_script != behaviour.startup_script;
         profile.behaviour = behaviour;
         self.remember_profiles(cx);
         let profile = &mut self.profiles[index];
-        if !depth_changed || profile.connection().is_none() {
+        if profile.connection().is_none() {
+            // Nothing live to disagree with the text: the next connect reads
+            // it. A save that reconnects is in this arm too, and the connect
+            // it started has its landing check the script (`begin_connect`).
+            return;
+        }
+        if script_changed {
+            // The sessions already open were given the statements the connect
+            // ran, and are not changed under the user.
+            profile.session.notice =
+                Some("The startup script applies from the next connect.".to_string());
+        }
+        if !depth_changed {
             return;
         }
         // A refresh declines to start while a read is under way, so the one
@@ -932,11 +972,24 @@ impl Workspace {
                 return;
             }
         };
+        let behaviour = match form.behaviour(cx) {
+            Ok(behaviour) => behaviour,
+            Err(error) => {
+                form.error = Some(error);
+                form.test = None;
+                cx.notify();
+                return;
+            }
+        };
         let editing = form.editing.clone();
-        let mode = editing
+        let (mode, confirmed) = editing
             .as_ref()
             .and_then(|id| self.profiles.iter().find(|profile| &profile.id == id))
-            .map_or(form.mode, |profile| profile.mode);
+            .map_or((form.mode, Vec::new()), |profile| {
+                (profile.mode, profile.confirmed.clone())
+            });
+        let script = behaviour.startup_script;
+        let speaks = config.engine();
         form.error = None;
 
         let attempt = crate::db::ConnectAttempt::default();
@@ -969,6 +1022,7 @@ impl Workspace {
                         .set_read_only(true)
                         .map_err(|error| error.message)?;
                 }
+                let connection = run_startup(connection, speaks, mode, &confirmed, &script)?;
                 Ok::<_, String>(Reported::of(&connection))
             })();
             let elapsed = started.elapsed();
@@ -1991,6 +2045,10 @@ impl Workspace {
         let mut config = profile.config.clone();
         config.set_connect_attempt(attempt.clone());
         let mode = profile.mode;
+        let confirmed = profile.confirmed.clone();
+        let script = profile.behaviour.startup_script.clone();
+        let ran_script = script.clone();
+        let engine_of = config.engine();
         // The sidebar draws the tree whenever there are saved queries, so the
         // old catalog's rows have to leave it with the catalog.
         self.refresh_explorer(&id, cx);
@@ -2065,6 +2123,12 @@ impl Workspace {
                         .set_read_only(true)
                         .map_err(|error| failed("read-only hold", error.message))?;
                 }
+                // The replays the driver makes on later sessions run before
+                // `query_alongside`, `open_database` and `Routed::resolve` apply
+                // the hold. That is safe because every replayed statement passed
+                // the gate under the profile's current mode.
+                let connection = run_startup(connection, engine_of, mode, &confirmed, &script)
+                    .map_err(|message| failed("startup script", message))?;
                 connection.warm();
                 attempt.finish().map_err(|error| error.message)?;
                 let elapsed = started.elapsed();
@@ -2086,7 +2150,15 @@ impl Workspace {
                     // cannot read in Read-only on the strength of that hold.
                     let held_otherwise =
                         (profile.mode == Mode::ReadOnly) != (mode == Mode::ReadOnly);
-                    if held_otherwise && result.is_ok() {
+                    // The same for the startup script, in two ways. A mode
+                    // lowered meanwhile may refuse a script that ran under the
+                    // mode this set out under, and the drivers replay it on
+                    // every later session. And a script saved meanwhile -- a
+                    // save that edits it and reconnects starts this connect
+                    // before the edit lands -- was not the one this ran.
+                    let regate = profile.mode < mode && script_refused(profile, profile.mode);
+                    let script_moved = profile.behaviour.startup_script != ran_script;
+                    if ((held_otherwise || regate) && result.is_ok()) || script_moved {
                         if let Some(index) = workspace.profiles.iter().position(|p| p.id == id) {
                             workspace.begin_connect(index, cx);
                         }
@@ -3255,6 +3327,36 @@ enum ProjectChoice {
     /// An existing project, or `None` for No project.
     In(Option<String>),
     New,
+}
+
+/// Whether the profile's startup script, which is not blank, is refused under
+/// `mode`: the same gate a connect applies, asked without opening anything.
+pub(super) fn script_refused(profile: &Profile, mode: Mode) -> bool {
+    let script = &profile.behaviour.startup_script;
+    !script.trim().is_empty()
+        && sql::startup_statements(profile.config.engine(), mode, &profile.confirmed, script)
+            .is_err()
+}
+
+/// Gates the profile's startup script under `mode` and runs it on `connection`,
+/// which is handed back with the statements kept for every session the driver
+/// opens beside it. A blank script returns it untouched. The same call at a
+/// connect and in Test connection, so a pass there is a promise about the
+/// connect. The messages never quote the script.
+fn run_startup(
+    connection: Connection,
+    engine: Engine,
+    mode: Mode,
+    confirmed: &[Destructive],
+    script: &str,
+) -> Result<Connection, String> {
+    let statements = sql::startup_statements(engine, mode, confirmed, script)?;
+    if statements.is_empty() {
+        return Ok(connection);
+    }
+    connection
+        .with_startup(statements)
+        .map_err(|error| format!("The startup script failed: {}", error.message))
 }
 
 /// The connection a stored profile describes and any notice it opens with, or,
