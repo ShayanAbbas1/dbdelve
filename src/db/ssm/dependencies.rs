@@ -62,13 +62,19 @@ fn probe(path: &Path, timeout: Duration) -> Result<(), &'static str> {
         .stderr(Stdio::null())
         .env("AWS_PAGER", "")
         .env("AWS_CLI_AUTO_PROMPT", "off");
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
-    }
-    let mut child = crate::db::spawn(&mut command)
+    // Reuse the tunnel watchdog so timeout and owner exit clean up descendants
+    // too, including Windows children born before a job could be assigned.
+    let mut process = super::process::Process::spawn(command)
         .map_err(|_| "Could not start. Check executable permissions and installation.")?;
+    let child = process.child.as_mut().expect("live probe");
+    for mut output in [
+        Box::new(child.stdout.take().unwrap()) as Box<dyn std::io::Read + Send>,
+        Box::new(child.stderr.take().unwrap()),
+    ] {
+        thread::spawn(move || {
+            let _ = std::io::copy(&mut output, &mut std::io::sink());
+        });
+    }
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
@@ -83,8 +89,7 @@ fn probe(path: &Path, timeout: Duration) -> Result<(), &'static str> {
             }
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
             _ => {
-                let _ = child.kill();
-                let _ = child.wait();
+                process.stop();
                 return Err(
                     "Version check timed out or could not complete. Check the installation and try again.",
                 );
@@ -113,6 +118,36 @@ mod tests {
             check_tool(Some(Path::new("/wrong-plugin")), "session-manager-plugin"),
             Status::Unavailable(_)
         ));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn ssm_dependency_timeout_stops_descendants() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("dbdelve-probe-tree-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("aws");
+        let marker = root.join("survived");
+        let started = root.join("started");
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\n(touch '{}'; sleep 2; touch '{}') &\nwait\n",
+                started.display(),
+                marker.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(probe(&path, Duration::from_millis(500)).is_err());
+        thread::sleep(Duration::from_secs(3));
+        let did_start = started.exists();
+        let survived = marker.exists();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(
+            did_start,
+            "probe descendant did not start; cleanup was not tested"
+        );
+        assert!(!survived, "probe descendant survived timeout");
     }
     #[cfg(unix)]
     #[test]

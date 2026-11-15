@@ -4173,3 +4173,52 @@ fn ssm_setup_advanced_collapse_restores_focus_and_keeps_paths(cx: &mut TestAppCo
         quit(workspace, cx);
     });
 }
+
+#[gpui::test]
+fn ssm_picker_selection_rechecks_tools_but_cancel_keeps_the_result(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        use crate::db::ssm::dependencies::Status;
+        let (workspace, cx) = launch(cx);
+        cx.simulate_resize(gpui::size(gpui::px(1200.), gpui::px(1800.)));
+        let input = cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.new_connection_in(None, window, cx);
+                let form = workspace.form.as_mut().unwrap();
+                form.ssm = true;
+                form.ssm_dependencies = Some([Status::Missing, Status::Missing]);
+                form.ssm_aws_cli.clone()
+            })
+        });
+        settle(cx);
+        let choose = |cx: &mut VisualTestContext| {
+            let bounds = cx.debug_bounds("ssm-choose-0").unwrap();
+            cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+            settle(cx);
+            assert!(cx.did_prompt_for_paths());
+        };
+        choose(cx);
+        cx.simulate_path_prompt_response(|_| None);
+        settle(cx);
+        assert!(cx.update(|_, cx| input.read(cx).value().is_empty()));
+        assert!(workspace.read_with(cx, |workspace, _| {
+            let form = workspace.form.as_ref().unwrap();
+            !form.ssm_checking && form.ssm_dependencies == Some([Status::Missing, Status::Missing])
+        }));
+        choose(cx);
+        let selected = std::env::temp_dir().join("dbdelve-picker-test/missing-aws");
+        cx.simulate_path_prompt_response(|_| Some(vec![selected.clone()]));
+        settle(cx);
+        assert_eq!(
+            cx.update(|_, cx| input.read(cx).value().to_string()),
+            selected.to_string_lossy()
+        );
+        assert!(
+            workspace.read_with(cx, |workspace, _| {
+                let form = workspace.form.as_ref().unwrap();
+                form.ssm_checking && form.ssm_dependencies.is_none()
+            }),
+            "choosing a path must invalidate the previous tool result"
+        );
+        quit(workspace, cx);
+    });
+}

@@ -583,25 +583,27 @@ impl Workspace {
                 .into_iter()
                 .enumerate()
                 {
-                    let row = nested_field_row(layout::SPACE_MD, id, label, input, bare(input), t);
+                    let row = nested_field_row(0.0, id, label, input, bare(input), t);
                     security.push(revealed(row, "ssm-reveal", index, !cx.reduce_motion()));
                 }
                 security.push(
                     div()
+                        .flex()
                         .px(px(layout::SPACE_LG))
                         .py(px(layout::SPACE_SM))
                         .child(
                             button(
                                 "ssm-advanced",
                                 if form.ssm_advanced {
-                                    "Hide advanced"
+                                    "▾ Advanced"
                                 } else {
-                                    "Advanced"
+                                    "▸ Advanced"
                                 },
                                 Tone::Quiet,
                                 Control::Compact,
                                 t,
                             )
+                            .px_0()
                             .debug_selector(|| "ssm-advanced".into())
                             .on_click(cx.listener(
                                 |workspace, _, _, cx| {
@@ -626,7 +628,7 @@ impl Workspace {
                     .enumerate()
                     {
                         security.push(
-                            nested_field_row(layout::SPACE_MD, id, label, input, bare(input), t)
+                            nested_field_row(0.0, id, label, input, bare(input), t)
                                 .child(browse_button(
                                     if index == 0 {
                                         "browse-aws-cli"
@@ -1047,15 +1049,18 @@ impl Workspace {
                 None => "Checking…",
             };
             let mut row = div().flex().flex_col().gap(px(layout::SPACE_XS))
-                .child(div().text_color(t.text).child(format!("{label}: {title}")));
+                .child(div().flex().items_center().justify_between().gap(px(layout::SPACE_MD))
+                    .child(div().text_color(t.text).child(label))
+                    .child(div().text_color(t.text_muted).child(title)));
             if let Some(ToolStatus::Unavailable(message)) = status {
                 row = row.child(div().text_color(t.text_muted).child(message.clone()));
             }
             if matches!(status, Some(ToolStatus::Missing | ToolStatus::Unavailable(_))) {
                 row = row.child(div().flex().flex_wrap().gap(px(layout::SPACE_SM))
-                    .child(button(("ssm-install", index), "Installation instructions", Tone::Quiet, Control::Compact, t)
+                    .child(button(("ssm-install", index), "Installation instructions", Tone::Primary, Control::Compact, t)
                         .on_click(move |_, _, cx| cx.open_url(url)))
-                    .child(button(("ssm-choose", index), "Choose executable…", Tone::Quiet, Control::Compact, t)
+                    .child(button(("ssm-choose", index), "Choose executable…", Tone::Primary, Control::Compact, t)
+                        .debug_selector(move || format!("ssm-choose-{index}"))
                         .on_click(cx.listener(move |workspace, _, window, cx| {
                             if let Some(form) = &mut workspace.form {
                                 form.ssm_advanced = true;
@@ -1067,13 +1072,39 @@ impl Workspace {
             }
             setup = setup.child(row);
         }
-        setup.child(div().text_color(t.text_muted).child("Checks local tools only. Use Test to check AWS access and the database. For SSO, sign in with the AWS CLI first."))
-            .child(button("ssm-check-again", "Check again", Tone::Quiet, Control::Compact, t)
-                .disabled(form.ssm_checking)
-                .on_click(cx.listener(|workspace, _, _, cx| {
-                    if let Some(form) = &mut workspace.form { form.ssm_dependencies = None; }
-                    workspace.check_ssm_dependencies(cx);
-                })))
+        setup
+            .child(
+                div().text_color(t.text_muted).child(
+                    "Checks installed tools only. Use Test to verify AWS and database access.",
+                ),
+            )
+            .child(
+                div().flex().child(
+                    div()
+                        .rounded(px(layout::RADIUS_CONTROL))
+                        .border_1()
+                        .border_color(t.border)
+                        .bg(t.element_active)
+                        .child(
+                            button(
+                                "ssm-check-again",
+                                "Check again",
+                                Tone::Primary,
+                                Control::Compact,
+                                t,
+                            )
+                            .disabled(form.ssm_checking)
+                            .on_click(cx.listener(
+                                |workspace, _, _, cx| {
+                                    if let Some(form) = &mut workspace.form {
+                                        form.ssm_dependencies = None;
+                                    }
+                                    workspace.check_ssm_dependencies(cx);
+                                },
+                            )),
+                        ),
+                ),
+            )
     }
 
     /// The native Open dialog, for a file found rather than typed into
@@ -1105,6 +1136,9 @@ impl Workspace {
                         return;
                     }
                     let path = path.to_string_lossy().into_owned();
+                    if input == form.ssm_aws_cli || input == form.ssm_plugin {
+                        form.ssm_dependencies = None;
+                    }
                     input.update(cx, |input, cx| input.set_value(path, window, cx));
                     form.needs_focus = Some(input);
                     // A pass was for the file that was there before.

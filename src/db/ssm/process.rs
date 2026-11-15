@@ -122,7 +122,7 @@ fn run(payload: &str) -> io::Result<i32> {
         command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
     }
     #[cfg(windows)]
-    let job = {
+    let _job = {
         use std::os::windows::io::BorrowedHandle;
         use windows_sys::Win32::System::Threading::GetCurrentProcess;
         // Join before spawning: Windows only enrolls children born after the
@@ -166,9 +166,17 @@ fn run(payload: &str) -> io::Result<i32> {
         }
     }
     #[cfg(windows)]
-    drop(job);
-    let _ = child.wait();
-    Ok(status.and_then(|s| s.code()).unwrap_or(1))
+    {
+        // Exiting closes the job and kills its remaining descendants. Dropping
+        // it first would terminate this helper before it can report the CLI's
+        // exit code (also used by local dependency probes).
+        std::process::exit(status.and_then(|s| s.code()).unwrap_or(1));
+    }
+    #[cfg(unix)]
+    {
+        let _ = child.wait();
+        Ok(status.and_then(|s| s.code()).unwrap_or(1))
+    }
 }
 
 #[cfg(all(
@@ -323,6 +331,34 @@ mod windows_tests {
         command
     }
 
+    #[test]
+    fn watchdog_preserves_success_and_failure_exit_codes() {
+        for code in [0, 7] {
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture"])
+                .env(FIXTURE, format!("exit-{code}"))
+                .env(COMMAND, "fixture")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    assert_eq!(status.code(), Some(code));
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("watchdog did not report child exit");
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+
     // Runs only in explicitly launched subprocesses, never in the test runner.
     #[test]
     fn process_fixture() {
@@ -335,6 +371,9 @@ mod windows_tests {
             let args = ["--exact", TEST, "--nocapture", "--skip", &pid];
             let payload = serde_json::to_string(&(program, args)).unwrap();
             std::process::exit(run(&payload).unwrap());
+        }
+        if let Some(code) = role.strip_prefix("exit-") {
+            std::process::exit(code.parse().unwrap());
         }
         if role == "plugin" {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
