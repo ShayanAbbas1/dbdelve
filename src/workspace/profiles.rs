@@ -330,6 +330,7 @@ impl Workspace {
             session_changed: false,
             catalog: CatalogState::Loading,
             schema_refresh: None,
+            reread_after_load: false,
             databases: Databases::default(),
             bound: HashMap::new(),
             database_catalogs: HashMap::new(),
@@ -405,6 +406,7 @@ impl Workspace {
             session_changed: false,
             catalog: CatalogState::Loading,
             schema_refresh: None,
+            reread_after_load: false,
             databases: Databases::default(),
             bound: HashMap::new(),
             database_catalogs: HashMap::new(),
@@ -1152,9 +1154,15 @@ impl Workspace {
     /// at once, so the sidebar neither blanks nor loses the rows folded open.
     /// With no session to read over, this is a connect.
     pub(crate) fn refresh_schema(&mut self, cx: &mut Context<Self>) {
-        let Some(index) = self.active else {
-            return;
-        };
+        if let Some(index) = self.active {
+            self.refresh_schema_of(index, cx);
+        }
+    }
+
+    /// [`Self::refresh_schema`] for the profile at `index`, which is the front
+    /// one except when a read that was under way when a filter was saved comes
+    /// back after the user moved on.
+    fn refresh_schema_of(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(profile) = self.profiles.get_mut(index) else {
             return;
         };
@@ -1205,6 +1213,8 @@ impl Workspace {
                         // A session that is gone has no transaction left to
                         // keep, and a new one is the only way to get an answer.
                         Err((_, true)) => {
+                            // The new session reads with the saved filter.
+                            profile.reread_after_load = false;
                             let index = workspace
                                 .profiles
                                 .iter()
@@ -1219,6 +1229,7 @@ impl Workspace {
                         // they were rather than trading them for an error.
                         Err((error, false)) => {
                             profile.session.notice = Some(error.message);
+                            workspace.reread_if_saved(&id, cx);
                             return;
                         }
                     };
@@ -1252,10 +1263,22 @@ impl Workspace {
                     if complete && workspace.profile().is_some_and(|front| front.id == id) {
                         workspace.confirm("Schema refreshed.".into(), cx);
                     }
+                    workspace.reread_if_saved(&id, cx);
                 })
                 .ok();
         })
         .detach();
+    }
+
+    /// A filter was saved while the read that has just landed was under way:
+    /// read again, which now starts, so the saved filter applies.
+    fn reread_if_saved(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(index) = self.profiles.iter().position(|profile| profile.id == id) else {
+            return;
+        };
+        if std::mem::take(&mut self.profiles[index].reread_after_load) {
+            self.refresh_schema_of(index, cx);
+        }
     }
 
     /// Ask the server which databases it holds, then offer them in the palette.
@@ -2186,6 +2209,7 @@ impl Workspace {
         // paints the same sentence twice in the same red.
         let Some(connection) = profile.connection() else {
             profile.catalog = CatalogState::Failed("Not connected.".into());
+            profile.reread_after_load = false;
             self.refresh_explorer(id, cx);
             self.catalog_landed(id, cx);
             return;
@@ -2204,7 +2228,13 @@ impl Workspace {
                     };
                     profile.catalog = match result {
                         Ok(catalog) => CatalogState::Loaded(catalog, Routines::Loading),
-                        Err(error) => CatalogState::Failed(error.message),
+                        Err(error) => {
+                            // A failed read stored nothing drawn with the old filter, and every
+                            // read takes `shown()` as it starts, so the next one applies the
+                            // saved filter; reading again here would be a retry nobody asked for.
+                            profile.reread_after_load = false;
+                            CatalogState::Failed(error.message)
+                        }
                     };
                     workspace.catalog_replaced(&id, generation, false, cx);
                     cx.notify();
@@ -2712,7 +2742,7 @@ impl Workspace {
     /// A failure here leaves the relations alone and is said once in the status
     /// bar. Replacing a working explorer with an error because the functions
     /// could not be listed would cost more than it reports.
-    fn load_routines(&mut self, id: &str, generation: u64, cx: &mut Context<Self>) {
+    pub(super) fn load_routines(&mut self, id: &str, generation: u64, cx: &mut Context<Self>) {
         let Some(profile) = self.issued_to(id, generation) else {
             return;
         };
@@ -2756,6 +2786,7 @@ impl Workspace {
                     workspace.install_completions(&id, cx);
                     workspace.refresh_explorer(&id, cx);
                     workspace.catalog_landed(&id, cx);
+                    workspace.reread_if_saved(&id, cx);
                     cx.notify();
                 })
                 .ok();

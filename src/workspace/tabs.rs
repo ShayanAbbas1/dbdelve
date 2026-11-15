@@ -1074,6 +1074,9 @@ impl Workspace {
         if self.close_ddl_view(cx) {
             return;
         }
+        if self.close_filter_picker(cx) {
+            return;
+        }
         // Only from inside the panel: it sits beside the workspace rather than
         // over it, and an `escape` in the editor is for the editor's
         // completions, or for the new-row form beside the grid. The search is

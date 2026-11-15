@@ -34,8 +34,8 @@ use crate::explorer::{
 use crate::icons::{queries_group_icon, saved_query_icon};
 use crate::session::Binding;
 use crate::sidebar::{
-    self as model, Content, Listed, Node, NodeKind, OPEN_ROWS_CAP, SelectedNode, Selection,
-    SelectionAction, node_actions, schema_row_is_a_database, shown_size,
+    self as model, Content, Listed, Node, NodeAction, NodeKind, OPEN_ROWS_CAP, SelectedNode,
+    Selection, SelectionAction, node_actions, schema_row_is_a_database, shown_size,
 };
 use crate::ui::{Status, row_icon_tinted, status_dot};
 
@@ -1240,15 +1240,16 @@ impl Workspace {
             let inner = model::unscoped(id).map(|scoped| scoped.inner.to_string());
             match node.kind {
                 NodeKind::Connection | NodeKind::Database => {
-                    let Some(target) = state
+                    let Some((target, filterable)) = state
                         .profiles
                         .iter()
                         .find(|found| found.id == node.profile)
-                        .map(|found| found.config.target())
+                        .map(|found| (found.config.target(), found.offers_filter()))
                     else {
                         return menu;
                     };
-                    let actions = node_actions(node.kind, &node.name, target);
+                    let mut actions = node_actions(node.kind, &node.name, target);
+                    actions.retain(|action| filterable || *action != NodeAction::FilterDatabases);
                     node_items(menu, &node, actions, &menu_workspace)
                 }
                 // A row of one connection's own rows: the menu simple mode

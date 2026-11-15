@@ -12,6 +12,7 @@ mod editing;
 mod exports;
 use exports::ExportMenu;
 mod files;
+mod filter_picker;
 mod filters;
 mod folders;
 mod forms;
@@ -413,6 +414,13 @@ pub(crate) struct Workspace {
     /// Numbers each Show DDL read, so an answer that comes back after the
     /// dialog was closed, or put up for another object, is not drawn.
     pub(crate) last_ddl_request: u64,
+    /// The filter picker: one connection's include list being edited. Only a
+    /// connection node's Filter Databases and the palette's command open it,
+    /// and only its own Save Filter, Discard Changes and `escape` end it.
+    pub(crate) filter_picker: Option<filter_picker::FilterPicker>,
+    /// Numbers each picker open, so a listing that lands after the dialog
+    /// closed, or after another went up, is not applied.
+    pub(crate) last_filter_request: u64,
     /// The opacity field in the settings panel. Kept here rather than built
     /// with the card, because an input is state the user is part-way through
     /// typing into and a fresh one every frame would swallow the keystroke.
@@ -591,6 +599,8 @@ impl Workspace {
             theme_before_preview: None,
             ddl_view: None,
             last_ddl_request: 0,
+            filter_picker: None,
+            last_filter_request: 0,
             opacity_input,
             #[cfg(test)]
             held: Vec::new(),
@@ -2824,6 +2834,7 @@ impl Render for Workspace {
             .children(self.dialog_layer(
                 [
                     ("show-ddl", self.render_show_ddl(cx)),
+                    ("filter-picker", self.render_filter_picker(window, cx)),
                     ("apply-review", self.render_apply_review(cx)),
                     ("import-rows", self.render_import_rows(window, cx)),
                     ("delete", self.render_delete_confirmation(cx)),
