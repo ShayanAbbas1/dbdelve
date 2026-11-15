@@ -4402,6 +4402,72 @@ fn keys_only_switched_just_before_a_neighbourhood_holds_back_on_the_schema(
     });
 }
 
+/// A card of many columns zoomed out short of name blocks drew its key rows
+/// alone, with Keys only off, and its bottom edge could not open it.
+#[gpui::test]
+fn zoomed_out_a_card_draws_its_columns_and_its_bottom_edge_opens_it(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let notes: Vec<String> = (0..38).map(|note| format!("note_{note} text")).collect();
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            &format!(
+                "{DIAGRAM_SCHEMA} create table users (id integer primary key, \
+                 email text unique, bird integer references birds(id), {});",
+                notes.join(", ")
+            ),
+        );
+        let view = show_diagram(&workspace, cx);
+        assert!(
+            !cx.update(|_, cx| view.read(cx).laid_out()).unwrap().1,
+            "a small schema is laid out with every column"
+        );
+        let zoom = |cx: &mut VisualTestContext| cx.update(|_, cx| view.read(cx).zoom());
+        let users = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| view.read(cx).table_bounds("users"))
+                .expect("the diagram drew the users")
+        };
+        for _ in 0..40 {
+            let delta = match zoom(cx) {
+                zoom if zoom >= 0.8 => -40.0,
+                zoom if zoom < 0.6 => 40.0,
+                _ => break,
+            };
+            let position = users(cx).center();
+            cx.simulate_event(gpui::ScrollWheelEvent {
+                position,
+                delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(delta))),
+                modifiers: gpui::Modifiers::secondary_key(),
+                touch_phase: gpui::TouchPhase::Moved,
+            });
+            settle(cx);
+        }
+        let zoomed = zoom(cx);
+        assert!((0.6..0.8).contains(&zoomed), "{zoomed}");
+        assert_eq!(
+            cx.update(|_, cx| view.read(cx).rows_drawn("users")),
+            Some(crate::diagram::geometry::AUTO_ROWS - 1),
+            "every column up to the cap, not the three keys"
+        );
+
+        let before = users(cx);
+        let edge = gpui::point(before.center().x, before.bottom() - gpui::px(1.0));
+        let to = gpui::point(edge.x, edge.y + gpui::px(3.0 * 24.0 * zoomed));
+        let left = gpui::MouseButton::Left;
+        cx.simulate_mouse_down(edge, left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(to, left, gpui::Modifiers::default());
+        cx.simulate_mouse_up(to, left, gpui::Modifiers::default());
+        settle(cx);
+        let after = users(cx);
+        assert_eq!(after.origin, before.origin, "a resize, not a move");
+        assert!(
+            after.size.height > before.size.height + gpui::px(2.0 * 24.0 * zoomed),
+            "the bottom edge opened the card: {before:?} to {after:?}"
+        );
+
+        quit(workspace, cx);
+    });
+}
+
 /// From the sidebar, the chord that moves between a buffer and its rows
 /// puts the keyboard on a diagram's canvas, which has neither.
 #[gpui::test]

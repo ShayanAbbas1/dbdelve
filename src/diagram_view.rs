@@ -2046,19 +2046,42 @@ impl DiagramView {
         ))
     }
 
-    /// Where a table's card is on screen, in window coordinates, once drawn.
+    /// Where the middle of a table's card is on screen, in window
+    /// coordinates, once drawn.
     #[cfg(test)]
     pub fn table_on_screen(&self, name: &str) -> Option<gpui::Point<Pixels>> {
+        self.table_bounds(name).map(|bounds| bounds.center())
+    }
+
+    /// A table's card as drawn, in window coordinates.
+    #[cfg(test)]
+    pub fn table_bounds(&self, name: &str) -> Option<Bounds<Pixels>> {
         let ready = self.ready()?;
         let layout = ready.scene.layout();
         let card = (0..layout.cards.len() as u32).find(|&card| ready.name(card) == name)?;
         let zoom = self.transform.zoom;
         let rect = layout.card_rect(card, layout.detail(zoom), zoom);
-        let at = self.transform.to_screen(rect.centre());
-        Some(point(
-            self.viewport.origin.x + px(at.x),
-            self.viewport.origin.y + px(at.y),
-        ))
+        let at = self.transform.to_screen(Point::new(rect.x, rect.y));
+        Some(Bounds {
+            origin: point(
+                self.viewport.origin.x + px(at.x),
+                self.viewport.origin.y + px(at.y),
+            ),
+            size: size(px(rect.width * zoom), px(rect.height * zoom)),
+        })
+    }
+
+    /// The column rows a table's card draws at the zoom on screen.
+    #[cfg(test)]
+    pub fn rows_drawn(&self, name: &str) -> Option<usize> {
+        let ready = self.ready()?;
+        let layout = ready.scene.layout();
+        let card = (0..layout.cards.len() as u32).find(|&card| ready.name(card) == name)?;
+        Some(
+            layout
+                .rows(card, layout.detail(self.transform.zoom))
+                .count(),
+        )
     }
 
     fn scroll(&mut self, event: &ScrollWheelEvent, window: &Window, cx: &mut Context<Self>) {
