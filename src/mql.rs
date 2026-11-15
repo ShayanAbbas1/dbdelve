@@ -1967,6 +1967,9 @@ fn writes_out(value: &Value) -> bool {
     }
 }
 
+const NO_EDITS: &str = "There are no edits to apply.";
+const NO_KEY: &str = "dbdelve cannot name an edited row by its primary key.";
+
 /// Each pending row as one `updateOne` that names the document by its key
 /// and `$set`s each edited field, one statement per row, in order.
 ///
@@ -1978,7 +1981,7 @@ fn writes_out(value: &Value) -> bool {
 /// that does not read as one is the error, never a string in its place.
 pub(crate) fn update_batch(rows: &[PendingRow]) -> Result<String, String> {
     if rows.is_empty() {
-        return Err("There are no edits to apply.".into());
+        return Err(NO_EDITS.into());
     }
     let mut statements = Vec::with_capacity(rows.len());
     for row in rows {
@@ -2009,6 +2012,62 @@ pub(crate) fn update_batch(rows: &[PendingRow]) -> Result<String, String> {
         ));
     }
     Ok(statements.join("\n"))
+}
+
+/// A draft's marked, edited and added documents as one statement per document:
+/// the `deleteOne`s, then the `updateOne`s, then the `insertOne`s, each group in
+/// the order given. The MongoDB counterpart of [`crate::sql::draft_batch`].
+///
+/// Nothing brackets it (`Engine::transaction_start` is `None`): the statements
+/// run in this order and the run stops at the first one that fails. A document
+/// is named by its `_id` alone, so a delete whose key has a null in it cannot
+/// be written.
+///
+/// Every statement ends `;`, and the error is `There are no edits to apply.`
+/// when all three lists are empty.
+//
+// ponytail: the order is fixed (deletes, updates, inserts), not
+// dependency-sorted, as `sql::draft_batch`'s is. Each statement names its
+// document by `_id` and none reads what another wrote, so the order only has to
+// be one the review can state. A draft whose statements depend on each other
+// would need a sort by what each reads.
+pub(crate) fn draft_batch(
+    deletes: &[crate::sql::DraftDelete],
+    updates: &[PendingRow],
+    inserts: &[crate::sql::DraftInsert],
+) -> Result<String, String> {
+    if deletes.is_empty() && updates.is_empty() && inserts.is_empty() {
+        return Err(NO_EDITS.into());
+    }
+    let mut statements = Vec::with_capacity(deletes.len() + updates.len() + inserts.len());
+    for row in deletes {
+        if !row.null_keys.is_empty() {
+            return Err(NO_KEY.into());
+        }
+        let keys: Vec<(&str, &str)> = row
+            .keys
+            .iter()
+            .map(|(field, text)| (field.as_str(), text.as_str()))
+            .collect();
+        statements.push(terminated(&delete_row(&row.table, &keys, &row.types)?));
+    }
+    if !updates.is_empty() {
+        statements.push(terminated(&update_batch(updates)?));
+    }
+    for row in inserts {
+        let columns: Vec<(&str, Option<&str>)> = row
+            .columns
+            .iter()
+            .map(|(field, value)| (field.as_str(), value.as_deref()))
+            .collect();
+        statements.push(terminated(&insert_row(&row.table, &columns, &row.types)?));
+    }
+    Ok(statements.join("\n"))
+}
+
+/// `statement` ending in one `;`, whether or not it came with one.
+fn terminated(statement: &str) -> String {
+    format!("{};", statement.trim_end_matches(';'))
 }
 
 /// One `insertOne` of the fields the form filled. A field left empty is left
@@ -2236,7 +2295,7 @@ fn collection(table: &str) -> String {
 /// `{_id: <value>}`, from the key's values as the server sent them.
 fn key_filter(keys: &[(String, String)], types: &[(String, String)]) -> Result<String, String> {
     if keys.is_empty() {
-        return Err("dbdelve cannot name an edited row by its primary key.".into());
+        return Err(NO_KEY.into());
     }
     let fields = keys
         .iter()
@@ -2459,7 +2518,7 @@ pub(crate) fn operator_free(value: &Value) -> bool {
 /// out of the parse rather than trusted because `update_batch`, `insert_row`
 /// or `delete_row` wrote it: `sql::is_generated_write` for MongoDB.
 ///
-/// Exactly one of four shapes, on a collection of the connected database,
+/// Exactly one of five shapes, on a collection of the connected database,
 /// with no options and no cursor:
 ///
 /// - one or more `updateOne`s on one collection, each filter exactly
@@ -2467,7 +2526,10 @@ pub(crate) fn operator_free(value: &Value) -> bool {
 ///   plain field names;
 /// - one `insertOne` of a non-empty document;
 /// - one `insertMany` of a non-empty array of non-empty documents;
-/// - one `deleteOne` whose filter is exactly `{_id: <literal>}`.
+/// - one `deleteOne` whose filter is exactly `{_id: <literal>}`;
+/// - a draft, as [`draft_batch`] writes it: two or more of the above's
+///   `deleteOne`s, then `updateOne`s, then `insertOne`s on one collection, each
+///   group possibly empty and each statement passing what it passes alone.
 ///
 /// Every value is a literal with no `$`-named field anywhere inside it, so no
 /// operator -- `$where` included -- can ride in on a value.
@@ -2507,12 +2569,48 @@ pub(crate) fn is_generated_write(text: &str) -> bool {
         [(_, call)] if call.method == Method::DeleteOne => {
             matches!(arguments(call)[..], [filter] if names_by_id(filter))
         }
+        calls
+            if calls.len() > 1
+                && calls
+                    .iter()
+                    .any(|(_, call)| call.method != Method::UpdateOne) =>
+        {
+            draft_sequence(calls)
+        }
         calls => calls.iter().all(|(_, call)| {
             call.method == Method::UpdateOne
                 && matches!(arguments(call)[..], [filter, update]
                     if names_by_id(filter) && sets_only(update))
         }),
     }
+}
+
+/// Whether `calls`, which are two or more on one collection, read as a draft:
+/// `deleteOne`s, then `updateOne`s, then `insertOne`s, each passing the test
+/// its single shape passes. Any other method, and any order but that one, is
+/// refused: a `deleteOne` after an `insertOne` would be a delete the draft
+/// never reviewed in its place.
+fn draft_sequence(calls: &[(&String, &Call<Method>)]) -> bool {
+    let rank = |method| match method {
+        Method::DeleteOne => Some(0),
+        Method::UpdateOne => Some(1),
+        Method::InsertOne => Some(2),
+        _ => None,
+    };
+    let Some(ranks) = calls
+        .iter()
+        .map(|(_, call)| rank(call.method))
+        .collect::<Option<Vec<u8>>>()
+    else {
+        return false;
+    };
+    ranks.is_sorted()
+        && calls.iter().all(|(_, call)| match call.method {
+            Method::DeleteOne => matches!(arguments(call)[..], [filter] if names_by_id(filter)),
+            Method::UpdateOne => matches!(arguments(call)[..], [filter, update]
+                if names_by_id(filter) && sets_only(update)),
+            _ => matches!(arguments(call)[..], [document] if literal_document(document)),
+        })
 }
 
 /// `sql::delete_matches_key` for MongoDB: whether `text` is one `deleteOne`
@@ -2545,6 +2643,61 @@ pub(crate) fn delete_matches_key(text: &str, keys: &[&str]) -> bool {
         && fields
             .iter()
             .all(|(field, _)| keys.contains(&field.as_str()))
+}
+
+/// How many `deleteOne`s `text`, a draft, holds, when each names exactly `keys`
+/// as a set on `collection` of the connected database: the readout the gate
+/// cannot give (which documents, on which collection), for the caller to compare
+/// with the documents it marked. The MongoDB counterpart of
+/// [`crate::sql::draft_deletes_match`].
+///
+/// Every statement's method is read from the parse, never from the caller, and
+/// only the three a draft holds are read at all: any other method, text that
+/// does not parse, and text with no statement are `None`. An `updateOne` or an
+/// `insertOne` is not counted. Their shape is the gate's to check
+/// ([`is_generated_write`]), as is the order.
+pub(crate) fn draft_deletes_match(text: &str, keys: &[&str], collection: &str) -> Option<usize> {
+    let statements = parse(text).ok()?;
+    if statements.is_empty() {
+        return None;
+    }
+    let mut deletes = 0;
+    for statement in &statements {
+        let Target::Collection {
+            database,
+            collection: named,
+            call,
+            ..
+        } = &statement.target
+        else {
+            return None;
+        };
+        match call.method {
+            Method::UpdateOne | Method::InsertOne => {}
+            Method::DeleteOne => {
+                let [
+                    Arg {
+                        value: Value::Document(fields),
+                        ..
+                    },
+                ] = call.args.as_slice()
+                else {
+                    return None;
+                };
+                let names_keys = distinct(fields)
+                    && fields.len() == keys.len()
+                    && fields
+                        .iter()
+                        .all(|(field, _)| keys.contains(&field.as_str()));
+                if database.is_some() || named != collection || !names_keys {
+                    return None;
+                }
+                deletes += 1;
+            }
+            _ => return None,
+        }
+    }
+    Some(deletes)
 }
 
 /// A non-empty document of distinct fields with no operator anywhere in it.
@@ -4629,6 +4782,251 @@ mod tests {
         assert!(delete_row("c", &[], &[]).is_err());
     }
 
+    fn draft_delete(id: &str) -> crate::sql::DraftDelete {
+        crate::sql::DraftDelete {
+            schema: "dbdelve_dev".into(),
+            table: "accounts".into(),
+            keys: vec![("_id".into(), id.into())],
+            null_keys: Vec::new(),
+            types: vec![("_id".into(), "objectId".into())],
+        }
+    }
+
+    fn draft_insert(columns: &[(&str, Option<&str>)]) -> crate::sql::DraftInsert {
+        crate::sql::DraftInsert {
+            schema: "dbdelve_dev".into(),
+            table: "accounts".into(),
+            columns: columns
+                .iter()
+                .map(|(field, value)| ((*field).to_owned(), value.map(str::to_owned)))
+                .collect(),
+            types: vec![
+                ("name".into(), "string".into()),
+                ("seats".into(), "int".into()),
+            ],
+        }
+    }
+
+    fn draft_update(id: &str, name: &str) -> PendingRow {
+        edited(
+            &[("name", typed_text(name))],
+            id,
+            &[("_id", "objectId"), ("name", "string")],
+        )
+    }
+
+    fn oid(n: u8) -> String {
+        format!("ObjectId('65a4f1c0ffffffffffffff{n:02x}')")
+    }
+
+    fn methods_of(batch: &str) -> Vec<Method> {
+        parse(batch)
+            .unwrap_or_else(|e| panic!("{batch}: {e:?}"))
+            .iter()
+            .map(|statement| match &statement.target {
+                Target::Collection { call, .. } => call.method,
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_mongo_draft_is_written_deletes_then_updates_then_inserts() {
+        let deletes = [draft_delete(&oid(1)), draft_delete(&oid(2))];
+        let updates = [draft_update(&oid(3), "Ada"), draft_update(&oid(4), "Bo")];
+        let inserts = [
+            draft_insert(&[("name", Some("Cy")), ("seats", Some("3"))]),
+            draft_insert(&[("name", Some("Di"))]),
+        ];
+        let batch = draft_batch(&deletes, &updates, &inserts).unwrap();
+        assert_eq!(
+            methods_of(&batch),
+            [
+                Method::DeleteOne,
+                Method::DeleteOne,
+                Method::UpdateOne,
+                Method::UpdateOne,
+                Method::InsertOne,
+                Method::InsertOne,
+            ]
+        );
+        let lines: Vec<&str> = batch.lines().collect();
+        assert_eq!(lines.len(), 6, "{batch}");
+        assert!(
+            lines
+                .iter()
+                .all(|line| line.ends_with(';') && !line.ends_with(";;"))
+        );
+        // Each group keeps the order it was given.
+        let key = |n| delete_row("accounts", &[("_id", &oid(n))], &deletes[0].types).unwrap();
+        assert_eq!(lines[0], format!("{};", key(1)));
+        assert_eq!(lines[1], format!("{};", key(2)));
+        assert!(lines[2].contains(&format!(
+            "_id: ObjectId(\"65a4f1c0ffffffffffffff{:02x}\")",
+            3
+        )));
+        assert!(lines[3].contains(&format!(
+            "_id: ObjectId(\"65a4f1c0ffffffffffffff{:02x}\")",
+            4
+        )));
+        assert!(lines[4].contains(r#""name": "Cy""#), "{}", lines[4]);
+        assert!(lines[5].contains(r#""name": "Di""#), "{}", lines[5]);
+
+        assert_eq!(
+            draft_batch(&[], &[], &[]),
+            Err("There are no edits to apply.".to_owned())
+        );
+        let one = draft_batch(&deletes[..1], &[], &[]).unwrap();
+        assert_eq!(one, format!("{};", key(1)));
+        let mut unnamed = draft_delete(&oid(1));
+        unnamed.null_keys = vec!["_id".into()];
+        assert_eq!(
+            draft_batch(&[unnamed], &[], &[]),
+            Err("dbdelve cannot name an edited row by its primary key.".to_owned())
+        );
+        assert!(draft_batch(&[], &[], &[draft_insert(&[("name", Some(""))])]).is_err());
+    }
+
+    #[test]
+    fn a_mixed_mongo_draft_is_admitted_and_every_widened_shape_refused() {
+        let delete = || vec![draft_delete(&oid(1))];
+        let update = || vec![draft_update(&oid(3), "Ada")];
+        let insert = || vec![draft_insert(&[("name", Some("Cy"))])];
+        let shapes: [(&str, Vec<_>, Vec<_>, Vec<_>); 5] = [
+            ("delete update insert", delete(), update(), insert()),
+            (
+                "delete delete",
+                vec![draft_delete(&oid(1)), draft_delete(&oid(2))],
+                vec![],
+                vec![],
+            ),
+            (
+                "insert insert",
+                vec![],
+                vec![],
+                vec![
+                    draft_insert(&[("name", Some("a"))]),
+                    draft_insert(&[("name", Some("b"))]),
+                ],
+            ),
+            ("update insert", vec![], update(), insert()),
+            ("delete insert", delete(), vec![], insert()),
+        ];
+        for (case, deletes, updates, inserts) in shapes {
+            let batch = draft_batch(&deletes, &updates, &inserts).unwrap();
+            assert!(is_generated_write(&batch), "{case}: {batch}");
+        }
+        for single in [
+            r#"db.c.insertOne({a: 1})"#,
+            "db.c.insertMany([{a: 1}])",
+            r#"db.c.deleteOne({_id: 1})"#,
+            r#"db.c.updateOne({_id: 1}, {$set: {a: 1}})"#,
+        ] {
+            assert!(is_generated_write(single), "{single}");
+        }
+
+        let c = r#"db.getCollection("accounts")"#;
+        for refused in [
+            // Out of order: the draft writes deletes, then updates, then inserts.
+            "{c}.insertOne({a: 1});\n{c}.deleteOne({_id: 1});",
+            "{c}.updateOne({_id: 1}, {$set: {a: 1}});\n{c}.deleteOne({_id: 2});",
+            "{c}.insertOne({a: 1});\n{c}.updateOne({_id: 1}, {$set: {a: 1}});",
+            // Methods that can reach more than one document, or replace one.
+            "{c}.deleteOne({_id: 1});\n{c}.deleteMany({});",
+            "{c}.deleteOne({_id: 1});\n{c}.updateMany({_id: 1}, {$set: {a: 1}});",
+            "{c}.deleteOne({_id: 1});\n{c}.replaceOne({_id: 2}, {a: 1});",
+            "{c}.deleteOne({_id: 1});\n{c}.findOneAndDelete({_id: 2});",
+            "{c}.deleteOne({_id: 1});\n{c}.insertMany([{a: 1}]);",
+            // A filter that is not exactly `{_id: <literal>}`.
+            "{c}.deleteOne({_id: 1});\n{c}.deleteOne({_id: 2, a: 1});",
+            "{c}.deleteOne({_id: 1});\n{c}.deleteOne({a: 1});",
+            "{c}.deleteOne({_id: 1});\n{c}.deleteOne({});",
+            "{c}.deleteOne({_id: 1});\n{c}.deleteOne({_id: {$ne: 1}});",
+            "{c}.deleteOne({_id: 1});\n{c}.deleteOne({_id: /./});",
+            "{c}.deleteOne({_id: 1});\n{c}.deleteOne({_id: 2}, {collation: {}});",
+            "{c}.deleteOne({_id: 1});\n{c}.updateOne({a: 1}, {$set: {a: 1}});",
+            "{c}.deleteOne({_id: 1});\n{c}.updateOne({_id: 2}, {$set: {a: 1}}, {upsert: true});",
+            "{c}.deleteOne({_id: 1});\n{c}.updateOne({_id: 2}, {$unset: {a: 1}});",
+            // One collection of the connected database, and nothing chained.
+            "{c}.deleteOne({_id: 1});\ndb.getCollection(\"other\").deleteOne({_id: 2});",
+            "{c}.deleteOne({_id: 1});\ndb.getSiblingDB(\"x\").accounts.deleteOne({_id: 2});",
+            "{c}.find({}).limit(1);\n{c}.deleteOne({_id: 1});",
+            "{c}.deleteOne({_id: 1});\n{c}.find({});",
+            "{c}.deleteOne({_id: 1});\ndb.dropDatabase();",
+            // An operator riding in a value.
+            "{c}.deleteOne({_id: 1});\n{c}.insertOne({\"$where\": \"1\"});",
+            "{c}.deleteOne({_id: 1});\n{c}.insertOne({a: {\"$set\": {b: 1}}});",
+            "{c}.deleteOne({_id: 1});\n{c}.insertOne({});",
+            "{c}.deleteOne({_id: 1});\n{c}.insertOne({a: 1}, {writeConcern: {w: 0}});",
+            "{c}.deleteOne({_id: 1});\n{c}.updateOne({_id: 2}, {$set: {a: {$where: \"1\"}}});",
+        ] {
+            let refused = refused.replace("{c}", c);
+            assert!(!is_generated_write(&refused), "{refused} passed the gate");
+        }
+    }
+
+    #[test]
+    fn the_key_check_of_a_mongo_draft_reads_methods_and_collection_from_the_parse() {
+        let deletes = [draft_delete(&oid(1)), draft_delete(&oid(2))];
+        let updates = [draft_update(&oid(3), "Ada")];
+        let inserts = [draft_insert(&[("name", Some("Cy"))])];
+        let mixed = draft_batch(&deletes, &updates, &inserts).unwrap();
+        assert_eq!(draft_deletes_match(&mixed, &["_id"], "accounts"), Some(2));
+        // The keys are read as a set, and the collection by name.
+        assert_eq!(
+            draft_deletes_match(&mixed, &["_id", "email"], "accounts"),
+            None
+        );
+        assert_eq!(draft_deletes_match(&mixed, &["email"], "accounts"), None);
+        assert_eq!(draft_deletes_match(&mixed, &[], "accounts"), None);
+        assert_eq!(draft_deletes_match(&mixed, &["_id"], "other"), None);
+        // An `updateOne` that names `_id` is not a delete and is not counted.
+        let no_deletes = draft_batch(&[], &updates, &inserts).unwrap();
+        assert_eq!(
+            draft_deletes_match(&no_deletes, &["_id"], "accounts"),
+            Some(0)
+        );
+        // Another collection, or another database, is not the marked document.
+        let c = r#"db.getCollection("accounts")"#;
+        let on_other = format!(
+            r#"{c}.deleteOne({{_id: 1}});{}"#,
+            "\ndb.getCollection(\"other\").deleteOne({_id: 2});"
+        );
+        assert_eq!(draft_deletes_match(&on_other, &["_id"], "accounts"), None);
+        let sibling = r#"db.getSiblingDB("x").accounts.deleteOne({_id: 1});"#;
+        assert_eq!(draft_deletes_match(sibling, &["_id"], "accounts"), None);
+        // Methods are read from the parse: only the three a draft holds.
+        for text in [
+            "{c}.deleteOne({_id: 1});\n{c}.deleteMany({});",
+            "{c}.deleteMany({_id: 1});",
+            "{c}.deleteOne({_id: 1});\n{c}.updateMany({_id: 1}, {$set: {a: 1}});",
+            "{c}.deleteOne({_id: 1});\n{c}.replaceOne({_id: 2}, {a: 1});",
+            "{c}.deleteOne({_id: 1});\n{c}.findOneAndDelete({_id: 2});",
+            "{c}.deleteOne({_id: 1});\n{c}.insertMany([{a: 1}]);",
+            "{c}.deleteOne({_id: 1});\n{c}.find({});",
+            "{c}.deleteOne({_id: 1, a: 2});",
+            "{c}.deleteOne({});",
+            "{c}.deleteOne({_id: 1}, {_id: 1});",
+            "{c}.deleteOne({_id: 1});\ndb.dropDatabase();",
+        ] {
+            let text = text.replace("{c}", c);
+            assert_eq!(
+                draft_deletes_match(&text, &["_id"], "accounts"),
+                None,
+                "{text}"
+            );
+        }
+        // Text that does not parse, or holds no statement, is not a draft.
+        assert_eq!(
+            draft_deletes_match("db.accounts.deleteOne({_id: ", &["_id"], "accounts"),
+            None
+        );
+        assert_eq!(draft_deletes_match("", &["_id"], "accounts"), None);
+        // Each statement is read for what it is, not for where it stands.
+        let one = r#"db.accounts.deleteOne({_id: 1})"#;
+        assert_eq!(draft_deletes_match(one, &["_id"], "accounts"), Some(1));
+    }
+
     #[test]
     fn the_write_gate_admits_the_four_generated_shapes_and_nothing_else() {
         for admitted in [
@@ -4677,10 +5075,9 @@ mod tests {
             "db.c.replaceOne({_id: 1}, {a: 1})",
             "db.c.updateOne({_id: 1}, {$set: {a: 1}}); db.d.updateOne({_id: 1}, {$set: {a: 1}})",
             "db.getSiblingDB('admin').c.updateOne({_id: 1}, {$set: {a: 1}})",
-            "db.c.insertOne({a: 1}); db.c.insertOne({a: 2})",
+            // Two inserts or two deletes are a draft, admitted in `a_mixed_mongo_draft_is_admitted_and_every_widened_shape_refused`.
             "db.c.insertOne({})",
             "db.c.insertOne({a: 1}, {writeConcern: {w: 0}})",
-            "db.c.deleteOne({_id: 1}); db.c.deleteOne({_id: 2})",
             "db.c.deleteOne({_id: 1}); db.c.drop()",
             "db.c.updateOne({_id: 1}, {$set: {a: 1}}); db.c.drop()",
             "db.c.updateOne({_id: 1}, {$set: {a: 1}}); db.c.deleteOne({_id: 1})",

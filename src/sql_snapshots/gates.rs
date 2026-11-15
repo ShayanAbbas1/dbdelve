@@ -1,8 +1,49 @@
 use super::{check, statement_with};
 use crate::{
     db::{Engine, Syntax, Target},
+    mql,
     sql::{self, Destructive, Mode},
 };
+
+/// A `DraftDelete` of `accounts` by the `_id` text the grid would hold.
+fn mongo_delete(id: &str) -> sql::DraftDelete {
+    sql::DraftDelete {
+        schema: "dbdelve_dev".to_owned(),
+        table: "accounts".to_owned(),
+        keys: vec![("_id".to_owned(), id.to_owned())],
+        null_keys: Vec::new(),
+        types: vec![("_id".to_owned(), "objectId".to_owned())],
+    }
+}
+
+fn mongo_update(id: &str, name: &str) -> crate::result_grid::PendingRow {
+    crate::result_grid::PendingRow {
+        schema: "dbdelve_dev".to_owned(),
+        table: "accounts".to_owned(),
+        sets: vec![(
+            "name".to_owned(),
+            crate::result_grid::NewValue::Value(name.to_owned().into()),
+        )],
+        keys: vec![("_id".to_owned(), id.to_owned())],
+        types: vec![
+            ("_id".to_owned(), "objectId".to_owned()),
+            ("name".to_owned(), "string".to_owned()),
+        ],
+        ..Default::default()
+    }
+}
+
+fn mongo_insert(columns: &[(&str, Option<&str>)]) -> sql::DraftInsert {
+    sql::DraftInsert {
+        schema: "dbdelve_dev".to_owned(),
+        table: "accounts".to_owned(),
+        columns: columns
+            .iter()
+            .map(|(field, value)| ((*field).to_owned(), value.map(str::to_owned)))
+            .collect(),
+        types: vec![("name".to_owned(), "string".to_owned())],
+    }
+}
 
 /// The text reaches the gates exactly as written: no generator is called.
 fn corpus(out: &mut String, engine: Engine, case: &str, text: &str) {
@@ -983,4 +1024,294 @@ fn mongo_and_redis_gate_corpus() {
         corpus(&mut out, Engine::Redis, &format!("{text:?}"), text);
     }
     check("gates_nonsql", &out);
+}
+
+/// The MongoDB draft: every shape the write gate admits beyond the four it
+/// admitted before, and every widened form it refuses. A record carries what
+/// the gate says and what the key check reads on `accounts` by `_id`, so a
+/// text the gate admits and the key check cannot count shows here.
+#[test]
+fn mongo_draft_gate_corpus() {
+    let c = r#"db.getCollection("accounts")"#;
+    let mut out = String::new();
+    let mut record = |case: &str, text: &str, admitted: bool| {
+        assert_eq!(
+            sql::is_generated_write_on(Engine::MongoDb, text),
+            admitted,
+            "{case}: {text}"
+        );
+        let counted = mql::draft_deletes_match(text, &["_id"], "accounts");
+        corpus_with(
+            &mut out,
+            Engine::MongoDb,
+            case,
+            text,
+            &format!(" draft_deletes_match={counted:?}"),
+        );
+    };
+    let delete = |n: u8| mongo_delete(&format!("ObjectId('65a4f1c0ffffffffffffff{n:02x}')"));
+    let update = |n: u8, name: &str| {
+        mongo_update(&format!("ObjectId('65a4f1c0ffffffffffffff{n:02x}')"), name)
+    };
+    let insert = |name: &str| mongo_insert(&[("name", Some(name))]);
+    let written = |deletes: &[_], updates: &[_], inserts: &[_]| {
+        mql::draft_batch(deletes, updates, inserts).expect("a draft that is written")
+    };
+    for (case, text) in [
+        (
+            "draft: deletes, updates, inserts",
+            written(
+                &[delete(1), delete(2)],
+                &[update(3, "a"), update(4, "b")],
+                &[insert("c"), insert("d")],
+            ),
+        ),
+        (
+            "draft: marks only",
+            written(&[delete(1), delete(2)], &[], &[]),
+        ),
+        (
+            "draft: adds only",
+            written(&[], &[], &[insert("c"), insert("d")]),
+        ),
+        (
+            "draft: marks and adds",
+            written(&[delete(1)], &[], &[insert("c")]),
+        ),
+        (
+            "draft: edits and adds",
+            written(&[], &[update(3, "a")], &[insert("c")]),
+        ),
+        ("draft: one mark", written(&[delete(1)], &[], &[])),
+        ("draft: one edit", written(&[], &[update(3, "a")], &[])),
+        ("draft: one add", written(&[], &[], &[insert("c")])),
+    ] {
+        record(case, &text, true);
+    }
+    for (case, text) in [
+        (
+            "two deletes by id",
+            "{c}.deleteOne({_id: 1});\n{c}.deleteOne({_id: 2});",
+        ),
+        (
+            "two inserts",
+            "{c}.insertOne({\"a\": 1});\n{c}.insertOne({\"a\": 2});",
+        ),
+        (
+            "delete then insert",
+            "{c}.deleteOne({_id: 1});\n{c}.insertOne({\"a\": 1});",
+        ),
+    ] {
+        record(case, &text.replace("{c}", c), true);
+    }
+    for (case, text) in [
+        (
+            "insert before delete",
+            "{c}.insertOne({\"a\": 1});\n{c}.deleteOne({_id: 1});",
+        ),
+        (
+            "update before delete",
+            "{c}.updateOne({_id: 1}, {$set: {\"a\": 1}});\n{c}.deleteOne({_id: 2});",
+        ),
+        (
+            "insert before update",
+            "{c}.insertOne({\"a\": 1});\n{c}.updateOne({_id: 1}, {$set: {\"a\": 1}});",
+        ),
+        (
+            "delete then deleteMany",
+            "{c}.deleteOne({_id: 1});\n{c}.deleteMany({});",
+        ),
+        (
+            "delete then updateMany",
+            "{c}.deleteOne({_id: 1});\n{c}.updateMany({_id: 1}, {$set: {\"a\": 1}});",
+        ),
+        (
+            "delete then replaceOne",
+            "{c}.deleteOne({_id: 1});\n{c}.replaceOne({_id: 2}, {\"a\": 1});",
+        ),
+        (
+            "delete then findOneAndDelete",
+            "{c}.deleteOne({_id: 1});\n{c}.findOneAndDelete({_id: 2});",
+        ),
+        (
+            "delete then insertMany",
+            "{c}.deleteOne({_id: 1});\n{c}.insertMany([{\"a\": 1}]);",
+        ),
+        (
+            "delete then a second key",
+            "{c}.deleteOne({_id: 1});\n{c}.deleteOne({_id: 2, \"a\": 1});",
+        ),
+        (
+            "delete then a filter without id",
+            "{c}.deleteOne({_id: 1});\n{c}.deleteOne({\"a\": 1});",
+        ),
+        (
+            "delete then an empty filter",
+            "{c}.deleteOne({_id: 1});\n{c}.deleteOne({});",
+        ),
+        (
+            "delete then an operator filter",
+            "{c}.deleteOne({_id: 1});\n{c}.deleteOne({_id: {\"$ne\": 1}});",
+        ),
+        (
+            "delete then a regex id",
+            "{c}.deleteOne({_id: 1});\n{c}.deleteOne({_id: /./});",
+        ),
+        (
+            "delete then an option",
+            "{c}.deleteOne({_id: 1});\n{c}.deleteOne({_id: 2}, {collation: {}});",
+        ),
+        (
+            "delete then an upsert",
+            "{c}.deleteOne({_id: 1});\n{c}.updateOne({_id: 2}, {$set: {\"a\": 1}}, {upsert: true});",
+        ),
+        (
+            "delete then an unset",
+            "{c}.deleteOne({_id: 1});\n{c}.updateOne({_id: 2}, {$unset: {\"a\": 1}});",
+        ),
+        (
+            "delete then a second collection",
+            "{c}.deleteOne({_id: 1});\ndb.getCollection(\"other\").deleteOne({_id: 2});",
+        ),
+        (
+            "delete then a sibling database",
+            "{c}.deleteOne({_id: 1});\ndb.getSiblingDB(\"x\").accounts.deleteOne({_id: 2});",
+        ),
+        (
+            "a cursor before a delete",
+            "{c}.find({}).limit(1);\n{c}.deleteOne({_id: 1});",
+        ),
+        (
+            "delete then a read",
+            "{c}.deleteOne({_id: 1});\n{c}.find({});",
+        ),
+        (
+            "delete then dropDatabase",
+            "{c}.deleteOne({_id: 1});\ndb.dropDatabase();",
+        ),
+        (
+            "delete then an inserted $where",
+            "{c}.deleteOne({_id: 1});\n{c}.insertOne({\"$where\": \"1\"});",
+        ),
+        (
+            "delete then an inserted $set",
+            "{c}.deleteOne({_id: 1});\n{c}.insertOne({\"a\": {\"$set\": {\"b\": 1}}});",
+        ),
+        (
+            "delete then an empty insert",
+            "{c}.deleteOne({_id: 1});\n{c}.insertOne({});",
+        ),
+        (
+            "delete then an updated $where",
+            "{c}.deleteOne({_id: 1});\n{c}.updateOne({_id: 2}, {$set: {\"a\": {\"$where\": \"1\"}}});",
+        ),
+        (
+            "delete then text that does not parse",
+            "{c}.deleteOne({_id: 1});\n{c}.insertOne({\"a\": ",
+        ),
+    ] {
+        record(case, &text.replace("{c}", c), false);
+    }
+    check("gates_mongo_draft", &out);
+}
+
+/// What a keyless draft's apply asks of a text besides the gate: how many
+/// `DELETE`s it names against the key of every column of the table
+/// (`bird`, `place`) and against a keyed table's `id`, and how many statements
+/// the gate recovers from it.
+fn keyless_more(engine: Engine, text: &str) -> String {
+    let key = |keys: &[&str]| sql::draft_deletes_match(engine, text, keys, "public", "accounts");
+    format!(
+        " draft_deletes_match[bird+place]={:?} draft_deletes_match[id]={:?} statements={:?}",
+        key(&["bird", "place"]),
+        key(&["id"]),
+        sql::generated_writes(engine, text).map(|statements| statements.len()),
+    )
+}
+
+/// A row named by every value, a NULL as `IS NULL`, on every SQL engine: what
+/// the gate admits where `null_terms` (or ClickHouse's `row_terms`) is set and
+/// refuses elsewhere, and the shapes it refuses everywhere.
+#[test]
+fn keyless_gate_corpus_per_engine() {
+    let mut out = String::new();
+    for engine in sql_engines() {
+        let q = engine.qualified("public", "accounts");
+        let id = engine.quote_identifier("id");
+        let bird = engine.quote_identifier("bird");
+        let place = engine.quote_identifier("place");
+        let every = format!("{bird} = 'wren' AND {place} IS NULL");
+        let delete = |predicate: &str| format!("DELETE FROM {q} WHERE {predicate}");
+        let ins = format!("INSERT INTO {q} ({bird}, {place}) VALUES ('tit', NULL)");
+        let cases: Vec<(&str, String)> = vec![
+            ("delete every column, a null", delete(&every)),
+            (
+                "delete every column, no null",
+                delete(&format!("{bird} = 'wren' AND {place} = 'oak'")),
+            ),
+            (
+                "delete every column, other order",
+                delete(&format!("{place} IS NULL AND {bird} = 'wren'")),
+            ),
+            (
+                "delete every column, an empty string",
+                delete(&format!("{bird} = 'wren' AND {place} = ''")),
+            ),
+            (
+                "delete fewer columns than the row",
+                delete(&format!("{bird} = 'wren'")),
+            ),
+            ("delete a null alone", delete(&format!("{place} IS NULL"))),
+            (
+                "delete or",
+                delete(&format!("{bird} = 'wren' OR {place} IS NULL")),
+            ),
+            (
+                "delete subquery",
+                delete(&format!("{bird} = (SELECT 'wren') AND {place} IS NULL")),
+            ),
+            (
+                "delete is not null",
+                delete(&format!("{bird} = 'wren' AND {place} IS NOT NULL")),
+            ),
+            (
+                "delete is null twice",
+                delete(&format!("{place} IS NULL AND {place} IS NULL")),
+            ),
+            (
+                "delete an extra null term on a keyed table",
+                delete(&format!("{id} = '7' AND {place} IS NULL")),
+            ),
+            (
+                "update every column, a null",
+                format!("UPDATE {q} SET {bird} = 'finch' WHERE {every}"),
+            ),
+            (
+                "update to null, every column",
+                format!("UPDATE {q} SET {place} = NULL WHERE {every}"),
+            ),
+            (
+                "draft, delete every column then insert",
+                format!("{};\n{};", delete(&every), ins),
+            ),
+            (
+                "draft, bracketed",
+                format!("BEGIN;\n{};\n{};\nCOMMIT;", delete(&every), ins),
+            ),
+        ];
+        for (case, text) in cases {
+            let more = keyless_more(engine, &text);
+            corpus_with(&mut out, engine, case, &text, &more);
+        }
+    }
+
+    // A plugin that speaks Postgres's dialect reads the same gate through
+    // `generated_writes`, so what it is asked to run is what is admitted here.
+    let q = Engine::Postgres.qualified("public", "accounts");
+    let text = format!(r#"DELETE FROM {q} WHERE "bird" = 'wren' AND "place" IS NULL"#);
+    out.push_str(&format!(
+        "\n[plugin speaking postgres] every-column delete => generated_writes={:?}\n",
+        sql::generated_writes(Engine::Postgres, &text)
+    ));
+    check("gates_keyless", &out);
 }

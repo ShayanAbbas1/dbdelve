@@ -37,10 +37,10 @@ use num_bigint::BigUint;
 use crate::sql::Projected;
 
 use super::{
-    Catalog, Column, Databases, DbError, EditTarget, Engine, Fetch, QueryResult, Reference,
-    RowBuilder, SchemaGraph, Stopped, Structure, Unpicked, assemble_catalog, assemble_foreign_keys,
-    assemble_references, assemble_schema_graph, assemble_structure, plain_error, required_cell,
-    terminated,
+    ApplyOutcome, ApplyStage, Catalog, Column, Databases, DbError, EditTarget, Engine, Fetch,
+    QueryResult, Reference, RowBuilder, RowMatch, SchemaGraph, Sending, Stopped, Structure,
+    Unpicked, VerifiedStep, assemble_catalog, assemble_foreign_keys, assemble_references,
+    assemble_schema_graph, assemble_structure, plain_error, required_cell, terminated,
 };
 
 // Workaround for duckdb-rs#920, fixed upstream by #923 but unreleased past
@@ -347,9 +347,51 @@ impl Connection {
         let mut result =
             run(&connection, sql, fetch).map_err(|error| rolled_back(&connection, sql, error))?;
         if !result.columns.is_empty() {
-            result.edit = edit_target(&connection, sql, &result.columns);
+            (result.edit, result.read_only_reason) = edit_target(&connection, sql, &result.columns);
         }
         Ok(result)
+    }
+
+    /// Applies `steps` as one verified sequence on this session, under one
+    /// acquisition of its lock, so no other statement runs between the
+    /// re-reads and the writes: see [`super::run_verified`]. A count is the `Count` column DuckDB answers a write with, the rows the
+    /// statement matched, and a write-write conflict surfaces at the statement
+    /// that met it, so it is a failure at that write. The statement timeout is
+    /// armed once for the sequence. `proceed` says no once a Cancel has come.
+    pub fn apply_verified(
+        &self,
+        steps: &[VerifiedStep],
+        proceed: &dyn Fn() -> bool,
+    ) -> ApplyOutcome {
+        let _deadline = self.deadline();
+        let failed = |error| ApplyOutcome::Failed {
+            stage: ApplyStage::Begin,
+            error,
+        };
+        let connection = match lock(&self.connection) {
+            Ok(connection) => connection,
+            Err(error) => return failed(error),
+        };
+        // Registers the run, so a Cancel finds the session, and checks for one
+        // that came first, as `submit` does before it touches the session.
+        if !proceed() {
+            return failed(plain_error("Cancelled before it was sent.".into()));
+        }
+        // Not `rolled_back`: that reads a `BEGIN` off the statement's text and
+        // ends the transaction itself, and `run_verified` owns the rollback.
+        // A `ROLLBACK` with no transaction to end is an error it ignores.
+        let mut send = |sql: &str, _: Sending| run(&connection, sql, Fetch::default());
+        // A file or memory database has no socket to lose, and renders every
+        // cell the same way on both reads, so nothing is skipped and no
+        // `COMMIT` error means a lost session.
+        super::run_verified(
+            Engine::DuckDb,
+            steps,
+            &mut send,
+            proceed,
+            &|_| false,
+            &|_| false,
+        )
     }
 
     /// dbdelve's own SQL, whose rows are never edited.
@@ -747,18 +789,84 @@ fn run(connection: &duckdb::Connection, sql: &str, fetch: Fetch) -> Result<Query
     Ok(result)
 }
 
+/// Whether `=` against a column's value rendered as text finds it, for the
+/// type the catalog gives the column. Fail closed: only types the pinned
+/// engine was seen to match are listed.
+///
+/// ponytail: a type is added when
+/// `tests::every_listed_type_matches_its_row_by_its_rendered_text` exercises it
+/// on the pinned engine. Left off: `BLOB` (rendered as hex, which reads back as
+/// the characters), lists of text, structs and maps (rendered without quoting,
+/// so a comma splits a value and a struct or a map does not read back), enums,
+/// fixed-size arrays and the rest.
+fn is_matchable(data_type: &str) -> bool {
+    const LISTED: &[&str] = &[
+        "TINYINT",
+        "SMALLINT",
+        "INTEGER",
+        "BIGINT",
+        "HUGEINT",
+        "UTINYINT",
+        "USMALLINT",
+        "UINTEGER",
+        "UBIGINT",
+        "UHUGEINT",
+        "BOOLEAN",
+        "VARCHAR",
+        "FLOAT",
+        "DOUBLE",
+        "DECIMAL",
+        "DATE",
+        "TIME",
+        "TIMESTAMP",
+        "TIMESTAMP WITH TIME ZONE",
+        "TIME WITH TIME ZONE",
+        "INTERVAL",
+        "UUID",
+        "JSON",
+        "BIT",
+        "INTEGER[]",
+        "BIGINT[]",
+    ];
+    let name = data_type.to_ascii_uppercase();
+    // `DECIMAL(10,2)` is one type whatever its precision.
+    let base = match name.split_once('(') {
+        Some(("DECIMAL", _)) => "DECIMAL",
+        _ => name.as_str(),
+    };
+    LISTED.contains(&base)
+}
+
 /// Which table these columns can be written back to, if any.
 ///
 /// DuckDB names no column's table, so the statement says where each column
 /// came from, and only a select of one table's own columns
 /// ([`crate::sql::table_read`]) answers at all; the catalog says what the
 /// table is and which key names its rows. Every step may answer "no", a
-/// failed lookup included: the user's statement has already succeeded.
+/// failed lookup included: the user's statement has already succeeded. A table
+/// with no primary key is named by every column, or answers the reason it is
+/// not.
 fn edit_target(
     connection: &duckdb::Connection,
     sql: &str,
     columns: &[Column],
-) -> Option<EditTarget> {
+) -> (Option<EditTarget>, Option<String>) {
+    let Some(target) = keyed_or_keyless_target(connection, sql, columns) else {
+        return (None, None);
+    };
+    match target {
+        Ok(target) => (Some(target), None),
+        Err(reason) => (None, Some(reason)),
+    }
+}
+
+/// [`edit_target`]'s steps, where `None` is "no, and nothing to say about it"
+/// and `Err` is the reason a keyless table is read-only.
+fn keyed_or_keyless_target(
+    connection: &duckdb::Connection,
+    sql: &str,
+    columns: &[Column],
+) -> Option<Result<EditTarget, String>> {
     let read = crate::sql::table_read(Engine::DuckDb, sql)?;
     let (schema, table) = resolved_table(connection, &read.table)?;
     let lookup = |sql: String| -> Option<Vec<String>> {
@@ -821,16 +929,70 @@ fn edit_target(
                 .position(|origin| origin.as_ref() == Some(name))
         })
         .collect::<Option<Vec<usize>>>()?;
-    if keys.is_empty() {
+    if !keys.is_empty() {
+        return Some(Ok(EditTarget {
+            schema,
+            table,
+            columns: origins,
+            keys,
+            ..Default::default()
+        }));
+    }
+
+    // No primary key, whatever unique index there is. Every column of the
+    // table names the row, never some of them: a column left out of the WHERE
+    // matches rows the user is not looking at.
+    if origins.iter().any(Option::is_none) {
         return None;
     }
-    Some(EditTarget {
+    let described = |column: &str| {
+        lookup(format!(
+            "SELECT {column} FROM duckdb_columns()
+             WHERE database_name = current_database()
+               AND schema_name = {schema_literal} AND table_name = {table_literal}
+             ORDER BY column_index"
+        ))
+    };
+    let (types, generated) = (described("data_type")?, described("is_generated")?);
+    if types.len() != names.len() || generated.len() != names.len() {
+        return None;
+    }
+    let refusal = |what: String| {
+        Some(Err(format!(
+            "A table without a primary key is edited by matching every column, and {what}."
+        )))
+    };
+    if let Some((name, data_type)) = names
+        .iter()
+        .zip(&types)
+        .find(|(_, data_type)| !is_matchable(data_type))
+    {
+        return refusal(format!(
+            "{name} ({}) cannot be matched by its value",
+            data_type.to_ascii_lowercase()
+        ));
+    }
+    let (mut keys, mut fixed) = (Vec::new(), Vec::new());
+    for (name, generated) in names.iter().zip(&generated) {
+        let Some(at) = origins
+            .iter()
+            .position(|origin| origin.as_deref() == Some(name.as_str()))
+        else {
+            return refusal(format!("{name} is not in the result"));
+        };
+        keys.push(at);
+        if generated == "true" {
+            fixed.push(at);
+        }
+    }
+    Some(Ok(EditTarget {
         schema,
         table,
         columns: origins,
         keys,
+        row_match: RowMatch::EveryColumn { fixed },
         ..Default::default()
-    })
+    }))
 }
 
 /// The stored schema and name of the base table `written` names in the
@@ -1338,6 +1500,116 @@ mod tests {
         connection
     }
 
+    /// Every type a keyless table may hold, each with a value and whether it is
+    /// matched by its rendered text on the pinned engine.
+    const TYPE_SAMPLES: &[(&str, &str)] = &[
+        ("tinyint", "-5"),
+        ("smallint", "300"),
+        ("integer", "42"),
+        ("bigint", "9007199254740993"),
+        ("hugeint", "170141183460469231731687303715884105727"),
+        ("utinyint", "200"),
+        ("usmallint", "60000"),
+        ("uinteger", "4000000000"),
+        ("ubigint", "18446744073709551615"),
+        ("uhugeint", "340282366920938463463374607431768211455"),
+        ("boolean", "true"),
+        ("varchar", "'h''e llo, \\ {a: 1}'"),
+        ("varchar(5)", "''"),
+        ("float", "0.1"),
+        ("double", "0.30000000000000004"),
+        ("decimal(10,2)", "-12.50"),
+        ("decimal(38,10)", "1.1234567890"),
+        ("date", "'2024-02-29'"),
+        ("time", "'12:34:56.123456'"),
+        ("timestamp", "'2024-02-29 12:34:56.123456'"),
+        ("timestamp with time zone", "'2024-06-01 00:00:00-07'"),
+        ("time with time zone", "'12:34:56+02'"),
+        (
+            "interval",
+            "INTERVAL '1 year 2 months 3 days 4 hours 5 minutes 6.789 seconds'",
+        ),
+        ("uuid", "'8F1F4D3A-1B2C-4D5E-8F90-123456789ABC'"),
+        ("json", "'{\"a\": [1,   2]}'::JSON"),
+        ("bit", "'0101'::BIT"),
+        ("integer[]", "[1, NULL, 3]"),
+        ("bigint[]", "[9007199254740993]"),
+    ];
+
+    /// Types the pinned engine does not find by their rendered text, and so
+    /// types a keyless table may not hold: a blob renders as hex, which reads
+    /// back as the characters; a list of text, a struct and a map render
+    /// without quoting, so a comma in a value splits it and a struct or a map
+    /// does not read back at all.
+    const UNMATCHED_SAMPLES: &[(&str, &str)] = &[
+        ("blob", "'abc'::BLOB"),
+        ("varchar[]", "['a, b', 'c']"),
+        ("struct(a integer, b varchar)", "{'a': 1, 'b': 'x, y'}"),
+        ("map(varchar, integer)", "MAP {'a': 1}"),
+    ];
+
+    /// The catalog's name for the type of the one column of a scratch table
+    /// declared `declared`, and how many of its rows the column's own rendered
+    /// text finds, through the literal dbdelve would write.
+    fn matched_by_its_rendered_text(
+        declared: &str,
+        value: &str,
+    ) -> (String, Result<String, String>) {
+        let connection = memory(&format!(
+            "CREATE TABLE t (c {declared}); INSERT INTO t VALUES ({value});"
+        ));
+        let catalog = connection
+            .query(
+                "SELECT data_type FROM duckdb_columns() WHERE table_name = 't'",
+                Fetch::default(),
+            )
+            .expect("the catalog answers");
+        let data_type = catalog.rows[0].get(0).expect("a type").to_string();
+        let read = connection
+            .query("SELECT c FROM t", Fetch::default())
+            .expect("the column reads");
+        let rendered = read.rows[0].get(0).expect("a value").to_string();
+        let literal = Engine::DuckDb.quote_value(&rendered, read.columns[0].data_type.as_deref());
+        let counted = connection
+            .query(
+                &format!("SELECT COUNT(*) FROM t WHERE c = {literal}"),
+                Fetch::default(),
+            )
+            .map(|result| result.rows[0].get(0).unwrap_or("NULL").to_string())
+            .map_err(|error| error.message);
+        (data_type, counted)
+    }
+
+    #[test]
+    fn every_listed_type_matches_its_row_by_its_rendered_text() {
+        for (declared, value) in TYPE_SAMPLES {
+            let (data_type, counted) = matched_by_its_rendered_text(declared, value);
+            assert_eq!(counted.as_deref(), Ok("1"), "{declared}: {value}");
+            assert!(
+                is_matchable(&data_type),
+                "{declared} matches by its rendered text and is not listed ({data_type})"
+            );
+        }
+        for (declared, value) in UNMATCHED_SAMPLES {
+            let (data_type, counted) = matched_by_its_rendered_text(declared, value);
+            assert_ne!(counted.as_deref(), Ok("1"), "{declared}: {value}");
+            assert!(
+                !is_matchable(&data_type),
+                "{declared} does not match by its rendered text and is listed ({data_type})"
+            );
+        }
+        // Left off without a probe of their own: types that need a parameter
+        // to be spelled, and the ones a rendering does not carry whole.
+        for data_type in [
+            "ENUM('a', 'b')",
+            "INTEGER[2]",
+            "BIGNUM",
+            "UNION(a INTEGER)",
+            "TIMESTAMP_NS",
+        ] {
+            assert!(!is_matchable(data_type), "{data_type}");
+        }
+    }
     fn cells(result: &QueryResult) -> Vec<Vec<Option<&str>>> {
         result.rows.iter().map(|row| row.iter().collect()).collect()
     }
@@ -2218,8 +2490,6 @@ mod tests {
             .unwrap();
         for sql in [
             "SELECT name FROM accounts",
-            "SELECT * FROM tally",
-            "SELECT * FROM contacts",
             "SELECT * FROM account_overview",
             "SELECT a.id, b.id FROM accounts a JOIN twin b ON a.id = b.id",
             "SELECT * FROM accounts, twin",
@@ -2238,6 +2508,75 @@ mod tests {
         ] {
             assert_eq!(edit_of(&connection, sql), None, "{sql}");
         }
+    }
+
+    #[test]
+    fn a_table_without_a_primary_key_is_matched_by_every_column_or_read_only_with_a_reason() {
+        use crate::db::RowMatch;
+        let connection = seeded();
+        connection
+            .query(
+                "CREATE TABLE mixed (note VARCHAR, photo BLOB);
+                 CREATE TABLE computed (a INTEGER, b INTEGER GENERATED ALWAYS AS (a + 1) VIRTUAL);",
+                Fetch::default(),
+            )
+            .unwrap();
+        // Made by CREATE TABLE AS, so with no constraint of any kind, and a
+        // table whose only key is a unique index: neither names a row.
+        for (sql, keys, table) in [
+            ("SELECT * FROM tally", vec![0, 1], "tally"),
+            ("SELECT * FROM contacts", vec![0, 1], "contacts"),
+            (
+                "SELECT display_name, email FROM contacts",
+                vec![1, 0],
+                "contacts",
+            ),
+        ] {
+            let edit = edit_of(&connection, sql).unwrap_or_else(|| panic!("{sql}"));
+            assert_eq!(edit.table, table, "{sql}");
+            assert_eq!(edit.keys, keys, "{sql}");
+            assert_eq!(
+                edit.row_match,
+                RowMatch::EveryColumn { fixed: vec![] },
+                "{sql}"
+            );
+        }
+        let computed = edit_of(&connection, "SELECT * FROM computed").expect("a generated column");
+        assert_eq!(computed.keys, [0, 1]);
+        assert_eq!(computed.row_match, RowMatch::EveryColumn { fixed: vec![1] });
+
+        let reason = |sql: &str| {
+            let read = connection.query(sql, Fetch::default()).unwrap();
+            assert!(read.edit.is_none(), "{sql}");
+            read.read_only_reason
+        };
+        let refused = |column: &str| {
+            Some(format!(
+                "A table without a primary key is edited by matching every column, \
+                 and {column} cannot be matched by its value."
+            ))
+        };
+        assert_eq!(reason("SELECT * FROM mixed"), refused("photo (blob)"));
+        assert_eq!(reason("SELECT note FROM mixed"), refused("photo (blob)"));
+        // A column the result leaves out would be left out of the WHERE.
+        assert_eq!(
+            reason("SELECT n FROM tally"),
+            Some(
+                "A table without a primary key is edited by matching every column, \
+                 and label is not in the result."
+                    .to_string()
+            )
+        );
+        // Computed beside real columns, and a self-join, are no table's rows.
+        assert_eq!(reason("SELECT *, 1 AS one FROM tally"), None);
+        assert_eq!(reason("SELECT n, n, label FROM tally"), None);
+        assert_eq!(reason("SELECT * FROM account_overview"), None);
+
+        let keyed = connection
+            .query("SELECT * FROM accounts", Fetch::default())
+            .unwrap();
+        assert_eq!(keyed.edit.expect("keyed").row_match, RowMatch::Key);
+        assert_eq!(keyed.read_only_reason, None);
     }
 
     #[test]
@@ -2757,5 +3096,7 @@ mod tests {
         read_only_session_refuses_a_write,
         generated_writes_round_trip,
         generated_draft_round_trip,
+        verified_draft_round_trip,
+        verified_keyless_round_trip,
     );
 }

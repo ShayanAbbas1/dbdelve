@@ -7,13 +7,16 @@ use std::ops::Range;
 
 use gpui_component::table::TableState;
 
-use crate::db::{Feed, Fetch, QueryResult, Row, Stopped};
-use crate::result_grid::{ColumnView, ColumnWidth};
+use crate::db::{
+    ApplyOutcome, ApplyStage, Drift, Feed, Fetch, QueryResult, Row, StepKind, Stopped,
+};
+use crate::result_grid::{ColumnView, ColumnWidth, StepRow};
 
 use super::*;
 use crate::session::{
-    AfterEdits, Finished, Lane, PendingDelete, PendingDiscard, PendingRun, QueryRename, Queue,
-    Resume, Step, TabKey, next_step, query_name_refusal, reveals_results,
+    APPLY_IN_TRANSACTION, AfterEdits, Finished, Lane, PendingDelete, PendingDiscard, PendingRun,
+    QueryRename, Queue, Resume, Step, TabKey, Verification, next_step, query_name_refusal,
+    reveals_results,
 };
 
 impl Workspace {
@@ -74,17 +77,14 @@ impl Workspace {
     pub(crate) fn has_markable_row(&self, cx: &App) -> bool {
         self.profile().is_some_and(|profile| {
             let tab = profile.session.active;
-            matches!(tab, Tab::Object(_))
-                && profile.session.edit_mode(tab) == EditMode::Draft
-                && profile.config.target().row_edits()
-                && profile.session.active_results().is_some_and(|results| {
-                    let grid = results.read(cx).delegate();
-                    grid.insert_target().is_some()
-                        && grid
-                            .selected_draft_rows()
-                            .into_iter()
-                            .any(|row| row >= grid.fetched_rows() || grid.row_key(row).is_some())
-                })
+            profile.session.active_results().is_some_and(|results| {
+                markable_row(
+                    profile.config.target(),
+                    tab,
+                    profile.session.edit_mode(tab),
+                    results.read(cx).delegate(),
+                )
+            })
         })
     }
 
@@ -2201,19 +2201,69 @@ impl Workspace {
         let edit = matches!(
             refresh,
             Some(
-                Refresh::Statement(_)
+                Refresh::Statement { .. }
                     | Refresh::Earlier { .. }
-                    | Refresh::Relation(_)
+                    | Refresh::Relation { .. }
                     | Refresh::Row { .. }
             )
         );
+        // What the run is checked against, where its edit was reviewed for a
+        // target that verifies an apply: the rows as they were fetched, read
+        // again inside the apply's transaction. Cloned, as the refresh that
+        // carries it goes on to the landing.
+        let verification = match &refresh {
+            Some(
+                Refresh::Relation { verify, .. }
+                | Refresh::Row { verify, .. }
+                | Refresh::Statement { verify, .. }
+                | Refresh::Earlier { verify, .. },
+            ) => verify.clone(),
+            _ => None,
+        };
+        // Every path that writes a grid's rows on a target that verifies
+        // applies builds a `Verification`; this keeps a future one that does
+        // not from sending the edit as the text alone, with no re-read and no
+        // count (`AGENTS.md`, rule 2). A query tab's edit on a target that
+        // does not review it (`Target::reviews_query_apply`) goes to its
+        // buffer and is not one of these.
+        let unverified = edit
+            && verification.is_none()
+            && target.verifies_applies()
+            && match tab {
+                Tab::Object(_) => true,
+                Tab::Query(_) => target.reviews_query_apply(),
+            };
+        // A review that was open when a `COMMIT` went unanswered still holds
+        // its draft, and running it again could write it twice. A run with no
+        // verification is a read of the rows, which is what clears the mark.
+        let outcome_unknown = verification.is_some()
+            && profile
+                .session
+                .results(tab)
+                .is_some_and(|results| results.read(cx).delegate().outcome_unknown());
+        // A review written before the user opened a transaction is caught
+        // here, at Run: the apply's own `BEGIN` and `COMMIT` would end theirs.
+        let refusal = outcome_unknown
+            .then(|| super::editing::OUTCOME_UNKNOWN_REFUSAL.to_string())
+            .or_else(|| {
+                (verification.is_some() && profile.in_transaction)
+                    .then(|| APPLY_IN_TRANSACTION.to_string())
+            })
+            .or_else(|| {
+                unverified.then(|| "dbdelve refused to send an edit it could not verify.".into())
+            });
         // An edit sent to a transactional SQL engine leaves the grid and the
         // draft where they are until the server answers, so a refusal or a
-        // failure costs the user nothing. Not for a target whose batch has no
-        // transaction (`Target::row_edits`): what failed part way there has
-        // already applied some of the draft, and keeping it would send those
-        // rows again.
-        let kept = edit && target.row_edits();
+        // failure costs the user nothing. So does one sent to an ordered
+        // target, MongoDB, whose batch has no transaction: what failed part way
+        // there has applied some of the draft, and the landing removes exactly
+        // those rows from it by identity (`ResultGrid::drop_applied`), so the
+        // kept draft is never sent twice. Not for a target that is neither
+        // (`Target::keeps_edits`).
+        let kept = edit && target.keeps_edits();
+        // Whether a failed apply of this target has written the statements before
+        // the one that failed (`Target::ordered_edits`).
+        let ordered = target.ordered_edits();
         // Whether the batch is the grid's staged cells: Apply edits, from its
         // review or appended to a query tab's buffer. An Insert or a Delete
         // row sends none of them, and a relation tab's send without a review
@@ -2441,9 +2491,11 @@ impl Workspace {
         // the user's statement, and the statement itself is already there.
         // A Row send is recorded as a statement's run is, though it is a
         // relation tab's and dbdelve's: it is the user's edit, sent unreviewed,
-        // and the history is where they can read what it was.
-        let statement = ((matches!(tab, Tab::Query(_)) && explain.is_none()) || row_sent.is_some())
-            .then(|| sql.clone());
+        // and the history is where they can read what it was. Not one refused
+        // before the server (`refusal`), which sent nothing.
+        let statement = ((matches!(tab, Tab::Query(_)) && explain.is_none())
+            || (row_sent.is_some() && refusal.is_none()))
+        .then(|| sql.clone());
         // What the plan pane says it is a plan of: the user's statement, without
         // the prefix dbdelve put in front of it.
         let explained = explain
@@ -2478,8 +2530,12 @@ impl Workspace {
         // rather than appended: recalled into a buffer, it would run without
         // the count that guards it. Its outcome is written as it lands, under
         // the same rules, since only a run recorded here has one to record.
+        // Only a query tab's: a Row send is the user's edit sent unreviewed and
+        // stays recorded.
         let recorded = match &statement {
-            Some(statement) if !(generated && target.reviews_query_edits()) => {
+            Some(statement)
+                if !(generated && matches!(tab, Tab::Query(_)) && target.reviews_query_apply()) =>
+            {
                 self.issued_to(&id, generation).map(|profile| {
                     let entry = store::HistoryEntry::started(statement.as_str());
                     // A line that could not be written is not worth a notice
@@ -2579,44 +2635,73 @@ impl Workspace {
         }
         let fed = feed.clone();
         let reads_only = sql::stoppable(engine, &sql);
-        // The read of a Row send's row, run on the connection the write used
-        // once the write has succeeded. It is the caller's string, so it meets
-        // the select gate here, with nothing between the gate and the run: a
-        // caller that fills it in by hand cannot get any other statement run
-        // on the connection (`AGENTS.md`, rule 2).
-        let row_read = match &refresh {
-            Some(Refresh::Row { read, .. }) => Some(read.clone()),
-            _ => None,
-        };
-        let read_refused = row_read
-            .as_deref()
-            .is_some_and(|read| !sql::is_generated_select(engine, read));
-        let row_read = row_read.filter(|_| !read_refused);
         // What the status line says of it, once `work` has taken the statement.
         let row_statement = row_sent.as_ref().map(|_| sql.clone());
         let work = move || {
+            // Refused before the server: nothing is sent, and the refusal lands
+            // as the run's error, said where the statement is.
+            if let Some(message) = refusal {
+                let error = DbError {
+                    message,
+                    position: None,
+                };
+                return (Err(error), false, None, false, Vec::new());
+            }
             let fetch = Fetch {
                 limit,
                 feed: fed.as_ref(),
                 reads_only,
                 held: None,
             };
-            let result = match (generated, alongside) {
-                (true, _) => connection.generated(&sql, &cancel, fed.as_ref(), preview_limit),
-                (false, false) => connection.query(&sql, &cancel, fetch),
-                (false, true) => connection.query_alongside(&sql, &cancel, fetch, read_only),
+            // A verified Row send's row, read inside the transaction that
+            // wrote it.
+            let mut verified_read = None;
+            // A verified apply whose `COMMIT` has no answer: the grid is
+            // marked when this lands.
+            let mut unknown = false;
+            // The rows of an ordered apply that was written before it stopped,
+            // which the landing takes out of the draft.
+            let mut applied = Vec::new();
+            let result = match (&verification, generated, alongside) {
+                // A reviewed draft, or a Row send, of a target that verifies an
+                // apply: its rows read again and compared inside one
+                // transaction, each write counted. Never `generated`, which
+                // sends the text as it is.
+                (Some(verify), _, _) => {
+                    let mut outcome = connection.apply_verified(&verify.steps, &cancel);
+                    if let ApplyOutcome::Applied { read_back, .. } = &mut outcome {
+                        verified_read = read_back.take().map(|rows| Ok(*rows));
+                    }
+                    unknown = matches!(outcome, ApplyOutcome::Unknown(_));
+                    if ordered {
+                        applied = verify
+                            .identities
+                            .get(..written_before_stop(&outcome))
+                            .map(<[StepRow]>::to_vec)
+                            .unwrap_or_default();
+                        // The write landed and only its read failed: it lands
+                        // as written, with the read's own failure told by
+                        // `land_row`, and not as a refusal that keeps the edits.
+                        let (written, read_failed) = read_back_after_write(outcome);
+                        outcome = written;
+                        if let Some(error) = read_failed {
+                            verified_read = Some(Err(error));
+                        }
+                    }
+                    verified_result(outcome, verify, ordered)
+                }
+                (None, true, _) => connection.generated(&sql, &cancel, fed.as_ref(), preview_limit),
+                (None, false, false) => connection.query(&sql, &cancel, fetch),
+                (None, false, true) => connection.query_alongside(&sql, &cancel, fetch, read_only),
             };
-            // Through the call the write used, with no feed and no row limit:
-            // the one row is the whole answer.
-            let read_back = match (&result, &row_read) {
-                (Ok(_), Some(read)) => Some(connection.generated(read, &cancel, None, None)),
-                _ => None,
-            };
+            // A Row send's row, read inside the transaction that wrote it: the
+            // one row is the whole answer.
+            let read_back = verified_read;
             // A connection of the lane's own that failed is gone with it, and
             // says nothing about the profile's.
             let failed = result.is_err() || matches!(read_back, Some(Err(_)));
             let lost = !alongside && failed && connection.is_lost();
-            (result, lost, read_back)
+            (result, lost, read_back, unknown, applied)
         };
         // Blocks for as long as the server takes, and statements queued
         // behind it on the same session block on its lock, so none of them
@@ -2625,7 +2710,7 @@ impl Workspace {
         let number = crate::logging::connection_number(&id);
 
         cx.spawn(async move |workspace, cx| {
-            let (result, lost, read_back) = query_task.await;
+            let (result, lost, read_back, unknown, applied) = query_task.await;
             // Outcome and duration only. Not even at debug the server's text:
             // some engines quote the statement back in a syntax error.
             let (origin, elapsed) = (
@@ -2682,6 +2767,9 @@ impl Workspace {
                     // What a Row send's landing says, and whether the relation
                     // is read again.
                     let mut row_said: Option<(String, bool)> = None;
+                    // Whether an ordered apply stopped after writing some of the
+                    // draft, which is then no longer the draft the review shows.
+                    let mut part_way = false;
                     let (succeeded, produced_grid, plan, rest, notice, landed) = {
                         let Some(profile) = workspace.issued_to(&id, generation) else {
                             workspace.drop_stale_run(&id, tab, lane.as_ref(), cx);
@@ -2772,6 +2860,13 @@ impl Workspace {
                             }
                             result => result,
                         };
+                        // Marked whichever way the landing goes: the draft may
+                        // have landed, and the grid says so until its rows are
+                        // read again.
+                        if unknown {
+                            results
+                                .update(cx, |table, _| table.delegate_mut().mark_outcome_unknown());
+                        }
                         match result {
                             // An `EXPLAIN` describes a statement rather than
                             // returning its rows, so nothing here reaches the
@@ -2817,7 +2912,6 @@ impl Workspace {
                                             table.delegate_mut(),
                                             (*row, *rows_id, cells),
                                             read_back,
-                                            read_refused,
                                             status,
                                         );
                                         table.refresh(cx);
@@ -3001,21 +3095,9 @@ impl Workspace {
                                 if let Some(previous) = restored {
                                     *state = previous;
                                 }
-                                // The row says what the server said to it, and
-                                // keeps its edits.
-                                if let Some((row, rows_id, _, _)) = &row_sent {
-                                    results.update(cx, |table, cx| {
-                                        let grid = table.delegate_mut();
-                                        grid.end_send(false);
-                                        if grid.rows_id() == *rows_id {
-                                            grid.set_send_failure(*row, error.message.clone());
-                                        }
-                                        cx.notify();
-                                    });
-                                }
                                 // A refused row is left dirty and marked, and the
-                                // tab's controls ask before they leave it, so the
-                                // notice says what gets it back.
+                                // tab's controls ask before they leave it, so what
+                                // is said says what gets it back.
                                 let said = match row_sent.is_some() {
                                     true => format!(
                                         "{}{} {}",
@@ -3028,6 +3110,29 @@ impl Workspace {
                                     ),
                                     false => error.message,
                                 };
+                                // What an ordered apply wrote before it stopped
+                                // is on the server and not to be sent again, so
+                                // it leaves the draft, by what names it: the rows
+                                // may have been sorted since the apply began.
+                                if !applied.is_empty() {
+                                    part_way = true;
+                                    results.update(cx, |table, cx| {
+                                        table.delegate_mut().drop_applied(&applied);
+                                        table.refresh(cx);
+                                    });
+                                }
+                                // The row says what the server said to it, and
+                                // keeps its edits.
+                                if let Some((row, rows_id, _, _)) = &row_sent {
+                                    results.update(cx, |table, cx| {
+                                        let grid = table.delegate_mut();
+                                        grid.end_send(false);
+                                        if grid.rows_id() == *rows_id {
+                                            grid.set_send_failure(*row, said.clone());
+                                        }
+                                        cx.notify();
+                                    });
+                                }
                                 (false, false, None, Vec::new(), Some(said), landed)
                             }
                             Err(mut error) => {
@@ -3090,7 +3195,13 @@ impl Workspace {
                     {
                         // A kept send that failed says so where its statement
                         // is, which is the review when one covers the tab.
-                        if kept && !succeeded {
+                        if kept && !succeeded && part_way {
+                            // The review's statements include the ones that
+                            // applied, and Run would send them again: the draft
+                            // that is left is written afresh by Apply.
+                            profile.session.drop_apply_review_of(tab);
+                            profile.session.tab_notice = Some((tab, notice));
+                        } else if kept && !succeeded {
                             profile.session.edit_failed(tab, notice);
                         } else {
                             profile.session.tab_notice = Some((tab, notice));
@@ -3122,12 +3233,6 @@ impl Workspace {
                             true => profile.session.park_resume(tab, then),
                             false => profile.session.put_back(tab, then),
                         }
-                    }
-                    if read_refused
-                        && let Tab::Object(object) = tab
-                        && let Some(profile) = workspace.issued_to(&id, generation)
-                    {
-                        profile.session.mark_stale(object);
                     }
                     if let Some((mut said, reread)) = row_said {
                         // The relation is read again first: that clears the
@@ -3256,7 +3361,9 @@ impl Workspace {
                     } else if succeeded
                         && !in_front
                         && let Some(
-                            Refresh::Statement(_) | Refresh::Earlier { .. } | Refresh::Relation(_),
+                            Refresh::Statement { .. }
+                            | Refresh::Earlier { .. }
+                            | Refresh::Relation { .. },
                         ) = &refresh
                     {
                         workspace.give_back(&id, generation, tab);
@@ -3267,7 +3374,7 @@ impl Workspace {
                         }
                     } else if succeeded && let Some(refresh) = refresh {
                         match refresh {
-                            Refresh::Statement(sql) => workspace.execute_sql(sql, tab, cx),
+                            Refresh::Statement { sql, .. } => workspace.execute_sql(sql, tab, cx),
                             Refresh::Earlier { sql, .. } => {
                                 workspace.execute_and_then(
                                     sql,
@@ -3289,7 +3396,7 @@ impl Workspace {
                             Refresh::Return => {}
                             // Landed where it stands, above.
                             Refresh::Row { .. } => {}
-                            Refresh::Relation(id) => workspace.refresh_relation(id, cx),
+                            Refresh::Relation { id, .. } => workspace.refresh_relation(id, cx),
                         }
                     }
                     // A refresh belongs to a generated edit, so the run that
@@ -3930,6 +4037,199 @@ fn pour(
     changed
 }
 
+/// [`Workspace::has_markable_row`] over what it reads: a Draft view of a
+/// relation's rows on a target whose edits stay in the grid until the server
+/// answers, whose selection holds an added row or a row named by its key.
+fn markable_row(target: Target, tab: Tab, mode: EditMode, grid: &ResultGrid) -> bool {
+    matches!(tab, Tab::Object(_))
+        && mode == EditMode::Draft
+        && target.keeps_edits()
+        && grid.insert_target().is_some()
+        && grid
+            .selected_draft_rows()
+            .into_iter()
+            .any(|row| row >= grid.fetched_rows() || grid.row_key(row).is_some())
+}
+
+/// What a verified apply's outcome is to the run that sent it: the write's own
+/// answer, or the error the landing shows where the statement is.
+fn verified_result(
+    outcome: ApplyOutcome,
+    verify: &Verification,
+    ordered: bool,
+) -> Result<QueryResult, DbError> {
+    match outcome {
+        ApplyOutcome::Applied { affected, .. } => Ok(QueryResult {
+            rows_affected: Some(affected),
+            ..QueryResult::default()
+        }),
+        // An ordered target's failure after its first write is told with what
+        // applied (`verified_message`); every other is the driver's own words.
+        ApplyOutcome::Failed { stage, error }
+            if !(ordered && matches!(stage, ApplyStage::Write(_))) =>
+        {
+            Err(error)
+        }
+        refused => Err(DbError {
+            message: verified_message(&refused, verify, ordered).unwrap_or_default(),
+            position: None,
+        }),
+    }
+}
+
+/// How many statements of an ordered apply were written when it stopped, the
+/// ones before the step it names: a statement the server refused, or counted
+/// other than one row. Nothing was sent after it. A drift and a failure
+/// before the first write wrote nothing.
+///
+/// A read-back that failed follows its step's write, so that step counts too:
+/// only a Row send's step carries one, and the draft's own steps never do.
+fn written_before_stop(outcome: &ApplyOutcome) -> usize {
+    match outcome {
+        ApplyOutcome::Miscounted { step, .. }
+        | ApplyOutcome::Failed {
+            stage: ApplyStage::Write(step),
+            ..
+        } => *step,
+        ApplyOutcome::Failed {
+            stage: ApplyStage::ReadBack(step),
+            ..
+        } => step + 1,
+        _ => 0,
+    }
+}
+
+/// An ordered target's failed read-back as what it is: every statement up to
+/// and including its step was written, there being no transaction to take them
+/// back, and the read is what failed. The outcome is then that of the writes,
+/// applied, and the error is the read's, for the landing to tell
+/// ([`land_row`]); any other outcome is returned as it is.
+fn read_back_after_write(outcome: ApplyOutcome) -> (ApplyOutcome, Option<DbError>) {
+    match outcome {
+        ApplyOutcome::Failed {
+            stage: ApplyStage::ReadBack(step),
+            error,
+        } => (
+            ApplyOutcome::Applied {
+                affected: step as u64 + 1,
+                read_back: None,
+            },
+            Some(error),
+        ),
+        other => (other, None),
+    }
+}
+
+/// What an ordered apply that stopped at step `stopped` says: what applied and
+/// has left the draft, the sentence for the statement it stopped at, and the
+/// statements after it that were never sent.
+fn stopped_part_way(verify: &Verification, stopped: usize, sentence: String) -> String {
+    let total = verify.steps.len();
+    let applied = match stopped {
+        0 => "Nothing was applied.".to_string(),
+        1 => "Statement 1 was applied and has left the draft.".to_string(),
+        written => format!("Statements 1 to {written} were applied and have left the draft."),
+    };
+    let unsent = match total.saturating_sub(stopped + 1) {
+        0 => None,
+        1 => Some(format!("Statement {total} was not sent.")),
+        _ => Some(format!(
+            "Statements {} to {total} were not sent.",
+            stopped + 2
+        )),
+    };
+    [Some(applied), Some(sentence), unsent]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// What the review says of a verified apply that wrote nothing, naming the
+/// rows: `Nothing was applied.` and then one sentence for each row that is not
+/// the row that was read. A `COMMIT` whose answer was lost is said as that
+/// alone, since nothing is known of what it did. `None` for an outcome that
+/// carries no such sentence, the write that landed and the errors a driver
+/// words itself.
+///
+/// For an `ordered` target, which has no transaction to roll back, a statement
+/// that failed or counted wrongly after others had been written says which
+/// were applied, which one stopped it and which were not sent
+/// ([`stopped_part_way`]); a drift wrote nothing and keeps the sentences above.
+fn verified_message(
+    outcome: &ApplyOutcome,
+    verify: &Verification,
+    ordered: bool,
+) -> Option<String> {
+    let row = |step: usize| verify.rows.get(step).map_or("?", String::as_str);
+    // An added row is named as it is, an existing one by its key.
+    let named = |step: usize| match verify.steps.get(step).map(|step| step.kind) {
+        Some(StepKind::Insert) => row(step).to_string(),
+        Some(StepKind::Update | StepKind::Delete) | None => format!("row {}", row(step)),
+    };
+    let sentences: Vec<String> = match outcome {
+        ApplyOutcome::Drifted(drifted) => drifted
+            .iter()
+            .map(|(step, drift)| match drift {
+                Drift::Changed => {
+                    format!("Row {} does not match the row as it was read.", row(*step))
+                }
+                Drift::Gone => format!("Row {} is no longer on the server.", row(*step)),
+                Drift::Ambiguous(rows) => {
+                    format!("Row {} matches {rows} rows on the server.", row(*step))
+                }
+            })
+            .collect(),
+        ApplyOutcome::Miscounted { step, count } => {
+            let what = match count {
+                Some(count) => format!("affected {count} rows"),
+                None => "did not say how many rows it affected".to_string(),
+            };
+            let sentence = format!(
+                "{} {} ({}) {what}.",
+                verify
+                    .steps
+                    .get(*step)
+                    .map_or("Statement", |step| step.kind.keyword()),
+                step + 1,
+                named(*step)
+            );
+            if ordered {
+                return Some(stopped_part_way(verify, *step, sentence));
+            }
+            vec![sentence]
+        }
+        ApplyOutcome::Failed {
+            stage: ApplyStage::Write(step),
+            error,
+        } if ordered => {
+            let said = error.message.trim_end();
+            let stop = match said.ends_with(['.', '!', '?']) {
+                true => "",
+                false => ".",
+            };
+            return Some(stopped_part_way(
+                verify,
+                *step,
+                format!(
+                    "Statement {} ({}) failed: {said}{stop}",
+                    step + 1,
+                    named(*step)
+                ),
+            ));
+        }
+        ApplyOutcome::Unknown(_) => {
+            return Some(
+                "The connection was lost during COMMIT; whether the changes were applied is not \
+                 known."
+                    .into(),
+            );
+        }
+        ApplyOutcome::Applied { .. } | ApplyOutcome::Failed { .. } => return None,
+    };
+    Some(format!("Nothing was applied. {}", sentences.join(" ")))
+}
+
 /// What a Row send's landing does to the grid, and what it says. The row the
 /// server now holds is put where the row stood and the cells that were sent
 /// are cleared, so an edit staged while it was out stays. Anything else clears
@@ -3944,24 +4244,9 @@ fn land_row(
     grid: &mut ResultGrid,
     (row, rows_id, sent): (usize, u64, &[(usize, NewValue)]),
     read: Option<Result<QueryResult, DbError>>,
-    read_refused: bool,
     status: String,
 ) -> (String, bool) {
     grid.end_send(true);
-    // The write landed and the read was not run, so the row on screen is what
-    // it was fetched as: the tab is owed a read (the caller marks it) and the
-    // relation is not read here, which is not what the user asked for.
-    if read_refused {
-        if grid.rows_id() == rows_id {
-            grid.clear_sent(row, sent);
-        }
-        return (
-            "The row was updated. dbdelve refused to run a read it wrote itself: it is not a \
-             SELECT, so the row was not read back."
-                .into(),
-            false,
-        );
-    }
     if grid.rows_id() != rows_id {
         return (
             "The row was updated. The rows were reordered while it was saved, so it was not \
@@ -4029,6 +4314,399 @@ pub(super) fn answered(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn verification() -> Verification {
+        let step = |kind| db::VerifiedStep {
+            sql: String::new(),
+            kind,
+            reread: None,
+            before: Vec::new(),
+            read_back: None,
+        };
+        Verification {
+            steps: vec![
+                step(db::StepKind::Delete),
+                step(db::StepKind::Update),
+                step(db::StepKind::Insert),
+            ],
+            rows: vec!["id = 1".into(), "id = 2".into(), "added row 1".into()],
+            identities: Vec::new(),
+        }
+    }
+
+    /// A collection's three documents keyed by `_id`, as a `find` on it reads
+    /// them, each cell carrying its own `$type` tag.
+    fn mongo_grid() -> ResultGrid {
+        let id = |n: u8| Some(format!("ObjectId('65a4f1c0ffffffffffffff{n:02x}')"));
+        let column = |name: &str, data_type: &str| db::Column {
+            name: name.into(),
+            data_type: Some(data_type.into()),
+        };
+        ResultGrid::new(
+            QueryResult {
+                columns: vec![column("_id", "objectId"), column("name", "string")],
+                rows: db::rows(vec![
+                    vec![id(1), Some("Ann".into())],
+                    vec![id(2), Some("Bo".into())],
+                    vec![id(3), Some("Cy".into())],
+                ]),
+                cell_types: vec![vec!["objectId", "string"]; 3],
+                edit: Some(db::EditTarget {
+                    schema: "dbdelve_dev".into(),
+                    table: "accounts".into(),
+                    columns: vec![Some("_id".into()), Some("name".into())],
+                    keys: vec![0],
+                    ..Default::default()
+                }),
+                ..QueryResult::default()
+            },
+            crate::sql::Mode::ReadWrite,
+        )
+        .with_engine(Engine::MongoDb)
+    }
+
+    #[test]
+    fn a_mongo_collection_tab_offers_draft_rows_and_marks() {
+        let mut grid = mongo_grid();
+        let (mongo, object) = (Target::built_in(Engine::MongoDb), Tab::Object(0));
+        assert!(grid.toggle_marks(&[0]), "a document is marked by its _id");
+        assert!(grid.set_pending(1, 1, NewValue::Value("Boris".into())));
+        let added = grid
+            .add_row()
+            .expect("a collection takes an added document");
+        assert!(grid.set_pending(added, 1, NewValue::Value("Di".into())));
+
+        // The row the ring is on is the added one, which Delete row removes.
+        assert!(markable_row(mongo, object, EditMode::Draft, &grid));
+        assert!(!markable_row(mongo, object, EditMode::Row, &grid));
+        assert!(!markable_row(mongo, object, EditMode::Classic, &grid));
+        assert!(!markable_row(mongo, Tab::Query(0), EditMode::Draft, &grid));
+        assert!(!markable_row(
+            Target::built_in(Engine::Redis),
+            object,
+            EditMode::Draft,
+            &grid
+        ));
+
+        // The manifest of its draft, as Apply draft builds it.
+        let batch = sql::draft_batch(
+            Engine::MongoDb,
+            &grid.draft_deletes(),
+            &grid.pending_updates(),
+            &grid
+                .draft_inserts()
+                .expect("the added document holds a value"),
+        )
+        .expect("the draft is written");
+        let verify = super::super::editing::verification(Engine::MongoDb, &grid, &batch)
+            .expect("a collection's draft can be verified");
+        let kinds: Vec<_> = verify.steps.iter().map(|step| step.kind).collect();
+        assert_eq!(
+            kinds,
+            [StepKind::Delete, StepKind::Update, StepKind::Insert]
+        );
+        assert_eq!(
+            verify.rows,
+            [
+                "_id = ObjectId('65a4f1c0ffffffffffffff01')",
+                "_id = ObjectId('65a4f1c0ffffffffffffff02')",
+                "added row 1"
+            ]
+        );
+        for step in &verify.steps[..2] {
+            assert!(step.reread.is_some(), "{}", step.sql);
+            let tags: Vec<_> = step
+                .before
+                .iter()
+                .map(|cell| (cell.column.as_str(), cell.cell_type.as_deref()))
+                .collect();
+            assert_eq!(
+                tags,
+                [("_id", Some("objectId")), ("name", Some("string"))],
+                "each fetched cell carries its $type tag"
+            );
+        }
+        assert!(verify.steps[2].reread.is_none() && verify.steps[2].before.is_empty());
+    }
+
+    #[test]
+    fn a_verified_outcome_names_each_row_in_what_happened() {
+        let verify = verification();
+        let said = |outcome: ApplyOutcome| verified_message(&outcome, &verify, false);
+
+        assert_eq!(
+            said(ApplyOutcome::Drifted(vec![
+                (0, Drift::Changed),
+                (1, Drift::Gone)
+            ]))
+            .as_deref(),
+            Some(
+                "Nothing was applied. Row id = 1 does not match the row as it was read. \
+                 Row id = 2 is no longer on the server."
+            ),
+            "every drifted row, in step order"
+        );
+        assert_eq!(
+            said(ApplyOutcome::Drifted(vec![(1, Drift::Ambiguous(2))])).as_deref(),
+            Some("Nothing was applied. Row id = 2 matches 2 rows on the server.")
+        );
+        assert_eq!(
+            said(ApplyOutcome::Miscounted {
+                step: 1,
+                count: Some(0)
+            })
+            .as_deref(),
+            Some("Nothing was applied. UPDATE 2 (row id = 2) affected 0 rows.")
+        );
+        assert_eq!(
+            said(ApplyOutcome::Miscounted {
+                step: 0,
+                count: Some(2)
+            })
+            .as_deref(),
+            Some("Nothing was applied. DELETE 1 (row id = 1) affected 2 rows.")
+        );
+        assert_eq!(
+            said(ApplyOutcome::Miscounted {
+                step: 1,
+                count: None
+            })
+            .as_deref(),
+            Some(
+                "Nothing was applied. UPDATE 2 (row id = 2) did not say how many rows it affected."
+            )
+        );
+        assert_eq!(
+            said(ApplyOutcome::Miscounted {
+                step: 2,
+                count: Some(0)
+            })
+            .as_deref(),
+            Some("Nothing was applied. INSERT 3 (added row 1) affected 0 rows.")
+        );
+        assert_eq!(
+            said(ApplyOutcome::Applied {
+                affected: 3,
+                read_back: None
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn a_mongo_apply_that_stops_part_way_says_which_statements_were_applied() {
+        let step = |kind| db::VerifiedStep {
+            sql: String::new(),
+            kind,
+            reread: None,
+            before: Vec::new(),
+            read_back: None,
+        };
+        // A delete, an update and three added documents, as a draft orders them.
+        let verify = Verification {
+            steps: vec![
+                step(db::StepKind::Delete),
+                step(db::StepKind::Update),
+                step(db::StepKind::Insert),
+                step(db::StepKind::Insert),
+                step(db::StepKind::Insert),
+            ],
+            rows: vec![
+                "_id = 1".into(),
+                "_id = 2".into(),
+                "added row 1".into(),
+                "added row 2".into(),
+                "added row 3".into(),
+            ],
+            identities: Vec::new(),
+        };
+        let failed = |stage| ApplyOutcome::Failed {
+            stage,
+            error: DbError {
+                message: "duplicate key".into(),
+                position: None,
+            },
+        };
+        let said = |outcome: ApplyOutcome| verified_message(&outcome, &verify, true);
+
+        assert_eq!(
+            said(failed(db::ApplyStage::Write(2))).as_deref(),
+            Some(
+                "Statements 1 to 2 were applied and have left the draft. Statement 3 \
+                 (added row 1) failed: duplicate key. Statements 4 to 5 were not sent."
+            )
+        );
+        assert_eq!(
+            said(failed(db::ApplyStage::Write(3))).as_deref(),
+            Some(
+                "Statements 1 to 3 were applied and have left the draft. Statement 4 \
+                 (added row 2) failed: duplicate key. Statement 5 was not sent."
+            ),
+            "one statement left reads in the singular"
+        );
+        assert_eq!(
+            said(failed(db::ApplyStage::Write(4))).as_deref(),
+            Some(
+                "Statements 1 to 4 were applied and have left the draft. Statement 5 \
+                 (added row 3) failed: duplicate key."
+            ),
+            "nothing after the failure, so nothing is said was not sent"
+        );
+        assert_eq!(
+            said(failed(db::ApplyStage::Write(1))).as_deref(),
+            Some(
+                "Statement 1 was applied and has left the draft. Statement 2 (row _id = 2) \
+                 failed: duplicate key. Statements 3 to 5 were not sent."
+            )
+        );
+        assert_eq!(
+            said(failed(db::ApplyStage::Write(0))).as_deref(),
+            Some(
+                "Nothing was applied. Statement 1 (row _id = 1) failed: duplicate key. \
+                 Statements 2 to 5 were not sent."
+            )
+        );
+        assert_eq!(
+            said(ApplyOutcome::Miscounted {
+                step: 0,
+                count: Some(0)
+            })
+            .as_deref(),
+            Some(
+                "Nothing was applied. DELETE 1 (row _id = 1) affected 0 rows. \
+                 Statements 2 to 5 were not sent."
+            )
+        );
+        assert_eq!(
+            said(ApplyOutcome::Miscounted {
+                step: 1,
+                count: Some(2)
+            })
+            .as_deref(),
+            Some(
+                "Statement 1 was applied and has left the draft. UPDATE 2 (row _id = 2) \
+                 affected 2 rows. Statements 3 to 5 were not sent."
+            )
+        );
+        // A failure before any write, and a drift, wrote nothing and keep the
+        // sentences of a transactional engine.
+        assert_eq!(said(failed(db::ApplyStage::Reread(1))), None);
+        assert_eq!(
+            said(ApplyOutcome::Drifted(vec![(1, Drift::Gone)])).as_deref(),
+            Some("Nothing was applied. Row _id = 2 is no longer on the server.")
+        );
+        // A transactional target rolled it all back, whichever step it was.
+        let rolled_back = |outcome: ApplyOutcome| verified_message(&outcome, &verify, false);
+        assert_eq!(rolled_back(failed(db::ApplyStage::Write(2))), None);
+        assert_eq!(
+            rolled_back(ApplyOutcome::Miscounted {
+                step: 1,
+                count: Some(0)
+            })
+            .as_deref(),
+            Some("Nothing was applied. UPDATE 2 (row _id = 2) affected 0 rows.")
+        );
+        // What lands in the draft's notice is the same sentence.
+        let landed = verified_result(failed(db::ApplyStage::Write(2)), &verify, true)
+            .expect_err("a part-way failure is an error");
+        assert!(landed.message.starts_with("Statements 1 to 2 were applied"));
+    }
+
+    #[test]
+    fn an_ordered_apply_has_written_the_steps_before_the_one_it_stopped_at() {
+        let failed = |stage| ApplyOutcome::Failed {
+            stage,
+            error: DbError {
+                message: "refused".into(),
+                position: None,
+            },
+        };
+        assert_eq!(written_before_stop(&failed(ApplyStage::Write(3))), 3);
+        assert_eq!(
+            written_before_stop(&ApplyOutcome::Miscounted {
+                step: 2,
+                count: Some(0)
+            }),
+            2
+        );
+        // A read-back follows its step's write, so that step is written.
+        assert_eq!(written_before_stop(&failed(ApplyStage::ReadBack(0))), 1);
+        // Before any write, or with none sent: nothing is written.
+        for outcome in [
+            failed(ApplyStage::Begin),
+            failed(ApplyStage::Reread(2)),
+            ApplyOutcome::Drifted(vec![(1, Drift::Gone)]),
+            ApplyOutcome::Applied {
+                affected: 3,
+                read_back: None,
+            },
+        ] {
+            assert_eq!(written_before_stop(&outcome), 0, "{outcome:?}");
+        }
+    }
+
+    #[test]
+    fn a_failed_read_back_after_a_written_update_lands_as_written_with_the_read_failing() {
+        let error = DbError {
+            message: "connection reset".into(),
+            position: None,
+        };
+        let (outcome, read_failed) = read_back_after_write(ApplyOutcome::Failed {
+            stage: ApplyStage::ReadBack(0),
+            error: error.clone(),
+        });
+        assert_eq!(
+            outcome,
+            ApplyOutcome::Applied {
+                affected: 1,
+                read_back: None
+            }
+        );
+        assert_eq!(read_failed, Some(error.clone()));
+        // The row lands as written, said with the read's own words, and the
+        // tab reads the relation again.
+        let mut grid = ResultGrid::empty();
+        let rows_id = grid.rows_id();
+        let (said, reread) = land_row(
+            &mut grid,
+            (0, rows_id, &[]),
+            read_failed.map(Err),
+            "ok".into(),
+        );
+        assert_eq!(
+            said,
+            "The row was updated. Reading it back failed: connection reset"
+        );
+        assert!(reread);
+        // A write that failed is not written, and is left as it is.
+        let refused = |error| ApplyOutcome::Failed {
+            stage: ApplyStage::Write(0),
+            error,
+        };
+        assert_eq!(
+            read_back_after_write(refused(error.clone())),
+            (refused(error), None)
+        );
+    }
+
+    #[test]
+    fn a_lost_commit_is_said_as_an_unknown_outcome() {
+        let said = verified_message(
+            &ApplyOutcome::Unknown(DbError {
+                message: "connection reset by peer".into(),
+                position: None,
+            }),
+            &verification(),
+            false,
+        )
+        .expect("a lost COMMIT is said");
+
+        assert_eq!(
+            said,
+            "The connection was lost during COMMIT; whether the changes were applied is not known."
+        );
+        assert!(!said.contains("Nothing was applied."), "{said}");
+    }
 
     #[test]
     fn a_run_answered_without_its_tab_keeps_only_what_the_answer_says() {
@@ -4247,7 +4925,7 @@ mod tests {
         ] {
             let (mut grid, sent) = edited();
             let rows_id = grid.rows_id();
-            let (_, reread) = land_row(&mut grid, (0, rows_id, &sent), read, false, "ok".into());
+            let (_, reread) = land_row(&mut grid, (0, rows_id, &sent), read, "ok".into());
             assert!(reread);
             assert_eq!(
                 grid.pending_cells(0),

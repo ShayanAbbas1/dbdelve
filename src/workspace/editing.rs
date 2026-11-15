@@ -5,11 +5,27 @@
 
 use super::*;
 use crate::actions::StepPastEdge;
+use crate::db::{StepKind, VerifiedStep};
+use crate::result_grid::DraftRow;
 use crate::session::{
-    AfterEdits, ReviewSlot, StaleEdit, StaleResume, insert_placeholder, refreshing,
+    APPLY_IN_TRANSACTION, AfterEdits, ReviewSlot, StaleEdit, StaleResume, Verification,
+    insert_placeholder, refreshing,
 };
 
 impl Workspace {
+    /// Whether a verified write is refused, with the notice Apply gives, because
+    /// the user's transaction is open: the write's own `BEGIN` and `COMMIT`
+    /// would end it. Asked before a form or a review opens, so nothing is
+    /// filled in or read only to be refused at Run.
+    fn refuses_in_transaction(&mut self, cx: &mut Context<Self>) -> bool {
+        let refused = self.target().verifies_applies()
+            && self.profile().is_some_and(|profile| profile.in_transaction);
+        if refused {
+            self.note(APPLY_IN_TRANSACTION.into(), cx);
+        }
+        refused
+    }
+
     /// Open the "Insert" form over the preview in front, one field per column
     /// of the relation's loaded structure (spec §4).
     ///
@@ -86,7 +102,7 @@ impl Workspace {
                 // the draft's review; every other view takes the form.
                 if matches!(active, Tab::Object(_))
                     && profile.session.edit_mode(active) == EditMode::Draft
-                    && self.target().row_edits()
+                    && self.target().keeps_edits()
                     && results.read(cx).delegate().insert_target().is_some()
                 {
                     let results = results.clone();
@@ -111,6 +127,9 @@ impl Workspace {
                 target
             }
         };
+        if self.refuses_in_transaction(cx) {
+            return;
+        }
         let mut fields = Vec::with_capacity(columns.len());
         for (index, (column, data_type)) in columns.into_iter().enumerate() {
             let sends_empty = engine.new_row_sends_empty(&column);
@@ -315,6 +334,22 @@ impl Workspace {
             );
             return;
         }
+        // A form opened before the user's transaction began.
+        if self.refuses_in_transaction(cx) {
+            return;
+        }
+        // The `INSERT` must count the one row it adds.
+        let verify = if self.target().verifies_applies() {
+            match lone_verification(engine, &statement, StepKind::Insert, None, None) {
+                Ok(verify) => Some(verify),
+                Err(message) => {
+                    self.note(message, cx);
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         if !self.review_slot_free(tab, false, window, cx) {
             return;
         }
@@ -329,6 +364,7 @@ impl Workspace {
                 sql: statement,
                 error: None,
                 edits: false,
+                verify,
             });
         }
         cx.notify();
@@ -1394,7 +1430,7 @@ impl Workspace {
         // `apply_edits` writes it. Every other view reviews the one `DELETE`.
         if matches!(tab, Tab::Object(_))
             && profile.session.edit_mode(tab) == EditMode::Draft
-            && target.row_edits()
+            && target.keeps_edits()
             && let Some(results) = profile.session.active_results().cloned()
             && results.read(cx).delegate().insert_target().is_some()
         {
@@ -1413,9 +1449,12 @@ impl Workspace {
             );
             return;
         }
-        let Some(results) = profile.session.active_results() else {
+        let Some(results) = profile.session.active_results().cloned() else {
             return;
         };
+        if self.refuses_in_transaction(cx) {
+            return;
+        }
         let grid = results.read(cx);
         let unnameable = grid.delegate().read_only_reason().map_or_else(
             || {
@@ -1426,11 +1465,12 @@ impl Workspace {
         );
         let key = grid.delegate().active().and_then(|(row, _)| {
             Some((
+                row,
                 grid.delegate().row_key(row)?,
                 grid.delegate().row_types(row),
             ))
         });
-        let Some(((schema, table, keys, null_keys), types)) = key else {
+        let Some((row, (schema, table, keys, null_keys), types)) = key else {
             self.note(unnameable, cx);
             return;
         };
@@ -1470,6 +1510,25 @@ impl Workspace {
             );
             return;
         }
+        // The row read again before the `DELETE`, which must count one.
+        let verify = if target.verifies_applies() {
+            let grid = results.read(cx).delegate();
+            match lone_verification(
+                engine,
+                &statement,
+                StepKind::Delete,
+                Some((grid.fetched_cells(row), grid.row_label(row))),
+                None,
+            ) {
+                Ok(verify) => Some(verify),
+                Err(message) => {
+                    self.note(message, cx);
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         if !self.review_slot_free(tab, false, window, cx) {
             return;
         }
@@ -1482,6 +1541,7 @@ impl Workspace {
                 sql: statement,
                 error: None,
                 edits: false,
+                verify,
             });
         }
         cx.notify();
@@ -1805,7 +1865,8 @@ impl Workspace {
     /// is refused while the grid holds an added row or a delete mark, which a
     /// Classic view has no way to show or apply. Cell edits carry between
     /// Classic and Draft with no prompt, since both review the same `UPDATE`s.
-    /// Leaving Row over edited rows sends them first, as any action
+    /// Switching into Row is refused while the user's transaction is open,
+    /// where a Row view sends nothing. Leaving Row over edited rows sends them first, as any action
     /// that leaves them would (`held_for_edits`), and does not switch if one is
     /// refused.
     pub(crate) fn pick_edit_mode(
@@ -1827,6 +1888,7 @@ impl Workspace {
             return;
         };
         let current = profile.session.edit_mode(tab);
+        let in_transaction = profile.in_transaction;
         if !matches!(tab, Tab::Object(_)) || current == mode {
             return;
         }
@@ -1847,6 +1909,19 @@ impl Workspace {
             self.note(
                 format!(
                     "The draft has {size}{}{} mode.",
+                    Self::DRAFT_REFUSAL,
+                    mode.label()
+                ),
+                cx,
+            );
+            return;
+        }
+        // A Row view sends nothing while the user's transaction is open, so
+        // it would only hold every row it was asked to leave.
+        if mode == EditMode::Row && in_transaction {
+            self.note(
+                format!(
+                    "A transaction is open on this connection{}{} mode.",
                     Self::DRAFT_REFUSAL,
                     mode.label()
                 ),
@@ -1956,6 +2031,35 @@ impl Workspace {
         let Some(pending) = pending else {
             return false;
         };
+        // The row's edits stay as they are: the last apply may have landed.
+        if results.read(cx).delegate().outcome_unknown() {
+            results.update(cx, |table, cx| {
+                table
+                    .delegate_mut()
+                    .set_send_failure(row, OUTCOME_UNKNOWN_REFUSAL.into());
+                cx.notify();
+            });
+            self.snap_back_to(tab, row, to, cx);
+            return false;
+        }
+        // The send is verified inside a transaction of its own, whose `BEGIN`
+        // and `COMMIT` would end one the user opened, so nothing is sent while
+        // one is open.
+        if profile.in_transaction {
+            results.update(cx, |table, cx| {
+                table.delegate_mut().set_send_failure(
+                    row,
+                    "A transaction is open on this connection; the row was not sent.".into(),
+                );
+                cx.notify();
+            });
+            self.snap_back_to(tab, row, to, cx);
+            return false;
+        }
+        let defaulted = pending
+            .sets
+            .iter()
+            .any(|(_, value)| matches!(value, NewValue::Default));
         let update = match update_batch(self.engine(), &[pending]) {
             Ok(update) => update,
             Err(message) => {
@@ -1971,6 +2075,21 @@ impl Workspace {
             return false;
         }
         let Some(read) = sql::row_read(self.engine(), &update) else {
+            // A row named by every value is read back by the values it now
+            // holds, and one set to DEFAULT holds none the statement spells.
+            if defaulted && names_rows_by_every_column(results.read(cx).delegate()) {
+                results.update(cx, |table, cx| {
+                    table.delegate_mut().set_send_failure(
+                        row,
+                        "The row was not sent: a value set to DEFAULT \
+                         cannot be read back on a row named by every value."
+                            .into(),
+                    );
+                    cx.notify();
+                });
+                self.snap_back_to(tab, row, to, cx);
+                return false;
+            }
             self.note(
                 "dbdelve refused to run a statement it wrote itself: it is not the read of one \
                  row."
@@ -1979,6 +2098,26 @@ impl Workspace {
             );
             return false;
         };
+        // The send is one step: the row read again and compared before the
+        // `UPDATE`, the write counted, and `read` taken inside the same
+        // transaction. Row is offered only where every apply is verified
+        // (`Target::keeps_edits`), so there is no send of the text alone.
+        let verify = {
+            let grid = results.read(cx).delegate();
+            match lone_verification(
+                self.engine(),
+                &update,
+                StepKind::Update,
+                Some((grid.fetched_cells(row), grid.row_label(row))),
+                Some(read),
+            ) {
+                Ok(verify) => Some(verify),
+                Err(message) => {
+                    self.note(message, cx);
+                    return false;
+                }
+            }
+        };
         let out = sent.clone();
         self.execute_and_then(
             update,
@@ -1986,10 +2125,10 @@ impl Workspace {
             Some(Refresh::Row {
                 row,
                 rows_id,
-                read,
                 sent,
                 to,
                 then,
+                verify,
             }),
             false,
             None,
@@ -2209,7 +2348,7 @@ impl Workspace {
 
     /// Turn the grid's pending edits into SQL and put it where the user can read
     /// it: the query tab's buffer, or the review modal on a relation tab and on
-    /// a query tab whose target reviews them (`Target::reviews_query_edits`).
+    /// a query tab whose target reviews them (`Target::reviews_query_apply`).
     ///
     /// Binds to `cmd+s` -- a deliberate departure from `cmd+enter` ("run the
     /// statement under the cursor"), which stays unrelated so neither
@@ -2249,7 +2388,19 @@ impl Workspace {
             }
             return;
         }
+        // A draft is applied again only once the rows are read: the last
+        // `COMMIT` may have landed, and a second would write it twice.
+        if results.read(cx).delegate().outcome_unknown() {
+            self.note(OUTCOME_UNKNOWN_REFUSAL.into(), cx);
+            return;
+        }
         let own_review = profile.session.apply_review_covers(tab);
+        // A verified apply opens and ends a transaction of its own, whose
+        // `BEGIN` and `COMMIT` would end one the user opened, so nothing is
+        // written while one is open; the draft is kept for when it ends.
+        if self.refuses_in_transaction(cx) {
+            return;
+        }
         // A draft holding an added row or a marked one is written by the
         // draft's own writer, for a relation tab alone: only there can a row be
         // added or marked.
@@ -2280,8 +2431,29 @@ impl Workspace {
         }
 
         let notes = target.review_notes(&batch);
+        // What the review's run is checked against, where the target verifies
+        // an apply: the rows as the grid fetched them, one step to a statement.
+        // A query tab's is built the same way, by the real column names its
+        // edit target gives the projection. Not where its batch goes to the
+        // buffer, which has nothing to check it against.
+        let verified = target.verifies_applies()
+            && match tab {
+                Tab::Object(_) => true,
+                Tab::Query(_) => target.reviews_query_apply(),
+            };
+        let verify = if verified {
+            match verification(self.engine(), results.read(cx).delegate(), &batch) {
+                Ok(verify) => Some(verify),
+                Err(message) => {
+                    self.note(message, cx);
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         match tab {
-            Tab::Query(_) if !target.reviews_query_edits() => {
+            Tab::Query(_) if !target.reviews_query_apply() => {
                 if !own_review {
                     self.apply_in_buffer(batch, window, cx);
                 }
@@ -2296,6 +2468,7 @@ impl Workspace {
                         sql: batch,
                         error: None,
                         edits: true,
+                        verify,
                     });
                     cx.notify();
                 }
@@ -2367,6 +2540,17 @@ impl Workspace {
             );
             return;
         }
+        let verify = if target.verifies_applies() {
+            match verification(engine, results.read(cx).delegate(), &batch) {
+                Ok(verify) => Some(verify),
+                Err(message) => {
+                    self.note(message, cx);
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         if !self.review_slot_free(tab, true, window, cx) {
             return;
         }
@@ -2379,6 +2563,7 @@ impl Workspace {
                 sql: batch,
                 error: None,
                 edits: true,
+                verify,
             });
             cx.notify();
         }
@@ -2389,7 +2574,7 @@ impl Workspace {
     ///
     /// The append is what keeps a failure readable: the statement that was
     /// attempted is still in the buffer. On a target that answers
-    /// `Target::row_edits` a failure leaves the edits staged as well; elsewhere
+    /// `Target::keeps_edits` a failure leaves the edits staged as well; elsewhere
     /// `execute_sql` clears the grid as it starts and they go with it.
     pub(crate) fn apply_in_buffer(
         &mut self,
@@ -2430,16 +2615,19 @@ impl Workspace {
             return;
         };
         let (tab, sql) = (review.tab, review.sql.clone());
+        // Cloned, never taken: a refusal leaves the review open and the next
+        // Run reads the rows again.
+        let verify = review.verify.clone();
         // Without the refresh the grid would show the UPDATE's empty result set
         // and the user would watch their table vanish.
         let refresh = match tab {
-            Tab::Object(id) => Refresh::Relation(id),
+            Tab::Object(id) => Refresh::Relation { id, verify },
             Tab::Query(id) => match profile
                 .session
                 .query_tab(id)
                 .and_then(QueryTab::apply_refresh)
             {
-                Some(refresh) => refresh,
+                Some(refresh) => refresh.verified(verify),
                 None => {
                     self.note(
                         "dbdelve does not know which statement produced these rows.".into(),
@@ -2668,9 +2856,177 @@ impl Short {
     }
 }
 
+/// What Apply edits, Save and the review's Run say while a grid's last apply
+/// may have landed: the draft is sent again only once the rows are read.
+pub(super) const OUTCOME_UNKNOWN_REFUSAL: &str = "Not applied: whether the last apply reached the server is not known until the rows are read again.";
+
+/// Whether `grid` names the rows it writes back by every column they were read
+/// with, as a table with no primary key does. Asked positively, so a grid with
+/// no edit target says no.
+fn names_rows_by_every_column(grid: &ResultGrid) -> bool {
+    grid.result()
+        .edit
+        .as_ref()
+        .is_some_and(|edit| matches!(edit.row_match, db::RowMatch::EveryColumn { .. }))
+}
+
+/// The sentence for a draft whose statements cannot be paired with its rows.
+const UNPAIRED: &str = "dbdelve refused to run a statement it wrote itself: the draft and its statements do not match.";
+
+/// What a reviewed draft's run is verified against: `batch`'s statements, cut
+/// from the text the gate admitted, each paired with the row it was written for
+/// ([`ResultGrid::draft_order`]), the row as the grid fetched it, and the read
+/// that brings it back ([`sql::row_reread`]).
+///
+/// Refused, so nothing is reviewed, when the statements and the draft do not
+/// pair up, or when a row an `UPDATE` or `DELETE` names has no re-read or no
+/// name: an apply that cannot be verified is not offered for a target that
+/// verifies.
+pub(super) fn verification(
+    engine: Engine,
+    grid: &ResultGrid,
+    batch: &str,
+) -> Result<Verification, String> {
+    let statements = sql::generated_writes(engine, batch).ok_or(UNPAIRED)?;
+    let order = grid.draft_order();
+    let identities = grid.draft_identities();
+    if statements.len() != order.len() || identities.len() != order.len() {
+        return Err(UNPAIRED.into());
+    }
+    let (mut steps, mut rows) = (Vec::new(), Vec::new());
+    for (statement, row) in statements.into_iter().zip(order) {
+        let (kind, fetched) = match row {
+            DraftRow::Marked(row) => (StepKind::Delete, Some(row)),
+            DraftRow::Updated(row) => (StepKind::Update, Some(row)),
+            DraftRow::Added(_) => (StepKind::Insert, None),
+        };
+        let (reread, before, label) = match (row, fetched) {
+            (DraftRow::Added(index), _) => (None, Vec::new(), format!("added row {}", index + 1)),
+            (_, Some(fetched)) => (
+                Some(sql::row_reread(engine, &statement).ok_or(UNPAIRED)?),
+                grid.fetched_cells(fetched),
+                grid.row_label(fetched).ok_or(UNPAIRED)?,
+            ),
+            (_, None) => return Err(UNPAIRED.into()),
+        };
+        steps.push(VerifiedStep {
+            sql: statement,
+            kind,
+            reread,
+            before,
+            read_back: None,
+        });
+        rows.push(label);
+    }
+    Ok(Verification {
+        steps,
+        rows,
+        identities,
+    })
+}
+
+/// The sentence for a statement whose write cannot be checked against the
+/// server: it is not one statement of the kind it was written as.
+const UNCHECKABLE: &str =
+    "dbdelve refused to run a statement it wrote itself: it cannot be checked against the server.";
+
+/// [`verification`] for the one statement of a Row send, a New row form's
+/// `INSERT` or a lone Delete row's `DELETE`: one step, cut from the text the
+/// gate admitted. An `UPDATE` or a `DELETE` is paired with `row`, the row as
+/// it was fetched (`ResultGrid::fetched_cells`) and what it is called
+/// (`ResultGrid::row_label`), and with the read that brings it back; an
+/// `INSERT` has no row to read and is called `new row` in what the apply says
+/// of it.
+/// `read_back` is the read a Row send takes of its row inside the transaction.
+///
+/// Refused, so nothing is sent, when the statement is not exactly one of the
+/// kind named or its row cannot be read again or named: an apply that cannot
+/// be verified is not offered for a target that verifies.
+fn lone_verification(
+    engine: Engine,
+    statement: &str,
+    kind: StepKind,
+    row: Option<(Vec<db::FetchedCell>, Option<String>)>,
+    read_back: Option<String>,
+) -> Result<Verification, String> {
+    let written = sql::generated_writes(engine, statement);
+    let Some([one]) = written.as_deref() else {
+        return Err(UNCHECKABLE.into());
+    };
+    let (reread, before, label) = match (kind, row) {
+        (StepKind::Insert, None) => (None, Vec::new(), "new row".to_string()),
+        (StepKind::Update | StepKind::Delete, Some((before, label))) => (
+            Some(sql::row_reread(engine, one).ok_or(NOT_ONE_ROW)?),
+            before,
+            label.ok_or(NOT_ONE_ROW)?,
+        ),
+        (StepKind::Insert | StepKind::Update | StepKind::Delete, _) => {
+            return Err(UNCHECKABLE.into());
+        }
+    };
+    Ok(Verification {
+        steps: vec![VerifiedStep {
+            sql: one.clone(),
+            kind,
+            reread,
+            before,
+            read_back,
+        }],
+        rows: vec![label],
+        identities: Vec::new(),
+    })
+}
+
+/// The sentence for a row write whose row cannot be read by its key.
+const NOT_ONE_ROW: &str =
+    "dbdelve refused to run a statement it wrote itself: it is not the read of one row.";
+
 #[cfg(test)]
 mod tests {
-    use super::typed_page;
+    use super::{lone_verification, typed_page};
+    use crate::{db::Engine, db::StepKind, sql};
+
+    /// A lone `INSERT` and a lone `DELETE` the writers produce are accepted by
+    /// `lone_verification` on every engine that verifies an apply, since a
+    /// refusal there is a New row form or a Delete row that stops working.
+    #[test]
+    fn the_new_row_insert_and_the_delete_rows_delete_are_accepted_as_one_step() {
+        for (engine, types) in [
+            (Engine::Sqlite, [("id", "integer"), ("name", "text")]),
+            (Engine::DuckDb, [("id", "INTEGER"), ("name", "VARCHAR")]),
+            (Engine::Postgres, [("id", "int4"), ("name", "text")]),
+        ] {
+            let types: Vec<(String, String)> = types
+                .iter()
+                .map(|(column, kind)| (column.to_string(), kind.to_string()))
+                .collect();
+            let insert = sql::insert_row(
+                engine,
+                "public",
+                "birds",
+                &[("id", Some("3")), ("name", Some("robin"))],
+                &types,
+            )
+            .expect("the form's INSERT is written");
+            let verify = lone_verification(engine, &insert, StepKind::Insert, None, None)
+                .unwrap_or_else(|why| panic!("{engine:?}: {insert}: {why}"));
+            assert_eq!(verify.rows, ["new row"]);
+
+            let delete =
+                sql::delete_row_matching(engine, "public", "birds", &[("id", "2")], &[], &types)
+                    .expect("Delete row's DELETE is written");
+            let verify = lone_verification(
+                engine,
+                &delete,
+                StepKind::Delete,
+                Some((Vec::new(), Some("id = 2".into()))),
+                None,
+            )
+            .unwrap_or_else(|why| panic!("{engine:?}: {delete}: {why}"));
+            assert_eq!(verify.steps.len(), 1);
+            assert!(verify.steps[0].reread.is_some(), "{engine:?}: {delete}");
+        }
+    }
 
     #[test]
     fn a_typed_page_is_the_offset_it_names() {

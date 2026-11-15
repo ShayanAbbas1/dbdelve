@@ -197,6 +197,42 @@ impl Target {
                 && matches!(self.engine, Engine::Snowflake | Engine::Turso))
     }
 
+    /// Whether a query tab's Apply is shown in the review dialog, as an object
+    /// tab's is, rather than appended to its buffer: where what runs is not the
+    /// text alone, because of a guard ([`Self::reviews_query_edits`]) or because
+    /// the apply is verified (the rows re-read and the writes counted,
+    /// [`Self::verifies_applies`]). A copy left in the buffer, or recalled from
+    /// the history, would run without either.
+    ///
+    /// [`Self::reviews_query_edits`] is not widened to say this: it also decides
+    /// whether a query tab takes Delete row ([`Self::edits_query_rows`]), which a
+    /// verified target does not offer there.
+    pub fn reviews_query_apply(self) -> bool {
+        self.reviews_query_edits() || (self.row_edits() && self.verifies_applies())
+    }
+
+    /// Whether a grid of this target applies its edits in order, one document
+    /// at a time, with no transaction around them: a built-in MongoDB target
+    /// that edits rows. An apply that stops part way has written the statements
+    /// before the one that failed, so those rows leave the draft by their
+    /// identity and the rest is kept (`ResultGrid::drop_applied`), where a
+    /// transactional engine's rolled-back draft is kept whole.
+    pub fn ordered_edits(self) -> bool {
+        matches!(self.driver, Driver::BuiltIn)
+            && self.engine.syntax() == Syntax::Mongo
+            && self.edits_rows()
+    }
+
+    /// Whether an edit sent to this target leaves the grid and the draft where
+    /// they are until the server answers: the transactional engines
+    /// ([`Self::row_edits`]), whose failure rolls the draft back, and the
+    /// ordered ones ([`Self::ordered_edits`]), whose failure removes from the
+    /// draft what applied. A target that is neither blanks the grid as the send
+    /// starts, which a draft kept behind would be sent twice from.
+    pub fn keeps_edits(self) -> bool {
+        self.row_edits() || self.ordered_edits()
+    }
+
     /// Whether this target is one of the transactional SQL engines dbdelve
     /// drives itself: a built-in driver speaking SQL that edits rows and names
     /// a row by its key in the statement text. An edit sent to one keeps the
@@ -212,6 +248,17 @@ impl Target {
             && self.engine.syntax() == Syntax::Sql
             && self.edits_relations()
             && !self.reviews_query_edits()
+    }
+
+    /// Whether an edit of this target's rows is applied through
+    /// `Connection::apply_verified`: a built-in driver whose engine has an arm
+    /// of it ([`Engine::verifies_applies`]) and whose rows are written back at
+    /// all. Every other target applies through `Connection::generated` as it
+    /// did, so no apply is refused for want of an arm.
+    pub fn verifies_applies(self) -> bool {
+        matches!(self.driver, Driver::BuiltIn)
+            && self.engine.verifies_applies()
+            && self.edits_rows()
     }
 
     /// What the review of a generated write says beyond its statements.
@@ -445,6 +492,29 @@ mod tests {
     }
 
     #[test]
+    fn a_query_tabs_apply_is_reviewed_where_its_rows_are_guarded_or_verified() {
+        for engine in Engine::ALL {
+            let target = Target::built_in(engine);
+            assert_eq!(
+                target.reviews_query_apply(),
+                target.reviews_query_edits() || (target.row_edits() && target.verifies_applies()),
+                "{engine:?}"
+            );
+        }
+        // Verified, so its edits are reviewed; and guarded, so ClickHouse's are.
+        assert!(Target::built_in(Engine::Sqlite).reviews_query_apply());
+        assert!(Target::built_in(Engine::ClickHouse).reviews_query_apply());
+        // Neither: their query-tab edits stay appended to the buffer.
+        assert!(!Target::built_in(Engine::MongoDb).reviews_query_apply());
+        assert!(!Target::built_in(Engine::Redis).reviews_query_apply());
+        let plugin = Target {
+            engine: Engine::Postgres,
+            driver: Driver::Plugin(odbc()),
+        };
+        assert!(plugin.reviews_query_apply());
+    }
+
+    #[test]
     fn only_transactional_sql_targets_offer_row_mode() {
         for engine in Engine::ALL {
             assert_eq!(
@@ -486,6 +556,47 @@ mod tests {
             driver: Driver::Plugin(odbc()),
         };
         assert!(plugin.edits_relations() && !plugin.row_edits());
+    }
+
+    #[test]
+    fn only_mongodb_orders_its_edits_and_keeps_them_with_the_transactional_engines() {
+        for engine in Engine::ALL {
+            let target = Target::built_in(engine);
+            // Row mode is offered where edits are kept, and a Row send with no
+            // `Verification` is refused only on a target that verifies: so a
+            // target that keeps its edits must verify them.
+            assert!(
+                !target.keeps_edits() || target.verifies_applies(),
+                "{engine:?}"
+            );
+            assert_eq!(
+                target.ordered_edits(),
+                engine == Engine::MongoDb,
+                "{engine:?}"
+            );
+            assert_eq!(
+                target.keeps_edits(),
+                matches!(
+                    engine,
+                    Engine::Postgres
+                        | Engine::MySql
+                        | Engine::MariaDb
+                        | Engine::Sqlite
+                        | Engine::DuckDb
+                        | Engine::SqlServer
+                        | Engine::MongoDb
+                ),
+                "{engine:?}"
+            );
+        }
+        for engine in [Engine::Postgres, Engine::MongoDb] {
+            let plugin = Target {
+                engine,
+                driver: Driver::Plugin(odbc()),
+            };
+            assert!(!plugin.ordered_edits(), "{engine:?}");
+            assert!(!plugin.keeps_edits(), "{engine:?}");
+        }
     }
 
     #[test]

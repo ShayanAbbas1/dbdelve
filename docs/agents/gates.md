@@ -53,17 +53,63 @@ mode, always where the user can read it before it runs:
   sorted in memory reorders the rows it holds and writes nothing;
   switching it to the server is an ask, and splices its keys the same way.
 - Grid edits on a query tab are appended to the buffer
-  (`sql::appended_statement`) and run from there. On an object tab, which
-  has no buffer, the statement is shown in a review dialog before it runs,
-  as it is on a query tab of an engine without unique keys
-  (`Engine::reviews_query_edits`), whose writes run only behind the guard.
+  (`sql::appended_statement`) and run from there only where the target
+  neither guards nor verifies them (`Target::reviews_query_apply`). On an
+  object tab, which has no buffer, the statement is shown in a review dialog
+  before it runs, as it is on a query tab of an engine without unique keys
+  (`Engine::reviews_query_edits`), whose writes run only behind the guard, and
+  on one whose apply is verified (`Target::verifies_applies`: the rows are
+  re-read and compared and each write counted, which a copy left in the buffer
+  would run without). A verified query-tab apply is not kept in the history for
+  the same reason, and no edit of a verifying target is sent without its
+  verification: `execute_unchecked` refuses one that arrives with none (`dbdelve
+  refused to send an edit it could not verify.`), so a path added later that
+  forgets to build one cannot send the text alone.
   The exception is a relation tab's view in Row mode, which has no buffer and
   no dialog: the row's `UPDATE` is sent as the row is left or saved
   (`Workspace::save_row`), and that is the user's own act. It is gated by
   `sql::is_generated_write_on`, mode-checked in `execute_and_then` as it is
   sent, read back by `sql::row_read` under `sql::is_generated_select`, written
-  to history, and the last one is shown in the status line. A Classic or
+  to history, and the last one is shown in the status line. On a target that
+  verifies applies (`Target::verifies_applies`) the send is one verified step:
+  the row is re-read and compared with the row as it was fetched before its
+  `UPDATE`, the `UPDATE` must count one row, and the read-back is taken inside
+  the same transaction. A row that drifted, or an `UPDATE` that counted any
+  other number, applies nothing and the row keeps its edits. A Classic or
   Draft view sends nothing unread.
+  The New row form's `INSERT` and a lone Delete row's `DELETE` are reviewed as
+  before and run through the same verified apply on such a target: the
+  `INSERT` must count one row, and the `DELETE` re-reads its row first and
+  must count one.
+- A relation tab's Draft apply on a target that verifies it
+  (`Target::verifies_applies`: SQLite, DuckDB, Postgres, MySQL, MariaDB and SQL Server so
+  far, widened an engine at a time as each one's arm of `Connection::apply_verified` lands) is not sent as the text
+  the user read. The text is still what the user reads, and it is gated as it
+  always was (`sql::is_generated_write_on`, `sql::draft_deletes_match`); the
+  apply then cuts its statements out of that text (`sql::generated_writes`,
+  which sees through the `BEGIN`/`COMMIT` brackets the text may hold) and sends
+  them one at a time on one held session: a `BEGIN` of the apply's own
+  (`Engine::transaction_start`, or `BEGIN` where one submission is already
+  atomic), a `SELECT * … WHERE <the statement's own
+  predicate>` for every `UPDATE` and `DELETE` (`sql::row_reread`, cut from the
+  statement's own parse tree and admitted by `sql::is_generated_select`) before
+  any write, the writes in the order the text holds them with each one's row
+  count checked, then `COMMIT`, or `ROLLBACK` on any refusal or failure before
+  it. Every re-read is compared whole, by column name and byte for byte, with
+  the row as the grid fetched it (copied by value when the review was written);
+  a row that differs or is gone writes nothing, keeps the draft and is named in
+  the review. A statement that does not count exactly one row rolls the whole
+  sequence back; a `DELETE` may count none only when a second read of its row
+  finds it gone, which an earlier `DELETE` of the draft taking it along would
+  leave, and a statement something skipped (a trigger returning without writing)
+  leaves its row there. While a transaction the user opened is open on the
+  connection (`Profile::in_transaction`) a verified apply is refused, at
+  review and at Run (`session::APPLY_IN_TRANSACTION`), because its own `BEGIN`
+  and `COMMIT` would end that transaction; the draft is kept. There is no `FOR UPDATE`: the pinned grammar cannot read it,
+  so the compare catches a change made between the fetch and the apply, not one
+  made in the milliseconds between the re-read and the write, and the count
+  still catches a row that vanished in that window. Targets that do not verify
+  keep `Connection::generated`.
 - Import Rows shows every statement it will send in its dialog's SQL view
   before any runs.
 - **Explain** puts the engine's `EXPLAIN` prefix on a copy of the
@@ -76,9 +122,9 @@ mode, always where the user can read it before it runs:
 
 Limits on what DBDelve may write. It never writes `DROP` or `TRUNCATE`
 into a buffer or onto the wire, whatever the user asked for. It writes
-`DELETE` only as the explicit deletion of one named row: by primary key (on
-an engine without unique keys, by all of the row's values as read, and only
-when exactly one row matches), from a direct ask, with the statement shown before it runs
+`DELETE` only as the explicit deletion of one named row: by primary key (on a
+table with no primary key, by all of the row's values as read, a NULL as
+`IS NULL`, and only when exactly one row matches), from a direct ask, with the statement shown before it runs
 (`sql::delete_row`), or as one `DELETE` per row the user marked in a reviewed
 draft, each naming that row's key and shown with the rest of the draft before it
 runs. The one exception to both is the explorer's
@@ -125,10 +171,15 @@ passes first. It admits exactly five shapes:
   distinct, unqualified columns against single-quoted literals (or a bare
   `0x…` hex literal, SQL Server's spelling of bytes): no `OR`, no
   other operator, no subquery, no function call, no CTE beside it, no
-  `RETURNING`, no `LIMIT`, and nothing else in the submission. ClickHouse,
-  which has no unique key, is the one exception to the terms: a row is named
-  by every value, and a term may also be `toString(col) = '…'` (the only
-  function call admitted, over a bare column) or `col IS NULL`;
+  `RETURNING`, no `LIMIT`, and nothing else in the submission. A row with no
+  primary key is named by every value, so a term may also be `col IS NULL`
+  (never `IS NOT NULL`) on Postgres, MySQL, MariaDB, SQLite, DuckDB and SQL
+  Server (`SqlSpec::null_terms`); ClickHouse, whose drafts are not verified,
+  also admits `toString(col) = '…'` (the only function call admitted, over a
+  bare column) under `SqlSpec::row_terms`. The `IS NULL` term is read through
+  the spoken engine's spec, so a plugin that speaks one of those dialects is
+  admitted it too (`generated_writes`); its driver holds each statement to
+  exactly one row or saves nothing;
 - a draft: more than one statement, optionally bracketed as the first shape
   is, each an `UPDATE`, an `INSERT` of exactly one row with no skip tail
   (otherwise as the second shape reads it) or a `DELETE` of the third shape,
@@ -218,18 +269,25 @@ counts are the marks the grid holds.
 
 A cell is editable only when DBDelve can name its row by primary key; when
 it cannot, the grid stays read-only and says why, and never guesses at a
-predicate. An `INSERT` has no existing row to name, so a table without a
-primary key can be inserted into and not edited. That asymmetry is
-deliberate and belongs in anything that documents either feature.
+predicate.
 
-The one exception is an engine without unique keys (ClickHouse): a row is
-named by all of its values as read, and a write runs only when exactly one row
-matches. Before each `UPDATE`, `DELETE` or `ALTER` write, an exactly-one-row
-`COUNT(*)` with the identical predicate (`sql::row_guard`) must return one. An
-update on a table lacking the block columns is spelled `ALTER TABLE <t> UPDATE
-<assignments> WHERE <predicate> SETTINGS mutations_sync = 2`, exactly, with
-the setting last. A row that cannot be matched exactly stays read-only and says
-why.
+The one exception is a table with no primary key: a row is named by all of its
+values as read, a NULL as `IS NULL`, and a write runs only when exactly one row
+matches. On the six verified engines the re-read must return one row and the
+write must count one, inside the apply's transaction
+(`sql::draft_deletes_match` holds a `DELETE` to every column of the grid's
+key, as a set). On ClickHouse, before each `UPDATE`, `DELETE` or `ALTER` write,
+an exactly-one-row `COUNT(*)` with the identical predicate (`sql::row_guard`)
+must return one. An update on a table lacking the block columns is spelled
+`ALTER TABLE <t> UPDATE <assignments> WHERE <predicate> SETTINGS
+mutations_sync = 2`, exactly, with the setting last. A column that cannot be
+matched by equality (on SQLite, any declared type outside the INTEGER, TEXT
+and REAL affinities, a blob rendering as `x'…'` text no blob equals; on
+Postgres and DuckDB, any type not on the list
+`docs/agents/engines.md` gives, each listed because a test matched it on that
+engine) leaves the grid read-only and says why; it is never
+left out of the `WHERE`, and no unique key, rowid or subset of the columns
+names the row in its place.
 
 ## Connection modes, per engine
 

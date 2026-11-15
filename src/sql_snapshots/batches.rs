@@ -789,3 +789,70 @@ fn every_draft_output_is_gated_wherever_row_mode_is_offered() {
         }
     }
 }
+
+/// The MongoDB draft's spellings: one statement per document, in the draft's
+/// order, each ending `;`, and the refusals a draft that cannot be written has.
+#[test]
+fn mongo_draft_batches() {
+    let mut out = String::new();
+    let engine = Engine::MongoDb;
+    let types = mongo_types();
+    let id = |n: u8| format!("ObjectId('65a4f1c0ffffffffffffff{n:02x}')");
+    let delete = |n: u8| sql::DraftDelete {
+        keys: vec![("_id".to_owned(), id(n))],
+        ..draft_delete("dbdelve_dev", "accounts", "", &types)
+    };
+    let update = |n: u8, name: &str| {
+        pending(
+            "dbdelve_dev",
+            "accounts",
+            &[("Name", set(name))],
+            &[("_id", &id(n))],
+            &types,
+        )
+    };
+    let insert = |name: Option<&str>| {
+        draft_insert(
+            "dbdelve_dev",
+            "accounts",
+            &[("id", Some("9")), ("Name", name)],
+            &types,
+        )
+    };
+    let mut record = |case: &str, deletes: &[_], updates: &[_], inserts: &[_], ok| {
+        outcome(
+            &mut out,
+            engine,
+            case,
+            crate::mql::draft_batch(deletes, updates, inserts),
+            ok,
+        );
+    };
+    record(
+        "mixed",
+        &[delete(1), delete(2)],
+        &[update(3, "it's"), update(4, "b")],
+        &[insert(Some("a")), insert(Some("b"))],
+        true,
+    );
+    record("marks only", &[delete(1), delete(2)], &[], &[], true);
+    record(
+        "adds only",
+        &[],
+        &[],
+        &[insert(Some("a")), insert(Some("b"))],
+        true,
+    );
+    record(
+        "an added document holding a null",
+        &[],
+        &[],
+        &[insert(None)],
+        true,
+    );
+    let mut unnamed = delete(1);
+    unnamed.null_keys = vec!["_id".to_owned()];
+    record("a mark with a null key", &[unnamed], &[], &[], false);
+    record("empty", &[], &[], &[], false);
+    check("batches_mongo_draft", &out);
+}
