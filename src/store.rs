@@ -164,6 +164,16 @@ pub struct StoredProfile {
     /// order they were picked. Same rules as `open_rows`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub selected_rows: Vec<String>,
+    /// The databases of the server this profile shows: exact names or `*`/`?`
+    /// globs, case ignored. Empty shows every database. A scalar array, so it
+    /// comes before `ssh`. Left out when empty, which is every profile written
+    /// before the filter existed; a build without the key drops it on its next
+    /// save, and the profile then shows everything.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include_databases: Vec<String>,
+    /// The schemas this profile shows, by the same rules as `include_databases`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include_schemas: Vec<String>,
     /// The SSH tunnel this profile dials through, or absent for a direct
     /// connection -- which is every profile written before tunnels existed. A
     /// table, so it has to come after every scalar above. Nothing secret is in
@@ -3483,6 +3493,8 @@ user = "shayan"
                 ssm: None,
                 open_rows: Vec::new(),
                 selected_rows: Vec::new(),
+                include_databases: Vec::new(),
+                include_schemas: Vec::new(),
                 ssh: None,
                 open_queries: Vec::new(),
                 open_objects: Vec::new(),
@@ -3544,6 +3556,8 @@ user = "shayan"
             ssm: None,
             open_rows: Vec::new(),
             selected_rows: Vec::new(),
+            include_databases: Vec::new(),
+            include_schemas: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![
@@ -3693,6 +3707,8 @@ open_objects = []
             ssm: None,
             open_rows: Vec::new(),
             selected_rows: Vec::new(),
+            include_databases: Vec::new(),
+            include_schemas: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: Vec::new(),
@@ -3758,6 +3774,53 @@ open_objects = []
         assert_eq!(resaved(include_str!("testdata/every-engine.toml")), golden);
         assert!(
             !golden.contains("open_rows"),
+            "the fixtures hold neither key"
+        );
+    }
+
+    #[test]
+    fn the_include_lists_round_trip_before_ssh_and_an_old_file_reads_unfiltered() {
+        let mut profile = a_stored_profile();
+        profile.include_databases = vec!["app*".into(), "Billing".into()];
+        profile.include_schemas = vec!["public".into(), "tenant_?".into()];
+        profile.ssh = Some(SshTunnel {
+            host: "bastion".into(),
+            ..Default::default()
+        });
+        let text = written_alone(profile.clone());
+        let databases = text
+            .find("include_databases")
+            .expect("the database list is written");
+        let schemas = text.find("include_schemas").expect("so is the schema list");
+        let tunnel = text.find("[profiles.ssh]").expect("and the tunnel");
+        assert!(
+            databases < tunnel && schemas < tunnel,
+            "TOML cannot emit a scalar after a table, so both come before `ssh`:\n{text}"
+        );
+        let decoded = decode_profiles(&text, &[]).expect("the file loads");
+        assert_eq!(
+            decoded.profiles[0].include_databases,
+            profile.include_databases
+        );
+        assert_eq!(decoded.profiles[0].include_schemas, profile.include_schemas);
+        assert_eq!(
+            written_alone(decoded.profiles[0].clone()),
+            text,
+            "saving what was saved changes nothing"
+        );
+
+        let bare = written_alone(a_stored_profile());
+        assert!(
+            !bare.contains("include_databases") && !bare.contains("include_schemas"),
+            "a profile with none is written as it always was:\n{bare}"
+        );
+        let old = decode_profiles(&bare, &[]).expect("an older file loads");
+        assert!(old.profiles[0].include_databases.is_empty());
+        assert!(old.profiles[0].include_schemas.is_empty());
+        let golden = include_str!("testdata/every-engine.resaved.toml");
+        assert_eq!(resaved(include_str!("testdata/every-engine.toml")), golden);
+        assert!(
+            !golden.contains("include_databases") && !golden.contains("include_schemas"),
             "the fixtures hold neither key"
         );
     }
@@ -4317,6 +4380,8 @@ folder = "Hot"
             ssm: None,
             open_rows: Vec::new(),
             selected_rows: Vec::new(),
+            include_databases: Vec::new(),
+            include_schemas: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![StoredObject {
@@ -4405,6 +4470,8 @@ folder = "Hot"
             ssm: None,
             open_rows: Vec::new(),
             selected_rows: Vec::new(),
+            include_databases: Vec::new(),
+            include_schemas: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![StoredObject {
@@ -4479,6 +4546,8 @@ folder = "Hot"
             ssm: None,
             open_rows: Vec::new(),
             selected_rows: Vec::new(),
+            include_databases: Vec::new(),
+            include_schemas: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: Vec::new(),
@@ -4599,6 +4668,8 @@ open_objects = []
             ssm: None,
             open_rows: Vec::new(),
             selected_rows: Vec::new(),
+            include_databases: Vec::new(),
+            include_schemas: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![StoredObject {
@@ -4746,6 +4817,8 @@ open_objects = []
                     ssm: None,
                     open_rows: Vec::new(),
                     selected_rows: Vec::new(),
+                    include_databases: Vec::new(),
+                    include_schemas: Vec::new(),
                     ssh: None,
                     open_queries: Vec::new(),
                     open_objects: Vec::new(),
@@ -4787,6 +4860,8 @@ open_objects = []
                     ssm: None,
                     open_rows: Vec::new(),
                     selected_rows: Vec::new(),
+                    include_databases: Vec::new(),
+                    include_schemas: Vec::new(),
                     ssh: None,
                     open_queries: Vec::new(),
                     open_objects: Vec::new(),
@@ -5610,6 +5685,8 @@ open_objects = []
             ssm: None,
             open_rows: Vec::new(),
             selected_rows: Vec::new(),
+            include_databases: Vec::new(),
+            include_schemas: Vec::new(),
             ssh: None,
             open_queries: vec![
                 StoredQueryTab {
@@ -6231,6 +6308,8 @@ name = \"accounts\"
             ssm: None,
             open_rows: Vec::new(),
             selected_rows: Vec::new(),
+            include_databases: Vec::new(),
+            include_schemas: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![
@@ -6361,6 +6440,8 @@ name = \"accounts\"
             ssm: None,
             open_rows: Vec::new(),
             selected_rows: Vec::new(),
+            include_databases: Vec::new(),
+            include_schemas: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![object],

@@ -1226,6 +1226,7 @@ impl Connection {
         Ok(super::Databases {
             names,
             current: Some(self.database.clone()).filter(|name| !name.is_empty()),
+            left_out: 0,
         })
     }
 
@@ -1250,6 +1251,7 @@ impl Connection {
                 sequences: Vec::new(),
             }],
             database: None,
+            ..Default::default()
         })
     }
 
@@ -4380,6 +4382,46 @@ mod tests {
         // with exactly the ones it holds a role on.
         assert_eq!(databases.names, ["dbdelve_archive", "dbdelve_dev"]);
         assert_eq!(databases.current.as_deref(), Some("dbdelve_dev"));
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MONGO_URL"]
+    fn live_the_include_list_lists_only_the_matched_databases() {
+        use crate::db::{Include, Levels};
+        let connection = crate::db::Connection::MongoDb(live());
+        let shown = |entries: &[&str]| {
+            let list = entries.iter().map(|entry| entry.to_string()).collect();
+            Include::from_stored(list, Vec::new()).resolve(
+                Levels::DatabaseHoldsObjects,
+                Some("dbdelve_dev"),
+                None,
+            )
+        };
+
+        let narrowed = shown(&["nothing*"]);
+        let listed = connection
+            .databases(Engine::MongoDb, &narrowed)
+            .expect("databases should list");
+        assert_eq!(listed.names, ["dbdelve_dev"]);
+        assert_eq!(listed.left_out, 1);
+        assert_eq!(listed.current.as_deref(), Some("dbdelve_dev"));
+
+        let both = connection
+            .databases(Engine::MongoDb, &shown(&["dbdelve_arch*"]))
+            .expect("databases should list");
+        assert_eq!(both.names, ["dbdelve_archive", "dbdelve_dev"]);
+        assert_eq!(both.left_out, 0);
+
+        let unfiltered = connection
+            .catalog(&crate::db::Shown::everything())
+            .expect("the catalog should read");
+        let narrowed = connection
+            .catalog(&narrowed)
+            .expect("the catalog should read");
+        assert_eq!(
+            narrowed, unfiltered,
+            "one database's own catalog is not narrowed"
+        );
     }
 
     #[test]

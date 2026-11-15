@@ -2980,9 +2980,13 @@ impl Workspace {
         let message = match &profile.catalog {
             CatalogState::Loading => Some(("Loading database objects…".to_string(), t.text_muted)),
             CatalogState::Failed(message) => Some((message.clone(), t.danger)),
-            CatalogState::Loaded(catalog, _) if catalog.schemas.is_empty() => {
-                Some(("No database objects found.".to_string(), t.text_muted))
-            }
+            CatalogState::Loaded(catalog, _) if catalog.schemas.is_empty() => Some((
+                crate::sidebar::empty_catalog_line(
+                    profile.config.target().levels(),
+                    catalog.left_out,
+                ),
+                t.text_muted,
+            )),
             CatalogState::Loaded(..) => None,
         };
         let lists_schemas = matches!(
