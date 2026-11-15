@@ -214,6 +214,77 @@ fn a_query_typed_and_run_from_the_keyboard_lands_its_rows(cx: &mut TestAppContex
 }
 
 #[gpui::test]
+fn hidden_results_come_back_from_the_keyboard_and_for_a_refused_run(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+
+        cx.simulate_keystrokes("secondary-j");
+        cx.run_until_parked();
+        query_tab(&workspace, cx, |tab, _, _| assert!(tab.results_hidden));
+        // Hiding hands the keyboard to the editor, so the chord still reaches
+        // the workspace to bring the pane back.
+        cx.simulate_keystrokes("secondary-j");
+        cx.run_until_parked();
+        query_tab(&workspace, cx, |tab, _, _| assert!(!tab.results_hidden));
+
+        cx.simulate_keystrokes("secondary-j");
+        cx.run_until_parked();
+        // An empty buffer is refused straight into the slot, never landing as
+        // a run does, and the refusal must still be seen.
+        cx.simulate_keystrokes("secondary-enter");
+        cx.run_until_parked();
+        query_tab(&workspace, cx, |tab, _, _| {
+            assert!(matches!(tab.query, QueryState::Failed(_)));
+            assert!(!tab.results_hidden);
+        });
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn going_to_a_column_or_a_result_brings_hidden_results_back(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        cx.simulate_input("select 1 as a, 2 as b");
+        cx.simulate_keystrokes("secondary-enter");
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("secondary-j");
+        cx.run_until_parked();
+        // Go to column hands the grid the keyboard, which only a drawn grid
+        // can keep.
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| workspace.reveal_column(1, window, cx))
+        });
+        settle(cx);
+        query_tab(&workspace, cx, |tab, _, _| assert!(!tab.results_hidden));
+        assert!(grid_has_keyboard(&workspace, cx));
+
+        // Hidden from the grid, the keyboard goes to the editor, and the chord
+        // still has a path back to the pane.
+        cx.simulate_keystrokes("secondary-j");
+        settle(cx);
+        query_tab(&workspace, cx, |tab, _, _| assert!(tab.results_hidden));
+        assert!(editor_has_keyboard(&workspace, cx));
+        cx.simulate_keystrokes("secondary-j");
+        settle(cx);
+        query_tab(&workspace, cx, |tab, _, _| assert!(!tab.results_hidden));
+
+        cx.simulate_keystrokes("secondary-j");
+        cx.run_until_parked();
+        // Show result, the palette's way off the Messages chip.
+        let id = query_tab(&workspace, cx, |tab, _, _| tab.id);
+        workspace.update(cx, |workspace, cx| {
+            workspace.show_queued_result(crate::session::Tab::Query(id), 0, cx)
+        });
+        query_tab(&workspace, cx, |tab, _, _| assert!(!tab.results_hidden));
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn a_prompt_takes_the_keyboard_and_hands_it_back_once_answered(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite(cx);
