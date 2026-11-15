@@ -20,11 +20,11 @@ use super::ssh::{self, Bridged, SocketBridge};
 use super::tunnel::{Tunnel, tunnelled};
 use super::{
     ApplyOutcome, ApplyStage, Catalog, Column, DbError, EditTarget, Engine, Feed, Fetch,
-    GraphCancel, QueryResult, Reference, RelationKind, Row, RowBuilder, RowMatch, SchemaGraph,
-    Sending, ServerConfig, Sizes, Stopped, Structure, VerifiedStep, assemble_catalog,
+    GraphCancel, Properties, QueryResult, Reference, RelationKind, Row, RowBuilder, RowMatch,
+    SchemaGraph, Sending, ServerConfig, Sizes, Stopped, Structure, VerifiedStep, assemble_catalog,
     assemble_databases, assemble_foreign_keys, assemble_references, assemble_schema_graph,
     assemble_sequences, assemble_sizes, assemble_structure, create_table, non_utf8_error,
-    optional_cell, plain_error, required_cell, terminated,
+    optional_cell, plain_error, required_cell, terminated, time_zone_statement,
 };
 
 mod pgpass;
@@ -672,6 +672,8 @@ pub fn config_from_url(url: &str) -> Result<PostgresConfig, String> {
             ssm: None,
             ssh: None,
             schema: None,
+            time_zone: None,
+            properties: Properties::default(),
         },
         service,
     })
@@ -701,7 +703,19 @@ fn connection_string(server: &ServerConfig) -> String {
     // Without this the driver waits out the OS SYN retry budget, so a host
     // that resolves but drops packets pins the UI in "Connecting…" for
     // minutes with no cancel.
-    parts.push(format!("connect_timeout={CONNECT_TIMEOUT_SECONDS}"));
+    // The profile's own number replaces it, never adds a second key.
+    parts.push(format!(
+        "connect_timeout={}",
+        server
+            .properties
+            .connect_timeout
+            .map_or(CONNECT_TIMEOUT_SECONDS, u64::from)
+    ));
+    // Shown in `pg_stat_activity` for the session. Never in `options`, which
+    // carries the statement timeout.
+    if let Some(name) = &server.properties.application_name {
+        parts.push(format!("application_name={}", quote(name)));
+    }
     if server.statement_timeout > 0 {
         // A session default set once, here, rather than a `SET` prepended to
         // the user's submission -- see `ServerConfig::statement_timeout`. It
@@ -1240,6 +1254,15 @@ impl Connection {
                 });
         let pid = row.as_ref().and_then(|row| row.get(0)?.parse().ok());
         let current_schema = row.and_then(|row| row.get(1).map(str::to_string));
+        // Before the pick and the script, so a zone the script sets wins. A
+        // `SET` after connecting, not a startup option, as the pick is.
+        if let Some(statement) = server
+            .time_zone
+            .as_deref()
+            .and_then(|zone| time_zone_statement(Engine::Postgres, zone))
+        {
+            replay(&mut client, &[statement])?;
+        }
         if let Some(schema) = &server.schema {
             set_search_path(&mut client, Some(schema))?;
         }
@@ -2850,6 +2873,8 @@ mod tests {
             ssm: None,
             ssh: None,
             schema: None,
+            time_zone: None,
+            properties: Properties::default(),
         }
     }
 
@@ -2893,6 +2918,8 @@ mod tests {
             ssm: None,
             ssh: None,
             schema: None,
+            time_zone: None,
+            properties: Properties::default(),
         }
     }
 
@@ -2997,6 +3024,55 @@ mod tests {
         assert_eq!(
             cell(&beside, "SHOW search_path").as_deref(),
             Some("pg_catalog")
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_the_time_zone_reaches_every_session() {
+        let paris = ServerConfig {
+            time_zone: Some("Europe/Paris".into()),
+            ..live_config()
+        };
+        let main = Connection::open(&paris).expect("the connection opens");
+        let zone = |connection: &Connection| cell(connection, "SHOW timezone");
+        assert_eq!(zone(&main).as_deref(), Some("Europe/Paris"));
+        let beside = main.alongside().expect("a session beside it opens");
+        assert_eq!(zone(&beside).as_deref(), Some("Europe/Paris"));
+        let database = main.current_database().to_string();
+        let other = main.on_database(&database).expect("a session opens");
+        assert_eq!(zone(&other).as_deref(), Some("Europe/Paris"));
+        let side = main
+            .aside(Duration::from_secs(10), |side| Some(zone(side)))
+            .expect("the side session opens");
+        assert_eq!(side.as_deref(), Some("Europe/Paris"));
+
+        // Set before the script, so the script's own zone wins.
+        let scripted = Connection::open(&paris)
+            .and_then(|connection| connection.with_startup(vec!["SET TIME ZONE 'UTC'".into()]))
+            .expect("the script runs");
+        assert_eq!(zone(&scripted).as_deref(), Some("UTC"));
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_driver_properties_reach_the_server() {
+        let config = ServerConfig {
+            properties: Properties {
+                application_name: Some("o'brien app".to_string()),
+                connect_timeout: Some(5),
+            },
+            ..live_config()
+        };
+        let main = Connection::open(&config).expect("the connection opens");
+        assert_eq!(
+            cell(&main, "SHOW application_name").as_deref(),
+            Some("o'brien app")
+        );
+        let beside = main.alongside().expect("a session beside it opens");
+        assert_eq!(
+            cell(&beside, "SHOW application_name").as_deref(),
+            Some("o'brien app")
         );
     }
 
@@ -3175,6 +3251,40 @@ mod tests {
     #[test]
     fn connection_string_quotes_values() {
         let config = config();
+        assert_eq!(
+            connection_string(&config),
+            "host='db.example.test' dbname='dbdelve_test' user='someone' port=8432 \
+             sslmode=prefer connect_timeout=10"
+        );
+    }
+
+    #[test]
+    fn stored_driver_properties_reach_the_connection_string() {
+        let config = ServerConfig {
+            properties: Properties {
+                application_name: Some("o'brien app".to_string()),
+                connect_timeout: Some(5),
+            },
+            ..config()
+        };
+        let string = connection_string(&config);
+        assert!(
+            string.contains(&format!("application_name={}", quote("o'brien app"))),
+            "{string}"
+        );
+        assert!(string.contains("connect_timeout=5"), "{string}");
+        assert!(!string.contains("connect_timeout=10"), "{string}");
+        assert_eq!(string.matches("connect_timeout=").count(), 1, "{string}");
+        // The hold's channel is the `options` parameter, and no property rides it.
+        assert!(!string.contains("options="), "{string}");
+    }
+
+    #[test]
+    fn no_driver_property_leaves_the_connection_string_as_it_was() {
+        let config = ServerConfig {
+            properties: Properties::default(),
+            ..config()
+        };
         assert_eq!(
             connection_string(&config),
             "host='db.example.test' dbname='dbdelve_test' user='someone' port=8432 \
@@ -3940,6 +4050,8 @@ mod tests {
                     ssm: None,
                     ssh: None,
                     schema: None,
+                    time_zone: None,
+                    properties: Properties::default(),
                 },
                 service: None,
             }
