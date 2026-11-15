@@ -242,6 +242,10 @@ struct Session {
 enum Kind {
     /// On the profile's session.
     User,
+    /// On the session of a tab bound to this connection's database, which
+    /// every tab bound to it shares: put back in the database first, as the
+    /// profile's own is never, since a `USE` there is the user's to keep.
+    Bound,
     /// DBDelve's, run at the user's ask: a preview, an edit.
     Generated,
     /// DBDelve's, unseen: the connect, the catalog, a structure.
@@ -260,7 +264,7 @@ impl Kind {
         match self {
             Self::Internal | Self::Enter => Bounds::internal(),
             Self::Kill { within } => Bounds::within(within),
-            Self::User | Self::Generated | Self::Alongside { .. } => {
+            Self::User | Self::Bound | Self::Generated | Self::Alongside { .. } => {
                 Bounds::user(statement_timeout)
             }
         }
@@ -409,6 +413,30 @@ impl Connection {
         Ok(result)
     }
 
+    /// [`Self::query`] for a tab bound to this session's database: a `USE` of
+    /// another tab's, or of the tab's own before, moved the session every tab
+    /// bound to it shares, so it is put back in the database first, in the
+    /// same hold of the session as the statement. Nothing a statement of
+    /// dbdelve's does needs this: [`Self::generated`] and the reads of the
+    /// catalog go out without a session, naming the database.
+    pub fn query_bound(
+        &self,
+        sql: &str,
+        cancel: &CancelToken,
+        fetch: Fetch,
+    ) -> Result<QueryResult, DbError> {
+        self.forget_if_changing(sql);
+        let result = self.request(sql, Kind::Bound, cancel, fetch);
+        self.forget_if_changing(sql);
+        let mut result = result.map_err(hinted)?;
+        // Where an unqualified table was read from is asked as a bound run
+        // too: on a session every tab bound to the database shares, another's
+        // `USE` could land between the statement and a plain read of it.
+        (result.edit, result.read_only_reason) =
+            self.edit_of_query(sql, &result.columns, Kind::Bound, cancel);
+        Ok(result)
+    }
+
     /// A preview of a table also says whether its rows can be written back, or
     /// why not; see [`Self::edit_of`]. A submission of more than one
     /// statement, or of a write that names rows, goes out as [`Self::writes`].
@@ -543,7 +571,7 @@ impl Connection {
         // The guard and the write go without the session, and match each
         // value as the text it was shown as: after a `SET session_timezone`,
         // say, that text would name another instant, and so another row.
-        if matches!(kind, Kind::User) && lock(&self.session).set {
+        if matches!(kind, Kind::User | Kind::Bound) && lock(&self.session).set {
             return refused(edit::SESSION_SET);
         }
         let (schema, table) = match read.table.as_slice() {
@@ -924,7 +952,7 @@ impl Connection {
         fetch: Fetch,
     ) -> Result<QueryResult, Failed> {
         let started = Instant::now();
-        let mut session = matches!(kind, Kind::User).then(|| lock(&self.session));
+        let mut session = matches!(kind, Kind::User | Kind::Bound).then(|| lock(&self.session));
         fetch.hold().map_err(Failed::Unsent)?;
         if let Some(session) = session.as_deref_mut() {
             if session.id.is_none() {
@@ -935,7 +963,18 @@ impl Connection {
                     set: false,
                 };
             }
-            self.enter(session, cancel)?;
+            let bound = matches!(kind, Kind::Bound);
+            self.enter(session, cancel, bound)
+                .map_err(|failed| match failed {
+                    Failed::Error(error) | Failed::Broken(error)
+                        if bound
+                            && error.message != CANCELLED
+                            && error.message != SESSION_ENDED =>
+                    {
+                        Failed::Unsent(super::unplaced(error))
+                    }
+                    failed => failed,
+                })?;
             session.set |= sets_session(sql);
         }
         self.send(sql, kind, cancel, fetch, session.as_deref_mut(), started)
@@ -1096,9 +1135,18 @@ impl Connection {
     /// stops it, and its failure fails the run before the statement is sent.
     /// A statement sent anyway would mark the session open while it is still
     /// in `default`, where every later one would then run.
-    fn enter(&self, session: &mut Session, cancel: &CancelToken) -> Result<(), Failed> {
+    ///
+    /// `rebind` sends it again on a session already in a database, which a
+    /// `USE` since may have moved. That request carries `session_check`, so a
+    /// session the server has let go is reported, not quietly replaced.
+    fn enter(
+        &self,
+        session: &mut Session,
+        cancel: &CancelToken,
+        rebind: bool,
+    ) -> Result<(), Failed> {
         let database = self.config.database.trim();
-        if session.opened || database.is_empty() {
+        if (session.opened && !rebind) || database.is_empty() {
             return Ok(());
         }
         let sql = format!("USE {}", Engine::ClickHouse.quote_identifier(database));
@@ -2084,6 +2132,78 @@ mod tests {
                 assert_eq!(request.param("session_check"), Some("1"));
             }
         }
+    }
+
+    fn bound(connection: &Connection, sql: &str) -> Result<QueryResult, DbError> {
+        connection.query_bound(sql, &CancelToken::alongside(), Fetch::default())
+    }
+
+    #[test]
+    fn a_bound_run_puts_the_session_back_in_its_database_before_each_statement() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        numbers(&mock);
+        bound(&connection, "SELECT n").unwrap();
+        bound(&connection, "SELECT n").unwrap();
+        // The profile's own tab keeps the `USE` it ran.
+        run(&connection, "SELECT n").unwrap();
+        let [enter, again] = sent(&mock, "USE `").try_into().unwrap();
+        let session = enter.param("session_id").unwrap();
+        assert_eq!(again.statement, "USE `dbdelve_dev`");
+        assert_eq!(again.param("session_id"), Some(session));
+        assert_eq!(
+            again.param("session_check"),
+            Some("1"),
+            "a session the server let go of is reported, not quietly replaced"
+        );
+        assert_eq!(again.param("database"), None);
+        let entered: Vec<bool> = mock
+            .requests()
+            .iter()
+            .filter(|request| {
+                request.statement.starts_with("USE") || request.statement == "SELECT n"
+            })
+            .map(|request| request.statement.starts_with("USE"))
+            .collect();
+        assert_eq!(entered, [true, false, true, false, false]);
+    }
+
+    #[test]
+    fn the_table_a_bound_reads_name_is_resolved_in_the_database_it_was_put_back_in() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        numbers(&mock);
+        bound(&connection, "SELECT n FROM t").unwrap();
+        // Another tab's `USE` could land between the statement and the read
+        // that says where `t` was read from, on a session they share.
+        let order: Vec<&str> = mock
+            .requests()
+            .iter()
+            .filter_map(|request| match request.statement.as_str() {
+                statement if statement.starts_with("USE") => Some("USE"),
+                statement if statement.starts_with("SELECT currentDatabase") => Some("resolve"),
+                "SELECT n FROM t" => Some("statement"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(order, ["USE", "statement", "USE", "resolve"]);
+    }
+
+    #[test]
+    fn a_bound_run_that_cannot_put_its_database_back_says_nothing_was_sent() {
+        let mock = Mock::start();
+        let connection = open(&mock);
+        numbers(&mock);
+        bound(&connection, "SELECT n").unwrap();
+        mock.on_statement("USE `", [Response::text(502, "Bad Gateway")]);
+        let error = bound(&connection, "SELECT n").unwrap_err();
+        assert!(
+            error.message.starts_with("The statement was not sent"),
+            "{}",
+            error.message
+        );
+        assert_eq!(error.position, None);
+        assert_eq!(sent(&mock, "SELECT n").len(), 1);
     }
 
     #[test]
@@ -3890,6 +4010,44 @@ mod live {
             named(&profile).as_deref(),
             Some("dbdelve_dev"),
             "the profile's own connection is where it was"
+        );
+    }
+
+    /// A `USE` of a bound tab's lives on the `session_id` every tab bound to
+    /// the database shares, so the next bound statement must put it back;
+    /// dbdelve's own statements go out sessionless, naming the database.
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_a_bound_run_is_put_back_in_its_database_after_a_use() {
+        let session = crate::db::Connection::ClickHouse(
+            live()
+                .on_database("system")
+                .expect("a session on another database should open"),
+        );
+        let cancel = crate::db::CancelToken::alongside();
+        let sql = "SELECT currentDatabase()";
+        let bound = |sql: &str| {
+            let read = session
+                .query_bound(None, sql, &cancel, Fetch::default())
+                .unwrap_or_else(|error| panic!("{sql}: {}", error.message));
+            let row = read.rows.first()?;
+            row.iter().next().flatten().map(str::to_string)
+        };
+        assert_eq!(bound(sql).as_deref(), Some("system"));
+
+        bound("USE dbdelve_dev");
+        let edit = session
+            .generated_bound(None, sql, &cancel, None, None)
+            .expect("the read runs");
+        assert_eq!(
+            edit.rows[0].iter().next().flatten(),
+            Some("system"),
+            "dbdelve's own statements name the database and take no session"
+        );
+        assert_eq!(
+            bound(sql).as_deref(),
+            Some("system"),
+            "another tab's USE does not carry a later bound run to its database"
         );
     }
 

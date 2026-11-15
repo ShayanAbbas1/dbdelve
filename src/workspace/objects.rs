@@ -19,9 +19,15 @@ type DdlRead = (String, u64, gpui::Task<Result<String, DbError>>);
 
 /// What the `Show DDL` dialog calls the object it lists: its kind, then its
 /// qualified name.
-fn ddl_title(kind: ObjectKind, schema: &str, name: &str) -> String {
+/// An object's title in the Show DDL dialog, with its database when that is
+/// not the connection's own: the same `main.birds` can be in both.
+fn ddl_title(kind: ObjectKind, database: Option<&str>, schema: &str, name: &str) -> String {
     let kind = crate::palette::kind_label(kind);
-    format!("{}{} {schema}.{name}", kind[..1].to_uppercase(), &kind[1..])
+    let named = match database {
+        Some(database) => format!("{database}.{schema}.{name}"),
+        None => format!("{schema}.{name}"),
+    };
+    format!("{}{} {named}", kind[..1].to_uppercase(), &kind[1..])
 }
 
 impl Workspace {
@@ -1058,7 +1064,23 @@ impl Workspace {
                     NodeKind::Relation(kind) => ObjectKind::Relation(kind),
                     _ => ObjectKind::Sequence,
                 };
-                let mut title = ddl_title(kind, node.schema.as_deref().unwrap_or(""), &node.name);
+                // The connection's own database is the connection, as
+                // `elsewhere` says it; only another one is named.
+                let own = self
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.id == node.profile)
+                    .and_then(|profile| profile.active_database());
+                let database = node
+                    .database
+                    .as_deref()
+                    .filter(|database| own.as_deref() != Some(*database));
+                let mut title = ddl_title(
+                    kind,
+                    database,
+                    node.schema.as_deref().unwrap_or(""),
+                    &node.name,
+                );
                 // Two connections can hold the same `main.birds`.
                 if across && let Some(profile) = self.profiles.iter().find(|p| p.id == node.profile)
                 {
@@ -1154,8 +1176,9 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.clear_notice();
-        let title = ddl_title(kind, &schema, &relation);
         let shown = relation.clone();
+        let shown_database = self.elsewhere(database.clone());
+        let title = ddl_title(kind, shown_database.as_deref(), &schema, &relation);
         let Some((profile_id, generation, task)) =
             self.read_ddl(database, schema, relation, kind, cx)
         else {

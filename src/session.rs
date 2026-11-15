@@ -10,7 +10,7 @@
 //! changed but their visibility.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     ops::Range,
     path::PathBuf,
     rc::Rc,
@@ -97,6 +97,12 @@ pub(crate) struct Profile {
     /// for the connections tree to read its catalog over. Never the profile's
     /// own connection, and dropped with it.
     pub(crate) bound: HashMap<String, BoundSession>,
+    /// The databases whose session a statement of the user's has left a
+    /// transaction open on, read off what was sent as [`Profile::in_transaction`]
+    /// is, and gone with the session when it is lost or dropped. A session is
+    /// shared by every tab bound to its database, so a write of dbdelve's from
+    /// another tab would run inside it ([`Profile::bound_write_refusal`]).
+    pub(crate) bound_transactions: HashSet<String>,
     /// What each other database's catalog has got to, by name. A database
     /// with no entry has not been asked for.
     pub(crate) database_catalogs: HashMap<String, CatalogState>,
@@ -355,7 +361,31 @@ impl Profile {
     /// the last tab bound to it is gone and its row is folded.
     pub(crate) fn drop_sessions(&mut self) {
         self.bound.clear();
+        self.bound_transactions.clear();
         self.database_catalogs.clear();
+    }
+
+    /// Why an edit under `binding` is not sent: a transaction a tab's own
+    /// statement opened is still open on the session of its database, which
+    /// every tab bound to the database shares, and the edit would run inside
+    /// it and read back as applied while nothing has committed it.
+    pub(crate) fn bound_write_refusal(&self, binding: &Binding) -> Option<String> {
+        self.bound_transactions
+            .contains(&binding.database)
+            .then(|| {
+                format!(
+                    "Not sent: a transaction is open on the session of {}, and the change would run inside it.",
+                    binding.database
+                )
+            })
+    }
+
+    /// The connection a Cancel for `tab` is sent over: the session its
+    /// statement runs on, which for a bound tab is not the profile's own. What
+    /// MongoDB keeps of a running statement, and ClickHouse's fallback, is on
+    /// that session and nowhere else.
+    pub(crate) fn connection_to_stop(&self, tab: Tab) -> Option<Connection> {
+        self.connection_for(tab).existing().cloned()
     }
 
     /// Where a run of `tab` goes. See [`Profile::route`].
@@ -888,6 +918,16 @@ pub(crate) struct ImportDialog {
 }
 
 impl ImportDialog {
+    /// The table as the dialog names it: with its database when that is not
+    /// the connection's own, where `public.t` of two databases would read the
+    /// same.
+    pub(crate) fn target_name(&self) -> String {
+        match &self.database {
+            Some(database) => format!("{database}.{}.{}", self.schema, self.table),
+            None => format!("{}.{}", self.schema, self.table),
+        }
+    }
+
     /// Where the import runs: on the session of its table's database, when
     /// that is not the connection's own.
     pub(crate) fn binding(&self) -> Option<Binding> {

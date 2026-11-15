@@ -1270,7 +1270,12 @@ impl Workspace {
     /// For a tab on its way out: left running, its statement holds the
     /// connection while nothing is left to show it.
     pub(crate) fn stop_run(&mut self, tab: Tab, cx: &mut Context<Self>) {
-        let Some(connection) = self.profile().and_then(Profile::connection) else {
+        // The session the tab runs on, as `cancel_query` stops it: closing a
+        // bound tab stops its statement where it is running.
+        let Some(connection) = self
+            .profile()
+            .and_then(|profile| profile.connection_to_stop(tab))
+        else {
             return;
         };
         let Some(profile) = self.profile_mut() else {

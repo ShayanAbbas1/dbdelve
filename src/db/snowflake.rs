@@ -2849,6 +2849,46 @@ mod tests {
         );
     }
 
+    /// Nothing a statement does stays on the server between requests: the
+    /// database rides on every one, and what dbdelve wrote names its schema,
+    /// so it is sent none. A `USE` through a bound run cannot move the edit
+    /// applied from a bound tab's grid.
+    #[test]
+    fn a_bound_edit_names_its_sessions_database_whatever_a_use_ran_before_it() {
+        let mock = Mock::start();
+        let sql = "SELECT 1 AS one, NULL AS nothing, '' AS blank, DATE '2024-02-29' AS leap";
+        let usage = "USE DATABASE THIRD_DB";
+        mock.answer(sql, "query");
+        mock.answer(usage, "query");
+        let session = connected(&mock).on_database("OTHER_DB");
+        session.set_schema(Some("Archive"));
+        let session = crate::db::Connection::Snowflake(session);
+        let cancel = CancelToken::default();
+        session
+            .query_bound(Some("Sales EU"), usage, &cancel, Fetch::default())
+            .expect("runs");
+        session
+            .generated_bound(Some("Sales EU"), sql, &cancel, None, None)
+            .expect("runs");
+
+        let sent = mock
+            .requests()
+            .iter()
+            .filter(|request| request.body["statement"] == sql)
+            .map(|request| {
+                (
+                    request.body["database"].clone(),
+                    request.body["schema"].clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sent,
+            [(json!("OTHER_DB"), json!(null))],
+            "the session's database, and no schema of the session's or the tab's"
+        );
+    }
+
     #[test]
     fn a_statement_still_running_is_polled_until_it_finishes() {
         let mock = Mock::start();

@@ -3171,6 +3171,39 @@ mod tests {
         );
     }
 
+    /// The bound entry points of [`crate::db::Connection`] are what a bound
+    /// tab and an object tab of that database run through, so this drives them
+    /// rather than the driver: a `USE` through `query_bound` must not carry a
+    /// later `generated_bound` statement, which names its schema and no
+    /// database, to another database.
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_bound_session_is_put_back_by_the_server_after_a_use() {
+        let session = crate::db::Connection::SqlServer(
+            live()
+                .on_database("master")
+                .expect("a session on another database should open"),
+        );
+        let cancel = crate::db::CancelToken::alongside();
+        let named = |session: &crate::db::Connection| {
+            let read = session
+                .generated_bound(None, "SELECT DB_NAME()", &cancel, None, None)
+                .expect("the read runs");
+            first(&read).first().copied().flatten().map(str::to_string)
+        };
+        assert_eq!(named(&session).as_deref(), Some("master"));
+
+        let moved = session
+            .query_bound(None, "USE dbdelve_dev", &cancel, Fetch::default())
+            .expect_err("a statement that moves the session says it was moved back");
+        assert!(moved.message.contains("moved it back"), "{}", moved.message);
+        assert_eq!(
+            named(&session).as_deref(),
+            Some("master"),
+            "an edit applied from a bound tab's grid is not carried to the database a USE named"
+        );
+    }
+
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
     fn live_a_blank_database_holds_a_use_to_where_the_login_landed() {

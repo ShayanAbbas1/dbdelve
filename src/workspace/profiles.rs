@@ -16,7 +16,7 @@ use crate::sidebar::OPEN_ROWS_CAP;
 use crate::sql::{Destructive, Mode};
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 /// How long [`Workspace::remember_profiles_soon`] waits after the last change.
 const PROFILES_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
@@ -292,6 +292,7 @@ impl Workspace {
             schema_refresh: None,
             databases: Databases::default(),
             bound: HashMap::new(),
+            bound_transactions: HashSet::new(),
             database_catalogs: HashMap::new(),
             left_database: false,
             shortcuts: restored_shortcuts(&stored.folders, &stored.pins),
@@ -363,6 +364,7 @@ impl Workspace {
             schema_refresh: None,
             databases: Databases::default(),
             bound: HashMap::new(),
+            bound_transactions: HashSet::new(),
             database_catalogs: HashMap::new(),
             left_database: false,
             shortcuts: Shortcuts::default(),
@@ -1189,6 +1191,8 @@ impl Workspace {
                         return;
                     }
                 }
+                // The tree reads the same list for its database rows.
+                workspace.rebuild_connections(cx);
                 // Moved to another connection while the list was coming: the
                 // palette would open over that one's databases. And
                 // `open_palette` toggles, so one already up -- a second press,
@@ -2349,6 +2353,7 @@ impl Workspace {
                         // next expand opens another.
                         if lost {
                             profile.bound.remove(&database);
+                            profile.bound_transactions.remove(&database);
                         }
                         profile
                             .database_catalogs

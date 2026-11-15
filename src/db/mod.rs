@@ -1657,11 +1657,11 @@ impl Connection {
     /// schema. The statement itself is never touched; the binding is applied
     /// through the driver's own calls and no text of the user's carries it.
     ///
-    /// Postgres, DuckDB, MySQL, MariaDB and Redis apply it; Snowflake sends
-    /// the schema with the request; every other engine runs the statement as
-    /// [`Connection::query`] does, because a session of theirs that has been
-    /// moved moves itself back (SQL Server) or keeps no state a statement
-    /// leaves (ClickHouse, MongoDB).
+    /// Postgres, DuckDB, MySQL, MariaDB, Redis and ClickHouse apply it;
+    /// Snowflake sends the schema with the request. SQL Server and MongoDB run
+    /// the statement as [`Connection::query`] does: the first moves a session
+    /// a `USE` moved back before it returns (`held_to_database`), the second's
+    /// database is fixed for the session.
     ///
     /// `cancel` is made by [`CancelToken::alongside`]: a Cancel on it stops
     /// this session only while this statement is what it is running, and a
@@ -1691,6 +1691,7 @@ impl Connection {
                 Self::DuckDb(connection) => connection.query_bound(schema, sql, fetch),
                 Self::Redis(connection) => connection.query_bound(sql, fetch),
                 Self::Snowflake(connection) => connection.query_bound(schema, sql, cancel, fetch),
+                Self::ClickHouse(connection) => connection.query_bound(sql, cancel, fetch),
                 _ => self.query(sql, cancel, fetch),
             }
         })
@@ -1698,11 +1699,14 @@ impl Connection {
 
     /// [`Connection::generated`] for a tab bound to this session's database:
     /// where that is [`Connection::query`] (Postgres, MySQL, MariaDB and
-    /// DuckDB) it is [`Connection::query_bound`], Redis's is put back on its
-    /// database too, and every other engine's own statement already names
-    /// where it goes. An edit applied from a bound
-    /// tab's grid writes to the database the rows came from, whichever way the
-    /// session has been moved since.
+    /// DuckDB) it is [`Connection::query_bound`], and Redis's is put back on
+    /// its database too. For every other engine nothing needs putting back: a
+    /// ClickHouse statement of dbdelve's goes out without the session and
+    /// names the database, a Snowflake request carries its database and is
+    /// sent no schema, a MongoDB statement names the database it reads, and
+    /// SQL Server moves a session a `USE` moved back before any run returns.
+    /// An edit applied from a bound tab's grid writes to the database the rows
+    /// came from, whichever way the session has been moved since.
     pub fn generated_bound(
         &self,
         schema: Option<&str>,
@@ -1722,14 +1726,19 @@ impl Connection {
                     ..Fetch::default()
                 },
             ),
-            Self::Redis(connection) => connection.generated_bound(
-                sql,
-                Fetch {
-                    feed,
-                    limit,
-                    ..Fetch::default()
-                },
-            ),
+            // Registered in the token as `query_bound` does, or a Cancel on a
+            // bound run finds nothing to stop.
+            Self::Redis(connection) => running_on(cancel, self, |held| {
+                connection.generated_bound(
+                    sql,
+                    Fetch {
+                        feed,
+                        limit,
+                        held: Some(held),
+                        ..Fetch::default()
+                    },
+                )
+            }),
             _ => self.generated(sql, cancel, feed, limit),
         }
     }

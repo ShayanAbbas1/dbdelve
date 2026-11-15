@@ -396,8 +396,8 @@ impl Workspace {
                 .flex_1()
                 .text_color(t.text_muted)
                 .child(format!(
-                    "Reading the columns of `{}.{}`…",
-                    dialog.schema, dialog.table
+                    "Reading the columns of `{}`…",
+                    dialog.target_name()
                 ))
                 .into_any_element(),
             None => div().flex_1().into_any_element(),
@@ -1359,7 +1359,7 @@ fn import_header(dialog: &ImportDialog, cx: &mut Context<Workspace>) -> impl Int
                 .text_ellipsis()
                 .whitespace_nowrap()
                 .text_color(t.text_muted)
-                .child(format!("{}.{}", dialog.schema, dialog.table)),
+                .child(dialog.target_name()),
         )
         .children(rows.map(|rows| div().flex_shrink_0().child(rows)))
 }
