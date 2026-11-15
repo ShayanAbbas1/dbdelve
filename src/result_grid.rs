@@ -1574,16 +1574,19 @@ impl ResultGrid {
         self.refit_from_the_top();
     }
 
-    /// Whether a column holds bytes, by its type or, where each cell has a
-    /// type of its own, by any of its cells': what offers to parse them.
+    /// Whether a column holds bytes: what offers to parse them. A binary type
+    /// is not enough, since the name is matched loosely (ClickHouse's
+    /// `Tuple(blob String)`), so one of its cells must also read back as
+    /// bytes. Asked only as a menu opens, so the walk down the rows is paid
+    /// once per right click.
     pub fn holds_bytes(&self, col: usize) -> bool {
-        let binary = |data_type: &str| self.engine.is_binary_type(data_type);
-        self.column_type(col).is_some_and(binary)
-            || self
-                .result
-                .cell_types
-                .iter()
-                .any(|types| types.get(col).is_some_and(|data_type| binary(data_type)))
+        (0..self.result.rows.len()).any(|row| {
+            self.cell_type(row, col)
+                .is_some_and(|data_type| self.engine.is_binary_type(data_type))
+                && self
+                    .cell(row, col)
+                    .is_some_and(|value| self.engine.bytes_of(value, 1).is_some())
+        })
     }
 
     /// Whether the row has no such field at all: a document store's absent
@@ -4805,6 +4808,16 @@ mod tests {
         )
         .with_engine(db::Engine::Postgres);
         assert!(grid.holds_bytes(1) && !grid.holds_bytes(0));
+        let tuple = ResultGrid::new(
+            QueryResult {
+                columns: vec![typed("pair", "Tuple(blob String)")],
+                rows: rows(vec![vec![Some("('a')".into())], vec![None]]),
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        )
+        .with_engine(db::Engine::ClickHouse);
+        assert!(!tuple.holds_bytes(0), "a binary name over no bytes");
         assert_eq!(grid.binary_form(1), Some(BinaryForm::Hex));
 
         grid.set_binary_form(1, BinaryForm::Text);
