@@ -23,6 +23,7 @@ mod result_grid;
 mod scroller;
 mod session;
 mod settings_panel;
+mod sidebar;
 mod sql;
 #[cfg(test)]
 mod sql_snapshots;

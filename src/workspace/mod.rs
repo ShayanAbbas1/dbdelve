@@ -22,6 +22,7 @@ mod objects;
 mod profiles;
 mod projects;
 mod queries;
+mod sidebar;
 mod tabs;
 mod welcome;
 
@@ -39,6 +40,7 @@ pub(crate) use queries::error_in_buffer;
 use crate::connection_form::{Origin, passphrase_to_persist, password_to_persist};
 use crate::session::{catalog_relation, write_buffer, write_grids};
 use crate::settings_panel::{SettingMatch, SettingsTab, filter_settings, render_settings_panel};
+use crate::sidebar::ViewMode;
 use crate::sql::{Mode, appended_statement, remember_statement, update_batch};
 use crate::theme::{install_fonts, install_theme, restored_fonts, restored_theme};
 use crate::*;
@@ -91,6 +93,9 @@ pub(crate) struct Settings {
     /// Keybinding overrides, keyed by action id. Applied to the keymap on
     /// the next launch -- see `src/keybindings.rs`.
     pub(crate) custom_keybindings: HashMap<String, String>,
+    /// Which sidebar is drawn: the tree of the connection in front, or every
+    /// connection under its project.
+    pub(crate) view_mode: ViewMode,
 }
 
 impl Settings {
@@ -128,6 +133,7 @@ impl Default for Settings {
             verbose_logging: false,
             welcomed: false,
             custom_keybindings: HashMap::new(),
+            view_mode: ViewMode::default(),
         }
     }
 }
@@ -371,6 +377,8 @@ pub(crate) struct Workspace {
     /// Around the sidebar's tree, whose own handle the library keeps to
     /// itself: what tells an `escape` in the tree from one anywhere else.
     pub(crate) explorer_focus: FocusHandle,
+    /// Complex mode's tree: every connection under its project.
+    pub(crate) connections: sidebar::ConnectionsSidebar,
     /// The dialogs' own, so `enter` answers the one in front instead of
     /// editing the buffer or the grid it covers.
     pub(crate) dialog_focus: FocusHandle,
@@ -535,6 +543,7 @@ impl Workspace {
             opacity_input,
             focus: cx.focus_handle(),
             explorer_focus: cx.focus_handle(),
+            connections: sidebar::ConnectionsSidebar::new(cx),
             dialog_focus: cx.focus_handle(),
             dialog_in_front: std::cell::Cell::default(),
             dialog_choice: std::cell::Cell::default(),
@@ -634,6 +643,8 @@ impl Workspace {
                     .custom_keybindings
                     .clone()
                     .unwrap_or_default();
+                workspace.settings.view_mode =
+                    ViewMode::from_slug(stored_settings.view_mode.as_deref());
                 // Ahead of the restore, which must not prune grids an
                 // unavailable profile under the same id still owns.
                 workspace.unavailable = unavailable;
@@ -698,6 +709,10 @@ impl Workspace {
                 workspace.form = Some(form);
             }
         }
+
+        // A connection nothing connects at launch gets no other rebuild, and
+        // the tree would sit empty over profiles that are all there.
+        workspace.rebuild_connections(cx);
 
         // After the environment's form, which takes the notice over the
         // welcome surface when there is one.
@@ -2326,12 +2341,16 @@ impl Render for Workspace {
                                 .size_full()
                                 .flex()
                                 .flex_col()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_h_0()
-                                        .child(self.render_explorer(profile, cx)),
-                                )
+                                .child(div().flex_1().min_h_0().child(
+                                    match self.settings.view_mode {
+                                        ViewMode::Complex => {
+                                            self.render_connections(cx).into_any_element()
+                                        }
+                                        ViewMode::Simple => {
+                                            self.render_explorer(profile, cx).into_any_element()
+                                        }
+                                    },
+                                ))
                                 .child(
                                     div()
                                         .h(px(layout::chrome(layout::STATUS_HEIGHT)))
