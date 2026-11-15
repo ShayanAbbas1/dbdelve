@@ -136,7 +136,7 @@ source: src/sql_snapshots.rs
 
 [postgres] adjacent strings
   |UPDATE "public"."accounts" SET "Name" = 'a' 'b' WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(RunOnce),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [postgres] escaped quote
   |UPDATE "public"."accounts" SET "Name" = 'a\\'b' WHERE "id" = '7'|
@@ -148,23 +148,23 @@ source: src/sql_snapshots.rs
 
 [postgres] dollar quote
   |UPDATE "public"."accounts" SET "Name" = $$x$$ WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [postgres] concatenation
   |UPDATE "public"."accounts" SET "Name" = 'a' || 'b' WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [postgres] function
   |UPDATE "public"."accounts" SET "Name" = now() WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [postgres] subquery
   |UPDATE "public"."accounts" SET "Name" = (SELECT 1) WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [postgres] arithmetic
   |UPDATE "public"."accounts" SET "Name" = 1 + 1 WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [postgres] control character
   |UPDATE "public"."accounts" SET "Name" = 'a\u{0}b' WHERE "id" = '7'|
@@ -424,7 +424,7 @@ source: src/sql_snapshots.rs
 
 [mysql] adjacent strings
   |UPDATE `public`.`accounts` SET `Name` = 'a' 'b' WHERE `id` = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [mysql] escaped quote
   |UPDATE `public`.`accounts` SET `Name` = 'a\\'b' WHERE `id` = '7'|
@@ -436,23 +436,23 @@ source: src/sql_snapshots.rs
 
 [mysql] dollar quote
   |UPDATE `public`.`accounts` SET `Name` = $$x$$ WHERE `id` = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [mysql] concatenation
   |UPDATE `public`.`accounts` SET `Name` = 'a' || 'b' WHERE `id` = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [mysql] function
   |UPDATE `public`.`accounts` SET `Name` = now() WHERE `id` = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [mysql] subquery
   |UPDATE `public`.`accounts` SET `Name` = (SELECT 1) WHERE `id` = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [mysql] arithmetic
   |UPDATE `public`.`accounts` SET `Name` = 1 + 1 WHERE `id` = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [mysql] control character
   |UPDATE `public`.`accounts` SET `Name` = 'a\u{0}b' WHERE `id` = '7'|
@@ -712,7 +712,7 @@ source: src/sql_snapshots.rs
 
 [mariadb] adjacent strings
   |UPDATE `public`.`accounts` SET `Name` = 'a' 'b' WHERE `id` = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [mariadb] escaped quote
   |UPDATE `public`.`accounts` SET `Name` = 'a\\'b' WHERE `id` = '7'|
@@ -724,23 +724,23 @@ source: src/sql_snapshots.rs
 
 [mariadb] dollar quote
   |UPDATE `public`.`accounts` SET `Name` = $$x$$ WHERE `id` = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [mariadb] concatenation
   |UPDATE `public`.`accounts` SET `Name` = 'a' || 'b' WHERE `id` = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [mariadb] function
   |UPDATE `public`.`accounts` SET `Name` = now() WHERE `id` = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [mariadb] subquery
   |UPDATE `public`.`accounts` SET `Name` = (SELECT 1) WHERE `id` = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [mariadb] arithmetic
   |UPDATE `public`.`accounts` SET `Name` = 1 + 1 WHERE `id` = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [mariadb] control character
   |UPDATE `public`.`accounts` SET `Name` = 'a\u{0}b' WHERE `id` = '7'|
@@ -1000,7 +1000,7 @@ source: src/sql_snapshots.rs
 
 [sqlite] adjacent strings
   |UPDATE "public"."accounts" SET "Name" = 'a' 'b' WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [sqlite] escaped quote
   |UPDATE "public"."accounts" SET "Name" = 'a\\'b' WHERE "id" = '7'|
@@ -1012,23 +1012,23 @@ source: src/sql_snapshots.rs
 
 [sqlite] dollar quote
   |UPDATE "public"."accounts" SET "Name" = $$x$$ WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [sqlite] concatenation
   |UPDATE "public"."accounts" SET "Name" = 'a' || 'b' WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [sqlite] function
   |UPDATE "public"."accounts" SET "Name" = now() WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [sqlite] subquery
   |UPDATE "public"."accounts" SET "Name" = (SELECT 1) WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [sqlite] arithmetic
   |UPDATE "public"."accounts" SET "Name" = 1 + 1 WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [sqlite] control character
   |UPDATE "public"."accounts" SET "Name" = 'a\u{0}b' WHERE "id" = '7'|
@@ -1288,7 +1288,7 @@ source: src/sql_snapshots.rs
 
 [turso] adjacent strings
   |UPDATE "public"."accounts" SET "Name" = 'a' 'b' WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [turso] escaped quote
   |UPDATE "public"."accounts" SET "Name" = 'a\\'b' WHERE "id" = '7'|
@@ -1300,23 +1300,23 @@ source: src/sql_snapshots.rs
 
 [turso] dollar quote
   |UPDATE "public"."accounts" SET "Name" = $$x$$ WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [turso] concatenation
   |UPDATE "public"."accounts" SET "Name" = 'a' || 'b' WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [turso] function
   |UPDATE "public"."accounts" SET "Name" = now() WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [turso] subquery
   |UPDATE "public"."accounts" SET "Name" = (SELECT 1) WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [turso] arithmetic
   |UPDATE "public"."accounts" SET "Name" = 1 + 1 WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [turso] control character
   |UPDATE "public"."accounts" SET "Name" = 'a\u{0}b' WHERE "id" = '7'|
@@ -1576,7 +1576,7 @@ source: src/sql_snapshots.rs
 
 [duckdb] adjacent strings
   |UPDATE "public"."accounts" SET "Name" = 'a' 'b' WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [duckdb] escaped quote
   |UPDATE "public"."accounts" SET "Name" = 'a\\'b' WHERE "id" = '7'|
@@ -1588,23 +1588,23 @@ source: src/sql_snapshots.rs
 
 [duckdb] dollar quote
   |UPDATE "public"."accounts" SET "Name" = $$x$$ WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [duckdb] concatenation
   |UPDATE "public"."accounts" SET "Name" = 'a' || 'b' WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [duckdb] function
   |UPDATE "public"."accounts" SET "Name" = now() WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [duckdb] subquery
   |UPDATE "public"."accounts" SET "Name" = (SELECT 1) WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [duckdb] arithmetic
   |UPDATE "public"."accounts" SET "Name" = 1 + 1 WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [duckdb] control character
   |UPDATE "public"."accounts" SET "Name" = 'a\u{0}b' WHERE "id" = '7'|
@@ -1864,7 +1864,7 @@ source: src/sql_snapshots.rs
 
 [snowflake] adjacent strings
   |UPDATE "public"."accounts" SET "Name" = 'a' 'b' WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [snowflake] escaped quote
   |UPDATE "public"."accounts" SET "Name" = 'a\\'b' WHERE "id" = '7'|
@@ -1876,23 +1876,23 @@ source: src/sql_snapshots.rs
 
 [snowflake] dollar quote
   |UPDATE "public"."accounts" SET "Name" = $$x$$ WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [snowflake] concatenation
   |UPDATE "public"."accounts" SET "Name" = 'a' || 'b' WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [snowflake] function
   |UPDATE "public"."accounts" SET "Name" = now() WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [snowflake] subquery
   |UPDATE "public"."accounts" SET "Name" = (SELECT 1) WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [snowflake] arithmetic
   |UPDATE "public"."accounts" SET "Name" = 1 + 1 WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [snowflake] control character
   |UPDATE "public"."accounts" SET "Name" = 'a\u{0}b' WHERE "id" = '7'|
@@ -2440,7 +2440,7 @@ source: src/sql_snapshots.rs
 
 [mssql] adjacent strings
   |UPDATE "public"."accounts" SET "Name" = 'a' 'b' WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [mssql] escaped quote
   |UPDATE "public"."accounts" SET "Name" = 'a\\'b' WHERE "id" = '7'|
@@ -2452,23 +2452,23 @@ source: src/sql_snapshots.rs
 
 [mssql] dollar quote
   |UPDATE "public"."accounts" SET "Name" = $$x$$ WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [mssql] concatenation
   |UPDATE "public"."accounts" SET "Name" = 'a' || 'b' WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [mssql] function
   |UPDATE "public"."accounts" SET "Name" = now() WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [mssql] subquery
   |UPDATE "public"."accounts" SET "Name" = (SELECT 1) WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [mssql] arithmetic
   |UPDATE "public"."accounts" SET "Name" = 1 + 1 WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [mssql] control character
   |UPDATE "public"."accounts" SET "Name" = 'a\u{0}b' WHERE "id" = '7'|
@@ -2728,7 +2728,7 @@ source: src/sql_snapshots.rs
 
 [generic] adjacent strings
   |UPDATE "public"."accounts" SET "Name" = 'a' 'b' WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [generic] escaped quote
   |UPDATE "public"."accounts" SET "Name" = 'a\\'b' WHERE "id" = '7'|
@@ -2740,23 +2740,23 @@ source: src/sql_snapshots.rs
 
 [generic] dollar quote
   |UPDATE "public"."accounts" SET "Name" = $$x$$ WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [generic] concatenation
   |UPDATE "public"."accounts" SET "Name" = 'a' || 'b' WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [generic] function
   |UPDATE "public"."accounts" SET "Name" = now() WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [generic] subquery
   |UPDATE "public"."accounts" SET "Name" = (SELECT 1) WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [generic] arithmetic
   |UPDATE "public"."accounts" SET "Name" = 1 + 1 WHERE "id" = '7'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [generic] control character
   |UPDATE "public"."accounts" SET "Name" = 'a\u{0}b' WHERE "id" = '7'|

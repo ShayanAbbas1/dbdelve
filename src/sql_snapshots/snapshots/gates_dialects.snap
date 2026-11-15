@@ -231,7 +231,7 @@ source: src/sql_snapshots.rs
 
 [postgres] "UPDATE t SET a = 1 WHERE b = 'x\\'"
   |UPDATE t SET a = 1 WHERE b = 'x\\'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [postgres] "DELETE FROM t WHERE a = 'x\\'"
   |DELETE FROM t WHERE a = 'x\\'|
@@ -972,7 +972,7 @@ source: src/sql_snapshots.rs
 
 [sqlite] "UPDATE t SET a = 1 WHERE b = 'x\\'"
   |UPDATE t SET a = 1 WHERE b = 'x\\'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [sqlite] "DELETE FROM t WHERE a = 'x\\'"
   |DELETE FROM t WHERE a = 'x\\'|
@@ -1219,7 +1219,7 @@ source: src/sql_snapshots.rs
 
 [turso] "UPDATE t SET a = 1 WHERE b = 'x\\'"
   |UPDATE t SET a = 1 WHERE b = 'x\\'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [turso] "DELETE FROM t WHERE a = 'x\\'"
   |DELETE FROM t WHERE a = 'x\\'|
@@ -1466,7 +1466,7 @@ source: src/sql_snapshots.rs
 
 [duckdb] "UPDATE t SET a = 1 WHERE b = 'x\\'"
   |UPDATE t SET a = 1 WHERE b = 'x\\'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [duckdb] "DELETE FROM t WHERE a = 'x\\'"
   |DELETE FROM t WHERE a = 'x\\'|
@@ -2207,7 +2207,7 @@ source: src/sql_snapshots.rs
 
 [mssql] "UPDATE t SET a = 1 WHERE b = 'x\\'"
   |UPDATE t SET a = 1 WHERE b = 'x\\'|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [mssql] "DELETE FROM t WHERE a = 'x\\'"
   |DELETE FROM t WHERE a = 'x\\'|
@@ -2454,7 +2454,7 @@ source: src/sql_snapshots.rs
 
 [generic] "UPDATE t SET a = 1 WHERE b = 'x\\'"
   |UPDATE t SET a = 1 WHERE b = 'x\\'|
-  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [generic] "DELETE FROM t WHERE a = 'x\\'"
   |DELETE FROM t WHERE a = 'x\\'|

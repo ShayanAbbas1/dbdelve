@@ -340,6 +340,19 @@ pub enum NulText {
     AddedNchar,
 }
 
+/// How a value of bytes is written into a statement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BinaryLiteral {
+    /// `E'\\x6869'`. An escape string reads the same whatever
+    /// `standard_conforming_strings` says, where a plain `'\x6869'` with it
+    /// off reads `\x68` as `h` and stores the bytes of `h69`.
+    EscapeString,
+    /// `X'6869'`, empty as `X''`.
+    XQuoted,
+    /// `0x6869`. Empty, it is `0x`, which the gate's grammar cannot read.
+    ZeroX,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct SqlSpec {
     pub identifier_quote: IdentifierQuote,
@@ -412,6 +425,8 @@ pub struct SqlSpec {
     /// Whether the write gate reads the terms a row named by every value
     /// carries: `toString(c) = '…'` and `c IS NULL`.
     pub row_terms: bool,
+    /// How a grid edit writes bytes, `None` where it writes none.
+    pub binary_literal: Option<BinaryLiteral>,
     /// What completion offers beside the catalog: the functions and value
     /// expressions the dialect has built in.
     pub builtins: &'static [Builtin],
@@ -455,6 +470,7 @@ impl SqlSpec {
         stateless_requests: false,
         transactions: true,
         row_terms: false,
+        binary_literal: None,
         builtins: &[],
     };
 
@@ -839,6 +855,7 @@ pub(crate) const POSTGRES: EngineSpec = EngineSpec {
         regex: RegexMatch::Tilde,
         read_only_session: ReadOnlySession::DefaultTransaction,
         builtins: builtins::postgres::BUILTINS,
+        binary_literal: Some(BinaryLiteral::EscapeString),
         ..SqlSpec::ANSI
     },
     abilities: Abilities {
@@ -899,6 +916,7 @@ pub(crate) const MYSQL: EngineSpec = EngineSpec {
         regex: RegexMatch::RegexpLike,
         read_only_session: ReadOnlySession::SessionTransaction,
         builtins: builtins::mysql::BUILTINS,
+        binary_literal: Some(BinaryLiteral::XQuoted),
         ..SqlSpec::ANSI
     },
     abilities: Abilities {
@@ -962,6 +980,7 @@ pub(crate) const MARIADB: EngineSpec = EngineSpec {
         regex: RegexMatch::RegexpInstr,
         read_only_session: ReadOnlySession::SessionTransaction,
         builtins: builtins::mysql::BUILTINS,
+        binary_literal: Some(BinaryLiteral::XQuoted),
         ..SqlSpec::ANSI
     },
     abilities: Abilities {
@@ -1027,6 +1046,7 @@ pub(crate) const SQLITE: EngineSpec = EngineSpec {
         substring: SubstringMatch::Instr,
         generated_defaults: SQLITE_GENERATED,
         builtins: builtins::sqlite::BUILTINS,
+        binary_literal: Some(BinaryLiteral::XQuoted),
         ..SqlSpec::ANSI
     },
     abilities: Abilities {
@@ -1074,6 +1094,7 @@ pub(crate) const TURSO: EngineSpec = EngineSpec {
         substring: SubstringMatch::Instr,
         generated_defaults: SQLITE_GENERATED,
         builtins: builtins::sqlite::BUILTINS,
+        binary_literal: Some(BinaryLiteral::XQuoted),
         ..SqlSpec::ANSI
     },
     abilities: Abilities {
@@ -1271,6 +1292,7 @@ pub(crate) const SQL_SERVER: EngineSpec = EngineSpec {
         // `ApplicationIntent=ReadOnly` routes a login to a readable replica
         // and is ignored by a primary.
         builtins: builtins::sqlserver::BUILTINS,
+        binary_literal: Some(BinaryLiteral::ZeroX),
         ..SqlSpec::ANSI
     },
     abilities: Abilities {

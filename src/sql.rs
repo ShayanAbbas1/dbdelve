@@ -35,8 +35,8 @@ use sqlparser::tokenizer::{Location, Token, Tokenizer, Whitespace};
 use tree_sitter::{Node, Parser, Tree};
 
 use crate::db::{
-    ColumnDefinition, Engine, EngineSpec, ExplainMode, ExplainPrefix, FormatDialect, Paging,
-    Params, ParserDialect, SkipDuplicates, SqlSpec, StatementSplit, Syntax, TypedExplain,
+    BinaryLiteral, ColumnDefinition, Engine, EngineSpec, ExplainMode, ExplainPrefix, FormatDialect,
+    Paging, Params, ParserDialect, SkipDuplicates, SqlSpec, StatementSplit, Syntax, TypedExplain,
     UnreadableFloor, UpdateSpelling,
 };
 use crate::import_rows::Value;
@@ -859,10 +859,10 @@ pub(crate) fn generated_write(spec: &SqlSpec, sql: &str) -> bool {
     // exactly-one guard can count, so each update must be that shape too.
     let updates = !kinds.is_empty()
         && kinds.iter().all(|kind| *kind == "update")
-        && (!spec.row_terms
-            || statements
-                .iter()
-                .all(|statement| one_row_update(spec, *statement, sql).is_some()));
+        && statements.iter().all(|statement| match spec.row_terms {
+            true => one_row_update(spec, *statement, sql).is_some(),
+            false => literal_sets(spec, *statement, sql),
+        });
 
     // One insert alone, or a batch of updates. A batch of inserts is a shape
     // nothing generates, so admitting it would widen the gate for nobody.
@@ -1598,6 +1598,62 @@ fn literal_value(node: Node, sql: &str) -> bool {
         !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_hexdigit())
     });
     node.kind() == "literal" && (quoted || hex)
+}
+
+/// Whether every value an `UPDATE` sets is one dbdelve writes: a literal
+/// [`literal_value`] reads, `NULL`, `DEFAULT`, or the engine's own literal of
+/// bytes. A function call, a concatenation, a subquery or another column is a
+/// value dbdelve did not write. The predicate is not read here.
+fn literal_sets(spec: &SqlSpec, statement: Node, sql: &str) -> bool {
+    let Some(update) = statement.named_child(0) else {
+        return false;
+    };
+    let mut cursor = update.walk();
+    let assignments: Vec<_> = update
+        .named_children(&mut cursor)
+        .filter(|node| node.kind() == "assignment")
+        .collect();
+    !assignments.is_empty()
+        && assignments.iter().all(|assignment| {
+            assignment
+                .child_by_field_name("right")
+                .is_some_and(|value| {
+                    literal_value(value, sql)
+                        || null_literal(value, sql)
+                        || default_keyword(value, sql)
+                        || bytes_literal(spec, value, sql)
+                })
+        })
+}
+
+/// `DEFAULT`, which this grammar reads as a column of that name.
+fn default_keyword(node: Node, sql: &str) -> bool {
+    node.kind() == "field" && sql.get(node.byte_range()) == Some("DEFAULT")
+}
+
+/// The engine's literal of bytes ([`BinaryLiteral`]), as a set value only,
+/// so never a deleted row's key or an inserted value. Hex digits in pairs between the quotes and
+/// nothing else, so nothing in it can end it early, and in an escape string
+/// no backslash but the one that opens `\x`. The grammar reads `X'00' 'aa'`
+/// as one literal, which is why the text and not the node is checked.
+fn bytes_literal(spec: &SqlSpec, node: Node, sql: &str) -> bool {
+    let Some(text) = sql
+        .get(node.byte_range())
+        .filter(|_| node.kind() == "literal")
+    else {
+        return false;
+    };
+    let digits = match spec.binary_literal {
+        Some(BinaryLiteral::EscapeString) => text.strip_prefix(r"E'\\x"),
+        Some(BinaryLiteral::XQuoted) => text.strip_prefix("X'"),
+        // Read by `literal_value`, which admits it as a binary key too.
+        Some(BinaryLiteral::ZeroX) | None => None,
+    };
+    digits
+        .and_then(|rest| rest.strip_suffix('\''))
+        .is_some_and(|digits| {
+            digits.len() % 2 == 0 && digits.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
 }
 
 fn commented(node: Node) -> bool {
@@ -6857,6 +6913,88 @@ mod tests {
         assert!(odd.ends_with(r#""hash" = N'0x1 OR 1=1'"#), "{odd}");
         assert!(!is_generated_write(r#"DELETE FROM t WHERE "id" = 7"#));
         assert!(!is_generated_write(r#"DELETE FROM t WHERE "id" = 0x"#));
+    }
+
+    #[test]
+    fn an_update_sets_only_values_dbdelve_writes_and_bytes_in_the_engines_own_literal() {
+        let update = |value: &str| format!(r#"UPDATE "s"."t" SET "b" = {value} WHERE "id" = '7'"#);
+        let bytes = [
+            (Engine::Postgres, r"E'\\x6869'", r"E'\\x'"),
+            (Engine::MySql, "X'6869'", "X''"),
+            (Engine::MariaDb, "X'6869'", "X''"),
+            (Engine::Sqlite, "X'6869'", "X''"),
+            (Engine::Turso, "X'6869'", "X''"),
+            (Engine::SqlServer, "0x6869", "0x00"),
+        ];
+        for (engine, hi, short) in bytes {
+            for value in [hi, short, "'x'", "NULL", "DEFAULT"] {
+                assert!(
+                    is_generated_write_on(engine, &update(value)),
+                    "{engine:?} {value}"
+                );
+            }
+            let set = format!(r#"UPDATE "s"."t" SET "a" = 'x', "b" = {hi} WHERE "id" = '7'"#);
+            assert!(is_generated_write_on(engine, &set), "{engine:?} {set}");
+            // A value that computes, whatever it computes from.
+            for value in [
+                "now()",
+                "'a' || 'b'",
+                "(SELECT 1)",
+                "1 + 1",
+                "1",
+                "'a' 'b'",
+                "$$x$$",
+                r#""a""#,
+                "default",
+                &format!("{hi} || {hi}"),
+                &format!("({hi})"),
+                &format!("{hi}::bytea"),
+                &format!("{hi} 'aa'"),
+                &format!("upper({hi})"),
+                &format!("(SELECT {hi})"),
+            ] {
+                assert!(
+                    !is_generated_write_on(engine, &update(value)),
+                    "{engine:?} {value}"
+                );
+            }
+            // A value set, never a deleted row's key nor an inserted value.
+            if engine != Engine::SqlServer {
+                for sql in [
+                    format!(r#"DELETE FROM "s"."t" WHERE "id" = {hi}"#),
+                    format!(r#"INSERT INTO "s"."t" ("b") VALUES ({hi})"#),
+                ] {
+                    assert!(!is_generated_write_on(engine, &sql), "{engine:?} {sql}");
+                }
+            }
+        }
+        // Each engine's own spelling, and nothing that only looks like one.
+        for (engine, value) in [
+            (Engine::Postgres, "X'6869'"),
+            (Engine::Postgres, r"E'\x6869'"),
+            (Engine::Postgres, r"e'\\x6869'"),
+            (Engine::Postgres, r"E'\\x686'"),
+            (Engine::Postgres, r"E'\\x68\\'"),
+            (Engine::Postgres, r"E'\\x68' || '\\'"),
+            (Engine::Postgres, r"E'\\x6869''; DROP TABLE t; --'"),
+            (Engine::MySql, r"E'\\x6869'"),
+            (Engine::MySql, "x'6869'"),
+            (Engine::MySql, "X'686'"),
+            (Engine::MySql, "X'68 69'"),
+            (Engine::MySql, "X'6G'"),
+            (Engine::Sqlite, "X'6869' 'aa'"),
+            (Engine::SqlServer, "X'6869'"),
+            (Engine::SqlServer, "0x"),
+            (Engine::DuckDb, "X'6869'"),
+            (Engine::DuckDb, r"E'\\x6869'"),
+            (Engine::Snowflake, "X'6869'"),
+            (Engine::Generic, r"E'\\x6869'"),
+        ] {
+            assert!(
+                !is_generated_write_on(engine, &update(value)),
+                "{engine:?} {value}"
+            );
+        }
     }
 
     #[test]
