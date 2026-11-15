@@ -39,6 +39,7 @@ pub const GRID_ROW_CAP: usize = 5_000;
 /// every scalar has to precede `ssh` and the `open_queries` and `open_objects`
 /// arrays.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(remote = "Self")]
 pub struct StoredProfile {
     pub id: String,
     pub name: String,
@@ -54,11 +55,10 @@ pub struct StoredProfile {
     pub sslmode: Option<String>,
     #[serde(default)]
     pub root_certificate: Option<String>,
-    /// `db::Engine::as_str()`. Absent is a profile written before a second
-    /// engine existed, and reads back as Postgres -- which is what it was
-    /// connecting as.
-    #[serde(default)]
-    pub engine: Option<String>,
+    /// The engine's slug in memory; SSM adds a non-string guard on disk.
+    /// Absent predates a second engine and still means Postgres.
+    #[serde(default, getter = "StoredProfile::persisted_engine")]
+    pub engine: Option<StoredEngine>,
     /// The built-in dialect a profile on a plugin speaks (`Engine::as_str()`),
     /// and its connection string as typed: a DSN or `key=value;` pairs. Both
     /// absent for every built-in engine.
@@ -157,6 +157,8 @@ pub struct StoredProfile {
     /// it: the key's passphrase is skipped here and kept in the Keychain.
     #[serde(default)]
     pub ssh: Option<SshTunnel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssm: Option<crate::db::SsmTunnel>,
     /// The query buffers this profile had open, in strip order.
     #[serde(default)]
     pub open_queries: Vec<StoredQueryTab>,
@@ -182,6 +184,82 @@ pub struct StoredProfile {
     /// opens as `explorer::root_folds` says.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub folds: BTreeMap<String, bool>,
+}
+
+/// Older readers ignore unknown fields, including `ssm`, but their engine
+/// field is a string. A table makes them hold this profile back (or refuse
+/// the file), even on their plain-reader fallback, before any connection.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum StoredEngine {
+    Plain(String),
+    Ssm { ssm: SsmEngine },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SsmEngine {
+    engine: Option<String>,
+}
+
+impl std::ops::Deref for StoredEngine {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        match self {
+            Self::Plain(engine) => engine,
+            Self::Ssm { ssm } => ssm.engine.as_deref().unwrap_or("postgres"),
+        }
+    }
+}
+
+impl From<String> for StoredEngine {
+    fn from(engine: String) -> Self {
+        Self::Plain(engine)
+    }
+}
+
+impl From<&str> for StoredEngine {
+    fn from(engine: &str) -> Self {
+        Self::Plain(engine.to_owned())
+    }
+}
+
+impl StoredProfile {
+    fn persisted_engine(&self) -> Option<StoredEngine> {
+        if self.ssm.is_some() {
+            Some(StoredEngine::Ssm {
+                ssm: SsmEngine {
+                    engine: self.engine.as_deref().map(str::to_owned),
+                },
+            })
+        } else {
+            self.engine.clone()
+        }
+    }
+}
+
+// The remote derive keeps the field schema in one place. Every serializer,
+// including unavailable-profile retention, must write the downgrade guard.
+impl Serialize for StoredProfile {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        Self::serialize(self, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for StoredProfile {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut profile = Self::deserialize(deserializer)?;
+        if let Some(StoredEngine::Ssm { ssm }) = &profile.engine {
+            if profile.ssm.is_none() {
+                return Err(serde::de::Error::custom(
+                    "SSM engine requires an SSM tunnel",
+                ));
+            }
+            profile.engine = ssm.engine.clone().map(StoredEngine::Plain);
+        }
+        Ok(profile)
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -578,12 +656,14 @@ pub struct ProfileList {
 /// build, or for a plugin that is not installed. It is never decoded into a
 /// [`StoredProfile`], since the keys it needs may be ones this build has
 /// never heard of; only what the palette shows is read out of its table, and
-/// the table is written back as it was read (its keys sorted).
+/// the table is written back with its keys sorted. The only migration here
+/// is the downgrade guard for an earlier development build's SSM profile.
 #[derive(Clone, Debug, PartialEq)]
 pub struct UnavailableProfile {
     pub id: String,
     pub name: String,
-    /// The tag as written, or a tag that is not a string as TOML writes it.
+    /// The underlying engine for a recognized guard, otherwise the tag as
+    /// written (or a non-string tag as TOML writes it).
     pub engine: String,
     /// What a `plugin:` profile's reason is read from.
     pub speaks: Option<String>,
@@ -608,7 +688,11 @@ impl UnavailableProfile {
             text("name").ok_or("a profile on an engine this build cannot read has no name")?;
         let engine = match table.get("engine") {
             Some(toml::Value::String(engine)) => engine.clone(),
-            Some(engine) => engine.to_string(),
+            Some(engine) => engine
+                .clone()
+                .try_into::<StoredEngine>()
+                .map(|engine| engine.to_string())
+                .unwrap_or_else(|_| engine.to_string()),
             None => String::new(),
         };
         Ok(Self {
@@ -643,6 +727,29 @@ impl UnavailableProfile {
 
 impl Serialize for UnavailableProfile {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // A development SSM profile can be held back because its plugin is
+        // absent. It still needs the guard before an older build with that
+        // plugin installed sees it. Change only its legacy engine spelling;
+        // unknown fields and already-guarded/future engine tables stay whole.
+        if self.table.contains_key("ssm")
+            && self.table.get("engine").is_none_or(toml::Value::is_str)
+        {
+            let engine = StoredEngine::Ssm {
+                ssm: SsmEngine {
+                    engine: self
+                        .table
+                        .get("engine")
+                        .and_then(toml::Value::as_str)
+                        .map(str::to_owned),
+                },
+            };
+            let mut table = self.table.clone();
+            table.insert(
+                "engine".into(),
+                toml::Value::try_from(engine).map_err(serde::ser::Error::custom)?,
+            );
+            return table.serialize(serializer);
+        }
         self.table.serialize(serializer)
     }
 }
@@ -860,16 +967,20 @@ fn readable(tag: &Tag, plugins: &[&'static Plugin]) -> bool {
             Some(_) => Err(()),
         }
     }
-    match &tag.engine {
+    match tag
+        .engine
+        .clone()
+        .map(toml::Value::try_into::<StoredEngine>)
+    {
         None => true,
-        Some(toml::Value::String(engine)) => match engine.strip_prefix(PLUGIN_TAG) {
+        Some(Ok(engine)) => match engine.strip_prefix(PLUGIN_TAG) {
             Some(id) => match (text(&tag.speaks), text(&tag.connection)) {
                 (Ok(speaks), Ok(connection)) => {
                     through_plugin(id, speaks, connection, plugins).is_ok()
                 }
                 _ => false,
             },
-            None => Engine::parse(engine).is_ok_and(Engine::has_built_in_driver),
+            None => Engine::parse(&engine).is_ok_and(Engine::has_built_in_driver),
         },
         Some(_) => false,
     }
@@ -3016,6 +3127,7 @@ user = "shayan"
                 mode: Some("full".into()),
                 confirmed: vec!["drop".into(), "truncate".into()],
                 open_query: None,
+                ssm: None,
                 ssh: None,
                 open_queries: Vec::new(),
                 open_objects: Vec::new(),
@@ -3074,6 +3186,7 @@ user = "shayan"
             mode: None,
             confirmed: Vec::new(),
             open_query: Some("daily".into()),
+            ssm: None,
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![
@@ -3214,6 +3327,7 @@ open_objects = []
             mode: None,
             confirmed: Vec::new(),
             open_query: None,
+            ssm: None,
             ssh: None,
             open_queries: Vec::new(),
             open_objects: Vec::new(),
@@ -3400,8 +3514,167 @@ folder = "Hot"
     }
 
     #[test]
+    fn ssm_profiles_are_unreadable_as_direct_connections_by_legacy_readers() {
+        // v0.1.0 and v0.7.2 both decode engine as Option<String>. Keep this
+        // independent of StoredProfile so changing its decoder cannot make
+        // the downgrade check start testing the new reader instead.
+        #[derive(Debug, Deserialize)]
+        struct LegacyProfile {
+            #[serde(default)]
+            engine: Option<String>,
+        }
+        let direct = a_stored_profile();
+        let legacy: LegacyProfile = toml::from_str(&toml::to_string(&direct).unwrap()).unwrap();
+        assert_eq!(legacy.engine.as_deref(), Some("postgres"));
+        for engine in [None, Some("postgres"), Some("mysql"), Some("plugin:odbc")] {
+            let mut profile = direct.clone();
+            profile.engine = engine.map(Into::into);
+            profile.ssm = Some(crate::db::SsmTunnel {
+                target: "i-0123456789abcdef0".into(),
+                ..Default::default()
+            });
+            let text = toml::to_string(&profile).unwrap();
+            assert!(toml::from_str::<LegacyProfile>(&text).is_err(), "{text}");
+            assert_eq!(toml::from_str::<StoredProfile>(&text).unwrap(), profile);
+        }
+    }
+
+    #[test]
+    fn ssm_guard_survives_an_old_readers_unavailable_profile_round_trip() {
+        let mut profile = a_stored_profile();
+        profile.ssm = Some(crate::db::SsmTunnel {
+            target: "i-0123456789abcdef0".into(),
+            ..Default::default()
+        });
+        profile.open_query = Some("daily".into());
+        profile.schema = Some("reporting".into());
+        profile.mode = Some("read-only".into());
+        let mut list = decode_profiles(&written_alone(a_stored_profile()), &[]).unwrap();
+        list.profiles[0].id = "direct".into();
+        list.profiles.push(profile.clone());
+        list.active = Some(profile.id.clone());
+        let text = encode_profiles(&list).unwrap();
+        let tags: Tags = toml::from_str(&text).unwrap();
+        // The pre-SSM reader's non-string engine branch holds it back. Its
+        // table-preserving path must not lose the guard on a later save.
+        assert!(matches!(
+            tags.profiles[1].engine,
+            Some(toml::Value::Table(_))
+        ));
+        let old = decode_mixed(&text, &[false, true]).unwrap();
+        assert_eq!(old.profiles, [list.profiles[0].clone()]);
+        assert_eq!(old.unavailable.len(), 1);
+        let saved = encode_profiles(&old).unwrap();
+        let upgraded = decode_profiles(&saved, &[]).unwrap();
+        assert!(upgraded.unavailable.is_empty());
+        assert_eq!(upgraded, list);
+    }
+
+    #[test]
+    fn ssm_guard_requires_its_tunnel_even_on_the_plain_reader_fallback() {
+        let profile = stub("ssm", "postgres").replace(
+            "engine = 'postgres'",
+            "engine = { ssm = { engine = 'postgres' } }",
+        );
+        for payload in ["", "ssm = {}\n", "ssm = false\n"] {
+            for extra in ["", "odd = { '$__toml_private_datetime' = 'not a date' }\n"] {
+                let text = format!("{profile}{payload}{extra}");
+                assert!(decode_profiles(&text, &[]).is_err(), "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn ssm_unknown_guard_constraints_are_preserved_as_unavailable() {
+        for engine in [
+            "{}",
+            "{ other_transport = 'postgres' }",
+            "{ ssm = { engine = 'postgres', future_constraint = true } }",
+            "{ ssm = { engine = 'postgres' }, future_constraint = true }",
+        ] {
+            let text = stub("ssm", "postgres")
+                .replace("engine = 'postgres'", &format!("engine = {engine}"))
+                + "ssm = { target = 'i-0123456789abcdef0' }\n";
+            let list = decode_profiles(&text, &[]).unwrap();
+            assert!(list.profiles.is_empty(), "{text}");
+            assert_eq!(list.unavailable.len(), 1);
+            let original: toml::Table = toml::from_str(&text).unwrap();
+            let saved: toml::Table = toml::from_str(&encode_profiles(&list).unwrap()).unwrap();
+            assert_eq!(saved["profiles"], original["profiles"]);
+        }
+    }
+
+    #[test]
+    fn ssm_development_profiles_acquire_the_guard_on_save() {
+        let text = stub("ssm", "postgres") + "ssm = { target = 'i-0123456789abcdef0' }\n";
+        let list = decode_profiles(&text, &[]).unwrap();
+        assert!(list.profiles[0].ssm.is_some());
+        let saved = encode_profiles(&list).unwrap();
+        let tags: Tags = toml::from_str(&saved).unwrap();
+        assert!(matches!(
+            tags.profiles[0].engine,
+            Some(toml::Value::Table(_))
+        ));
+        assert_eq!(decode_profiles(&saved, &[]).unwrap(), list);
+        let held = UnavailableProfile::held_back(&list.profiles[0], std::iter::empty()).unwrap();
+        assert!(held.table["engine"].is_table());
+    }
+
+    #[test]
+    fn ssm_unavailable_development_profiles_acquire_the_guard_without_losing_fields() {
+        let text = ODBC.split("[profiles.ssh]").next().unwrap().to_owned()
+            + "future = { nested = [1, 2], at = 2026-10-01T09:00:00Z }\n"
+            + "ssm = { target = 'i-0123456789abcdef0' }\n";
+        let unavailable = decode_profiles(&text, &[]).unwrap();
+        assert!(unavailable.profiles.is_empty());
+        let saved = encode_profiles(&unavailable).unwrap();
+        let original: toml::Table = toml::from_str(&text).unwrap();
+        let written: toml::Table = toml::from_str(&saved).unwrap();
+        let mut guarded = written["profiles"][0].as_table().unwrap().clone();
+        assert!(guarded.remove("engine").unwrap().is_table());
+        let mut original = original["profiles"][0].as_table().unwrap().clone();
+        original.remove("engine");
+        assert_eq!(guarded, original);
+        let plugins = [odbc_plugin()];
+        let upgraded = decode_profiles(&saved, &plugins).unwrap();
+        assert_eq!(upgraded, decode_profiles(&text, &plugins).unwrap());
+        assert!(upgraded.profiles[0].ssm.is_some());
+        let mixed = saved + PLUGIN;
+        let mixed = decode_profiles(&mixed, &plugins).unwrap();
+        assert_eq!(mixed.profiles, upgraded.profiles);
+        assert_eq!(mixed.unavailable.len(), 1);
+        let saved = encode_profiles(&mixed).unwrap();
+        assert_eq!(decode_profiles(&saved, &plugins).unwrap(), mixed);
+    }
+
+    #[test]
+    fn ssm_profile_round_trip_preserves_the_route() {
+        let mut profile = a_stored_profile();
+        profile.ssm = Some(crate::db::SsmTunnel {
+            target: "i-0123456789abcdef0".into(),
+            profile: Some("production".into()),
+            region: Some("ap-northeast-1".into()),
+            aws_cli: Some("/opt/tools/aws".into()),
+            session_manager_plugin: Some("/opt/tools/session-manager-plugin".into()),
+            ..Default::default()
+        });
+        let text = toml::to_string(&profile).unwrap();
+        let decoded: StoredProfile = toml::from_str(&text).unwrap();
+        assert_eq!(decoded, profile);
+        assert!(!text.contains("attempt"));
+        let legacy = toml::to_string(&a_stored_profile()).unwrap();
+        assert!(
+            toml::from_str::<StoredProfile>(&legacy)
+                .unwrap()
+                .ssm
+                .is_none()
+        );
+    }
+
+    #[test]
     fn an_ssh_tunnel_with_every_field_survives_the_round_trip_through_toml() {
         let profile = StoredProfile {
+            ssm: None,
             ssh: Some(SshTunnel {
                 host: "dbdelve-bastion".into(),
                 port: Some(2222),
@@ -3429,6 +3702,7 @@ folder = "Hot"
     #[test]
     fn an_ssh_tunnel_with_only_a_host_survives_the_round_trip_through_toml() {
         let profile = StoredProfile {
+            ssm: None,
             ssh: Some(SshTunnel {
                 host: "dbdelve-bastion".into(),
                 port: None,
@@ -3469,6 +3743,7 @@ folder = "Hot"
             settings: None,
             projects: Vec::new(),
             profiles: vec![StoredProfile {
+                ssm: None,
                 ssh: Some(tunnel.clone()),
                 ..a_stored_profile()
             }],
@@ -3492,6 +3767,7 @@ folder = "Hot"
     fn an_active_schema_survives_the_round_trip_through_toml_beside_a_tunnel() {
         let profile = StoredProfile {
             schema: Some(r#"Sales "EU""#.into()),
+            ssm: None,
             ssh: Some(SshTunnel {
                 host: "dbdelve-bastion".into(),
                 ..SshTunnel::default()
@@ -3541,6 +3817,7 @@ folder = "Hot"
         let profile = StoredProfile {
             password_command: Some("printf %s \"$TOKEN\" # %USERNAME%".into()),
             password_expires: Some(900),
+            ssm: None,
             ssh: Some(SshTunnel {
                 host: "bastion".into(),
                 port: None,
@@ -3615,6 +3892,7 @@ folder = "Hot"
             mode: None,
             confirmed: Vec::new(),
             open_query: None,
+            ssm: None,
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![StoredObject {
@@ -3697,6 +3975,7 @@ folder = "Hot"
             mode: None,
             confirmed: Vec::new(),
             open_query: None,
+            ssm: None,
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![StoredObject {
@@ -3765,6 +4044,7 @@ folder = "Hot"
             mode: None,
             confirmed: Vec::new(),
             open_query: None,
+            ssm: None,
             ssh: None,
             open_queries: Vec::new(),
             open_objects: Vec::new(),
@@ -3882,6 +4162,7 @@ open_objects = []
             mode: None,
             confirmed: Vec::new(),
             open_query: None,
+            ssm: None,
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![StoredObject {
@@ -4014,6 +4295,7 @@ open_objects = []
                     mode: None,
                     confirmed: Vec::new(),
                     open_query: None,
+                    ssm: None,
                     ssh: None,
                     open_queries: Vec::new(),
                     open_objects: Vec::new(),
@@ -4052,6 +4334,7 @@ open_objects = []
                     mode: None,
                     confirmed: Vec::new(),
                     open_query: None,
+                    ssm: None,
                     ssh: None,
                     open_queries: Vec::new(),
                     open_objects: Vec::new(),
@@ -4698,6 +4981,7 @@ open_objects = []
             mode: None,
             confirmed: Vec::new(),
             open_query: Some("daily".into()),
+            ssm: None,
             ssh: None,
             open_queries: vec![
                 StoredQueryTab {
@@ -5066,6 +5350,7 @@ name = \"accounts\"
             mode: None,
             confirmed: Vec::new(),
             open_query: None,
+            ssm: None,
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![
@@ -5184,6 +5469,7 @@ name = \"accounts\"
             mode: None,
             confirmed: Vec::new(),
             open_query: None,
+            ssm: None,
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![object],

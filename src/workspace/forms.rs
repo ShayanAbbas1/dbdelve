@@ -496,24 +496,187 @@ impl Workspace {
             // Host and Port are the far end of the forward, which is easy to
             // read as this machine's view of the network.
             let socket = form.target().reaches_socket_over_ssh();
-            let hint = if socket {
-                "Host and port are as the SSH host sees them: localhost is the SSH host \
-                 itself. A Host such as /var/run/postgresql is its Unix socket directory; \
-                 Run as is the OS user sudo opens the socket as, for peer authentication."
+            let hint = if form.ssm {
+                "Connect through an AWS managed instance. Database host and port are as that \
+                 instance sees them. AWS credentials come from the CLI; sign in first when using SSO."
+            } else if form.ssh {
+                "Connect through an SSH host. Database host and port are as the SSH host sees \
+                 them; localhost refers to the SSH host itself."
             } else {
-                "Host and port are as the SSH host sees them: localhost is the SSH host itself."
+                "Connect directly to the database."
             };
+            let help = |text: &'static str| {
+                div()
+                    .px(px(layout::SPACE_LG))
+                    .pb(px(layout::SPACE_MD))
+                    .text_size(px(layout::chrome(layout::TEXT_SM)))
+                    .text_color(t.text_muted)
+                    .child(text)
+            };
+            let selected = if form.ssm {
+                2
+            } else if form.ssh {
+                1
+            } else {
+                0
+            };
+            let choices = ["None", "SSH", "AWS SSM"]
+                .into_iter()
+                .enumerate()
+                .filter(|(index, _)| *index != 2 || form.target().takes_ssm_tunnel())
+                .map(|(index, label)| {
+                    ui::segmented_choice(("tunnel-kind", index), label, selected == index, t)
+                        .debug_selector(move || {
+                            if index == 1 {
+                                "ssh-tunnel".into()
+                            } else {
+                                format!("tunnel-kind-{index}")
+                            }
+                        })
+                        .on_click(cx.listener(move |workspace, _, _, cx| {
+                            if let Some(form) = &mut workspace.form {
+                                form.ssh = index == 1;
+                                form.ssm = index == 2;
+                                form.test = None;
+                                form.needs_focus = Some(match index {
+                                    1 => form.ssh_host.clone(),
+                                    2 => form.ssm_target.clone(),
+                                    _ => {
+                                        if form.target().fields() == Fields::Server {
+                                            form.password.clone()
+                                        } else {
+                                            form.connection.clone()
+                                        }
+                                    }
+                                });
+                                cx.notify();
+                            }
+                        }))
+                });
             security.push(
-                ui::option_row(
-                    "SSH tunnel",
-                    Some(hint.into()),
-                    ui::switch("ssh-tunnel", form.ssh, t)
-                        .debug_selector(|| "ssh-tunnel".into())
-                        .on_click(cx.listener(Self::toggle_ssh_tunnel)),
-                    t,
-                )
-                .into_any_element(),
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(ui::option_row(
+                        "Tunnel",
+                        None,
+                        ui::segmented(t).children(choices),
+                        t,
+                    ))
+                    .child(help(hint))
+                    .into_any_element(),
             );
+            if form.ssm {
+                if form.ssm_dependencies.is_none() && !form.ssm_checking {
+                    let workspace = cx.entity().downgrade();
+                    cx.defer(move |cx| {
+                        let _ = workspace
+                            .update(cx, |workspace, cx| workspace.check_ssm_dependencies(cx));
+                    });
+                }
+                security.push(self.render_ssm_setup(t, cx).into_any_element());
+                for (index, (id, label, input)) in [
+                    ("ssm-target", "Target instance", &form.ssm_target),
+                    ("ssm-profile", "AWS profile", &form.ssm_profile),
+                    ("ssm-region", "AWS region", &form.ssm_region),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let row = nested_field_row(0.0, id, label, input, bare(input), t);
+                    security.push(revealed(row, "ssm-reveal", index, !cx.reduce_motion()));
+                }
+                security.push(
+                    div()
+                        .flex()
+                        .px(px(layout::SPACE_LG))
+                        .py(px(layout::SPACE_SM))
+                        .child(
+                            button(
+                                "ssm-advanced",
+                                if form.ssm_advanced {
+                                    "▾ Advanced"
+                                } else {
+                                    "▸ Advanced"
+                                },
+                                Tone::Quiet,
+                                Control::Compact,
+                                t,
+                            )
+                            .px(px(layout::SPACE_XS))
+                            .debug_selector(|| "ssm-advanced".into())
+                            .on_click(cx.listener(
+                                |workspace, _, _, cx| {
+                                    if let Some(form) = &mut workspace.form {
+                                        form.ssm_advanced = !form.ssm_advanced;
+                                        if !form.ssm_advanced {
+                                            form.needs_focus = Some(form.ssm_target.clone());
+                                        }
+                                        cx.notify();
+                                    }
+                                },
+                            )),
+                        )
+                        .into_any_element(),
+                );
+                if form.ssm_advanced {
+                    for (index, (id, label, input)) in [
+                        ("ssm-aws-cli", "AWS CLI path", &form.ssm_aws_cli),
+                        ("ssm-plugin", "Plugin path", &form.ssm_plugin),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        let found = form
+                            .ssm_dependencies
+                            .as_ref()
+                            .map(|results| &results[index]);
+                        let row = div()
+                            .debug_selector(move || format!("ssm-executable-{index}"))
+                            .child(
+                                nested_field_row(0.0, id, label, input, bare(input), t)
+                                    .min_h(px(layout::chrome(layout::CONTROL_HEIGHT)))
+                                    .child(browse_button(
+                                        if index == 0 {
+                                            "browse-aws-cli"
+                                        } else {
+                                            "browse-ssm-plugin"
+                                        },
+                                        input,
+                                        t,
+                                        cx,
+                                    )),
+                            );
+                        use crate::db::ssm::dependencies::Status;
+                        let detail = match found {
+                            _ if form.ssm_checking => "Detecting…".to_owned(),
+                            None => "Detecting…".to_owned(),
+                            Some(Status::Found(path)) => format!("Detected: {}", path.display()),
+                            Some(Status::Missing) => "Not detected".to_owned(),
+                            Some(Status::WrongExecutable(_)) => "Wrong executable".to_owned(),
+                            Some(Status::Unavailable(_)) => "Couldn’t run executable".to_owned(),
+                        };
+                        let row = row.child(
+                            div()
+                                .debug_selector({
+                                    let detail = detail.clone();
+                                    move || format!("ssm-path-{index}: {detail}")
+                                })
+                                .px(px(layout::SPACE_LG))
+                                .pb(px(layout::SPACE_SM))
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                                .text_color(t.text_muted)
+                                .child(detail),
+                        );
+                        security.push(row.into_any_element());
+                    }
+                    security.push(help("Paths are optional. Leave blank to use PATH. After installing, choose the executable here if the desktop app cannot find it.").pt(px(layout::SPACE_MD)).into_any_element());
+                }
+            }
             if form.ssh {
                 let reveal = !cx.reduce_motion();
                 let nested = |id: &'static str,
@@ -546,17 +709,24 @@ impl Workspace {
                     ),
                 ];
                 if socket {
-                    rows.push(nested(
-                        "ssh-run-as",
-                        "Run as",
-                        &form.ssh_run_as,
-                        bare(&form.ssh_run_as),
-                    ));
+                    rows.push(
+                        div()
+                            .child(nested(
+                                "ssh-run-as",
+                                "Run as",
+                                &form.ssh_run_as,
+                                bare(&form.ssh_run_as),
+                            ))
+                            .child(help(
+                                "For a Unix socket host such as /var/run/postgresql, sudo opens \
+                                 the socket as this OS user for peer authentication.",
+                            )),
+                    );
                 }
                 security.extend(
                     rows.into_iter()
                         .enumerate()
-                        .map(|(index, row)| revealed(row, index, reveal)),
+                        .map(|(index, row)| revealed(row, "ssh-reveal", index, reveal)),
                 );
             }
         }
@@ -807,30 +977,153 @@ impl Workspace {
         )
     }
 
-    fn toggle_ssh_tunnel(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn check_ssm_dependencies(&mut self, cx: &mut Context<Self>) {
         let Some(form) = &mut self.form else {
             return;
         };
-        form.ssh = !form.ssh;
-        if form.ssh {
-            form.needs_focus = Some(form.ssh_host.clone());
-        } else if [
-            &form.ssh_host,
-            &form.ssh_port,
-            &form.ssh_user,
-            &form.ssh_identity_file,
-            &form.ssh_passphrase,
-            &form.ssh_run_as,
-        ]
-        .iter()
-        .any(|input| input.focus_handle(cx).is_focused(window))
-        {
-            // The rows going take the focus with them.
-            form.needs_focus = Some(form.password.clone());
+        if !form.ssm || form.ssm_checking {
+            return;
         }
-        // A pass without the tunnel did not test it.
-        form.test = None;
+        form.ssm_checking = true;
+        let input = form.ssm_aws_cli.clone();
+        let paths = [
+            form.ssm_aws_cli.read(cx).value().trim().to_owned(),
+            form.ssm_plugin.read(cx).value().trim().to_owned(),
+        ];
+        let checked = paths.clone();
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |workspace, cx| {
+            // Coalesce edits without starting a process for every keystroke.
+            executor.timer(Duration::from_millis(400)).await;
+            let current = workspace
+                .update(cx, |workspace, cx| {
+                    let Some(form) = &mut workspace.form else {
+                        return false;
+                    };
+                    if form.ssm_aws_cli != input {
+                        return false;
+                    }
+                    if !form.ssm
+                        || form.ssm_aws_cli.read(cx).value().trim() != paths[0]
+                        || form.ssm_plugin.read(cx).value().trim() != paths[1]
+                    {
+                        form.ssm_checking = false;
+                        cx.notify();
+                        return false;
+                    }
+                    true
+                })
+                .unwrap_or(false);
+            if !current {
+                return;
+            }
+            let results = spawn_blocking(&executor, move || {
+                crate::db::ssm::dependencies::check(
+                    (!checked[0].is_empty()).then(|| std::path::Path::new(&checked[0])),
+                    (!checked[1].is_empty()).then(|| std::path::Path::new(&checked[1])),
+                )
+            })
+            .await;
+            _ = workspace.update(cx, |workspace, cx| {
+                let Some(form) = &mut workspace.form else {
+                    return;
+                };
+                if form.ssm_aws_cli != input {
+                    return;
+                }
+                form.ssm_checking = false;
+                if form.ssm_aws_cli.read(cx).value().trim() == paths[0]
+                    && form.ssm_plugin.read(cx).value().trim() == paths[1]
+                {
+                    form.ssm_dependencies = Some(results);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
+    }
+
+    fn render_ssm_setup(&self, t: Theme, cx: &mut Context<Self>) -> Div {
+        use crate::db::ssm::dependencies::Status as ToolStatus;
+        let form = self.form.as_ref().expect("form is open");
+        let mut setup = div()
+            .px(px(layout::SPACE_LG))
+            .py(px(layout::SPACE_SM))
+            .flex()
+            .flex_col()
+            .gap(px(layout::SPACE_SM))
+            .text_size(px(layout::chrome(layout::TEXT_SM)));
+        for (index, (label, url)) in [
+            ("AWS CLI", "https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"),
+            ("Session Manager plugin", "https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html"),
+        ].into_iter().enumerate() {
+            let status = form.ssm_dependencies.as_ref().map(|results| &results[index]);
+            let title = match status {
+                _ if form.ssm_checking => "Checking…",
+                Some(ToolStatus::Found(_)) => "Found",
+                Some(ToolStatus::Missing) => "Missing",
+                Some(ToolStatus::WrongExecutable(_)) => "Wrong executable",
+                Some(ToolStatus::Unavailable(_)) => "Couldn’t run",
+                None => "Checking…",
+            };
+            let mut row = div().flex().flex_col().gap(px(layout::SPACE_XS))
+                .child(div().flex().items_center().justify_between().gap(px(layout::SPACE_MD))
+                    .child(div().text_color(t.text).child(label))
+                    .child(div().debug_selector(move || format!("ssm-status-{index}: {title}")).text_color(t.text_muted).child(title)));
+            if let Some(ToolStatus::Unavailable(message) | ToolStatus::WrongExecutable(message)) = status {
+                row = row.child(div().text_color(t.text_muted).child(message.clone()));
+            }
+            if matches!(status, Some(ToolStatus::Missing | ToolStatus::Unavailable(_) | ToolStatus::WrongExecutable(_))) {
+                row = row.child(div().flex().flex_wrap().items_center().gap(px(layout::SPACE_SM))
+                    .child(div().rounded(px(layout::RADIUS_CONTROL)).border_1().border_color(t.border).bg(t.element_active)
+                        .child(button(("ssm-choose", index), "Choose executable…", Tone::Primary, Control::Compact, t)
+                        .debug_selector(move || format!("ssm-choose-{index}"))
+                        .on_click(cx.listener(move |workspace, _, window, cx| {
+                            if let Some(form) = &mut workspace.form {
+                                form.ssm_advanced = true;
+                                let input = if index == 0 { form.ssm_aws_cli.clone() } else { form.ssm_plugin.clone() };
+                                cx.notify();
+                                workspace.browse_into(input, window, cx);
+                            }
+                        }))))
+                    .child(button(("ssm-install", index), "Installation guide ↗", Tone::Quiet, Control::Compact, t)
+                        .debug_selector(move || format!("ssm-install-{index}"))
+                        .on_click(move |_, _, cx| cx.open_url(url))));
+            }
+            setup = setup.child(row);
+        }
+        setup
+            .child(
+                div().text_color(t.text_muted).child(
+                    "Checks installed tools only. Use Test to verify AWS and database access.",
+                ),
+            )
+            .child(
+                div().flex().child(
+                    div()
+                        .rounded(px(layout::RADIUS_CONTROL))
+                        .border_1()
+                        .border_color(t.border)
+                        .bg(t.element_active)
+                        .child(
+                            button(
+                                "ssm-check-again",
+                                "Check again",
+                                Tone::Primary,
+                                Control::Compact,
+                                t,
+                            )
+                            .debug_selector(|| "ssm-check-again".into())
+                            .disabled(form.ssm_checking)
+                            .on_click(cx.listener(
+                                |workspace, _, _, cx| {
+                                    workspace.check_ssm_dependencies(cx);
+                                },
+                            )),
+                        ),
+                ),
+            )
     }
 
     /// The native Open dialog, for a file found rather than typed into
@@ -862,6 +1155,9 @@ impl Workspace {
                         return;
                     }
                     let path = path.to_string_lossy().into_owned();
+                    if input == form.ssm_aws_cli || input == form.ssm_plugin {
+                        form.ssm_dependencies = None;
+                    }
                     input.update(cx, |input, cx| input.set_value(path, window, cx));
                     form.needs_focus = Some(input);
                     // A pass was for the file that was there before.
@@ -3526,6 +3822,9 @@ fn shown_file_fields<'a>(form: &'a ConnectionForm, cx: &App) -> Vec<&'a Entity<I
             if form.ssh {
                 shown.push(&form.ssh_identity_file);
             }
+            if form.ssm && form.ssm_advanced {
+                shown.extend([&form.ssm_aws_cli, &form.ssm_plugin]);
+            }
             shown
         }
     }
@@ -3563,20 +3862,20 @@ fn port_field(input: &Entity<InputState>, t: Theme) -> gpui::Div {
         .child(div().flex_1().min_w_0().child(bare(input)))
 }
 
-const SSH_REVEAL_MS: u64 = 220;
-const SSH_REVEAL_PX: f32 = 4.;
+const TUNNEL_REVEAL_MS: u64 = 220;
+const TUNNEL_REVEAL_PX: f32 = 4.;
 
-/// The SSH rows, settling in once as the tunnel is switched on. Keyed by the
+/// The tunnel rows, settling in once as the tunnel is switched on. Keyed by the
 /// row, so it plays each time they mount and never again while they stay.
-fn revealed(row: gpui::Div, index: usize, animate: bool) -> AnyElement {
+fn revealed(row: gpui::Div, section: &'static str, index: usize, animate: bool) -> AnyElement {
     if !animate {
         return row.into_any_element();
     }
     row.relative()
         .with_animation(
-            ("ssh-reveal", index),
-            Animation::new(Duration::from_millis(SSH_REVEAL_MS)).with_easing(ease_out_quint()),
-            |row, delta| row.opacity(delta).top(px(-SSH_REVEAL_PX * (1. - delta))),
+            (section, index),
+            Animation::new(Duration::from_millis(TUNNEL_REVEAL_MS)).with_easing(ease_out_quint()),
+            |row, delta| row.opacity(delta).top(px(-TUNNEL_REVEAL_PX * (1. - delta))),
         )
         .into_any_element()
 }
@@ -3602,7 +3901,7 @@ fn footer_status(
     }
     match (error, test) {
         (Some(error), _) => Some((Status::Failed, one_line(error))),
-        (None, Some(ConnectionTest::Running(_))) => {
+        (None, Some(ConnectionTest::Running(_, _))) => {
             Some((Status::Connecting, "Testing connection…".to_string()))
         }
         (None, Some(ConnectionTest::Passed(reported))) => Some((

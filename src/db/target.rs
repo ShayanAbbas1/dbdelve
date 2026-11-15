@@ -105,6 +105,15 @@ impl Target {
             )
     }
 
+    /// SSM forwards TCP server or ODBC-string targets, never MongoDB: its
+    /// driver may redial without rechecking the tunnel.
+    pub fn takes_ssm_tunnel(self) -> bool {
+        matches!(
+            self.fields(),
+            super::Fields::Server | super::Fields::ConnectionString
+        ) && self.engine != Engine::MongoDb
+    }
+
     /// Whether a profile's SSH tunnel may end at a Unix socket on the SSH host,
     /// opened as another OS user: a Host starting with `/` is its directory.
     pub fn reaches_socket_over_ssh(self) -> bool {

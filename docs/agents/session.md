@@ -629,6 +629,14 @@ one waiting on a column ignores whatever is typed into it.
   dialect it does not know, the dialect's own refusal for one no plugin may
   carry, or the string's `storable()` refusal for a hand-edited secret; a
   `generic` engine with no plugin gets the Generic refusal.
+- **SSM profiles have a downgrade guard.** `StoredProfile` serializes its
+  engine as a table containing a required `ssm` table and the original engine
+  inside it. Old readers' `Option<String>` engine cannot decode that table,
+  even when the unavailable-profile reader falls back to plain deserialization.
+  Current readers require the tunnel payload before normalizing the engine;
+  unknown guard shapes remain unavailable. The guard is derived from `ssm`
+  on every serialization, including held-back profiles, so earlier development
+  profiles gain protection on save. Direct and SSH profiles keep their format.
 - **Passwords** go through `keyring`, never into `profiles.toml`: Keychain on
   macOS, Secret Service on Linux, Credential Manager on Windows. So does an
   SSH key's passphrase, as an item per profile in a service of its own.

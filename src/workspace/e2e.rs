@@ -2533,6 +2533,7 @@ fn an_odbc_profile_saves_and_restores_as_it_was(cx: &mut TestAppContext) {
                 user: user.into(),
                 password: String::new(),
                 statement_timeout: timeout,
+                ssm: None,
                 ssh,
             })
         };
@@ -2819,8 +2820,14 @@ fn turning_the_tunnel_off_from_key_passphrase_hands_the_keyboard_to_password(
         });
         settle(cx);
         let toggle_tunnel = |cx: &mut VisualTestContext| {
+            let enabled =
+                workspace.read_with(cx, |workspace, _| workspace.form.as_ref().unwrap().ssh);
             let switch = cx
-                .debug_bounds("ssh-tunnel")
+                .debug_bounds(if enabled {
+                    "tunnel-kind-0"
+                } else {
+                    "ssh-tunnel"
+                })
                 .expect("the switch is drawn")
                 .center();
             cx.simulate_click(switch, gpui::Modifiers::default());
@@ -3992,6 +3999,483 @@ fn the_default_chip_puts_a_typed_then_emptied_insert_field_back_out_of_the_state
         let sql = statement(cx);
         assert!(sql.contains("NULL") && !sql.contains("robin"), "{sql}");
 
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn ssm_selection_preserves_fields_and_moves_focus(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch(cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.new_connection_in(None, window, cx)
+            })
+        });
+        settle(cx);
+        let select = |cx: &mut VisualTestContext, id: &'static str| {
+            let bounds = cx.debug_bounds(id).expect("tunnel option drawn");
+            cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+            settle(cx);
+        };
+        select(cx, "tunnel-kind-2");
+        let target =
+            cx.update(|_, cx| workspace.read(cx).form.as_ref().unwrap().ssm_target.clone());
+        assert!(cx.update(|window, cx| target.focus_handle(cx).is_focused(window)));
+        cx.simulate_input("i-0123456789abcdef0");
+        select(cx, "ssh-tunnel");
+        assert!(workspace.read_with(cx, |workspace, _| {
+            let form = workspace.form.as_ref().unwrap();
+            form.ssh && !form.ssm
+        }));
+        select(cx, "tunnel-kind-2");
+        assert_eq!(
+            cx.update(|_, cx| target.read(cx).value().to_string()),
+            "i-0123456789abcdef0"
+        );
+        select(cx, "tunnel-kind-0");
+        assert!(workspace.read_with(cx, |workspace, _| {
+            let form = workspace.form.as_ref().unwrap();
+            !form.ssh && !form.ssm
+        }));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn ssm_form_reopens_with_the_same_route(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch(cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |_, cx| {
+                let config = ConnectionConfig::Postgres(crate::db::PostgresConfig {
+                    server: crate::db::ServerConfig {
+                        host: "private.example.test".into(),
+                        user: "reader".into(),
+                        ssm: Some(crate::db::SsmTunnel {
+                            target: "i-0123456789abcdef0".into(),
+                            profile: Some("production".into()),
+                            region: Some("ap-northeast-1".into()),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                });
+                let mut form =
+                    crate::connection_form::ConnectionForm::new(Some(&config), window, cx);
+                assert!(form.ssm && !form.ssh);
+                let (_, reopened) = form.config(cx).unwrap();
+                assert_eq!(reopened.ssm(), config.ssm());
+                assert_eq!(reopened.server().unwrap().host, "private.example.test");
+                form.ssm_target
+                    .update(cx, |input, cx| input.set_value("", window, cx));
+                assert!(form.config(cx).is_err());
+                form.ssm = false;
+                assert!(form.config(cx).unwrap().1.ssm().is_none());
+            });
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn ssm_setup_checks_missing_tools_and_discards_edited_paths(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch(cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.new_connection_in(None, window, cx);
+                let form = workspace.form.as_mut().unwrap();
+                form.ssm = true;
+                form.ssm_aws_cli.update(cx, |input, cx| {
+                    input.set_value(
+                        std::env::temp_dir()
+                            .join("dbdelve-missing/aws")
+                            .to_string_lossy()
+                            .into_owned(),
+                        window,
+                        cx,
+                    )
+                });
+                form.ssm_plugin
+                    .update(cx, |input, cx| input.set_value("relative-path", window, cx));
+            })
+        });
+        settle(cx);
+        assert!(workspace.read_with(cx, |workspace, _| {
+            workspace.form.as_ref().unwrap().ssm_checking
+        }));
+        // Edit while the delayed check still owns the old paths.
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                let input = workspace.form.as_ref().unwrap().ssm_aws_cli.clone();
+                input.update(cx, |input, cx| {
+                    input.set_value("changed-relative-path", window, cx)
+                });
+            })
+        });
+        settle(cx);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        settle(cx);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        settle(cx);
+        assert!(workspace.read_with(cx, |workspace, _| {
+            matches!(
+                workspace.form.as_ref().unwrap().ssm_dependencies,
+                Some([
+                    crate::db::ssm::dependencies::Status::Unavailable(_),
+                    crate::db::ssm::dependencies::Status::Unavailable(_)
+                ])
+            )
+        }));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn ssm_setup_recheck_preserves_detected_path_layout(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        use crate::db::ssm::dependencies::Status;
+        let (workspace, cx) = launch(cx);
+        cx.simulate_resize(gpui::size(gpui::px(1200.), gpui::px(1800.)));
+        let results = [
+            Status::Found("/previous/aws".into()),
+            Status::Found("/previous/session-manager-plugin".into()),
+        ];
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.new_connection_in(None, window, cx);
+                let form = workspace.form.as_mut().unwrap();
+                form.opened = std::time::Instant::now() - std::time::Duration::from_secs(2);
+                form.ssm = true;
+                form.ssm_advanced = true;
+                // Invalid explicit paths keep this test independent of local tools.
+                for input in [&form.ssm_aws_cli, &form.ssm_plugin] {
+                    input.update(cx, |input, cx| input.set_value("relative-path", window, cx));
+                }
+            });
+        });
+        settle(cx);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        settle(cx);
+        workspace.update(cx, |workspace, cx| {
+            workspace.form.as_mut().unwrap().ssm_dependencies = Some(results.clone());
+            cx.notify();
+        });
+        settle(cx);
+        assert!(
+            cx.debug_bounds("ssm-path-0: Detected: /previous/aws")
+                .is_some()
+        );
+        let before = [
+            cx.debug_bounds("ssm-executable-0").unwrap(),
+            cx.debug_bounds("ssm-executable-1").unwrap(),
+        ];
+        let button = cx.debug_bounds("ssm-check-again").unwrap();
+        cx.simulate_click(button.center(), gpui::Modifiers::default());
+        settle(cx);
+        assert!(workspace.read_with(cx, |workspace, _| {
+            workspace.form.as_ref().unwrap().ssm_checking
+        }));
+        for selector in ["ssm-path-0: Detecting…", "ssm-path-1: Detecting…"] {
+            assert!(cx.debug_bounds(selector).is_some());
+        }
+        assert!(
+            cx.debug_bounds("ssm-path-0: Detected: /previous/aws")
+                .is_none()
+        );
+        assert_eq!(
+            before,
+            [
+                cx.debug_bounds("ssm-executable-0").unwrap(),
+                cx.debug_bounds("ssm-executable-1").unwrap()
+            ]
+        );
+        assert!(workspace.read_with(cx, |workspace, _| {
+            workspace.form.as_ref().unwrap().ssm_dependencies == Some(results)
+        }));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        settle(cx);
+        assert!(workspace.read_with(cx, |workspace, _| {
+            let form = workspace.form.as_ref().unwrap();
+            !form.ssm_checking
+                && matches!(
+                    form.ssm_dependencies,
+                    Some([Status::Unavailable(_), Status::Unavailable(_)])
+                )
+        }));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn ssm_setup_first_expansion_keeps_detail_rows_through_detection(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        use crate::db::ssm::dependencies::Status;
+        let (workspace, cx) = launch(cx);
+        cx.simulate_resize(gpui::size(gpui::px(1200.), gpui::px(1800.)));
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.new_connection_in(None, window, cx);
+                let form = workspace.form.as_mut().unwrap();
+                form.opened = std::time::Instant::now() - std::time::Duration::from_secs(2);
+                form.ssm = true;
+                for input in [&form.ssm_aws_cli, &form.ssm_plugin] {
+                    input.update(cx, |input, cx| input.set_value("relative-path", window, cx));
+                }
+            });
+        });
+        settle(cx);
+        let advanced = cx.debug_bounds("ssm-advanced").unwrap();
+        cx.simulate_click(advanced.center(), gpui::Modifiers::default());
+        settle(cx);
+        for selector in ["ssm-path-0: Detecting…", "ssm-path-1: Detecting…"] {
+            assert!(cx.debug_bounds(selector).is_some());
+        }
+        let before = [
+            cx.debug_bounds("ssm-executable-0").unwrap(),
+            cx.debug_bounds("ssm-executable-1").unwrap(),
+        ];
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        settle(cx);
+        assert!(workspace.read_with(cx, |workspace, _| {
+            !workspace.form.as_ref().unwrap().ssm_checking
+        }));
+        for results in [
+            [Status::Unavailable("invalid path".into()), Status::Missing],
+            [
+                Status::Found("/aws".into()),
+                Status::Found("/plugin".into()),
+            ],
+        ] {
+            workspace.update(cx, |workspace, cx| {
+                workspace.form.as_mut().unwrap().ssm_dependencies = Some(results);
+                cx.notify();
+            });
+            settle(cx);
+            // Missing tools add setup guidance above Advanced; the path rows
+            // themselves must retain their size.
+            assert_eq!(
+                before.map(|bounds| bounds.size),
+                [
+                    cx.debug_bounds("ssm-executable-0").unwrap().size,
+                    cx.debug_bounds("ssm-executable-1").unwrap().size
+                ]
+            );
+        }
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn ssm_setup_long_paths_keep_one_line_at_larger_ui_fonts(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        use crate::db::ssm::dependencies::Status;
+        let (workspace, cx) = launch(cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.new_connection_in(None, window, cx);
+                let form = workspace.form.as_mut().unwrap();
+                form.opened = std::time::Instant::now() - std::time::Duration::from_secs(2);
+                form.ssm = true;
+                form.ssm_advanced = true;
+                form.ssm_dependencies = Some([
+                    Status::Found("/aws".into()),
+                    Status::Found("/plugin".into()),
+                ]);
+            });
+        });
+        for font_size in [13., 15., 17.] {
+            workspace.update(cx, |workspace, cx| {
+                workspace.set_font_size(super::FontSlot::Chrome, font_size, cx);
+            });
+            for width in [480., 1200.] {
+                cx.simulate_resize(gpui::size(gpui::px(width), gpui::px(2400.)));
+                workspace.update(cx, |workspace, cx| {
+                    let form = workspace.form.as_mut().unwrap();
+                    form.ssm_checking = false;
+                    form.ssm_dependencies = Some([
+                        Status::Found("/aws".into()),
+                        Status::Found("/plugin".into()),
+                    ]);
+                    cx.notify();
+                });
+                settle(cx);
+                let short = [
+                    cx.debug_bounds("ssm-executable-0").unwrap(),
+                    cx.debug_bounds("ssm-executable-1").unwrap(),
+                ];
+                workspace.update(cx, |workspace, cx| {
+                    let long = format!(
+                        "/Applications/{}/aws",
+                        "A very long installation directory/".repeat(20)
+                    );
+                    workspace.form.as_mut().unwrap().ssm_dependencies = Some([
+                        Status::Found(long.clone().into()),
+                        Status::Found(long.into()),
+                    ]);
+                    cx.notify();
+                });
+                settle(cx);
+                assert_eq!(
+                    short,
+                    [
+                        cx.debug_bounds("ssm-executable-0").unwrap(),
+                        cx.debug_bounds("ssm-executable-1").unwrap()
+                    ],
+                    "long paths at font {font_size}, width {width}"
+                );
+                workspace.update(cx, |workspace, cx| {
+                    workspace.form.as_mut().unwrap().ssm_checking = true;
+                    cx.notify();
+                });
+                settle(cx);
+                assert_eq!(
+                    short,
+                    [
+                        cx.debug_bounds("ssm-executable-0").unwrap(),
+                        cx.debug_bounds("ssm-executable-1").unwrap()
+                    ],
+                    "detecting at font {font_size}, width {width}"
+                );
+            }
+        }
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_font_size(
+                super::FontSlot::Chrome,
+                crate::theme::layout::BODY_FONT_SIZE,
+                cx,
+            );
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn ssm_setup_advanced_collapse_restores_focus_and_keeps_paths(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch(cx);
+        cx.simulate_resize(gpui::size(gpui::px(1200.), gpui::px(1800.)));
+        let (input, target) = cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.new_connection_in(None, window, cx);
+                let form = workspace.form.as_mut().unwrap();
+                form.ssm = true;
+                form.ssm_advanced = true;
+                // Keep this focus test independent of installed tools.
+                form.ssm_dependencies = Some([
+                    crate::db::ssm::dependencies::Status::Missing,
+                    crate::db::ssm::dependencies::Status::Missing,
+                ]);
+                form.ssm_aws_cli.update(cx, |input, cx| {
+                    input.set_value("keep-this-path", window, cx)
+                });
+                (form.ssm_aws_cli.clone(), form.ssm_target.clone())
+            })
+        });
+        settle(cx);
+        cx.update(|window, cx| window.focus(&input.focus_handle(cx), cx));
+        let bounds = cx.debug_bounds("ssm-advanced").expect("Advanced drawn");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+        settle(cx);
+        assert!(cx.update(|window, cx| target.focus_handle(cx).is_focused(window)));
+        assert_eq!(
+            cx.update(|_, cx| input.read(cx).value().to_string()),
+            "keep-this-path"
+        );
+        assert!(!workspace.read_with(cx, |workspace, _| {
+            workspace.form.as_ref().unwrap().ssm_advanced
+        }));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn ssm_picker_selection_rechecks_tools_but_cancel_keeps_the_result(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        use crate::db::ssm::dependencies::Status;
+        let (workspace, cx) = launch(cx);
+        cx.simulate_resize(gpui::size(gpui::px(1200.), gpui::px(1800.)));
+        let input = cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.new_connection_in(None, window, cx);
+                let form = workspace.form.as_mut().unwrap();
+                form.ssm = true;
+                form.ssm_dependencies = Some([Status::Missing, Status::Missing]);
+                form.ssm_aws_cli.clone()
+            })
+        });
+        settle(cx);
+        let choose = |cx: &mut VisualTestContext| {
+            let bounds = cx.debug_bounds("ssm-choose-0").unwrap();
+            cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+            settle(cx);
+            assert!(cx.did_prompt_for_paths());
+        };
+        choose(cx);
+        cx.simulate_path_prompt_response(|_| None);
+        settle(cx);
+        assert!(cx.update(|_, cx| input.read(cx).value().is_empty()));
+        assert!(workspace.read_with(cx, |workspace, _| {
+            let form = workspace.form.as_ref().unwrap();
+            !form.ssm_checking && form.ssm_dependencies == Some([Status::Missing, Status::Missing])
+        }));
+        choose(cx);
+        let selected = std::env::temp_dir().join("dbdelve-picker-test/missing-aws");
+        cx.simulate_path_prompt_response(|_| Some(vec![selected.clone()]));
+        settle(cx);
+        assert_eq!(
+            cx.update(|_, cx| input.read(cx).value().to_string()),
+            selected.to_string_lossy()
+        );
+        assert!(
+            workspace.read_with(cx, |workspace, _| {
+                let form = workspace.form.as_ref().unwrap();
+                form.ssm_checking && form.ssm_dependencies.is_none()
+            }),
+            "choosing a path must invalidate the previous tool result"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn ssm_wrong_executable_offers_picker_before_installation_guide(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        use crate::db::ssm::dependencies::Status;
+        let (workspace, cx) = launch(cx);
+        cx.simulate_resize(gpui::size(gpui::px(1200.), gpui::px(1800.)));
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.new_connection_in(None, window, cx);
+                let form = workspace.form.as_mut().unwrap();
+                form.opened = std::time::Instant::now() - std::time::Duration::from_secs(2);
+                form.ssm = true;
+                form.ssm_dependencies = Some([
+                    Status::WrongExecutable("Choose the aws executable.".into()),
+                    Status::Unavailable("Version check timed out.".into()),
+                ]);
+            });
+        });
+        settle(cx);
+        assert!(cx.debug_bounds("ssm-status-0: Wrong executable").is_some());
+        assert!(cx.debug_bounds("ssm-status-1: Couldn’t run").is_some());
+        let picker = cx.debug_bounds("ssm-choose-0").unwrap();
+        let guide = cx.debug_bounds("ssm-install-0").unwrap();
+        assert!(picker.origin.x < guide.origin.x);
+        assert_eq!(picker.center().y, guide.center().y);
+        cx.simulate_click(picker.center(), gpui::Modifiers::default());
+        settle(cx);
+        assert!(cx.did_prompt_for_paths());
+        cx.simulate_path_prompt_response(|_| None);
+        settle(cx);
+        assert!(cx.debug_bounds("ssm-status-0: Wrong executable").is_some());
         quit(workspace, cx);
     });
 }

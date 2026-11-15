@@ -195,12 +195,16 @@ fn connection_config_from(
         root_certificate,
         // No `PG*` variable means it, and dbdelve is not inventing one.
         statement_timeout: 0,
+        ssm: None,
         ssh: None,
         schema: None,
     })))
 }
 
 fn main() {
+    if let Some(code) = db::ssm_helper() {
+        std::process::exit(code);
+    }
     // ssh runs this executable as its askpass to fetch a key's passphrase,
     // which must answer and exit before anything else starts.
     if let Some(status) = db::askpass(std::env::args_os().nth(1).as_deref()) {

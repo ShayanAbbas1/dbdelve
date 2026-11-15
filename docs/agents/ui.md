@@ -162,9 +162,9 @@ curves, and hover states are instant. These things move:
   clock and curve (`Part::Form`, read off `ConnectionForm::opened`), over the
   same contours, which fade in only when the welcome surface was not already
   showing them (`ConnectionForm::backdrop_shown`). It stops asking for frames
-  at `form_entrance_ms`, and `reduce_motion` skips it. Its SSH rows settle in
+  at `form_entrance_ms`, and `reduce_motion` skips it. Its SSH and AWS SSM rows settle in
   once over 220ms when the tunnel is switched on (`revealed`, keyed by the
-  row, so they replay only on remounting). Neither repeats.
+  transport and row, so switching transports replays the entrance). Neither repeats.
 
 Anything else that moves needs raising first, and a second repeating animation
 means building the shared throttled clock and moving both onto it.
