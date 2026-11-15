@@ -765,6 +765,7 @@ mod tests {
                     relation("active_users", RelationKind::View, None),
                 ],
                 routines: Vec::new(),
+                sequences: Vec::new(),
             }],
             database: None,
         };
@@ -784,6 +785,7 @@ mod tests {
                 rows: None,
             }],
             routines: Vec::new(),
+            sequences: Vec::new(),
         };
         let catalog = Catalog {
             schemas: vec![

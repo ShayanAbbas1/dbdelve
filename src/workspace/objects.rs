@@ -1961,6 +1961,7 @@ mod tests {
                         Routines::Loaded => vec![digest],
                         _ => Vec::new(),
                     },
+                    sequences: Vec::new(),
                 }],
                 database: None,
             },

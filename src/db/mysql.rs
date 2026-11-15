@@ -32,8 +32,8 @@ use super::{
     Catalog, Column, DbError, EditTarget, Engine, Fetch, GraphCancel, Index, IndexKind,
     QueryResult, Reference, RowBuilder, Schema, SchemaGraph, ServerConfig, Sizes, SslMode, Stopped,
     Structure, assemble_catalog, assemble_databases, assemble_foreign_keys, assemble_references,
-    assemble_schema_graph, assemble_sizes, assemble_structure, non_utf8_error, optional_cell,
-    plain_error, required_cell,
+    assemble_schema_graph, assemble_sequences, assemble_sizes, assemble_structure, non_utf8_error,
+    optional_cell, plain_error, required_cell,
 };
 
 /// Without this the driver waits out the OS SYN retry budget, so a host that
@@ -66,9 +66,9 @@ const SYSTEM_SCHEMAS: &str = "('information_schema', 'mysql', 'performance_schem
 /// the history of apart.
 const STORED_TABLES: &str = "('BASE TABLE', 'SYSTEM VERSIONED')";
 
-/// Every table, with MariaDB's sequence among them: there is no kind of its
-/// own for one, and it reads as the one-row table it is to a `SELECT`.
-const TABLES: &str = "('BASE TABLE', 'SYSTEM VERSIONED', 'SEQUENCE')";
+/// Every table. MariaDB's sequence is a `TABLE_TYPE` of its own and is listed
+/// apart, as a sequence (`SEQUENCES_SQL`): it is not a relation rows go into.
+const TABLES: &str = "('BASE TABLE', 'SYSTEM VERSIONED')";
 
 /// `SYSTEM VIEW` is `information_schema`'s own, and listed only where it is
 /// the database selected.
@@ -144,6 +144,17 @@ FROM information_schema.ROUTINES AS routine
 WHERE (routine.ROUTINE_SCHEMA NOT IN {system} OR routine.ROUTINE_SCHEMA = DATABASE())
   AND routine.ROUTINE_TYPE IN ('FUNCTION', 'PROCEDURE')
 ORDER BY routine.ROUTINE_SCHEMA, routine.ROUTINE_NAME
+";
+
+// The names alone: reading a sequence's own table for its current value is not
+// needed to list it.
+const SEQUENCES_SQL: &str = "
+SELECT TABLE_SCHEMA AS schema_name,
+       TABLE_NAME AS sequence_name
+FROM information_schema.TABLES
+WHERE TABLE_TYPE = 'SEQUENCE'
+  AND TABLE_SCHEMA NOT IN {system}
+ORDER BY 1, 2
 ";
 
 // The four structure queries name one relation, so they carry `{schema}` and
@@ -946,6 +957,7 @@ impl Connection {
                     name,
                     relations: Vec::new(),
                     routines: Vec::new(),
+                    sequences: Vec::new(),
                 });
             }
         }
@@ -955,6 +967,16 @@ impl Connection {
     pub fn routines(&self) -> Result<Catalog, DbError> {
         let routines = self.internal_query(&ROUTINES_SQL.replace("{system}", SYSTEM_SCHEMAS))?;
         assemble_catalog(QueryResult::default(), routines)
+    }
+
+    /// MariaDB's only: MySQL has no sequences, and a MariaDB before 10.3 answers
+    /// the filter with no rows, so there is no version probe.
+    pub fn sequences(&self) -> Result<Catalog, DbError> {
+        if self.engine != Engine::MariaDb {
+            return Ok(Catalog::default());
+        }
+        let sequences = self.internal_query(&SEQUENCES_SQL.replace("{system}", SYSTEM_SCHEMAS))?;
+        assemble_sequences(sequences)
     }
 
     /// On a connection of its own, as [`Self::cancel`] is, so opening every
@@ -1266,9 +1288,7 @@ fn graph_sql(template: &str, schema: &str) -> String {
 }
 
 fn structure_sql(template: &str, schema: &str, relation: &str) -> String {
-    template
-        .replace("{schema}", &Engine::MySql.quote_literal(schema))
-        .replace("{relation}", &Engine::MySql.quote_literal(relation))
+    super::structure_sql(Engine::MySql, template, schema, relation)
 }
 
 /// Every row's value for one column, for the catalog queries that return a
@@ -1848,6 +1868,18 @@ mod tests {
     }
 
     #[test]
+    fn a_placeholder_inside_a_name_is_not_replaced_again() {
+        assert_eq!(
+            structure_sql(
+                "WHERE TABLE_SCHEMA = {schema} AND TABLE_NAME = {relation}",
+                "a{relation}",
+                "; DROP TABLE t; --",
+            ),
+            "WHERE TABLE_SCHEMA = 'a{relation}' AND TABLE_NAME = '; DROP TABLE t; --'"
+        );
+    }
+
+    #[test]
     fn structure_sql_quotes_a_name_containing_a_quote() {
         assert_eq!(
             structure_sql(
@@ -2350,6 +2382,7 @@ mod tests {
             )
             .expect("the fixtures should create");
         let catalog = connection.catalog();
+        let sequences = connection.sequences();
         let sizes = connection.sizes();
         let versioned = connection.query("SELECT * FROM dbdelve_test_versioned", Fetch::default());
         let sequence = connection.query("SELECT * FROM dbdelve_test_sequence", Fetch::default());
@@ -2367,14 +2400,29 @@ mod tests {
             .find(|schema| schema.name == "dbdelve_dev")
             .expect("dbdelve_dev should exist")
             .relations;
-        for name in ["dbdelve_test_versioned", "dbdelve_test_sequence"] {
-            assert!(
-                relations
+        assert!(
+            relations
+                .iter()
+                .any(|relation| relation.name == "dbdelve_test_versioned"
+                    && relation.kind == RelationKind::Table)
+        );
+        assert!(
+            !relations
+                .iter()
+                .any(|relation| relation.name == "dbdelve_test_sequence"),
+            "a sequence is listed as a sequence and not among the relations"
+        );
+        let sequences = sequences.expect("sequences should load");
+        assert!(
+            sequences
+                .schemas
+                .iter()
+                .find(|schema| schema.name == "dbdelve_dev")
+                .is_some_and(|schema| schema
+                    .sequences
                     .iter()
-                    .any(|relation| relation.name == name && relation.kind == RelationKind::Table),
-                "{name}"
-            );
-        }
+                    .any(|name| name == "dbdelve_test_sequence"))
+        );
         assert!(
             sizes.expect("sizes should load")["dbdelve_dev"].contains_key("dbdelve_test_versioned")
         );
@@ -2817,6 +2865,71 @@ mod tests {
         connection
             .cancel()
             .expect("the cancel's login should sign in too");
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_mariadb_lists_a_sequence_in_its_own_kind() {
+        // In the database the login owns, which cannot create another.
+        let connection = live(Engine::MariaDb);
+        let drop = |connection: &Connection| {
+            connection
+                .query(
+                    "DROP SEQUENCE IF EXISTS dbdelve_sequence_probe_ticket",
+                    Fetch::default(),
+                )
+                .expect("the probe sequence should drop");
+        };
+        drop(&connection);
+        connection
+            .query(
+                "CREATE SEQUENCE dbdelve_sequence_probe_ticket",
+                Fetch::default(),
+            )
+            .expect("the probe sequence should be created");
+
+        let second = super::super::Connection::MySql(live(Engine::MariaDb))
+            .routines()
+            .expect("the second half should read");
+        let listed: Vec<_> = second
+            .schemas
+            .iter()
+            .filter(|schema| schema.name == "dbdelve_dev")
+            .flat_map(|schema| schema.sequences.clone())
+            .filter(|name| name == "dbdelve_sequence_probe_ticket")
+            .collect();
+
+        drop(&connection);
+        assert_eq!(listed, vec!["dbdelve_sequence_probe_ticket".to_string()]);
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_mysql_lists_no_sequence_and_sends_no_sequence_statement() {
+        let connection = live(Engine::MySql);
+        let second = super::super::Connection::MySql(live(Engine::MySql))
+            .routines()
+            .expect("the second half should read");
+        assert!(
+            second
+                .schemas
+                .iter()
+                .all(|schema| schema.sequences.is_empty())
+        );
+
+        // A statement sent to a lost session fails, and a MySQL server answers
+        // a `TABLE_TYPE = 'SEQUENCE'` filter with no rows anyway, so only a
+        // dead session tells a statement never sent from one that found nothing.
+        assert!(
+            connection
+                .query("KILL CONNECTION_ID()", Fetch::default())
+                .is_err()
+        );
+        assert!(connection.is_lost());
+        let catalog = connection
+            .sequences()
+            .expect("a MySQL connection sends no sequence statement");
+        assert!(catalog.schemas.is_empty());
     }
 
     /// Each `live_` body above, run once against each server the driver

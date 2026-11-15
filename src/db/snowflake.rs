@@ -25,8 +25,8 @@ use serde_json::{Value, json};
 use super::{
     CancelToken, Cancelling, Catalog, Column, Databases, DbError, Engine, Fetch, ForeignKey,
     NamedDefinition, QueryResult, RelationKind, Row, RowBuilder, SchemaGraph, Stopped, Structure,
-    assemble_catalog, assemble_databases, assemble_schema_graph, assemble_structure, plain_error,
-    terminated,
+    assemble_catalog, assemble_databases, assemble_schema_graph, assemble_sequences,
+    assemble_structure, plain_error, terminated,
 };
 
 /// What it takes to reach one database in one Snowflake account.
@@ -1056,9 +1056,16 @@ impl Connection {
         )
     }
 
-    pub fn structure(&self, schema: &str, relation: &str) -> Result<Structure, DbError> {
-        let literal = |value: &str| Engine::Snowflake.quote_literal(value);
+    /// Asked for after the routines, on a round of its own.
+    ///
+    /// ponytail: one more `INFORMATION_SCHEMA` round beside the routines'
+    /// `at_once` pair, so the ceiling is a warehouse that takes seconds to
+    /// answer each view; the upgrade is to fold this query into that pair.
+    pub fn sequences(&self) -> Result<Catalog, DbError> {
+        assemble_sequences(self.internal_query(SEQUENCES_SQL)?)
+    }
 
+    pub fn structure(&self, schema: &str, relation: &str) -> Result<Structure, DbError> {
         // `INFORMATION_SCHEMA` names a constraint and its type but has no view
         // of the columns in it, so the keys come from `SHOW`.
         //
@@ -1075,10 +1082,12 @@ impl Connection {
         let database = self.config.stored_database();
         let within = Engine::Snowflake.qualified(&database, schema);
         let [columns, primary, unique, imported] = self.at_once([
-            COLUMNS_SQL
-                .replace("{type}", TYPE_SQL)
-                .replace("{schema}", &literal(schema))
-                .replace("{relation}", &literal(relation)),
+            super::structure_sql(
+                Engine::Snowflake,
+                &COLUMNS_SQL.replace("{type}", TYPE_SQL),
+                schema,
+                relation,
+            ),
             format!("SHOW PRIMARY KEYS IN SCHEMA {within}"),
             format!("SHOW UNIQUE KEYS IN SCHEMA {within}"),
             format!("SHOW IMPORTED KEYS IN SCHEMA {within}"),
@@ -1254,6 +1263,14 @@ SELECT TABLE_SCHEMA AS "schema_name",
        ROW_COUNT AS "row_estimate"
 FROM INFORMATION_SCHEMA.TABLES
 WHERE TABLE_SCHEMA <> 'INFORMATION_SCHEMA'
+ORDER BY 1, 2"#;
+
+// The names alone: `NEXT_VALUE` is not needed to list a sequence.
+const SEQUENCES_SQL: &str = r#"
+SELECT SEQUENCE_SCHEMA AS "schema_name",
+       SEQUENCE_NAME AS "sequence_name"
+FROM INFORMATION_SCHEMA.SEQUENCES
+WHERE SEQUENCE_SCHEMA <> 'INFORMATION_SCHEMA'
 ORDER BY 1, 2"#;
 
 const FUNCTIONS_SQL: &str = r#"
@@ -2080,6 +2097,38 @@ mod tests {
             )
             .expect("runs");
         assert_eq!(shown.rows[0].get(0), Some("INFORMATION_SCHEMA"));
+    }
+
+    #[test]
+    #[ignore = "requires a Snowflake account configured through DBDELVE_SNOWFLAKE_*"]
+    fn live_a_sequence_is_listed_in_its_own_kind() {
+        let connection = Connection::open(&live_config()).expect("connects");
+        let drop = |connection: &Connection| {
+            connection
+                .query("DROP SCHEMA IF EXISTS dbdelve_sequence_probe")
+                .expect("the probe schema should drop");
+        };
+        drop(&connection);
+        connection
+            .query("CREATE SCHEMA dbdelve_sequence_probe")
+            .expect("the probe schema should be created");
+        connection
+            .query("CREATE SEQUENCE dbdelve_sequence_probe.ticket")
+            .expect("the probe sequence should be created");
+
+        let second = crate::db::Connection::Snowflake(connection.clone())
+            .routines()
+            .expect("the second half should read");
+        let listed: Vec<_> = second
+            .schemas
+            .iter()
+            .filter(|schema| schema.name == "DBDELVE_SEQUENCE_PROBE")
+            .map(|schema| schema.sequences.clone())
+            .collect();
+
+        drop(&connection);
+        // Unquoted names are folded to upper case by the server.
+        assert_eq!(listed, vec![vec!["TICKET".to_string()]]);
     }
 
     #[test]
