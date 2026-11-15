@@ -199,6 +199,7 @@ pub(crate) fn update_batch(rows: &[PendingRow]) -> Result<String, String> {
                     Some(NewValue::Default) => {
                         return Err("Redis has no default for ttl to take.".into());
                     }
+                    Some(NewValue::Bytes(_)) => return Err(BYTES_UNEDITED.into()),
                 }
                 // Last, so the row's other edits still name the key.
                 if set("key").is_some() {
@@ -843,6 +844,10 @@ fn fetched(
     }
 }
 
+/// The grid stages bytes only where a target writes them, which Redis never
+/// does.
+const BYTES_UNEDITED: &str = "Binary values cannot be edited here.";
+
 /// What a cell was edited to, as one word.
 fn typed_value(column: &str, value: Option<&NewValue>) -> Result<String, String> {
     match value {
@@ -851,6 +856,7 @@ fn typed_value(column: &str, value: Option<&NewValue>) -> Result<String, String>
             "{column} cannot be NULL: Redis has no NULL to store."
         )),
         Some(NewValue::Default) => Err(format!("Redis has no default for {column} to take.")),
+        Some(NewValue::Bytes(_)) => Err(BYTES_UNEDITED.into()),
         None => Err(format!("{column} was not edited.")),
     }
 }
@@ -862,6 +868,7 @@ fn score(value: &NewValue) -> Result<String, String> {
         }
         NewValue::Value(text) => Err(format!("{text} is not a score: a score is a number.")),
         NewValue::Null | NewValue::Default => Err("score cannot be NULL.".into()),
+        NewValue::Bytes(_) => Err(BYTES_UNEDITED.into()),
     }
 }
 

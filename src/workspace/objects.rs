@@ -1389,7 +1389,7 @@ impl Workspace {
             return;
         };
         let engine = self.engine();
-        show_snapshot(&results, &snapshot, mode, engine, cx);
+        show_snapshot(&results, &snapshot, mode, self.target(), cx);
         // The snapshot holds the rows already in this order. Sorted again so
         // the headers take a click, which a restored grid's do not.
         let sorting = Sorting::restored(snapshot.client_sort.as_deref()).on(engine);
@@ -1488,7 +1488,7 @@ impl Workspace {
         else {
             return;
         };
-        let engine = self.engine();
+        let target = self.target();
         let mut done = Vec::new();
         for index in 0..count {
             let key = store::queued_grid_key(id, index);
@@ -1499,7 +1499,7 @@ impl Workspace {
                 continue;
             };
             let grid = crate::result_grid::new_grid(window, cx);
-            show_snapshot(&grid, &snapshot, mode, engine, cx);
+            show_snapshot(&grid, &snapshot, mode, target, cx);
             done.push(Finished {
                 // ponytail: a restored result has no buffer offset to point
                 // at, and `start` only feeds the line number in the failure

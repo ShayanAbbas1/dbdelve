@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::rc::Rc;
 
@@ -184,6 +185,24 @@ impl BinaryForm {
 
     pub fn from_slug(slug: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|form| form.slug() == slug)
+    }
+
+    /// The bytes `text` spells in this form, typed into a cell of `engine`'s,
+    /// or why it spells none. Hex is the driver's own spelling, which is what
+    /// the cell shows, or bare digits, so a NULL cell can be typed into; empty
+    /// text is no bytes in every form.
+    fn read(self, text: &str, engine: db::Engine) -> Result<Vec<u8>, &'static str> {
+        use base64::Engine as _;
+        match self {
+            Self::Text => Ok(text.as_bytes().to_vec()),
+            Self::Base64 => base64::engine::general_purpose::STANDARD
+                .decode(text)
+                .map_err(|_| "This is not base64, so it was not staged."),
+            Self::Hex => engine
+                .bytes_of(text, usize::MAX)
+                .or_else(|| hex::decode(text).ok())
+                .ok_or("This is not hex: pairs of digits 0-9 and A-F, so it was not staged."),
+        }
     }
 
     /// How many bytes it takes to fill `chars` characters.
@@ -444,6 +463,9 @@ pub struct ResultGrid {
     /// The binary columns drawn as something other than what the server
     /// sent, as indices into `columns`. A handful at most, scanned per cell.
     binary_forms: Vec<(usize, BinaryForm)>,
+    /// Whether the target writes a binary cell back
+    /// ([`db::Target::edits_bytes`]), which the engine alone cannot say.
+    edits_bytes: bool,
     /// Whether the rows are a table's that Import Rows writes into, marked the
     /// way the structure's keys are, so the cell menu offers a paste.
     takes_imports: bool,
@@ -454,8 +476,8 @@ pub struct ResultGrid {
     focus: Option<FocusHandle>,
 }
 
-/// What a pending edit will write. Three states rather than two, because both
-/// keywords are writes dbdelve cannot spell as a value: `'NULL'` and
+/// What a pending edit will write. Both keywords are their own states,
+/// because they are writes dbdelve cannot spell as a value: `'NULL'` and
 /// `'DEFAULT'` are the words, and the column's own default is a thing only the
 /// server knows.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -465,6 +487,10 @@ pub enum NewValue {
     Value(SharedString),
     Null,
     Default,
+    /// What was typed into a binary cell, read back to bytes by its column's
+    /// form and written as the engine's literal of them
+    /// ([`db::Engine::binary_literal`]), never as the text it was typed as.
+    Bytes(Vec<u8>),
 }
 
 /// What a non-NULL cell sorts as. Numbers rank ahead of text, so a document
@@ -629,11 +655,19 @@ impl ResultGrid {
             mode,
             engine: db::Engine::default(),
             binary_forms: Vec::new(),
+            edits_bytes: false,
             takes_imports: false,
             focus: None,
         };
         grid.refit();
         grid
+    }
+
+    /// [`Self::with_engine`], and what only the driver says: whether a binary
+    /// cell is written back.
+    pub fn with_target(mut self, target: db::Target) -> Self {
+        self.edits_bytes = target.edits_bytes();
+        self.with_engine(target.engine)
     }
 
     pub fn with_engine(mut self, engine: db::Engine) -> Self {
@@ -1576,6 +1610,19 @@ impl ResultGrid {
         if form != BinaryForm::Hex || !self.engine.shows_bytes_as_hex() {
             self.binary_forms.push((col, form));
         }
+        let restaged: Vec<_> = self
+            .pending
+            .iter()
+            .map(|edit| match &edit.value {
+                NewValue::Bytes(bytes) if edit.col == col => {
+                    Some(SharedString::from(clip(&self.bytes_text(col, bytes))))
+                }
+                _ => edit.shown.clone(),
+            })
+            .collect();
+        for (edit, shown) in self.pending.iter_mut().zip(restaged) {
+            edit.shown = shown;
+        }
         self.refit_from_the_top();
     }
 
@@ -1619,8 +1666,13 @@ impl ResultGrid {
             .enumerate()
             .map(|(col_ix, column)| {
                 let edit = self.pending_value(row_ix, col_ix).cloned();
+                let staged_bytes = match &edit {
+                    Some(NewValue::Bytes(bytes)) => Some(self.bytes_text(col_ix, bytes)),
+                    _ => None,
+                };
                 let cell = match &edit {
                     Some(NewValue::Value(value)) => Some(value.as_ref()),
+                    Some(NewValue::Bytes(_)) => staged_bytes.as_deref(),
                     Some(NewValue::Null | NewValue::Default) => None,
                     None => self.cell(row_ix, col_ix),
                 };
@@ -1987,10 +2039,10 @@ impl ResultGrid {
     /// re-verified afterwards, so the spec's §3 refuses it. The exception is a
     /// key the engine edits as what the row is ([`db::Engine::edits_key_column`]).
     ///
-    /// Nor a binary column. What the grid shows there is a blob *literal* the
-    /// user could not type a replacement for anyway, and the value that came
-    /// back would be written as the text it looks like — see
-    /// [`db::Engine::writes_back`].
+    /// A binary cell only where [`Self::bytes_refusal`] has nothing to say: its
+    /// text is read back to bytes and written as the engine's literal of them,
+    /// since what the grid shows is a blob *literal* that [`db::Engine::writes_back`]
+    /// would otherwise write as the text it looks like.
     pub fn editable(&self, row: usize, col: usize) -> bool {
         // Structural only: the mode lives one step further in, on `set_pending`.
         // A Read-only connection still opens its cells, because an open input is
@@ -2008,11 +2060,56 @@ impl ResultGrid {
         };
         row < self.result.rows.len()
             && settable
-            && self.engine.writes_back(
-                [self.column_type(col), self.cell_type(row, col)]
-                    .into_iter()
-                    .flatten(),
-            )
+            && match self.holds_binary(row, col) {
+                true => self.bytes_refusal(row, col).is_none(),
+                false => self.engine.writes_back(
+                    [self.column_type(col), self.cell_type(row, col)]
+                        .into_iter()
+                        .flatten(),
+                ),
+            }
+    }
+
+    /// Whether the cell is typed as bytes, by its column or itself.
+    fn holds_binary(&self, row: usize, col: usize) -> bool {
+        [self.column_type(col), self.cell_type(row, col)]
+            .into_iter()
+            .flatten()
+            .any(|data_type| self.engine.is_binary_type(data_type))
+    }
+
+    /// Why a binary cell cannot be edited, `None` where it can be or is not
+    /// binary. Asked by [`Self::editable`], and said when an edit is refused.
+    pub fn bytes_refusal(&self, row: usize, col: usize) -> Option<&'static str> {
+        let edit = self.result.edit.as_ref()?;
+        if !self.holds_binary(row, col) {
+            return None;
+        }
+        if !self.edits_bytes {
+            return Some("Binary values cannot be edited on this connection.");
+        }
+        // ponytail: a row named by bytes would need the bytes' literal in its
+        // predicate, which the write gate admits nowhere. Lift this with a
+        // predicate term for bytes and its gate tests.
+        let named_by_bytes = match &edit.row_match {
+            db::RowMatch::Key => edit.keys.iter().any(|&key| self.holds_binary(row, key)),
+            db::RowMatch::EveryColumn { .. } => true,
+        };
+        if named_by_bytes {
+            return Some(
+                "This row is named by a binary value, so its binary values cannot be edited.",
+            );
+        }
+        // The whole value, not the part a cell draws: an input holds all of it.
+        let not_text = self.binary_form(col) == Some(BinaryForm::Text)
+            && self.cell(row, col).is_some_and(|value| {
+                self.engine
+                    .bytes_of(value, usize::MAX)
+                    .is_none_or(|bytes| std::str::from_utf8(&bytes).is_err())
+            });
+        not_text.then_some(
+            "These bytes are not UTF-8 text. Parse the column as Hex or Base64 to edit them.",
+        )
     }
 
     fn column_type(&self, col: usize) -> Option<&str> {
@@ -2128,6 +2225,9 @@ impl ResultGrid {
         if self.unconfirmed || !self.editable(row, col) {
             return false;
         }
+        let Ok(value) = self.staged(row, col, value) else {
+            return false;
+        };
 
         // An input seeds itself with the value as fetched, so opening an edit
         // and closing it without typing arrives here carrying the server's own
@@ -2141,6 +2241,10 @@ impl ResultGrid {
         // from one that is not.
         let unchanged = match &value {
             NewValue::Value(value) => self.cell(row, col) == Some(value.as_ref()),
+            NewValue::Bytes(bytes) => self
+                .cell(row, col)
+                .and_then(|cell| self.engine.bytes_of(cell, usize::MAX))
+                .is_some_and(|held| held == *bytes),
             // A missing field is not a null, so nulling one is an edit.
             NewValue::Null => self.cell(row, col).is_none() && !self.missing(row, col),
             NewValue::Default => false,
@@ -2159,7 +2263,10 @@ impl ResultGrid {
             return false;
         }
 
-        let shown = pending_shown(&value);
+        let shown = match &value {
+            NewValue::Bytes(bytes) => Some(clip(&self.bytes_text(col, bytes)).into()),
+            value => pending_shown(value),
+        };
         match self
             .pending
             .iter_mut()
@@ -2177,6 +2284,57 @@ impl ResultGrid {
             }),
         }
         true
+    }
+
+    /// `value` as a cell stages it: on a binary cell, typed text read back to
+    /// bytes by the column's form, or why it reads as none.
+    fn staged(&self, row: usize, col: usize, value: NewValue) -> Result<NewValue, &'static str> {
+        let NewValue::Value(text) = &value else {
+            return Ok(value);
+        };
+        if !self.holds_binary(row, col) {
+            return Ok(value);
+        }
+        let form = self
+            .binary_form(col)
+            .ok_or("Binary values cannot be edited on this connection.")?;
+        let bytes = form.read(text, self.engine)?;
+        match self.engine.binary_literal(&bytes) {
+            Some(_) => Ok(NewValue::Bytes(bytes)),
+            None => Err(
+                "Empty bytes cannot be written on this connection. Set the value to NULL instead.",
+            ),
+        }
+    }
+
+    /// Why `value` is not staged on a cell that is editable, when the reason
+    /// is what it says rather than the mode or the cell.
+    pub fn staging_refusal(
+        &self,
+        row: usize,
+        col: usize,
+        value: &NewValue,
+    ) -> Option<&'static str> {
+        if !self.editable(row, col) {
+            return None;
+        }
+        self.staged(row, col, value.clone()).err()
+    }
+
+    /// What the open input holds would be refused by [`Self::staging_refusal`].
+    pub(crate) fn commit_refusal(&self, cx: &App) -> Option<&'static str> {
+        let editing = self.editing.as_ref()?;
+        let text = editing.input.as_ref()?.read(cx).value().clone();
+        self.staging_refusal(editing.row, editing.col, &NewValue::Value(text))
+    }
+
+    /// Bytes as their column draws them: in the form it is parsed as, else
+    /// as the driver spells them.
+    fn bytes_text(&self, col: usize, bytes: &[u8]) -> String {
+        self.parsed_as(col)
+            .and_then(|form| form.show(bytes, false))
+            .or_else(|| self.engine.bytes_text(bytes))
+            .unwrap_or_else(|| hex::encode_upper(bytes))
     }
 
     /// Stage a value on a cell from outside the input, closing any input open
@@ -2340,11 +2498,36 @@ impl ResultGrid {
     /// seeds as the empty string because that is the only thing an input can
     /// hold; typing one back is the `SetNull` action's job, not the input's
     /// (spec §3). Either keyword seeds empty for the same reason.
-    pub fn edit_seed(&self, row: usize, col: usize) -> &str {
+    ///
+    /// A binary column parsed as text or base64 seeds the whole value in that
+    /// form, which is what committing it reads back.
+    pub fn edit_seed(&self, row: usize, col: usize) -> Cow<'_, str> {
         match self.pending_value(row, col) {
-            Some(NewValue::Value(value)) => value,
-            Some(NewValue::Null | NewValue::Default) => "",
-            None => self.cell(row, col).unwrap_or_default(),
+            Some(NewValue::Value(value)) => Cow::Borrowed(value),
+            Some(NewValue::Bytes(bytes)) => Cow::Owned(self.bytes_text(col, bytes)),
+            Some(NewValue::Null | NewValue::Default) => Cow::Borrowed(""),
+            None => {
+                let value = self.cell(row, col).unwrap_or_default();
+                self.parsed_as(col)
+                    .filter(|_| self.holds_binary(row, col))
+                    .and_then(|form| form.show(&self.engine.bytes_of(value, usize::MAX)?, false))
+                    .map_or(Cow::Borrowed(value), Cow::Owned)
+            }
+        }
+    }
+
+    /// A cell's whole value as the row panel copies it: the staged one where
+    /// an edit is pending, and bytes in the driver's spelling whatever form
+    /// the column is parsed as, as every other copy takes them.
+    pub fn copied_value(&self, row: usize, col: usize) -> Cow<'_, str> {
+        match self.pending_value(row, col) {
+            Some(NewValue::Bytes(bytes)) => Cow::Owned(
+                self.engine
+                    .bytes_text(bytes)
+                    .unwrap_or_else(|| hex::encode_upper(bytes)),
+            ),
+            Some(_) => self.edit_seed(row, col),
+            None => Cow::Borrowed(self.cell(row, col).unwrap_or_default()),
         }
     }
 
@@ -2365,7 +2548,7 @@ impl ResultGrid {
             return Some(input.clone());
         }
 
-        let seed = SharedString::from(self.edit_seed(row, col).to_string());
+        let seed = SharedString::from(self.edit_seed(row, col).into_owned());
         let input = cx.new(|cx| InputState::new(window, cx));
         // `set_value` rather than `default_value`: only the former leaves the
         // caret after the text, and an edit starts from the end of the value.
@@ -2433,6 +2616,17 @@ fn commit_from_input(
 ) -> bool {
     cx.stop_propagation();
     cx.notify();
+    // Text that spells no bytes is no mode's to fix: the input stays open on
+    // it, and the workspace says why.
+    if let Some(reason) = table.delegate().commit_refusal(cx) {
+        window.dispatch_action(
+            Box::new(crate::RefuseEdit {
+                reason: reason.into(),
+            }),
+            cx,
+        );
+        return false;
+    }
     if !table.delegate_mut().commit_edit(cx) {
         // A mode refusal has an action attached -- raise the mode -- and the
         // grid has nowhere to put one. The input stays open behind the prompt,
@@ -4837,7 +5031,12 @@ mod tests {
         assert!(grid.fields(1)[1].unparsed);
 
         assert_eq!(grid.cell(0, 1), Some(hello));
-        assert_eq!(grid.edit_seed(0, 1), hello);
+        assert_eq!(grid.copied_value(0, 1), hello);
+        assert_eq!(
+            grid.edit_seed(0, 1),
+            "hello",
+            "the whole value, in its form"
+        );
         grid.set_active(0, 1);
         assert_eq!(
             grid.rows_as(RowsAs::Text).and_then(|item| item.text()),
@@ -4877,6 +5076,198 @@ mod tests {
         grid.set_binary_form(1, BinaryForm::Hex);
         assert!(grid.binary_forms.is_empty());
         assert_eq!(grid.shown(0, 1).as_deref(), Some(hello));
+    }
+
+    /// A table's rows of `id`, a binary `payload` and a text `label`, keyed
+    /// by the columns `keys` names, read through `engine`'s own driver.
+    fn bytes_grid(
+        engine: db::Engine,
+        data_type: &str,
+        payloads: &[&str],
+        keys: Vec<usize>,
+    ) -> ResultGrid {
+        ResultGrid::new(
+            QueryResult {
+                columns: vec![
+                    column("id"),
+                    typed("payload", data_type),
+                    typed("label", "text"),
+                ],
+                rows: rows(
+                    payloads
+                        .iter()
+                        .enumerate()
+                        .map(|(id, payload)| {
+                            vec![
+                                Some(id.to_string()),
+                                Some(payload.to_string()),
+                                Some("l".into()),
+                            ]
+                        })
+                        .collect(),
+                ),
+                edit: Some(EditTarget {
+                    schema: "s".into(),
+                    table: "t".into(),
+                    columns: vec![
+                        Some("id".into()),
+                        Some("payload".into()),
+                        Some("label".into()),
+                    ],
+                    keys,
+                    ..Default::default()
+                }),
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        )
+        .with_target(db::Target::built_in(engine))
+    }
+
+    #[test]
+    fn a_binary_cell_is_written_as_the_bytes_its_form_reads_and_never_as_its_text() {
+        let staged = |grid: &ResultGrid| grid.pending_value(0, 1).cloned();
+        for (engine, data_type, held, edited, literal) in [
+            (
+                db::Engine::Postgres,
+                "bytea",
+                r"\x6869",
+                r"\x4869",
+                r"E'\\x4869'",
+            ),
+            (
+                db::Engine::MySql,
+                "varbinary(8)",
+                "0x6869",
+                "0x4869",
+                "X'4869'",
+            ),
+            (db::Engine::MariaDb, "blob", "0x6869", "0x4869", "X'4869'"),
+            (db::Engine::Sqlite, "blob", "x'6869'", "x'4869'", "X'4869'"),
+            (db::Engine::Turso, "blob", "x'6869'", "x'4869'", "X'4869'"),
+            (
+                db::Engine::SqlServer,
+                "varbinary",
+                "0x6869",
+                "0x4869",
+                "0x4869",
+            ),
+        ] {
+            let mut grid = bytes_grid(engine, data_type, &[held], vec![0]);
+            assert!(grid.editable(0, 1), "{engine:?}");
+            assert_eq!(grid.edit_seed(0, 1), held);
+            // The same bytes, however they are spelled, are no edit.
+            assert!(grid.set_pending(0, 1, value(held)));
+            assert!(grid.set_pending(0, 1, value("6869")));
+            assert!(!grid.has_pending(), "{engine:?}");
+
+            assert!(grid.set_pending(0, 1, value(edited)));
+            assert_eq!(staged(&grid), Some(NewValue::Bytes(b"Hi".to_vec())));
+            assert_eq!(
+                grid.pending_at(0, 1).unwrap().shown.as_deref(),
+                Some(edited)
+            );
+            let batch = crate::sql::update_batch(engine, &grid.pending_updates()).unwrap();
+            assert!(batch.contains(&format!("= {literal} WHERE")), "{batch}");
+            assert!(crate::sql::is_generated_write_on(engine, &batch), "{batch}");
+
+            // Each form reads its own text, and a staged edit is redrawn in
+            // whichever form the column is now parsed as.
+            grid.set_binary_form(1, BinaryForm::Text);
+            assert_eq!(grid.pending_at(0, 1).unwrap().shown.as_deref(), Some("Hi"));
+            assert_eq!(grid.edit_seed(0, 1), "Hi");
+            assert_eq!(
+                grid.copied_value(0, 1),
+                edited,
+                "copied as the driver spells it"
+            );
+            assert!(grid.set_pending(0, 1, value("hello")));
+            assert_eq!(staged(&grid), Some(NewValue::Bytes(b"hello".to_vec())));
+            assert_eq!(grid.fields(0)[1].value.as_deref(), Some("hello"));
+
+            grid.set_binary_form(1, BinaryForm::Base64);
+            assert!(grid.set_pending(0, 1, value("/wA=")));
+            assert_eq!(staged(&grid), Some(NewValue::Bytes(vec![0xff, 0])));
+            let not_base64 = value("not base64!");
+            assert_eq!(
+                grid.staging_refusal(0, 1, &not_base64),
+                Some("This is not base64, so it was not staged.")
+            );
+            assert!(!grid.set_pending(0, 1, not_base64));
+            assert_eq!(staged(&grid), Some(NewValue::Bytes(vec![0xff, 0])));
+
+            grid.set_binary_form(1, BinaryForm::Hex);
+            assert!(grid.staging_refusal(0, 1, &value("0xZZ")).is_some());
+            assert!(grid.staging_refusal(0, 1, &value("486")).is_some());
+
+            // Empty text is no bytes, in every form, where the engine has a
+            // literal for none.
+            let empty = grid.staging_refusal(0, 1, &value(""));
+            assert_eq!(
+                empty.is_some(),
+                engine == db::Engine::SqlServer,
+                "{engine:?}"
+            );
+            assert_eq!(grid.set_pending(0, 1, value("")), empty.is_none());
+            // The label beside it is written as text, as ever.
+            assert!(grid.set_pending(0, 2, value("0x4869")));
+            let batch = crate::sql::update_batch(engine, &grid.pending_updates()).unwrap();
+            assert!(crate::sql::is_generated_write_on(engine, &batch), "{batch}");
+        }
+    }
+
+    #[test]
+    fn a_binary_cell_stays_read_only_where_its_bytes_cannot_be_named_or_written() {
+        // Not UTF-8, judged on the whole value and not the part a cell draws:
+        // not as text, still as hex.
+        let long = format!(r"\x{}ff", "41".repeat(CELL_DISPLAY_LIMIT * 2));
+        let mut grid = bytes_grid(
+            db::Engine::Postgres,
+            "bytea",
+            &[r"\xff00", r"\x6869", &long],
+            vec![0],
+        );
+        grid.set_binary_form(1, BinaryForm::Text);
+        assert!(!grid.editable(0, 1) && grid.editable(1, 1) && !grid.editable(2, 1));
+        assert_eq!(
+            grid.bytes_refusal(0, 1),
+            Some("These bytes are not UTF-8 text. Parse the column as Hex or Base64 to edit them.")
+        );
+        assert!(!grid.set_pending(0, 1, value("x")));
+        assert!(grid.editable(0, 2), "the rest of the row edits as ever");
+        grid.set_binary_form(1, BinaryForm::Hex);
+        assert!(grid.editable(0, 1) && grid.editable(2, 1));
+
+        // A row named by bytes keeps them; its other cells edit as before.
+        let grid = bytes_grid(db::Engine::SqlServer, "varbinary", &["0x6869"], vec![1]);
+        assert!(!grid.editable(0, 1) && grid.editable(0, 2));
+        assert_eq!(
+            grid.bytes_refusal(0, 1),
+            Some("This row is named by a binary value, so its binary values cannot be edited.")
+        );
+        let mut every = bytes_grid(db::Engine::Postgres, "bytea", &[r"\x6869"], vec![0]);
+        every.result.edit.as_mut().unwrap().row_match =
+            db::RowMatch::EveryColumn { fixed: Vec::new() };
+        assert!(!every.editable(0, 1));
+
+        // Where nothing writes bytes back, they stay as they are.
+        for engine in [
+            db::Engine::DuckDb,
+            db::Engine::Snowflake,
+            db::Engine::ClickHouse,
+            db::Engine::Generic,
+        ] {
+            let grid = bytes_grid(engine, "blob", &["6869"], vec![0]);
+            assert!(!grid.editable(0, 1), "{engine:?}");
+            assert_eq!(
+                grid.bytes_refusal(0, 1),
+                Some("Binary values cannot be edited on this connection.")
+            );
+        }
+        // The engine alone, as a plugin's grid has it.
+        let mut grid = bytes_grid(db::Engine::Postgres, "bytea", &[r"\x6869"], vec![0]);
+        grid.edits_bytes = false;
+        assert!(!grid.editable(0, 1) && !grid.set_pending(0, 1, value(r"\x4869")));
     }
 
     #[test]

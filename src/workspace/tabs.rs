@@ -298,8 +298,8 @@ impl Workspace {
                         return field.is_some().then_some((col, None));
                     }
                     let seed = grid.edit_seed(row, col);
-                    (field.as_ref().map(|field| field.seed.as_ref()) != Some(seed))
-                        .then(|| (col, Some(gpui::SharedString::from(seed.to_string()))))
+                    (field.as_ref().map(|field| field.seed.as_ref()) != Some(seed.as_ref()))
+                        .then(|| (col, Some(gpui::SharedString::from(seed.into_owned()))))
                 })
                 .collect()
         };

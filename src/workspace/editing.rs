@@ -825,14 +825,19 @@ impl Workspace {
         // and one it can has this column alone refused.
         // A snapshot written before edit targets were kept has none, so it
         // would read as untraceable too.
-        let (traced, snapshot, reason) = {
+        let (traced, snapshot, reason, bytes) = {
             let grid = results.read(cx).delegate();
             (
                 grid.row_editable(row),
                 grid.captured().is_some(),
                 grid.read_only_reason().map(str::to_string),
+                grid.bytes_refusal(row, col),
             )
         };
+        if let Some(bytes) = bytes {
+            self.note(bytes.into(), cx);
+            return;
+        }
         // Checked before the snapshot: running a write again is not the way
         // back to editable rows.
         let engine = self.engine();
@@ -950,6 +955,15 @@ impl Workspace {
         {
             return false;
         }
+        // Text that spells no bytes is refused whatever the mode.
+        if let Some(reason) = results
+            .read(cx)
+            .delegate()
+            .staging_refusal(row, col, &value)
+        {
+            self.note(reason.into(), cx);
+            return false;
+        }
         if results.update(cx, |table, cx| {
             let staged = table.delegate_mut().stage(row, col, value);
             cx.notify();
@@ -961,7 +975,8 @@ impl Workspace {
         // cell already holds -- which changes nothing -- does not ask a
         // Read-only connection to raise its mode for it.
         if self.require(Mode::ReadWrite, cx) {
-            self.note("This column cannot be edited.".into(), cx);
+            let reason = results.read(cx).delegate().bytes_refusal(row, col);
+            self.note(reason.unwrap_or("This column cannot be edited.").into(), cx);
         }
         false
     }
@@ -1068,7 +1083,7 @@ impl Workspace {
             return true;
         };
         let seed =
-            gpui::SharedString::from(results.read(cx).delegate().edit_seed(row, col).to_string());
+            gpui::SharedString::from(results.read(cx).delegate().edit_seed(row, col).into_owned());
         if let Some(field) = self
             .row_panel
             .inputs
@@ -1221,6 +1236,15 @@ impl Workspace {
         {
             pending.commit_cell = true;
         }
+    }
+
+    pub(crate) fn refuse_edit(
+        &mut self,
+        action: &RefuseEdit,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.note(action.reason.clone(), cx);
     }
 
     /// Generate the one-row `DELETE` and show it. **Nothing runs here** — Run in
@@ -1567,8 +1591,8 @@ impl Workspace {
         let value = results
             .read(cx)
             .delegate()
-            .edit_seed(row_ix, col_ix)
-            .to_string();
+            .copied_value(row_ix, col_ix)
+            .into_owned();
         cx.write_to_clipboard(ClipboardItem::new_string(value));
 
         let copied = Some((row_ix, col_ix));

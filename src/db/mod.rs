@@ -773,7 +773,8 @@ impl Engine {
     /// What it is for: a blob is rendered as the engine's own literal — `x'AB'`,
     /// `0xAB` — and [`Engine::quote_literal`] would quote that back as the six
     /// characters it looks like, so an edited blob column becomes text. The grid
-    /// refuses the edit instead. Absent here means unknown, not text: a driver
+    /// writes such a cell as bytes ([`Engine::binary_literal`]) or refuses the
+    /// edit instead. Absent here means unknown, not text: a driver
     /// that could not name the type says nothing, and treating silence as binary
     /// would make ordinary columns read-only.
     pub fn is_binary_type(self, data_type: &str) -> bool {
@@ -783,9 +784,25 @@ impl Engine {
     /// The first `most` bytes of a value of a binary type
     /// ([`Engine::is_binary_type`]) as this engine's driver rendered it, or
     /// `None` where `value` is not its spelling of bytes. What the grid shows
-    /// a column parsed as text or base64 from; nothing written back reads it.
+    /// a column parsed as text or base64 from, and what an edit typed in the
+    /// driver's own spelling is read back to bytes by.
     pub fn bytes_of(self, value: &str, most: usize) -> Option<Vec<u8>> {
         self.spec().bytes_of(value, most)
+    }
+
+    /// `bytes` spelled as this engine's driver renders them, which
+    /// [`Engine::bytes_of`] reads back: how a staged edit of bytes is shown
+    /// beside the values the server sent. `None` where no column is binary.
+    pub fn bytes_text(self, bytes: &[u8]) -> Option<String> {
+        self.spec().bytes_text(bytes)
+    }
+
+    /// `bytes` as a literal a grid edit sets a binary column to, or `None`
+    /// where the engine writes none, or none of these bytes: SQL Server's
+    /// empty `0x` is no literal the write gate's grammar reads. Whether a
+    /// target writes bytes at all is [`Target::edits_bytes`]'s to say.
+    pub fn binary_literal(self, bytes: &[u8]) -> Option<String> {
+        self.spec().binary_literal(bytes)
     }
 
     /// Whether bytes already arrive as hex digits, so that showing them as
@@ -802,8 +819,8 @@ impl Engine {
     }
 
     /// Whether a cell whose type is known as each of `types` -- none, where
-    /// no driver named one -- holds what an edit of it would write back: not
-    /// bytes ([`Engine::is_binary_type`]), and on Redis only text that is the
+    /// no driver named one -- holds what an edit of it would write back as
+    /// text: not bytes ([`Engine::is_binary_type`]), and on Redis only text that is the
     /// whole of its value, never the start of a long one, a collection's size
     /// or the spelling of bytes that are not text. Whether rows are written
     /// back at all is the target's to say ([`Target::edits_rows`]): Generic
@@ -4283,6 +4300,42 @@ mod tests {
                 assert!(engine.is_binary_type(data_type), "{engine:?} {data_type}");
             }
         }
+    }
+
+    #[test]
+    fn bytes_are_written_as_each_engines_own_literal_and_spelled_as_its_driver_does() {
+        let hi = b"hi\xff\x00";
+        for (engine, literal, empty) in [
+            (Engine::Postgres, Some(r"E'\\x6869FF00'"), Some(r"E'\\x'")),
+            (Engine::MySql, Some("X'6869FF00'"), Some("X''")),
+            (Engine::MariaDb, Some("X'6869FF00'"), Some("X''")),
+            (Engine::Sqlite, Some("X'6869FF00'"), Some("X''")),
+            (Engine::Turso, Some("X'6869FF00'"), Some("X''")),
+            (Engine::SqlServer, Some("0x6869FF00"), None),
+            (Engine::DuckDb, None, None),
+            (Engine::Snowflake, None, None),
+            (Engine::ClickHouse, None, None),
+            (Engine::MongoDb, None, None),
+            (Engine::Redis, None, None),
+            (Engine::Generic, None, None),
+        ] {
+            assert_eq!(engine.binary_literal(hi).as_deref(), literal, "{engine:?}");
+            assert_eq!(engine.binary_literal(b"").as_deref(), empty, "{engine:?}");
+            // Whatever the driver spells, it reads back.
+            if let Some(text) = engine.bytes_text(hi) {
+                assert_eq!(
+                    engine.bytes_of(&text, usize::MAX),
+                    Some(hi.to_vec()),
+                    "{text}"
+                );
+            }
+        }
+        assert_eq!(
+            Engine::Postgres.bytes_text(hi).as_deref(),
+            Some(r"\x6869ff00")
+        );
+        assert_eq!(Engine::Sqlite.bytes_text(b"").as_deref(), Some("x''"));
+        assert_eq!(Engine::Redis.bytes_text(hi), None);
     }
 
     #[test]

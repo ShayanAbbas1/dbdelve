@@ -163,6 +163,16 @@ impl EngineSpec {
             .decode(most)
     }
 
+    /// [`Engine::bytes_text`](super::Engine::bytes_text).
+    pub fn bytes_text(&self, bytes: &[u8]) -> Option<String> {
+        Some(self.binary_text?.spell(bytes))
+    }
+
+    /// [`Engine::binary_literal`](super::Engine::binary_literal).
+    pub fn binary_literal(&self, bytes: &[u8]) -> Option<String> {
+        self.sql.binary_literal?.spell(bytes)
+    }
+
     /// [`Engine::is_numeric_type`](super::Engine::is_numeric_type). Wrappers
     /// come off first, so `Nullable(UInt64)` answers as `UInt64` does.
     pub fn is_numeric_type(&self, data_type: &str) -> bool {
@@ -261,6 +271,33 @@ impl BinaryText {
                 subtype.parse::<u8>().ok()?;
                 rest.strip_suffix("')").map(Payload::Base64)
             }
+        }
+    }
+
+    /// `bytes` as the driver writes them, which `payload` reads back.
+    fn spell(self, bytes: &[u8]) -> String {
+        match self {
+            Self::ZeroX => format!("0x{}", hex::encode_upper(bytes)),
+            Self::BackslashX => format!("\\x{}", hex::encode(bytes)),
+            Self::QuotedX => format!("x'{}'", hex::encode_upper(bytes)),
+            Self::Bare => hex::encode_upper(bytes),
+            Self::BinData => {
+                use base64::Engine as _;
+                let digits = base64::engine::general_purpose::STANDARD.encode(bytes);
+                format!("BinData(0, '{digits}')")
+            }
+        }
+    }
+}
+
+impl BinaryLiteral {
+    /// `None` for what has no spelling the write gate reads.
+    fn spell(self, bytes: &[u8]) -> Option<String> {
+        let digits = hex::encode_upper(bytes);
+        match self {
+            Self::EscapeString => Some(format!("E'\\\\x{digits}'")),
+            Self::XQuoted => Some(format!("X'{digits}'")),
+            Self::ZeroX => (!bytes.is_empty()).then(|| format!("0x{digits}")),
         }
     }
 }

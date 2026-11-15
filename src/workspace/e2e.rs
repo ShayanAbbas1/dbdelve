@@ -3729,6 +3729,47 @@ fn disconnect_is_refused_while_a_grid_holds_unapplied_edits(cx: &mut TestAppCont
 }
 
 #[gpui::test]
+fn enter_on_text_that_spells_no_bytes_keeps_the_input_open_and_says_why(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            "create table blobs (id integer primary key, b blob); \
+             insert into blobs values (1, x'6869');",
+        );
+        cx.simulate_input("select * from blobs");
+        cx.simulate_keystrokes("secondary-enter");
+        settle(cx);
+        cx.simulate_keystrokes("secondary-k r");
+        settle(cx);
+        press(cx, "right");
+        press(cx, "enter");
+        assert!(!grid_has_keyboard(&workspace, cx), "the input has it");
+
+        cx.simulate_input("zz");
+        press(cx, "enter");
+        assert!(
+            !grid_has_keyboard(&workspace, cx),
+            "the input is still open"
+        );
+        workspace.read_with(cx, |workspace, cx| {
+            let session = &workspace.profile().expect("a connection in front").session;
+            assert_eq!(
+                session.shown_notice(),
+                Some("This is not hex: pairs of digits 0-9 and A-F, so it was not staged.")
+            );
+            // A refusal of the text, not of the mode.
+            assert!(session.pending_run.is_none());
+            let grid = session.active_results().expect("rows on screen");
+            assert!(!grid.read(cx).delegate().has_pending());
+        });
+
+        press(cx, "escape");
+        assert!(grid_has_keyboard(&workspace, cx));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn disconnect_is_refused_while_an_export_runs(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");

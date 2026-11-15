@@ -542,7 +542,8 @@ pub(crate) fn sql_insert_row(
                 type_of(types, column),
             )
         })
-        .collect();
+        .collect::<Option<_>>()
+        .ok_or(UNSPELLED)?;
     Ok(format!(
         "INSERT INTO {} ({}) VALUES ({})",
         spec.qualified(schema, table),
@@ -604,7 +605,7 @@ pub(crate) fn sql_insert_rows(
                     NewValue::Value(text.clone().into())
                 }
             };
-            values.push(sql_literal(spec, &new, Some(data_type)));
+            values.push(sql_literal(spec, &new, Some(data_type)).ok_or(UNSPELLED)?);
         }
         tuples.push(format!("({})", values.join(", ")));
     }
@@ -758,7 +759,7 @@ fn sql_match(spec: &EngineSpec, row: Match, types: &[(String, String)]) -> Optio
             .collect();
         let mut terms = Vec::new();
         if !keys.is_empty() {
-            terms.push(sql_assignments(spec, &keys, types, " AND "));
+            terms.push(sql_assignments(spec, &keys, types, " AND ")?);
         }
         terms.extend(
             row.nulls
@@ -1283,18 +1284,15 @@ fn sql_assignments(
     columns: &[(&str, NewValue)],
     types: &[(String, String)],
     separator: &str,
-) -> String {
+) -> Option<String> {
     columns
         .iter()
         .map(|(column, value)| {
-            format!(
-                "{} = {}",
-                spec.quote_identifier(column),
-                sql_literal(spec, value, type_of(types, column))
-            )
+            let literal = sql_literal(spec, value, type_of(types, column))?;
+            Some(format!("{} = {literal}", spec.quote_identifier(column)))
         })
-        .collect::<Vec<_>>()
-        .join(separator)
+        .collect::<Option<Vec<_>>>()
+        .map(|terms| terms.join(separator))
 }
 
 fn type_of<'a>(types: &'a [(String, String)], column: &str) -> Option<&'a str> {
@@ -1310,18 +1308,24 @@ fn literal(engine: Engine, value: &NewValue, data_type: Option<&str>) -> String 
         NewValue::Value(value) => engine.quote_value(value, data_type),
         NewValue::Null => "NULL".to_string(),
         NewValue::Default => "DEFAULT".to_string(),
+        NewValue::Bytes(bytes) => engine.binary_literal(bytes).unwrap_or_default(),
     }
 }
+
+/// What a value with no literal on the engine is refused with.
+const UNSPELLED: &str = "A value has no literal on this engine.";
 
 /// A value as it goes into a statement: quoted, or one of the two keywords that
 /// stand for there being no value to quote. Unquoted is the only way to write
 /// either — `'NULL'` and `'DEFAULT'` are the words, and a user who typed one of
-/// them into a cell meant the word.
-fn sql_literal(spec: &EngineSpec, value: &NewValue, data_type: Option<&str>) -> String {
+/// them into a cell meant the word. Bytes are the engine's literal of them,
+/// `None` where it has none.
+fn sql_literal(spec: &EngineSpec, value: &NewValue, data_type: Option<&str>) -> Option<String> {
     match value {
-        NewValue::Value(value) => spec.quote_value(value, data_type),
-        NewValue::Null => "NULL".to_string(),
-        NewValue::Default => "DEFAULT".to_string(),
+        NewValue::Value(value) => Some(spec.quote_value(value, data_type)),
+        NewValue::Null => Some("NULL".to_string()),
+        NewValue::Default => Some("DEFAULT".to_string()),
+        NewValue::Bytes(bytes) => spec.binary_literal(bytes),
     }
 }
 
@@ -2325,9 +2329,10 @@ pub(crate) fn sql_update_batch(spec: &EngineSpec, rows: &[PendingRow]) -> Result
 /// column's assignment cast, so `'123'` lands in an `int4` exactly as `123`
 /// would, and SQLite applies the column's type affinity to the same effect. A
 /// cast dbdelve chose for itself could only ever be the wrong one. A cleared cell
-/// is therefore the empty string, and [`NewValue`]'s other two arms are the
-/// keywords: three different writes, which is the whole point of spelling two
-/// of them as something other than a value.
+/// is therefore the empty string, and the keywords are [`NewValue`]'s arms of
+/// their own: three different writes, which is the whole point of spelling two
+/// of them as something other than a value. Bytes are the engine's literal of
+/// them, and `None` where it has none.
 ///
 /// `keys` carries plain values, because a row identified by a `NULL` is a row
 /// `=` does not find; the caller drops such a row before it gets here.
@@ -2354,7 +2359,7 @@ fn sql_update_statement(
     }
 
     let table = spec.qualified(schema, table);
-    let assignments = sql_assignments(spec, sets, types, ", ");
+    let assignments = sql_assignments(spec, sets, types, ", ")?;
     let predicate = sql_match(spec, row, types)?;
     Some(match update {
         UpdateSpelling::Update => format!("UPDATE {table} SET {assignments} WHERE {predicate}"),

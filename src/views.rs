@@ -1626,6 +1626,7 @@ fn render_results(
                 .on_action(cx.listener(Workspace::set_empty))
                 .on_action(cx.listener(Workspace::set_default))
                 .on_action(cx.listener(Workspace::request_write_mode))
+                .on_action(cx.listener(Workspace::refuse_edit))
                 .on_action(cx.listener(Workspace::delete_row))
                 .on_action(cx.listener(Workspace::follow_foreign_key))
                 .on_action(cx.listener(Workspace::open_reference))
