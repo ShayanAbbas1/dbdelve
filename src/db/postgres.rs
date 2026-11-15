@@ -3384,11 +3384,23 @@ mod tests {
     fn live_a_cancel_on_its_own_connection_stops_a_schema_graph_read() {
         // The read takes no lock a user's statement would hold, so a lock on
         // the catalog its key statement reads is what keeps it running long
-        // enough to cancel. It is held for half a second.
+        // enough to cancel. The timeout is the floor under a Cancel that
+        // fails to land, so the test fails rather than hanging.
         let locker = Connection::open(&live_config()).expect("connection should open");
-        let side = live_profile()
-            .apart()
-            .expect("a side connection should open");
+        let watcher = Connection::open(&live_config()).expect("connection should open");
+        let side = Connection::open(&ServerConfig {
+            statement_timeout: 30,
+            ..live_config()
+        })
+        .and_then(|profile| profile.alongside())
+        .expect("a side connection should open");
+        let pid = side
+            .query("SELECT pg_backend_pid()", Fetch::default())
+            .unwrap()
+            .rows[0]
+            .get(0)
+            .unwrap()
+            .to_string();
         locker.query("BEGIN", Fetch::default()).unwrap();
         locker
             .query(
@@ -3396,19 +3408,31 @@ mod tests {
                 Fetch::default(),
             )
             .expect("the dev role is a superuser");
-        let canceller = side.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(500));
-            canceller
-                .cancel(&crate::db::CancelToken::default())
-                .expect("the cancel request should send");
-        });
+        let reader = super::super::Connection::Postgres(side.clone());
+        let read = std::thread::spawn(move || reader.schema_graph("public"));
+        // Cancelled once it waits on the lock: a cancel that reaches an idle
+        // session is not kept for the statement after it.
+        let waiting = format!(
+            "SELECT 1 FROM pg_catalog.pg_stat_activity \
+             WHERE pid = {pid} AND wait_event_type = 'Lock'"
+        );
+        while watcher
+            .query(&waiting, Fetch::default())
+            .unwrap()
+            .rows
+            .is_empty()
+            && !read.is_finished()
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        side.cancel().expect("the cancel request should send");
 
-        let error = side
-            .schema_graph("public")
+        let error = read
+            .join()
+            .unwrap()
             .expect_err("the read should be cancelled");
         locker.query("ROLLBACK", Fetch::default()).unwrap();
-        assert!(error.message.contains("cancel"), "{}", error.message);
+        assert!(error.message.contains("user request"), "{}", error.message);
     }
 
     #[test]
