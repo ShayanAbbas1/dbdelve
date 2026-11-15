@@ -36,6 +36,7 @@ pub(crate) mod odbc_string;
 mod password_command;
 pub(crate) mod plugin;
 mod postgres;
+mod properties;
 mod redis;
 mod snowflake;
 mod spec;
@@ -59,6 +60,7 @@ pub use graph::{GraphColumn, KeyTarget, SchemaGraph};
 pub use graph::{GraphKey, GraphTable};
 pub use password_command::{PasswordCommand, loggable_error};
 pub use plugin::Plugin;
+pub use properties::{Properties, Property};
 pub use ssh::askpass;
 
 pub use mongo::MongoConfig;
@@ -71,7 +73,7 @@ pub use spec::{
     MaterializedViewDrop, Paging, Params, ParserDialect, RegexMatch, SelectTop, SkipDuplicates,
     SqlSpec, StatementSplit, SubstringMatch, Truncate, TypedExplain,
 };
-pub use spec::{IdentityInsert, ReadOnlySession, UnreadableFloor};
+pub use spec::{IdentityInsert, ReadOnlySession, SessionTimeZone, UnreadableFloor};
 pub use target::{Driver, Levels, Target, cancel_cost, is_cancel};
 
 /// One run's claim on Cancel: [`Connection::query`] runs under it, and
@@ -1038,6 +1040,8 @@ pub(super) fn server_from_url(url: &str, engine: &str) -> Result<ServerConfig, S
         ssm: None,
         ssh: None,
         schema: None,
+        time_zone: None,
+        properties: Properties::default(),
     })
 }
 
@@ -1143,6 +1147,42 @@ pub struct ServerConfig {
     /// [`Target::picks_schema`]. None leaves the server's
     /// `search_path` alone.
     pub schema: Option<String>,
+    /// The session time zone, where [`Target::takes_time_zone`]. Applied by
+    /// each engine module as a session default, never spliced into the user's
+    /// submission, and None sends nothing, so the server's own zone stands.
+    pub time_zone: Option<String>,
+    /// The driver settings the profile set, each mapped by the engine module
+    /// onto the one driver field it names. Config, so every connection opened
+    /// from it carries them.
+    pub properties: Properties,
+}
+
+/// The longest a session time zone may be.
+const TIME_ZONE_CAP: usize = 64;
+
+/// Whether `zone` may be sent as a session time zone: a name (`Europe/Paris`,
+/// `Etc/GMT+5`, `UTC`) or an offset (`+05:30`), which is letters, digits and
+/// `_ / + - :`. Nothing else is admitted, so no quote or backslash can end the
+/// literal it is written into.
+pub fn check_time_zone(zone: &str) -> Result<(), String> {
+    let zone = zone.trim();
+    if zone.is_empty() {
+        return Err("The time zone is blank.".to_string());
+    }
+    if zone.chars().count() > TIME_ZONE_CAP {
+        return Err(format!(
+            "The time zone is longer than {TIME_ZONE_CAP} characters."
+        ));
+    }
+    if let Some(bad) = zone
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '/' | '+' | '-' | ':')))
+    {
+        return Err(format!(
+            "The time zone `{zone}` holds `{bad}`, which a time zone name does not."
+        ));
+    }
+    Ok(())
 }
 
 impl ServerConfig {
@@ -3734,6 +3774,23 @@ fn read_only_statement(engine: Engine, read_only: bool) -> Option<&'static str> 
     }
 }
 
+/// The statement that sets this session's time zone, or `None` where the
+/// engine has no session statement for it: ClickHouse sends the zone as a
+/// setting on each request instead, and the rest take none from a profile.
+///
+/// `zone` has passed [`check_time_zone`] -- the form and the restore both ask
+/// it -- and is quoted here as well, so a zone that slipped past still cannot
+/// end the literal.
+fn time_zone_statement(engine: Engine, zone: &str) -> Option<String> {
+    let spec = engine.spec();
+    let literal = spec.quote_literal(zone);
+    match spec.sql.session_time_zone {
+        SessionTimeZone::SetTimeZone => Some(format!("SET TIME ZONE {literal}")),
+        SessionTimeZone::TimeZoneVariable => Some(format!("SET time_zone = {literal}")),
+        SessionTimeZone::None | SessionTimeZone::RequestSetting => None,
+    }
+}
+
 /// Shared with `postgres::tests`, which exercises `assemble`'s type-matching
 /// against the same synthetic result shape.
 #[cfg(test)]
@@ -3932,6 +3989,29 @@ pub(crate) fn spawn(command: &mut std::process::Command) -> std::io::Result<std:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_time_zone_with_a_quote_is_refused() {
+        for zone in [
+            "UTC",
+            "SYSTEM",
+            "Europe/Paris",
+            "America/Port-au-Prince",
+            "Etc/GMT+5",
+            "+05:30",
+        ] {
+            assert_eq!(check_time_zone(zone), Ok(()), "{zone}");
+        }
+        let long = "a".repeat(65);
+        for zone in ["Europe/Paris'", "a b", "UTC;", r"a\b", long.as_str()] {
+            let message = check_time_zone(zone).expect_err(zone);
+            assert!(
+                message.contains(zone) || message.contains("64"),
+                "names the value or the limit: {message}"
+            );
+        }
+        assert!(check_time_zone("").is_err() && check_time_zone("   ").is_err());
+    }
 
     #[test]
     fn a_cancel_before_or_between_a_graph_reads_statements_holds_back_the_rest() {
@@ -5819,6 +5899,24 @@ mod tests {
             }
         }
         crate::sql_snapshots::check("spellings_read_only", &out);
+    }
+
+    /// Only the engines whose session takes a time zone by a statement have
+    /// one; ClickHouse sends it on each request instead, so it has none here.
+    #[test]
+    fn time_zone_statements_are_recorded_per_engine() {
+        for engine in Engine::ALL {
+            let expected = match engine {
+                Engine::Postgres => Some("SET TIME ZONE 'Europe/Paris'"),
+                Engine::MySql | Engine::MariaDb => Some("SET time_zone = 'Europe/Paris'"),
+                _ => None,
+            };
+            assert_eq!(
+                time_zone_statement(engine, "Europe/Paris").as_deref(),
+                expected,
+                "{engine:?}"
+            );
+        }
     }
 
     /// The script is the user's session's: every session the driver opens

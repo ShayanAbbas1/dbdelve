@@ -8,7 +8,7 @@ use gpui_component::menu::PopupMenuItem;
 use gpui_component::tree::{TreeEvent, TreeState};
 
 use crate::connection_form::{ConnectionTest, Reported, duplicate_profile_name, keep_schema};
-use crate::db::{ExternalConfig, PasswordCommand, Plugin};
+use crate::db::{ExternalConfig, PasswordCommand, Plugin, Properties, Target, check_time_zone};
 use crate::explorer::Shortcuts;
 use crate::import::{self, Source};
 use crate::session::{Behaviour, BoundSession, Depth, STALE_ROWS, restored_shortcuts};
@@ -201,6 +201,12 @@ impl Workspace {
                 return;
             }
         };
+        // Left out of the config rather than refused with the profile: the rest
+        // of it is still the connection that was asked for.
+        let refused = config
+            .server()
+            .and_then(|_| stored_session_settings(&stored, config.engine()).2)
+            .map(|message| format!("{message} It is not applied."));
         let stored_queries = stored_buffers(
             stored.open_queries,
             stored.next_query_id,
@@ -252,8 +258,9 @@ impl Workspace {
                     .filter(|_| config.server().is_some())
                     .map(|message| format!("{message} Connecting as verify-full."))
             });
-        if let Some(message) = notice {
-            session.notice = Some(message);
+        let notice = [notice, refused].into_iter().flatten().collect::<Vec<_>>();
+        if !notice.is_empty() {
+            session.notice = Some(notice.join(" "));
         }
         let id = stored.id.clone();
         let takes_script = config.target().takes_startup_script();
@@ -3421,6 +3428,39 @@ fn restored_config(
     })
 }
 
+/// A stored profile's session time zone and driver properties as `engine` may
+/// have them, and what was refused. A hand-edited value is checked here, never
+/// trusted from disk: a zone that fails [`check_time_zone`] is dropped, and a
+/// property list [`Properties::parse`] refuses is dropped whole. A zone on an
+/// engine with no time-zone row is left unread without a word, as a startup
+/// script is.
+fn stored_session_settings(
+    stored: &store::StoredProfile,
+    engine: Engine,
+) -> (Option<String>, Properties, Option<String>) {
+    let mut refused = Vec::new();
+    // The check trims, and a hand-edited file can carry whitespace the form
+    // never would: keep the text that was checked, so it is the text sent.
+    let time_zone = stored
+        .time_zone
+        .as_deref()
+        .map(|zone| zone.trim().to_string())
+        .filter(|_| Target::built_in(engine).takes_time_zone())
+        .filter(|zone| match check_time_zone(zone) {
+            Ok(()) => true,
+            Err(message) => {
+                refused.push(message);
+                false
+            }
+        });
+    let properties =
+        Properties::parse(engine, &stored.driver_properties).unwrap_or_else(|message| {
+            refused.push(message);
+            Properties::default()
+        });
+    let refused = (!refused.is_empty()).then(|| refused.join(" "));
+    (time_zone, properties, refused)
+}
 /// The connection a stored profile on a built-in `engine` describes, with
 /// `sslmode` as [`Workspace::restore_profile`] read it.
 fn stored_config(
@@ -3450,6 +3490,7 @@ fn stored_config(
         | Engine::ClickHouse
         | Engine::MongoDb
         | Engine::Redis => {
+            let (time_zone, properties, _) = stored_session_settings(stored, engine);
             let server = ServerConfig {
                 host: stored.host.clone(),
                 port: stored.port,
@@ -3464,6 +3505,8 @@ fn stored_config(
                 ssm: stored.ssm.clone(),
                 ssh: stored.ssh.clone(),
                 schema: stored.schema.clone(),
+                time_zone,
+                properties,
             };
             match engine {
                 Engine::MySql => ConnectionConfig::MySql(server),
@@ -3773,6 +3816,127 @@ target = 'i-0123456789abcdef0'
         assert_eq!(
             restored_configs(include_str!("../testdata/every-engine.toml")),
             include_str!("../testdata/every-engine.configs.txt")
+        );
+    }
+
+    #[test]
+    fn a_stored_time_zone_and_driver_properties_reach_the_config() {
+        use crate::db::Properties;
+
+        let profile = |engine: &str, extra: &str| {
+            format!(
+                "[[profiles]]\nid = 'a'\nname = 'A'\nhost = 'h'\ndatabase = 'd'\n\
+                 user = 'u'\nengine = '{engine}'\n{extra}"
+            )
+        };
+        let both = "time_zone = 'Europe/Paris'\n\
+            driver_properties = [['connect_timeout', '5'], ['application_name', 'billing']]\n";
+        let restored_server = |text: &str| {
+            let configs = restored(text);
+            configs[0].1.server().expect("a server engine").clone()
+        };
+
+        let postgres = restored_server(&profile("postgres", both));
+        assert_eq!(postgres.time_zone.as_deref(), Some("Europe/Paris"));
+        assert_eq!(
+            postgres.properties,
+            Properties {
+                application_name: Some("billing".into()),
+                connect_timeout: Some(5),
+            }
+        );
+        assert_eq!(
+            postgres.properties.stored(),
+            vec![
+                ("application_name".to_string(), "billing".to_string()),
+                ("connect_timeout".to_string(), "5".to_string()),
+            ],
+            "the list's order, not the file's"
+        );
+
+        let sql_server = restored_server(&profile("sqlserver", both));
+        assert_eq!(
+            sql_server.time_zone, None,
+            "SQL Server has no time-zone row"
+        );
+        assert_eq!(
+            sql_server.properties,
+            Properties::default(),
+            "connect_timeout is not on its list, so the whole list is refused"
+        );
+
+        let bare = restored_server(&profile("postgres", ""));
+        assert_eq!(bare.time_zone, None);
+        assert_eq!(bare.properties, Properties::default());
+    }
+
+    #[test]
+    fn a_stored_time_zone_reaches_the_config_without_its_surrounding_whitespace() {
+        let zone_of = |zone: &str| {
+            let text = format!(
+                "[[profiles]]\nid = 'a'\nname = 'A'\nhost = 'h'\ndatabase = 'd'\n\
+                 user = 'u'\nengine = 'postgres'\ntime_zone = \"{zone}\"\n"
+            );
+            let configs = restored(&text);
+            configs[0]
+                .1
+                .server()
+                .expect("a server engine")
+                .time_zone
+                .clone()
+        };
+        assert_eq!(
+            zone_of(" Europe/Paris\\n"),
+            Some("Europe/Paris".to_string())
+        );
+        assert_eq!(
+            zone_of(" \\t "),
+            None,
+            "a zone that is only whitespace is blank"
+        );
+    }
+
+    #[test]
+    fn a_hand_edited_zone_or_property_that_fails_its_check_is_not_restored() {
+        use crate::db::Properties;
+
+        let restored_server = |extra: &str| {
+            let text = format!(
+                "[[profiles]]\nid = 'a'\nname = 'A'\nhost = 'h'\ndatabase = 'd'\n\
+                 user = 'u'\nengine = 'postgres'\n{extra}"
+            );
+            restored(&text)[0]
+                .1
+                .server()
+                .expect("a server engine")
+                .clone()
+        };
+
+        let zone = restored_server("time_zone = \"Europe/Paris'; RESET ALL\"\n");
+        assert_eq!(zone.time_zone, None);
+        let options = restored_server("driver_properties = [['options', '-c x=1']]\n");
+        assert_eq!(options.properties, Properties::default());
+
+        let kept = restored_server(
+            "time_zone = 'Europe/Paris'\ndriver_properties = [['application_name', 'billing']]\n",
+        );
+        assert_eq!(kept.time_zone.as_deref(), Some("Europe/Paris"));
+        assert_eq!(kept.properties.application_name.as_deref(), Some("billing"));
+
+        let (_, _, refusal) = stored_session_settings(
+            &store::decode_profiles(
+                "[[profiles]]\nid = 'a'\nname = 'A'\nhost = 'h'\ndatabase = 'd'\nuser = 'u'\ntime_zone = \"x'y\"\n\
+                 driver_properties = [['options', 'z']]\n",
+                &[],
+            )
+            .expect("loads")
+            .profiles[0],
+            Engine::Postgres,
+        );
+        let refusal = refusal.expect("both refusals are reported");
+        assert!(
+            refusal.contains("x'y") && refusal.contains("`options`"),
+            "{refusal}"
         );
     }
 

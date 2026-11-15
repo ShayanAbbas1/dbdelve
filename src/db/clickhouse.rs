@@ -165,7 +165,7 @@ WHERE database = {schema} AND name = {relation} AND primary_key != ''";
 /// The server's version, and the settings a request may carry, with whether
 /// this user may change each.
 const FACTS_SQL: &str = "SELECT version() AS version, name, value, readonly FROM system.settings \
-                         WHERE name IN ('readonly', 'max_execution_time', \
+                         WHERE name IN ('readonly', 'max_execution_time', 'session_timezone', \
                          'format_tsv_null_representation', 'enable_http_compression')";
 
 /// Carries exactly what every later request will, so a setting this user may
@@ -370,7 +370,11 @@ impl Connection {
                 read => read.map_err(|failed| connection.explain(failed))?,
             };
             let connection = Self {
-                server: Arc::new(facts(&read, server.statement_timeout)?),
+                server: Arc::new(facts(
+                    &read,
+                    server.statement_timeout,
+                    server.time_zone.as_deref(),
+                )?),
                 ..connection
             };
             if !connection.server.settings.is_empty() {
@@ -1556,11 +1560,18 @@ fn cap(sets: &mut [QueryResult], returned: usize, kept: usize) {
 /// - `max_execution_time` is sent unless it already is the profile's timeout.
 ///   A user who may not change it and has another value fails the validation
 ///   request, in the server's words.
+/// - `session_timezone` is sent unless it already is the profile's time zone,
+///   with the same outcome for a user who may not change it. The text is
+///   compared as the server shows it, which is how a request will name it.
 /// - `format_tsv_null_representation=\N` is sent wherever it may be, so a
 ///   user's `SET` of it cannot make NULL and the text `NULL` the same bytes.
 ///   Where it may not be, it has to be `\N` already.
 /// - `enable_http_compression=1` where it is off and may be turned on.
-fn facts(read: &QueryResult, statement_timeout: u32) -> Result<ServerFacts, DbError> {
+fn facts(
+    read: &QueryResult,
+    statement_timeout: u32,
+    time_zone: Option<&str>,
+) -> Result<ServerFacts, DbError> {
     let mut version = String::new();
     let mut found = HashMap::new();
     for row in &read.rows {
@@ -1583,6 +1594,11 @@ fn facts(read: &QueryResult, statement_timeout: u32) -> Result<ServerFacts, DbEr
         if current != Some(f64::from(statement_timeout)) {
             settings.push(("max_execution_time", statement_timeout.to_string()));
         }
+    }
+    if let Some(zone) = time_zone
+        && found.get("session_timezone").map(|(value, _)| *value) != Some(zone)
+    {
+        settings.push(("session_timezone", zone.to_string()));
     }
     match found.get("format_tsv_null_representation") {
         Some((value, false)) if *value == NULL => {}
@@ -2030,6 +2046,23 @@ mod tests {
     }
 
     #[test]
+    fn a_readonly_user_whose_zone_differs_fails_the_connect_in_the_servers_words() {
+        let mock = Mock::start();
+        mock.readonly(&["session_timezone"]);
+        let server = ServerConfig {
+            time_zone: Some("Europe/Paris".into()),
+            ..profile(&mock)
+        };
+        let error = open_with(&mock, reader("0"), &server).err().unwrap();
+        assert_eq!(
+            error.message,
+            "Cannot modify 'session_timezone' setting in readonly mode. (READONLY)"
+        );
+        let [validation] = sent(&mock, VALIDATION_SQL).try_into().unwrap();
+        assert_eq!(validation.param("session_timezone"), Some("Europe/Paris"));
+    }
+
+    #[test]
     fn a_null_spelling_that_cannot_be_changed_back_fails_the_connect() {
         let mock = Mock::start();
         let facts = settings(&[
@@ -2044,9 +2077,9 @@ mod tests {
         );
     }
 
-    fn decided(statement_timeout: u32, rows: &[[&str; 3]]) -> Vec<&'static str> {
+    fn read_of(rows: &[[&str; 3]]) -> QueryResult {
         let mut builder = RowBuilder::default();
-        let read = QueryResult {
+        QueryResult {
             columns: FACTS_COLUMNS
                 .iter()
                 .map(|(name, _)| Column {
@@ -2065,13 +2098,35 @@ mod tests {
                 })
                 .collect(),
             ..QueryResult::default()
-        };
-        facts(&read, statement_timeout)
+        }
+    }
+
+    fn decided(statement_timeout: u32, rows: &[[&str; 3]]) -> Vec<&'static str> {
+        let read = read_of(rows);
+        facts(&read, statement_timeout, None)
             .unwrap()
             .settings
             .into_iter()
             .map(|(name, _)| name)
             .collect()
+    }
+
+    #[test]
+    fn a_time_zone_already_in_force_is_not_sent() {
+        let zone = |asked: Option<&str>, in_force: &str| {
+            let read = read_of(&[["session_timezone", in_force, "0"]]);
+            facts(&read, 0, asked)
+                .unwrap()
+                .settings
+                .into_iter()
+                .find(|(name, _)| *name == "session_timezone")
+        };
+        assert_eq!(zone(Some("Europe/Paris"), "Europe/Paris"), None);
+        assert_eq!(
+            zone(Some("UTC"), "Europe/Paris"),
+            Some(("session_timezone", "UTC".to_string()))
+        );
+        assert_eq!(zone(None, "Europe/Paris"), None);
     }
 
     #[test]
@@ -3989,6 +4044,26 @@ mod live {
             .iter()
             .map(|c: &Column| c.data_type.as_deref())
             .collect()
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_the_time_zone_rides_every_request() {
+        let zone = |connection: &Connection| {
+            ran(connection, "SELECT timezone()").rows[0]
+                .iter()
+                .next()
+                .flatten()
+                .map(str::to_string)
+        };
+        let config = ServerConfig {
+            time_zone: Some("Asia/Tokyo".into()),
+            ..live_config()
+        };
+        let main = Connection::open(&config).expect("connection should open");
+        assert_eq!(zone(&main).as_deref(), Some("Asia/Tokyo"));
+        let other = main.on_database("system").expect("a session should open");
+        assert_eq!(zone(&other).as_deref(), Some("Asia/Tokyo"));
     }
 
     #[test]

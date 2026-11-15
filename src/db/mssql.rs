@@ -530,6 +530,15 @@ pub fn config_from_url(url: &str) -> Result<ServerConfig, String> {
 
 type Tds = Client<Compat<TcpStream>>;
 
+/// The name the server shows for this login: the profile's, else `DBDelve`.
+fn application_name_of(server: &ServerConfig) -> &str {
+    server
+        .properties
+        .application_name
+        .as_deref()
+        .unwrap_or("DBDelve")
+}
+
 /// dbdelve's five rungs as tiberius's two settings.
 ///
 /// tiberius builds its own rustls configuration and offers three trusts:
@@ -551,7 +560,7 @@ fn config(server: &ServerConfig, encryption: EncryptionLevel) -> Config {
     if !server.database.is_empty() {
         config.database(&server.database);
     }
-    config.application_name("DBDelve");
+    config.application_name(application_name_of(server));
     // Sent as typed, blank included: cloud IAM issues a token or nothing.
     config.authentication(AuthMethod::sql_server(&server.user, &server.password));
     config.encryption(encryption);
@@ -2505,6 +2514,44 @@ mod tests {
         config_from_url(&url).expect("dbdelve_MSSQL_URL should parse")
     }
 
+    #[test]
+    fn a_blank_application_name_keeps_dbdelve() {
+        let named = |application_name: Option<&str>| {
+            application_name_of(&ServerConfig {
+                properties: crate::db::Properties {
+                    application_name: application_name.map(str::to_string),
+                    connect_timeout: None,
+                },
+                ..ServerConfig::default()
+            })
+            .to_string()
+        };
+        assert_eq!(named(None), "DBDelve");
+        assert_eq!(named(Some("billing")), "billing");
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_driver_properties_reach_the_server() {
+        let name = |connection: &Connection| {
+            let result = connection
+                .query("SELECT APP_NAME()", Fetch::default())
+                .expect("the name reads");
+            result.rows[0].get(0).map(str::to_string)
+        };
+        assert_eq!(name(&live()).as_deref(), Some("DBDelve"));
+        let config = ServerConfig {
+            properties: crate::db::Properties {
+                application_name: Some("billing app".into()),
+                connect_timeout: None,
+            },
+            ..live_config()
+        };
+        let main = Connection::open(&config).expect("the connection opens");
+        assert_eq!(name(&main).as_deref(), Some("billing app"));
+        assert_eq!(name(&main.alongside()).as_deref(), Some("billing app"));
+    }
+
     fn live() -> Connection {
         Connection::open(&live_config()).expect("connection should open")
     }
@@ -2698,13 +2745,7 @@ mod tests {
                 database: "dbdelve_test".into(),
                 user: "person@example.com".into(),
                 password: "pa ss".into(),
-                password_command: None,
-                sslmode: SslMode::default(),
-                root_certificate: None,
-                statement_timeout: 0,
-                ssm: None,
-                ssh: None,
-                schema: None,
+                ..ServerConfig::default()
             }
         );
         let error = config_from_url("mssql://someone@db.example.test/db?encrypt=true").unwrap_err();
