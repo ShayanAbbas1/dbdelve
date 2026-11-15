@@ -773,7 +773,8 @@ pub(crate) fn button_label(
         .overflow_hidden()
         .text_ellipsis()
         .whitespace_nowrap()
-        // Keep the normal line height: a one-em clipping box cuts descenders.
+        // Or the descenders decide where the text sits in the box.
+        .line_height(gpui::relative(1.))
         .text_size(px(size.text_size()))
         .font_weight(FontWeight::MEDIUM)
         .text_color(tone.ink(t))
