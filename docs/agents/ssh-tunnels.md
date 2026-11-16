@@ -270,6 +270,8 @@ teardown never waits for AWS.
 
 SSM cleanup reports a bounded one-time termination result through the runtime
 connection attempt when an explicitly disconnected tunnel is finally dropped.
+Disconnect subscribes before cancelling an in-flight connection too, so a
+session whose ID has not arrived still produces an uncertainty notice.
 The window keeps unconfirmed results separately from other notices;
 profile and region are configured settings, not verified identity. No result
 is persisted, and the local watchdog never waits for the remote request.

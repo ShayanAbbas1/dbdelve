@@ -1297,7 +1297,10 @@ impl Workspace {
         let Some(profile) = self.profile_mut() else {
             return;
         };
-        let cleanup = if matches!(profile.state, ProfileState::Connected(_)) {
+        let cleanup = if matches!(
+            profile.state,
+            ProfileState::Connecting { .. } | ProfileState::Connected(_)
+        ) {
             profile
                 .cleanup_attempt
                 .take()
