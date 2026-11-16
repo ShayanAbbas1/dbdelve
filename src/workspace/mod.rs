@@ -1423,7 +1423,7 @@ impl Workspace {
 impl Workspace {
     fn dismiss_cleanup_notice(
         &mut self,
-        event: &gpui::ClickEvent,
+        _: &gpui::ClickEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1431,7 +1431,9 @@ impl Workspace {
             return;
         }
         self.cleanup_notices.remove(0);
-        if self.cleanup_notices.is_empty() && matches!(event, gpui::ClickEvent::Keyboard(_)) {
+        // A mouse click too: a button never takes focus on mouse-down, so one
+        // tabbed to earlier still holds it as the notice unmounts.
+        if self.cleanup_notices.is_empty() {
             self.focus.focus(window, cx);
             self.refocus_front();
         }

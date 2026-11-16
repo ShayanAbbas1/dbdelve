@@ -6242,6 +6242,49 @@ fn ssm_cleanup_notice_keyboard_dismiss_keeps_actions_available(cx: &mut TestAppC
 }
 
 #[gpui::test]
+fn ssm_cleanup_notice_mouse_dismiss_after_tab_keeps_actions_available(cx: &mut TestAppContext) {
+    crate::IGNORE_ENVIRONMENT.set(true);
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch(cx);
+        workspace.update(cx, |workspace, cx| {
+            workspace
+                .cleanup_notices
+                .push(crate::db::ssm::CleanupResult {
+                    accepted: false,
+                    session: None,
+                    profile: None,
+                    region: None,
+                });
+            cx.notify();
+        });
+        settle(cx);
+        cx.update(|window, cx| {
+            window.blur(cx);
+            window.focus_next(cx);
+            window.draw(cx).clear(cx);
+        });
+        let dismiss = cx
+            .debug_bounds("cleanup-dismiss-0")
+            .expect("dismiss action");
+        cx.simulate_click(dismiss.center(), gpui::Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.cleanup_notices.is_empty())
+        });
+        cx.update(|window, cx| {
+            assert!(
+                window.focused(cx).is_some(),
+                "a mouse dismiss must retain a keyboard dispatch path"
+            )
+        });
+        cx.simulate_keystrokes("secondary-shift-p");
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| assert!(workspace.palette.is_some()));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn ssm_disconnect_delivers_failed_cleanup_notice(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite(cx);
