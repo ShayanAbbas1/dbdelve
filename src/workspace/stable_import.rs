@@ -119,6 +119,14 @@ impl Workspace {
         then_connect: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        // A disconnect while the copy runs leaves the profile Idle but moves its
+        // generation, so the generation is what says the user hasn't touched it.
+        let held = then_connect.as_ref().and_then(|id| {
+            self.profiles
+                .iter()
+                .find(|profile| &profile.id == id)
+                .map(|profile| profile.generation)
+        });
         let failed = spawn_blocking(cx.background_executor(), move || {
             copy_saved_passwords(secrets)
         });
@@ -127,7 +135,9 @@ impl Workspace {
             _ = workspace.update(cx, |workspace, cx| {
                 let untouched = then_connect.and_then(|id| {
                     workspace.profiles.iter().position(|profile| {
-                        profile.id == id && matches!(profile.state, ProfileState::Idle)
+                        profile.id == id
+                            && Some(profile.generation) == held
+                            && matches!(profile.state, ProfileState::Idle)
                     })
                 });
                 if let Some(index) = untouched {
