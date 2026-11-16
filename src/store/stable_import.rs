@@ -1,13 +1,14 @@
 //! Import from DBDelve, which only a nightly offers, in two halves.
 //!
 //! The running app copies a stable install's data directory into
-//! `<target>.importing`, marks the copy complete, and copies the saved
-//! passwords across in the keychain. The first launch after that with no
-//! other nightly running, before anything reads the data directory, moves
-//! whatever is at the target to a backup beside it and the copy into its
-//! place. Nothing a running session holds can be written over the import that
-//! way: a session saves into what becomes the backup. No backup is ever
-//! deleted here.
+//! `<target>.importing` and marks the copy complete. The first launch after
+//! that with no other nightly running, before anything reads the data
+//! directory, moves whatever is at the target to a backup beside it and the
+//! copy into its place, and once its window is up copies the saved passwords
+//! across in the keychain. Nothing a running session holds can be written
+//! over the import that way: a session saves into what becomes the backup.
+//! And no password here is replaced for an import that never went in. No
+//! backup is ever deleted here.
 //!
 //! Everything here takes its directories and services as arguments, so the
 //! tests run it on a stable build against directories of their own.
@@ -18,7 +19,7 @@ use std::io;
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use serde::Deserialize;
 use time::macros::format_description;
@@ -39,6 +40,10 @@ const COPIED: [&str; 6] = [
 /// In a staging directory, says its copy is complete, and holds the name of
 /// the backup the dialog promised.
 const MARKER: &str = ".import-complete";
+
+/// In a data directory, says the import now in it still has its saved
+/// passwords to copy. The marker, renamed once the copy is in place.
+const SECRETS_PENDING: &str = ".import-passwords-pending";
 
 /// Stable's data directory, whatever variant this build runs as.
 pub(crate) fn source() -> Result<PathBuf, String> {
@@ -414,8 +419,8 @@ pub(crate) enum Settled {
 pub(crate) fn settle(target: &Path, now: SystemTime) -> Settled {
     let staging = staging_of(target);
     // Left in the data directory by a launch that stopped right after moving
-    // the copy in. Nothing reads it, and a later import makes its own.
-    let _ = fs::remove_file(target.join(MARKER));
+    // the copy in, whose passwords then still wait.
+    secrets_now_pending(target);
 
     if !exists(&staging) {
         if exists(target) {
@@ -481,22 +486,37 @@ pub(crate) fn settle(target: &Path, now: SystemTime) -> Settled {
         }
         return Settled::Failed(moved);
     }
-    let _ = fs::remove_file(target.join(MARKER));
+    secrets_now_pending(target);
     Settled::Applied {
         // A launch that stopped between the two moves made it.
         backup: backup.or(promised.filter(|promised| exists(promised))),
     }
 }
 
+/// The marker of an import moved in, turned into the note that its saved
+/// passwords are still to copy. One that won't rename is tried again at the
+/// next launch.
+fn secrets_now_pending(target: &Path) {
+    let marker = target.join(MARKER);
+    if exists(&marker)
+        && let Err(error) = fs::rename(&marker, target.join(SECRETS_PENDING))
+    {
+        tracing::warn!("the import's passwords could not be marked as still to copy: {error}");
+    }
+}
+
 /// How a launch went, as far as an import is concerned.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Launch {
-    Settled(Settled),
+    /// Alone, so whatever was waiting is settled, and this launch copies the
+    /// saved passwords of an import in place whose passwords haven't been.
+    Settled {
+        settled: Settled,
+        secrets_pending: bool,
+    },
     /// Another instance is running, so nothing was looked at but whether an
     /// import is waiting for them all to close.
-    Shared {
-        waiting: bool,
-    },
+    Shared { waiting: bool },
 }
 
 /// Settles while no other instance is running, which the instance lock at
@@ -511,12 +531,21 @@ pub(crate) fn settle_alone(
     match locked(lock, try_alone) {
         Ok(file) => {
             let settled = settle(target, now);
+            // Looked at only while alone, so one instance copies them.
+            let secrets_pending = exists(&target.join(SECRETS_PENDING));
             // std leaves a lock taken over one already held unspecified, so
             // the exclusive one goes first. A launch that slips in between
-            // finds this one settled and nothing left to do.
+            // finds this one settled and nothing left to do, and its shared
+            // lock waits for this one's.
             file.unlock().map_err(failed)?;
             file.lock_shared().map_err(failed)?;
-            Ok((file, Launch::Settled(settled)))
+            Ok((
+                file,
+                Launch::Settled {
+                    settled,
+                    secrets_pending,
+                },
+            ))
         }
         Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
             let file = locked(lock, File::lock_shared).map_err(failed)?;
@@ -529,6 +558,13 @@ pub(crate) fn settle_alone(
 
 /// This process's hold on the instance lock, kept until it exits.
 static INSTANCE: OnceLock<File> = OnceLock::new();
+
+/// How long a launch tries for the instance lock before it starts without
+/// one, and so without looking for an import.
+const INSTANCE_LOCK_WAIT: Duration = Duration::from_secs(3);
+
+/// The data directory whose import's saved passwords this launch copies.
+static SECRETS_TO_COPY: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 /// What the workspace says once it is up, for an import this launch
 /// finished, undid or had to leave waiting.
@@ -548,19 +584,41 @@ pub(crate) fn settle_at_launch() {
             return;
         }
     };
-    let launch = match settle_alone(&instance_lock_of(&target), &target, SystemTime::now()) {
-        Ok((lock, launch)) => {
-            _ = INSTANCE.set(lock);
-            launch
-        }
-        Err(error) => {
-            tracing::warn!("an import was not looked for: {error}");
-            return;
+    let lock = instance_lock_of(&target);
+    let started = Instant::now();
+    let launch = loop {
+        match settle_alone(&lock, &target, SystemTime::now()) {
+            Ok((lock, launch)) => {
+                _ = INSTANCE.set(lock);
+                break launch;
+            }
+            Err(error) if started.elapsed() < INSTANCE_LOCK_WAIT => {
+                tracing::debug!("the instance lock is not there yet: {error}");
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            Err(error) => {
+                tracing::warn!("an import was not looked for: {error}");
+                return;
+            }
         }
     };
+    let launch = match launch {
+        Launch::Settled {
+            settled,
+            secrets_pending,
+        } => {
+            if secrets_pending {
+                *SECRETS_TO_COPY
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner()) = Some(target.clone());
+            }
+            Ok(settled)
+        }
+        Launch::Shared { waiting } => Err(waiting),
+    };
     let notice = match launch {
-        Launch::Shared { waiting: false } | Launch::Settled(Settled::Nothing) => None,
-        Launch::Shared { waiting: true } => {
+        Err(false) | Ok(Settled::Nothing) => None,
+        Err(true) => {
             tracing::info!("the import waits for every other instance to close");
             Some(format!(
                 "The import from DBDelve is put in place once every {name} window is closed \
@@ -568,7 +626,7 @@ pub(crate) fn settle_at_launch() {
                 name = Channel::current().display_name()
             ))
         }
-        Launch::Settled(Settled::Applied { backup }) => {
+        Ok(Settled::Applied { backup }) => {
             tracing::info!("the import from DBDelve is in place");
             Some(match backup {
                 Some(backup) => format!(
@@ -578,18 +636,18 @@ pub(crate) fn settle_at_launch() {
                 None => "Imported from DBDelve.".to_string(),
             })
         }
-        Launch::Settled(Settled::Abandoned) => {
+        Ok(Settled::Abandoned) => {
             tracing::info!("an import copy that never finished was deleted");
             None
         }
-        Launch::Settled(Settled::RolledBack { from }) => {
+        Ok(Settled::RolledBack { from }) => {
             tracing::warn!("no data directory but a backup, which was put back");
             Some(format!(
                 "The data directory was missing, so the backup in {} was put back.",
                 from.display()
             ))
         }
-        Launch::Settled(Settled::Failed(message)) => {
+        Ok(Settled::Failed(message)) => {
             tracing::warn!("the import from DBDelve could not be put in place: {message}");
             Some(format!(
                 "Could not finish importing from DBDelve. It is tried again at the next \
@@ -606,6 +664,33 @@ pub(crate) fn take_notice() -> Option<String> {
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
         .take()
+}
+
+/// The data directory whose import's saved passwords are still to copy, for
+/// [`copy_pending_secrets`], once.
+pub(crate) fn take_secrets_to_copy() -> Option<PathBuf> {
+    SECRETS_TO_COPY
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .take()
+}
+
+/// The saved passwords of the connections the import in `target` brought,
+/// copied from `from`'s services to `to`'s, after which none are pending.
+/// Returns the names of the connections one didn't come across for.
+pub(crate) fn copy_pending_secrets(
+    target: &Path,
+    from: &Services,
+    to: &Services,
+    keychain: &impl Keychain,
+) -> Vec<String> {
+    let failed = copy_secrets(&listed(target), from, to, keychain);
+    if let Err(error) = fs::remove_file(target.join(SECRETS_PENDING))
+        && error.kind() != io::ErrorKind::NotFound
+    {
+        tracing::warn!("the import's passwords are copied but still marked as to copy: {error}");
+    }
+    failed
 }
 
 /// The keychain as an import uses it: one item at a time, by service and
@@ -826,6 +911,7 @@ mod tests {
         assert_eq!(
             file_names(&target),
             [
+                ".import-passwords-pending",
                 "diagrams",
                 "diagrams/a",
                 "diagrams/a/d-public.toml",
@@ -948,7 +1034,10 @@ mod tests {
         let (_alone, launch) = settle_alone(&lock, &target, now()).unwrap();
         assert!(matches!(
             launch,
-            Launch::Settled(Settled::Applied { backup: Some(_) })
+            Launch::Settled {
+                settled: Settled::Applied { backup: Some(_) },
+                secrets_pending: true
+            }
         ));
         assert_eq!(read(&target.join("queries/a/report.sql")), "select 1");
         let (_beside, launch) = settle_alone(&lock, &target, now()).unwrap();
@@ -975,7 +1064,7 @@ mod tests {
     }
 
     #[test]
-    fn a_launch_after_a_crash_past_the_moves_drops_the_stray_marker() {
+    fn a_launch_after_a_crash_past_the_moves_leaves_the_passwords_to_copy() {
         let scratch = Scratch::new("past");
         let source = stable(&scratch.0);
         let target = scratch.0.join("dbdelve-nightly");
@@ -984,6 +1073,7 @@ mod tests {
 
         assert_eq!(settle(&target, now()), Settled::Nothing);
         assert!(!target.join(MARKER).exists());
+        assert!(target.join(SECRETS_PENDING).exists());
         assert_eq!(read(&target.join("queries/a/report.sql")), "select 1");
     }
 
@@ -1217,6 +1307,53 @@ port = 22
             id: id.into(),
             name: name.into(),
         }
+    }
+
+    #[test]
+    fn saved_passwords_are_copied_once_the_import_is_in_place_and_only_then() {
+        let scratch = Scratch::new("secrets");
+        let source = stable(&scratch.0);
+        let target = scratch.0.join("dbdelve-nightly");
+        let lock = instance_lock_of(&target);
+        write(&target.join(PROFILES_FILE), "mine");
+        let keychain = FakeKeychain::with(&[
+            ("dbdelve", "a", "pw-a"),
+            ("dbdelve-nightly", "a", "nightly's own"),
+        ]);
+        let copy = || {
+            copy_pending_secrets(
+                &target,
+                &Services::of("dbdelve"),
+                &Services::of("dbdelve-nightly"),
+                &keychain,
+            )
+        };
+        let alone = || match settle_alone(&lock, &target, now()).unwrap().1 {
+            Launch::Settled {
+                secrets_pending, ..
+            } => secrets_pending,
+            Launch::Shared { .. } => panic!("no other instance runs"),
+        };
+
+        staged_and_exited(&source, &target);
+        let running = locked(&lock, File::lock_shared).unwrap();
+        let (beside_it, launch) = settle_alone(&lock, &target, now()).unwrap();
+        assert_eq!(launch, Launch::Shared { waiting: true });
+        drop((running, beside_it));
+        assert_eq!(
+            keychain.get("dbdelve-nightly", "a").as_deref(),
+            Some("nightly's own"),
+            "nothing is copied while the import waits"
+        );
+
+        assert!(alone(), "the launch that puts it in place copies them");
+        assert!(alone(), "and so does the next, until they are copied");
+        assert!(copy().is_empty());
+        assert_eq!(
+            keychain.get("dbdelve-nightly", "a").as_deref(),
+            Some("pw-a")
+        );
+        assert!(!alone(), "copied once");
     }
 
     #[test]

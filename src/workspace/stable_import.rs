@@ -1,20 +1,21 @@
 //! Import from DBDelve, offered by a nightly only: a stable install's
 //! connections, saved passwords, queries and settings copied beside this
-//! one's, and put in place by the next launch (`settle_at_launch`).
+//! one's, and put in place by the next launch (`settle_at_launch`), which
+//! then copies the saved passwords.
 //!
 //! A restart rather than a reload in place: the plugins, the user themes and
 //! the keymap are all read once, at launch, before the workspace exists, and
 //! an import can bring each of them. Nothing is moved while this session
 //! runs, so it goes on saving into the directory that becomes the backup.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use gpui_component::spinner::Spinner;
 use gpui_component::{IconName, Sizable};
 
 use super::*;
-use crate::store::stable_import::{self, Listed, Services, Staged, SystemKeychain};
+use crate::store::stable_import::{self, Services, Staged, SystemKeychain};
 
 /// Where an import is, as its dialog shows it.
 pub(crate) enum StableImport {
@@ -31,9 +32,6 @@ pub(crate) enum StableImport {
 pub(crate) struct Imported {
     /// Holds the import's lock until this process exits.
     staged: Staged,
-    /// The connections a saved password or key passphrase didn't come
-    /// across for.
-    without_secrets: Vec<String>,
     /// What to restart into, or why this install can't start itself again.
     relaunch: Result<Option<PathBuf>, &'static str>,
 }
@@ -75,8 +73,10 @@ impl Workspace {
         }
     }
 
-    /// The copy and the saved passwords both off this thread: the copy can be
-    /// large, and on macOS each password can wait on a Keychain prompt.
+    /// Off this thread, as the copy can be large. The saved passwords wait
+    /// for the launch that puts the import in place
+    /// ([`Workspace::copy_imported_passwords`]), so none here is replaced for
+    /// an import that never goes in.
     pub(crate) fn run_stable_import(&mut self, at: SystemTime, cx: &mut Context<Self>) {
         let directories =
             stable_import::source().and_then(|source| Ok((source, store::dbdelve_directory()?)));
@@ -88,10 +88,8 @@ impl Workspace {
         cx.notify();
         let imported = spawn_blocking(cx.background_executor(), move || {
             let staged = stable_import::stage(&source, &target, at)?;
-            let without_secrets = copy_saved_passwords(&staged.connections);
             Ok::<_, String>(Imported {
                 staged,
-                without_secrets,
                 relaunch: update::this_install(),
             })
         });
@@ -103,6 +101,37 @@ impl Workspace {
                     cx.notify();
                 }
                 Err(message) => workspace.stable_import_failed(message, cx),
+            });
+        })
+        .detach();
+    }
+
+    /// For the import this launch put in place, once its window is up: on
+    /// macOS each password can raise a Keychain prompt, which then has the
+    /// app behind it. Off this thread, as each read can wait on one.
+    pub(crate) fn copy_imported_passwords(&mut self, target: PathBuf, cx: &mut Context<Self>) {
+        let failed = spawn_blocking(cx.background_executor(), move || {
+            copy_saved_passwords(&target)
+        });
+        cx.spawn(async move |workspace, cx| {
+            let failed = failed.await;
+            if failed.is_empty() {
+                return;
+            }
+            _ = workspace.update(cx, |workspace, cx| {
+                workspace.note(
+                    format!(
+                        "Saved passwords couldn't be copied for {}. Edit {} to enter them \
+                         again.",
+                        failed.join(", "),
+                        if failed.len() == 1 {
+                            "that connection"
+                        } else {
+                            "those connections"
+                        }
+                    ),
+                    cx,
+                );
             });
         })
         .detach();
@@ -224,17 +253,8 @@ impl Workspace {
                                 .color(t.text_muted.into())
                                 .small(),
                         )
-                        .child(text(
-                            "Copying connections, queries and saved passwords…".into(),
-                        )),
-                )
-                .when(cfg!(target_os = "macos"), |card| {
-                    card.child(text(
-                        "macOS asks before each saved password is read. Choose Allow to \
-                         copy it."
-                            .into(),
-                    ))
-                }),
+                        .child(text("Copying connections, queries and settings…".into())),
+                ),
             StableImport::Done(imported) => dialog(t)
                 .child(section_label(t, "Imported from DBDelve"))
                 .child(text(format!(
@@ -251,18 +271,18 @@ impl Workspace {
                         ),
                     }
                 )))
-                .when(!imported.without_secrets.is_empty(), |card| {
-                    card.child(text(format!(
-                        "Saved passwords couldn't be copied for {}. Edit {} to enter them \
-                         again.",
-                        imported.without_secrets.join(", "),
-                        if imported.without_secrets.len() == 1 {
-                            "that connection"
-                        } else {
-                            "those connections"
-                        }
-                    )))
-                })
+                .child(text(format!(
+                    "Saved passwords are copied after it {}{}",
+                    match imported.relaunch {
+                        Ok(_) => "restarts",
+                        Err(_) => "starts again",
+                    },
+                    if cfg!(target_os = "macos") {
+                        "; macOS asks before each one is read."
+                    } else {
+                        "."
+                    }
+                )))
                 .children(imported.staged.backup.as_ref().map(|backup| {
                     text(format!(
                         "What is here now is moved to {}.",
@@ -308,17 +328,18 @@ impl Workspace {
     }
 }
 
-/// Every connection's password and key passphrase, from stable's services
+/// The saved passwords of the import now in `target`, from stable's services
 /// into this build's. Returns the names of the connections one didn't come
-/// across for: every one, when the services can't even be named.
-fn copy_saved_passwords(connections: &[Listed]) -> Vec<String> {
+/// across for: every one, when the services can't even be named, which
+/// leaves them to try again at the next launch.
+fn copy_saved_passwords(target: &Path) -> Vec<String> {
     match Services::stable().and_then(|stable| Ok((stable, Services::this_build()?))) {
         Ok((stable, here)) => {
-            stable_import::copy_secrets(connections, &stable, &here, &SystemKeychain)
+            stable_import::copy_pending_secrets(target, &stable, &here, &SystemKeychain)
         }
         Err(error) => {
             tracing::warn!("saved passwords could not be imported: {error}");
-            connections
+            stable_import::listed(target)
                 .iter()
                 .map(|connection| connection.name().to_string())
                 .collect()

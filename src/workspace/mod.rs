@@ -713,6 +713,11 @@ impl Workspace {
         if let Some(message) = store::stable_import::take_notice() {
             workspace.note(message, cx);
         }
+        if let Some(target) = store::stable_import::take_secrets_to_copy() {
+            cx.on_next_frame(window, move |workspace, _, cx| {
+                workspace.copy_imported_passwords(target, cx);
+            });
+        }
         if let Some(message) = load_failure {
             workspace.note(message, cx);
         }
