@@ -128,13 +128,13 @@ if (-not $Iscc) {
 
 # Each /D is one argument, so a CARGO_TARGET_DIR with spaces stays one value
 # and is not wrapped in extra quotes -- those would become part of the path.
-$ChannelDefine = if ($Nightly) { @("/DNightly") } else { @() }
+$ChannelName = if ($Nightly) { "nightly" } else { "stable" }
 & $Iscc /Q `
     "/DMyAppVersion=$Version" `
     "/DStageDir=$Stage" `
     "/DOutputDir=$OutDir" `
     "/DOutputBase=$SetupName" `
-    @ChannelDefine `
+    "/DChannel=$ChannelName" `
     (Join-Path $Root "assets\windows\dbdelve.iss")
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 if (-not (Test-Path $Setup)) {

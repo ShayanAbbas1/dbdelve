@@ -37,8 +37,8 @@
 ;   OutputBase    filename without .exe
 ;
 ; Optional:
-;   Nightly       builds DBDelve Nightly's installer: its own AppId, name,
-;                 folder, Start Menu entry and icon, so it installs beside
+;   Channel       "nightly" builds DBDelve Nightly's installer: its own AppId,
+;                 name, folder, Start Menu entry and icon, so it installs beside
 ;                 stable and neither upgrades over the other. Its data is in
 ;                 %APPDATA%\dbdelve-nightly. The exe is dbdelve.exe in both.
 
@@ -55,7 +55,11 @@
   #error OutputBase must be defined (/DOutputBase=...)
 #endif
 
-#ifdef Nightly
+#ifndef Channel
+  #define Channel "stable"
+#endif
+
+#if Channel == "nightly"
   #define MyAppName "DBDelve Nightly"
   #define MyAppIcon "dbdelve-nightly.ico"
 #else
@@ -67,7 +71,7 @@
 #define MyAppExeName "dbdelve.exe"
 
 [Setup]
-#ifdef Nightly
+#if Channel == "nightly"
 AppId={{221ADDEE-C041-4E6A-A2E9-72E92DF71DCF}
 #else
 AppId={{300CEAF2-D7A2-4D97-B94B-20ED16631AF4}
