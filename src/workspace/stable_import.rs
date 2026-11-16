@@ -8,6 +8,7 @@
 //! runs, so it goes on saving into the directory that becomes the backup.
 
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 use gpui_component::spinner::Spinner;
 use gpui_component::{IconName, Sizable};
@@ -17,19 +18,19 @@ use crate::store::stable_import::{self, Listed, Services, Staged, SystemKeychain
 
 /// Where an import is, as its dialog shows it.
 pub(crate) enum StableImport {
-    /// Asked first, since the data here is moved aside to `backup`.
+    /// Asked first, since the data here is moved aside to `backup`, the
+    /// name free `at` the time asked, which the copy then names again.
     Confirm {
         backup: PathBuf,
+        at: SystemTime,
     },
     Running,
     Done(Imported),
 }
 
 pub(crate) struct Imported {
-    /// Holds the copy's marker locked until this process exits.
+    /// Holds the import's lock until this process exits.
     staged: Staged,
-    /// Where the next launch moves the data here now.
-    backup: Option<PathBuf>,
     /// The connections a saved password or key passphrase didn't come
     /// across for.
     without_secrets: Vec<String>,
@@ -55,13 +56,15 @@ impl Workspace {
             Ok(target) => target,
             Err(message) => return self.note(message, cx),
         };
-        if self.profiles.is_empty() && self.unavailable.is_empty() {
-            self.run_stable_import(cx);
-        } else {
+        let at = SystemTime::now();
+        if target.exists() {
             self.stable_import = Some(StableImport::Confirm {
-                backup: stable_import::backup_of(&target),
+                backup: stable_import::free_backup(&target, at),
+                at,
             });
             cx.notify();
+        } else {
+            self.run_stable_import(at, cx);
         }
     }
 
@@ -74,7 +77,7 @@ impl Workspace {
 
     /// The copy and the saved passwords both off this thread: the copy can be
     /// large, and on macOS each password can wait on a Keychain prompt.
-    pub(crate) fn run_stable_import(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn run_stable_import(&mut self, at: SystemTime, cx: &mut Context<Self>) {
         let directories =
             stable_import::source().and_then(|source| Ok((source, store::dbdelve_directory()?)));
         let (source, target) = match directories {
@@ -84,11 +87,10 @@ impl Workspace {
         self.stable_import = Some(StableImport::Running);
         cx.notify();
         let imported = spawn_blocking(cx.background_executor(), move || {
-            let staged = stable_import::stage(&source, &target)?;
+            let staged = stable_import::stage(&source, &target, at)?;
             let without_secrets = copy_saved_passwords(&staged.connections);
             Ok::<_, String>(Imported {
                 staged,
-                backup: target.exists().then(|| stable_import::backup_of(&target)),
                 without_secrets,
                 relaunch: update::this_install(),
             })
@@ -134,7 +136,7 @@ impl Workspace {
     /// The dialog's button the ring is on, pressed.
     pub(crate) fn answer_stable_import(&mut self, choice: usize, cx: &mut Context<Self>) {
         match (&self.stable_import, choice) {
-            (Some(StableImport::Confirm { .. }), 0) => self.run_stable_import(cx),
+            (Some(StableImport::Confirm { at, .. }), 0) => self.run_stable_import(*at, cx),
             (Some(StableImport::Confirm { .. }), _) => self.cancel_stable_import(cx),
             (Some(StableImport::Done(_)), _) => self.restart_after_import(cx),
             _ => {}
@@ -161,7 +163,7 @@ impl Workspace {
         };
         let buttons = || div().flex().justify_end().gap(px(layout::SPACE_SM));
         let card = match self.stable_import.as_ref()? {
-            StableImport::Confirm { backup } => dialog(t)
+            StableImport::Confirm { backup, .. } => dialog(t)
                 .child(section_label(t, "Import from DBDelve"))
                 .child(text(format!(
                     "{name}'s connections, queries and settings are replaced with DBDelve's \
@@ -202,7 +204,7 @@ impl Workspace {
                                 )
                                 .on_click(cx.listener(
                                     |workspace, _, _, cx| {
-                                        workspace.run_stable_import(cx);
+                                        workspace.answer_stable_import(0, cx);
                                     },
                                 )),
                                 t,
@@ -261,7 +263,7 @@ impl Workspace {
                         }
                     )))
                 })
-                .children(imported.backup.as_ref().map(|backup| {
+                .children(imported.staged.backup.as_ref().map(|backup| {
                     text(format!(
                         "What is here now is moved to {}.",
                         backup.display()

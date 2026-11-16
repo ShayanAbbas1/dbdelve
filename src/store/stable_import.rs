@@ -2,11 +2,12 @@
 //!
 //! The running app copies a stable install's data directory into
 //! `<target>.importing`, marks the copy complete, and copies the saved
-//! passwords across in the keychain. The next launch, before anything reads
-//! the data directory, moves whatever is at the target to
-//! `<target>.before-import` and the copy into its place. Nothing a running
-//! session holds can be written over the import that way: the session saves
-//! into what becomes the backup.
+//! passwords across in the keychain. The first launch after that with no
+//! other nightly running, before anything reads the data directory, moves
+//! whatever is at the target to a backup beside it and the copy into its
+//! place. Nothing a running session holds can be written over the import that
+//! way: a session saves into what becomes the backup. No backup is ever
+//! deleted here.
 //!
 //! Everything here takes its directories and services as arguments, so the
 //! tests run it on a stable build against directories of their own.
@@ -15,11 +16,12 @@ use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io;
 use std::ops::Range;
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::path::{Component, Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::SystemTime;
 
 use serde::Deserialize;
+use time::macros::format_description;
 
 use super::{
     PROFILES_FILE, data_root, dbdelve_directory, passphrase_service, variant_name, variant_of,
@@ -34,27 +36,81 @@ const COPIED: [&str; 6] = [
     "queries", "grids", "diagrams", "themes", "ssh-keys", "plugins",
 ];
 
-/// In a staging directory, says its copy is complete. Locked for as long as
-/// the app that made it runs, so a launch beside it leaves it alone.
+/// In a staging directory, says its copy is complete, and holds the name of
+/// the backup the dialog promised.
 const MARKER: &str = ".import-complete";
-
-/// How long a launch waits for the app that staged an import to finish
-/// quitting. Every platform's restart already waits for the old process, so
-/// this covers only an instance started by hand meanwhile.
-const STAGER_EXIT_WAIT: Duration = Duration::from_secs(5);
 
 /// Stable's data directory, whatever variant this build runs as.
 pub(crate) fn source() -> Result<PathBuf, String> {
     Ok(data_root()?.join(variant_of(Channel::Stable, None)?))
 }
 
-/// Where the data an import replaces is kept.
-pub(crate) fn backup_of(target: &Path) -> PathBuf {
-    beside(target, ".before-import")
-}
-
 fn staging_of(target: &Path) -> PathBuf {
     beside(target, ".importing")
+}
+
+/// Held by whoever is copying an import. Beside the staging directory rather
+/// than in it, so it is never moved or deleted with it.
+fn staging_lock_of(target: &Path) -> PathBuf {
+    beside(target, ".importing.lock")
+}
+
+/// Held shared by every running instance of this build, and alone by a
+/// launch that settles an import. Beside the data directory, which moves.
+fn instance_lock_of(target: &Path) -> PathBuf {
+    beside(target, ".lock")
+}
+
+/// `<target>.before-import`, or when that is taken, the same with the time
+/// after it (and a count, within one second): a backup is never replaced.
+pub(crate) fn free_backup(target: &Path, now: SystemTime) -> PathBuf {
+    let plain = beside(target, ".before-import");
+    if !exists(&plain) {
+        return plain;
+    }
+    let seconds = now
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs() as i64);
+    let stamp = time::OffsetDateTime::from_unix_timestamp(seconds)
+        .ok()
+        .and_then(|at| {
+            at.format(format_description!(
+                "[year][month][day]T[hour][minute][second]Z"
+            ))
+            .ok()
+        })
+        .unwrap_or_else(|| seconds.to_string());
+    let stamped = beside(target, &format!(".before-import-{stamp}"));
+    let mut candidate = stamped.clone();
+    let mut count = 2;
+    while exists(&candidate) {
+        candidate = beside(target, &format!(".before-import-{stamp}-{count}"));
+        count += 1;
+    }
+    candidate
+}
+
+/// The backups an import kept beside `target`, newest last: the timestamped
+/// names sort after the plain one, and by time among themselves.
+fn backups(target: &Path) -> Vec<PathBuf> {
+    let Some(prefix) = target
+        .file_name()
+        .map(|name| format!("{}.before-import", name.to_string_lossy()))
+    else {
+        return Vec::new();
+    };
+    let Some(parent) = target.parent() else {
+        return Vec::new();
+    };
+    let mut found: Vec<PathBuf> = fs::read_dir(parent)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+        .map(|entry| entry.path())
+        .collect();
+    found.sort();
+    found
 }
 
 fn beside(directory: &Path, suffix: &str) -> PathBuf {
@@ -115,9 +171,11 @@ fn in_flight(name: &OsStr) -> bool {
 pub(crate) struct Staged {
     /// What the copied profiles file lists, whose saved passwords come next.
     pub(crate) connections: Vec<Listed>,
-    /// The marker, locked until this process exits; dropping it earlier lets
-    /// another instance launched meanwhile move the import in under this one.
-    _marker: File,
+    /// Where the next launch moves the data here now, if there is any.
+    pub(crate) backup: Option<PathBuf>,
+    /// The staging lock, held until this process exits, so no other import
+    /// starts over this one before a launch puts it in place.
+    _lock: File,
 }
 
 /// Copies what `source` keeps into a fresh directory beside `target`, with
@@ -125,30 +183,65 @@ pub(crate) struct Staged {
 /// pointed at the same place in `target`, and marks it complete. `source` is
 /// only read: DBDelve may be running, and each of its writes replaces a file
 /// whole, so every file copied is one version of it or the next.
-pub(crate) fn stage(source: &Path, target: &Path) -> Result<Staged, String> {
+///
+/// Refused while another import is copying or one is waiting for a restart.
+pub(crate) fn stage(source: &Path, target: &Path, now: SystemTime) -> Result<Staged, String> {
     if source == target {
         return Err("This is DBDelve's own data directory.".into());
     }
     let staging = staging_of(target);
-    // An earlier import that never finished copying leaves one behind, and a
-    // complete one is replaced by this newer copy.
-    remove_directory(&staging)?;
-    let staged = copy_into(source, target, &staging).and_then(|()| {
-        let path = staging.join(MARKER);
-        File::create(&path)
-            .and_then(|marker| marker.lock().map(|()| marker))
-            .map_err(|error| format!("Could not create {}: {error}", path.display()))
-    });
-    match staged {
-        Ok(marker) => Ok(Staged {
-            connections: listed(&staging),
-            _marker: marker,
-        }),
-        Err(message) => {
-            let _ = fs::remove_dir_all(&staging);
-            Err(message)
-        }
+    let waiting = || exists(&staging.join(MARKER));
+    if waiting() {
+        return Err("An import from DBDelve is already waiting for a restart.".into());
     }
+    let lock = locked(&staging_lock_of(target), try_alone).map_err(|error| match error.kind() {
+        io::ErrorKind::WouldBlock => "An import from DBDelve is already copying.".to_string(),
+        _ => format!("Could not start the import: {error}"),
+    })?;
+    // One that finished between the look above and the lock.
+    if waiting() {
+        return Err("An import from DBDelve is already waiting for a restart.".into());
+    }
+    // Copying takes the lock this process now holds, so a copy without its
+    // marker belongs to no running process: one that stopped half way.
+    remove_directory(&staging)?;
+    let backup = exists(target).then(|| free_backup(target, now));
+    let named = backup
+        .as_deref()
+        .and_then(Path::file_name)
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let copied = copy_into(source, target, &staging)
+        .and_then(|()| write_file(&staging.join(MARKER), &named));
+    if let Err(message) = copied {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(message);
+    }
+    Ok(Staged {
+        connections: listed(&staging),
+        backup,
+        _lock: lock,
+    })
+}
+
+/// An exclusive lock, or `WouldBlock` while anyone else holds one.
+fn try_alone(file: &File) -> io::Result<()> {
+    file.try_lock().map_err(io::Error::from)
+}
+
+/// `path` opened, created if need be, and locked by `lock`.
+fn locked(path: &Path, lock: impl FnOnce(&File) -> io::Result<()>) -> io::Result<File> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    lock(&file)?;
+    Ok(file)
 }
 
 fn copy_into(source: &Path, target: &Path, staging: &Path) -> Result<(), String> {
@@ -255,6 +348,10 @@ fn moved_paths(
                         && rest.components().next().is_some_and(|first| {
                             COPIED.iter().any(|copied| first.as_os_str() == *copied)
                         })
+                        // `ssh-keys/../ca.pem` names a file no directory copied.
+                        && !rest
+                            .components()
+                            .any(|component| component == Component::ParentDir)
                 });
             if let Some(rest) = inside_a_copy {
                 let literal = toml::Value::String(to.join(rest).to_string_lossy().into_owned());
@@ -297,45 +394,47 @@ pub(crate) enum Settled {
     Applied { backup: Option<PathBuf> },
     /// A copy that never finished was deleted.
     Abandoned,
-    /// An import stopped between its two moves, with the data directory moved
-    /// aside and nothing in its place; it was put back.
-    RolledBack,
-    /// The app that staged the import is still running.
-    Waiting,
-    /// A move failed. Whatever was moved went back, and the import waits for
-    /// the next launch.
+    /// No data directory and no import, but a backup, which was put back.
+    RolledBack { from: PathBuf },
+    /// A move failed. Whatever was moved went back where it could, and the
+    /// import waits for the next launch.
     Failed(String),
 }
 
-/// Finishes or undoes an import, deciding from what is on disk alone, so a
-/// launch after a crash at any point picks up where it stopped:
-/// - a complete staging copy moves in, the target (whatever it holds) going
-///   to `<target>.before-import` first, replacing an older one;
-/// - a staging copy without its marker is deleted;
-/// - no target and no staging copy, but a backup, puts the backup back.
-pub(crate) fn settle(target: &Path, wait: Duration) -> Settled {
+/// Finishes an import, deciding from what is on disk alone, so a launch after
+/// a crash at any point picks up where it stopped. Only for a launch with no
+/// other instance running (see [`settle_alone`]), so every staging copy it
+/// finds belongs to a process that has exited:
+/// - a copy with its marker moves in, the target (whatever it holds) moving
+///   first to the backup the marker names, or to a free name beside it;
+/// - a copy without its marker is deleted;
+/// - no target and no copy, but a backup, puts the newest backup back.
+///
+/// Nothing deletes a backup, so no failure here can lose one.
+pub(crate) fn settle(target: &Path, now: SystemTime) -> Settled {
     let staging = staging_of(target);
-    let backup = backup_of(target);
     // Left in the data directory by a launch that stopped right after moving
     // the copy in. Nothing reads it, and a later import makes its own.
     let _ = fs::remove_file(target.join(MARKER));
 
     if !exists(&staging) {
-        if exists(target) || !exists(&backup) {
+        if exists(target) {
             return Settled::Nothing;
         }
-        return match fs::rename(&backup, target) {
-            Ok(()) => Settled::RolledBack,
+        let Some(newest) = backups(target).pop() else {
+            return Settled::Nothing;
+        };
+        return match fs::rename(&newest, target) {
+            Ok(()) => Settled::RolledBack { from: newest },
             Err(error) => Settled::Failed(format!(
                 "Could not move {} back to {}: {error}",
-                backup.display(),
+                newest.display(),
                 target.display()
             )),
         };
     }
-    match stager_exited(&staging.join(MARKER), wait) {
-        Ok(true) => {}
-        Ok(false) => return Settled::Waiting,
+    let promised = match fs::read_to_string(staging.join(MARKER)) {
+        Ok(name) => name,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return match remove_directory(&staging) {
                 Ok(()) => Settled::Abandoned,
@@ -345,20 +444,26 @@ pub(crate) fn settle(target: &Path, wait: Duration) -> Settled {
         Err(error) => {
             return Settled::Failed(format!("Could not read the import's marker: {error}"));
         }
-    }
+    };
+    // The one the dialog named, unless something has taken that name since.
+    let promised = Some(promised.trim())
+        .filter(|name| !name.is_empty() && Path::new(name).file_name() == Some(OsStr::new(name)))
+        .map(|name| target.with_file_name(name));
 
-    let kept = exists(target);
-    if kept {
-        if let Err(message) = remove_directory(&backup) {
-            return Settled::Failed(message);
-        }
-        if let Err(error) = fs::rename(target, &backup) {
+    let mut backup = None;
+    if exists(target) {
+        let aside = promised
+            .clone()
+            .filter(|promised| !exists(promised))
+            .unwrap_or_else(|| free_backup(target, now));
+        if let Err(error) = fs::rename(target, &aside) {
             return Settled::Failed(format!(
                 "Could not move {} to {}: {error}",
                 target.display(),
-                backup.display()
+                aside.display()
             ));
         }
+        backup = Some(aside);
     }
     if let Err(error) = fs::rename(&staging, target) {
         let moved = format!(
@@ -366,48 +471,70 @@ pub(crate) fn settle(target: &Path, wait: Duration) -> Settled {
             staging.display(),
             target.display()
         );
-        if kept && let Err(error) = fs::rename(&backup, target) {
-            // The next launch finds no target and a complete copy, and moves
-            // it in then.
+        if let Some(aside) = &backup
+            && let Err(error) = fs::rename(aside, target)
+        {
             return Settled::Failed(format!(
                 "{moved}. {} could not be moved back either: {error}",
-                backup.display()
+                aside.display()
             ));
         }
         return Settled::Failed(moved);
     }
     let _ = fs::remove_file(target.join(MARKER));
-    // Kept by this launch, or by one that stopped between the two moves.
     Settled::Applied {
-        backup: exists(&backup).then_some(backup),
+        // A launch that stopped between the two moves made it.
+        backup: backup.or(promised.filter(|promised| exists(promised))),
     }
 }
 
-/// Whether the marker's lock is free, which it is once the app that took it
-/// has exited, within `wait`. `NotFound` for a staging copy with no marker.
-fn stager_exited(marker: &Path, wait: Duration) -> io::Result<bool> {
-    let started = Instant::now();
-    loop {
-        // Closed before anything moves: Windows refuses to rename a directory
-        // with a file open in it.
-        let marker = fs::OpenOptions::new().read(true).write(true).open(marker)?;
-        match marker.try_lock() {
-            Ok(()) => return Ok(true),
-            Err(fs::TryLockError::WouldBlock) if started.elapsed() < wait => {
-                drop(marker);
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(fs::TryLockError::WouldBlock) => return Ok(false),
-            Err(fs::TryLockError::Error(error)) => return Err(error),
+/// How a launch went, as far as an import is concerned.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Launch {
+    Settled(Settled),
+    /// Another instance is running, so nothing was looked at but whether an
+    /// import is waiting for them all to close.
+    Shared {
+        waiting: bool,
+    },
+}
+
+/// Settles while no other instance is running, which the instance lock at
+/// `lock` says, and touches nothing while one is. Returns the lock held
+/// shared, for this process to keep while it runs.
+pub(crate) fn settle_alone(
+    lock: &Path,
+    target: &Path,
+    now: SystemTime,
+) -> Result<(File, Launch), String> {
+    let failed = |error: io::Error| format!("Could not lock {}: {error}", lock.display());
+    match locked(lock, try_alone) {
+        Ok(file) => {
+            let settled = settle(target, now);
+            // std leaves a lock taken over one already held unspecified, so
+            // the exclusive one goes first. A launch that slips in between
+            // finds this one settled and nothing left to do.
+            file.unlock().map_err(failed)?;
+            file.lock_shared().map_err(failed)?;
+            Ok((file, Launch::Settled(settled)))
         }
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+            let file = locked(lock, File::lock_shared).map_err(failed)?;
+            let waiting = exists(&staging_of(target).join(MARKER));
+            Ok((file, Launch::Shared { waiting }))
+        }
+        Err(error) => Err(failed(error)),
     }
 }
+
+/// This process's hold on the instance lock, kept until it exits.
+static INSTANCE: OnceLock<File> = OnceLock::new();
 
 /// What the workspace says once it is up, for an import this launch
-/// finished or undid.
+/// finished, undid or had to leave waiting.
 static NOTICE: Mutex<Option<String>> = Mutex::new(None);
 
-/// [`settle`] for this build's data directory, at the very start of a
+/// [`settle_alone`] for this build's data directory, at the very start of a
 /// launch: before the plugins, the themes or the profiles are read from it.
 /// A nightly's only, as only a nightly imports.
 pub(crate) fn settle_at_launch() {
@@ -421,9 +548,27 @@ pub(crate) fn settle_at_launch() {
             return;
         }
     };
-    let notice = match settle(&target, STAGER_EXIT_WAIT) {
-        Settled::Nothing => None,
-        Settled::Applied { backup } => {
+    let launch = match settle_alone(&instance_lock_of(&target), &target, SystemTime::now()) {
+        Ok((lock, launch)) => {
+            _ = INSTANCE.set(lock);
+            launch
+        }
+        Err(error) => {
+            tracing::warn!("an import was not looked for: {error}");
+            return;
+        }
+    };
+    let notice = match launch {
+        Launch::Shared { waiting: false } | Launch::Settled(Settled::Nothing) => None,
+        Launch::Shared { waiting: true } => {
+            tracing::info!("the import waits for every other instance to close");
+            Some(format!(
+                "The import from DBDelve is put in place once every {name} window is closed \
+                 and it is opened again.",
+                name = Channel::current().display_name()
+            ))
+        }
+        Launch::Settled(Settled::Applied { backup }) => {
             tracing::info!("the import from DBDelve is in place");
             Some(match backup {
                 Some(backup) => format!(
@@ -433,23 +578,18 @@ pub(crate) fn settle_at_launch() {
                 None => "Imported from DBDelve.".to_string(),
             })
         }
-        Settled::Abandoned => {
+        Launch::Settled(Settled::Abandoned) => {
             tracing::info!("an import copy that never finished was deleted");
             None
         }
-        Settled::RolledBack => {
-            tracing::warn!("an import stopped half way, and the data before it was put back");
-            Some(
-                "An import from DBDelve didn't finish, so the data that was here before it \
-                 was put back."
-                    .to_string(),
-            )
+        Launch::Settled(Settled::RolledBack { from }) => {
+            tracing::warn!("no data directory but a backup, which was put back");
+            Some(format!(
+                "The data directory was missing, so the backup in {} was put back.",
+                from.display()
+            ))
         }
-        Settled::Waiting => {
-            tracing::info!("the import waits for the app that copied it to quit");
-            None
-        }
-        Settled::Failed(message) => {
+        Launch::Settled(Settled::Failed(message)) => {
             tracing::warn!("the import from DBDelve could not be put in place: {message}");
             Some(format!(
                 "Could not finish importing from DBDelve. It is tried again at the next \
@@ -647,10 +787,19 @@ mod tests {
         names
     }
 
-    /// A staging copy as an app that has since exited left it: complete, its
-    /// marker no longer locked.
-    fn staged_and_exited(source: &Path, target: &Path) {
-        drop(stage(source, target).unwrap());
+    /// A fixed moment, so a backup's name is the same on every run.
+    fn now() -> SystemTime {
+        SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_763_300_000)
+    }
+
+    fn plain_backup(target: &Path) -> PathBuf {
+        beside(target, ".before-import")
+    }
+
+    /// A staging copy as an app that has since exited left it: complete, and
+    /// no longer locked.
+    fn staged_and_exited(source: &Path, target: &Path) -> Option<PathBuf> {
+        stage(source, target, now()).unwrap().backup
     }
 
     #[test]
@@ -660,7 +809,7 @@ mod tests {
         let target = scratch.0.join("dbdelve-nightly");
         let before = file_names(&source);
 
-        let staged = stage(&source, &target).unwrap();
+        let staged = stage(&source, &target, now()).unwrap();
         assert_eq!(
             staged
                 .connections
@@ -669,13 +818,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["Name a", "Name b"]
         );
+        assert_eq!(staged.backup, None, "nothing here to keep");
         assert!(!target.exists(), "nothing moves until the next launch");
         drop(staged);
 
-        assert_eq!(
-            settle(&target, Duration::ZERO),
-            Settled::Applied { backup: None }
-        );
+        assert_eq!(settle(&target, now()), Settled::Applied { backup: None });
         assert_eq!(
             file_names(&target),
             [
@@ -700,38 +847,71 @@ mod tests {
                 "themes/mine.json",
             ]
         );
-        assert_eq!(read(&target.join("queries/a/report.sql")), "select 1");
         assert_eq!(file_names(&source), before, "the source is never written");
         assert_eq!(
             read(&source.join(PROFILES_FILE)),
             profiles(&source, &["a", "b"])
         );
         assert!(!staging_of(&target).exists());
-        assert_eq!(settle(&target, Duration::ZERO), Settled::Nothing);
+        assert_eq!(settle(&target, now()), Settled::Nothing);
     }
 
     #[test]
-    fn whatever_is_here_is_kept_beside_it_in_place_of_an_older_copy() {
+    fn whatever_is_here_goes_to_the_backup_the_dialog_named_and_an_older_one_stays() {
         let scratch = Scratch::new("backup");
         let source = stable(&scratch.0);
         let target = scratch.0.join("dbdelve-nightly");
         // No connection, only settings and a project: still kept.
         let mine = "[settings]\nwelcomed = true\n\n[[projects]]\nname = \"Work\"\n";
         write(&target.join(PROFILES_FILE), mine);
-        let backup = backup_of(&target);
-        write(&backup.join("old.txt"), "older import");
+        write(&plain_backup(&target).join("old.txt"), "older import");
 
-        staged_and_exited(&source, &target);
+        let named = staged_and_exited(&source, &target).expect("there is data to keep");
+        assert_ne!(named, plain_backup(&target));
+        assert!(
+            named
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("dbdelve-nightly.before-import-")
+        );
         assert_eq!(
-            settle(&target, Duration::ZERO),
+            settle(&target, now()),
             Settled::Applied {
-                backup: Some(backup.clone())
+                backup: Some(named.clone())
             }
         );
 
-        assert_eq!(read(&backup.join(PROFILES_FILE)), mine);
-        assert!(!backup.join("old.txt").exists());
+        assert_eq!(read(&named.join(PROFILES_FILE)), mine);
+        assert_eq!(read(&plain_backup(&target).join("old.txt")), "older import");
         assert_eq!(read(&target.join("queries/a/report.sql")), "select 1");
+    }
+
+    #[test]
+    fn backups_taken_within_one_second_each_get_a_name_of_their_own() {
+        let scratch = Scratch::new("names");
+        let target = scratch.0.join("dbdelve-nightly");
+        let first = free_backup(&target, now());
+        assert_eq!(first, plain_backup(&target));
+        fs::create_dir_all(&first).unwrap();
+        let second = free_backup(&target, now());
+        fs::create_dir_all(&second).unwrap();
+        let third = free_backup(&target, now());
+        assert_eq!(
+            third,
+            beside(
+                &target,
+                &format!(
+                    "{}-2",
+                    second
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .trim_start_matches("dbdelve-nightly")
+                )
+            )
+        );
+        assert_eq!(backups(&target), [first, second]);
     }
 
     #[test]
@@ -743,29 +923,36 @@ mod tests {
         staged_and_exited(&source, &target);
         fs::remove_file(staging_of(&target).join(MARKER)).unwrap();
 
-        assert_eq!(settle(&target, Duration::ZERO), Settled::Abandoned);
+        assert_eq!(settle(&target, now()), Settled::Abandoned);
         assert!(!staging_of(&target).exists());
         assert_eq!(read(&target.join(PROFILES_FILE)), "mine");
-        assert!(!backup_of(&target).exists());
+        assert!(backups(&target).is_empty());
     }
 
     #[test]
-    fn a_launch_beside_the_app_that_copied_the_import_leaves_it_alone() {
-        let scratch = Scratch::new("waiting");
+    fn a_launch_beside_a_running_instance_touches_nothing() {
+        let scratch = Scratch::new("instances");
         let source = stable(&scratch.0);
         let target = scratch.0.join("dbdelve-nightly");
+        let lock = instance_lock_of(&target);
         write(&target.join(PROFILES_FILE), "mine");
-        let staged = stage(&source, &target).unwrap();
+        staged_and_exited(&source, &target);
+        let running = locked(&lock, File::lock_shared).unwrap();
 
-        assert_eq!(settle(&target, Duration::ZERO), Settled::Waiting);
+        let (beside_it, launch) = settle_alone(&lock, &target, now()).unwrap();
+        assert_eq!(launch, Launch::Shared { waiting: true });
         assert_eq!(read(&target.join(PROFILES_FILE)), "mine");
         assert!(staging_of(&target).join(MARKER).exists());
 
-        drop(staged);
+        drop((running, beside_it));
+        let (_alone, launch) = settle_alone(&lock, &target, now()).unwrap();
         assert!(matches!(
-            settle(&target, Duration::ZERO),
-            Settled::Applied { .. }
+            launch,
+            Launch::Settled(Settled::Applied { backup: Some(_) })
         ));
+        assert_eq!(read(&target.join("queries/a/report.sql")), "select 1");
+        let (_beside, launch) = settle_alone(&lock, &target, now()).unwrap();
+        assert_eq!(launch, Launch::Shared { waiting: false });
     }
 
     #[test]
@@ -774,16 +961,16 @@ mod tests {
         let source = stable(&scratch.0);
         let target = scratch.0.join("dbdelve-nightly");
         write(&target.join(PROFILES_FILE), "mine");
-        staged_and_exited(&source, &target);
-        fs::rename(&target, backup_of(&target)).unwrap();
+        let named = staged_and_exited(&source, &target).unwrap();
+        fs::rename(&target, &named).unwrap();
 
         assert_eq!(
-            settle(&target, Duration::ZERO),
+            settle(&target, now()),
             Settled::Applied {
-                backup: Some(backup_of(&target))
+                backup: Some(named.clone())
             }
         );
-        assert_eq!(read(&backup_of(&target).join(PROFILES_FILE)), "mine");
+        assert_eq!(read(&named.join(PROFILES_FILE)), "mine");
         assert_eq!(read(&target.join("queries/a/report.sql")), "select 1");
     }
 
@@ -795,36 +982,95 @@ mod tests {
         staged_and_exited(&source, &target);
         fs::rename(staging_of(&target), &target).unwrap();
 
-        assert_eq!(settle(&target, Duration::ZERO), Settled::Nothing);
+        assert_eq!(settle(&target, now()), Settled::Nothing);
         assert!(!target.join(MARKER).exists());
         assert_eq!(read(&target.join("queries/a/report.sql")), "select 1");
     }
 
+    /// A launch moved the data aside and then could neither move the import
+    /// in nor the data back; the app then started on an empty directory.
     #[test]
-    fn a_data_directory_moved_aside_with_nothing_in_its_place_is_put_back() {
-        let scratch = Scratch::new("rollback");
+    fn data_moved_aside_by_a_launch_that_failed_outlives_every_launch_after_it() {
+        let scratch = Scratch::new("failed-moves");
+        let source = stable(&scratch.0);
         let target = scratch.0.join("dbdelve-nightly");
-        write(&backup_of(&target).join(PROFILES_FILE), "mine");
+        write(&plain_backup(&target).join("old.txt"), "older import");
+        write(&target.join(PROFILES_FILE), "mine");
+        let named = staged_and_exited(&source, &target).unwrap();
+        fs::rename(&target, &named).unwrap();
+        write(&target.join(PROFILES_FILE), "fresh");
 
-        assert_eq!(settle(&target, Duration::ZERO), Settled::RolledBack);
-        assert_eq!(read(&target.join(PROFILES_FILE)), "mine");
-        assert!(!backup_of(&target).exists());
+        let Settled::Applied {
+            backup: Some(fresh),
+        } = settle(&target, now())
+        else {
+            panic!("the import goes in");
+        };
+        assert_eq!(read(&fresh.join(PROFILES_FILE)), "fresh");
+        assert_eq!(read(&named.join(PROFILES_FILE)), "mine");
+        assert_eq!(read(&plain_backup(&target).join("old.txt")), "older import");
+        assert_eq!(backups(&target).len(), 3);
     }
 
     #[test]
-    fn a_kept_backup_beside_a_data_directory_stays_where_it_is() {
+    fn a_missing_data_directory_gets_the_newest_backup_back() {
+        let scratch = Scratch::new("rollback");
+        let target = scratch.0.join("dbdelve-nightly");
+        write(&plain_backup(&target).join(PROFILES_FILE), "older");
+        let newest = free_backup(&target, now());
+        write(&newest.join(PROFILES_FILE), "newest");
+
+        assert_eq!(
+            settle(&target, now()),
+            Settled::RolledBack {
+                from: newest.clone()
+            }
+        );
+        assert_eq!(read(&target.join(PROFILES_FILE)), "newest");
+        assert_eq!(read(&plain_backup(&target).join(PROFILES_FILE)), "older");
+    }
+
+    #[test]
+    fn a_backup_beside_a_data_directory_stays_where_it_is() {
         let scratch = Scratch::new("settled");
         let target = scratch.0.join("dbdelve-nightly");
         write(&target.join(PROFILES_FILE), "imported");
-        write(&backup_of(&target).join(PROFILES_FILE), "mine");
+        write(&plain_backup(&target).join(PROFILES_FILE), "mine");
 
-        assert_eq!(settle(&target, Duration::ZERO), Settled::Nothing);
+        assert_eq!(settle(&target, now()), Settled::Nothing);
         assert_eq!(read(&target.join(PROFILES_FILE)), "imported");
-        assert_eq!(read(&backup_of(&target).join(PROFILES_FILE)), "mine");
+        assert_eq!(read(&plain_backup(&target).join(PROFILES_FILE)), "mine");
         assert_eq!(
-            settle(&scratch.0.join("never-made"), Duration::ZERO),
+            settle(&scratch.0.join("never-made"), now()),
             Settled::Nothing
         );
+    }
+
+    #[test]
+    fn one_import_at_a_time() {
+        let scratch = Scratch::new("one");
+        let source = stable(&scratch.0);
+        let target = scratch.0.join("dbdelve-nightly");
+
+        let copying = locked(&staging_lock_of(&target), try_alone).unwrap();
+        assert_eq!(
+            stage(&source, &target, now()).unwrap_err(),
+            "An import from DBDelve is already copying."
+        );
+        drop(copying);
+
+        let staged = stage(&source, &target, now()).unwrap();
+        assert_eq!(
+            stage(&source, &target, now()).unwrap_err(),
+            "An import from DBDelve is already waiting for a restart."
+        );
+        drop(staged);
+        assert_eq!(
+            stage(&source, &target, now()).unwrap_err(),
+            "An import from DBDelve is already waiting for a restart.",
+            "a complete copy waits for a launch, whoever made it"
+        );
+        assert!(staging_of(&target).join(MARKER).exists());
     }
 
     #[test]
@@ -839,6 +1085,7 @@ active = 'a'
 id = \"a\"
 path = '/home/me/.local/share/dbdelve/local.sqlite'
 root_certificate = \"/home/me/.local/share/dbdelve/ca.pem\"
+client_key = \"/home/me/.local/share/dbdelve/ssh-keys/../ca.pem\"
 other = \"/home/me/.local/share/dbdelve-dev/ssh-keys/k\"
 tags = [\"/home/me/.local/share/dbdelve/themes/t.json\", \"/home/me/.local/share/dbdelve/themes\", 'x']
 
@@ -856,6 +1103,7 @@ active = 'a'
 id = \"a\"
 path = '/home/me/.local/share/dbdelve/local.sqlite'
 root_certificate = \"/home/me/.local/share/dbdelve/ca.pem\"
+client_key = \"/home/me/.local/share/dbdelve/ssh-keys/../ca.pem\"
 other = \"/home/me/.local/share/dbdelve-dev/ssh-keys/k\"
 tags = [\"/home/me/.local/share/dbdelve-nightly/themes/t.json\", \"/home/me/.local/share/dbdelve/themes\", 'x']
 
@@ -873,7 +1121,7 @@ port = 22
         let target = scratch.0.join("dbdelve-nightly");
 
         staged_and_exited(&source, &target);
-        settle(&target, Duration::ZERO);
+        settle(&target, now());
 
         let imported = read(&target.join(PROFILES_FILE));
         let file: toml::Table = toml::from_str(&imported).unwrap();
@@ -892,9 +1140,9 @@ port = 22
         write(&target.join(PROFILES_FILE), "mine");
         write(&source.join(PROFILES_FILE), "not = [toml");
 
-        assert!(stage(&source, &target).is_err());
+        assert!(stage(&source, &target, now()).is_err());
         assert!(!staging_of(&target).exists());
-        assert_eq!(settle(&target, Duration::ZERO), Settled::Nothing);
+        assert_eq!(settle(&target, now()), Settled::Nothing);
         assert_eq!(read(&target.join(PROFILES_FILE)), "mine");
     }
 
@@ -902,7 +1150,7 @@ port = 22
     fn importing_a_directory_into_itself_is_refused() {
         let scratch = Scratch::new("itself");
         let source = stable(&scratch.0);
-        assert!(stage(&source, &source).is_err());
+        assert!(stage(&source, &source, now()).is_err());
         assert_eq!(read(&source.join("queries/a/report.sql")), "select 1");
     }
 
