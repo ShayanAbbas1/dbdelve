@@ -1982,6 +1982,15 @@ fn variant_of(channel: Channel, variant: Option<&str>) -> Result<String, String>
     if let Some(reason) = unsafe_component(variant) {
         return Err(format!("DBDELVE_VARIANT {reason}."));
     }
+    // Stable's `nightly` and `nightly-<x>` would be Nightly's own names. Any
+    // case, as macOS and Windows match directory names without it.
+    let nightlys = variant
+        .get(..7)
+        .is_some_and(|start| start.eq_ignore_ascii_case("nightly"))
+        && matches!(variant.as_bytes().get(7), None | Some(b'-'));
+    if channel == Channel::Stable && nightlys {
+        return Err("DBDELVE_VARIANT names DBDelve Nightly's own data.".into());
+    }
     Ok(format!("{}-{variant}", channel.slug()))
 }
 
@@ -4661,6 +4670,26 @@ open_objects = []
                 "{rejected:?}"
             );
         }
+    }
+
+    #[test]
+    fn stable_cannot_take_a_variant_that_is_nightlys_own() {
+        for reserved in ["nightly", "nightly-dev", "Nightly", "NIGHTLY-x"] {
+            assert!(
+                variant_of(Channel::Stable, Some(reserved)).is_err(),
+                "{reserved:?}"
+            );
+        }
+        for kept in ["nightlyish", "dev-nightly", "night"] {
+            assert_eq!(
+                variant_of(Channel::Stable, Some(kept)).unwrap(),
+                format!("dbdelve-{kept}")
+            );
+        }
+        assert_eq!(
+            variant_of(Channel::Nightly, Some("nightly")).unwrap(),
+            "dbdelve-nightly-nightly"
+        );
     }
 
     #[test]
