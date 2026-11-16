@@ -324,9 +324,6 @@ pub(crate) struct Workspace {
     /// import, looked for once at launch like `importable`.
     pub(crate) stable_connections: usize,
     pub(crate) stable_import: Option<stable_import::StableImport>,
-    /// The data directory holds an import now, which this session's state is
-    /// not, so nothing of it is written there before the restart.
-    pub(crate) data_replaced: bool,
     /// What `note` says while there is no connection and no form to say it
     /// on: the welcome surface's line.
     pub(crate) welcome_notice: Option<String>,
@@ -530,7 +527,6 @@ impl Workspace {
                 .collect(),
             stable_connections: stable_import::stable_connections(),
             stable_import: None,
-            data_replaced: false,
             welcome_notice: None,
             runs_on_connect: Vec::new(),
             project_name_error: None,
@@ -712,7 +708,11 @@ impl Workspace {
         }
 
         // After the environment's form, which takes the notice over the
-        // welcome surface when there is one.
+        // welcome surface when there is one. A load failure's last, since it
+        // says nothing will be saved.
+        if let Some(message) = store::stable_import::take_notice() {
+            workspace.note(message, cx);
+        }
         if let Some(message) = load_failure {
             workspace.note(message, cx);
         }

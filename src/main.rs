@@ -216,6 +216,9 @@ fn main() {
     }
     logging::install_panic_log();
     logging::install();
+    // Ahead of everything that reads the data directory: the plugins below,
+    // the themes and the profiles.
+    store::stable_import::settle_at_launch();
     update::remember_install();
     // Manifests only, ahead of the profiles that name them: no plugin process
     // starts until one of its connections opens.

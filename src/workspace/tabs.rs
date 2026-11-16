@@ -879,8 +879,8 @@ impl Workspace {
             cx.notify();
             return;
         }
-        // Only the question backs out. Once the import has started there is
-        // nothing to go back to, and what is under it is no longer on disk.
+        // Only the question backs out. Once the copy has started the dialog
+        // stays, and once it is done it is there to restart.
         if self.stable_import.is_some() {
             self.cancel_stable_import(cx);
             return;

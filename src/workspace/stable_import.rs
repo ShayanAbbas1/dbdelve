@@ -1,10 +1,11 @@
 //! Import from DBDelve, offered by a nightly only: a stable install's
-//! connections, saved passwords, queries and settings brought into this one,
-//! then a restart to open them.
+//! connections, saved passwords, queries and settings copied beside this
+//! one's, and put in place by the next launch (`settle_at_launch`).
 //!
 //! A restart rather than a reload in place: the plugins, the user themes and
 //! the keymap are all read once, at launch, before the workspace exists, and
-//! an import can bring each of them.
+//! an import can bring each of them. Nothing is moved while this session
+//! runs, so it goes on saving into the directory that becomes the backup.
 
 use std::path::PathBuf;
 
@@ -12,7 +13,7 @@ use gpui_component::spinner::Spinner;
 use gpui_component::{IconName, Sizable};
 
 use super::*;
-use crate::store::stable_import::{self, Listed, Services, Staged, Swapped, SystemKeychain};
+use crate::store::stable_import::{self, Listed, Services, Staged, SystemKeychain};
 
 /// Where an import is, as its dialog shows it.
 pub(crate) enum StableImport {
@@ -25,11 +26,15 @@ pub(crate) enum StableImport {
 }
 
 pub(crate) struct Imported {
-    connections: usize,
+    /// Holds the copy's marker locked until this process exits.
+    staged: Staged,
+    /// Where the next launch moves the data here now.
     backup: Option<PathBuf>,
     /// The connections a saved password or key passphrase didn't come
     /// across for.
     without_secrets: Vec<String>,
+    /// What to restart into, or why this install can't start itself again.
+    relaunch: Result<Option<PathBuf>, &'static str>,
 }
 
 /// How many connections a DBDelve install here has to import. None on stable
@@ -50,13 +55,13 @@ impl Workspace {
             Ok(target) => target,
             Err(message) => return self.note(message, cx),
         };
-        if stable_import::holds_data(&target) {
+        if self.profiles.is_empty() && self.unavailable.is_empty() {
+            self.run_stable_import(cx);
+        } else {
             self.stable_import = Some(StableImport::Confirm {
                 backup: stable_import::backup_of(&target),
             });
             cx.notify();
-        } else {
-            self.run_stable_import(cx);
         }
     }
 
@@ -67,9 +72,8 @@ impl Workspace {
         }
     }
 
-    /// Copies in the background and swaps on this thread, where nothing else
-    /// writes to the directory meanwhile. The saved passwords come last, off
-    /// this thread: on macOS each can wait on a Keychain prompt.
+    /// The copy and the saved passwords both off this thread: the copy can be
+    /// large, and on macOS each password can wait on a Keychain prompt.
     pub(crate) fn run_stable_import(&mut self, cx: &mut Context<Self>) {
         let directories =
             stable_import::source().and_then(|source| Ok((source, store::dbdelve_directory()?)));
@@ -79,69 +83,27 @@ impl Workspace {
         };
         self.stable_import = Some(StableImport::Running);
         cx.notify();
-        let staged = spawn_blocking(cx.background_executor(), move || {
-            stable_import::stage(&source, &target)
+        let imported = spawn_blocking(cx.background_executor(), move || {
+            let staged = stable_import::stage(&source, &target)?;
+            let without_secrets = copy_saved_passwords(&staged.connections);
+            Ok::<_, String>(Imported {
+                staged,
+                backup: target.exists().then(|| stable_import::backup_of(&target)),
+                without_secrets,
+                relaunch: update::this_install(),
+            })
         });
         cx.spawn(async move |workspace, cx| {
-            let staged = staged.await;
-            let Ok(Some((connections, swapped))) =
-                workspace.update(cx, |workspace, cx| workspace.swap_in_import(staged, cx))
-            else {
-                return;
-            };
-            let count = connections.len();
-            let Swapped { backup, discarded } = swapped;
-            let without_secrets = spawn_blocking(cx.background_executor(), move || {
-                if let Some(discarded) = discarded {
-                    let _ = std::fs::remove_dir_all(discarded);
+            let imported = imported.await;
+            _ = workspace.update(cx, |workspace, cx| match imported {
+                Ok(imported) => {
+                    workspace.stable_import = Some(StableImport::Done(imported));
+                    cx.notify();
                 }
-                copy_saved_passwords(&connections)
-            });
-            let without_secrets = without_secrets.await;
-            _ = workspace.update(cx, |workspace, cx| {
-                workspace.stable_import = Some(StableImport::Done(Imported {
-                    connections: count,
-                    backup,
-                    without_secrets,
-                }));
-                cx.notify();
+                Err(message) => workspace.stable_import_failed(message, cx),
             });
         })
         .detach();
-    }
-
-    /// The connections the import lists, and where the swap put what was
-    /// here.
-    fn swap_in_import(
-        &mut self,
-        staged: Result<Staged, String>,
-        cx: &mut Context<Self>,
-    ) -> Option<(Vec<Listed>, Swapped)> {
-        let staged = match staged {
-            Ok(staged) => staged,
-            Err(message) => {
-                self.stable_import_failed(message, cx);
-                return None;
-            }
-        };
-        // What this session holds reaches the disk first, so the copy kept
-        // aside is the data as it is now, as a quit would have left it.
-        self.persist_buffers(cx);
-        if self.profiles_unsaved {
-            let _ = self.save_profiles(cx);
-        }
-        let connections = staged.connections.clone();
-        match stable_import::swap(staged) {
-            Ok(swapped) => {
-                self.data_replaced = true;
-                self.profiles_save = None;
-                Some((connections, swapped))
-            }
-            Err(message) => {
-                self.stable_import_failed(message, cx);
-                None
-            }
-        }
     }
 
     fn stable_import_failed(&mut self, message: String, cx: &mut Context<Self>) {
@@ -152,13 +114,21 @@ impl Workspace {
         );
     }
 
-    /// Into the same install, which reads the imported directory as it starts.
+    /// Into the same install, the way an update restarts, which puts the
+    /// import in place as it starts. One that can't start itself again
+    /// quits, and the import waits for whenever it is opened next.
     pub(crate) fn restart_after_import(&mut self, cx: &mut Context<Self>) {
-        update::before_restart();
-        if let Some(install) = update::this_install() {
-            cx.set_restart_path(install);
+        let Some(StableImport::Done(imported)) = &self.stable_import else {
+            return;
+        };
+        match imported.relaunch {
+            Ok(Some(ref install)) => restart_into(install.clone(), cx),
+            Ok(None) => {
+                update::before_restart();
+                cx.restart();
+            }
+            Err(_) => cx.quit(),
         }
-        cx.restart();
     }
 
     /// The dialog's button the ring is on, pressed.
@@ -194,8 +164,8 @@ impl Workspace {
             StableImport::Confirm { backup } => dialog(t)
                 .child(section_label(t, "Import from DBDelve"))
                 .child(text(format!(
-                    "{name}'s connections, queries and settings are replaced with DBDelve's. \
-                     The ones here now are moved to {}.",
+                    "{name}'s connections, queries and settings are replaced with DBDelve's \
+                     when it restarts. The ones here now are moved to {}.",
                     backup.display()
                 )))
                 .child(
@@ -266,15 +236,17 @@ impl Workspace {
             StableImport::Done(imported) => dialog(t)
                 .child(section_label(t, "Imported from DBDelve"))
                 .child(text(format!(
-                    "{} imported. {name} restarts to open {}.",
-                    match imported.connections {
+                    "{} copied. {}",
+                    match imported.staged.connections.len() {
                         1 => "1 connection".to_string(),
                         count => format!("{count} connections"),
                     },
-                    if imported.connections == 1 {
-                        "it"
-                    } else {
-                        "them"
+                    match imported.relaunch {
+                        Ok(_) => format!("{name} restarts to put them in place."),
+                        Err(_) => format!(
+                            "They are put in place the next time {name} starts. Open it \
+                             again once it has quit."
+                        ),
                     }
                 )))
                 .when(!imported.without_secrets.is_empty(), |card| {
@@ -290,7 +262,10 @@ impl Workspace {
                     )))
                 })
                 .children(imported.backup.as_ref().map(|backup| {
-                    text(format!("What was here before is in {}.", backup.display()))
+                    text(format!(
+                        "What is here now is moved to {}.",
+                        backup.display()
+                    ))
                 }))
                 .child(
                     buttons().child(
@@ -299,7 +274,10 @@ impl Workspace {
                             0,
                             button(
                                 "restart-after-import",
-                                "Restart",
+                                match imported.relaunch {
+                                    Ok(_) => "Restart",
+                                    Err(_) => "Quit",
+                                },
                                 Tone::Primary,
                                 Control::Standard,
                                 t,

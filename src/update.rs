@@ -207,14 +207,16 @@ fn tag_version(tag: &str) -> &str {
     tag.trim_start_matches('v')
 }
 
-/// What relaunches this install as it is: the AppImage file for one running
-/// from it, since its executable lives in a mount that goes with this process,
-/// and on every other install what `App::restart` finds for itself.
-pub(crate) fn this_install() -> Option<std::path::PathBuf> {
+/// What relaunches this install as it is, for a restart into the same files:
+/// the AppImage file for one running from it, since its executable lives in a
+/// mount that goes with this process, and on every other install `None`, for
+/// what `App::restart` finds itself. An error is why it can't start itself
+/// again, as the updater finds it.
+pub(crate) fn this_install() -> Result<Option<std::path::PathBuf>, &'static str> {
     #[cfg(target_os = "linux")]
-    return linux::running_appimage();
+    return linux::relaunch_target();
     #[cfg(not(target_os = "linux"))]
-    None
+    Ok(None)
 }
 
 /// Just ahead of `App::restart` into an install.

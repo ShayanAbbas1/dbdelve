@@ -94,14 +94,22 @@ pub(super) fn remember_install() {
     }
 }
 
-pub(super) fn running_appimage() -> Option<PathBuf> {
-    let exe = std::env::current_exe().and_then(fs::canonicalize).ok()?;
-    appimage_of(
-        &exe,
-        std::env::var_os("APPIMAGE").as_deref(),
-        std::env::var_os("APPDIR").as_deref(),
-    )
-    .map(Path::to_path_buf)
+/// The AppImage this process runs from, checked the way an update's restart
+/// is, or `None` for a binary that `App::restart` relaunches as it is.
+pub(super) fn relaunch_target() -> Result<Option<PathBuf>, &'static str> {
+    let Ok(exe) = std::env::current_exe().and_then(fs::canonicalize) else {
+        return Ok(None);
+    };
+    let (appimage, appdir) = (std::env::var_os("APPIMAGE"), std::env::var_os("APPDIR"));
+    let Some(appimage) = appimage_of(&exe, appimage.as_deref(), appdir.as_deref()) else {
+        return Ok(None);
+    };
+    relaunchable(
+        Path::new(appdir.as_deref().unwrap_or_default()),
+        std::env::var_os("APPIMAGE_EXTRACT_AND_RUN").as_deref(),
+        mount_point,
+    )?;
+    Ok(Some(appimage.to_path_buf()))
 }
 
 fn remember(appimage: &Path, at_start: &OnceLock<Identity>) {
