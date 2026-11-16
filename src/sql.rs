@@ -1218,6 +1218,111 @@ pub fn is_generated_write_on(engine: Engine, statement: &str) -> bool {
     }
 }
 
+/// The gate every role change DBDelve writes passes before it is shown for
+/// review: `CREATE ROLE` and `ALTER ROLE`, one or more, in the shapes
+/// `db::roles` writes and no other. A
+/// password is admitted only as a SCRAM verifier, so a statement that would
+/// carry one in the clear is refused here whoever wrote it. Never a
+/// superuser, a privilege on an object, or a change of anything else.
+pub fn is_generated_role_change(engine: Engine, sql: &str) -> bool {
+    let spec = &engine.spec().sql;
+    if engine.syntax() != Syntax::Sql || spec.parser_dialect != ParserDialect::PostgreSql {
+        return false;
+    }
+    let dialect = parser(spec.parser_dialect);
+    let Ok(statements) = SqlParser::parse_sql(dialect.as_ref(), sql) else {
+        return false;
+    };
+    !statements.is_empty() && statements.iter().all(role_change)
+}
+
+/// Whether `text` is a SCRAM-SHA-256 verifier in full,
+/// `SCRAM-SHA-256$<iterations>:<salt>$<stored key>:<server key>`. The server
+/// takes a string of any other shape, a prefix-alike included, as the password
+/// itself.
+fn is_scram_verifier(text: &str) -> bool {
+    let base64 = |part: &str| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+    };
+    let Some(rest) = text.strip_prefix("SCRAM-SHA-256$") else {
+        return false;
+    };
+    let Some((head, keys)) = rest.split_once('$') else {
+        return false;
+    };
+    let (Some((iterations, salt)), Some((stored, server))) =
+        (head.split_once(':'), keys.split_once(':'))
+    else {
+        return false;
+    };
+    !iterations.is_empty()
+        && iterations.bytes().all(|b| b.is_ascii_digit())
+        && base64(salt)
+        && base64(stored)
+        && base64(server)
+}
+
+fn role_change(statement: &Statement) -> bool {
+    use sqlparser::ast::{AlterRoleOperation, CreateRole, Password, RoleOption};
+    let number = |expr: &Expr| matches!(expr, Expr::Value(value) if matches!(value.value, sqlparser::ast::Value::Number(..)));
+    let string = |expr: &Expr| matches!(expr, Expr::Value(value) if matches!(value.value, sqlparser::ast::Value::SingleQuotedString(_)));
+    let verifier = |password: &Password| match password {
+        Password::Password(Expr::Value(value)) => matches!(
+            &value.value,
+            sqlparser::ast::Value::SingleQuotedString(text) if is_scram_verifier(text)
+        ),
+        _ => false,
+    };
+    match statement {
+        Statement::CreateRole(CreateRole {
+            names,
+            if_not_exists: false,
+            login: Some(_),
+            inherit: None,
+            bypassrls: None,
+            password,
+            superuser: None,
+            create_db: None,
+            create_role: None,
+            replication: None,
+            connection_limit,
+            valid_until,
+            in_role: _,
+            in_group,
+            role,
+            user,
+            admin,
+            authorization_owner: None,
+        }) => {
+            names.len() == 1
+                && password.as_ref().is_none_or(verifier)
+                && connection_limit.as_ref().is_none_or(number)
+                && valid_until.as_ref().is_none_or(string)
+                && in_group.is_empty()
+                && role.is_empty()
+                && user.is_empty()
+                && admin.is_empty()
+        }
+        Statement::AlterRole {
+            operation: AlterRoleOperation::WithOptions { options },
+            ..
+        } => {
+            !options.is_empty()
+                && options.iter().all(|option| match option {
+                    RoleOption::ConnectionLimit(limit) => number(limit),
+                    RoleOption::ValidUntil(date) => string(date),
+                    RoleOption::Login(_) => true,
+                    RoleOption::Password(password) => verifier(password),
+                    _ => false,
+                })
+        }
+        _ => false,
+    }
+}
+
 /// The statements of a write [`is_generated_write_on`] admits, each as its own
 /// text, the transaction bracket the gate sees through dropped: for a driver
 /// that brackets them in a transaction of its own rather than in text. Each
@@ -5785,6 +5890,63 @@ fn has_dollar_quote(sql: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_role_gate_admits_what_db_roles_writes() {
+        use crate::db::roles::{NewRole, create_role, reset_password, set_login};
+        let pg = Engine::Postgres;
+        let create = create_role(&NewRole {
+            name: "ana".into(),
+            login: true,
+            password: Some("pw".into()),
+            connection_limit: Some(5),
+            password_expires: Some("2027-01-31".into()),
+            member_of: vec!["reporting".into()],
+        });
+        for sql in [
+            create.as_str(),
+            "CREATE ROLE app_rw NOLOGIN;",
+            &reset_password("ana", "pw"),
+            &set_login("ana", false),
+            "ALTER ROLE ana WITH CONNECTION LIMIT 3 VALID UNTIL 'infinity';",
+        ] {
+            assert!(is_generated_role_change(pg, sql), "{sql}");
+        }
+    }
+
+    #[test]
+    fn the_role_gate_refuses_anything_else() {
+        let pg = Engine::Postgres;
+        for sql in [
+            "CREATE ROLE ana LOGIN PASSWORD 'in the clear';",
+            // Shaped like a verifier only at its start: the server would
+            // store it as the password.
+            "ALTER ROLE ana WITH PASSWORD 'SCRAM-SHA-256$hunter2';",
+            "ALTER ROLE ana WITH PASSWORD 'SCRAM-SHA-256$4096:c2FsdA==$a2V5 :c2VydmVy';",
+            "CREATE ROLE ana LOGIN SUPERUSER;",
+            "CREATE ROLE ana;",
+            "ALTER ROLE ana SUPERUSER;",
+            "ALTER ROLE ana RENAME TO bo;",
+            // sqlparser cannot read a negative limit, so neither could the
+            // mode check: no limit is never written back.
+            "ALTER ROLE ana WITH CONNECTION LIMIT -1;",
+            "ALTER ROLE ana SET search_path = x;",
+            "GRANT SELECT ON t TO ana;",
+            "GRANT ALL ON t TO ana;",
+            // sqlparser cannot read a membership grant, so the mode check
+            // could not either: refused rather than run unread.
+            "GRANT reporting TO ana;",
+            "DROP ROLE ana;",
+            "CREATE ROLE ana NOLOGIN; DROP TABLE t;",
+            "",
+        ] {
+            assert!(!is_generated_role_change(pg, sql), "{sql}");
+        }
+        assert!(!is_generated_role_change(
+            Engine::MySql,
+            "CREATE ROLE app_rw NOLOGIN;"
+        ));
+    }
 
     #[test]
     fn the_mode_cycle_runs_read_only_to_full_and_back() {

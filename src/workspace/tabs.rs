@@ -1107,6 +1107,12 @@ impl Workspace {
         if self.close_apply_review(cx) || self.revert_active_row(window, cx) {
             return;
         }
+        if self.close_role_form(cx) {
+            return;
+        }
+        if self.close_grants_view(cx) {
+            return;
+        }
         if self.close_ddl_view(cx) {
             return;
         }
@@ -1251,7 +1257,7 @@ impl Workspace {
             ObjectBody::Diagram { view, .. } => {
                 Some(Focus::Diagram(view.read(cx).focus_handle().clone()))
             }
-            ObjectBody::Routine(_) => None,
+            ObjectBody::Routine(_) | ObjectBody::Users { .. } => None,
         }
     }
 

@@ -1837,6 +1837,65 @@ impl Connection {
         })
     }
 
+    /// Whether the connection may read passwords (`pg_authid`), and whether
+    /// the server keeps an inherit option per membership (Postgres 16 on).
+    fn role_catalog(&self) -> Result<(bool, bool), DbError> {
+        let probe = self.internal_query(
+            "SELECT CASE WHEN pg_catalog.has_table_privilege('pg_catalog.pg_authid', 'SELECT')
+                 THEN 'y' ELSE 'n' END AS passwords,
+                 CASE WHEN pg_catalog.current_setting('server_version_num')::int >= 160000
+                 THEN 'y' ELSE 'n' END AS per_membership",
+        )?;
+        let row = probe.rows.first().cloned().unwrap_or_default();
+        Ok((
+            required_cell(&probe, &row, "passwords")? == "y",
+            required_cell(&probe, &row, "per_membership")? == "y",
+        ))
+    }
+
+    pub fn roles(&self) -> Result<super::roles::Roles, DbError> {
+        use super::roles::{assemble_roles, memberships_sql, roles_sql};
+        let (passwords, per_membership) = self.role_catalog()?;
+        let roles = self.internal_query(&roles_sql(passwords))?;
+        let memberships = self.internal_query(&memberships_sql(per_membership))?;
+        assemble_roles(&roles, &memberships)
+    }
+
+    pub fn object_grants(
+        &self,
+        schema: &str,
+        name: &str,
+    ) -> Result<super::roles::ObjectGrants, DbError> {
+        use super::roles::{RELATION_GRANTS_SQL, assemble_grants};
+        let grants = self.internal_query(&structure_sql(RELATION_GRANTS_SQL, schema, name))?;
+        assemble_grants(&grants, self.roles()?)
+    }
+
+    pub fn role_reach(&self, name: &str) -> Result<super::roles::Reach, DbError> {
+        use super::roles::{assemble_reach, owns_sql, reach_sql};
+        let (_, per_membership) = self.role_catalog()?;
+        let reach = self.internal_query(&reach_sql(name, per_membership))?;
+        let owns = self.internal_query(&owns_sql(name, per_membership))?;
+        assemble_reach(&reach, &owns)
+    }
+
+    pub fn role_grants(&self, name: &str) -> Result<super::roles::RoleGrants, DbError> {
+        use super::roles::{assemble_role_grants, role_grants_sql};
+        let (_, per_membership) = self.role_catalog()?;
+        assemble_role_grants(&self.internal_query(&role_grants_sql(name, per_membership))?)
+    }
+
+    pub fn role_reports(
+        &self,
+        roles: &super::roles::Roles,
+    ) -> Result<super::roles::Reports, DbError> {
+        use super::roles::{PUBLIC_GRANTS_SQL, SESSIONS_SQL, UNUSED_ROLES_SQL, assemble_reports};
+        let public = self.internal_query(PUBLIC_GRANTS_SQL)?;
+        let unused = self.internal_query(UNUSED_ROLES_SQL)?;
+        let sessions = self.internal_query(SESSIONS_SQL)?;
+        assemble_reports(roles, &public, &unused, &sessions)
+    }
+
     /// A view's options are its `WITH (…)`, its check option among them.
     ///
     /// ponytail: a partition is written as a table of its own, without its
@@ -3341,6 +3400,155 @@ mod tests {
             assert!(crate::db::Connection::open(config.clone()).is_err());
         }
         assert_eq!(std::fs::read_to_string(&runs).unwrap(), "svcusersvcuser");
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_roles_grants_and_reach_read_what_the_server_holds() {
+        let plain = Connection::open(&live_config()).expect("connection should open");
+        let reset = "DROP SCHEMA IF EXISTS dbdelve_roles_probe CASCADE; \
+                     DROP ROLE IF EXISTS dbdelve_probe_ana; \
+                     DROP ROLE IF EXISTS dbdelve_probe_new; \
+                     DROP ROLE IF EXISTS dbdelve_probe_team";
+        plain
+            .query(reset, Fetch::default())
+            .expect("an earlier run's roles should drop");
+        plain
+            .query(
+                "CREATE SCHEMA dbdelve_roles_probe; \
+                 CREATE TABLE dbdelve_roles_probe.orders (id int); \
+                 CREATE ROLE dbdelve_probe_team NOLOGIN; \
+                 CREATE ROLE dbdelve_probe_ana LOGIN CONNECTION LIMIT 5 \
+                     VALID UNTIL '2000-01-01' IN ROLE dbdelve_probe_team; \
+                 GRANT SELECT ON dbdelve_roles_probe.orders TO dbdelve_probe_team; \
+                 GRANT INSERT ON dbdelve_roles_probe.orders TO PUBLIC",
+                Fetch::default(),
+            )
+            .expect("the probe roles should be created");
+
+        let roles = plain.roles().expect("roles should read");
+        let grants = plain
+            .object_grants("dbdelve_roles_probe", "orders")
+            .expect("grants should read");
+        let reach = plain
+            .role_reach("dbdelve_probe_ana")
+            .expect("reach should read");
+        let held = plain
+            .role_grants("dbdelve_probe_ana")
+            .expect("a role's grants should read");
+        let reports = plain.role_reports(&roles).expect("reports should read");
+
+        // What the Users and roles tab writes, as the server takes it.
+        use super::super::roles::{
+            NewRole, RoleEdit, create_role, edit_role, reset_password, set_login,
+        };
+        let created = create_role(&NewRole {
+            name: "dbdelve_probe_new".into(),
+            login: true,
+            password: Some("first".into()),
+            connection_limit: Some(2),
+            password_expires: Some("2030-01-01".into()),
+            member_of: vec!["dbdelve_probe_team".into()],
+        });
+        plain
+            .query(&created, Fetch::default())
+            .expect("the role should be created");
+        let made = plain.roles().expect("roles should read");
+        let before = made
+            .role("dbdelve_probe_new")
+            .expect("it is listed")
+            .clone();
+        let edited = edit_role(
+            &before,
+            &RoleEdit {
+                name: before.name.clone(),
+                connection_limit: Some(3),
+                password_expires: None,
+            },
+        )
+        .expect("something changed");
+        for statement in [
+            edited,
+            reset_password("dbdelve_probe_new", "second"),
+            set_login("dbdelve_probe_new", false),
+        ] {
+            plain
+                .query(&statement, Fetch::default())
+                .expect("the change should run");
+        }
+        let after = plain.roles().expect("roles should read");
+
+        plain
+            .query(reset, Fetch::default())
+            .expect("the probe roles should drop");
+
+        assert_eq!(before.connection_limit, Some(2));
+        assert_eq!(made.member_of("dbdelve_probe_new"), ["dbdelve_probe_team"]);
+        let changed = after.role("dbdelve_probe_new").expect("it is listed");
+        assert_eq!(changed.connection_limit, Some(3));
+        assert_eq!(changed.password_expires, None);
+        assert!(
+            changed.deactivated(),
+            "a login turned off keeps its password"
+        );
+
+        let ana = roles.role("dbdelve_probe_ana").expect("ana is listed");
+        assert!(ana.login && ana.expired);
+        assert_eq!(ana.connection_limit, Some(5));
+        assert_eq!(ana.password_expires.as_deref(), Some("2000-01-01"));
+        assert_eq!(roles.member_of("dbdelve_probe_ana"), ["dbdelve_probe_team"]);
+        assert!(!roles.roles.iter().any(|role| role.name.starts_with("pg_")));
+
+        // Seven before Postgres 17, which adds MAINTAIN.
+        assert!(grants.privileges.len() >= 7);
+        let held_by = |grantee: Option<&str>| -> Vec<&str> {
+            (grants.grants.iter())
+                .filter(|grant| grant.grantee.as_deref() == grantee)
+                .map(|grant| grant.privilege.as_str())
+                .collect()
+        };
+        assert_eq!(held_by(Some("dbdelve_probe_team")), ["SELECT"]);
+        assert_eq!(held_by(None), ["INSERT"]);
+        assert!(!held_by(Some(grants.owner.as_str())).is_empty());
+
+        // SELECT through the team; INSERT through PUBLIC, which every role
+        // holds.
+        let probe: Vec<_> = (reach.entries.iter())
+            .filter(|entry| entry.schema == "dbdelve_roles_probe")
+            .map(|entry| {
+                (
+                    entry.privilege.as_str(),
+                    entry.relations,
+                    entry.through.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            probe,
+            [
+                ("INSERT", 1, vec!["PUBLIC".to_string()]),
+                ("SELECT", 1, vec!["dbdelve_probe_team".to_string()]),
+            ]
+        );
+        let held: Vec<_> = (held.held.iter())
+            .filter(|grant| grant.schema == "dbdelve_roles_probe")
+            .map(|grant| (grant.privilege.as_str(), grant.through.as_deref()))
+            .collect();
+        assert_eq!(
+            held,
+            [
+                ("INSERT", Some("PUBLIC")),
+                ("SELECT", Some("dbdelve_probe_team"))
+            ]
+        );
+
+        assert!(reports.expired.contains(&"dbdelve_probe_ana".to_string()));
+        assert!(
+            reports
+                .public_grants
+                .contains(&"dbdelve_roles_probe.orders".to_string())
+        );
+        assert_eq!(reports.idle, None, "Postgres records no logins");
     }
 
     #[test]

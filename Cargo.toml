@@ -71,6 +71,12 @@ blocking = "=1.6.2"
 # one, which leaves nothing to stop at a row limit. See AGENTS.md.
 tokio-postgres = "0.7"
 
+# The SCRAM-SHA-256 verifier a new or reset password is sent as, so a role
+# change carries the hash and never the password itself, as psql's
+# `\password` does. Already in the graph under tokio-postgres; pinned to the
+# version locked there, so `Cargo.lock` gains no package.
+postgres-protocol = "=0.6.12"
+
 # SQLite. Blocking like the Postgres driver, and for the same reason.
 #
 # `bundled` compiles the amalgamation instead of linking whatever libsqlite3

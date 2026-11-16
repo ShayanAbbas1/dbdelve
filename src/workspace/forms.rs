@@ -1313,7 +1313,8 @@ impl Workspace {
             Some("unsaved") => 3,
             // Forms with fields and a list of their own, which Tab moves the
             // keyboard through and whose buttons act through their own handlers.
-            Some("import-rows" | "schema-export" | "filter-picker") | None => 0,
+            Some("import-rows" | "schema-export" | "filter-picker" | "role-form") | None => 0,
+            Some("show-grants") => 1,
             Some(_) => 2 + checkbox,
         }
     }
@@ -1460,6 +1461,9 @@ impl Workspace {
             ("apply-review", 0) if !running => self.run_apply_review(cx),
             ("apply-review", 1) => _ = self.close_apply_review(cx),
             ("show-ddl", 0) => _ = self.close_ddl_view(cx),
+            ("show-grants", _) => _ = self.close_grants_view(cx),
+            ("role-form", 0) => self.submit_role_form(window, cx),
+            ("role-form", _) => _ = self.close_role_form(cx),
             ("show-ddl", _) => self.copy_shown_ddl(cx),
             _ => {}
         }
@@ -3794,6 +3798,7 @@ pub(super) fn explorer_menu(
                             ddl_names.clone(),
                         );
                         let (show_workspace, show_node) = (workspace.clone(), node.clone());
+                        let (grants_workspace, grants_node) = (workspace.clone(), node.clone());
                         menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
                             let (schema, relation) = names.clone();
                             let database = database.clone();
@@ -3801,21 +3806,34 @@ pub(super) fn explorer_menu(
                                 workspace.copy_ddl(database, schema, relation, kind, cx);
                             });
                         }))
-                        .item(
-                            PopupMenuItem::new(NodeAction::ShowDdl.label()).on_click(
+                        .item(PopupMenuItem::new(NodeAction::ShowDdl.label()).on_click(
+                            move |_, window, cx| {
+                                let node = show_node.clone();
+                                _ = show_workspace.update(cx, |workspace, cx| {
+                                    workspace.run_node_action(
+                                        &node,
+                                        NodeAction::ShowDdl,
+                                        window,
+                                        cx,
+                                    )
+                                });
+                            },
+                        ))
+                        .when(target.manages_roles(), |menu| {
+                            menu.item(PopupMenuItem::new(NodeAction::ShowGrants.label()).on_click(
                                 move |_, window, cx| {
-                                    let node = show_node.clone();
-                                    _ = show_workspace.update(cx, |workspace, cx| {
+                                    let node = grants_node.clone();
+                                    _ = grants_workspace.update(cx, |workspace, cx| {
                                         workspace.run_node_action(
                                             &node,
-                                            NodeAction::ShowDdl,
+                                            NodeAction::ShowGrants,
                                             window,
                                             cx,
                                         )
                                     });
                                 },
-                            ),
-                        )
+                            ))
+                        })
                     }
                 })
         });
