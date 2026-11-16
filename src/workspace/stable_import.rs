@@ -8,14 +8,14 @@
 //! an import can bring each of them. Nothing is moved while this session
 //! runs, so it goes on saving into the directory that becomes the backup.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::SystemTime;
 
 use gpui_component::spinner::Spinner;
 use gpui_component::{IconName, Sizable};
 
 use super::*;
-use crate::store::stable_import::{self, Services, Staged, SystemKeychain};
+use crate::store::stable_import::{self, SecretsClaim, Services, Staged, SystemKeychain};
 
 /// Where an import is, as its dialog shows it.
 pub(crate) enum StableImport {
@@ -109,9 +109,13 @@ impl Workspace {
     /// For the import this launch put in place, once its window is up: on
     /// macOS each password can raise a Keychain prompt, which then has the
     /// app behind it. Off this thread, as each read can wait on one.
-    pub(crate) fn copy_imported_passwords(&mut self, target: PathBuf, cx: &mut Context<Self>) {
+    pub(crate) fn copy_imported_passwords(
+        &mut self,
+        secrets: SecretsClaim,
+        cx: &mut Context<Self>,
+    ) {
         let failed = spawn_blocking(cx.background_executor(), move || {
-            copy_saved_passwords(&target)
+            copy_saved_passwords(secrets)
         });
         cx.spawn(async move |workspace, cx| {
             let failed = failed.await;
@@ -328,18 +332,19 @@ impl Workspace {
     }
 }
 
-/// The saved passwords of the import now in `target`, from stable's services
+/// The saved passwords the import brought, from stable's services
 /// into this build's. Returns the names of the connections one didn't come
 /// across for: every one, when the services can't even be named, which
 /// leaves them to try again at the next launch.
-fn copy_saved_passwords(target: &Path) -> Vec<String> {
+fn copy_saved_passwords(secrets: SecretsClaim) -> Vec<String> {
     match Services::stable().and_then(|stable| Ok((stable, Services::this_build()?))) {
         Ok((stable, here)) => {
-            stable_import::copy_pending_secrets(target, &stable, &here, &SystemKeychain)
+            stable_import::copy_pending_secrets(secrets, &stable, &here, &SystemKeychain)
         }
         Err(error) => {
             tracing::warn!("saved passwords could not be imported: {error}");
-            stable_import::listed(target)
+            secrets
+                .connections
                 .iter()
                 .map(|connection| connection.name().to_string())
                 .collect()

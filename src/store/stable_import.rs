@@ -45,6 +45,10 @@ const MARKER: &str = ".import-complete";
 /// passwords to copy. The marker, renamed once the copy is in place.
 const SECRETS_PENDING: &str = ".import-passwords-pending";
 
+/// [`SECRETS_PENDING`], renamed by the one process that copies them, and
+/// locked by it while it does.
+const SECRETS_CLAIMED: &str = ".import-passwords-copying";
+
 /// Stable's data directory, whatever variant this build runs as.
 pub(crate) fn source() -> Result<PathBuf, String> {
     Ok(data_root()?.join(variant_of(Channel::Stable, None)?))
@@ -154,10 +158,18 @@ struct Listing {
 /// Every connection `directory` lists. None for a profiles file that is
 /// missing or doesn't read.
 pub(crate) fn listed(directory: &Path) -> Vec<Listed> {
-    fs::read_to_string(directory.join(PROFILES_FILE))
-        .ok()
-        .and_then(|text| toml::from_str::<Listing>(&text).ok())
-        .map_or_else(Vec::new, |listing| listing.profiles)
+    listing(directory).unwrap_or_default()
+}
+
+/// Every connection `directory` lists, and an error for a profiles file that
+/// is missing or doesn't read, where [`listed`] says none.
+fn listing(directory: &Path) -> Result<Vec<Listed>, String> {
+    let path = directory.join(PROFILES_FILE);
+    let text = fs::read_to_string(&path)
+        .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
+    toml::from_str::<Listing>(&text)
+        .map(|listing| listing.profiles)
+        .map_err(|_| format!("Could not read the profiles in {}", path.display()))
 }
 
 /// A write's temporary: `write_file` names its own `<stem>.tmp-<pid>-<n>` and
@@ -505,14 +517,77 @@ fn secrets_now_pending(target: &Path) {
     }
 }
 
+/// The saved passwords of the import in place, which this process alone
+/// copies. Dropped without [`copy_pending_secrets`], it leaves them for the
+/// next launch.
+#[derive(Debug)]
+pub(crate) struct SecretsClaim {
+    /// The connections the import brought, read before the workspace can
+    /// move a profiles file that doesn't read aside.
+    pub(crate) connections: Vec<Listed>,
+    claim: PathBuf,
+    /// Held while the copy runs, which tells a later launch a claim is live.
+    _lock: File,
+}
+
+/// Puts back a claim whose copy stopped with its process, then claims
+/// whatever is pending. Run only while alone, so nothing else claims or puts
+/// back meanwhile. A profile list that doesn't read leaves them pending.
+fn claim_secrets(target: &Path) -> Option<SecretsClaim> {
+    let pending = target.join(SECRETS_PENDING);
+    let claim = target.join(SECRETS_CLAIMED);
+    let abandoned = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&claim)
+        .is_ok_and(|file| file.try_lock().is_ok());
+    if abandoned {
+        // The handle is closed by now: Windows renames no open file.
+        if let Err(error) = fs::rename(&claim, &pending) {
+            tracing::warn!("a stopped copy of the import's passwords was not put back: {error}");
+        }
+    }
+    if !exists(&pending) {
+        return None;
+    }
+    let connections = match listing(target) {
+        Ok(connections) => connections,
+        Err(message) => {
+            tracing::warn!("the import's passwords wait, as its profiles don't read: {message}");
+            return None;
+        }
+    };
+    match fs::rename(&pending, &claim) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            tracing::warn!("the import's passwords could not be claimed: {error}");
+            return None;
+        }
+    }
+    let lock = match locked(&claim, try_alone) {
+        Ok(lock) => lock,
+        Err(error) => {
+            tracing::warn!("the import's passwords could not be claimed: {error}");
+            let _ = fs::rename(&claim, &pending);
+            return None;
+        }
+    };
+    Some(SecretsClaim {
+        connections,
+        claim,
+        _lock: lock,
+    })
+}
+
 /// How a launch went, as far as an import is concerned.
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub(crate) enum Launch {
     /// Alone, so whatever was waiting is settled, and this launch copies the
     /// saved passwords of an import in place whose passwords haven't been.
     Settled {
         settled: Settled,
-        secrets_pending: bool,
+        secrets: Option<SecretsClaim>,
     },
     /// Another instance is running, so nothing was looked at but whether an
     /// import is waiting for them all to close.
@@ -531,21 +606,14 @@ pub(crate) fn settle_alone(
     match locked(lock, try_alone) {
         Ok(file) => {
             let settled = settle(target, now);
-            // Looked at only while alone, so one instance copies them.
-            let secrets_pending = exists(&target.join(SECRETS_PENDING));
+            let secrets = claim_secrets(target);
             // std leaves a lock taken over one already held unspecified, so
             // the exclusive one goes first. A launch that slips in between
-            // finds this one settled and nothing left to do, and its shared
-            // lock waits for this one's.
+            // finds this one settled and its passwords claimed, and its
+            // shared lock waits for this one's.
             file.unlock().map_err(failed)?;
             file.lock_shared().map_err(failed)?;
-            Ok((
-                file,
-                Launch::Settled {
-                    settled,
-                    secrets_pending,
-                },
-            ))
+            Ok((file, Launch::Settled { settled, secrets }))
         }
         Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
             let file = locked(lock, File::lock_shared).map_err(failed)?;
@@ -563,8 +631,8 @@ static INSTANCE: OnceLock<File> = OnceLock::new();
 /// one, and so without looking for an import.
 const INSTANCE_LOCK_WAIT: Duration = Duration::from_secs(3);
 
-/// The data directory whose import's saved passwords this launch copies.
-static SECRETS_TO_COPY: Mutex<Option<PathBuf>> = Mutex::new(None);
+/// The saved passwords this launch copies once its window is up.
+static SECRETS_TO_COPY: Mutex<Option<SecretsClaim>> = Mutex::new(None);
 
 /// What the workspace says once it is up, for an import this launch
 /// finished, undid or had to leave waiting.
@@ -603,15 +671,10 @@ pub(crate) fn settle_at_launch() {
         }
     };
     let launch = match launch {
-        Launch::Settled {
-            settled,
-            secrets_pending,
-        } => {
-            if secrets_pending {
-                *SECRETS_TO_COPY
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner()) = Some(target.clone());
-            }
+        Launch::Settled { settled, secrets } => {
+            *SECRETS_TO_COPY
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()) = secrets;
             Ok(settled)
         }
         Launch::Shared { waiting } => Err(waiting),
@@ -666,28 +729,27 @@ pub(crate) fn take_notice() -> Option<String> {
         .take()
 }
 
-/// The data directory whose import's saved passwords are still to copy, for
-/// [`copy_pending_secrets`], once.
-pub(crate) fn take_secrets_to_copy() -> Option<PathBuf> {
+/// The saved passwords this launch claimed, for [`copy_pending_secrets`],
+/// once.
+pub(crate) fn take_secrets_to_copy() -> Option<SecretsClaim> {
     SECRETS_TO_COPY
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
         .take()
 }
 
-/// The saved passwords of the connections the import in `target` brought,
-/// copied from `from`'s services to `to`'s, after which none are pending.
-/// Returns the names of the connections one didn't come across for.
+/// The saved passwords of the connections the import brought, copied from
+/// `from`'s services to `to`'s, after which none are pending. Returns the
+/// names of the connections one didn't come across for.
 pub(crate) fn copy_pending_secrets(
-    target: &Path,
+    secrets: SecretsClaim,
     from: &Services,
     to: &Services,
     keychain: &impl Keychain,
 ) -> Vec<String> {
-    let failed = copy_secrets(&listed(target), from, to, keychain);
-    if let Err(error) = fs::remove_file(target.join(SECRETS_PENDING))
-        && error.kind() != io::ErrorKind::NotFound
-    {
+    let failed = copy_secrets(&secrets.connections, from, to, keychain);
+    // Removed while still locked, so no launch takes it for a stopped copy.
+    if let Err(error) = fs::remove_file(&secrets.claim) {
         tracing::warn!("the import's passwords are copied but still marked as to copy: {error}");
     }
     failed
@@ -711,14 +773,33 @@ impl Keychain for SystemKeychain {
         match keyring::Entry::new(service, account).and_then(|entry| entry.get_password()) {
             Ok(secret) => Ok(Some(secret)),
             Err(keyring::Error::NoEntry) => Ok(None),
-            Err(error) => Err(error.to_string()),
+            Err(error) => Err(kind_of(&error).to_string()),
         }
     }
 
     fn write(&self, service: &str, account: &str, secret: &str) -> Result<(), String> {
         keyring::Entry::new(service, account)
             .and_then(|entry| entry.set_password(secret))
-            .map_err(|error| error.to_string())
+            .map_err(|error| kind_of(&error).to_string())
+    }
+}
+
+/// What went wrong, and nothing else: a keyring error's own text can carry
+/// the account, which is named after the connection, and the `Ambiguous` one
+/// the matching items themselves.
+fn kind_of(error: &keyring::Error) -> &'static str {
+    match error {
+        keyring::Error::PlatformFailure(_) => "the keychain failed",
+        keyring::Error::NoStorageAccess(_) => "the keychain could not be opened",
+        keyring::Error::NoEntry => "no saved item",
+        keyring::Error::BadEncoding(_) | keyring::Error::BadDataFormat(..) => {
+            "the saved item could not be read"
+        }
+        keyring::Error::BadStoreFormat(_) => "the keychain could not be read",
+        keyring::Error::TooLong(..) => "a name is too long for the keychain",
+        keyring::Error::Invalid(..) => "the keychain refused the item",
+        keyring::Error::Ambiguous(_) => "more than one saved item matched",
+        _ => "an unknown keychain error",
     }
 }
 
@@ -1026,7 +1107,7 @@ mod tests {
         let running = locked(&lock, File::lock_shared).unwrap();
 
         let (beside_it, launch) = settle_alone(&lock, &target, now()).unwrap();
-        assert_eq!(launch, Launch::Shared { waiting: true });
+        assert!(matches!(launch, Launch::Shared { waiting: true }));
         assert_eq!(read(&target.join(PROFILES_FILE)), "mine");
         assert!(staging_of(&target).join(MARKER).exists());
 
@@ -1036,12 +1117,12 @@ mod tests {
             launch,
             Launch::Settled {
                 settled: Settled::Applied { backup: Some(_) },
-                secrets_pending: true
+                secrets: Some(_)
             }
         ));
         assert_eq!(read(&target.join("queries/a/report.sql")), "select 1");
         let (_beside, launch) = settle_alone(&lock, &target, now()).unwrap();
-        assert_eq!(launch, Launch::Shared { waiting: false });
+        assert!(matches!(launch, Launch::Shared { waiting: false }));
     }
 
     #[test]
@@ -1310,7 +1391,7 @@ port = 22
     }
 
     #[test]
-    fn saved_passwords_are_copied_once_the_import_is_in_place_and_only_then() {
+    fn saved_passwords_are_copied_once_the_import_is_in_place_and_by_one_process() {
         let scratch = Scratch::new("secrets");
         let source = stable(&scratch.0);
         let target = scratch.0.join("dbdelve-nightly");
@@ -1320,25 +1401,15 @@ port = 22
             ("dbdelve", "a", "pw-a"),
             ("dbdelve-nightly", "a", "nightly's own"),
         ]);
-        let copy = || {
-            copy_pending_secrets(
-                &target,
-                &Services::of("dbdelve"),
-                &Services::of("dbdelve-nightly"),
-                &keychain,
-            )
-        };
         let alone = || match settle_alone(&lock, &target, now()).unwrap().1 {
-            Launch::Settled {
-                secrets_pending, ..
-            } => secrets_pending,
+            Launch::Settled { secrets, .. } => secrets,
             Launch::Shared { .. } => panic!("no other instance runs"),
         };
 
         staged_and_exited(&source, &target);
         let running = locked(&lock, File::lock_shared).unwrap();
         let (beside_it, launch) = settle_alone(&lock, &target, now()).unwrap();
-        assert_eq!(launch, Launch::Shared { waiting: true });
+        assert!(matches!(launch, Launch::Shared { waiting: true }));
         drop((running, beside_it));
         assert_eq!(
             keychain.get("dbdelve-nightly", "a").as_deref(),
@@ -1346,14 +1417,54 @@ port = 22
             "nothing is copied while the import waits"
         );
 
-        assert!(alone(), "the launch that puts it in place copies them");
-        assert!(alone(), "and so does the next, until they are copied");
-        assert!(copy().is_empty());
+        let first = alone().expect("the launch that puts it in place claims them");
+        assert_eq!(
+            first
+                .connections
+                .iter()
+                .map(Listed::name)
+                .collect::<Vec<_>>(),
+            ["Name a", "Name b"]
+        );
+        assert!(
+            alone().is_none(),
+            "a launch while the first one copies leaves them to it"
+        );
+        drop(first);
+        let again = alone().expect("a copy that stopped is claimed again");
+        assert!(alone().is_none());
+
+        let failed = copy_pending_secrets(
+            again,
+            &Services::of("dbdelve"),
+            &Services::of("dbdelve-nightly"),
+            &keychain,
+        );
+        assert!(failed.is_empty());
         assert_eq!(
             keychain.get("dbdelve-nightly", "a").as_deref(),
             Some("pw-a")
         );
-        assert!(!alone(), "copied once");
+        assert!(alone().is_none(), "copied once");
+        assert!(!target.join(SECRETS_PENDING).exists());
+        assert!(!target.join(SECRETS_CLAIMED).exists());
+    }
+
+    #[test]
+    fn saved_passwords_wait_while_the_profiles_dont_read() {
+        let scratch = Scratch::new("unread");
+        let target = scratch.0.join("dbdelve-nightly");
+        write(&target.join(SECRETS_PENDING), "");
+
+        assert!(claim_secrets(&target).is_none(), "no profiles file");
+        write(&target.join(PROFILES_FILE), "profiles = [");
+        assert!(claim_secrets(&target).is_none(), "one that doesn't parse");
+        assert!(target.join(SECRETS_PENDING).exists());
+
+        write(&target.join(PROFILES_FILE), "[settings]\n");
+        let claim = claim_secrets(&target).expect("an empty list reads");
+        assert!(claim.connections.is_empty());
+        assert!(!target.join(SECRETS_PENDING).exists());
     }
 
     #[test]
