@@ -13,20 +13,23 @@
 # libraries DBDelve may carry is short enough to state outright, and stating it
 # outright is the only way a reader can check it.
 #
+# DBDELVE_CHANNEL=nightly packages DBDelve Nightly (see dev/linux-channel.sh).
+#
 # Usage: dev/package-appimage.sh
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+# shellcheck source=dev/linux-channel.sh
+source dev/linux-channel.sh
 # Same reason as dev/package-linux.sh: a build that set CARGO_TARGET_DIR put
 # the binary somewhere else, and reading `target/` regardless picks up a stale
 # one.
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 ARCH="$(uname -m)"
-APPDIR="$TARGET_DIR/linux/dbdelve-$VERSION-$ARCH.AppDir"
-APPIMAGE="$TARGET_DIR/linux/dbdelve-$VERSION-$ARCH.AppImage"
+APPDIR="$TARGET_DIR/linux/$SLUG-$VERSION-$ARCH.AppDir"
+APPIMAGE="$TARGET_DIR/linux/$SLUG-$VERSION-$ARCH.AppImage"
 
 cargo build --release
 # The bridge links the system's libodbc.so.2. It is deliberately not bundled:
@@ -38,27 +41,27 @@ dev/check-linux-floor.sh "$TARGET_DIR/release/dbdelve" "$TARGET_DIR"/release/plu
 
 rm -rf "$APPDIR"
 mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/lib" "$APPDIR/usr/share/applications"
-install -m 755 "$TARGET_DIR/release/dbdelve" "$APPDIR/usr/bin/dbdelve"
+install -m 755 "$TARGET_DIR/release/dbdelve" "$APPDIR/usr/bin/$SLUG"
 # Beside the binary, where db::plugin::discover() looks; only odbc, as echo is
 # test code that may sit in the staging directory.
 mkdir -p "$APPDIR/usr/bin/plugins"
 cp -R "$TARGET_DIR/release/plugins/odbc" "$APPDIR/usr/bin/plugins/odbc"
 
-# The basename has to stay `dbdelve`: src/main.rs asks gpui for the app_id
-# "dbdelve", that app_id is what a Wayland compositor matches against a desktop
+# The basename has to stay the slug: src/main.rs asks gpui for the slug as its
+# app_id, that app_id is what a Wayland compositor matches against a desktop
 # entry's basename, and a rename here is a window with no icon.
-install -m 644 assets/linux/dbdelve.desktop "$APPDIR/usr/share/applications/dbdelve.desktop"
-for PNG in assets/linux/icons/dbdelve-*.png; do
-  SIZE="${PNG##*-}"
-  SIZE="${SIZE%.png}"
-  install -Dm 644 "$PNG" "$APPDIR/usr/share/icons/hicolor/${SIZE}x${SIZE}/apps/dbdelve.png"
+desktop_entry > "$APPDIR/usr/share/applications/$SLUG.desktop"
+chmod 644 "$APPDIR/usr/share/applications/$SLUG.desktop"
+for SIZE in "${ICON_SIZES[@]}"; do
+  install -Dm 644 "assets/linux/icons/$SLUG-$SIZE.png" \
+    "$APPDIR/usr/share/icons/hicolor/${SIZE}x${SIZE}/apps/$SLUG.png"
 done
 # appimagetool reads the desktop entry and the icon from the AppDir root, and
 # the thumbnailers read .DirIcon. All three are the files above under another
 # name.
-cp assets/linux/icons/dbdelve-256.png "$APPDIR/dbdelve.png"
-cp "$APPDIR/dbdelve.png" "$APPDIR/.DirIcon"
-ln -s usr/share/applications/dbdelve.desktop "$APPDIR/dbdelve.desktop"
+cp "assets/linux/icons/$SLUG-256.png" "$APPDIR/$SLUG.png"
+cp "$APPDIR/$SLUG.png" "$APPDIR/.DirIcon"
+ln -s "usr/share/applications/$SLUG.desktop" "$APPDIR/$SLUG.desktop"
 
 cp LICENSE NOTICES.md "$APPDIR/"
 # NOTICES.md points at licenses/OFL-1.1.txt, and the OFL asks that the licence
@@ -116,7 +119,7 @@ cp -R licenses "$APPDIR/"
 # they are now, vendored into the binary, so the loop below never sees them.
 HOST_ONLY='^(ld-linux.*|libc|libm|libdl|libpthread|librt|libresolv|libnsl|libutil|libanl|libBrokenLocale|libstdc\+\+|libgcc_s|libGL|libGLX|libGLdispatch|libGLESv[0-9]|libOpenGL|libEGL|libglapi|libgbm|libdrm|libvulkan|libX11|libX11-xcb|libxcb|libXau|libXdmcp|libbsd|libmd|libwayland-egl)\.so'
 
-ldd "$APPDIR/usr/bin/dbdelve" |
+ldd "$APPDIR/usr/bin/$SLUG" |
   sed -n 's/^.* => \(\/[^ ]*\) (0x[0-9a-f]*)$/\1/p' |
   while read -r LIB; do
     SONAME="$(basename "$LIB")"
@@ -154,8 +157,9 @@ else
   export DBDELVE_ORIGINAL_LD_LIBRARY_PATH_UNSET=1
 fi
 export LD_LIBRARY_PATH="$HERE/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-exec "$HERE/usr/bin/dbdelve" "$@"
 APPRUN
+# shellcheck disable=SC2016 # $HERE and $@ are AppRun's to expand, not ours.
+printf 'exec "$HERE/usr/bin/%s" "$@"\n' "$SLUG" >> "$APPDIR/AppRun"
 chmod 755 "$APPDIR/AppRun"
 
 # aarch64 runners exist and the tool is per-architecture: appimagetool embeds a

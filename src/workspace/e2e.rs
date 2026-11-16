@@ -3752,6 +3752,47 @@ fn buffers_of(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Vec<
 }
 
 #[gpui::test]
+fn a_launch_copying_imported_passwords_connects_once_they_are_copied(cx: &mut TestAppContext) {
+    crate::IGNORE_ENVIRONMENT.set(true);
+    store::tests::with_home(|| {
+        let directory = store::dbdelve_directory().unwrap();
+        std::fs::create_dir_all(&directory).unwrap();
+        let database = directory.join("e2e.db");
+        std::fs::write(&database, b"").unwrap();
+        std::fs::write(
+            directory.join("profiles.toml"),
+            format!(
+                "active = \"e2e\"\n[settings]\ncheck_for_updates = false\n[[profiles]]\n\
+                 id = \"e2e\"\nname = \"E2E\"\nhost = \"\"\ndatabase = \"\"\nuser = \"\"\n\
+                 engine = \"sqlite\"\npath = {:?}\n",
+                database.display().to_string()
+            ),
+        )
+        .unwrap();
+        let copy = directory.with_file_name("dbdelve-e2e-import");
+        std::fs::create_dir_all(&copy).unwrap();
+        store::stable_import::hand_over_an_empty_copy(&copy);
+
+        let (workspace, cx) = launch(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert!(
+                matches!(workspace.profiles[0].state, ProfileState::Idle),
+                "no connect before the passwords are copied"
+            );
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert!(matches!(
+                workspace.profiles[0].state,
+                ProfileState::Connected(_)
+            ));
+        });
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn disconnect_leads_home_and_a_relaunch_stays_there(cx: &mut TestAppContext) {
     // CI's live job sets `PG*`, whose profile would be put in front on launch.
     crate::IGNORE_ENVIRONMENT.set(true);

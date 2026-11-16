@@ -1,9 +1,14 @@
-use std::{fs, io, path::Path};
+use std::{fs, io, path::Path, sync::LazyLock};
 
 use super::download::COULD_NOT_REPLACE;
+use crate::channel::Channel;
 
-pub(super) const ALREADY_UPDATED: &str =
-    "DBDelve was updated since it started. Restart it to run that version.";
+pub(super) static ALREADY_UPDATED: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{} was updated since it started. Restart it to run that version.",
+        Channel::current().display_name()
+    )
+});
 
 /// A file, whatever path it is reached by or renamed to.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -90,7 +95,7 @@ pub(super) fn unchanged(installed: &Path, running: Identity) -> Result<(), (&'st
     })?;
     if identity != running {
         return Err((
-            ALREADY_UPDATED,
+            ALREADY_UPDATED.as_str(),
             format!(
                 "{} is no longer the file this DBDelve started from",
                 installed.display()

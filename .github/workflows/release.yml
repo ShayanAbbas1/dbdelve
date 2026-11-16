@@ -7,13 +7,28 @@ name: release
 # exists, and repoints the Homebrew cask. A version with a hyphen
 # (0.2.0-rc.1) is published as a pre-release, may come from any branch, and
 # leaves the cask alone.
+#
+# The nightly channel builds DBDelve Nightly, a separate app, from main: every
+# day on the schedule, or from the Actions tab with channel set to nightly. Its
+# version is Cargo.toml's with the patch bumped, then -nightly.<UTC
+# date>.<run number>, so it never needs a bump. A scheduled run publishes, and
+# skips itself when main has not moved since the last nightly. Each nightly is
+# a pre-release, repoints the dbdelve@nightly cask, and the oldest beyond the
+# newest 14 are deleted with their tags.
 on:
+  schedule:
+    - cron: "17 3 * * *"
   workflow_dispatch:
     inputs:
       publish:
         description: Publish the release (unticked builds only)
         type: boolean
         default: false
+      channel:
+        description: Stable is Cargo.toml's version; nightly is DBDelve Nightly
+        type: choice
+        options: [stable, nightly]
+        default: stable
 
 # Only the job that publishes needs the token; it asks for its own write.
 permissions: {}
@@ -25,9 +40,16 @@ concurrency:
 jobs:
   version:
     runs-on: ubuntu-latest
+    # Reads the releases to find the last nightly.
+    permissions:
+      contents: read
     outputs:
+      channel: ${{ steps.version.outputs.channel }}
       version: ${{ steps.version.outputs.version }}
       prerelease: ${{ steps.version.outputs.prerelease }}
+      publish: ${{ steps.version.outputs.publish }}
+      build: ${{ steps.version.outputs.build }}
+      previous: ${{ steps.version.outputs.previous }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -36,16 +58,59 @@ jobs:
       # instead of after every asset has been built.
       - id: version
         run: |
-          VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
-          PRERELEASE=false
-          [[ "$VERSION" == *-* ]] && PRERELEASE=true
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
-          [[ "$PUBLISH" == true ]] || exit 0
+          CARGO_VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          # A scheduled run has no inputs, and is always a nightly that
+          # publishes.
+          if [[ "$GITHUB_EVENT_NAME" == schedule ]]; then
+            CHANNEL=nightly
+            PUBLISH=true
+          fi
+          BUILD=true
+          PREVIOUS=
+          if [[ "$CHANNEL" == nightly ]]; then
+            if [[ ! "$CARGO_VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+              echo "a nightly bumps the patch of a plain x.y.z, and Cargo.toml has $CARGO_VERSION" >&2
+              exit 1
+            fi
+            VERSION="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.$((BASH_REMATCH[3] + 1))-nightly.$(date -u +%Y%m%d).$RUN_NUMBER"
+            PRERELEASE=true
+            # The same page and the same tag shape the nightly updater reads,
+            # and sort -V orders them as it does: version, then date, then run.
+            PREVIOUS="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=30" --jq '.[].tag_name' |
+              { grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-nightly\.[0-9]+\.[0-9]+$' || true; } | sort -V | tail -n 1)"
+            if [[ "$GITHUB_EVENT_NAME" == schedule && -n "$PREVIOUS" ]]; then
+              BUILT_FROM="$(gh api "repos/$GITHUB_REPOSITORY/commits/$PREVIOUS" --jq .sha)"
+              if [[ "$BUILT_FROM" == "$GITHUB_SHA" ]]; then
+                echo "::notice::$PREVIOUS was built from $GITHUB_SHA, which main is still at -- nothing to release"
+                BUILD=false
+              fi
+            fi
+          else
+            VERSION="$CARGO_VERSION"
+            PRERELEASE=false
+            [[ "$VERSION" == *-* ]] && PRERELEASE=true
+          fi
+          {
+            echo "channel=$CHANNEL"
+            echo "version=$VERSION"
+            echo "prerelease=$PRERELEASE"
+            echo "publish=$PUBLISH"
+            echo "build=$BUILD"
+            echo "previous=$PREVIOUS"
+          } >> "$GITHUB_OUTPUT"
+          [[ "$BUILD" == true && "$PUBLISH" == true ]] || exit 0
           # An existing tag means Cargo.toml was not bumped since the last
           # release, and publishing would reuse a tag on a different commit.
           if [[ -n "$(git ls-remote --tags origin "refs/tags/v$VERSION")" ]]; then
-            echo "v$VERSION is already tagged -- bump the version in Cargo.toml" >&2
+            if [[ "$CHANNEL" == nightly ]]; then
+              echo "v$VERSION is already tagged" >&2
+            else
+              echo "v$VERSION is already tagged -- bump the version in Cargo.toml" >&2
+            fi
+            exit 1
+          fi
+          if [[ "$CHANNEL" == nightly && "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "a nightly is built from main -- publish it from there" >&2
             exit 1
           fi
           if [[ "$PRERELEASE" == false && "$GITHUB_REF" != refs/heads/main ]]; then
@@ -53,10 +118,14 @@ jobs:
             exit 1
           fi
         env:
+          CHANNEL: ${{ inputs.channel }}
           PUBLISH: ${{ inputs.publish }}
+          RUN_NUMBER: ${{ github.run_number }}
+          GH_TOKEN: ${{ github.token }}
 
   linux:
     needs: version
+    if: needs.version.outputs.build == 'true'
     strategy:
       matrix:
         # 22.04, never ubuntu-latest: glibc is forward-compatible only, so a
@@ -69,6 +138,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # The binary reads both at compile time, and the packaging scripts name
+      # the nightly's assets from them. Stable sets neither.
+      - if: needs.version.outputs.channel == 'nightly'
+        run: |
+          echo "DBDELVE_CHANNEL=nightly" >> "$GITHUB_ENV"
+          echo "DBDELVE_VERSION=$VERSION" >> "$GITHUB_ENV"
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
 
       # The same list the README tells a Linux user to install before building
       # from source, plus unixodbc-dev for the ODBC bridge to link against.
@@ -100,12 +178,20 @@ jobs:
 
   macos:
     needs: version
+    if: needs.version.outputs.build == 'true'
     # arm64, which is all the cask installs on.
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - if: needs.version.outputs.channel == 'nightly'
+        run: |
+          echo "DBDELVE_CHANNEL=nightly" >> "$GITHUB_ENV"
+          echo "DBDELVE_VERSION=$VERSION" >> "$GITHUB_ENV"
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
 
       # bundle.sh also builds the ODBC bridge; unixODBC compiles from source
       # into it with the runner's C compiler, so nothing is installed here.
@@ -115,20 +201,31 @@ jobs:
       # every release, so the Keychain asks once more after each update.
       - run: dev/bundle.sh
         env:
-          DBDELVE_CHANNEL: release
+          DBDELVE_CHANNEL: ${{ needs.version.outputs.channel == 'nightly' && 'nightly' || 'release' }}
           DBDELVE_SIGN_ID: "-"
 
       # A symlink beside the app is the whole of the drag-to-install convention.
       - run: |
-          VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          if [[ "$CHANNEL" == nightly ]]; then
+            NAME="DBDelve Nightly"
+            APP="target/macos-nightly/DBDelve Nightly.app"
+            DMG="target/DBDelve-Nightly-$VERSION.dmg"
+          else
+            NAME=DBDelve
+            APP=target/DBDelve.app
+            DMG="target/DBDelve-$VERSION.dmg"
+          fi
           mkdir -p target/dmg
-          cp -R target/DBDelve.app target/dmg/
+          cp -R "$APP" target/dmg/
           ln -s /Applications target/dmg/Applications
           # hdiutil's own estimate from -srcfolder came up short once the
           # binary grew; it only sizes the scratch image, not the compressed DMG.
           SIZE_MB=$(( $(du -sm target/dmg | cut -f1) * 2 + 50 ))
-          hdiutil create -volname "DBDelve $VERSION" -srcfolder target/dmg \
-            -size "${SIZE_MB}m" -ov -format UDZO "target/DBDelve-$VERSION.dmg"
+          hdiutil create -volname "$NAME $VERSION" -srcfolder target/dmg \
+            -size "${SIZE_MB}m" -ov -format UDZO "$DMG"
+        env:
+          CHANNEL: ${{ needs.version.outputs.channel }}
+          VERSION: ${{ needs.version.outputs.version }}
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -138,11 +235,20 @@ jobs:
 
   windows:
     needs: version
+    if: needs.version.outputs.build == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - if: needs.version.outputs.channel == 'nightly'
+        shell: bash
+        run: |
+          echo "DBDELVE_CHANNEL=nightly" >> "$GITHUB_ENV"
+          echo "DBDELVE_VERSION=$VERSION" >> "$GITHUB_ENV"
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
 
       # The hosted image already has MSVC, the Windows SDK (GPUI's shaders)
       # and rc.exe (the icon resource). Inno Setup is only for wrapping the
@@ -223,7 +329,7 @@ jobs:
 
   release:
     needs: [version, sign]
-    if: inputs.publish
+    if: needs.version.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -240,11 +346,20 @@ jobs:
       # that quietly lost one fails before anything goes public rather than
       # publishing a release that is missing it.
       - run: |
-          for ASSET in "DBDelve-$VERSION.dmg" \
-            "dbdelve-$VERSION-linux-x86_64.tar.gz" "dbdelve-$VERSION-x86_64.AppImage" \
-            "dbdelve-$VERSION-linux-aarch64.tar.gz" "dbdelve-$VERSION-aarch64.AppImage" \
-            "dbdelve-$VERSION-windows-x86_64.zip" \
-            "dbdelve-$VERSION-windows-x86_64-setup.exe"; do
+          if [[ "$CHANNEL" == nightly ]]; then
+            DMG="DBDelve-Nightly-$VERSION.dmg"
+            SLUG=dbdelve-nightly
+            TITLE="DBDelve Nightly $VERSION"
+          else
+            DMG="DBDelve-$VERSION.dmg"
+            SLUG=dbdelve
+            TITLE="DBDelve $VERSION"
+          fi
+          for ASSET in "$DMG" \
+            "$SLUG-$VERSION-linux-x86_64.tar.gz" "$SLUG-$VERSION-x86_64.AppImage" \
+            "$SLUG-$VERSION-linux-aarch64.tar.gz" "$SLUG-$VERSION-aarch64.AppImage" \
+            "$SLUG-$VERSION-windows-x86_64.zip" \
+            "$SLUG-$VERSION-windows-x86_64-setup.exe"; do
             for FILE in "$ASSET" "$ASSET.minisig"; do
               if [[ ! -f "dist/$FILE" ]]; then
                 echo "no $FILE among the built assets" >&2
@@ -253,23 +368,28 @@ jobs:
               fi
             done
           done
-          PRERELEASE_FLAG=()
-          [[ "$PRERELEASE" == true ]] && PRERELEASE_FLAG=(--prerelease)
+          FLAGS=()
+          [[ "$PRERELEASE" == true ]] && FLAGS+=(--prerelease)
+          # A nightly's notes cover what changed since the last nightly, not
+          # since the last stable release.
+          [[ "$CHANNEL" == nightly && -n "$PREVIOUS" ]] && FLAGS+=(--notes-start-tag "$PREVIOUS")
           # --target creates the tag on the commit that was built. A tag made
           # with github.token starts no other workflow run.
           gh release create "v$VERSION" dist/* --target "$GITHUB_SHA" \
-            --title "DBDelve $VERSION" --generate-notes "${PRERELEASE_FLAG[@]}" \
+            --title "$TITLE" --generate-notes "${FLAGS[@]}" \
             --notes "Missing something? [Request it or upvote others' ideas](https://github.com/ShayanAbbas1/dbdelve/discussions/42)."
         env:
           GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ needs.version.outputs.channel }}
           VERSION: ${{ needs.version.outputs.version }}
           PRERELEASE: ${{ needs.version.outputs.prerelease }}
+          PREVIOUS: ${{ needs.version.outputs.previous }}
 
   cask:
     needs: [version, release]
-    # A pre-release is for testing the pipeline, and Homebrew users would get it
-    # as an ordinary update.
-    if: needs.version.outputs.prerelease == 'false'
+    # A stable pre-release is for testing the pipeline, and Homebrew users
+    # would get it as an ordinary update. A nightly has a cask of its own.
+    if: needs.version.outputs.channel == 'nightly' || needs.version.outputs.prerelease == 'false'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -286,7 +406,8 @@ jobs:
           persist-credentials: true
           path: tap
 
-      - run: |
+      - if: needs.version.outputs.channel != 'nightly'
+        run: |
           SHA="$(sha256sum "DBDelve-$VERSION.dmg" | cut -d' ' -f1)"
           mkdir -p tap/Casks
           # Rewritten whole rather than patched in place: two substitutions that
@@ -330,3 +451,66 @@ jobs:
           git push
         env:
           VERSION: ${{ needs.version.outputs.version }}
+
+      # Stable's cask with Nightly's app, DMG and directories. The @ name is
+      # Homebrew's for another channel of the same app, and installs beside it.
+      - if: needs.version.outputs.channel == 'nightly'
+        run: |
+          SHA="$(sha256sum "DBDelve-Nightly-$VERSION.dmg" | cut -d' ' -f1)"
+          mkdir -p tap/Casks
+          cat > tap/Casks/dbdelve@nightly.rb <<CASK
+          cask "dbdelve@nightly" do
+            version "$VERSION"
+            sha256 "$SHA"
+
+            url "https://github.com/ShayanAbbas1/dbdelve/releases/download/v#{version}/DBDelve-Nightly-#{version}.dmg"
+            name "DBDelve Nightly"
+            desc "Fast, native, multi-engine database client"
+            homepage "https://github.com/ShayanAbbas1/dbdelve"
+
+            auto_updates true
+            depends_on arch: :arm64
+            depends_on macos: :monterey
+
+            app "DBDelve Nightly.app"
+
+            postflight_steps do
+              run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{appdir}}/DBDelve Nightly.app"]
+            end
+
+            zap trash: [
+              "~/Library/Application Support/dbdelve-nightly",
+              "~/Library/Logs/dbdelve-nightly",
+            ]
+          end
+          CASK
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/dbdelve@nightly.rb
+          git commit -m "DBDelve Nightly $VERSION"
+          git push
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+
+  # Nightlies are not kept: the newest 14 stay, and older ones go with their
+  # tags. Only nightly tags are matched, so a stable release is never touched.
+  prune:
+    needs: [version, release]
+    if: needs.version.outputs.channel == 'nightly'
+    runs-on: ubuntu-latest
+    # Deletes releases and their tags.
+    permissions:
+      contents: write
+    steps:
+      - run: |
+          gh api --paginate "repos/$GH_REPO/releases?per_page=100" --jq '.[].tag_name' |
+            { grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-nightly\.[0-9]+\.[0-9]+$' || true; } |
+            sort -rV | tail -n +15 |
+            while read -r TAG; do
+              echo "deleting $TAG"
+              gh release delete "$TAG" --cleanup-tag --yes
+            done
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}

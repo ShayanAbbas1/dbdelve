@@ -21,6 +21,7 @@ use super::{
     download::{COULD_NOT_REPLACE, COULD_NOT_UNPACK, NOT_THE_APP, failed, remove, unique},
     identity::{ALREADY_UPDATED, Identity, unchanged},
 };
+use crate::channel::Channel;
 
 pub(super) const CANCELLED: &str = "The update was cancelled before anything was installed.";
 
@@ -54,9 +55,14 @@ const STAGING: &str = "update.dbdelve-new";
 /// one.
 const PLUGIN_TREE: [&str; 2] = ["plugins", "odbc"];
 
-/// The installer's AppId, which names its entry under Uninstall.
+/// The installer's entry under Uninstall, which its AppId names.
 #[cfg(windows)]
-const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{300CEAF2-D7A2-4D97-B94B-20ED16631AF4}_is1";
+fn uninstall_key(channel: Channel) -> String {
+    format!(
+        r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{}_is1",
+        channel.windows_app_id()
+    )
+}
 
 /// Setup's exit code when it stopped before installing anything, which is
 /// also what a declined elevation prompt gives.
@@ -99,10 +105,11 @@ impl Installer {
 }
 
 impl Kind {
-    fn asset_name(&self, version: &str, arch: &str) -> String {
+    fn asset_name(&self, channel: Channel, version: &str, arch: &str) -> String {
+        let directory = release_directory(channel, version, arch);
         match self {
-            Kind::Setup { .. } => format!("{}-setup.exe", release_directory(version, arch)),
-            Kind::Portable { .. } => format!("{}.zip", release_directory(version, arch)),
+            Kind::Setup { .. } => format!("{directory}-setup.exe"),
+            Kind::Portable { .. } => format!("{directory}.zip"),
         }
     }
 
@@ -114,8 +121,8 @@ impl Kind {
 }
 
 /// The one folder a release zip holds.
-fn release_directory(version: &str, arch: &str) -> String {
-    format!("dbdelve-{version}-windows-{arch}")
+fn release_directory(channel: Channel, version: &str, arch: &str) -> String {
+    format!("{}-{version}-windows-{arch}", channel.slug())
 }
 
 /// The executable this process was started from, as it was then.
@@ -184,7 +191,11 @@ fn clear_set_aside(folder: &Path) {
 /// The installer for `version`, when this install may replace itself with it.
 /// Each reason it may not is logged once per check.
 #[cfg(windows)]
-pub(super) fn installer(version: &str, asset: impl Fn(&str) -> Option<Asset>) -> Option<Installer> {
+pub(super) fn installer(
+    channel: Channel,
+    version: &str,
+    asset: impl Fn(&str) -> Option<Asset>,
+) -> Option<Installer> {
     let Some(key) = release_key() else {
         tracing::info!("this build has no release key, so it does not update itself");
         return None;
@@ -215,7 +226,7 @@ pub(super) fn installer(version: &str, asset: impl Fn(&str) -> Option<Asset>) ->
         tracing::info!("no self-update: {reason}");
         return None;
     }
-    let name = kind.asset_name(version, std::env::consts::ARCH);
+    let name = kind.asset_name(channel, version, std::env::consts::ARCH);
     let Some(asset) = asset(&name) else {
         tracing::info!(
             version,
@@ -238,7 +249,7 @@ pub(super) fn installer(version: &str, asset: impl Fn(&str) -> Option<Asset>) ->
 /// without touching the installed app.
 #[cfg(windows)]
 fn release_channel() -> bool {
-    cfg!(feature = "update-test-hooks") || crate::store::is_release_variant()
+    cfg!(feature = "update-test-hooks") || crate::store::is_shipped_build()
 }
 
 /// How the executable at `exe` was installed, or why it cannot replace
@@ -309,7 +320,10 @@ fn registered(scope: Scope) -> Option<PathBuf> {
         Scope::AllUsers => HKEY_LOCAL_MACHINE,
     };
     let key = RegKey::predef(hive)
-        .open_subkey_with_flags(UNINSTALL_KEY, KEY_READ | KEY_WOW64_64KEY)
+        .open_subkey_with_flags(
+            uninstall_key(Channel::current()),
+            KEY_READ | KEY_WOW64_64KEY,
+        )
         .ok()?;
     ["Inno Setup: App Path", "InstallLocation"]
         .into_iter()
@@ -338,7 +352,7 @@ pub(crate) fn install(installer: &Installer, progress: &Progress) -> Result<Path
         return Err(failed(COULD_NOT_REPLACE)("the app has no folder".into()));
     };
     tracing::info!(version, path = %installed.display(), "update started");
-    let _lock = lock(&installed).map_err(failed(ALREADY_RUNNING))?;
+    let _lock = lock(&installed).map_err(failed(&ALREADY_RUNNING))?;
     unchanged(&installed, *running).map_err(|(reason, detail)| failed(reason)(detail))?;
 
     let scratch = Scratch::new().map_err(failed(NO_SCRATCH))?;
@@ -366,7 +380,7 @@ pub(crate) fn install(installer: &Installer, progress: &Progress) -> Result<Path
         Kind::Portable { .. } => put_in_place(
             &file,
             folder,
-            &release_directory(version, std::env::consts::ARCH),
+            &release_directory(Channel::current(), version, std::env::consts::ARCH),
             &mut |from, to| fs::rename(from, to),
             &mut protect,
         )?,
@@ -464,7 +478,7 @@ fn log_tail(log: &Path) -> String {
 /// updated anything.
 fn replaced(installed: &Path, running: Identity) -> Result<(), String> {
     match unchanged(installed, running) {
-        Err((reason, _)) if reason == ALREADY_UPDATED => Ok(()),
+        Err((reason, _)) if reason == *ALREADY_UPDATED => Ok(()),
         Err((_, detail)) => Err(detail),
         Ok(()) => Err(format!(
             "{} is still the file this DBDelve started from",
@@ -732,6 +746,7 @@ mod tests {
         protect, put_in_place, release_directory, replaced, same_folder, setup_arguments, swap,
         unpack,
     };
+    use crate::channel::Channel;
     use crate::update::{
         download::{COULD_NOT_REPLACE, COULD_NOT_UNPACK, NOT_THE_APP, tests::scratch},
         identity::{ALREADY_UPDATED, Identity, unchanged},
@@ -744,7 +759,7 @@ mod tests {
             scope: Scope::AllUsers,
         };
         assert_eq!(
-            setup.asset_name("0.8.0", "x86_64"),
+            setup.asset_name(Channel::Stable, "0.8.0", "x86_64"),
             "dbdelve-0.8.0-windows-x86_64-setup.exe"
         );
         assert_eq!(
@@ -755,12 +770,21 @@ mod tests {
             exe: PathBuf::from(r"D:\tools\dbdelve-0.7.1-windows-x86_64\dbdelve.exe"),
         };
         assert_eq!(
-            portable.asset_name("0.8.0", "x86_64"),
+            portable.asset_name(Channel::Stable, "0.8.0", "x86_64"),
             "dbdelve-0.8.0-windows-x86_64.zip"
         );
         assert_eq!(
             portable.installed(),
             Path::new(r"D:\tools\dbdelve-0.7.1-windows-x86_64\dbdelve.exe")
+        );
+        let version = "0.7.4-nightly.20261116.12";
+        assert_eq!(
+            setup.asset_name(Channel::Nightly, version, "x86_64"),
+            "dbdelve-nightly-0.7.4-nightly.20261116.12-windows-x86_64-setup.exe"
+        );
+        assert_eq!(
+            portable.asset_name(Channel::Nightly, version, "x86_64"),
+            "dbdelve-nightly-0.7.4-nightly.20261116.12-windows-x86_64.zip"
         );
     }
 
@@ -932,6 +956,17 @@ mod tests {
         );
     }
 
+    /// The Uninstall entry the updater reads is the one the installer writes.
+    /// Inno Setup escapes the GUID's opening brace by doubling it.
+    #[test]
+    fn the_installer_registers_each_channel_under_its_app_id() {
+        let script = include_str!("../../assets/windows/dbdelve.iss");
+        for channel in [Channel::Stable, Channel::Nightly] {
+            let line = format!("AppId={{{}", channel.windows_app_id());
+            assert!(script.contains(&line), "{line}");
+        }
+    }
+
     /// A zip of `entries`: a name ending in `/` is a folder, `->` a link.
     fn zip_of(at: &Path, entries: &[(&str, &[u8])]) {
         let mut zip = ZipWriter::new(File::create(at).unwrap());
@@ -994,7 +1029,7 @@ mod tests {
     #[test]
     fn a_zip_must_be_the_release_it_claims() {
         let directory = scratch("windows-unpack");
-        let top = release_directory("9.9.9", "x86_64");
+        let top = release_directory(Channel::Stable, "9.9.9", "x86_64");
         let good = directory.join("good.zip");
         let mut entries = vec![(format!("{top}/"), Vec::new())];
         entries.extend(release(&top, "new"));
@@ -1006,7 +1041,7 @@ mod tests {
             "new bridge"
         );
         // Another version's zip under this name.
-        let other = release_directory("9.9.8", "x86_64");
+        let other = release_directory(Channel::Stable, "9.9.8", "x86_64");
         assert_eq!(
             unpack(&good, &directory.join("other"), &other).map_err(|(reason, _)| reason),
             Err(NOT_THE_APP)
@@ -1109,7 +1144,7 @@ mod tests {
         let directory = scratch("windows-swap");
         let folder = directory.join("dbdelve-0.7.1-windows-x86_64");
         installed_folder(&folder);
-        let top = release_directory("9.9.9", "x86_64");
+        let top = release_directory(Channel::Stable, "9.9.9", "x86_64");
         let zip = directory.join(format!("{top}.zip"));
         zip_release(&zip, &release(&top, "new"));
         // Running: Windows renames these but will not overwrite them.
@@ -1169,7 +1204,7 @@ mod tests {
     #[test]
     fn a_failed_swap_puts_everything_back() {
         let directory = scratch("windows-rollback");
-        let top = release_directory("9.9.9", "x86_64");
+        let top = release_directory(Channel::Stable, "9.9.9", "x86_64");
         let zip = directory.join(format!("{top}.zip"));
         zip_release(&zip, &release(&top, "new"));
         let tree = Path::new("plugins").join("odbc");
@@ -1213,7 +1248,7 @@ mod tests {
     #[test]
     fn what_a_failed_swap_could_not_put_back_is_never_cleared() {
         let directory = scratch("windows-unrestored");
-        let top = release_directory("9.9.9", "x86_64");
+        let top = release_directory(Channel::Stable, "9.9.9", "x86_64");
         let zip = directory.join(format!("{top}.zip"));
         zip_release(&zip, &release(&top, "new"));
         let folder = directory.join("install");
@@ -1251,7 +1286,7 @@ mod tests {
     #[test]
     fn nothing_moves_until_the_set_aside_folder_is_protected() {
         let directory = scratch("windows-unprotected");
-        let top = release_directory("9.9.9", "x86_64");
+        let top = release_directory(Channel::Stable, "9.9.9", "x86_64");
         let zip = directory.join(format!("{top}.zip"));
         zip_release(&zip, &release(&top, "new"));
         let folder = directory.join("install");
@@ -1310,7 +1345,7 @@ mod tests {
     #[test]
     fn a_finished_swap_leaves_its_set_aside_folder_to_clearing() {
         let directory = scratch("windows-finished");
-        let top = release_directory("9.9.9", "x86_64");
+        let top = release_directory(Channel::Stable, "9.9.9", "x86_64");
         let zip = directory.join(format!("{top}.zip"));
         zip_release(&zip, &release(&top, "new"));
         let folder = directory.join("install");
@@ -1347,9 +1382,15 @@ mod tests {
         let folder = directory.join("install");
         installed_folder(&folder);
         let before = contents(&folder);
-        let top = release_directory("9.9.9", "x86_64");
+        let top = release_directory(Channel::Stable, "9.9.9", "x86_64");
         let zip = directory.join("other.zip");
-        zip_release(&zip, &release(&release_directory("9.9.8", "x86_64"), "new"));
+        zip_release(
+            &zip,
+            &release(
+                &release_directory(Channel::Stable, "9.9.8", "x86_64"),
+                "new",
+            ),
+        );
         assert_eq!(
             put_in_place(
                 &zip,
@@ -1437,7 +1478,7 @@ mod tests {
         // Another DBDelve's update, seen by this one before it starts its own.
         assert_eq!(
             unchanged(&installed, started).map_err(|(reason, _)| reason),
-            Err(ALREADY_UPDATED)
+            Err(ALREADY_UPDATED.as_str())
         );
         fs::remove_dir_all(directory).unwrap();
     }
@@ -1473,7 +1514,7 @@ mod tests {
             })
         };
         assert!(matches!(
-            State::stopped(ALREADY_UPDATED, installer()),
+            State::stopped(&ALREADY_UPDATED, installer()),
             State::Superseded(path) if path == Path::new(r"C:\tools\dbdelve\dbdelve.exe")
         ));
         assert!(matches!(

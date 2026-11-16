@@ -17,12 +17,7 @@ use super::{
     },
     is_newer,
 };
-
-/// The release bundle's id, which `dev/bundle.sh` sets and the Keychain scopes
-/// saved passwords to.
-const RELEASE_IDENTIFIER: &str = "com.shayanabbas.dbdelve";
-
-const APP_IN_DMG: &str = "DBDelve.app";
+use crate::channel::Channel;
 
 /// Everything an install needs, found when the release was: having one is what
 /// makes this install eligible to update itself.
@@ -89,8 +84,9 @@ fn release_channel(bundle: &Path) -> bool {
     if cfg!(feature = "update-test-hooks") {
         return true;
     }
-    crate::store::is_release_variant()
-        && bundle_info(bundle).is_ok_and(|info| info.identifier == RELEASE_IDENTIFIER)
+    crate::store::is_shipped_build()
+        && bundle_info(bundle)
+            .is_ok_and(|info| info.identifier == Channel::current().bundle_identifier())
 }
 
 /// Why the bundle cannot be swapped where it stands, if it cannot.
@@ -136,7 +132,7 @@ pub(crate) fn install(installer: &Installer, progress: &Progress) -> Result<Path
         key,
     } = installer;
     tracing::info!(version, bundle = %bundle.display(), "update started");
-    let _lock = lock(bundle).map_err(failed(ALREADY_RUNNING))?;
+    let _lock = lock(bundle).map_err(failed(&ALREADY_RUNNING))?;
     let staged = sibling(bundle, "update-new");
     // What an earlier attempt left when it was killed before it could clean up.
     remove(&staged);
@@ -174,7 +170,9 @@ pub(crate) fn install(installer: &Installer, progress: &Progress) -> Result<Path
 fn sibling(bundle: &Path, tag: &str) -> PathBuf {
     let stem = bundle
         .file_stem()
-        .map_or("DBDelve".into(), |stem| stem.to_string_lossy());
+        .map_or(Channel::current().bundle_executable().into(), |stem| {
+            stem.to_string_lossy()
+        });
     bundle.with_file_name(format!(".{stem}.{tag}.app"))
 }
 
@@ -193,9 +191,10 @@ fn stage(dmg: &Path, mount: &Path, staged: &Path) -> Result<(), String> {
         .arg(mount)
         .arg(dmg))?;
     let mounted = Mounted(mount);
-    let app = mounted.0.join(APP_IN_DMG);
+    let name = Channel::current().app_bundle();
+    let app = mounted.0.join(&name);
     if !app.is_dir() {
-        return Err(format!("the image holds no {APP_IN_DMG}"));
+        return Err(format!("the image holds no {name}"));
     }
     run(Command::new("/usr/bin/ditto").arg(&app).arg(staged)).map(drop)
 }
@@ -310,7 +309,17 @@ mod tests {
         BundleInfo, accept, blocked, bundle_info, bundle_of, check, exchange, read_only_volume,
         run, sibling, stage,
     };
+    use crate::channel::Channel;
     use crate::update::download::tests::scratch;
+
+    /// `core` as this build's channel numbers a release: a nightly accepts
+    /// only nightlies.
+    fn v(core: &str) -> String {
+        match Channel::current() {
+            Channel::Stable => core.to_string(),
+            Channel::Nightly => format!("{core}-nightly.20261116.1"),
+        }
+    }
 
     #[test]
     fn the_bundle_is_found_from_its_executable() {
@@ -359,17 +368,25 @@ mod tests {
             version: version.into(),
         };
         let id = "com.shayanabbas.dbdelve";
-        let installed = info(id, "0.7.1");
-        accept(&info(id, "0.8.0"), &installed, "0.8.0", "0.7.1").unwrap();
-        let other = info("com.example.other", "0.8.0");
-        assert!(accept(&other, &installed, "0.8.0", "0.7.1").is_err());
-        assert!(accept(&info(id, "0.7.9"), &installed, "0.8.0", "0.7.1").is_err());
+        let installed = info(id, &v("0.7.1"));
+        accept(&info(id, &v("0.8.0")), &installed, &v("0.8.0"), &v("0.7.1")).unwrap();
+        let other = info("com.example.other", &v("0.8.0"));
+        assert!(accept(&other, &installed, &v("0.8.0"), &v("0.7.1")).is_err());
+        assert!(accept(&info(id, &v("0.7.9")), &installed, &v("0.8.0"), &v("0.7.1")).is_err());
         // A validly signed older release served as the latest: its plist
         // agrees with the feed, and it is still refused.
-        assert!(accept(&info(id, "0.7.0"), &installed, "0.7.0", "0.7.1").is_err());
-        assert!(accept(&info(id, "0.7.1"), &installed, "0.7.1", "0.7.1").is_err());
+        assert!(accept(&info(id, &v("0.7.0")), &installed, &v("0.7.0"), &v("0.7.1")).is_err());
+        assert!(accept(&info(id, &v("0.7.1")), &installed, &v("0.7.1"), &v("0.7.1")).is_err());
         // Newer than this process, older than what was installed since.
-        assert!(accept(&info(id, "0.8.0"), &info(id, "0.9.0"), "0.8.0", "0.7.1").is_err());
+        assert!(
+            accept(
+                &info(id, &v("0.8.0")),
+                &info(id, &v("0.9.0")),
+                &v("0.8.0"),
+                &v("0.7.1")
+            )
+            .is_err()
+        );
     }
 
     fn fake_bundle(at: &Path, identifier: &str, version: &str) {
@@ -439,8 +456,8 @@ mod tests {
     fn a_dmg_is_staged_and_its_app_checked() {
         let directory = scratch("stage");
         let source = directory.join("source");
-        let app = source.join("DBDelve.app");
-        fake_bundle(&app, "com.example.dbdelve", "999.0.0");
+        let app = source.join(Channel::current().app_bundle());
+        fake_bundle(&app, "com.example.dbdelve", &v("999.0.0"));
         run(Command::new("/usr/bin/codesign")
             .args(["--force", "--sign", "-"])
             .arg(&app))
@@ -461,7 +478,7 @@ mod tests {
         .unwrap();
 
         let running = directory.join("DBDelve.app");
-        fake_bundle(&running, "com.example.dbdelve", "0.0.1");
+        fake_bundle(&running, "com.example.dbdelve", &v("0.0.1"));
         let staged = sibling(&running, "update-new");
         let mount = directory.join("mnt");
         stage(&dmg, &mount, &staged).unwrap();
@@ -469,12 +486,12 @@ mod tests {
             fs::read_dir(&mount).unwrap().next().is_none(),
             "still mounted"
         );
-        check(&staged, &running, "999.0.0").unwrap();
-        assert!(check(&staged, &running, "998.0.0").is_err());
+        check(&staged, &running, &v("999.0.0")).unwrap();
+        assert!(check(&staged, &running, &v("998.0.0")).is_err());
 
         // Tampering after signing breaks the seal codesign checks.
         fs::write(staged.join("Contents/MacOS/extra"), "x").unwrap();
-        assert!(check(&staged, &running, "999.0.0").is_err());
+        assert!(check(&staged, &running, &v("999.0.0")).is_err());
 
         // A DMG without the app detaches all the same.
         let empty = directory.join("empty");

@@ -189,6 +189,42 @@ DBDelve doesn't bundle any.
   to load it: `xattr -dr com.apple.quarantine <driver directory>`.
 - **Windows** uses the system ODBC manager. That path is untested.
 
+## Nightly
+
+DBDelve Nightly is built from `main` every day that it changes. It has what
+has been merged since the last release, before that release is cut. It is a
+separate app: its own name and icon, its own connections, settings and saved
+passwords, and its own logs. It installs beside DBDelve and never replaces it.
+It updates itself to newer nightlies only, never to a release.
+
+macOS, with Homebrew:
+
+```sh
+brew install --cask shayanabbas1/dbdelve/dbdelve@nightly
+```
+
+macOS or Linux, without it:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ShayanAbbas1/dbdelve/main/install.sh | sh -s -- --nightly
+```
+
+Or take its files from the newest pre-release on [the releases page][all-releases]:
+
+| | DBDelve | DBDelve Nightly |
+|---|---|---|
+| macOS | `DBDelve-<version>.dmg` | `DBDelve-Nightly-<version>.dmg` |
+| Linux tarball | `dbdelve-<version>-linux-<arch>.tar.gz` | `dbdelve-nightly-<version>-linux-<arch>.tar.gz` |
+| Linux AppImage | `dbdelve-<version>-<arch>.AppImage` | `dbdelve-nightly-<version>-<arch>.AppImage` |
+| Windows installer | `dbdelve-<version>-windows-x86_64-setup.exe` | `dbdelve-nightly-<version>-windows-x86_64-setup.exe` |
+| Windows zip | `dbdelve-<version>-windows-x86_64.zip` | `dbdelve-nightly-<version>-windows-x86_64.zip` |
+
+It installs as `DBDelve Nightly.app` on macOS, as `~/.local/bin/dbdelve-nightly`
+on Linux, and as **DBDelve Nightly** in its own folder on Windows. Its data is
+in a `dbdelve-nightly` folder next to DBDelve's `dbdelve` one. DBDelve Nightly
+can import DBDelve's connections, saved passwords, queries and settings. It
+copies them and never writes to DBDelve's data.
+
 ## Updating
 
 On macOS, Linux and Windows, **Update and restart** in the titlebar's update
@@ -224,4 +260,5 @@ which you can turn off in Settings, and to download the release you asked to
 update to.
 
 [releases]: https://github.com/ShayanAbbas1/dbdelve/releases/latest
+[all-releases]: https://github.com/ShayanAbbas1/dbdelve/releases
 [Inno Setup]: https://jrsoftware.org/isinfo.php

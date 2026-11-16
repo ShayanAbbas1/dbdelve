@@ -5,7 +5,10 @@
 # Dev by default: its own bundle id, its own name, its own profiles and its own
 # Keychain items, run from the build tree and never installed, so a build can
 # neither replace the released app nor touch what it has saved.
-# DBDELVE_CHANNEL=release builds the app the release workflow ships.
+# DBDELVE_CHANNEL=release builds the app the release workflow ships, and
+# DBDELVE_CHANNEL=nightly builds DBDelve Nightly, a separate app with its own
+# name, id and icon. DBDELVE_VERSION overrides Cargo.toml's version; only the
+# nightly build sets it.
 #
 # DBDELVE_FEATURES passes cargo features to the app's build (update-test-hooks
 # for an end-to-end test of the updater), and DBDELVE_NO_LAUNCH=1 builds the
@@ -17,8 +20,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+VERSION="${DBDELVE_VERSION:-$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)}"
+# CFBundleVersion takes period-separated integers only, so a nightly's
+# 0.7.4-nightly.20261116.12 is 20261116.12 there: the date and the run, which
+# only ever grow from one nightly to the next. CFBundleShortVersionString keeps
+# the whole version, which is what the updater checks a download against.
+BUILD="$VERSION"
+if [[ "$VERSION" == *-nightly.* ]]; then
+  BUILD="${VERSION#*-nightly.}"
+fi
 CHANNEL="${DBDELVE_CHANNEL:-dev}"
+ICON="DBDelve"
 
 if [[ "$CHANNEL" == release ]]; then
   APP="target/DBDelve.app"
@@ -28,6 +40,14 @@ if [[ "$CHANNEL" == release ]]; then
   # Capitalised: the menu bar, Force Quit and Activity Monitor all name the app
   # after its executable, not after CFBundleName.
   NAME="DBDelve"
+  ENVIRONMENT=""
+elif [[ "$CHANNEL" == nightly ]]; then
+  # The binary knows its channel from DBDELVE_CHANNEL at compile time, so no
+  # LSEnvironment: the build below inherits it from this shell.
+  APP="target/macos-nightly/DBDelve Nightly.app"
+  IDENTIFIER="com.shayanabbas.dbdelve.nightly"
+  NAME="DBDelve Nightly"
+  ICON="DBDelve-Nightly"
   ENVIRONMENT=""
 else
   APP="target/macos-dev/DBDelve Dev.app"
@@ -61,7 +81,7 @@ dev/plugins.sh --release
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/plugins/odbc" "$APP/Contents/Helpers"
 
-cp assets/macos/DBDelve.icns "$APP/Contents/Resources/DBDelve.icns"
+cp "assets/macos/$ICON.icns" "$APP/Contents/Resources/$ICON.icns"
 cp target/release/dbdelve "$APP/Contents/MacOS/$NAME"
 
 # The OFL asks that the licence travel with the fonts, and the fonts are
@@ -107,10 +127,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 	<key>CFBundleDisplayName</key><string>${NAME}</string>
 	<key>CFBundleIdentifier</key><string>${IDENTIFIER}</string>
 	<key>CFBundleExecutable</key><string>${NAME}</string>
-	<key>CFBundleIconFile</key><string>DBDelve</string>
+	<key>CFBundleIconFile</key><string>${ICON}</string>
 	<key>CFBundlePackageType</key><string>APPL</string>
 	<key>CFBundleShortVersionString</key><string>${VERSION}</string>
-	<key>CFBundleVersion</key><string>${VERSION}</string>
+	<key>CFBundleVersion</key><string>${BUILD}</string>
 	<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
 	<key>LSMinimumSystemVersion</key><string>12.0</string>
 	<key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
@@ -146,10 +166,10 @@ codesign --force --sign "${DBDELVE_SIGN_ID:--}" --identifier "$IDENTIFIER.odbc" 
 codesign --force --sign "${DBDELVE_SIGN_ID:--}" --identifier "$IDENTIFIER" "$APP"
 codesign --verify --deep --strict "$APP"
 
-# Neither variant installs. The release reaches /Applications by the DMG's
+# No variant installs. Release and nightly reach /Applications by the DMG's
 # drag-to-install, and the dev app runs where it was built so it can never be
 # mistaken for -- or dropped over -- the real one.
-if [[ "$CHANNEL" == release || "${DBDELVE_NO_LAUNCH:-}" == 1 ]]; then
+if [[ "$CHANNEL" == release || "$CHANNEL" == nightly || "${DBDELVE_NO_LAUNCH:-}" == 1 ]]; then
   echo "built $APP (v$VERSION)"
   exit 0
 fi

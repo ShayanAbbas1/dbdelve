@@ -18,6 +18,7 @@ use gpui_component::{Disableable, Sizable, input::Input, tooltip::Tooltip};
 use crate::{
     Workspace,
     actions::LimitTarget,
+    channel::Channel,
     fuzzy::{Fuzzy, Query},
     icons::icon,
     keybindings::{self, KeybindingSpec},
@@ -113,6 +114,7 @@ enum SettingId {
     RunUnreadable,
     CheckForUpdates,
     VerboseLogging,
+    ImportFromStable,
     MatchSystemAppearance,
     Theme,
     SystemTheme(Appearance),
@@ -246,6 +248,24 @@ fn setting_rows() -> Vec<SettingRow> {
                 "bug",
                 "report",
                 "verbose",
+            ],
+        ),
+        row(
+            SettingId::ImportFromStable,
+            SettingsTab::General,
+            "Data",
+            "Import from DBDelve",
+            "Replaces DBDelve Nightly's connections, saved passwords, queries \
+             and settings with DBDelve's, then restarts. What is here now is \
+             kept in a folder beside it.",
+            &[
+                "import",
+                "stable",
+                "migrate",
+                "copy",
+                "transfer",
+                "connections",
+                "passwords",
             ],
         ),
         row(
@@ -456,6 +476,7 @@ fn applies(id: SettingId, settings: &Settings) -> bool {
     match id {
         SettingId::Theme => !settings.match_system_appearance,
         SettingId::SystemTheme(_) => settings.match_system_appearance,
+        SettingId::ImportFromStable => Channel::current() == Channel::Nightly,
         _ => true,
     }
 }
@@ -769,9 +790,15 @@ fn render_row(
 ) -> AnyElement {
     let t = popup_theme(cx);
     let glass_only = row.id == SettingId::Opacity && !t.is_glass;
+    let nothing_to_import =
+        row.id == SettingId::ImportFromStable && workspace.stable_connections == 0;
     let description = row.description.map(|description| {
         if glass_only {
             SharedString::from(format!("{description} Glass themes only."))
+        } else if nothing_to_import {
+            SharedString::from(format!(
+                "{description} DBDelve has no connections on this computer."
+            ))
         } else {
             SharedString::from(description)
         }
@@ -836,6 +863,18 @@ fn render_control(
                 workspace.set_verbose_logging(verbose, cx);
             }))
             .into_any_element(),
+        SettingId::ImportFromStable => button(
+            "import-from-stable",
+            "Import",
+            Tone::Quiet,
+            Control::Compact,
+            t,
+        )
+        .disabled(workspace.stable_connections == 0 || workspace.stable_import.is_some())
+        .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
+            workspace.import_from_stable(cx);
+        }))
+        .into_any_element(),
         SettingId::QualifyCompletions => {
             switch("qualify-completions", settings.qualify_completions, t)
                 .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
@@ -1180,7 +1219,7 @@ mod tests {
                 SettingId::Keybinding("sort_active_column"),
             ]
         );
-        assert_eq!(found("!keyboard").len(), 16);
+        assert_eq!(found("!keyboard").len(), 17);
     }
 
     #[test]
@@ -1242,6 +1281,17 @@ mod tests {
                 SettingId::SystemTheme(Appearance::Dark),
                 SettingId::Opacity
             ]
+        );
+    }
+
+    #[test]
+    fn only_a_nightly_offers_the_import_from_dbdelve_it_is_searched_for_by() {
+        for word in ["import", "stable", "migrate"] {
+            assert!(found(word).contains(&SettingId::ImportFromStable), "{word}");
+        }
+        assert_eq!(
+            applies(SettingId::ImportFromStable, &Settings::default()),
+            Channel::current() == Channel::Nightly
         );
     }
 

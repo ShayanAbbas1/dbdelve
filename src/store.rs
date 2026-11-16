@@ -6,15 +6,15 @@ use std::path::{Path, PathBuf};
 use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::channel::Channel;
 use crate::db::{
     DbError, EditTarget, Engine, ExplainMode, Plugin, QueryResult, RelationKind, Row, SshTunnel,
     Stopped, odbc_string,
 };
 
+pub(crate) mod stable_import;
+
 const PROFILES_FILE: &str = "profiles.toml";
-/// The release variant's name. Both the support directory and the keychain
-/// service are this, so [`variant_name`] is the only thing that may widen it.
-const NAME: &str = "dbdelve";
 /// The buffer file a build before per-tab buffers wrote. Read-only now, and
 /// only for tab 0 -- see [`read_scratch`].
 const LEGACY_SCRATCH_FILE: &str = ".scratch.sql";
@@ -1960,31 +1960,45 @@ pub(crate) fn unsafe_component(value: &str) -> Option<&'static str> {
     }
 }
 
-/// `dbdelve` unset or empty, `dbdelve-<variant>` otherwise.
+/// The channel's slug with `DBDELVE_VARIANT` unset or empty,
+/// `<slug>-<variant>` otherwise.
 ///
-/// The support directory and the keychain service both come from here, and
-/// they have to move together: a dev build that suffixed only one of them
-/// would read the release's saved passwords or write its `profiles.toml`.
-/// A variant that cannot be a path component is an error rather than a
-/// fallback to the release name, for the same reason.
-fn variant_name() -> Result<String, String> {
-    let Some(variant) = std::env::var("DBDELVE_VARIANT")
-        .ok()
-        .filter(|variant| !variant.is_empty())
-    else {
-        return Ok(NAME.to_string());
-    };
-    if let Some(reason) = unsafe_component(&variant) {
-        return Err(format!("DBDELVE_VARIANT {reason}."));
-    }
-    Ok(format!("{NAME}-{variant}"))
+/// The support directory, the keychain service and the log directory all come
+/// from here, and they have to move together: a dev build that suffixed only
+/// one of them would read the release's saved passwords or write its
+/// `profiles.toml`. A variant that cannot be a path component is an error
+/// rather than a fallback to the release name, for the same reason.
+pub(crate) fn variant_name() -> Result<String, String> {
+    variant_of(
+        Channel::current(),
+        std::env::var("DBDELVE_VARIANT").ok().as_deref(),
+    )
 }
 
-/// Whether this is the release's own data and keychain, rather than a dev or
-/// other variant's.
+fn variant_of(channel: Channel, variant: Option<&str>) -> Result<String, String> {
+    let Some(variant) = variant.filter(|variant| !variant.is_empty()) else {
+        return Ok(channel.slug().to_string());
+    };
+    if let Some(reason) = unsafe_component(variant) {
+        return Err(format!("DBDELVE_VARIANT {reason}."));
+    }
+    // Stable's `nightly` and `nightly-<x>` would be Nightly's own names. Any
+    // case, as macOS and Windows match directory names without it.
+    let nightlys = variant
+        .get(..7)
+        .is_some_and(|start| start.eq_ignore_ascii_case("nightly"))
+        && matches!(variant.as_bytes().get(7), None | Some(b'-'));
+    if channel == Channel::Stable && nightlys {
+        return Err("DBDELVE_VARIANT names DBDelve Nightly's own data.".into());
+    }
+    Ok(format!("{}-{variant}", channel.slug()))
+}
+
+/// Whether this is a channel's shipped build, on its own data and keychain,
+/// rather than a dev or other variant's.
 #[cfg(any(target_os = "macos", target_os = "linux", windows))]
-pub(crate) fn is_release_variant() -> bool {
-    variant_name().is_ok_and(|name| name == NAME)
+pub(crate) fn is_shipped_build() -> bool {
+    variant_name().is_ok_and(|name| name == Channel::current().slug())
 }
 
 /// macOS keeps Application Support, where every install before this already
@@ -4609,17 +4623,19 @@ open_objects = []
                 }
             };
 
+            let slug = Channel::current().slug();
             for unset in [None, Some("")] {
                 variant(unset);
-                assert_eq!(variant_name().unwrap(), "dbdelve");
+                assert_eq!(variant_name().unwrap(), slug);
                 let directory = dbdelve_directory().unwrap();
-                assert!(directory.ends_with(data_path("dbdelve")));
+                assert!(directory.ends_with(data_path(slug)));
             }
 
+            let dev = format!("{slug}-dev");
             variant(Some("dev"));
-            assert_eq!(variant_name().unwrap(), "dbdelve-dev");
+            assert_eq!(variant_name().unwrap(), dev);
             let directory = dbdelve_directory().unwrap();
-            assert!(directory.ends_with(data_path("dbdelve-dev")));
+            assert!(directory.ends_with(data_path(&dev)));
 
             // No NUL case: `set_var` panics on one before the code under test
             // ever sees it.
@@ -4629,6 +4645,74 @@ open_objects = []
                 assert!(dbdelve_directory().is_err(), "{rejected:?}");
             }
 
+            variant(None);
+        });
+    }
+
+    #[test]
+    fn each_channel_has_its_own_variants() {
+        assert_eq!(variant_of(Channel::Stable, None).unwrap(), "dbdelve");
+        assert_eq!(
+            variant_of(Channel::Stable, Some("dev")).unwrap(),
+            "dbdelve-dev"
+        );
+        for unset in [None, Some("")] {
+            assert_eq!(
+                variant_of(Channel::Nightly, unset).unwrap(),
+                "dbdelve-nightly"
+            );
+        }
+        assert_eq!(
+            variant_of(Channel::Nightly, Some("dev")).unwrap(),
+            "dbdelve-nightly-dev"
+        );
+        for rejected in ["../release", "a/b", ".dev", "   "] {
+            assert!(
+                variant_of(Channel::Nightly, Some(rejected)).is_err(),
+                "{rejected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn stable_cannot_take_a_variant_that_is_nightlys_own() {
+        for reserved in ["nightly", "nightly-dev", "Nightly", "NIGHTLY-x"] {
+            assert!(
+                variant_of(Channel::Stable, Some(reserved)).is_err(),
+                "{reserved:?}"
+            );
+        }
+        for kept in ["nightlyish", "dev-nightly", "night"] {
+            assert_eq!(
+                variant_of(Channel::Stable, Some(kept)).unwrap(),
+                format!("dbdelve-{kept}")
+            );
+        }
+        assert_eq!(
+            variant_of(Channel::Nightly, Some("nightly")).unwrap(),
+            "dbdelve-nightly-nightly"
+        );
+    }
+
+    #[test]
+    fn only_the_unsuffixed_variant_is_the_shipped_build() {
+        with_home(|| {
+            // SAFETY: as in `the_variant_moves_the_directory_and_the_keychain_together`.
+            let variant = |value: Option<&str>| unsafe {
+                match value {
+                    Some(value) => std::env::set_var("DBDELVE_VARIANT", value),
+                    None => std::env::remove_var("DBDELVE_VARIANT"),
+                }
+            };
+            for (value, shipped) in [
+                (None, true),
+                (Some(""), true),
+                (Some("dev"), false),
+                (Some("../release"), false),
+            ] {
+                variant(value);
+                assert_eq!(is_shipped_build(), shipped, "{value:?}");
+            }
             variant(None);
         });
     }

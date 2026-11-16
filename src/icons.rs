@@ -255,7 +255,11 @@ pub const BRAND: &str = "brand/dbdelve.svg";
 /// is drawn: enough for a 2x and a 3x display.
 fn brand_document() -> String {
     let side = (3. * crate::theme::layout::WELCOME_MARK_SIZE) as u32;
-    include_str!("../assets/icon/dbdelve.svg").replacen(
+    let document = match crate::channel::Channel::current() {
+        crate::channel::Channel::Stable => include_str!("../assets/icon/dbdelve.svg"),
+        crate::channel::Channel::Nightly => include_str!("../assets/icon/dbdelve-nightly.svg"),
+    };
+    document.replacen(
         r#"width="1024" height="1024""#,
         &format!(r#"width="{side}" height="{side}""#),
         1,

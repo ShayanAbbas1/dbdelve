@@ -152,7 +152,7 @@ pub fn agent(
         .proxy(None)
         .timeout_connect(Some(CONNECT_WITHIN))
         .timeout_recv_response(bounds.limit())
-        .user_agent(concat!("dbdelve/", env!("CARGO_PKG_VERSION")))
+        .user_agent(crate::channel::user_agent())
         .tls_config(tls)
         .build();
     // The watched TCP, then TLS: the watch sees ciphertext arrive, which is

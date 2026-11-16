@@ -35,6 +35,12 @@
 ;   StageDir      the staged zip directory (absolute)
 ;   OutputDir     where the setup exe is written
 ;   OutputBase    filename without .exe
+;
+; Optional:
+;   Nightly       builds DBDelve Nightly's installer: its own AppId, name,
+;                 folder, Start Menu entry and icon, so it installs beside
+;                 stable and neither upgrades over the other. Its data is in
+;                 %APPDATA%\dbdelve-nightly. The exe is dbdelve.exe in both.
 
 #ifndef MyAppVersion
   #error MyAppVersion must be defined (/DMyAppVersion=...)
@@ -49,13 +55,23 @@
   #error OutputBase must be defined (/DOutputBase=...)
 #endif
 
-#define MyAppName "DBDelve"
+#ifdef Nightly
+  #define MyAppName "DBDelve Nightly"
+  #define MyAppIcon "dbdelve-nightly.ico"
+#else
+  #define MyAppName "DBDelve"
+  #define MyAppIcon "dbdelve.ico"
+#endif
 #define MyAppPublisher "Shayan Abbas"
 #define MyAppURL "https://github.com/ShayanAbbas1/dbdelve"
 #define MyAppExeName "dbdelve.exe"
 
 [Setup]
+#ifdef Nightly
+AppId={{221ADDEE-C041-4E6A-A2E9-72E92DF71DCF}
+#else
 AppId={{300CEAF2-D7A2-4D97-B94B-20ED16631AF4}
+#endif
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
@@ -69,7 +85,7 @@ AllowNoIcons=yes
 LicenseFile={#StageDir}\LICENSE
 OutputDir={#OutputDir}
 OutputBaseFilename={#OutputBase}
-SetupIconFile={#SourcePath}dbdelve.ico
+SetupIconFile={#SourcePath}{#MyAppIcon}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -93,7 +109,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 ; Files when elevated and %LOCALAPPDATA%\Programs when not; the labels have
 ; to say that, or the dialog only talks about "users".
 PrivilegesRequiredOverrideTitle=Choose install location
-PrivilegesRequiredOverrideInstruction=Where should DBDelve be installed?
+PrivilegesRequiredOverrideInstruction=Where should {#MyAppName} be installed?
 PrivilegesRequiredOverrideCurrentUser=&Just for me (AppData, no administrator)
 PrivilegesRequiredOverrideCurrentUserRecommended=&Just for me (AppData, no administrator) [recommended]
 PrivilegesRequiredOverrideAllUsers=&All users (Program Files, requires administrator)

@@ -17,6 +17,12 @@
 # DBDELVE_FEATURES passes cargo features to the app's build (update-test-hooks
 # for dev/update-e2e-windows.ps1).
 #
+# DBDELVE_CHANNEL=nightly packages DBDelve Nightly: assets named
+# dbdelve-nightly-*, and an installer with its own AppId, folder and Start
+# Menu name, so it installs beside stable. The exe is dbdelve.exe in both.
+# DBDELVE_VERSION overrides Cargo.toml's version; only the nightly build sets
+# it. The build reads both at compile time.
+#
 # Usage: powershell -File dev/package-windows.ps1
 
 $ErrorActionPreference = "Stop"
@@ -28,7 +34,9 @@ $VersionLine = Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"' | 
 if (-not $VersionLine) {
     throw "Cargo.toml has no version."
 }
-$Version = $VersionLine.Matches.Groups[1].Value
+$Version = if ($env:DBDELVE_VERSION) { $env:DBDELVE_VERSION } else { $VersionLine.Matches.Groups[1].Value }
+$Nightly = $env:DBDELVE_CHANNEL -eq "nightly"
+$Slug = if ($Nightly) { "dbdelve-nightly" } else { "dbdelve" }
 
 # Honoured rather than assumed: a build that set CARGO_TARGET_DIR puts the
 # binary somewhere else, and reading target/ regardless is how a stale exe
@@ -47,7 +55,7 @@ $Arch = switch ($env:PROCESSOR_ARCHITECTURE) {
     default { throw "Unsupported architecture: $env:PROCESSOR_ARCHITECTURE" }
 }
 
-$Name = "dbdelve-$Version-windows-$Arch"
+$Name = "$Slug-$Version-windows-$Arch"
 $OutDir = Join-Path $TargetDir "windows"
 $Stage = Join-Path $OutDir $Name
 $Zip = Join-Path $OutDir "$Name.zip"
@@ -120,11 +128,13 @@ if (-not $Iscc) {
 
 # Each /D is one argument, so a CARGO_TARGET_DIR with spaces stays one value
 # and is not wrapped in extra quotes -- those would become part of the path.
+$ChannelDefine = if ($Nightly) { @("/DNightly") } else { @() }
 & $Iscc /Q `
     "/DMyAppVersion=$Version" `
     "/DStageDir=$Stage" `
     "/DOutputDir=$OutDir" `
     "/DOutputBase=$SetupName" `
+    @ChannelDefine `
     (Join-Path $Root "assets\windows\dbdelve.iss")
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 if (-not (Test-Path $Setup)) {

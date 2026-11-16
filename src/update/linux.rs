@@ -20,6 +20,7 @@ use super::{
     },
     identity::{Identity, unchanged},
 };
+use crate::channel::Channel;
 
 /// Everything an install needs, found when the release was: having one is what
 /// makes this install eligible to update itself.
@@ -51,10 +52,12 @@ impl Installer {
 }
 
 impl Kind {
-    fn asset_name(&self, version: &str, arch: &str) -> String {
+    fn asset_name(&self, channel: Channel, version: &str, arch: &str) -> String {
         match self {
-            Kind::AppImage(_) => format!("dbdelve-{version}-{arch}.AppImage"),
-            Kind::Tarball { .. } => format!("{}.tar.gz", release_directory(version, arch)),
+            Kind::AppImage(_) => format!("{}-{version}-{arch}.AppImage", channel.slug()),
+            Kind::Tarball { .. } => {
+                format!("{}.tar.gz", release_directory(channel, version, arch))
+            }
         }
     }
 
@@ -62,7 +65,7 @@ impl Kind {
     fn installed(&self) -> PathBuf {
         match self {
             Kind::AppImage(appimage) => appimage.clone(),
-            Kind::Tarball { home } => home.join(".local/bin/dbdelve"),
+            Kind::Tarball { home } => home.join(".local/bin").join(Channel::current().slug()),
         }
     }
 }
@@ -89,6 +92,24 @@ pub(super) fn remember_install() {
     ) {
         remember(appimage, &APPIMAGE_AT_START);
     }
+}
+
+/// The AppImage this process runs from, checked the way an update's restart
+/// is, or `None` for a binary that `App::restart` relaunches as it is.
+pub(super) fn relaunch_target() -> Result<Option<PathBuf>, &'static str> {
+    let Ok(exe) = std::env::current_exe().and_then(fs::canonicalize) else {
+        return Ok(None);
+    };
+    let (appimage, appdir) = (std::env::var_os("APPIMAGE"), std::env::var_os("APPDIR"));
+    let Some(appimage) = appimage_of(&exe, appimage.as_deref(), appdir.as_deref()) else {
+        return Ok(None);
+    };
+    relaunchable(
+        Path::new(appdir.as_deref().unwrap_or_default()),
+        std::env::var_os("APPIMAGE_EXTRACT_AND_RUN").as_deref(),
+        mount_point,
+    )?;
+    Ok(Some(appimage.to_path_buf()))
 }
 
 fn remember(appimage: &Path, at_start: &OnceLock<Identity>) {
@@ -164,13 +185,17 @@ fn running(kind: &Kind, appimage_at_start: &OnceLock<Identity>) -> io::Result<Id
 }
 
 /// The one directory a release tarball holds.
-fn release_directory(version: &str, arch: &str) -> String {
-    format!("dbdelve-{version}-linux-{arch}")
+fn release_directory(channel: Channel, version: &str, arch: &str) -> String {
+    format!("{}-{version}-linux-{arch}", channel.slug())
 }
 
 /// The installer for `version`, when this install may replace itself with it.
 /// Each reason it may not is logged once per check.
-pub(super) fn installer(version: &str, asset: impl Fn(&str) -> Option<Asset>) -> Option<Installer> {
+pub(super) fn installer(
+    channel: Channel,
+    version: &str,
+    asset: impl Fn(&str) -> Option<Asset>,
+) -> Option<Installer> {
     let Some(key) = release_key() else {
         tracing::info!("this build has no release key, so it does not update itself");
         return None;
@@ -221,7 +246,7 @@ pub(super) fn installer(version: &str, asset: impl Fn(&str) -> Option<Asset>) ->
         tracing::info!("no self-update: {reason}");
         return None;
     }
-    let name = kind.asset_name(version, std::env::consts::ARCH);
+    let name = kind.asset_name(channel, version, std::env::consts::ARCH);
     let Some(asset) = asset(&name) else {
         tracing::info!(
             version,
@@ -243,7 +268,7 @@ pub(super) fn installer(version: &str, asset: impl Fn(&str) -> Option<Asset>) ->
 /// replace itself with one. A test build may, so the whole path can be run
 /// without touching the installed app.
 fn release_channel() -> bool {
-    cfg!(feature = "update-test-hooks") || crate::store::is_release_variant()
+    cfg!(feature = "update-test-hooks") || crate::store::is_shipped_build()
 }
 
 /// How the executable at `exe` (canonical) was installed, from the
@@ -261,11 +286,12 @@ fn kind_of(
         return Err("HOME is not set");
     };
     let bin = home.join(".local/bin");
-    let installed = bin.join("dbdelve");
+    let name = Channel::current().slug();
+    let installed = bin.join(name);
     let installed_here = installed
         .symlink_metadata()
         .is_ok_and(|metadata| metadata.is_file())
-        && fs::canonicalize(&bin).is_ok_and(|bin| bin.join("dbdelve") == exe);
+        && fs::canonicalize(&bin).is_ok_and(|bin| bin.join(name) == exe);
     if !installed_here {
         return Err("it is neither an AppImage nor the binary install.sh put in ~/.local/bin");
     }
@@ -354,7 +380,7 @@ pub(crate) fn install(installer: &Installer, progress: &Progress) -> Result<Path
     } = installer;
     let installed = kind.installed();
     tracing::info!(version, path = %installed.display(), "update started");
-    let _lock = lock(&installed).map_err(failed(ALREADY_RUNNING))?;
+    let _lock = lock(&installed).map_err(failed(&ALREADY_RUNNING))?;
     unchanged(&installed, *running).map_err(|(reason, detail)| failed(reason)(detail))?;
 
     let scratch = Scratch::new().map_err(failed(NO_SCRATCH))?;
@@ -377,7 +403,7 @@ pub(crate) fn install(installer: &Installer, progress: &Progress) -> Result<Path
             let release = unpack(
                 &file,
                 &scratch.0.join("unpacked"),
-                &release_directory(version, std::env::consts::ARCH),
+                &release_directory(Channel::current(), version, std::env::consts::ARCH),
             )
             .map_err(|error| error.to_string())
             .map_err(failed(COULD_NOT_UNPACK))?;
@@ -472,7 +498,7 @@ fn unpack(tarball: &Path, into: &Path, top: &str) -> io::Result<PathBuf> {
         )));
     }
     let release = into.join(top);
-    for file in ["dbdelve", "install.sh"] {
+    for file in [Channel::current().slug(), "install.sh"] {
         if !release
             .join(file)
             .symlink_metadata()
@@ -512,6 +538,7 @@ mod tests {
         Identity, Kind, appimage_of, bundled_installer, kind_of, mount_point, relaunchable,
         release_directory, remember, run, running, sibling, swap_in, unchanged, unpack,
     };
+    use crate::channel::Channel;
     use crate::update::{
         download::{COULD_NOT_REPLACE, NOT_THE_APP, tests::scratch},
         identity::ALREADY_UPDATED,
@@ -531,7 +558,7 @@ mod tests {
     fn each_install_asks_for_its_own_asset() {
         let appimage = Kind::AppImage(PathBuf::from("/opt/DBDelve.AppImage"));
         assert_eq!(
-            appimage.asset_name("0.8.0", "x86_64"),
+            appimage.asset_name(Channel::Stable, "0.8.0", "x86_64"),
             "dbdelve-0.8.0-x86_64.AppImage"
         );
         assert_eq!(appimage.installed(), Path::new("/opt/DBDelve.AppImage"));
@@ -539,12 +566,21 @@ mod tests {
             home: PathBuf::from("/home/me"),
         };
         assert_eq!(
-            tarball.asset_name("0.8.0", "aarch64"),
+            tarball.asset_name(Channel::Stable, "0.8.0", "aarch64"),
             "dbdelve-0.8.0-linux-aarch64.tar.gz"
         );
         assert_eq!(
             tarball.installed(),
-            Path::new("/home/me/.local/bin/dbdelve")
+            Path::new("/home/me/.local/bin").join(Channel::current().slug())
+        );
+        let version = "0.7.4-nightly.20261116.12";
+        assert_eq!(
+            appimage.asset_name(Channel::Nightly, version, "x86_64"),
+            "dbdelve-nightly-0.7.4-nightly.20261116.12-x86_64.AppImage"
+        );
+        assert_eq!(
+            tarball.asset_name(Channel::Nightly, version, "aarch64"),
+            "dbdelve-nightly-0.7.4-nightly.20261116.12-linux-aarch64.tar.gz"
         );
     }
 
@@ -597,7 +633,7 @@ mod tests {
         let home = directory.join("home");
         let bin = home.join(".local/bin");
         fs::create_dir_all(&bin).unwrap();
-        let installed = bin.join("dbdelve");
+        let installed = bin.join(Channel::current().slug());
         fs::write(&installed, "").unwrap();
         let tarball = Ok(Kind::Tarball { home: home.clone() });
 
@@ -653,7 +689,7 @@ mod tests {
         let newer = directory.join(".dbdelve.new");
         fs::write(&newer, "C").unwrap();
         fs::rename(&newer, &installed).unwrap();
-        assert_eq!(reason(started), Err(ALREADY_UPDATED));
+        assert_eq!(reason(started), Err(ALREADY_UPDATED.as_str()));
 
         // Nothing a restart could run.
         fs::remove_file(&installed).unwrap();
@@ -752,7 +788,7 @@ mod tests {
             })
         };
         assert!(matches!(
-            State::stopped(ALREADY_UPDATED, installer()),
+            State::stopped(&ALREADY_UPDATED, installer()),
             State::Superseded(path) if path == Path::new("/home/me/.local/bin/dbdelve")
         ));
         assert!(matches!(
@@ -821,38 +857,39 @@ mod tests {
     #[test]
     fn a_tarball_must_be_the_release_it_claims() {
         let directory = scratch("unpack");
-        let top = release_directory("9.9.9", "x86_64");
+        let top = release_directory(Channel::Stable, "9.9.9", "x86_64");
         let file = |name: &str| format!("{top}/{name}");
+        let binary = Channel::current().slug();
         let good = directory.join("good.tar.gz");
         tarball(
             &good,
             &[
-                (&file("dbdelve"), b"binary", 0o755),
+                (&file(binary), b"binary", 0o755),
                 (&file("install.sh"), b"#!/bin/bash", 0o755),
                 (&file("plugins/odbc/manifest.toml"), b"", 0o644),
             ],
         );
         let release = unpack(&good, &directory.join("good"), &top).unwrap();
         assert_eq!(release, directory.join("good").join(&top));
-        assert_eq!(mode(&release.join("dbdelve")), 0o755);
+        assert_eq!(mode(&release.join(binary)), 0o755);
         assert!(release.join("plugins/odbc/manifest.toml").is_file());
         // Another version's tarball under this name.
         assert!(
             unpack(
                 &good,
                 &directory.join("other"),
-                &release_directory("9.9.8", "x86_64")
+                &release_directory(Channel::Stable, "9.9.8", "x86_64")
             )
             .is_err()
         );
 
         for (case, entries) in [
             ("no-binary", vec![(file("install.sh"), &b""[..], 0o755)]),
-            ("no-installer", vec![(file("dbdelve"), &b""[..], 0o755)]),
+            ("no-installer", vec![(file(binary), &b""[..], 0o755)]),
             (
                 "two-tops",
                 vec![
-                    (file("dbdelve"), &b""[..], 0o755),
+                    (file(binary), &b""[..], 0o755),
                     (file("install.sh"), &b""[..], 0o755),
                     ("stray".to_string(), &b""[..], 0o644),
                 ],
@@ -860,7 +897,7 @@ mod tests {
             (
                 "escape",
                 vec![
-                    (file("dbdelve"), &b""[..], 0o755),
+                    (file(binary), &b""[..], 0o755),
                     (file("install.sh"), &b""[..], 0o755),
                     (format!("{top}/../../escaped"), &b""[..], 0o644),
                 ],
@@ -893,7 +930,7 @@ mod tests {
     #[test]
     fn the_bundled_installer_replaces_the_binary_in_place() {
         let directory = scratch("bundled-installer");
-        let top = release_directory("9.9.9", "x86_64");
+        let top = release_directory(Channel::Stable, "9.9.9", "x86_64");
         let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/linux");
         let installer = fs::read(assets.join("install.sh")).unwrap();
         let desktop = fs::read(assets.join("dbdelve.desktop")).unwrap();

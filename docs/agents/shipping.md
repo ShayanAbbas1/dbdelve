@@ -4,7 +4,7 @@
 
 `dev/bundle.sh` builds `--release`, copies in the icon, writes `Info.plist`
 and signs. It is the only way to get a real app rather than a binary. It
-builds **two variants from one script**, and neither of them installs:
+builds **three variants from one script**, and none of them installs:
 
 - **Dev, the default.** `target/macos-dev/DBDelve Dev.app`, named
   `DBDelve Dev`, id `com.shayanabbas.dbdelve.dev`. Run from the build tree,
@@ -15,6 +15,14 @@ builds **two variants from one script**, and neither of them installs:
 - **Release, under `DBDELVE_CHANNEL=release`.** `target/DBDelve.app`, named
   `DBDelve`, id `com.shayanabbas.dbdelve`, no `LSEnvironment`. Only the release
   workflow sets it, and the DMG's drag-to-Applications is the install.
+- **Nightly, under `DBDELVE_CHANNEL=nightly`.** `target/macos-nightly/DBDelve
+  Nightly.app`, named `DBDelve Nightly`, id `com.shayanabbas.dbdelve.nightly`,
+  icon `assets/macos/DBDelve-Nightly.icns`, no `LSEnvironment`: the binary
+  reads its channel at compile time, from the same variable. The version comes
+  from `DBDELVE_VERSION` when it is set. `CFBundleShortVersionString` is the
+  whole version, which the updater checks a download against.
+  `CFBundleVersion` takes integers only, so a nightly's is its date and run
+  (`20261116.12`).
 
 **The two variants share nothing on disk.** `DBDELVE_VARIANT` moves both the
 support directory and the keychain service together: unset or empty is
@@ -339,6 +347,23 @@ through the `TAP_TOKEN` secret. A version with a hyphen (`0.2.0-rc.1`) is a
 pre-release, may run from any branch and leaves the cask alone. Unticked, the
 workflow builds everything, signs it and publishes nothing, which is how to
 check `UPDATE_SIGNING_KEY` against the app's key without releasing.
+
+**Nightly** is the same workflow on the `nightly` channel. The daily schedule
+(`17 3 * * *`) runs it, and so does a dispatch with **channel** set to
+`nightly`. Its version is `Cargo.toml`'s with the patch bumped, then
+`-nightly.<UTC yyyymmdd>.<run number>` (`0.7.4-nightly.20261116.12`), so it
+never needs a bump. Every build job gets `DBDELVE_CHANNEL=nightly` and
+`DBDELVE_VERSION`. A stable run sets neither. The assets are named
+`DBDelve-Nightly-V.dmg` and `dbdelve-nightly-V-…`, and the Linux and Windows
+packaging scripts take the same two variables. A scheduled run always
+publishes. It ends green without building when `main` is still at the commit
+the newest nightly was built from. A nightly publishes only from `main`; a
+dispatch with **publish** unticked builds from any branch, as stable does.
+Publishing makes a pre-release titled `DBDelve Nightly V` with notes since the
+previous nightly tag. It also writes `Casks/dbdelve@nightly.rb` in the tap,
+and deletes nightly releases and their tags beyond the newest 14. Nightly's
+installer has its own Inno AppId, `{221ADDEE-C041-4E6A-A2E9-72E92DF71DCF}`
+(`iscc /DNightly`), so the two never upgrade over each other.
 
 **There is no notarization and no Developer ID.** A release signs ad-hoc rather
 than with `dev/identity.sh`'s certificate: that certificate is trusted only on

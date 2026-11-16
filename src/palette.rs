@@ -43,6 +43,7 @@ use crate::{
         PaletteHistoryFilter, PaletteHistorySort, PaletteNext, PaletteNextScope, PalettePrevious,
         PalettePreviousScope, PaletteRowActions, PaletteScopeLeft, PaletteScopeRight,
     },
+    channel::Channel,
     db::{ConnectionConfig, ExplainMode, RelationKind, RoutineKind, Syntax},
     diagram_view::DiagramFile,
     explorer::ROW_LIMITS,
@@ -403,6 +404,8 @@ pub enum Command {
     RenameProject(String, String),
     DeleteProject(String),
     ImportConnections(Source),
+    /// A nightly's Import from DBDelve.
+    ImportFromStable,
     RefreshConnection,
     Reconnect,
     /// Put the palette back up over the theme list.
@@ -3330,7 +3333,7 @@ fn mode_icon(mode: sql::Mode) -> &'static str {
 /// what a palette can reach with no connection in front.
 fn welcome_items(workspace: &Workspace) -> Vec<Item> {
     let overrides = &workspace.settings.custom_keybindings;
-    let mut items = starting_items(overrides);
+    let mut items = starting_items(workspace);
     items.extend(appearance_items(overrides));
     items.extend(workspace.update.iter().flat_map(update_items));
     if !workspace.profiles.is_empty() || !workspace.unavailable.is_empty() {
@@ -3342,9 +3345,17 @@ fn welcome_items(workspace: &Workspace) -> Vec<Item> {
 /// The update's rows, as its pill offers them.
 fn update_items(update: &update::Update) -> Vec<Item> {
     let version = &update.release.version;
+    let channel = Channel::current();
+    let name = channel.display_name();
+    // As the titlebar's pill says it on a nightly, whose version is mostly a
+    // date stamp.
+    let release = match channel {
+        Channel::Stable => format!("{name} {version}"),
+        Channel::Nightly => "the new nightly".to_string(),
+    };
     let download = || {
         command(
-            &format!("Download dbdelve {version}"),
+            &format!("Download {release}"),
             icon::LINK,
             Command::DownloadUpdate(update.release.url.clone()),
             WINDOW,
@@ -3352,14 +3363,14 @@ fn update_items(update: &update::Update) -> Vec<Item> {
     };
     match &update.state {
         update::State::Ready(_) => vec![command(
-            &format!("Update to dbdelve {version} and restart"),
+            &format!("Update to {release} and restart"),
             icon::REFRESH,
             Command::InstallUpdate,
             WINDOW,
         )],
         update::State::Failed(..) => vec![
             command(
-                &format!("Try updating to dbdelve {version} again"),
+                &format!("Try updating to {release} again"),
                 icon::REFRESH,
                 Command::InstallUpdate,
                 WINDOW,
@@ -3367,7 +3378,7 @@ fn update_items(update: &update::Update) -> Vec<Item> {
             download(),
         ],
         update::State::Superseded(installed) => vec![command(
-            &format!("Restart dbdelve to finish updating to {version}"),
+            &format!("Restart {name} to finish updating to {version}"),
             icon::REFRESH,
             Command::RestartIntoUpdate(installed.clone()),
             WINDOW,
@@ -3386,7 +3397,8 @@ fn with_chord(item: Item, id: &str, overrides: &HashMap<String, String>) -> Item
 
 /// New connection, a data file opened in DuckDB, New project, and the
 /// imports this machine has something to import from.
-fn starting_items(overrides: &HashMap<String, String>) -> Vec<Item> {
+fn starting_items(workspace: &Workspace) -> Vec<Item> {
+    let overrides = &workspace.settings.custom_keybindings;
     let mut items = vec![
         with_chord(
             command(
@@ -3415,6 +3427,14 @@ fn starting_items(overrides: &HashMap<String, String>) -> Vec<Item> {
             overrides,
         ),
     ];
+    if workspace.stable_connections > 0 {
+        items.push(command(
+            "Import from DBDelve…",
+            icon::PLUS,
+            Command::ImportFromStable,
+            CONNECTION,
+        ));
+    }
     items.extend(import_connection_items(overrides));
     items
 }
@@ -4225,7 +4245,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         ));
     }
 
-    items.extend(starting_items(overrides));
+    items.extend(starting_items(workspace));
     // The active connection's share of what the Connections scope offers
     // every connection on its row's actions, for whoever looks for the verb.
     let active = workspace.active.unwrap_or_default();
@@ -4500,6 +4520,7 @@ fn beside_import(command: &Command) -> bool {
             | Command::NewProject
             | Command::PickProject(_)
             | Command::ImportConnections(_)
+            | Command::ImportFromStable
             | Command::RefreshConnection
             | Command::Reconnect
             | Command::SelectTheme
@@ -4574,7 +4595,10 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(
             items[0].label,
-            "Restart dbdelve to finish updating to 9.9.9"
+            format!(
+                "Restart {} to finish updating to 9.9.9",
+                crate::channel::Channel::current().display_name()
+            )
         );
         assert!(
             matches!(&items[0].command, Command::RestartIntoUpdate(path) if *path == installed)
@@ -4586,7 +4610,11 @@ mod tests {
     fn an_update_this_install_cannot_take_offers_the_download() {
         let items = update_items(&update_in(update::State::Link));
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].label, "Download dbdelve 9.9.9");
+        let expected = match crate::channel::Channel::current() {
+            crate::channel::Channel::Stable => "Download DBDelve 9.9.9",
+            crate::channel::Channel::Nightly => "Download the new nightly",
+        };
+        assert_eq!(items[0].label, expected);
         assert!(
             matches!(&items[0].command, Command::DownloadUpdate(url) if url == "https://example.test/v9.9.9")
         );

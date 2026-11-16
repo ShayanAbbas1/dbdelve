@@ -22,6 +22,7 @@ mod objects;
 mod profiles;
 mod projects;
 mod queries;
+mod stable_import;
 mod tabs;
 mod welcome;
 
@@ -36,6 +37,7 @@ pub(crate) use profiles::unavailable_reason;
 pub(crate) use projects::project_name_refusal;
 pub(crate) use queries::error_in_buffer;
 
+use crate::channel::Channel;
 use crate::connection_form::{Origin, passphrase_to_persist, password_to_persist};
 use crate::session::{catalog_relation, write_buffer, write_grids};
 use crate::settings_panel::{SettingMatch, SettingsTab, filter_settings, render_settings_panel};
@@ -318,6 +320,10 @@ pub(crate) struct Workspace {
     /// The other clients installed here, looked for once at launch rather
     /// than on every frame of the welcome surface.
     pub(crate) importable: Vec<crate::import::Source>,
+    /// How many connections a DBDelve install here has for a nightly to
+    /// import, looked for once at launch like `importable`.
+    pub(crate) stable_connections: usize,
+    pub(crate) stable_import: Option<stable_import::StableImport>,
     /// What `note` says while there is no connection and no form to say it
     /// on: the welcome surface's line.
     pub(crate) welcome_notice: Option<String>,
@@ -519,6 +525,8 @@ impl Workspace {
                 .into_iter()
                 .filter(|source| source.found())
                 .collect(),
+            stable_connections: stable_import::stable_connections(),
+            stable_import: None,
             welcome_notice: None,
             runs_on_connect: Vec::new(),
             project_name_error: None,
@@ -700,7 +708,11 @@ impl Workspace {
         }
 
         // After the environment's form, which takes the notice over the
-        // welcome surface when there is one.
+        // welcome surface when there is one. A load failure's last, since it
+        // says nothing will be saved.
+        if let Some(message) = store::stable_import::take_notice() {
+            workspace.note(message, cx);
+        }
         if let Some(message) = load_failure {
             workspace.note(message, cx);
         }
@@ -794,7 +806,17 @@ impl Workspace {
         })
         .detach();
 
-        workspace.connect_active(cx);
+        match store::stable_import::take_secrets_to_copy() {
+            // The connect reads its password from the keychain, which the
+            // copy is about to write, so it waits for the copy.
+            Some(secrets) => {
+                let then_connect = workspace.profile().map(|profile| profile.id.clone());
+                cx.on_next_frame(window, move |workspace, _, cx| {
+                    workspace.copy_imported_passwords(secrets, then_connect, cx);
+                });
+            }
+            None => workspace.connect_active(cx),
+        }
         workspace
     }
 
@@ -1150,10 +1172,18 @@ impl Workspace {
         let t = *theme(cx);
         let update = self.update.as_ref()?;
         let version = update.release.version.clone();
+        let channel = Channel::current();
+        let name = channel.display_name();
+        // A nightly's version is mostly a date stamp, too long for the
+        // titlebar beside the name, which already says nightly.
+        let available = match channel {
+            Channel::Stable => format!("{name} {version} available"),
+            Channel::Nightly => "New nightly available".to_string(),
+        };
         let url = update.release.url.clone();
         let (label, menu): (String, Rc<dyn Fn(PopupMenu) -> PopupMenu>) = match &update.state {
             update::State::Link => (
-                format!("DBDelve {version} available"),
+                available,
                 Rc::new(move |menu| {
                     menu.label("Update it with your package manager,")
                         .label("or download it from GitHub.")
@@ -1164,7 +1194,7 @@ impl Workspace {
             update::State::Ready(_) => {
                 let workspace = cx.weak_entity();
                 (
-                    format!("DBDelve {version} available"),
+                    available,
                     Rc::new(move |menu| {
                         let workspace = workspace.clone();
                         menu.item(PopupMenuItem::new("Update and restart").on_click(
@@ -1179,7 +1209,12 @@ impl Workspace {
                 )
             }
             update::State::Running(progress) => {
-                let status = format!("DBDelve {version} opens once it is installed.");
+                let status = match channel {
+                    Channel::Stable => {
+                        format!("{name} {version} opens once it is installed.")
+                    }
+                    Channel::Nightly => "The new nightly opens once it is installed.".to_string(),
+                };
                 (
                     progress.label(),
                     Rc::new(move |menu| {
@@ -1192,7 +1227,7 @@ impl Workspace {
             &update::State::Failed(reason, _) => {
                 let workspace = cx.weak_entity();
                 (
-                    format!("DBDelve {version} available"),
+                    available,
                     Rc::new(move |menu| {
                         let workspace = workspace.clone();
                         menu.label(reason)
@@ -1211,9 +1246,9 @@ impl Workspace {
                     "Restart to update".into(),
                     Rc::new(move |menu| {
                         let installed = installed.clone();
-                        menu.label("DBDelve was updated since it started.")
+                        menu.label(format!("{name} was updated since it started."))
                             .item(
-                                PopupMenuItem::new("Restart DBDelve")
+                                PopupMenuItem::new(format!("Restart {name}"))
                                     .on_click(move |_, _, cx| restart_into(installed.clone(), cx)),
                             )
                             .separator()
@@ -1654,7 +1689,10 @@ impl Render for Workspace {
                         .child(self.render_connection_form(window, cx)),
                 )
                 .children(self.dialog_layer(
-                    [("import-choice", self.render_import_choice(cx))],
+                    [
+                        ("import-choice", self.render_import_choice(cx)),
+                        ("stable-import", self.render_stable_import(cx)),
+                    ],
                     window,
                     cx,
                 ))
@@ -1697,7 +1735,10 @@ impl Render for Workspace {
                 ))
                 .child(self.beside_settings(self.render_welcome(window, cx).into_any_element(), cx))
                 .children(self.dialog_layer(
-                    [("import-choice", self.render_import_choice(cx))],
+                    [
+                        ("import-choice", self.render_import_choice(cx)),
+                        ("stable-import", self.render_stable_import(cx)),
+                    ],
                     window,
                     cx,
                 ))
@@ -2538,6 +2579,7 @@ impl Render for Workspace {
                     ("queue-failure", self.render_queue_failure(cx)),
                     ("stale-edit", self.render_stale_edit(cx)),
                     ("import-choice", self.render_import_choice(cx)),
+                    ("stable-import", self.render_stable_import(cx)),
                 ],
                 window,
                 cx,

@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod actions;
+mod channel;
 mod completion;
 mod connection_form;
 mod db;
@@ -215,6 +216,9 @@ fn main() {
     }
     logging::install_panic_log();
     logging::install();
+    // Ahead of everything that reads the data directory: the plugins below,
+    // the themes and the profiles.
+    store::stable_import::settle_at_launch();
     update::remember_install();
     // Manifests only, ahead of the profiles that name them: no plugin process
     // starts until one of its connections opens.
@@ -291,7 +295,7 @@ fn main() {
             let options = WindowOptions {
                 window_background: theme.window_background(),
                 titlebar: Some(TitlebarOptions {
-                    title: Some("dbdelve".into()),
+                    title: Some(channel::Channel::current().display_name().into()),
                     appears_transparent: ui::CLIENT_TITLEBAR,
                     traffic_light_position: cfg!(target_os = "macos").then(|| {
                         point(
@@ -309,7 +313,7 @@ fn main() {
                     std::env::var("DBDELVE_APP_ID")
                         .ok()
                         .filter(|id| !id.is_empty())
-                        .unwrap_or_else(|| "dbdelve".into()),
+                        .unwrap_or_else(|| channel::Channel::current().slug().into()),
                 ),
                 ..Default::default()
             };
@@ -343,14 +347,15 @@ fn main() {
 /// The menu bar. Import Rows is listed only while a table that takes rows is
 /// in front, so `Workspace` sets the bar again whenever that flips.
 pub(crate) fn app_menus(imports_rows: bool) -> Vec<Menu> {
+    let name = channel::Channel::current().display_name();
     vec![
         Menu {
-            name: "dbdelve".into(),
+            name: name.into(),
             disabled: false,
             items: vec![
                 MenuItem::action("Settings…", OpenSettings),
                 MenuItem::separator(),
-                MenuItem::action("Quit dbdelve", Quit),
+                MenuItem::action(format!("Quit {name}"), Quit),
             ],
         },
         Menu {

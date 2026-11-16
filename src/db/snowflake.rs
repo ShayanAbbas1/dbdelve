@@ -647,7 +647,7 @@ impl Connection {
             // on the statement: that is polled, a short request at a time.
             .timeout_recv_response(Some(Duration::from_secs(120)))
             .timeout_recv_body(Some(recv_body(config)))
-            .user_agent(concat!("dbdelve/", env!("CARGO_PKG_VERSION")))
+            .user_agent(crate::channel::user_agent())
             .build()
             .into();
         let connection = Self {

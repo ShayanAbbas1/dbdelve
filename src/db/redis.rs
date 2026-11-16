@@ -767,7 +767,7 @@ fn client(
     };
     let mut login = RedisConnectionInfo::default()
         .set_protocol(protocol)
-        .set_lib_name("DBDelve", env!("CARGO_PKG_VERSION"));
+        .set_lib_name("DBDelve", crate::channel::VERSION);
     if !server.user.is_empty() {
         login = login.set_username(&server.user);
     }
