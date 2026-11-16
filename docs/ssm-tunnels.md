@@ -94,6 +94,15 @@ Job Object. Local cleanup is independent of a bounded, best-effort remote
 remote session visible until AWS expires it. A dropped tunnel never falls
 back to a direct database connection or replays a query.
 
+If AWS does not confirm the termination request after an explicit disconnect,
+DBDelve shows the observed session ID, if available, and the configured profile
+and region in a notice. Copy the ID to locate the session in the AWS
+Session Manager console and choose the correct account and region before ending
+it. These settings do not verify which account or region was used. The notice is
+not saved, so a crash or app exit can prevent it appearing. No automatic retry
+is made; AWS idle timeout can close the channel without explicitly terminating
+the session or immediately removing it from the active list.
+
 **Downgrading:** SSM profiles are saved with a non-string engine guard
 (`[profiles.engine.ssm]`) as well as their tunnel settings. Older releases
 cannot read that engine as a direct connection. Releases with unavailable-profile

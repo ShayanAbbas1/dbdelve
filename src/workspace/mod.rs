@@ -327,6 +327,7 @@ pub(crate) struct Workspace {
     /// What `note` says while there is no connection and no form to say it
     /// on: the welcome surface's line.
     pub(crate) welcome_notice: Option<String>,
+    pub(crate) cleanup_notices: Vec<crate::db::ssm::CleanupResult>,
     /// Statements written for data files opened before their profile had
     /// connected: profile id, query tab, statement. Run once it has.
     pub(crate) runs_on_connect: Vec<(String, u64, String)>,
@@ -528,6 +529,7 @@ impl Workspace {
             stable_connections: stable_import::stable_connections(),
             stable_import: None,
             welcome_notice: None,
+            cleanup_notices: Vec::new(),
             runs_on_connect: Vec::new(),
             project_name_error: None,
             welcome_needs_focus: true,
@@ -1453,6 +1455,115 @@ impl Workspace {
     }
 }
 
+impl Workspace {
+    fn dismiss_cleanup_notice(
+        &mut self,
+        _: &gpui::ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.cleanup_notices.is_empty() {
+            return;
+        }
+        self.cleanup_notices.remove(0);
+        // A mouse click too: a button never takes focus on mouse-down, so one
+        // tabbed to earlier still holds it as the notice unmounts.
+        if self.cleanup_notices.is_empty() {
+            self.focus.focus(window, cx);
+            self.refocus_front();
+        }
+        cx.notify();
+    }
+
+    fn render_cleanup_notice(&self, t: Theme, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let result = self.cleanup_notices.first()?;
+        let profile = result.profile.as_deref().map_or_else(
+            || "Profile: AWS CLI configuration".to_string(),
+            |profile| format!("Configured profile: {profile}"),
+        );
+        let profile_selector = format!("cleanup-profile: {profile}");
+        let region = result.region.as_deref().unwrap_or("AWS CLI configuration");
+        let session = result.session.clone();
+        let remaining = self.cleanup_notices.len().saturating_sub(1);
+        Some(
+            div()
+                .flex_shrink_0()
+                .w_full()
+                .px(px(layout::SPACE_MD))
+                .py(px(layout::SPACE_SM))
+                .border_b_1()
+                .border_color(t.border)
+                .flex()
+                .flex_col()
+                .gap(px(layout::SPACE_XS))
+                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                .text_color(t.text_muted)
+                .child("AWS session termination could not be confirmed. Check the session in AWS.")
+                .child(
+                    div()
+                        .debug_selector(move || profile_selector.clone())
+                        .child(format!(
+                            "{profile} · Region: {region} (account and effective region unverified)"
+                        )),
+                )
+                .child(session.as_ref().map_or_else(
+                    || "Session ID unavailable".to_string(),
+                    |id| format!("Session ID: {id}"),
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(layout::SPACE_SM))
+                        .children(session.map(|id| {
+                            div()
+                                .rounded(px(layout::RADIUS_CONTROL))
+                                .border_1()
+                                .border_color(t.border)
+                                .bg(t.element_active)
+                                .child(
+                                    ui::button(
+                                        ("cleanup-copy", 0usize),
+                                        "Copy session ID",
+                                        Tone::Primary,
+                                        Control::Compact,
+                                        t,
+                                    )
+                                    .debug_selector(|| "cleanup-copy-0".to_string())
+                                    .on_click(cx.listener(
+                                        move |_, _, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                id.clone(),
+                                            ))
+                                        },
+                                    )),
+                                )
+                        }))
+                        .child(
+                            div()
+                                .rounded(px(layout::RADIUS_CONTROL))
+                                .border_1()
+                                .border_color(t.border)
+                                .bg(t.element_active)
+                                .child(
+                                    ui::button(
+                                        ("cleanup-dismiss", 0usize),
+                                        "Dismiss",
+                                        Tone::Primary,
+                                        Control::Compact,
+                                        t,
+                                    )
+                                    .debug_selector(|| "cleanup-dismiss-0".to_string())
+                                    .on_click(cx.listener(Self::dismiss_cleanup_notice)),
+                                ),
+                        )
+                        .when(remaining > 0, |row| row.child(format!("{remaining} more"))),
+                ),
+        )
+    }
+}
+
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = *theme(cx);
@@ -1682,6 +1793,7 @@ impl Render for Workspace {
                 // Without a titlebar of its own the form has no drag handle at
                 // all, since the platform's is transparent.
                 .child(titlebar(t, None, Vec::new(), Vec::new(), Vec::new()))
+                .children(self.render_cleanup_notice(t, cx))
                 .child(
                     div()
                         .flex_1()
@@ -1733,6 +1845,7 @@ impl Render for Workspace {
                     Vec::new(),
                     Vec::new(),
                 ))
+                .children(self.render_cleanup_notice(t, cx))
                 .child(self.beside_settings(self.render_welcome(window, cx).into_any_element(), cx))
                 .children(self.dialog_layer(
                     [
@@ -2567,6 +2680,7 @@ impl Render for Workspace {
                     .into_any_element(),
                 ],
             ))
+            .children(self.render_cleanup_notice(t, cx))
             .child(self.beside_settings(main_pane, cx))
             .children(self.dialog_layer(
                 [

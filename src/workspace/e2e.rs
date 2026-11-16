@@ -6142,3 +6142,334 @@ fn ssm_wrong_executable_offers_picker_before_installation_guide(cx: &mut TestApp
         quit(workspace, cx);
     });
 }
+
+#[gpui::test]
+fn ssm_cleanup_notice_copies_only_session_id_and_preserves_other_notice(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch(cx);
+        workspace.update(cx, |workspace, cx| {
+            workspace.welcome_notice = Some("Existing notice".into());
+            workspace
+                .cleanup_notices
+                .push(crate::db::ssm::CleanupResult {
+                    accepted: false,
+                    session: Some("alice-123".into()),
+                    profile: Some("development".into()),
+                    region: None,
+                });
+            cx.notify();
+        });
+        settle(cx);
+        let copy = cx.debug_bounds("cleanup-copy-0").expect("copy action");
+        cx.simulate_click(copy.center(), gpui::Modifiers::default());
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("alice-123".into())
+        );
+        let dismiss = cx
+            .debug_bounds("cleanup-dismiss-0")
+            .expect("dismiss action");
+        cx.simulate_click(dismiss.center(), gpui::Modifiers::default());
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.cleanup_notices.is_empty());
+            assert_eq!(workspace.welcome_notice.as_deref(), Some("Existing notice"));
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn ssm_cleanup_notice_without_session_has_no_copy_action(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch(cx);
+        workspace.update(cx, |workspace, cx| {
+            workspace
+                .cleanup_notices
+                .push(crate::db::ssm::CleanupResult {
+                    accepted: false,
+                    session: None,
+                    profile: None,
+                    region: None,
+                });
+            cx.notify();
+        });
+        settle(cx);
+        assert!(cx.debug_bounds("cleanup-copy-0").is_none());
+        assert!(cx.debug_bounds("cleanup-dismiss-0").is_some());
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn ssm_cleanup_notice_survives_form_and_connected_workspace(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        workspace.update(cx, |workspace, cx| {
+            workspace
+                .cleanup_notices
+                .push(crate::db::ssm::CleanupResult {
+                    accepted: false,
+                    session: Some("alice-123".into()),
+                    profile: None,
+                    region: None,
+                });
+            cx.notify();
+        });
+        settle(cx);
+        assert!(
+            cx.debug_bounds("cleanup-copy-0").is_some(),
+            "connected workspace"
+        );
+        assert!(
+            cx.debug_bounds("cleanup-profile: Profile: AWS CLI configuration")
+                .is_some(),
+            "profile wording"
+        );
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.new_connection_in(None, window, cx)
+        });
+        settle(cx);
+        assert!(
+            cx.debug_bounds("cleanup-copy-0").is_some(),
+            "connection form"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn ssm_cleanup_notice_keyboard_dismiss_keeps_actions_available(cx: &mut TestAppContext) {
+    // CI's PG* settings must not replace this welcome-screen fixture.
+    crate::IGNORE_ENVIRONMENT.set(true);
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch(cx);
+        workspace.update(cx, |workspace, cx| {
+            workspace
+                .cleanup_notices
+                .push(crate::db::ssm::CleanupResult {
+                    accepted: false,
+                    session: None,
+                    profile: None,
+                    region: None,
+                });
+            cx.notify();
+        });
+        settle(cx);
+        cx.update(|window, cx| {
+            window.blur(cx);
+            window.focus_next(cx);
+            window.draw(cx).clear(cx);
+        });
+        press(cx, "enter");
+        // Focus restoration happens during rendering. Draw its dispatch path
+        // before sending the next shortcut on the headless platform.
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.cleanup_notices.is_empty());
+            assert!(workspace.form.is_none());
+        });
+        cx.update(|window, cx| {
+            assert!(
+                window.focused(cx).is_some(),
+                "dismiss must retain a keyboard dispatch path"
+            )
+        });
+        cx.simulate_keystrokes("secondary-shift-p");
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| assert!(workspace.palette.is_some()));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn ssm_cleanup_notice_mouse_dismiss_after_tab_keeps_actions_available(cx: &mut TestAppContext) {
+    crate::IGNORE_ENVIRONMENT.set(true);
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch(cx);
+        workspace.update(cx, |workspace, cx| {
+            workspace
+                .cleanup_notices
+                .push(crate::db::ssm::CleanupResult {
+                    accepted: false,
+                    session: None,
+                    profile: None,
+                    region: None,
+                });
+            cx.notify();
+        });
+        settle(cx);
+        cx.update(|window, cx| {
+            window.blur(cx);
+            window.focus_next(cx);
+            window.draw(cx).clear(cx);
+        });
+        let dismiss = cx
+            .debug_bounds("cleanup-dismiss-0")
+            .expect("dismiss action");
+        cx.simulate_click(dismiss.center(), gpui::Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.cleanup_notices.is_empty())
+        });
+        cx.update(|window, cx| {
+            assert!(
+                window.focused(cx).is_some(),
+                "a mouse dismiss must retain a keyboard dispatch path"
+            )
+        });
+        cx.simulate_keystrokes("secondary-shift-p");
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| assert!(workspace.palette.is_some()));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn ssm_disconnect_delivers_failed_cleanup_notice(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let attempt = crate::db::ConnectAttempt::default();
+        attempt.finish().unwrap();
+        let profile_index = workspace.update(cx, |workspace, _| {
+            let index = workspace.active.unwrap();
+            let profile = &mut workspace.profiles[index];
+            assert!(matches!(profile.state, ProfileState::Connected(_)));
+            profile.cleanup_attempt = Some(attempt.clone());
+            index
+        });
+        disconnect(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.active.is_none());
+            assert!(matches!(
+                workspace.profiles[profile_index].state,
+                ProfileState::Idle
+            ));
+            assert!(workspace.profiles[profile_index].cleanup_attempt.is_none());
+            assert!(workspace.cleanup_notices.is_empty());
+        });
+        // Deliver after disconnect returns, as the background AWS request does.
+        let result = crate::db::ssm::CleanupResult {
+            accepted: false,
+            session: Some("alice-123".into()),
+            profile: Some("development".into()),
+            region: Some("test-region".into()),
+        };
+        attempt.report_cleanup(result.clone());
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.cleanup_notices, vec![result]);
+        });
+        assert!(cx.debug_bounds("cleanup-copy-0").is_some());
+        assert!(cx.debug_bounds("cleanup-dismiss-0").is_some());
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn ssm_disconnect_does_not_warn_after_successful_cleanup(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let attempt = crate::db::ConnectAttempt::default();
+        attempt.finish().unwrap();
+        let profile_index = workspace.update(cx, |workspace, _| {
+            let index = workspace.active.unwrap();
+            let profile = &mut workspace.profiles[index];
+            assert!(matches!(profile.state, ProfileState::Connected(_)));
+            profile.cleanup_attempt = Some(attempt.clone());
+            index
+        });
+        disconnect(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.active.is_none());
+            assert!(workspace.profiles[profile_index].cleanup_attempt.is_none());
+        });
+        attempt.report_cleanup(crate::db::ssm::CleanupResult {
+            accepted: true,
+            session: Some("alice-123".into()),
+            profile: Some("development".into()),
+            region: Some("test-region".into()),
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.cleanup_notices.is_empty())
+        });
+        assert!(cx.debug_bounds("cleanup-copy-0").is_none());
+        assert!(cx.debug_bounds("cleanup-dismiss-0").is_none());
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn ssm_disconnect_while_connecting_delivers_missing_session_notice(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let attempt = crate::db::ConnectAttempt::default();
+        workspace.update(cx, |workspace, _| {
+            let profile = workspace.profile_mut().unwrap();
+            profile.cleanup_attempt = Some(attempt.clone());
+            profile.state = ProfileState::Connecting {
+                _attempt: attempt.guard(),
+            };
+        });
+        disconnect(cx);
+        assert!(attempt.is_cancelled());
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.active.is_none());
+            assert!(workspace.cleanup_notices.is_empty());
+        });
+        let result = crate::db::ssm::CleanupResult {
+            accepted: false,
+            session: None,
+            profile: Some("development".into()),
+            region: Some("test-region".into()),
+        };
+        attempt.report_cleanup(result.clone());
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.cleanup_notices, vec![result]);
+        });
+        assert!(cx.debug_bounds("cleanup-copy-0").is_none());
+        let dismiss = cx
+            .debug_bounds("cleanup-dismiss-0")
+            .expect("dismiss action");
+        cx.simulate_click(dismiss.center(), gpui::Modifiers::default());
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.cleanup_notices.is_empty());
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn ssm_disconnect_delivers_cleanup_completed_before_subscription(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let attempt = crate::db::ConnectAttempt::default();
+        workspace.update(cx, |workspace, _| {
+            let profile = workspace.profile_mut().unwrap();
+            profile.cleanup_attempt = Some(attempt.clone());
+            profile.state = ProfileState::Connecting {
+                _attempt: attempt.guard(),
+            };
+        });
+        // The worker can finish cleanup before the UI processes its connect failure.
+        let result = crate::db::ssm::CleanupResult {
+            accepted: false,
+            session: None,
+            profile: Some("development".into()),
+            region: Some("test-region".into()),
+        };
+        attempt.report_cleanup(result.clone());
+        disconnect(cx);
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.active.is_none());
+            assert_eq!(workspace.cleanup_notices, vec![result]);
+        });
+        assert!(cx.debug_bounds("cleanup-copy-0").is_none());
+        assert!(cx.debug_bounds("cleanup-dismiss-0").is_some());
+        quit(workspace, cx);
+    });
+}
