@@ -875,14 +875,15 @@ impl Workspace {
             cx.notify();
             return;
         }
-        if self.pending_import.take().is_some() {
-            cx.notify();
-            return;
-        }
-        // Only the question backs out. Once the copy has started the dialog
+        // Ahead of the client import's report, which it is drawn over. Only
+        // the question backs out. Once the copy has started the dialog
         // stays, and once it is done it is there to restart.
         if self.stable_import.is_some() {
             self.cancel_stable_import(cx);
+            return;
+        }
+        if self.pending_import.take().is_some() {
+            cx.notify();
             return;
         }
         if self.project_name.is_some() {
