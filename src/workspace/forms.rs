@@ -3601,8 +3601,8 @@ pub(super) fn explorer_menu(
         .database
         .clone()
         .filter(|database| profile.active_database().as_deref() != Some(database.as_str()));
-    // A diagram reads the connection's own database, so another one draws none.
-    let draws_diagrams = elsewhere.is_none() && profile.draws_diagrams();
+    // A diagram is of the row's database, read on a session of its own there.
+    let draws_diagrams = profile.draws_diagrams();
     let node = state.row_node(&row.profile, row.database.as_deref(), &row.id, row.leaf);
     let Some(leaf) = row.leaf else {
         let Some(node) = node else {
@@ -3612,12 +3612,12 @@ pub(super) fn explorer_menu(
         // First, where it was before the node actions came.
         if draws_diagrams && is_schema_row(&row.id) {
             let (workspace, profile_id) = (workspace.clone(), row.profile.clone());
-            let schema = row.label.to_string();
+            let (schema, database) = (row.label.to_string(), row.database.clone());
             menu = menu.item(
                 PopupMenuItem::new("Show Diagram").on_click(move |_, window, cx| {
-                    let schema = schema.clone();
+                    let (schema, database) = (schema.clone(), database.clone());
                     on_profile(&workspace, &profile_id, cx, |workspace, cx| {
-                        workspace.open_diagram(schema, None, window, cx);
+                        workspace.open_diagram(database, schema, None, window, cx);
                     });
                 }),
             );
@@ -3745,12 +3745,13 @@ pub(super) fn explorer_menu(
         .item(open("Open Structure", true));
     if draws_diagrams && super::drawn_in_diagrams(kind) {
         let (workspace, profile) = (workspace.clone(), row.profile.clone());
-        let (schema, relation) = (schema.clone(), relation.clone());
+        let (schema, relation, database) = (schema.clone(), relation.clone(), row.database.clone());
         menu = menu.item(
             PopupMenuItem::new("Show in Diagram").on_click(move |_, window, cx| {
-                let (schema, relation) = (schema.clone(), relation.clone());
+                let (schema, relation, database) =
+                    (schema.clone(), relation.clone(), database.clone());
                 on_profile(&workspace, &profile, cx, |workspace, cx| {
-                    workspace.open_diagram(schema, Some(relation), window, cx);
+                    workspace.open_diagram(database, schema, Some(relation), window, cx);
                 });
             }),
         );

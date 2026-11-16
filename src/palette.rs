@@ -309,8 +309,10 @@ impl Mode {
 pub enum Command {
     OpenObject(ExplorerTarget),
     /// A schema's ER diagram, by name, showing the neighbourhood of `centre`
-    /// where one is named.
+    /// where one is named. The schema is `database`'s, the connection's own
+    /// where none is named.
     ShowDiagram {
+        database: Option<String>,
         schema: String,
         centre: Option<String>,
     },
@@ -4024,6 +4026,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
                 &format!("Show {} in diagram", tab.name),
                 icon::DIAGRAM,
                 Command::ShowDiagram {
+                    database: tab.database.clone(),
                     schema: tab.schema.clone(),
                     centre: Some(tab.name.clone()),
                 },
@@ -4607,6 +4610,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
                         &format!("Show diagram of {schema}"),
                         icon::DIAGRAM,
                         Command::ShowDiagram {
+                            database: None,
                             schema,
                             centre: None,
                         },

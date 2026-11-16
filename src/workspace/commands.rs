@@ -726,9 +726,11 @@ impl Workspace {
             }
             Command::RecallStatement(sql) => self.recall_statement(sql, window, cx),
             Command::ShowStructure(structure) => self.show_structure(structure, window, cx),
-            Command::ShowDiagram { schema, centre } => {
-                self.open_diagram(schema, centre, window, cx)
-            }
+            Command::ShowDiagram {
+                database,
+                schema,
+                centre,
+            } => self.open_diagram(database, schema, centre, window, cx),
             Command::RefreshRelation(id) => self.refresh_relation(id, cx),
             Command::CountRows(id) => self.count_rows(id, cx),
             Command::NextPage => self.turn_page(true, cx),
