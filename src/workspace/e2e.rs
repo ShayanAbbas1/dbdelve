@@ -6598,7 +6598,7 @@ fn a_diagram_read_outlived_by_a_reconnect_is_read_again_for_the_tab_in_front(
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite_holding(cx, DIAGRAM_SCHEMA);
         workspace.update_in(cx, |workspace, window, cx| {
-            workspace.open_diagram("main".into(), None, window, cx);
+            workspace.open_diagram(None, "main".into(), None, window, cx);
             // A reconnect landed while the read was out, and its own read
             // was refused because this one still held the slot.
             workspace.profile_mut().unwrap().generation += 1;
@@ -6620,7 +6620,7 @@ fn a_reconnect_cancels_a_diagram_read_still_out_and_reads_again(cx: &mut TestApp
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite_holding(cx, DIAGRAM_SCHEMA);
         let held = workspace.update_in(cx, |workspace, window, cx| {
-            workspace.open_diagram("main".into(), None, window, cx);
+            workspace.open_diagram(None, "main".into(), None, window, cx);
             let index = workspace.active.unwrap();
             workspace.reconnect(index, cx);
             let tab = workspace
