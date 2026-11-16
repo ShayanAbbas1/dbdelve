@@ -110,7 +110,8 @@ pub(crate) fn install() {
         from_environment,
     });
     tracing::info!(
-        version = env!("CARGO_PKG_VERSION"),
+        version = crate::channel::VERSION,
+        channel = crate::channel::Channel::current().slug(),
         os = std::env::consts::OS,
         arch = std::env::consts::ARCH,
         "dbdelve started"
@@ -252,11 +253,13 @@ pub(crate) fn install_panic_log() {
 /// A log is state, not cache. macOS uses `Logs`, Linux the XDG state
 /// directory — a cache cleaner is entitled to delete anything in the other
 /// one. Windows uses LocalAppData for the same reason: it stays on this machine.
+/// Named like the data directory, so each channel and variant logs apart.
 pub(crate) fn directory() -> Option<PathBuf> {
+    let name = crate::store::variant_name().ok()?;
     #[cfg(target_os = "macos")]
     {
         let home = std::env::var_os("HOME").filter(|home| !home.is_empty())?;
-        Some(PathBuf::from(home).join("Library/Logs/dbdelve"))
+        Some(PathBuf::from(home).join("Library/Logs").join(name))
     }
     #[cfg(target_os = "windows")]
     {
@@ -268,15 +271,15 @@ pub(crate) fn directory() -> Option<PathBuf> {
                     .filter(|value| !value.is_empty())
                     .map(|profile| PathBuf::from(profile).join("AppData").join("Local"))
             })?;
-        Some(root.join("dbdelve"))
+        Some(root.join(name))
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let home = std::env::var_os("HOME").filter(|home| !home.is_empty())?;
         Some(
             match std::env::var_os("XDG_STATE_HOME").filter(|value| !value.is_empty()) {
-                Some(state_home) => PathBuf::from(state_home).join("dbdelve"),
-                None => PathBuf::from(home).join(".local/state/dbdelve"),
+                Some(state_home) => PathBuf::from(state_home).join(name),
+                None => PathBuf::from(home).join(".local/state").join(name),
             },
         )
     }
@@ -332,7 +335,10 @@ pub(crate) fn diagnostics(plugins: &[&crate::db::Plugin]) -> String {
         .collect::<Vec<_>>();
     report(
         &[
-            ("DBDelve", env!("CARGO_PKG_VERSION").to_string()),
+            (
+                crate::channel::Channel::current().display_name(),
+                crate::channel::VERSION.to_string(),
+            ),
             (
                 "OS",
                 format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),

@@ -1150,10 +1150,11 @@ impl Workspace {
         let t = *theme(cx);
         let update = self.update.as_ref()?;
         let version = update.release.version.clone();
+        let name = crate::channel::Channel::current().display_name();
         let url = update.release.url.clone();
         let (label, menu): (String, Rc<dyn Fn(PopupMenu) -> PopupMenu>) = match &update.state {
             update::State::Link => (
-                format!("DBDelve {version} available"),
+                format!("{name} {version} available"),
                 Rc::new(move |menu| {
                     menu.label("Update it with your package manager,")
                         .label("or download it from GitHub.")
@@ -1164,7 +1165,7 @@ impl Workspace {
             update::State::Ready(_) => {
                 let workspace = cx.weak_entity();
                 (
-                    format!("DBDelve {version} available"),
+                    format!("{name} {version} available"),
                     Rc::new(move |menu| {
                         let workspace = workspace.clone();
                         menu.item(PopupMenuItem::new("Update and restart").on_click(
@@ -1179,7 +1180,7 @@ impl Workspace {
                 )
             }
             update::State::Running(progress) => {
-                let status = format!("DBDelve {version} opens once it is installed.");
+                let status = format!("{name} {version} opens once it is installed.");
                 (
                     progress.label(),
                     Rc::new(move |menu| {
@@ -1192,7 +1193,7 @@ impl Workspace {
             &update::State::Failed(reason, _) => {
                 let workspace = cx.weak_entity();
                 (
-                    format!("DBDelve {version} available"),
+                    format!("{name} {version} available"),
                     Rc::new(move |menu| {
                         let workspace = workspace.clone();
                         menu.label(reason)
@@ -1211,9 +1212,9 @@ impl Workspace {
                     "Restart to update".into(),
                     Rc::new(move |menu| {
                         let installed = installed.clone();
-                        menu.label("DBDelve was updated since it started.")
+                        menu.label(format!("{name} was updated since it started."))
                             .item(
-                                PopupMenuItem::new("Restart DBDelve")
+                                PopupMenuItem::new(format!("Restart {name}"))
                                     .on_click(move |_, _, cx| restart_into(installed.clone(), cx)),
                             )
                             .separator()

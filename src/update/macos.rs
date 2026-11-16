@@ -17,12 +17,7 @@ use super::{
     },
     is_newer,
 };
-
-/// The release bundle's id, which `dev/bundle.sh` sets and the Keychain scopes
-/// saved passwords to.
-const RELEASE_IDENTIFIER: &str = "com.shayanabbas.dbdelve";
-
-const APP_IN_DMG: &str = "DBDelve.app";
+use crate::channel::Channel;
 
 /// Everything an install needs, found when the release was: having one is what
 /// makes this install eligible to update itself.
@@ -89,8 +84,9 @@ fn release_channel(bundle: &Path) -> bool {
     if cfg!(feature = "update-test-hooks") {
         return true;
     }
-    crate::store::is_release_variant()
-        && bundle_info(bundle).is_ok_and(|info| info.identifier == RELEASE_IDENTIFIER)
+    crate::store::is_shipped_build()
+        && bundle_info(bundle)
+            .is_ok_and(|info| info.identifier == Channel::current().bundle_identifier())
 }
 
 /// Why the bundle cannot be swapped where it stands, if it cannot.
@@ -136,7 +132,7 @@ pub(crate) fn install(installer: &Installer, progress: &Progress) -> Result<Path
         key,
     } = installer;
     tracing::info!(version, bundle = %bundle.display(), "update started");
-    let _lock = lock(bundle).map_err(failed(ALREADY_RUNNING))?;
+    let _lock = lock(bundle).map_err(failed(&ALREADY_RUNNING))?;
     let staged = sibling(bundle, "update-new");
     // What an earlier attempt left when it was killed before it could clean up.
     remove(&staged);
@@ -174,7 +170,9 @@ pub(crate) fn install(installer: &Installer, progress: &Progress) -> Result<Path
 fn sibling(bundle: &Path, tag: &str) -> PathBuf {
     let stem = bundle
         .file_stem()
-        .map_or("DBDelve".into(), |stem| stem.to_string_lossy());
+        .map_or(Channel::current().bundle_executable().into(), |stem| {
+            stem.to_string_lossy()
+        });
     bundle.with_file_name(format!(".{stem}.{tag}.app"))
 }
 
@@ -193,9 +191,10 @@ fn stage(dmg: &Path, mount: &Path, staged: &Path) -> Result<(), String> {
         .arg(mount)
         .arg(dmg))?;
     let mounted = Mounted(mount);
-    let app = mounted.0.join(APP_IN_DMG);
+    let name = Channel::current().app_bundle();
+    let app = mounted.0.join(&name);
     if !app.is_dir() {
-        return Err(format!("the image holds no {APP_IN_DMG}"));
+        return Err(format!("the image holds no {name}"));
     }
     run(Command::new("/usr/bin/ditto").arg(&app).arg(staged)).map(drop)
 }

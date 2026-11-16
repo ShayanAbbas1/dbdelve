@@ -11,12 +11,14 @@ use std::{
     fs::{self, File},
     io::{Read, Write as _},
     path::{Path, PathBuf},
+    sync::LazyLock,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use minisign_verify::{PublicKey, Signature};
 
 use super::Progress;
+use crate::channel::Channel;
 
 /// The base64 line of the release key's `minisign.pub` (the line after the
 /// untrusted comment). The release workflow signs every asset with its secret
@@ -34,7 +36,12 @@ pub(super) const COULD_NOT_UNPACK: &str = "The downloaded update could not be op
 pub(super) const NOT_THE_APP: &str = "The downloaded app is not the release it should be.";
 pub(super) const COULD_NOT_REPLACE: &str = "The installed app could not be replaced.";
 pub(super) const NO_SCRATCH: &str = "There was nowhere to put the download.";
-pub(super) const ALREADY_RUNNING: &str = "Another DBDelve is already installing an update.";
+pub(super) static ALREADY_RUNNING: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "Another {} is already installing an update.",
+        Channel::current().display_name()
+    )
+});
 
 /// Only a test build takes its key from the environment, so a shipped one
 /// trusts nothing but the release key.
@@ -201,7 +208,9 @@ fn scratch_root() -> Result<PathBuf, String> {
     let root = std::env::var_os("LOCALAPPDATA")
         .filter(|root| !root.is_empty())
         .ok_or("LOCALAPPDATA is not set")?;
-    let root = PathBuf::from(root).join("dbdelve").join("updates");
+    let root = PathBuf::from(root)
+        .join(crate::store::variant_name()?)
+        .join("updates");
     fs::create_dir_all(&root).map_err(|error| format!("{}: {error}", root.display()))?;
     Ok(root)
 }
@@ -240,7 +249,7 @@ pub(super) fn agent() -> ureq::Agent {
         // closed the first connection fails the second outright on Windows
         // ("Peer disconnected") when the pool hands the dead one back.
         .max_idle_connections(0)
-        .user_agent(concat!("dbdelve/", env!("CARGO_PKG_VERSION")))
+        .user_agent(crate::channel::user_agent())
         .build()
         .into()
 }

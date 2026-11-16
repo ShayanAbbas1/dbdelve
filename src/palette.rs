@@ -3342,9 +3342,10 @@ fn welcome_items(workspace: &Workspace) -> Vec<Item> {
 /// The update's rows, as its pill offers them.
 fn update_items(update: &update::Update) -> Vec<Item> {
     let version = &update.release.version;
+    let name = crate::channel::Channel::current().display_name();
     let download = || {
         command(
-            &format!("Download dbdelve {version}"),
+            &format!("Download {name} {version}"),
             icon::LINK,
             Command::DownloadUpdate(update.release.url.clone()),
             WINDOW,
@@ -3352,14 +3353,14 @@ fn update_items(update: &update::Update) -> Vec<Item> {
     };
     match &update.state {
         update::State::Ready(_) => vec![command(
-            &format!("Update to dbdelve {version} and restart"),
+            &format!("Update to {name} {version} and restart"),
             icon::REFRESH,
             Command::InstallUpdate,
             WINDOW,
         )],
         update::State::Failed(..) => vec![
             command(
-                &format!("Try updating to dbdelve {version} again"),
+                &format!("Try updating to {name} {version} again"),
                 icon::REFRESH,
                 Command::InstallUpdate,
                 WINDOW,
@@ -3367,7 +3368,7 @@ fn update_items(update: &update::Update) -> Vec<Item> {
             download(),
         ],
         update::State::Superseded(installed) => vec![command(
-            &format!("Restart dbdelve to finish updating to {version}"),
+            &format!("Restart {name} to finish updating to {version}"),
             icon::REFRESH,
             Command::RestartIntoUpdate(installed.clone()),
             WINDOW,
@@ -4574,7 +4575,7 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(
             items[0].label,
-            "Restart dbdelve to finish updating to 9.9.9"
+            "Restart DBDelve to finish updating to 9.9.9"
         );
         assert!(
             matches!(&items[0].command, Command::RestartIntoUpdate(path) if *path == installed)
@@ -4586,7 +4587,7 @@ mod tests {
     fn an_update_this_install_cannot_take_offers_the_download() {
         let items = update_items(&update_in(update::State::Link));
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].label, "Download dbdelve 9.9.9");
+        assert_eq!(items[0].label, "Download DBDelve 9.9.9");
         assert!(
             matches!(&items[0].command, Command::DownloadUpdate(url) if url == "https://example.test/v9.9.9")
         );

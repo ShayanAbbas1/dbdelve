@@ -17,6 +17,8 @@ use std::{
 
 use serde::Deserialize;
 
+use crate::channel::{self, Channel};
+
 #[cfg(any(target_os = "macos", target_os = "linux", windows))]
 mod download;
 #[cfg(any(target_os = "linux", windows, all(test, target_os = "macos")))]
@@ -38,9 +40,9 @@ pub(crate) use macos::{Installer, install};
 #[cfg(windows)]
 pub(crate) use windows::{Installer, install};
 
-const LATEST: &str = "https://api.github.com/repos/ShayanAbbas1/dbdelve/releases/latest";
+const RELEASES: &str = "https://api.github.com/repos/ShayanAbbas1/dbdelve/releases";
 
-const CURRENT: &str = env!("CARGO_PKG_VERSION");
+const CURRENT: &str = channel::VERSION;
 
 /// How often a running app asks again, so a session left open for days still
 /// hears about a release.
@@ -77,7 +79,7 @@ impl State {
     /// What an install that stopped for `reason` leaves.
     pub(crate) fn stopped(reason: &'static str, installer: Arc<Installer>) -> Self {
         #[cfg(any(target_os = "linux", windows))]
-        if reason == identity::ALREADY_UPDATED {
+        if reason == *identity::ALREADY_UPDATED {
             return State::Superseded(installer.installed());
         }
         State::Failed(reason, installer)
@@ -140,42 +142,69 @@ pub(crate) struct Asset {
     pub(crate) signature_url: String,
 }
 
-/// The latest release, if it is newer than this build, and whether this install
-/// can put it in place itself. Blocking, so it belongs on the background
-/// executor. Any failure is `None`: being offline is not something to tell
-/// anyone about.
+/// The latest release of this build's channel, if it is newer than this
+/// build, and whether this install can put it in place itself. Blocking, so
+/// it belongs on the background executor. Any failure is `None`: being
+/// offline is not something to tell anyone about.
 pub(crate) fn newer_release() -> Option<Update> {
+    let channel = Channel::current();
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(10)))
-        .user_agent(concat!("dbdelve/", env!("CARGO_PKG_VERSION")))
+        .user_agent(channel::user_agent())
         .build()
         .into();
-    let feed = feed();
-    let latest: Latest = match agent
+    let feed = feed(channel);
+    let response = agent
         .get(&feed)
         .header("Accept", "application/vnd.github+json")
-        .call()
-        .and_then(|mut response| response.body_mut().read_json())
-    {
-        Ok(latest) => latest,
+        .call();
+    let latest = match channel {
+        Channel::Stable => response
+            .and_then(|mut response| response.body_mut().read_json::<Latest>())
+            .map(Some),
+        Channel::Nightly => response
+            .and_then(|mut response| response.body_mut().read_json::<Vec<Latest>>())
+            .map(|releases| newest(channel, releases)),
+    };
+    let latest = match latest {
+        Ok(Some(latest)) => latest,
+        Ok(None) => {
+            tracing::info!(feed, "the feed lists no release of this channel");
+            return None;
+        }
         Err(error) => {
             tracing::info!(feed, "update check failed: {error}");
             return None;
         }
     };
-    let version = latest.tag_name.trim_start_matches('v').to_string();
-    if !is_newer(&version, CURRENT) {
+    let version = tag_version(&latest.tag_name).to_string();
+    if !is_newer_in(channel, &version, CURRENT) {
         return None;
     }
     tracing::info!(version, current = CURRENT, "a newer release is out");
     Some(Update {
-        state: installer(&version, &latest.assets)
+        state: installer(channel, &version, &latest.assets)
             .map_or(State::Link, |installer| State::Ready(Arc::new(installer))),
         release: Release {
             version,
             url: latest.html_url,
         },
     })
+}
+
+/// The highest release of `channel` among `releases`, whatever order the feed
+/// lists them in.
+fn newest(channel: Channel, releases: Vec<Latest>) -> Option<Latest> {
+    releases
+        .into_iter()
+        .filter_map(|release| Some((Version::parse(tag_version(&release.tag_name))?, release)))
+        .filter(|(version, _)| version.channel() == channel)
+        .max_by_key(|(version, _)| *version)
+        .map(|(_, release)| release)
+}
+
+fn tag_version(tag: &str) -> &str {
+    tag.trim_start_matches('v')
 }
 
 /// Just ahead of `App::restart` into an install.
@@ -194,8 +223,10 @@ pub(crate) fn remember_install() {
 }
 
 /// Only a test build reads its feed from the environment, so a shipped one
-/// cannot be pointed anywhere but the real releases.
-fn feed() -> String {
+/// cannot be pointed anywhere but the real releases. Stable's feed is the one
+/// latest release, which GitHub never makes a pre-release; Nightly's is a list,
+/// since every nightly is one.
+fn feed(channel: Channel) -> String {
     #[cfg(feature = "update-test-hooks")]
     if let Some(feed) = std::env::var("DBDELVE_UPDATE_FEED")
         .ok()
@@ -203,7 +234,10 @@ fn feed() -> String {
     {
         return feed;
     }
-    LATEST.to_string()
+    match channel {
+        Channel::Stable => format!("{RELEASES}/latest"),
+        Channel::Nightly => format!("{RELEASES}?per_page=30"),
+    }
 }
 
 /// Whether a found update installs without anyone clicking: only a test build
@@ -232,25 +266,25 @@ fn asset(name: &str, assets: &[LatestAsset]) -> Option<Asset> {
 }
 
 #[cfg(target_os = "macos")]
-fn installer(version: &str, assets: &[LatestAsset]) -> Option<Installer> {
-    macos::installer(version, asset(&format!("DBDelve-{version}.dmg"), assets))
+fn installer(channel: Channel, version: &str, assets: &[LatestAsset]) -> Option<Installer> {
+    macos::installer(version, asset(&channel.disk_image(version), assets))
 }
 
 #[cfg(target_os = "linux")]
-fn installer(version: &str, assets: &[LatestAsset]) -> Option<Installer> {
-    linux::installer(version, |name| asset(name, assets))
+fn installer(channel: Channel, version: &str, assets: &[LatestAsset]) -> Option<Installer> {
+    linux::installer(channel, version, |name| asset(name, assets))
 }
 
 #[cfg(windows)]
-fn installer(version: &str, assets: &[LatestAsset]) -> Option<Installer> {
-    windows::installer(version, |name| asset(name, assets))
+fn installer(channel: Channel, version: &str, assets: &[LatestAsset]) -> Option<Installer> {
+    windows::installer(channel, version, |name| asset(name, assets))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 pub(crate) enum Installer {}
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
-fn installer(_: &str, _: &[LatestAsset]) -> Option<Installer> {
+fn installer(_: Channel, _: &str, _: &[LatestAsset]) -> Option<Installer> {
     None
 }
 
@@ -259,21 +293,91 @@ pub(crate) fn install(installer: &Installer, _: &Progress) -> Result<PathBuf, &'
     match *installer {}
 }
 
-/// Numeric, so 0.2.10 beats 0.2.9, and a build ahead of the latest release
-/// (a local one, say) is not told to "update" backwards.
+/// A release's version: `X.Y.Z` on Stable, `X.Y.Z-nightly.YYYYMMDD.RUN` on
+/// Nightly. Ordered numerically, field by field, so 0.2.10 beats 0.2.9 and a
+/// nightly's date and run come after its `X.Y.Z`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Version {
+    major: u64,
+    minor: u64,
+    patch: u64,
+    nightly: Option<NightlyBuild>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct NightlyBuild {
+    date: u64,
+    run: u64,
+}
+
+impl Version {
+    fn parse(text: &str) -> Option<Self> {
+        let (core, nightly) = match text.split_once('-') {
+            Some((core, build)) => (core, Some(build.strip_prefix("nightly.")?)),
+            None => (text, None),
+        };
+        let mut parts = core.split('.');
+        let mut part = || number(parts.next()?);
+        let (major, minor, patch) = (part()?, part()?, part()?);
+        if parts.next().is_some() {
+            return None;
+        }
+        let nightly = match nightly {
+            Some(build) => {
+                let (date, run) = build.split_once('.')?;
+                if date.len() != 8 {
+                    return None;
+                }
+                Some(NightlyBuild {
+                    date: number(date)?,
+                    run: number(run)?,
+                })
+            }
+            None => None,
+        };
+        Some(Self {
+            major,
+            minor,
+            patch,
+            nightly,
+        })
+    }
+
+    fn channel(self) -> Channel {
+        match self.nightly {
+            Some(_) => Channel::Nightly,
+            None => Channel::Stable,
+        }
+    }
+}
+
+/// Digits only: `parse` alone would take a sign.
+fn number(text: &str) -> Option<u64> {
+    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
+}
+
+/// Whether `candidate` is an update for a build at `current`. A build ahead of
+/// the latest release (a local one, say) is not told to "update" backwards.
 fn is_newer(candidate: &str, current: &str) -> bool {
-    let parse = |version: &str| {
-        version
-            .split('.')
-            .map(|part| part.parse::<u64>().ok())
-            .collect::<Option<Vec<_>>>()
-    };
-    matches!((parse(candidate), parse(current)), (Some(candidate), Some(current)) if candidate > current)
+    is_newer_in(Channel::current(), candidate, current)
+}
+
+/// Only a release of `channel` is one, so Nightly is never offered Stable and
+/// Stable never a nightly.
+fn is_newer_in(channel: Channel, candidate: &str, current: &str) -> bool {
+    match (Version::parse(candidate), Version::parse(current)) {
+        (Some(candidate), Some(current)) => candidate.channel() == channel && candidate > current,
+        _ => false,
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Asset, Latest, Progress, asset, is_newer};
+    use super::{Asset, Latest, Progress, Version, asset, is_newer, is_newer_in, newest};
+    use crate::channel::Channel;
 
     #[test]
     fn compares_versions_numerically() {
@@ -283,6 +387,114 @@ mod tests {
         assert!(!is_newer("0.2.0", "0.2.0"));
         assert!(!is_newer("0.1.9", "0.2.0"));
         assert!(!is_newer("0.3.0-beta", "0.2.0"));
+    }
+
+    #[test]
+    fn reads_only_a_stable_or_a_nightly_version() {
+        let nightly = Version::parse("0.7.4-nightly.20261116.12").unwrap();
+        assert_eq!(nightly.channel(), Channel::Nightly);
+        assert_eq!(Version::parse("0.7.3").unwrap().channel(), Channel::Stable);
+        for garbage in [
+            "",
+            "0.7",
+            "0.7.3.1",
+            "0.7.x",
+            "+0.7.3",
+            "0.7.3-",
+            "0.7.3-beta",
+            "0.7.3-beta.20261116.1",
+            "0.7.4-nightly",
+            "0.7.4-nightly.20261116",
+            "0.7.4-nightly.2026111.1",
+            "0.7.4-nightly.202611160.1",
+            "0.7.4-nightly.20261116.",
+            "0.7.4-nightly.20261116.1.2",
+            "0.7.4-nightly.20261116.+1",
+            "0.7.4-nightly.2026-11-16.1",
+            "v0.7.3",
+        ] {
+            assert_eq!(Version::parse(garbage), None, "{garbage:?}");
+        }
+    }
+
+    #[test]
+    fn orders_nightlies_by_version_then_date_then_run() {
+        let nightly = Channel::Nightly;
+        let current = "0.7.4-nightly.20261116.12";
+        for newer in [
+            "0.7.4-nightly.20261116.13",
+            "0.7.4-nightly.20261116.100",
+            "0.7.4-nightly.20261117.1",
+            "0.7.5-nightly.20261101.1",
+            "0.8.0-nightly.20261116.1",
+        ] {
+            assert!(is_newer_in(nightly, newer, current), "{newer}");
+        }
+        for older in [
+            current,
+            "0.7.4-nightly.20261116.11",
+            "0.7.4-nightly.20261115.99",
+            "0.7.3-nightly.20261201.1",
+        ] {
+            assert!(!is_newer_in(nightly, older, current), "{older}");
+        }
+        // A nightly built without a nightly version, locally say, still hears
+        // about the nightlies after it.
+        assert!(is_newer_in(nightly, "0.7.4-nightly.20261116.1", "0.7.3"));
+        assert!(!is_newer_in(nightly, "garbage", current));
+        assert!(!is_newer_in(nightly, current, "garbage"));
+    }
+
+    #[test]
+    fn a_channel_is_offered_only_its_own_releases() {
+        assert!(!is_newer_in(
+            Channel::Nightly,
+            "9.0.0",
+            "0.7.4-nightly.20261116.12"
+        ));
+        assert!(!is_newer_in(
+            Channel::Stable,
+            "0.7.4-nightly.20261116.12",
+            "0.7.3"
+        ));
+        assert!(is_newer_in(Channel::Stable, "0.7.4", "0.7.3"));
+    }
+
+    /// Trimmed from a real `releases` listing: newest first, stable releases
+    /// among the nightlies, and one tag that is neither.
+    const RELEASES: &str = r#"[
+        {"tag_name": "v0.7.5-nightly.20261118.15",
+         "html_url": "https://example.test/v0.7.5-nightly.20261118.15"},
+        {"tag_name": "v0.8.0", "html_url": "https://example.test/v0.8.0"},
+        {"tag_name": "v0.7.5-nightly.20261117.20",
+         "html_url": "https://example.test/v0.7.5-nightly.20261117.20"},
+        {"tag_name": "v0.7.5-nightly.20261118.9",
+         "html_url": "https://example.test/v0.7.5-nightly.20261118.9"},
+        {"tag_name": "v9.9.9-rc1", "html_url": "https://example.test/v9.9.9-rc1"},
+        {"tag_name": "v0.7.4", "html_url": "https://example.test/v0.7.4"}
+    ]"#;
+
+    #[test]
+    fn the_newest_nightly_is_picked_from_the_listing() {
+        let releases = || serde_json::from_str::<Vec<Latest>>(RELEASES).unwrap();
+        let picked = newest(Channel::Nightly, releases()).unwrap();
+        assert_eq!(picked.tag_name, "v0.7.5-nightly.20261118.15");
+        assert_eq!(
+            picked.html_url,
+            "https://example.test/v0.7.5-nightly.20261118.15"
+        );
+        assert!(picked.assets.is_empty());
+
+        assert_eq!(
+            newest(Channel::Stable, releases()).unwrap().tag_name,
+            "v0.8.0"
+        );
+        assert!(newest(Channel::Nightly, Vec::new()).is_none());
+        let stable_only = releases()
+            .into_iter()
+            .filter(|release| !release.tag_name.contains("nightly"))
+            .collect();
+        assert!(newest(Channel::Nightly, stable_only).is_none());
     }
 
     /// Trimmed from a real `releases/latest` response.
