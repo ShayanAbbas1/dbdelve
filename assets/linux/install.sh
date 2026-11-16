@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 #
 # Installs DBDelve for the current user, out of the unpacked release tarball.
+# The same script ships in DBDelve Nightly's tarball, whose binary is
+# dbdelve-nightly: every name below follows the binary beside it, so the two
+# install side by side.
 #
 # Everything lands under ~/.local, so this never needs root and never fights
 # the distribution's package manager over a path it owns.
@@ -9,12 +12,16 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SLUG=dbdelve
+if [[ -f "$HERE/dbdelve-nightly" ]]; then
+  SLUG=dbdelve-nightly
+fi
 BIN="$HOME/.local/bin"
 ICONS="$HOME/.local/share/icons/hicolor"
 APPS="$HOME/.local/share/applications"
 # The binary lands alone in ~/.local/bin, so its bridge goes to the per-user
 # plugin directory db::plugin::discover() also reads, not beside the binary.
-DATA="${XDG_DATA_HOME:-$HOME/.local/share}/dbdelve"
+DATA="${XDG_DATA_HOME:-$HOME/.local/share}/$SLUG"
 PLUGINS="$DATA/plugins"
 # The bridge's staged and backup copies: beside plugins/ rather than in it,
 # where another DBDelve would load them, and on its filesystem, so moving one
@@ -30,7 +37,7 @@ mkdir -p "$DATA"
 if command -v flock >/dev/null; then
   exec 9>"$DATA/.install.lock"
   flock -n 9 || {
-    echo "another dbdelve install is running" >&2
+    echo "another $SLUG install is running" >&2
     exit 1
   }
 fi
@@ -47,15 +54,15 @@ refresh() {
 }
 
 if [[ "${1:-}" == --uninstall ]]; then
-  rm -f "$BIN/dbdelve" "$BIN/.dbdelve.new" "$APPS/dbdelve.desktop"
+  rm -f "$BIN/$SLUG" "$BIN/.$SLUG.new" "$APPS/$SLUG.desktop"
   rm -rf "$PLUGINS/odbc" "$STAGED" "$BACKUP"
   for size in "${SIZES[@]}"; do
-    rm -f "$ICONS/${size}x${size}/apps/dbdelve.png"
+    rm -f "$ICONS/${size}x${size}/apps/$SLUG.png"
   done
   refresh
   # Connections, query history and saved passwords are deliberately left: an
   # uninstall here is usually a reinstall, and they live outside all of this.
-  echo "removed dbdelve -- data in ~/.local/share/dbdelve was left alone"
+  echo "removed $SLUG -- data in ~/.local/share/$SLUG was left alone"
   exit 0
 fi
 
@@ -65,7 +72,7 @@ mkdir -p "$BIN" "$APPS" "$PLUGINS"
 # still staged, or no bridge in place, the commit had not finished and the
 # backup is the installed bridge; otherwise it had, and the backup is spare.
 if [[ -d "$BACKUP" ]]; then
-  if [[ -e "$BIN/.dbdelve.new" || ! -e "$PLUGINS/odbc" ]]; then
+  if [[ -e "$BIN/.$SLUG.new" || ! -e "$PLUGINS/odbc" ]]; then
     rm -rf "$PLUGINS/odbc"
     mv "$BACKUP" "$PLUGINS/odbc"
   else
@@ -89,12 +96,12 @@ roll_back() {
       mv "$BACKUP" "$PLUGINS/odbc"
     fi
   fi
-  rm -rf "$BIN/.dbdelve.new" "$STAGED"
+  rm -rf "$BIN/.$SLUG.new" "$STAGED"
 }
 trap roll_back EXIT
 trap 'exit 1' HUP INT TERM
-rm -rf "$BIN/.dbdelve.new" "$STAGED"
-install -m 755 "$HERE/dbdelve" "$BIN/.dbdelve.new"
+rm -rf "$BIN/.$SLUG.new" "$STAGED"
+install -m 755 "$HERE/$SLUG" "$BIN/.$SLUG.new"
 cp -R "$HERE/plugins/odbc" "$STAGED"
 # Ignored while only renames run, so a signal cannot land between a rename and
 # the flag that records it and leave roll_back undoing the wrong step.
@@ -105,7 +112,7 @@ if [[ -e "$PLUGINS/odbc" || -L "$PLUGINS/odbc" ]]; then
 fi
 mv "$STAGED" "$PLUGINS/odbc"
 swapped=1
-mv -f "$BIN/.dbdelve.new" "$BIN/dbdelve"
+mv -f "$BIN/.$SLUG.new" "$BIN/$SLUG"
 committed=1
 rm -rf "$BACKUP"
 trap 'exit 1' HUP INT TERM
@@ -113,16 +120,16 @@ trap 'exit 1' HUP INT TERM
 # a desktop launches its entries with the session's PATH, and ~/.local/bin only
 # joins that at login -- and only when it already existed. Bare `dbdelve` would
 # leave the icon there and do nothing when clicked, until the next login.
-sed "s|^Exec=dbdelve |Exec=$BIN/dbdelve |" "$HERE/dbdelve.desktop" > "$APPS/dbdelve.desktop"
-chmod 644 "$APPS/dbdelve.desktop"
+sed "s|^Exec=$SLUG |Exec=$BIN/$SLUG |" "$HERE/$SLUG.desktop" > "$APPS/$SLUG.desktop"
+chmod 644 "$APPS/$SLUG.desktop"
 for size in "${SIZES[@]}"; do
   mkdir -p "$ICONS/${size}x${size}/apps"
-  install -m 644 "$HERE/icons/dbdelve-$size.png" "$ICONS/${size}x${size}/apps/dbdelve.png"
+  install -m 644 "$HERE/icons/$SLUG-$size.png" "$ICONS/${size}x${size}/apps/$SLUG.png"
 done
 refresh
 
-echo "installed $BIN/dbdelve"
+echo "installed $BIN/$SLUG"
 case ":$PATH:" in
   *":$BIN:"*) ;;
-  *) echo "note: $BIN is not on your PATH, so running dbdelve from a terminal needs a new login -- the menu entry works now regardless" >&2 ;;
+  *) echo "note: $BIN is not on your PATH, so running $SLUG from a terminal needs a new login -- the menu entry works now regardless" >&2 ;;
 esac

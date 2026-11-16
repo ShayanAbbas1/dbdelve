@@ -13,9 +13,16 @@
 #
 # On macOS, DBDELVE_INSTALL_DIR picks the folder the app goes in; the default
 # is /Applications, or ~/Applications when that is not writable.
+#
+# --nightly installs the newest DBDelve Nightly instead, a separate app that
+# sits beside DBDelve with its own data:
+#
+#   curl -fsSL https://raw.githubusercontent.com/ShayanAbbas1/dbdelve/main/install.sh | sh -s -- --nightly
 set -eu
 
 REPO="ShayanAbbas1/dbdelve"
+NAME="DBDelve"
+SLUG="dbdelve"
 IDENTIFIER="com.shayanabbas.dbdelve"
 # The key src/update/download.rs trusts; the release workflow fails if the two
 # ever differ.
@@ -38,10 +45,10 @@ download() {
     # First, so a missing signature fails before the download rather than
     # after it.
     curl -fsL -o "$2.minisig" "$1.minisig" 2>/dev/null ||
-      fail "the signature of DBDelve $version could not be downloaded, so the download cannot be checked"
+      fail "the signature of $NAME $version could not be downloaded, so the download cannot be checked"
   fi
 
-  echo "Downloading DBDelve $version..."
+  echo "Downloading $NAME $version..."
   curl -fL --progress-bar -o "$2" "$1"
 
   if [ -n "$verifying" ]; then
@@ -70,9 +77,9 @@ install_macos() {
     directory="$HOME/Applications"
   fi
   mkdir -p "$directory"
-  app="$directory/DBDelve.app"
+  app="$directory/$NAME.app"
   if pgrep -f "$app/Contents/MacOS/" >/dev/null 2>&1; then
-    fail "DBDelve is running from $app -- quit it and run this again"
+    fail "$NAME is running from $app -- quit it and run this again"
   fi
 
   scratch="$(mktemp -d)"
@@ -80,7 +87,7 @@ install_macos() {
   # Beside the destination, so putting the app in place is a rename, and a
   # folder of this run's own, so two runs cannot remove each other's copy.
   stage="$(mktemp -d "$directory/.DBDelve.install.XXXXXX")"
-  staged="$stage/DBDelve.app"
+  staged="$stage/$NAME.app"
   previous="$stage/previous.app"
   cleanup() {
     # Interrupted between moving the old app out and the new one in: the old
@@ -98,17 +105,18 @@ install_macos() {
   trap cleanup EXIT
   trap 'exit 1' INT TERM
 
-  dmg="$scratch/DBDelve-$version.dmg"
-  download "https://github.com/$REPO/releases/download/v$version/DBDelve-$version.dmg" "$dmg"
+  dmg_name="$(printf '%s' "$NAME" | tr ' ' -)-$version.dmg"
+  dmg="$scratch/$dmg_name"
+  download "https://github.com/$REPO/releases/download/v$version/$dmg_name" "$dmg"
 
   mkdir "$mount"
   hdiutil attach -nobrowse -readonly -noautoopen -mountpoint "$mount" "$dmg" >/dev/null
-  [ -d "$mount/DBDelve.app" ] || fail "the download holds no DBDelve.app"
-  ditto "$mount/DBDelve.app" "$staged"
+  [ -d "$mount/$NAME.app" ] || fail "the download holds no $NAME.app"
+  ditto "$mount/$NAME.app" "$staged"
 
   codesign --verify --deep --strict "$staged" || fail "the downloaded app is damaged"
   found="$(plutil -extract CFBundleIdentifier raw -o - "$staged/Contents/Info.plist")"
-  [ "$found" = "$IDENTIFIER" ] || fail "the downloaded app is $found, not DBDelve"
+  [ "$found" = "$IDENTIFIER" ] || fail "the downloaded app is $found, not $NAME"
 
   # The installed app is moved aside, not deleted, until the new one is in
   # its place; cleanup puts it back if that never happens.
@@ -116,7 +124,7 @@ install_macos() {
     mv "$app" "$previous"
   fi
   mv "$staged" "$app"
-  echo "DBDelve $version is in $app"
+  echo "$NAME $version is in $app"
   echo "Open it from there, or with: open \"$app\""
 }
 
@@ -133,7 +141,7 @@ install_linux() {
   trap 'rm -rf "$scratch"' EXIT
   trap 'exit 1' INT TERM
 
-  name="dbdelve-$version-linux-$arch"
+  name="$SLUG-$version-linux-$arch"
   tarball="$scratch/$name.tar.gz"
   download "https://github.com/$REPO/releases/download/v$version/$name.tar.gz" "$tarball"
 
@@ -142,22 +150,53 @@ install_linux() {
   bash "$scratch/$name/install.sh"
 }
 
+# The newest nightly's version. /releases/latest never names a pre-release,
+# so this asks the API, as a nightly's own updater does: the same page, the
+# same tag shape, the same order -- version, then date, then run.
+latest_nightly() {
+  releases="$(curl -fsSL "https://api.github.com/repos/$REPO/releases?per_page=30")" ||
+    fail "could not list the releases to find the newest nightly"
+  printf '%s\n' "$releases" |
+    tr ',' '\n' |
+    sed -n 's/^[^"]*"tag_name":[[:space:]]*"v\([0-9][0-9]*\)\.\([0-9][0-9]*\)\.\([0-9][0-9]*\)-nightly\.\([0-9][0-9]*\)\.\([0-9][0-9]*\)".*$/\1 \2 \3 \4 \5/p' |
+    sort -k1,1n -k2,2n -k3,3n -k4,4n -k5,5n |
+    tail -n 1 |
+    sed 's/^\([^ ]*\) \([^ ]*\) \([^ ]*\) \([^ ]*\) \([^ ]*\)$/\1.\2.\3-nightly.\4.\5/'
+}
+
 # All of it inside a function, called on the last line: a download cut short
 # then runs nothing rather than half a script.
 main() {
+  nightly=
+  case "${1:-}" in
+    '') ;;
+    --nightly) nightly=1 ;;
+    *) fail "unknown option $1; the only one is --nightly" ;;
+  esac
+  if [ -n "$nightly" ]; then
+    NAME="DBDelve Nightly"
+    SLUG="dbdelve-nightly"
+    IDENTIFIER="com.shayanabbas.dbdelve.nightly"
+  fi
+
   os="$(uname -s)"
   case "$os" in
     Darwin | Linux) ;;
-    *) fail "this installs DBDelve on macOS and Linux; see https://github.com/$REPO/blob/main/docs/install.md for other systems" ;;
+    *) fail "this installs $NAME on macOS and Linux; see https://github.com/$REPO/blob/main/docs/install.md for other systems" ;;
   esac
 
-  # The tag comes from where /releases/latest redirects to, which, unlike the
-  # API, is not rate limited.
-  latest="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest")"
-  version="${latest##*/v}"
-  case "$version" in
-    '' | *[!0-9.]*) fail "could not work out the latest release from $latest" ;;
-  esac
+  if [ -n "$nightly" ]; then
+    version="$(latest_nightly)"
+    [ -n "$version" ] || fail "found no nightly release"
+  else
+    # The tag comes from where /releases/latest redirects to, which, unlike
+    # the API, is not rate limited.
+    latest="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest")"
+    version="${latest##*/v}"
+    case "$version" in
+      '' | *[!0-9.]*) fail "could not work out the latest release from $latest" ;;
+    esac
+  fi
 
   if [ "$os" = Darwin ]; then
     install_macos
