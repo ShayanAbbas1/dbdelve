@@ -729,6 +729,20 @@ pub(crate) fn take_notice() -> Option<String> {
         .take()
 }
 
+/// A copy with no connections in it, claimed in `directory` and handed to
+/// the next workspace to start, as a launch that put an import in place
+/// hands one over. None of the keychain is read.
+#[cfg(test)]
+pub(crate) fn hand_over_an_empty_copy(directory: &Path) {
+    write_file(&directory.join(PROFILES_FILE), "").unwrap();
+    write_file(&directory.join(SECRETS_PENDING), "").unwrap();
+    let claim = claim_secrets(directory).expect("an empty list is claimed");
+    assert!(claim.connections.is_empty());
+    *SECRETS_TO_COPY
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) = Some(claim);
+}
+
 /// The saved passwords this launch claimed, for [`copy_pending_secrets`],
 /// once.
 pub(crate) fn take_secrets_to_copy() -> Option<SecretsClaim> {

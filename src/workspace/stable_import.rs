@@ -109,9 +109,14 @@ impl Workspace {
     /// For the import this launch put in place, once its window is up: on
     /// macOS each password can raise a Keychain prompt, which then has the
     /// app behind it. Off this thread, as each read can wait on one.
+    ///
+    /// Then connects `then_connect`, the profile the launch held back from
+    /// connecting until its password was here, unless the user has taken it
+    /// in hand meanwhile.
     pub(crate) fn copy_imported_passwords(
         &mut self,
         secrets: SecretsClaim,
+        then_connect: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let failed = spawn_blocking(cx.background_executor(), move || {
@@ -119,10 +124,18 @@ impl Workspace {
         });
         cx.spawn(async move |workspace, cx| {
             let failed = failed.await;
-            if failed.is_empty() {
-                return;
-            }
             _ = workspace.update(cx, |workspace, cx| {
+                let untouched = then_connect.and_then(|id| {
+                    workspace.profiles.iter().position(|profile| {
+                        profile.id == id && matches!(profile.state, ProfileState::Idle)
+                    })
+                });
+                if let Some(index) = untouched {
+                    workspace.begin_connect(index, cx);
+                }
+                if failed.is_empty() {
+                    return;
+                }
                 workspace.note(
                     format!(
                         "Saved passwords couldn't be copied for {}. Edit {} to enter them \
