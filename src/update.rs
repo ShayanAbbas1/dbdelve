@@ -361,6 +361,7 @@ fn number(text: &str) -> Option<u64> {
 
 /// Whether `candidate` is an update for a build at `current`. A build ahead of
 /// the latest release (a local one, say) is not told to "update" backwards.
+#[cfg(any(target_os = "macos", test))]
 fn is_newer(candidate: &str, current: &str) -> bool {
     is_newer_in(Channel::current(), candidate, current)
 }
