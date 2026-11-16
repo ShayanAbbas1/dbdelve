@@ -3861,6 +3861,7 @@ fn diagram_button(
         return None;
     }
     let command = Command::ShowDiagram {
+        database: tab.database.clone(),
         schema: tab.schema.clone(),
         centre: Some(tab.name.clone()),
     };

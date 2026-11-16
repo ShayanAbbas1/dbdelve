@@ -2489,7 +2489,9 @@ impl Workspace {
         for (opened, active, database) in opened {
             let id = match opened {
                 Reopened::Object(opened) => self.open_object(opened, database, window, cx),
-                Reopened::Diagram(schema, view) => self.diagram_tab(schema, Some(view), window, cx),
+                Reopened::Diagram(schema, view) => {
+                    self.diagram_tab(database, schema, Some(view), window, cx)
+                }
             };
             if active {
                 restored_active = id;
