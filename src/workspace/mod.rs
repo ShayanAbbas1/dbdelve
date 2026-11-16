@@ -1421,6 +1421,23 @@ impl Workspace {
 }
 
 impl Workspace {
+    fn dismiss_cleanup_notice(
+        &mut self,
+        event: &gpui::ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.cleanup_notices.is_empty() {
+            return;
+        }
+        self.cleanup_notices.remove(0);
+        if self.cleanup_notices.is_empty() && matches!(event, gpui::ClickEvent::Keyboard(_)) {
+            self.focus.focus(window, cx);
+            self.refocus_front();
+        }
+        cx.notify();
+    }
+
     fn render_cleanup_notice(&self, t: Theme, cx: &mut Context<Self>) -> Option<gpui::Div> {
         let result = self.cleanup_notices.first()?;
         let profile = result.profile.as_deref().map_or_else(
@@ -1501,23 +1518,7 @@ impl Workspace {
                                         t,
                                     )
                                     .debug_selector(|| "cleanup-dismiss-0".to_string())
-                                    .on_click(cx.listener(
-                                        |workspace, event, window, cx| {
-                                            if !workspace.cleanup_notices.is_empty() {
-                                                workspace.cleanup_notices.remove(0);
-                                                if workspace.cleanup_notices.is_empty()
-                                                    && matches!(
-                                                        event,
-                                                        gpui::ClickEvent::Keyboard(_)
-                                                    )
-                                                {
-                                                    workspace.focus.focus(window, cx);
-                                                    workspace.refocus_front();
-                                                }
-                                                cx.notify();
-                                            }
-                                        },
-                                    )),
+                                    .on_click(cx.listener(Self::dismiss_cleanup_notice)),
                                 ),
                         )
                         .when(remaining > 0, |row| row.child(format!("{remaining} more"))),

@@ -539,15 +539,10 @@ fn cleanup_response(bytes: &[u8], session: &str) -> bool {
         .strip_suffix("DBDELVE_SSM_CHILD_EXITED")
         .unwrap_or(text)
         .trim();
-    serde_json::from_str::<serde_json::Value>(text)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("SessionId")
-                .and_then(|id| id.as_str())
-                .map(str::to_owned)
-        })
-        .is_some_and(|id| id == session)
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return false;
+    };
+    value.get("SessionId").and_then(|id| id.as_str()) == Some(session)
 }
 
 fn run_cleanup(command: Command, session: &str, timeout: Duration) -> bool {
