@@ -392,6 +392,13 @@ impl Target {
     pub fn draws_diagrams(self) -> bool {
         self.abilities().draws_diagrams
     }
+
+    /// Whether the connection lists its server's users and roles, shows who
+    /// holds which grant on an object, and writes role changes for review.
+    /// Never for a plugin, whose dialect's catalog it may not carry.
+    pub fn manages_roles(self) -> bool {
+        self.abilities().manages_roles
+    }
 }
 
 /// Whether `error` is the user's Cancel landing, in the words each engine's

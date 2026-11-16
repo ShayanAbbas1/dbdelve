@@ -16,6 +16,7 @@ mod filter_picker;
 mod filters;
 mod folders;
 mod forms;
+mod grants_dialog;
 mod import_dialog;
 mod import_rows;
 mod modes;
@@ -26,6 +27,7 @@ mod queries;
 mod sidebar;
 mod stable_import;
 mod tabs;
+mod users;
 mod welcome;
 
 use std::collections::{HashMap, HashSet};
@@ -38,6 +40,7 @@ pub(crate) use import_dialog::PreviewGrid;
 pub(crate) use profiles::unavailable_reason;
 pub(crate) use projects::project_name_refusal;
 pub(crate) use queries::error_in_buffer;
+pub(crate) use users::{GrantsOf, GrantsView, RoleForm, RoleFormKind};
 
 use crate::channel::Channel;
 use crate::connection_form::{Origin, passphrase_to_persist, password_to_persist};
@@ -421,6 +424,11 @@ pub(crate) struct Workspace {
     /// Numbers each picker open, so a listing that lands after the dialog
     /// closed, or after another went up, is not applied.
     pub(crate) last_filter_request: u64,
+    /// The New User, New Role, Edit or Reset Password dialog.
+    pub(crate) role_form: Option<RoleForm>,
+    /// The Show Grants dialog.
+    pub(crate) grants_view: Option<GrantsView>,
+    pub(crate) last_grants_request: u64,
     /// The opacity field in the settings panel. Kept here rather than built
     /// with the card, because an input is state the user is part-way through
     /// typing into and a fresh one every frame would swallow the keystroke.
@@ -601,6 +609,9 @@ impl Workspace {
             last_ddl_request: 0,
             filter_picker: None,
             last_filter_request: 0,
+            role_form: None,
+            grants_view: None,
+            last_grants_request: 0,
             opacity_input,
             #[cfg(test)]
             held: Vec::new(),
@@ -1780,7 +1791,7 @@ impl Render for Workspace {
                     // keystroke. The window still has to hold focus, or the
                     // bindings that leave this tab go with it -- as it does
                     // for the last object tab of all, closed.
-                    Some(ObjectBody::Routine(_)) | None => Focus::Window,
+                    Some(ObjectBody::Routine(_) | ObjectBody::Users { .. }) | None => Focus::Window,
                 },
             };
             profile.session.editor_needs_focus = false;
@@ -2835,6 +2846,8 @@ impl Render for Workspace {
                 [
                     ("show-ddl", self.render_show_ddl(cx)),
                     ("filter-picker", self.render_filter_picker(window, cx)),
+                    ("show-grants", self.render_show_grants(cx)),
+                    ("role-form", self.render_role_form(cx)),
                     ("apply-review", self.render_apply_review(cx)),
                     ("import-rows", self.render_import_rows(window, cx)),
                     ("delete", self.render_delete_confirmation(cx)),

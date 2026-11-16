@@ -325,6 +325,28 @@ engine) leaves the grid read-only and says why; it is never
 left out of the `WHERE`, and no unique key, rowid or subset of the columns
 names the row in its place.
 
+**Role changes have their own gate.** The Users and roles tab writes
+`CREATE ROLE` and `ALTER ROLE` (`db::roles`), and every one passes
+`sql::is_generated_role_change` before it is shown in the apply review. It
+reads the sqlparser tree, Postgres only, and admits exactly what `db::roles`
+writes: one new role, `LOGIN` or `NOLOGIN` said, `CONNECTION LIMIT` a bare
+non-negative number, `VALID UNTIL` a string, `IN ROLE`, and a password only
+as a SCRAM-SHA-256 verifier (`'SCRAM-SHA-256$…'`), so no statement carrying
+a password in the clear gets through whoever wrote it; or `ALTER ROLE … WITH`
+those same options. Never `SUPERUSER`, `CREATEDB`, `CREATEROLE`,
+`REPLICATION`, `BYPASSRLS`, a rename, a `SET`, a `DROP` or a grant on an
+object. The run is `execute_and_then` like any edit, so `sql::classify` reads
+it (Full, as every role statement is) and the mode decides.
+
+Two things are left out because sqlparser 0.63 cannot read them, which would
+make the mode check treat them as unreadable and run them on a confirmation
+instead of asking for Full: changing a role's membership (`GRANT role TO
+member`; membership is set only at creation, `IN ROLE`), and clearing a
+connection limit (`CONNECTION LIMIT -1`). Edit refuses the second by name.
+
+Show Grants and everything else the tab reads are catalog reads on a side
+connection (`Connection::apart`), never a statement of the user's.
+
 ## Connection modes, per engine
 
 The core of the mode check is in `AGENTS.md`, "Connection modes". The detail:

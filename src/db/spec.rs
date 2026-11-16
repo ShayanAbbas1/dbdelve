@@ -821,6 +821,10 @@ pub struct Abilities {
     /// The catalog declares foreign keys that
     /// [`Connection::schema_graph`](super::Connection::schema_graph) reads.
     pub draws_diagrams: bool,
+    /// The server's logins, roles and grants can be read and changed through
+    /// [`Connection::roles`](super::Connection::roles) and the statements
+    /// [`super::roles`] writes.
+    pub manages_roles: bool,
     /// Why no transaction spans an import's chunks.
     pub chunk_refusal: Option<&'static str>,
 }
@@ -843,6 +847,7 @@ impl Abilities {
         exact_row_estimates: false,
         schema_switch_waits_for_transaction: false,
         draws_diagrams: false,
+        manages_roles: false,
         chunk_refusal: None,
     };
 
@@ -939,6 +944,7 @@ pub(crate) const POSTGRES: EngineSpec = EngineSpec {
         lists_sequences: true,
         schema_switch_waits_for_transaction: true,
         draws_diagrams: true,
+        manages_roles: true,
         ..Abilities::NONE
     },
     hooks: Hooks::NONE,

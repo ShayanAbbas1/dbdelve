@@ -332,6 +332,7 @@ impl Workspace {
             schema_refresh: None,
             reread_after_load: false,
             databases: Databases::default(),
+            roles: RolesState::default(),
             bound: HashMap::new(),
             database_catalogs: HashMap::new(),
             left_database: false,
@@ -408,6 +409,7 @@ impl Workspace {
             schema_refresh: None,
             reread_after_load: false,
             databases: Databases::default(),
+            roles: RolesState::default(),
             bound: HashMap::new(),
             database_catalogs: HashMap::new(),
             left_database: false,
@@ -1619,6 +1621,7 @@ impl Workspace {
         }
         forget_what_was_read(profile, window, cx);
         profile.databases = Databases::default();
+        profile.roles = RolesState::default();
     }
 
     /// The connect's half of [`Self::leave_database`], for a profile whose
@@ -2033,6 +2036,7 @@ impl Workspace {
         // onto another database, and `active_database` reads this first, so a
         // folder would go on naming the old one.
         profile.databases = Databases::default();
+        profile.roles = RolesState::default();
 
         let id = profile.id.clone();
         let mut config = profile.config.clone();

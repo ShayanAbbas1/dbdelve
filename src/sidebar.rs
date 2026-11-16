@@ -353,6 +353,42 @@ pub(crate) struct Listed<'a> {
     /// How many databases of its server the profile's filter left out of
     /// `databases`.
     pub(crate) databases_left_out: usize,
+    /// What is known of its server's logins and roles, where its target
+    /// manages them; `None` draws no Users and roles row.
+    pub(crate) roles: Option<RolesListing>,
+}
+
+/// How much of a server's roles is known: each by name, and whether it is a
+/// login (one that can log in, or was turned off) rather than a role.
+pub(crate) enum RolesListing {
+    /// Never asked: read when the row is first opened.
+    Unloaded,
+    Loading,
+    Failed(String),
+    Loaded(Vec<(String, bool)>),
+}
+
+/// What the Users and roles row is called, and the tab it opens.
+pub(crate) const USERS_AND_ROLES: &str = "Users and roles";
+
+/// A connection's Users and roles row.
+pub(crate) fn users_row(profile: &str) -> String {
+    format!("{}/users", connection_row(profile))
+}
+
+/// The Logins or the Roles row under it.
+pub(crate) fn role_group_row(profile: &str, logins: bool) -> String {
+    let group = if logins { "logins" } else { "roles" };
+    format!("{}/{group}", users_row(profile))
+}
+
+/// One login's or role's row, its name after its length.
+pub(crate) fn role_row(profile: &str, logins: bool, name: &str) -> String {
+    format!(
+        "{}/role:{}:{name}",
+        role_group_row(profile, logins),
+        name.len()
+    )
 }
 
 /// The databases of a server that are not `current`, the one the connection
@@ -378,6 +414,20 @@ pub(crate) enum Node {
     Database {
         profile: String,
         database: String,
+    },
+    /// A connection's Users and roles row, which opens its tab.
+    Users {
+        profile: String,
+    },
+    /// The Logins or the Roles row under it.
+    RoleGroup {
+        logins: bool,
+    },
+    /// One login or role.
+    Role {
+        profile: String,
+        name: String,
+        login: bool,
     },
     /// Says what happened to its connection, and is never acted on.
     Notice,
@@ -422,6 +472,7 @@ pub(crate) enum NodeAction {
     /// The name as the catalog lists it, so what is copied is what is read.
     CopyName(String),
     ShowDdl,
+    ShowGrants,
     Refresh,
     /// Choose which of the server's databases the connection lists.
     FilterDatabases,
@@ -443,10 +494,16 @@ pub(crate) fn node_actions(kind: NodeKind, name: &str, target: Target) -> Vec<No
             vec![NodeAction::NewQueryHere, copy, NodeAction::Refresh]
         }
         // A target with no definition to write out has none to show.
-        NodeKind::Relation(_) | NodeKind::Sequence if target.copies_ddl() => {
-            vec![copy, NodeAction::ShowDdl]
+        NodeKind::Relation(_) | NodeKind::Sequence => {
+            let mut actions = vec![copy];
+            if target.copies_ddl() {
+                actions.push(NodeAction::ShowDdl);
+            }
+            if target.manages_roles() {
+                actions.push(NodeAction::ShowGrants);
+            }
+            actions
         }
-        NodeKind::Relation(_) | NodeKind::Sequence => vec![copy],
         NodeKind::Routine => vec![copy, NodeAction::ShowDdl],
     }
 }
@@ -458,6 +515,7 @@ impl NodeAction {
             NodeAction::NewQueryHere => "New Query Here",
             NodeAction::CopyName(_) => "Copy Name",
             NodeAction::ShowDdl => "Show DDL",
+            NodeAction::ShowGrants => "Show Grants",
             NodeAction::Refresh => "Refresh",
             NodeAction::FilterDatabases => "Filter Databases",
         }
@@ -1011,6 +1069,9 @@ fn connection_item(
             // Each database row is one more of what the connection counts.
             count = count.map(|count| count + others.len());
             children.extend(others);
+            if let Some(roles) = connection.roles {
+                children.extend(users_item(tree, connection.id, roles, folds, search));
+            }
             (search.filtering || followed, children)
         }
     };
@@ -1031,6 +1092,104 @@ fn connection_item(
     };
     Some(
         TreeItem::new(id, connection.name.to_string())
+            .expanded(open)
+            .children(children),
+    )
+}
+
+/// The Users and roles row, with Logins and Roles under it once read. Kept
+/// by a filter that matches its own name, either group's, or a role's.
+fn users_item(
+    tree: &mut SidebarTree,
+    profile: &str,
+    roles: RolesListing,
+    folds: &HashMap<String, bool>,
+    search: &mut Search,
+) -> Option<TreeItem> {
+    let id = users_row(profile);
+    let named = search.builder.name_matches(&id, USERS_AND_ROLES);
+    let followed = folds.get(&id).copied().unwrap_or(false);
+    let notice_row = |tree: &mut SidebarTree, text: &str| {
+        let row = format!("{id}/notice");
+        tree.nodes.insert(row.clone(), Node::Notice);
+        TreeItem::new(row, text.to_string()).disabled(true)
+    };
+    let (open, children) = match roles {
+        RolesListing::Unloaded => {
+            if search.filtering && !named {
+                return None;
+            }
+            tree.unloaded.insert(id.clone());
+            (false, vec![notice_row(tree, LOADING)])
+        }
+        RolesListing::Loading | RolesListing::Failed(_) if search.filtering && !named => {
+            return None;
+        }
+        RolesListing::Loading => (followed, vec![notice_row(tree, LOADING)]),
+        RolesListing::Failed(text) => (followed, vec![notice_row(tree, &text)]),
+        RolesListing::Loaded(roles) => {
+            let mut groups = Vec::new();
+            let mut total = 0;
+            for (logins, label) in [(true, "Logins"), (false, "Roles")] {
+                let group = role_group_row(profile, logins);
+                let group_named = named || search.builder.name_matches(&group, label);
+                let under: Vec<TreeItem> = (roles.iter())
+                    .filter(|(_, login)| *login == logins)
+                    .filter_map(|(name, _)| {
+                        let row = role_row(profile, logins, name);
+                        let kept = !search.filtering
+                            || group_named
+                            || search.builder.name_matches(&row, name);
+                        kept.then(|| {
+                            tree.nodes.insert(
+                                row.clone(),
+                                Node::Role {
+                                    profile: profile.to_string(),
+                                    name: name.clone(),
+                                    login: logins,
+                                },
+                            );
+                            TreeItem::new(row, name.clone())
+                        })
+                    })
+                    .collect();
+                if search.filtering && !group_named && under.is_empty() {
+                    continue;
+                }
+                total += under.len();
+                tree.nodes.insert(group.clone(), Node::RoleGroup { logins });
+                tree.counts.insert(group.clone(), under.len());
+                let open = search.filtering || folds.get(&group).copied().unwrap_or(false);
+                let children = match (under.is_empty(), open) {
+                    (true, _) => vec![empty_row(tree, &group)],
+                    (false, true) => under,
+                    (false, false) => prune(tree, &group, under),
+                };
+                groups.push(
+                    TreeItem::new(group, label.to_string())
+                        .expanded(open)
+                        .children(children),
+                );
+            }
+            if search.filtering && !named && groups.is_empty() {
+                return None;
+            }
+            tree.counts.insert(id.clone(), total);
+            (search.filtering || followed, groups)
+        }
+    };
+    tree.nodes.insert(
+        id.clone(),
+        Node::Users {
+            profile: profile.to_string(),
+        },
+    );
+    let children = match open || search.filtering {
+        true => children,
+        false => prune(tree, &id, children),
+    };
+    Some(
+        TreeItem::new(id, USERS_AND_ROLES.to_string())
             .expanded(open)
             .children(children),
     )
@@ -1326,6 +1485,7 @@ mod tests {
             database: None,
             databases: Vec::new(),
             databases_left_out: 0,
+            roles: None,
         }
     }
 
@@ -1539,6 +1699,7 @@ mod tests {
             database: Some(database.to_string()),
             databases: Vec::new(),
             databases_left_out: 0,
+            roles: None,
         }
     }
 
@@ -2000,6 +2161,7 @@ mod tests {
             vec![Listed {
                 content: Content::Loaded(ExplorerTree::default()),
                 databases: vec![("shop".into(), Content::Loaded(shop))],
+                roles: None,
                 ..database_listed(
                     "a",
                     ExplorerTree::default(),
@@ -2989,7 +3151,15 @@ mod tests {
         let on = |kind, engine| node_actions(kind, "birds", Target::built_in(engine));
         let table = NodeKind::Relation(RelationKind::Table);
         let copy = || NodeAction::CopyName("birds".into());
-        assert_eq!(on(table, Engine::Postgres), [copy(), NodeAction::ShowDdl]);
+        assert_eq!(
+            on(table, Engine::Postgres),
+            [copy(), NodeAction::ShowDdl, NodeAction::ShowGrants]
+        );
+        assert_eq!(
+            on(table, Engine::MySql),
+            [copy(), NodeAction::ShowDdl],
+            "a target that manages no roles shows no grants"
+        );
         assert_eq!(
             on(table, Engine::Redis),
             [copy()],
@@ -2997,7 +3167,7 @@ mod tests {
         );
         assert_eq!(
             on(NodeKind::Sequence, Engine::Postgres),
-            [copy(), NodeAction::ShowDdl]
+            [copy(), NodeAction::ShowDdl, NodeAction::ShowGrants]
         );
         assert_eq!(
             on(NodeKind::Routine, Engine::Postgres),
@@ -3025,6 +3195,59 @@ mod tests {
             [NodeAction::NewQueryHere, copy(), NodeAction::Refresh],
             "a target with no databases to choose between has nothing to filter"
         );
+    }
+
+    #[test]
+    fn users_and_roles_counts_logins_and_roles_once_read_and_is_kept_by_a_role_name() {
+        let with_roles = |roles| Listed {
+            roles: Some(roles),
+            ..listed("a", "a", Content::Loaded(birds()))
+        };
+        let unread = super::build(
+            &[],
+            vec![with_roles(RolesListing::Unloaded)],
+            &opened([connection_row("a")]),
+            ListingScope::All,
+            None,
+            "",
+        );
+        assert!(unread.unloaded.contains(&users_row("a")));
+        assert!(
+            !unread.counts.contains_key(&users_row("a")),
+            "nothing counted before it is read"
+        );
+
+        let read = || {
+            RolesListing::Loaded(vec![
+                ("ana".into(), true),
+                ("bo".into(), true),
+                ("reporting".into(), false),
+            ])
+        };
+        let tree = super::build(
+            &[],
+            vec![with_roles(read())],
+            &opened([
+                connection_row("a"),
+                users_row("a"),
+                role_group_row("a", true),
+            ]),
+            ListingScope::All,
+            None,
+            "",
+        );
+        assert_eq!(tree.counts[&users_row("a")], 3);
+        assert_eq!(tree.counts[&role_group_row("a", true)], 2);
+        assert_eq!(tree.counts[&role_group_row("a", false)], 1);
+        assert!(matches!(
+            tree.nodes.get(&role_row("a", true, "ana")),
+            Some(Node::Role { login: true, .. })
+        ));
+
+        let tree = filtered(&[], vec![with_roles(read())], "report");
+        let ids = all_ids(&tree.items);
+        assert!(ids.contains(&role_row("a", false, "reporting")));
+        assert!(!ids.contains(&role_row("a", true, "ana")));
     }
 
     #[test]

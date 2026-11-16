@@ -101,6 +101,9 @@ pub(crate) struct Profile {
     pub(crate) reread_after_load: bool,
     /// What the server listed the last time Select Database asked.
     pub(crate) databases: Databases,
+    /// The server's logins and roles, read for the connections tree's Users
+    /// and roles row and its tab.
+    pub(crate) roles: RolesState,
     /// The session opened for each other database of the server, by name,
     /// for the connections tree to read its catalog over. Never the profile's
     /// own connection, and dropped with it.
@@ -498,6 +501,8 @@ impl Profile {
             .session
             .objects
             .iter()
+            // Users and roles is read again from the server, not restored.
+            .filter(|tab| !matches!(tab.body, ObjectBody::Users { .. }))
             .map(|tab| store::StoredObject {
                 active: active == Tab::Object(tab.id),
                 ..tab.stored(engine, cx)
@@ -1586,7 +1591,7 @@ impl Session {
         match self.active_object() {
             None => self.active_query_tab().map(|tab| tab.shown().0),
             Some(tab) => match &tab.body {
-                ObjectBody::Relation { query, .. } => Some(query),
+                ObjectBody::Relation { query, .. } | ObjectBody::Users { query, .. } => Some(query),
                 ObjectBody::Routine(_)
                 | ObjectBody::Structure { .. }
                 | ObjectBody::Diagram { .. } => None,
@@ -1608,7 +1613,8 @@ impl Session {
                 ObjectBody::Relation { results, .. } => Some(results),
                 ObjectBody::Routine(_)
                 | ObjectBody::Structure { .. }
-                | ObjectBody::Diagram { .. } => None,
+                | ObjectBody::Diagram { .. }
+                | ObjectBody::Users { .. } => None,
             },
         }
     }
@@ -1669,7 +1675,8 @@ impl Session {
                 ObjectBody::Relation { results, .. } => Some(results),
                 ObjectBody::Routine(_)
                 | ObjectBody::Structure { .. }
-                | ObjectBody::Diagram { .. } => None,
+                | ObjectBody::Diagram { .. }
+                | ObjectBody::Users { .. } => None,
             },
         }
     }
@@ -1704,7 +1711,9 @@ impl Session {
                 .iter()
                 .find(|tab| tab.id == id)
                 .and_then(|tab| match &tab.body {
-                    ObjectBody::Relation { query, .. } => Some(query),
+                    ObjectBody::Relation { query, .. } | ObjectBody::Users { query, .. } => {
+                        Some(query)
+                    }
                     ObjectBody::Routine(_)
                     | ObjectBody::Structure { .. }
                     | ObjectBody::Diagram { .. } => None,
@@ -1721,7 +1730,8 @@ impl Session {
                 ObjectBody::Relation { sorting, .. } => Some(sorting),
                 ObjectBody::Routine(_)
                 | ObjectBody::Structure { .. }
-                | ObjectBody::Diagram { .. } => None,
+                | ObjectBody::Diagram { .. }
+                | ObjectBody::Users { .. } => None,
             },
         }
     }
@@ -1733,7 +1743,8 @@ impl Session {
                 ObjectBody::Relation { sorting, .. } => Some(sorting),
                 ObjectBody::Routine(_)
                 | ObjectBody::Structure { .. }
-                | ObjectBody::Diagram { .. } => None,
+                | ObjectBody::Diagram { .. }
+                | ObjectBody::Users { .. } => None,
             },
         }
     }
@@ -1761,7 +1772,8 @@ impl Session {
                 ObjectBody::Relation { edit_mode, .. } => Some(edit_mode),
                 ObjectBody::Routine(_)
                 | ObjectBody::Structure { .. }
-                | ObjectBody::Diagram { .. } => None,
+                | ObjectBody::Diagram { .. }
+                | ObjectBody::Users { .. } => None,
             },
         }
     }
@@ -1781,7 +1793,8 @@ impl Session {
                 ObjectBody::Relation { results, .. } => Some(results),
                 ObjectBody::Routine(_)
                 | ObjectBody::Structure { .. }
-                | ObjectBody::Diagram { .. } => None,
+                | ObjectBody::Diagram { .. }
+                | ObjectBody::Users { .. } => None,
             }))
     }
 
@@ -1798,7 +1811,8 @@ impl Session {
                 Some((&mut tab.query, results))
             }
             Tab::Object(id) => match &mut self.objects.iter_mut().find(|tab| tab.id == id)?.body {
-                ObjectBody::Relation { query, results, .. } => Some((query, results.clone())),
+                ObjectBody::Relation { query, results, .. }
+                | ObjectBody::Users { query, results, .. } => Some((query, results.clone())),
                 ObjectBody::Routine(_)
                 | ObjectBody::Structure { .. }
                 | ObjectBody::Diagram { .. } => None,
@@ -2025,6 +2039,16 @@ pub(crate) enum Focus {
     /// element's dispatch path, so focusing nothing at all is what makes every
     /// binding dead until something is clicked.
     Window,
+}
+
+/// How much of a server's roles is known, read on a side connection.
+#[derive(Clone, Default)]
+pub(crate) enum RolesState {
+    #[default]
+    Unloaded,
+    Loading,
+    Failed(String),
+    Loaded(Arc<crate::db::roles::Roles>),
 }
 
 pub(crate) enum CatalogState {
@@ -3342,9 +3366,10 @@ impl ObjectTab {
     pub(crate) fn label(&self) -> &str {
         match &self.body {
             ObjectBody::Diagram { .. } => &self.schema,
-            ObjectBody::Relation { .. } | ObjectBody::Routine(_) | ObjectBody::Structure { .. } => {
-                &self.name
-            }
+            ObjectBody::Relation { .. }
+            | ObjectBody::Routine(_)
+            | ObjectBody::Structure { .. }
+            | ObjectBody::Users { .. } => &self.name,
         }
     }
 
@@ -3354,9 +3379,10 @@ impl ObjectTab {
     pub(crate) fn filter(&self) -> &str {
         match &self.body {
             ObjectBody::Relation { filter, .. } => filter,
-            ObjectBody::Routine(_) | ObjectBody::Structure { .. } | ObjectBody::Diagram { .. } => {
-                ""
-            }
+            ObjectBody::Routine(_)
+            | ObjectBody::Structure { .. }
+            | ObjectBody::Diagram { .. }
+            | ObjectBody::Users { .. } => "",
         }
     }
 
@@ -3368,18 +3394,20 @@ impl ObjectTab {
                 .iter()
                 .map(stored_filter)
                 .collect(),
-            ObjectBody::Routine(_) | ObjectBody::Structure { .. } | ObjectBody::Diagram { .. } => {
-                Vec::new()
-            }
+            ObjectBody::Routine(_)
+            | ObjectBody::Structure { .. }
+            | ObjectBody::Diagram { .. }
+            | ObjectBody::Users { .. } => Vec::new(),
         }
     }
 
     pub(crate) fn stored(&self, engine: Engine, cx: &gpui::App) -> store::StoredObject {
         let diagram_view = match &self.body {
             ObjectBody::Diagram { view, .. } => Some(view.read(cx).stored()),
-            ObjectBody::Relation { .. } | ObjectBody::Routine(_) | ObjectBody::Structure { .. } => {
-                None
-            }
+            ObjectBody::Relation { .. }
+            | ObjectBody::Routine(_)
+            | ObjectBody::Structure { .. }
+            | ObjectBody::Users { .. } => None,
         };
         store::StoredObject {
             database: self.database.clone(),
@@ -3391,7 +3419,8 @@ impl ObjectTab {
                 ObjectBody::Structure { origin, .. } => origin.clone(),
                 ObjectBody::Relation { .. }
                 | ObjectBody::Routine(_)
-                | ObjectBody::Diagram { .. } => None,
+                | ObjectBody::Diagram { .. }
+                | ObjectBody::Users { .. } => None,
             },
             // Nothing writes the two-field rows an older build did; they are
             // read once on the way in and superseded by `bars` on this save.
@@ -3669,6 +3698,14 @@ pub(crate) enum ObjectBody {
         /// the tab is looked at, with the old diagram on screen meanwhile.
         stale: bool,
     },
+    /// A server's Users and roles: one per connection. The view holds what
+    /// was read; the slot is where a role change it put up for review runs,
+    /// never drawn, since the tab reads its roles again once one lands.
+    Users {
+        view: Entity<crate::users_view::UsersView>,
+        query: QueryState,
+        results: Entity<TableState<ResultGrid>>,
+    },
 }
 
 /// A relation's row count, each state carrying the filter it was asked under so
@@ -3818,6 +3855,8 @@ pub(crate) enum Refresh {
         /// (`Workspace::execute_unchecked`).
         verify: Option<Verification>,
     },
+    /// The Users and roles tab: its roles read again after a role change.
+    Roles,
 }
 
 impl Refresh {
