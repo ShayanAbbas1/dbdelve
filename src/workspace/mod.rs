@@ -12,6 +12,7 @@ mod editing;
 mod exports;
 use exports::ExportMenu;
 mod files;
+mod filter_picker;
 mod filters;
 mod folders;
 mod forms;
@@ -367,6 +368,13 @@ pub(crate) struct Workspace {
     /// The theme in force when the theme picker opened, while it is open. The
     /// installed one is only a preview until a row is confirmed.
     pub(crate) theme_before_preview: Option<Theme>,
+    /// The filter picker: one connection's include list being edited. Only a
+    /// schema row's Filter Databases and the palette's command open it, and
+    /// only its own Save Filter, Discard Changes and `escape` end it.
+    pub(crate) filter_picker: Option<filter_picker::FilterPicker>,
+    /// Numbers each picker open, so a listing that lands after the dialog
+    /// closed, or after another went up, is not applied.
+    pub(crate) last_filter_request: u64,
     /// The opacity field in the settings panel. Kept here rather than built
     /// with the card, because an input is state the user is part-way through
     /// typing into and a fresh one every frame would swallow the keystroke.
@@ -540,6 +548,8 @@ impl Workspace {
             palette_recents: Vec::new(),
             collapsed_projects: HashSet::new(),
             theme_before_preview: None,
+            filter_picker: None,
+            last_filter_request: 0,
             opacity_input,
             focus: cx.focus_handle(),
             explorer_focus: cx.focus_handle(),
@@ -2570,6 +2580,7 @@ impl Render for Workspace {
             .child(self.beside_settings(main_pane, cx))
             .children(self.dialog_layer(
                 [
+                    ("filter-picker", self.render_filter_picker(window, cx)),
                     ("apply-review", self.render_apply_review(cx)),
                     ("import-rows", self.render_import_rows(window, cx)),
                     ("delete", self.render_delete_confirmation(cx)),

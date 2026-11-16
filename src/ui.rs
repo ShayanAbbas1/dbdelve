@@ -735,12 +735,37 @@ pub(crate) fn button(
     size: Control,
     t: Theme,
 ) -> Button {
+    button_inked(id, label, tone, size, tone.ink(t))
+}
+
+/// A [`button`] whose label wears `ink` rather than its tone's: the library's
+/// disabled style dims the fill, and a ghost has none, so a label pinned to
+/// its tone looks the same disabled as enabled.
+pub(crate) fn button_inked(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<gpui::SharedString>,
+    tone: Tone,
+    size: Control,
+    ink: Srgb,
+) -> Button {
     control(id, tone, size)
         .px(px(size.padding()))
         .when(size == Control::Standard, |standard| {
             standard.min_w(px(layout::CONTROL_MIN_WIDTH))
         })
-        .child(button_label(label, tone, size, t))
+        .child(inked_label(label, size, ink))
+}
+
+/// The ink a Quiet button's label wears, for [`button_inked`]: its tone's
+/// while the button can act and the faint one while it is disabled, decided by
+/// the same value the button's `.disabled` is given, since the library's
+/// disabled style dims only a fill and a ghost has none.
+pub(crate) fn quiet_ink(t: Theme, live: bool) -> Srgb {
+    if live {
+        Tone::Quiet.ink(t)
+    } else {
+        t.text_faint
+    }
 }
 
 /// A button that is only its icon, so it is square and reads as an
@@ -792,6 +817,10 @@ pub(crate) fn button_label(
     size: Control,
     t: Theme,
 ) -> impl IntoElement {
+    inked_label(label, size, tone.ink(t))
+}
+
+fn inked_label(label: impl Into<gpui::SharedString>, size: Control, ink: Srgb) -> gpui::Div {
     div()
         .min_w_0()
         .overflow_hidden()
@@ -801,7 +830,7 @@ pub(crate) fn button_label(
         .line_height(gpui::relative(1.))
         .text_size(px(size.text_size()))
         .font_weight(FontWeight::MEDIUM)
-        .text_color(tone.ink(t))
+        .text_color(ink)
         .child(label.into())
 }
 
@@ -1548,5 +1577,15 @@ mod tests {
         assert_eq!(human_bytes(999), "999 B");
         assert_eq!(human_bytes(578_923), "578.9 KB");
         assert_eq!(human_bytes(1_500_000), "1.5 MB");
+    }
+
+    #[test]
+    fn a_quiet_label_that_cannot_act_reads_apart_from_one_that_can_on_every_theme() {
+        for theme in theme::Theme::built_in() {
+            let t = theme.for_popup();
+            assert_eq!(quiet_ink(t, true), Tone::Quiet.ink(t));
+            assert_eq!(quiet_ink(t, false), t.text_faint);
+            assert_ne!(quiet_ink(t, false), quiet_ink(t, true));
+        }
     }
 }

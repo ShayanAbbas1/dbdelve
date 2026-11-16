@@ -224,6 +224,19 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   server-listed names into an `IN` list and sending nothing for a match of
   nothing. `Catalog::left_out` carries how many it hid, which the sidebar's
   empty line names (`explorer::empty_catalog_line`).
+  Save and load both pass the lists through `Include::from_stored` (entries
+  trimmed, blanks dropped, at most `ENTRIES_CAP`, 500, per list), so what a
+  profile holds is what its file holds and the picker's preview counts only
+  what Save keeps.
+  Where the catalog lists databases as schemas (MySQL, MariaDB, ClickHouse),
+  the hidden count comes from the listing the picker reads
+  (`Connection::catalog_databases`: on MySQL and MariaDB every database but
+  the system ones, as the catalog draws them; on ClickHouse the databases
+  holding a relation), so shown plus hidden is the unfiltered count.
+  A filter saved while a catalog read is under way sets
+  `Profile::reread_after_load`; the read that lands reads again with it, and a
+  read or connect that fails clears it, since the next read takes the saved
+  lists anyway.
 - **Where `Engine::picks_schema` (Postgres, Snowflake, DuckDB), the titlebar
   picks the schema unqualified names resolve in**, without a reconnect: tabs,
   results and staged edits stay, since every name DBDelve writes names its

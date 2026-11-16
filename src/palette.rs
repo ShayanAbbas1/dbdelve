@@ -418,6 +418,8 @@ pub enum Command {
     ImportTheme(user::Source, usize, Option<Appearance>),
     /// Fetch the server's databases and put the palette back up over them.
     SelectDatabase,
+    /// Open the filter picker over the front connection's databases.
+    FilterDatabases,
     SetDatabase(String),
     /// Put the palette back up over the catalog's schemas.
     SelectSchema,
@@ -4394,6 +4396,16 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
                     )
                 }),
         );
+    }
+    // Offered where there are databases to choose between, and omitted rather
+    // than disabled where there are none.
+    if profile.offers_filter() {
+        items.push(command(
+            "Filter databases…",
+            icon::DATABASE,
+            Command::FilterDatabases,
+            CONNECTION,
+        ));
     }
     if profile.config.target().picks_schema() {
         items.push(command(

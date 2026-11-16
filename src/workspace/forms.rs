@@ -1314,7 +1314,9 @@ impl Workspace {
                 if all { 3 } else { 2 }
             }
             Some("stable-import") => self.stable_import_buttons(),
-            Some("import-rows") | None => 0,
+            // Forms with fields and a list of their own, which Tab moves the
+            // keyboard through and whose buttons act through their own handlers.
+            Some("import-rows" | "filter-picker") | None => 0,
             Some(_) => 2 + checkbox,
         }
     }
@@ -2773,6 +2775,8 @@ impl Workspace {
         let menu_schema = active_schema.clone();
         let picks_schema = profile.config.target().picks_schema();
         let draws_diagrams = profile.draws_diagrams();
+        let offers_filter = profile.offers_filter();
+        let filter_profile = profile.id.clone();
         let drop_line = self.explorer_drop.clone();
         let open_queries: HashSet<String> = profile
             .session
@@ -3161,6 +3165,19 @@ impl Workspace {
                                     });
                                 }),
                         );
+                    }
+                    // Where a database is its own schema (MySQL, MariaDB,
+                    // ClickHouse) these rows are the databases the filter
+                    // chooses between; elsewhere the own database's schemas.
+                    if offers_filter {
+                        let (workspace, profile) = (menu_workspace.clone(), filter_profile.clone());
+                        menu = menu.item(PopupMenuItem::new("Filter Databases…").on_click(
+                            move |_, window, cx| {
+                                _ = workspace.update(cx, |workspace, cx| {
+                                    workspace.open_filter_picker(&profile, window, cx);
+                                });
+                            },
+                        ));
                     }
                     return menu;
                 };

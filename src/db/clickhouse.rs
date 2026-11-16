@@ -10,7 +10,7 @@
 mod edit;
 mod http;
 #[cfg(test)]
-mod mock;
+pub(crate) mod mock;
 mod tsv;
 
 use std::collections::HashMap;
@@ -83,6 +83,25 @@ const SESSION_ENDED: &str = "The server ended the session after it sat idle; USE
 const DATABASES_SQL: &str = "
 SELECT name, name = currentDatabase() AS is_current
 FROM system.databases
+ORDER BY name";
+
+/// The databases [`RELATIONS_SQL`] draws when nothing is filtered, by its own
+/// predicates, so a filtered catalog's `left_out` and the filter picker's list
+/// count what the unfiltered sidebar counts. `system.databases` also lists an
+/// empty database (`default` on a fresh server) the sidebar never draws. The
+/// inner select keeps the column name `database` and names it `name` only
+/// outside: ClickHouse resolves a select alias before a column of the same
+/// name, so aliasing it inside would make the `.inner` predicate read the
+/// database's name.
+const CATALOG_DATABASES_SQL: &str = "
+SELECT database AS name, database = currentDatabase() AS is_current
+FROM (
+    SELECT DISTINCT database
+    FROM system.tables
+    WHERE database NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema')
+        AND NOT is_temporary
+        AND NOT startsWith(name, '.inner')
+)
 ORDER BY name";
 
 /// `total_bytes` and `total_rows` are what the server keeps for the table, so
@@ -719,11 +738,13 @@ impl Connection {
 
     /// Only the matched databases are asked about; the listing is read here,
     /// in the read's own closure, so the statement carries names the server
-    /// just gave. ClickHouse would accept an empty `IN`, but a match of nothing
-    /// sends no statement on any engine.
+    /// just gave. The listing is [`Self::catalog_databases`], the databases the
+    /// catalog draws, so the `left_out` returned is on the sidebar's basis. A
+    /// match of nothing sends no statement on any engine, though ClickHouse
+    /// would accept an empty `IN`.
     pub fn catalog(&self, shown: &Shown) -> Result<Catalog, DbError> {
         let matched = if shown.narrows_catalog() {
-            shown.matched_databases(&self.databases()?, Engine::ClickHouse)
+            shown.matched_databases(&self.catalog_databases()?, Engine::ClickHouse)
         } else {
             None
         };
@@ -744,6 +765,12 @@ impl Connection {
 
     pub fn databases(&self) -> Result<Databases, DbError> {
         assemble_databases(&self.internal_query(DATABASES_SQL)?)
+    }
+
+    /// The databases holding something the catalog reads, the server's own
+    /// left out: what the unfiltered sidebar draws.
+    pub fn catalog_databases(&self) -> Result<Databases, DbError> {
+        assemble_databases(&self.internal_query(CATALOG_DATABASES_SQL)?)
     }
 
     pub fn structure(&self, schema: &str, relation: &str) -> Result<Structure, DbError> {
@@ -1688,12 +1715,10 @@ ORDER BY database, name"#;
 
         let connection = Connection::open(&live::live_config()).expect("connection should open");
         let user_databases = connection
-            .databases()
+            .catalog_databases()
             .expect("databases should list")
             .names
-            .iter()
-            .filter(|name| !Engine::ClickHouse.is_system_database(name))
-            .count();
+            .len();
         let shown = |entries: &[&str]| {
             Include {
                 databases: entries.iter().map(|entry| (*entry).to_string()).collect(),
@@ -1721,6 +1746,89 @@ ORDER BY database, name"#;
         let all = schema_names(&all);
         assert!(all.contains(&"analytics".to_string()), "{all:?}");
         assert!(all.contains(&"dbdelve_dev".to_string()), "{all:?}");
+    }
+
+    #[test]
+    fn a_filtered_catalog_counts_the_hidden_databases_the_sidebar_draws_and_the_picker_lists_the_same()
+     {
+        use crate::db::{Include, Levels};
+
+        let mock = Mock::start();
+        let connection = open(&mock);
+        let listing = [("name", "String"), ("is_current", "UInt8")];
+        mock.on_statement(
+            "SELECT DISTINCT database",
+            [Response::rows(
+                &listing,
+                &[&["analytics", "0"], &["dbdelve_dev", "1"]],
+            )],
+        );
+        mock.on_statement(
+            "relation_kind",
+            [Response::rows(
+                &[
+                    ("schema_name", "String"),
+                    ("relation_name", "String"),
+                    ("relation_kind", "String"),
+                    ("size_bytes", "Nullable(UInt64)"),
+                    ("row_estimate", "Nullable(UInt64)"),
+                ],
+                &[&["analytics", "events", "table", "\\N", "\\N"]],
+            )],
+        );
+        mock.on_statement(
+            "FROM system.databases",
+            [Response::rows(
+                &listing,
+                &[
+                    &["INFORMATION_SCHEMA", "0"],
+                    &["analytics", "0"],
+                    &["dbdelve_dev", "1"],
+                    &["default", "0"],
+                    &["information_schema", "0"],
+                    &["system", "0"],
+                ],
+            )],
+        );
+        let shown = Include {
+            databases: vec!["analyt*".into()],
+            ..Include::default()
+        }
+        .resolve(Levels::DatabaseIsSchema, None, None);
+
+        let catalog = connection.catalog(&shown).unwrap();
+        let drawn = connection.catalog_databases().unwrap();
+
+        let schemas: Vec<_> = catalog.schemas.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(schemas, ["analytics"]);
+        assert_eq!(catalog.left_out, 1);
+        assert_eq!(drawn.names, ["analytics", "dbdelve_dev"]);
+        assert_eq!(drawn.current.as_deref(), Some("dbdelve_dev"));
+        assert_eq!(catalog.schemas.len() + catalog.left_out, drawn.names.len());
+        let relations = sent(&mock, "relation_kind");
+        assert_eq!(relations.len(), 1);
+        assert!(
+            relations[0]
+                .statement
+                .contains("AND database IN ('analytics')"),
+            "{}",
+            relations[0].statement
+        );
+        assert!(sent(&mock, "FROM system.databases").is_empty());
+    }
+
+    #[test]
+    fn the_listing_a_filtered_catalog_counts_over_reads_with_the_relations_predicates() {
+        for predicate in [
+            "database NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema')",
+            "NOT is_temporary",
+            "NOT startsWith(name, '.inner')",
+        ] {
+            assert!(RELATIONS_SQL.contains(predicate), "{predicate}");
+            assert!(CATALOG_DATABASES_SQL.contains(predicate), "{predicate}");
+        }
+        assert!(CATALOG_DATABASES_SQL.contains("SELECT DISTINCT database"));
+        assert!(!CATALOG_DATABASES_SQL.contains("DISTINCT database AS"));
     }
 
     const FACTS_COLUMNS: [(&str, &str); 4] = [
@@ -1783,7 +1891,7 @@ ORDER BY database, name"#;
         Connection::open(server)
     }
 
-    fn open(mock: &Mock) -> Connection {
+    pub(super) fn open(mock: &Mock) -> Connection {
         open_with(mock, writer(), &profile(mock)).unwrap()
     }
 
@@ -3886,6 +3994,47 @@ mod live {
     fn live_any(config: ServerConfig) -> crate::db::Connection {
         crate::db::Connection::open(ConnectionConfig::ClickHouse(config))
             .expect("connection should open")
+    }
+
+    /// The picker's list, the unfiltered sidebar and a filtered one count the
+    /// same databases, so a filtered total never exceeds the unfiltered one.
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_the_pickers_total_and_a_filtered_total_are_the_unfiltered_count() {
+        use crate::db::{Include, Levels};
+
+        let connection = live_any(live_config());
+        let mut picker = connection
+            .catalog_databases(Engine::ClickHouse)
+            .expect("databases should list")
+            .names;
+        let drawn = |shown: &Shown| {
+            let mut catalog = connection.catalog(shown).expect("catalog should read");
+            catalog.merge(connection.routines(shown).expect("routines should read"));
+            catalog
+        };
+        let unfiltered = drawn(&Shown::everything());
+        let filtered = drawn(
+            &Include {
+                databases: vec!["analyt*".into()],
+                ..Include::default()
+            }
+            .resolve(Levels::DatabaseIsSchema, None, None),
+        );
+
+        assert_eq!(
+            filtered.schemas.len() + filtered.left_out,
+            unfiltered.schemas.len()
+        );
+        let mut tree: Vec<_> = unfiltered.schemas.iter().map(|s| s.name.clone()).collect();
+        picker.sort();
+        tree.sort();
+        assert_eq!(picker, tree);
+        assert!(
+            !picker
+                .iter()
+                .any(|name| name == "default" || name == "system")
+        );
     }
 
     fn run(connection: &Connection, sql: &str) -> Result<QueryResult, DbError> {

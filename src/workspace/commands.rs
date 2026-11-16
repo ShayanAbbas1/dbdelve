@@ -793,6 +793,11 @@ impl Workspace {
             }
             Command::SelectTheme => self.select_theme(&SelectTheme, window, cx),
             Command::SelectDatabase => self.select_database(&SelectDatabase, window, cx),
+            Command::FilterDatabases => {
+                if let Some(profile) = self.profile().map(|profile| profile.id.clone()) {
+                    self.open_filter_picker(&profile, window, cx);
+                }
+            }
             Command::SetDatabase(name) => self.set_database(name, window, cx),
             Command::SetTarget(target) => {
                 if let Some(form) = &mut self.form {
