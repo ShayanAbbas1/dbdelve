@@ -1742,6 +1742,7 @@ mod tests {
                 },
             ],
             database: None,
+            ..Default::default()
         }
     }
 
@@ -1972,6 +1973,7 @@ mod tests {
                         routines: Vec::new(),
                     }],
                     database: None,
+                    ..Default::default()
                 },
                 &[],
             )
@@ -2087,6 +2089,7 @@ mod tests {
                     routines: Vec::new(),
                 }],
                 database: None,
+                ..Default::default()
             },
             &[("public", "wide", &names)],
         );
@@ -2124,6 +2127,7 @@ mod tests {
                 })
                 .collect(),
             database: None,
+            ..Default::default()
         };
         let completions = detached(many, &[]);
         let sql = "SELECT * FROM users WHERE u";
@@ -2215,6 +2219,7 @@ mod tests {
                     routines: Vec::new(),
                 }],
                 database: None,
+                ..Default::default()
             },
             &[("shop", "users", &["_id", "name", "email"])],
         );
@@ -2296,6 +2301,7 @@ mod tests {
             Catalog {
                 schemas: Vec::new(),
                 database: None,
+                ..Default::default()
             },
             &[],
         );
@@ -2353,6 +2359,7 @@ mod tests {
                     routines: Vec::new(),
                 }],
                 database: None,
+                ..Default::default()
             },
             &held,
         );
@@ -2403,6 +2410,7 @@ mod tests {
                 },
             ],
             database: None,
+            ..Default::default()
         };
         let text = "parent_id IN (SELECT id FROM accounts) AND ema";
         let scope = ("public".to_string(), "accounts".to_string());
@@ -2535,6 +2543,7 @@ mod tests {
                 routines: Vec::new(),
             }],
             database: None,
+            ..Default::default()
         };
         let held = described
             .into_iter()

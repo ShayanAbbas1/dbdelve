@@ -6,7 +6,7 @@ use std::{
 use gpui_component::tree::TreeItem;
 
 use crate::db::{
-    Catalog, Engine, EngineSpec, ForeignTable, MaterializedViewDrop, RelationKind, Routine,
+    Catalog, Engine, EngineSpec, ForeignTable, Levels, MaterializedViewDrop, RelationKind, Routine,
     RoutineKind, Schema, SelectTop, Syntax, Target, Truncate,
 };
 use crate::fuzzy::{Fuzzy, Query};
@@ -392,6 +392,21 @@ pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
         highlights: builder.highlights,
         shortcuts: HashMap::new(),
     }
+}
+
+/// What a catalog with no rows to list says: that none was found, or, where
+/// the include filter left every one out, how many it hides, so an empty tree
+/// is not mistaken for an empty server.
+pub fn empty_catalog_line(levels: Levels, left_out: usize) -> String {
+    if left_out == 0 {
+        return "No database objects found.".to_string();
+    }
+    let noun = match levels {
+        Levels::DatabaseThenSchema => "schema",
+        Levels::Flat | Levels::DatabaseIsSchema | Levels::DatabaseHoldsObjects => "database",
+    };
+    let plural = if left_out == 1 { "" } else { "s" };
+    format!("No database objects shown: the filter hides {left_out} {noun}{plural}.")
 }
 
 /// The Queries group, holding every saved query whose name the filter keeps,
@@ -1349,6 +1364,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_empty_catalog_line_names_how_many_the_filter_hides() {
+        assert_eq!(
+            empty_catalog_line(Levels::DatabaseIsSchema, 0),
+            "No database objects found."
+        );
+        assert_eq!(
+            empty_catalog_line(Levels::DatabaseIsSchema, 37),
+            "No database objects shown: the filter hides 37 databases."
+        );
+        assert_eq!(
+            empty_catalog_line(Levels::DatabaseHoldsObjects, 1),
+            "No database objects shown: the filter hides 1 database."
+        );
+        assert_eq!(
+            empty_catalog_line(Levels::DatabaseThenSchema, 2),
+            "No database objects shown: the filter hides 2 schemas."
+        );
+        assert!(empty_catalog_line(Levels::DatabaseThenSchema, 1).ends_with("1 schema."));
+    }
+
+    #[test]
     fn a_count_counts_what_the_preview_pages_through_and_passes_both_gates() {
         for (engine, aggregate) in [
             (Engine::Postgres, "COUNT(*)"),
@@ -1529,6 +1565,7 @@ mod tests {
                 },
             ],
             database: None,
+            ..Default::default()
         }
     }
 
@@ -1574,6 +1611,7 @@ mod tests {
                 routines: Vec::new(),
             }],
             database: None,
+            ..Default::default()
         }
     }
 

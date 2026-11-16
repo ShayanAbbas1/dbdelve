@@ -2050,6 +2050,429 @@ fn a_session_changed_behind_the_save_panel_is_not_asked_about_the_table(cx: &mut
     });
 }
 
+/// The app launched on one saved DuckDB profile, `extra` among its scalar
+/// keys, its file seeded with `own_seed` and a second file, `other.duckdb`,
+/// seeded with `other_seed` beside it for a statement to attach. Both files
+/// are closed again before the app opens one.
+fn launch_duckdb_seeded<'a>(
+    cx: &'a mut TestAppContext,
+    extra: &str,
+    own_seed: &str,
+    other_seed: &str,
+) -> (Entity<Workspace>, &'a mut VisualTestContext) {
+    let directory = store::dbdelve_directory().expect("the test home has a data directory");
+    std::fs::create_dir_all(&directory).expect("the data directory must be creatable");
+    let database = directory.join("e2e.duckdb");
+    ::duckdb::Connection::open(&database)
+        .and_then(|connection| connection.execute_batch(own_seed))
+        .expect("the schema must apply");
+    ::duckdb::Connection::open(directory.join("other.duckdb"))
+        .and_then(|connection| connection.execute_batch(other_seed))
+        .expect("the second schema must apply");
+    std::fs::write(
+        directory.join("profiles.toml"),
+        format!(
+            "active = \"e2e\"\n\
+             [settings]\n\
+             check_for_updates = false\n\
+             [[profiles]]\n\
+             id = \"e2e\"\n\
+             name = \"E2E\"\n\
+             host = \"\"\n\
+             database = \"\"\n\
+             user = \"\"\n\
+             engine = \"duckdb\"\n\
+             path = {:?}\n\
+             {extra}\n",
+            database.display().to_string()
+        ),
+    )
+    .expect("profiles.toml must be writable");
+    let (workspace, cx) = launch(cx);
+    cx.executor().allow_parking();
+    // CI's live-test job sets `PG*`, which puts an environment profile in
+    // front of the saved one.
+    workspace.update(cx, |workspace, cx| {
+        let index = workspace
+            .profiles
+            .iter()
+            .position(|profile| profile.config.engine() == Engine::DuckDb)
+            .expect("the saved DuckDB profile is restored");
+        workspace.activate(index, cx);
+    });
+    settle(cx);
+    (workspace, cx)
+}
+
+/// Runs `sql` as the whole buffer of the query tab in front, and waits for it
+/// to complete.
+fn run_in_front(workspace: &Entity<Workspace>, cx: &mut VisualTestContext, sql: &str) {
+    cx.update(|window, cx| {
+        let editor = workspace
+            .read(cx)
+            .profile()
+            .and_then(|profile| profile.session.active_query_tab())
+            .expect("a connected profile opens on a query tab")
+            .editor
+            .clone();
+        editor.update(cx, |input, cx| input.set_value(sql, window, cx));
+    });
+    cx.dispatch_action(crate::actions::RunQuery);
+    settle(cx);
+    query_tab(workspace, cx, |tab, _, _| match &tab.query {
+        QueryState::Complete { .. } => {}
+        QueryState::Failed(error) => panic!("{sql} failed: {error}"),
+        _ => panic!("{sql} never completed"),
+    });
+}
+
+/// Attaches `other.duckdb` to the instance the profile in front is on, and
+/// reads the catalog again.
+fn attach_other(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
+    let other = store::dbdelve_directory()
+        .expect("the test home has a data directory")
+        .join("other.duckdb");
+    run_in_front(
+        workspace,
+        cx,
+        &format!("ATTACH '{}' AS other", other.display()),
+    );
+    workspace.update(cx, |workspace, cx| workspace.refresh_schema(cx));
+    settle(cx);
+}
+
+/// The schema names of the front profile's catalog, how many the filter left
+/// out of it, and whether its routines have landed.
+fn own_catalog(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) -> (Vec<String>, usize, bool) {
+    workspace.read_with(cx, |workspace, _| {
+        match &workspace.profile().expect("a profile is in front").catalog {
+            CatalogState::Loaded(catalog, routines) => (
+                catalog.schemas.iter().map(|s| s.name.clone()).collect(),
+                catalog.left_out,
+                matches!(routines, crate::session::Routines::Loaded),
+            ),
+            _ => panic!("the catalog has not loaded"),
+        }
+    })
+}
+
+/// Whether the sidebar's tree lists the row `id`.
+fn explorer_lists(workspace: &Entity<Workspace>, id: &str, cx: &mut VisualTestContext) -> bool {
+    cx.update(|_, cx| {
+        let tree = workspace
+            .read(cx)
+            .profile()
+            .expect("a profile is in front")
+            .session
+            .explorer_tree
+            .clone();
+        tree.read(cx).index_of(&id.to_string().into()).is_some()
+    })
+}
+
+#[gpui::test]
+fn select_database_on_a_filtered_duckdb_connection_lists_only_the_databases_it_names(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_duckdb_seeded(
+            cx,
+            "mode = \"full\"\ninclude_databases = [\"e2e\"]",
+            "CREATE TABLE t (id INTEGER);",
+            "CREATE TABLE u (id INTEGER);",
+        );
+        attach_other(&workspace, cx);
+
+        let listed = |cx: &mut VisualTestContext| {
+            cx.dispatch_action(crate::actions::SelectDatabase);
+            settle(cx);
+            let labels = palette_labels(&workspace, cx);
+            cx.simulate_keystrokes("escape");
+            settle(cx);
+            labels
+        };
+        let databases = listed(cx);
+        assert!(
+            databases.iter().any(|label| label == "e2e"),
+            "{databases:?}"
+        );
+        assert!(
+            !databases.iter().any(|label| label == "other"),
+            "{databases:?}"
+        );
+        workspace.read_with(cx, |workspace, cx| {
+            let profile = workspace.profile().expect("the connection is in front");
+            assert_eq!(profile.databases.names, ["e2e"]);
+            assert_eq!(profile.databases.current.as_deref(), Some("e2e"));
+            let stored = profile.stored(cx);
+            assert_eq!(stored.include_databases, ["e2e"]);
+            assert!(stored.include_schemas.is_empty());
+        });
+
+        // Without the list the attached database is offered: the filter, not
+        // the instance, kept it out. Changing the list keeps the session.
+        let generation = workspace.update(cx, |workspace, _| {
+            let profile = workspace.profile_mut().expect("the connection is in front");
+            profile.include.databases.clear();
+            profile.generation
+        });
+        let databases = listed(cx);
+        assert!(
+            databases.iter().any(|label| label == "other"),
+            "{databases:?}"
+        );
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.profile().unwrap().generation, generation);
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_schema_filter_hides_a_schema_of_the_own_database_across_a_refresh(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_duckdb_seeded(
+            cx,
+            "include_schemas = [\"main\"]",
+            "CREATE TABLE t (id INTEGER); CREATE SCHEMA extra; \
+             CREATE TABLE extra.x (id INTEGER);",
+            "CREATE TABLE u (id INTEGER);",
+        );
+        let check = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            assert_eq!(
+                own_catalog(workspace, cx),
+                (vec!["main".to_string()], 1, true)
+            );
+            assert!(explorer_lists(workspace, &explorer::schema_row("main"), cx));
+            assert!(!explorer_lists(
+                workspace,
+                &explorer::schema_row("extra"),
+                cx
+            ));
+        };
+        check(&workspace, cx);
+        workspace.update(cx, |workspace, cx| workspace.refresh_schema(cx));
+        settle(cx);
+        check(&workspace, cx);
+        quit(workspace, cx);
+    });
+}
+
+/// The labels the completion menu of the query tab in front lists after
+/// `text` is typed into an empty buffer and the menu asked for.
+fn completion_labels(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    text: &str,
+) -> Vec<String> {
+    cx.simulate_input(text);
+    settle(cx);
+    cx.simulate_keystrokes("escape");
+    settle(cx);
+    cx.simulate_keystrokes("ctrl-space");
+    settle(cx);
+    let labels = query_tab(workspace, cx, |tab, _, cx| {
+        tab.editor
+            .read(cx)
+            .completion_menu_state()
+            .items
+            .iter()
+            .map(|item| item.label.clone())
+            .collect()
+    });
+    cx.simulate_keystrokes("escape");
+    settle(cx);
+    labels
+}
+
+#[gpui::test]
+fn everything_that_reads_the_catalog_follows_the_filter(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_duckdb_seeded(
+            cx,
+            "mode = \"full\"\ninclude_databases = [\"e2e\"]\ninclude_schemas = [\"main\"]",
+            "CREATE TABLE t (id INTEGER); CREATE TABLE ab (id INTEGER); \
+             CREATE SCHEMA extra; CREATE TABLE extra.x (id INTEGER); \
+             CREATE TABLE extra.ax (id INTEGER);",
+            "CREATE TABLE u (id INTEGER);",
+        );
+        attach_other(&workspace, cx);
+
+        cx.dispatch_action(crate::actions::SelectDatabase);
+        settle(cx);
+        let databases = palette_labels(&workspace, cx);
+        assert!(
+            databases.iter().any(|label| label == "e2e"),
+            "{databases:?}"
+        );
+        assert!(
+            !databases.iter().any(|label| label == "other"),
+            "{databases:?}"
+        );
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| workspace.select_schema(window, cx))
+        });
+        settle(cx);
+        let schemas = palette_labels(&workspace, cx);
+        assert!(schemas.iter().any(|label| label == "main"), "{schemas:?}");
+        assert!(!schemas.iter().any(|label| label == "extra"), "{schemas:?}");
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+
+        cx.simulate_keystrokes("secondary-p");
+        settle(cx);
+        let objects = palette_labels(&workspace, cx);
+        assert!(objects.iter().any(|label| label == "main.t"), "{objects:?}");
+        assert!(
+            !objects.iter().any(|label| label == "extra.x"),
+            "{objects:?}"
+        );
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.new_query(&crate::actions::NewQuery, window, cx);
+        });
+        settle(cx);
+        let offered = completion_labels(&workspace, cx, "SELECT * FROM a");
+        // `ab` is in `main` and `ax` in `extra`: only the one the filter
+        // shows is offered.
+        assert!(
+            offered.iter().any(|label| label.contains("ab")),
+            "{offered:?}"
+        );
+        assert!(
+            !offered.iter().any(|label| label.contains("ax")),
+            "{offered:?}"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_tab_open_on_a_hidden_object_keeps_working_and_its_pin_draws_missing(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        store::write_query("e2e", "q", "SELECT 1").expect("the test home takes a saved query");
+        let (workspace, cx) = launch_duckdb_seeded(
+            cx,
+            "",
+            "CREATE TABLE t (id INTEGER); CREATE SCHEMA extra; \
+             CREATE TABLE extra.x (id INTEGER); INSERT INTO extra.x VALUES (1), (2);",
+            "CREATE TABLE u (id INTEGER);",
+        );
+        cx.simulate_keystrokes("secondary-p");
+        settle(cx);
+        cx.simulate_input("extra.x");
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        let x = explorer::relation_row("extra", "x");
+        workspace.update(cx, |workspace, cx| {
+            let leaf = workspace.profile().unwrap().session.explorer_leaves[&x];
+            let member = workspace.member_at(leaf.target).expect("x is a member");
+            workspace.toggle_pin(explorer::Pin::Member(member), cx);
+        });
+        settle(cx);
+
+        // What the tree draws of the pin, by whether its object is listed.
+        let pin_missing = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                let session = &workspace.profile().expect("a profile is in front").session;
+                let mut pins =
+                    session
+                        .explorer_shortcuts
+                        .values()
+                        .filter_map(|shortcut| match shortcut {
+                            explorer::Shortcut::Member {
+                                folder: None,
+                                missing,
+                                ..
+                            } => Some(*missing),
+                            _ => None,
+                        });
+                let pin = pins.next().expect("the object is pinned");
+                assert_eq!(pins.next(), None, "one pin");
+                pin
+            })
+        };
+        let survivors = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                let profile = workspace.profile().expect("a profile is in front");
+                (
+                    profile
+                        .session
+                        .objects
+                        .iter()
+                        .map(|tab| (tab.schema.clone(), tab.name.clone()))
+                        .collect::<Vec<_>>(),
+                    profile.shortcuts.pins.len(),
+                    profile.session.saved_queries.clone(),
+                )
+            })
+        };
+        let object = ("extra".to_string(), "x".to_string());
+        assert_eq!(
+            survivors(cx),
+            (vec![object.clone()], 1, vec!["q".to_string()])
+        );
+        assert!(!pin_missing(cx));
+
+        workspace.update(cx, |workspace, cx| {
+            workspace
+                .profile_mut()
+                .expect("a profile is in front")
+                .include
+                .schemas = vec!["main".to_string()];
+            workspace.refresh_schema(cx);
+        });
+        settle(cx);
+        assert_eq!(own_catalog(&workspace, cx).0, ["main"]);
+        assert_eq!(
+            survivors(cx),
+            (vec![object.clone()], 1, vec!["q".to_string()])
+        );
+        assert!(pin_missing(cx), "the pin is greyed, not dropped");
+        assert_eq!(
+            store::read_query("e2e", "q").expect("the file reads"),
+            Some("SELECT 1".to_string())
+        );
+
+        // The tab still reads its rows through the session it was opened on.
+        let id = workspace.read_with(cx, |workspace, _| {
+            workspace.profile().unwrap().session.objects[0].id
+        });
+        workspace.update(cx, |workspace, cx| workspace.refresh_relation(id, cx));
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let tab = &workspace.profile().unwrap().session.objects[0];
+            let ObjectBody::Relation { query, .. } = &tab.body else {
+                panic!("x is a table");
+            };
+            assert!(matches!(query, QueryState::Complete { .. }));
+        });
+
+        // Removing the filter lists the object again, and the pin with it.
+        workspace.update(cx, |workspace, cx| {
+            workspace
+                .profile_mut()
+                .expect("a profile is in front")
+                .include
+                .schemas
+                .clear();
+            workspace.refresh_schema(cx);
+        });
+        settle(cx);
+        assert!(!pin_missing(cx), "the pin is drawn present again");
+        assert_eq!(survivors(cx), (vec![object], 1, vec!["q".to_string()]));
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn the_export_question_takes_the_keyboard_and_hands_it_back_when_dismissed(
     cx: &mut TestAppContext,

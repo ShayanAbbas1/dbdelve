@@ -236,7 +236,7 @@ fn live_db2_structure_reads_a_composite_key_an_index_and_foreign_keys() {
     }
     let schema = schema();
 
-    let catalog = connection.catalog().unwrap();
+    let catalog = connection.catalog(&crate::db::Shown::everything()).unwrap();
     let relations = &catalog
         .schemas
         .iter()

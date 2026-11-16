@@ -208,6 +208,22 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   (`Workspace::use_database`): no reconnect, a new generation and a fresh
   catalog, and a `USE` that fails puts the profile back where it was. The
   database the file opens as is stored blank, so a renamed file still opens.
+- **A profile keeps one include list per filtered level** (`Profile::include`,
+  `db::Include`; `include_databases` and `include_schemas` in `profiles.toml`,
+  each left out when empty). An entry is an exact name or a `*`/`?` glob,
+  matched in Rust ignoring case (`db::include::matches`) and never sent as
+  `LIKE`; empty means everything. `Target::levels` says which list a target
+  uses, and a list its level does not use is kept and ignored. The
+  connection's own database and active schema always show. The lists sit
+  outside `ConnectionConfig`, so changing them never reconnects. A list is
+  narrowed where each answer is read (`Connection::catalog`, `routines`,
+  `sizes` and `databases`, each taking the `Shown` that `Profile::shown`
+  resolves), so nothing stores an unnarrowed answer: the sidebar, Select
+  Database, Select Schema, Go to Object and completion all follow it. MySQL,
+  MariaDB and ClickHouse read only the databases it matches, quoting the
+  server-listed names into an `IN` list and sending nothing for a match of
+  nothing. `Catalog::left_out` carries how many it hid, which the sidebar's
+  empty line names (`explorer::empty_catalog_line`).
 - **Where `Engine::picks_schema` (Postgres, Snowflake, DuckDB), the titlebar
   picks the schema unqualified names resolve in**, without a reconnect: tabs,
   results and staged edits stay, since every name DBDelve writes names its

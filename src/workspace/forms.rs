@@ -20,7 +20,7 @@ use crate::actions::{ConfirmDialog, NextDialogButton, PreviousDialogButton, Tick
 use crate::connection_form::{ConnectionTest, Reported, dialects, suggested_dialect};
 use crate::explorer::{
     Landing, Member, PINNED_GROUP, Pin, QUERIES_GROUP, Shortcut, ShortcutDatabase, Shortcuts,
-    is_schema_row, landing, relation_copies, saved_query,
+    empty_catalog_line, is_schema_row, landing, relation_copies, saved_query,
 };
 use crate::icons::{queries_group_icon, saved_query_icon};
 use crate::scroller::{SmoothScrollable, smooth_scoped};
@@ -2790,9 +2790,10 @@ impl Workspace {
         let message = match &profile.catalog {
             CatalogState::Loading => Some(("Loading database objects…".to_string(), t.text_muted)),
             CatalogState::Failed(message) => Some((message.clone(), t.danger)),
-            CatalogState::Loaded(catalog, _) if catalog.schemas.is_empty() => {
-                Some(("No database objects found.".to_string(), t.text_muted))
-            }
+            CatalogState::Loaded(catalog, _) if catalog.schemas.is_empty() => Some((
+                empty_catalog_line(profile.config.target().levels(), catalog.left_out),
+                t.text_muted,
+            )),
             CatalogState::Loaded(..) => None,
         };
         let lists_schemas = matches!(

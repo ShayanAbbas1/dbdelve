@@ -16,6 +16,23 @@ pub enum Driver {
     Plugin(&'static Plugin),
 }
 
+/// The levels a connection's databases and schemas sit at, from what the
+/// target's catalog holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Levels {
+    /// No databases to switch between: the schemas, or the objects, sit
+    /// directly under the connection.
+    Flat,
+    /// The catalog lists every database as a schema, so each schema is a
+    /// database.
+    DatabaseIsSchema,
+    /// A database, then the schemas of that database under it.
+    DatabaseThenSchema,
+    /// A database whose one schema is the database itself, so that one schema
+    /// holds the database's objects.
+    DatabaseHoldsObjects,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Target {
     pub engine: Engine,
@@ -259,6 +276,22 @@ impl Target {
     /// schema, as MySQL's does.
     pub fn catalog_lists_databases(self) -> bool {
         self.abilities().catalog_lists_databases
+    }
+
+    /// The levels a connection of this target's databases and schemas sit
+    /// at, one pure function of its abilities.
+    pub fn levels(self) -> Levels {
+        let abilities = self.abilities();
+        match (
+            abilities.switches_database,
+            abilities.catalog_lists_databases,
+            abilities.one_schema_per_database,
+        ) {
+            (false, ..) => Levels::Flat,
+            (true, true, _) => Levels::DatabaseIsSchema,
+            (true, false, true) => Levels::DatabaseHoldsObjects,
+            (true, false, false) => Levels::DatabaseThenSchema,
+        }
     }
 
     /// Whether the row count the catalog carries for a table is exact rather
@@ -558,5 +591,26 @@ mod tests {
             driver: Driver::Plugin(odbc()),
         };
         assert!(!plugin.takes_password_command());
+    }
+
+    #[test]
+    fn each_target_has_the_levels_its_abilities_give() {
+        for engine in Engine::ALL {
+            let levels = match engine {
+                Engine::Postgres | Engine::SqlServer | Engine::Snowflake | Engine::DuckDb => {
+                    Levels::DatabaseThenSchema
+                }
+                Engine::MySql | Engine::MariaDb | Engine::ClickHouse => Levels::DatabaseIsSchema,
+                Engine::MongoDb | Engine::Redis => Levels::DatabaseHoldsObjects,
+                Engine::Sqlite | Engine::Turso | Engine::Generic => Levels::Flat,
+            };
+            assert_eq!(Target::built_in(engine).levels(), levels, "{engine:?}");
+            // A plugin has none of the abilities whatever dialect it speaks.
+            let plugin = Target {
+                engine,
+                driver: Driver::Plugin(odbc()),
+            };
+            assert_eq!(plugin.levels(), Levels::Flat, "{engine:?}");
+        }
     }
 }

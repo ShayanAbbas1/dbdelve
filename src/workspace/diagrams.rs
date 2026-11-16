@@ -767,6 +767,7 @@ mod tests {
                 routines: Vec::new(),
             }],
             database: None,
+            ..Default::default()
         };
         assert_eq!(drawn_table_count(&catalog, "public"), Some(2));
         assert_eq!(drawn_table_count(&catalog, "other"), None);
@@ -793,6 +794,7 @@ mod tests {
                 schema("billing", RelationKind::PartitionedTable),
             ],
             database: None,
+            ..Default::default()
         };
         assert_eq!(
             offered_schemas(Some("public".into()), Some(&catalog)),

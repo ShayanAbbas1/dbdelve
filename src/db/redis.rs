@@ -631,6 +631,7 @@ impl Connection {
                 routines: Vec::new(),
             }],
             database: None,
+            ..Default::default()
         })
     }
 
@@ -2440,6 +2441,26 @@ mod tests {
         })
         .unwrap();
         assert_eq!(cells(&ran(&other, "GET other:key")), [some(&["in db 1"])]);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
+    fn live_the_include_list_lists_only_the_matched_databases() {
+        use crate::db::{Include, Levels, Shown};
+        let connection = crate::db::Connection::Redis(live());
+        let shown = Include::from_stored(vec!["db1".into()], Vec::new()).resolve(
+            Levels::DatabaseHoldsObjects,
+            Some("db0"),
+            None,
+        );
+        let listed = connection
+            .databases(Engine::Redis, &shown)
+            .expect("databases should list");
+        assert_eq!(listed.names, ["db0", "db1"]);
+        let all = connection
+            .databases(Engine::Redis, &Shown::everything())
+            .expect("databases should list");
+        assert!(all.names.len() > listed.names.len());
     }
 
     #[test]

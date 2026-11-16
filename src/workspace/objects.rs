@@ -1963,6 +1963,7 @@ mod tests {
                     },
                 }],
                 database: None,
+                ..Default::default()
             },
             routines,
         )

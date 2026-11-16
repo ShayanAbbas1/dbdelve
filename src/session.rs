@@ -32,7 +32,8 @@ use crate::{
     Workspace, completion,
     db::{
         CancelToken, Catalog, Connection, ConnectionConfig, Databases, DbError, Engine,
-        ExplainMode, QueryResult, Relation, RelationKind, Routine, Row, Structure, Syntax, Target,
+        ExplainMode, Include, QueryResult, Relation, RelationKind, Routine, Row, Shown, Structure,
+        Syntax, Target,
     },
     explain::{self, Plan},
     explorer::{
@@ -63,6 +64,9 @@ pub(crate) struct Profile {
     pub(crate) config: ConnectionConfig,
     pub(crate) color: Option<ConnectionColor>,
     pub(crate) mode: Mode,
+    /// Which of the server's databases and schemas this connection shows.
+    /// Not part of `config`: changing it never reconnects.
+    pub(crate) include: Include,
     pub(crate) confirmed: Vec<Destructive>,
     /// Whether this connection has silenced the prompt before editing rows
     /// restored from an earlier session. Stored as [`STALE_ROWS`] among
@@ -234,6 +238,16 @@ impl Profile {
             .or_else(|| connection?.current_database().map(str::to_string))
     }
 
+    /// The include lists as they apply to this connection now, owned so a
+    /// read on a background thread can narrow its answer with them.
+    pub(crate) fn shown(&self) -> Shown {
+        self.include.resolve(
+            self.config.target().levels(),
+            self.active_database().as_deref(),
+            self.active_schema(),
+        )
+    }
+
     /// The database a folder or a pin names its objects by, where the
     /// catalog is one database's. Where it lists every database as a schema,
     /// none: keying on the one the session is on would hide every shortcut
@@ -375,6 +389,8 @@ impl Profile {
             next_query_id: Some(self.session.next_query_id),
             color: self.color.map(|color| color.slug().to_string()),
             mode: Some(self.mode.slug().to_string()),
+            include_databases: self.include.databases.clone(),
+            include_schemas: self.include.schemas.clone(),
             confirmed: self
                 .confirmed
                 .iter()

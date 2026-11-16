@@ -240,7 +240,7 @@ pub(super) fn catalog_round_trip(subject: &Subject) {
     let at = format!("catalog_round_trip on {:?}", subject.target.engine);
     let catalog = subject
         .connection
-        .catalog()
+        .catalog(&crate::db::Shown::everything())
         .unwrap_or_else(|error| panic!("{at}: {error}"));
     let schema = catalog
         .schemas

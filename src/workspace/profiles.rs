@@ -8,7 +8,7 @@ use gpui_component::menu::PopupMenuItem;
 use gpui_component::tree::{TreeEvent, TreeState};
 
 use crate::connection_form::{ConnectionTest, Reported, duplicate_profile_name, keep_schema};
-use crate::db::{ExternalConfig, PasswordCommand, Plugin};
+use crate::db::{ExternalConfig, Include, PasswordCommand, Plugin};
 use crate::explorer::Shortcuts;
 use crate::import::{self, Source};
 use crate::session::{STALE_ROWS, restored_shortcuts};
@@ -223,6 +223,9 @@ impl Workspace {
             mode: stored.mode.as_deref().map_or(Mode::default(), |slug| {
                 Mode::from_slug(slug).unwrap_or(Mode::ReadOnly)
             }),
+            // A file is a person's to edit: blanks are dropped and each list is
+            // capped.
+            include: Include::from_stored(stored.include_databases, stored.include_schemas),
             // A silenced kind this build cannot read is dropped, which only
             // means that kind still asks.
             confirmed: stored
@@ -290,6 +293,9 @@ impl Workspace {
             config,
             color,
             mode,
+            // Every way a profile is made starts unfiltered: the lists are the
+            // owner's to write.
+            include: Include::default(),
             confirmed: Vec::new(),
             confirmed_stale: false,
             generation: 0,
@@ -995,6 +1001,7 @@ impl Workspace {
         profile.schema_refresh = Some(profile.generation);
         let (id, generation) = (profile.id.clone(), profile.generation);
         let in_transaction = profile.in_transaction;
+        let shown = profile.shown();
         cx.notify();
 
         let refresh_task = spawn_blocking(cx.background_executor(), move || {
@@ -1006,8 +1013,8 @@ impl Workspace {
                 true => connection.apart().map_err(lost)?,
                 false => connection.clone(),
             };
-            let catalog = reader.catalog().map_err(lost)?;
-            Ok::<_, (DbError, bool)>((catalog, reader.routines()))
+            let catalog = reader.catalog(&shown).map_err(lost)?;
+            Ok::<_, (DbError, bool)>((catalog, reader.routines(&shown)))
         });
 
         cx.spawn(async move |workspace, cx| {
@@ -1103,8 +1110,9 @@ impl Workspace {
             return;
         };
         let (id, generation) = (profile.id.clone(), profile.generation);
+        let shown = profile.shown();
         let fetch = spawn_blocking(cx.background_executor(), move || {
-            connection.databases(target.engine)
+            connection.databases(target.engine, &shown)
         });
         cx.spawn_in(window, async move |workspace, cx| {
             let result = fetch.await;
@@ -1976,7 +1984,9 @@ impl Workspace {
             self.catalog_landed(id, cx);
             return;
         };
-        let catalog_task = spawn_blocking(cx.background_executor(), move || connection.catalog());
+        let shown = profile.shown();
+        let catalog_task =
+            spawn_blocking(cx.background_executor(), move || connection.catalog(&shown));
 
         let id = id.to_string();
         cx.spawn(async move |workspace, cx| {
@@ -2049,7 +2059,10 @@ impl Workspace {
             }
             return;
         };
-        let routines_task = spawn_blocking(cx.background_executor(), move || connection.routines());
+        let shown = profile.shown();
+        let routines_task = spawn_blocking(cx.background_executor(), move || {
+            connection.routines(&shown)
+        });
 
         let id = id.to_string();
         cx.spawn(async move |workspace, cx| {
@@ -2094,13 +2107,13 @@ impl Workspace {
     /// may simply lack the privilege for, so a notice would repeat on every
     /// connect about something the user never asked for.
     fn load_sizes(&mut self, id: &str, generation: u64, cx: &mut Context<Self>) {
-        let Some(connection) = self
+        let Some((connection, shown)) = self
             .issued_to(id, generation)
-            .and_then(|profile| profile.connection())
+            .and_then(|profile| Some((profile.connection()?, profile.shown())))
         else {
             return;
         };
-        let sizes_task = spawn_blocking(cx.background_executor(), move || connection.sizes());
+        let sizes_task = spawn_blocking(cx.background_executor(), move || connection.sizes(&shown));
 
         let id = id.to_string();
         cx.spawn(async move |workspace, cx| {
