@@ -115,8 +115,10 @@ mod tests {
 
     #[test]
     fn a_default_build_is_stable_at_the_crate_version() {
-        assert_eq!(Channel::current(), Channel::Stable);
-        assert_eq!(VERSION, env!("CARGO_PKG_VERSION"));
+        assert_eq!(Channel::named(None), Channel::Stable);
+        if option_env!("DBDELVE_VERSION").is_none_or(str::is_empty) {
+            assert_eq!(VERSION, env!("CARGO_PKG_VERSION"));
+        }
     }
 
     /// Stable's names are what existing installs are found by.

@@ -389,17 +389,17 @@ fn is_newer_in(channel: Channel, candidate: &str, current: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Asset, Latest, Progress, Version, asset, is_newer, is_newer_in, newest};
+    use super::{Asset, Latest, Progress, Version, asset, is_newer_in, newest};
     use crate::channel::Channel;
 
     #[test]
     fn compares_versions_numerically() {
-        assert!(is_newer("0.2.1", "0.2.0"));
-        assert!(is_newer("0.2.10", "0.2.9"));
-        assert!(is_newer("1.0.0", "0.9.9"));
-        assert!(!is_newer("0.2.0", "0.2.0"));
-        assert!(!is_newer("0.1.9", "0.2.0"));
-        assert!(!is_newer("0.3.0-beta", "0.2.0"));
+        assert!(is_newer_in(Channel::Stable, "0.2.1", "0.2.0"));
+        assert!(is_newer_in(Channel::Stable, "0.2.10", "0.2.9"));
+        assert!(is_newer_in(Channel::Stable, "1.0.0", "0.9.9"));
+        assert!(!is_newer_in(Channel::Stable, "0.2.0", "0.2.0"));
+        assert!(!is_newer_in(Channel::Stable, "0.1.9", "0.2.0"));
+        assert!(!is_newer_in(Channel::Stable, "0.3.0-beta", "0.2.0"));
     }
 
     #[test]

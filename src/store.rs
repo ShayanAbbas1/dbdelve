@@ -4623,17 +4623,19 @@ open_objects = []
                 }
             };
 
+            let slug = Channel::current().slug();
             for unset in [None, Some("")] {
                 variant(unset);
-                assert_eq!(variant_name().unwrap(), "dbdelve");
+                assert_eq!(variant_name().unwrap(), slug);
                 let directory = dbdelve_directory().unwrap();
-                assert!(directory.ends_with(data_path("dbdelve")));
+                assert!(directory.ends_with(data_path(slug)));
             }
 
+            let dev = format!("{slug}-dev");
             variant(Some("dev"));
-            assert_eq!(variant_name().unwrap(), "dbdelve-dev");
+            assert_eq!(variant_name().unwrap(), dev);
             let directory = dbdelve_directory().unwrap();
-            assert!(directory.ends_with(data_path("dbdelve-dev")));
+            assert!(directory.ends_with(data_path(&dev)));
 
             // No NUL case: `set_var` panics on one before the code under test
             // ever sees it.

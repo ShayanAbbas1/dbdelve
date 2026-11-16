@@ -309,7 +309,17 @@ mod tests {
         BundleInfo, accept, blocked, bundle_info, bundle_of, check, exchange, read_only_volume,
         run, sibling, stage,
     };
+    use crate::channel::Channel;
     use crate::update::download::tests::scratch;
+
+    /// `core` as this build's channel numbers a release: a nightly accepts
+    /// only nightlies.
+    fn v(core: &str) -> String {
+        match Channel::current() {
+            Channel::Stable => core.to_string(),
+            Channel::Nightly => format!("{core}-nightly.20261116.1"),
+        }
+    }
 
     #[test]
     fn the_bundle_is_found_from_its_executable() {
@@ -358,17 +368,25 @@ mod tests {
             version: version.into(),
         };
         let id = "com.shayanabbas.dbdelve";
-        let installed = info(id, "0.7.1");
-        accept(&info(id, "0.8.0"), &installed, "0.8.0", "0.7.1").unwrap();
-        let other = info("com.example.other", "0.8.0");
-        assert!(accept(&other, &installed, "0.8.0", "0.7.1").is_err());
-        assert!(accept(&info(id, "0.7.9"), &installed, "0.8.0", "0.7.1").is_err());
+        let installed = info(id, &v("0.7.1"));
+        accept(&info(id, &v("0.8.0")), &installed, &v("0.8.0"), &v("0.7.1")).unwrap();
+        let other = info("com.example.other", &v("0.8.0"));
+        assert!(accept(&other, &installed, &v("0.8.0"), &v("0.7.1")).is_err());
+        assert!(accept(&info(id, &v("0.7.9")), &installed, &v("0.8.0"), &v("0.7.1")).is_err());
         // A validly signed older release served as the latest: its plist
         // agrees with the feed, and it is still refused.
-        assert!(accept(&info(id, "0.7.0"), &installed, "0.7.0", "0.7.1").is_err());
-        assert!(accept(&info(id, "0.7.1"), &installed, "0.7.1", "0.7.1").is_err());
+        assert!(accept(&info(id, &v("0.7.0")), &installed, &v("0.7.0"), &v("0.7.1")).is_err());
+        assert!(accept(&info(id, &v("0.7.1")), &installed, &v("0.7.1"), &v("0.7.1")).is_err());
         // Newer than this process, older than what was installed since.
-        assert!(accept(&info(id, "0.8.0"), &info(id, "0.9.0"), "0.8.0", "0.7.1").is_err());
+        assert!(
+            accept(
+                &info(id, &v("0.8.0")),
+                &info(id, &v("0.9.0")),
+                &v("0.8.0"),
+                &v("0.7.1")
+            )
+            .is_err()
+        );
     }
 
     fn fake_bundle(at: &Path, identifier: &str, version: &str) {
@@ -438,8 +456,8 @@ mod tests {
     fn a_dmg_is_staged_and_its_app_checked() {
         let directory = scratch("stage");
         let source = directory.join("source");
-        let app = source.join("DBDelve.app");
-        fake_bundle(&app, "com.example.dbdelve", "999.0.0");
+        let app = source.join(Channel::current().app_bundle());
+        fake_bundle(&app, "com.example.dbdelve", &v("999.0.0"));
         run(Command::new("/usr/bin/codesign")
             .args(["--force", "--sign", "-"])
             .arg(&app))
@@ -460,7 +478,7 @@ mod tests {
         .unwrap();
 
         let running = directory.join("DBDelve.app");
-        fake_bundle(&running, "com.example.dbdelve", "0.0.1");
+        fake_bundle(&running, "com.example.dbdelve", &v("0.0.1"));
         let staged = sibling(&running, "update-new");
         let mount = directory.join("mnt");
         stage(&dmg, &mount, &staged).unwrap();
@@ -468,12 +486,12 @@ mod tests {
             fs::read_dir(&mount).unwrap().next().is_none(),
             "still mounted"
         );
-        check(&staged, &running, "999.0.0").unwrap();
-        assert!(check(&staged, &running, "998.0.0").is_err());
+        check(&staged, &running, &v("999.0.0")).unwrap();
+        assert!(check(&staged, &running, &v("998.0.0")).is_err());
 
         // Tampering after signing breaks the seal codesign checks.
         fs::write(staged.join("Contents/MacOS/extra"), "x").unwrap();
-        assert!(check(&staged, &running, "999.0.0").is_err());
+        assert!(check(&staged, &running, &v("999.0.0")).is_err());
 
         // A DMG without the app detaches all the same.
         let empty = directory.join("empty");

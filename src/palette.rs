@@ -4595,7 +4595,10 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(
             items[0].label,
-            "Restart DBDelve to finish updating to 9.9.9"
+            format!(
+                "Restart {} to finish updating to 9.9.9",
+                crate::channel::Channel::current().display_name()
+            )
         );
         assert!(
             matches!(&items[0].command, Command::RestartIntoUpdate(path) if *path == installed)
@@ -4607,7 +4610,11 @@ mod tests {
     fn an_update_this_install_cannot_take_offers_the_download() {
         let items = update_items(&update_in(update::State::Link));
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].label, "Download DBDelve 9.9.9");
+        let expected = match crate::channel::Channel::current() {
+            crate::channel::Channel::Stable => "Download DBDelve 9.9.9",
+            crate::channel::Channel::Nightly => "Download the new nightly",
+        };
+        assert_eq!(items[0].label, expected);
         assert!(
             matches!(&items[0].command, Command::DownloadUpdate(url) if url == "https://example.test/v9.9.9")
         );

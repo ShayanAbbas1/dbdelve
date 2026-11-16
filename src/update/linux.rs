@@ -571,7 +571,7 @@ mod tests {
         );
         assert_eq!(
             tarball.installed(),
-            Path::new("/home/me/.local/bin/dbdelve")
+            Path::new("/home/me/.local/bin").join(Channel::current().slug())
         );
         let version = "0.7.4-nightly.20261116.12";
         assert_eq!(
@@ -633,7 +633,7 @@ mod tests {
         let home = directory.join("home");
         let bin = home.join(".local/bin");
         fs::create_dir_all(&bin).unwrap();
-        let installed = bin.join("dbdelve");
+        let installed = bin.join(Channel::current().slug());
         fs::write(&installed, "").unwrap();
         let tarball = Ok(Kind::Tarball { home: home.clone() });
 
@@ -859,18 +859,19 @@ mod tests {
         let directory = scratch("unpack");
         let top = release_directory(Channel::Stable, "9.9.9", "x86_64");
         let file = |name: &str| format!("{top}/{name}");
+        let binary = Channel::current().slug();
         let good = directory.join("good.tar.gz");
         tarball(
             &good,
             &[
-                (&file("dbdelve"), b"binary", 0o755),
+                (&file(binary), b"binary", 0o755),
                 (&file("install.sh"), b"#!/bin/bash", 0o755),
                 (&file("plugins/odbc/manifest.toml"), b"", 0o644),
             ],
         );
         let release = unpack(&good, &directory.join("good"), &top).unwrap();
         assert_eq!(release, directory.join("good").join(&top));
-        assert_eq!(mode(&release.join("dbdelve")), 0o755);
+        assert_eq!(mode(&release.join(binary)), 0o755);
         assert!(release.join("plugins/odbc/manifest.toml").is_file());
         // Another version's tarball under this name.
         assert!(
@@ -884,11 +885,11 @@ mod tests {
 
         for (case, entries) in [
             ("no-binary", vec![(file("install.sh"), &b""[..], 0o755)]),
-            ("no-installer", vec![(file("dbdelve"), &b""[..], 0o755)]),
+            ("no-installer", vec![(file(binary), &b""[..], 0o755)]),
             (
                 "two-tops",
                 vec![
-                    (file("dbdelve"), &b""[..], 0o755),
+                    (file(binary), &b""[..], 0o755),
                     (file("install.sh"), &b""[..], 0o755),
                     ("stray".to_string(), &b""[..], 0o644),
                 ],
@@ -896,7 +897,7 @@ mod tests {
             (
                 "escape",
                 vec![
-                    (file("dbdelve"), &b""[..], 0o755),
+                    (file(binary), &b""[..], 0o755),
                     (file("install.sh"), &b""[..], 0o755),
                     (format!("{top}/../../escaped"), &b""[..], 0o644),
                 ],
