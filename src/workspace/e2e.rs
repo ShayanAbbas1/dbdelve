@@ -6357,3 +6357,35 @@ fn ssm_disconnect_while_connecting_delivers_missing_session_notice(cx: &mut Test
         quit(workspace, cx);
     });
 }
+
+#[gpui::test]
+fn ssm_disconnect_delivers_cleanup_completed_before_subscription(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let attempt = crate::db::ConnectAttempt::default();
+        workspace.update(cx, |workspace, _| {
+            let profile = workspace.profile_mut().unwrap();
+            profile.cleanup_attempt = Some(attempt.clone());
+            profile.state = ProfileState::Connecting {
+                _attempt: attempt.guard(),
+            };
+        });
+        // The worker can finish cleanup before the UI processes its connect failure.
+        let result = crate::db::ssm::CleanupResult {
+            accepted: false,
+            session: None,
+            profile: Some("development".into()),
+            region: Some("test-region".into()),
+        };
+        attempt.report_cleanup(result.clone());
+        disconnect(cx);
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.active.is_none());
+            assert_eq!(workspace.cleanup_notices, vec![result]);
+        });
+        assert!(cx.debug_bounds("cleanup-copy-0").is_none());
+        assert!(cx.debug_bounds("cleanup-dismiss-0").is_some());
+        quit(workspace, cx);
+    });
+}

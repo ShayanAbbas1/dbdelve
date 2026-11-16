@@ -26,7 +26,12 @@ pub struct ConnectAttempt(Arc<AttemptState>);
 #[derive(Debug, Default)]
 struct AttemptState {
     state: AtomicU8,
-    cleanup: Mutex<Option<tokio::sync::oneshot::Sender<CleanupResult>>>,
+    cleanup: Mutex<CleanupState>,
+}
+#[derive(Debug, Default)]
+struct CleanupState {
+    sender: Option<tokio::sync::oneshot::Sender<CleanupResult>>,
+    result: Option<CleanupResult>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CleanupResult {
@@ -75,18 +80,21 @@ impl ConnectAttempt {
     }
     pub fn observe_cleanup(&self) -> tokio::sync::oneshot::Receiver<CleanupResult> {
         let (send, receive) = tokio::sync::oneshot::channel();
-        *self.0.cleanup.lock().unwrap_or_else(|p| p.into_inner()) = Some(send);
+        let mut cleanup = self.0.cleanup.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(result) = cleanup.result.take() {
+            let _ = send.send(result);
+        } else {
+            cleanup.sender = Some(send);
+        }
         receive
     }
     pub(crate) fn report_cleanup(&self, result: CleanupResult) {
-        if let Some(send) = self
-            .0
-            .cleanup
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .take()
-        {
+        let mut cleanup = self.0.cleanup.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(send) = cleanup.sender.take() {
             let _ = send.send(result);
+        } else {
+            // Startup can fail before Disconnect installs the observer.
+            cleanup.result = Some(result);
         }
     }
     pub fn guard(&self) -> ConnectGuard {
@@ -664,6 +672,21 @@ mod tests {
             ..Default::default()
         }
     }
+    #[test]
+    fn cleanup_completed_before_subscription_is_delivered() {
+        for accepted in [false, true] {
+            let attempt = ConnectAttempt::default();
+            let result = CleanupResult {
+                accepted,
+                session: Some("test-session".into()),
+                profile: Some("test-profile".into()),
+                region: Some("test-region".into()),
+            };
+            attempt.report_cleanup(result.clone());
+            assert_eq!(attempt.observe_cleanup().try_recv().unwrap(), result);
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn cleanup_process_confirms_only_successful_matching_response() {
