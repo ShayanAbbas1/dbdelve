@@ -1246,43 +1246,46 @@ mod tests {
 
     #[test]
     fn only_paths_into_a_copied_directory_point_into_this_one() {
-        let from = Path::new("/home/me/.local/share/dbdelve");
-        let to = Path::new("/home/me/.local/share/dbdelve-nightly");
-        let text = "\
-# kept as written
-active = 'a'
-
-[[profiles]]
-id = \"a\"
-path = '/home/me/.local/share/dbdelve/local.sqlite'
-root_certificate = \"/home/me/.local/share/dbdelve/ca.pem\"
-client_key = \"/home/me/.local/share/dbdelve/ssh-keys/../ca.pem\"
-other = \"/home/me/.local/share/dbdelve-dev/ssh-keys/k\"
-tags = [\"/home/me/.local/share/dbdelve/themes/t.json\", \"/home/me/.local/share/dbdelve/themes\", 'x']
-
-[profiles.ssh]
-identity_file = \"/home/me/.local/share/dbdelve/ssh-keys/tableplus-a\"
-port = 22
-";
-        assert_eq!(
-            repointed(text, from, to).unwrap(),
-            "\
-# kept as written
-active = 'a'
-
-[[profiles]]
-id = \"a\"
-path = '/home/me/.local/share/dbdelve/local.sqlite'
-root_certificate = \"/home/me/.local/share/dbdelve/ca.pem\"
-client_key = \"/home/me/.local/share/dbdelve/ssh-keys/../ca.pem\"
-other = \"/home/me/.local/share/dbdelve-dev/ssh-keys/k\"
-tags = [\"/home/me/.local/share/dbdelve-nightly/themes/t.json\", \"/home/me/.local/share/dbdelve/themes\", 'x']
-
-[profiles.ssh]
-identity_file = \"/home/me/.local/share/dbdelve-nightly/ssh-keys/tableplus-a\"
-port = 22
-"
+        let share = std::env::temp_dir().join("home").join("share");
+        let from = share.join("dbdelve");
+        let to = share.join("dbdelve-nightly");
+        let database = from.join("local.sqlite");
+        let certificate = from.join("ca.pem");
+        let climbing = from.join("ssh-keys").join("..").join("ca.pem");
+        let elsewhere = share.join("dbdelve-dev").join("ssh-keys").join("k");
+        let theme = from.join("themes").join("t.json");
+        let themes = from.join("themes");
+        let key = from.join("ssh-keys").join("tableplus-a");
+        let text = format!(
+            "# kept as written\nactive = 'a'\n\n[[profiles]]\nid = \"a\"\npath = '{}'\n\
+             root_certificate = {}\nclient_key = {}\nother = {}\ntags = [{}, {}, 'x']\n\n\
+             [profiles.ssh]\nidentity_file = {}\nport = 22\n",
+            database.display(),
+            string(&certificate),
+            string(&climbing),
+            string(&elsewhere),
+            string(&theme),
+            string(&themes),
+            string(&key),
         );
+
+        let rewritten = repointed(&text, &from, &to).unwrap();
+        assert!(rewritten.starts_with("# kept as written\nactive = 'a'\n"));
+        let file: toml::Table = toml::from_str(&rewritten).unwrap();
+        let profile = &file["profiles"][0];
+        let path = |value: &toml::Value| PathBuf::from(value.as_str().unwrap());
+        assert_eq!(path(&profile["path"]), database);
+        assert_eq!(path(&profile["root_certificate"]), certificate);
+        assert_eq!(path(&profile["client_key"]), climbing);
+        assert_eq!(path(&profile["other"]), elsewhere);
+        assert_eq!(path(&profile["tags"][0]), to.join("themes").join("t.json"));
+        assert_eq!(path(&profile["tags"][1]), themes);
+        assert_eq!(profile["tags"][2].as_str(), Some("x"));
+        assert_eq!(
+            path(&profile["ssh"]["identity_file"]),
+            to.join("ssh-keys").join("tableplus-a")
+        );
+        assert_eq!(profile["ssh"]["port"].as_integer(), Some(22));
     }
 
     #[test]
