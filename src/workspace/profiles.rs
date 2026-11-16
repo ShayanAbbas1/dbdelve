@@ -233,6 +233,7 @@ impl Workspace {
             confirmed_stale: stored.confirmed.iter().any(|slug| slug == STALE_ROWS),
             generation: 0,
             state: ProfileState::Idle,
+            cleanup_attempt: None,
             held: false,
             holds: Arc::default(),
             in_transaction: false,
@@ -294,6 +295,7 @@ impl Workspace {
             confirmed_stale: false,
             generation: 0,
             state: ProfileState::Idle,
+            cleanup_attempt: None,
             held: false,
             holds: Arc::default(),
             in_transaction: false,
@@ -1295,6 +1297,15 @@ impl Workspace {
         let Some(profile) = self.profile_mut() else {
             return;
         };
+        let cleanup = if matches!(profile.state, ProfileState::Connected(_)) {
+            profile
+                .cleanup_attempt
+                .take()
+                .map(|attempt| attempt.observe_cleanup())
+        } else {
+            profile.cleanup_attempt = None;
+            None
+        };
         let rolled_back = profile.in_transaction && profile.connection().is_some();
         tracing::info!(
             connection = crate::logging::connection_number(&profile.id),
@@ -1311,6 +1322,21 @@ impl Workspace {
         mark_objects_stale(profile);
         let name = profile.name.clone();
         self.active = None;
+        if let Some(cleanup) = cleanup {
+            cx.spawn(async move |workspace, cx| {
+                if let Ok(result) = cleanup.await
+                    && !result.accepted
+                {
+                    workspace
+                        .update(cx, |workspace, cx| {
+                            workspace.cleanup_notices.push(result);
+                            cx.notify();
+                        })
+                        .ok();
+                }
+            })
+            .detach();
+        }
         self.remember_profiles(cx);
         self.refocus_front();
         if let Err(message) = persisted {
@@ -1784,6 +1810,7 @@ impl Workspace {
         };
         profile.generation = generation;
         let attempt = crate::db::ConnectAttempt::default();
+        profile.cleanup_attempt = profile.config.ssm().map(|_| attempt.clone());
         profile.state = ProfileState::Connecting {
             _attempt: attempt.guard(),
         };

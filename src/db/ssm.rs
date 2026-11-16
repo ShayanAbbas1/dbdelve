@@ -22,7 +22,19 @@ const READY_WITHIN: Duration = Duration::from_secs(30);
 const DOCUMENT: &str = "AWS-StartPortForwardingSessionToRemoteHost";
 
 #[derive(Clone, Debug, Default)]
-pub struct ConnectAttempt(Arc<AtomicU8>);
+pub struct ConnectAttempt(Arc<AttemptState>);
+#[derive(Debug, Default)]
+struct AttemptState {
+    state: AtomicU8,
+    cleanup: Mutex<Option<tokio::sync::oneshot::Sender<CleanupResult>>>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CleanupResult {
+    pub accepted: bool,
+    pub session: Option<String>,
+    pub profile: Option<String>,
+    pub region: Option<String>,
+}
 impl PartialEq for ConnectAttempt {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
@@ -36,7 +48,7 @@ impl ConnectAttempt {
     const FINISHED: u8 = 2;
 
     pub fn cancel(&self) {
-        let _ = self.0.compare_exchange(
+        let _ = self.0.state.compare_exchange(
             Self::OPENING,
             Self::CANCELLED,
             Ordering::AcqRel,
@@ -44,13 +56,14 @@ impl ConnectAttempt {
         );
     }
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Acquire) == Self::CANCELLED
+        self.0.state.load(Ordering::Acquire) == Self::CANCELLED
     }
     fn is_finished(&self) -> bool {
-        self.0.load(Ordering::Acquire) == Self::FINISHED
+        self.0.state.load(Ordering::Acquire) == Self::FINISHED
     }
     pub fn finish(&self) -> Result<(), DbError> {
         self.0
+            .state
             .compare_exchange(
                 Self::OPENING,
                 Self::FINISHED,
@@ -59,6 +72,22 @@ impl ConnectAttempt {
             )
             .map(|_| ())
             .map_err(|_| plain_error("Connection cancelled.".into()))
+    }
+    pub fn observe_cleanup(&self) -> tokio::sync::oneshot::Receiver<CleanupResult> {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        *self.0.cleanup.lock().unwrap_or_else(|p| p.into_inner()) = Some(send);
+        receive
+    }
+    fn report_cleanup(&self, result: CleanupResult) {
+        if let Some(send) = self
+            .0
+            .cleanup
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+        {
+            let _ = send.send(result);
+        }
     }
     pub fn guard(&self) -> ConnectGuard {
         ConnectGuard(self.clone())
@@ -232,6 +261,21 @@ fn command(config: &SsmTunnel, args: &[String]) -> Result<Command, DbError> {
             "PATH",
             std::env::join_paths(paths).map_err(|e| plain_error(e.to_string()))?,
         )
+        .env("AWS_PAGER", "")
+        .env("AWS_CLI_AUTO_PROMPT", "off");
+    Ok(command)
+}
+
+// Keep the established command environment when possible, but cleanup does
+// not require the Session Manager plugin itself.
+fn cleanup_command(config: &SsmTunnel, args: &[String]) -> Result<Command, DbError> {
+    if let Ok(command) = command(config, args) {
+        return Ok(command);
+    }
+    let aws = executable(config.aws_cli.as_deref(), "aws")?;
+    let mut command = Command::new(aws);
+    command
+        .args(args)
         .env("AWS_PAGER", "")
         .env("AWS_CLI_AUTO_PROMPT", "off");
     Ok(command)
@@ -486,6 +530,89 @@ impl Tunnel {
     }
 }
 
+fn cleanup_response(bytes: &[u8], session: &str) -> bool {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    let text = text.trim();
+    let text = text
+        .strip_suffix("DBDELVE_SSM_CHILD_EXITED")
+        .unwrap_or(text)
+        .trim();
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("SessionId")
+                .and_then(|id| id.as_str())
+                .map(str::to_owned)
+        })
+        .is_some_and(|id| id == session)
+}
+
+fn run_cleanup(command: Command, session: &str, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    let Ok(mut process) = process::Process::spawn(command) else {
+        return false;
+    };
+    let child = process.child.as_mut().expect("cleanup child");
+    let (send, receive) = std::sync::mpsc::channel();
+    for (stdout, mut pipe) in [
+        (
+            true,
+            Box::new(child.stdout.take().unwrap()) as Box<dyn Read + Send>,
+        ),
+        (
+            false,
+            Box::new(child.stderr.take().unwrap()) as Box<dyn Read + Send>,
+        ),
+    ] {
+        let send = send.clone();
+        thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let result = pipe
+                .by_ref()
+                .take(16 * 1024 + 1)
+                .read_to_end(&mut bytes)
+                .and_then(|_| std::io::copy(&mut pipe, &mut std::io::sink()));
+            let _ = send.send((stdout, result.map(|_| bytes)));
+        });
+    }
+    drop(send);
+    let status = loop {
+        if Instant::now() >= deadline {
+            process.stop();
+            return false;
+        }
+        match process.child.as_mut().unwrap().try_wait() {
+            Ok(Some(status)) => break status.success(),
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            _ => {
+                process.stop();
+                return false;
+            }
+        }
+    };
+    if !status {
+        return false;
+    }
+    let mut accepted = false;
+    for _ in 0..2 {
+        let Ok((stdout, Ok(bytes))) =
+            receive.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        else {
+            return false;
+        };
+        if bytes.len() > 16 * 1024 {
+            return false;
+        }
+        if stdout {
+            accepted = cleanup_response(&bytes, session);
+        }
+    }
+    accepted
+}
+
 impl Drop for Tunnel {
     fn drop(&mut self) {
         self.process
@@ -498,35 +625,38 @@ impl Drop for Tunnel {
             .unwrap_or_else(|p| p.into_inner())
             .session
             .clone();
-        let terminate = session.and_then(|session| {
-            let mut args = vec![
-                "ssm".into(),
-                "terminate-session".into(),
-                "--session-id".into(),
-                session,
-            ];
-            for (flag, value) in [
-                ("--profile", &self.config.profile),
-                ("--region", &self.config.region),
-            ] {
-                if let Some(value) = value {
-                    args.push(flag.into());
-                    args.push(value.clone());
-                }
-            }
-            command(&self.config, &args).ok()
-        });
-        if let Some(command) = terminate {
-            thread::spawn(move || {
-                if let Ok(mut process) = process::Process::spawn(command) {
-                    capture_output(process.child.as_mut().unwrap());
-                    let deadline = Instant::now() + Duration::from_secs(3);
-                    while process.running() && Instant::now() < deadline {
-                        thread::sleep(Duration::from_millis(20));
+        let config = self.config.clone();
+        thread::spawn(move || {
+            let accepted = if let Some(session) = &session {
+                let mut args = vec![
+                    "ssm".into(),
+                    "terminate-session".into(),
+                    "--session-id".into(),
+                    session.clone(),
+                    "--output".into(),
+                    "json".into(),
+                ];
+                for (flag, value) in [("--profile", &config.profile), ("--region", &config.region)]
+                {
+                    if let Some(value) = value {
+                        args.push(flag.into());
+                        args.push(value.clone());
                     }
                 }
-            });
-        }
+                cleanup_command(&config, &args)
+                    .is_ok_and(|command| run_cleanup(command, session, Duration::from_secs(3)))
+            } else {
+                false
+            };
+            if let Some(attempt) = &config.attempt {
+                attempt.report_cleanup(CleanupResult {
+                    accepted,
+                    session,
+                    profile: config.profile.clone(),
+                    region: config.region.clone(),
+                });
+            }
+        });
     }
 }
 
@@ -538,6 +668,53 @@ mod tests {
             target: "i-0123456789abcdef0".into(),
             ..Default::default()
         }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_process_confirms_only_successful_matching_response() {
+        let mut good = Command::new("/bin/sh");
+        good.args(["-c", "printf '{\"SessionId\":\"alice-123\"}'"]);
+        assert!(run_cleanup(good, "alice-123", Duration::from_secs(3)));
+        let mut failure = Command::new("/bin/sh");
+        failure.args(["-c", "printf '{\"SessionId\":\"alice-123\"}'; exit 1"]);
+        assert!(!run_cleanup(failure, "alice-123", Duration::from_secs(3)));
+        let mut hanging = Command::new("/bin/sh");
+        hanging.args(["-c", "sleep 60"]);
+        assert!(!run_cleanup(
+            hanging,
+            "alice-123",
+            Duration::from_millis(100)
+        ));
+    }
+    #[test]
+    fn cleanup_accepts_only_matching_json_response() {
+        let marker = b"{\"SessionId\":\"alice-123\"}\nDBDELVE_SSM_CHILD_EXITED\n";
+        assert!(cleanup_response(marker, "alice-123"));
+        assert!(!cleanup_response(marker, "other-123"));
+        assert!(!cleanup_response(b"{bad}", "alice-123"));
+        assert!(!cleanup_response(
+            b"{\"SessionId\":\"alice-123\"} trailing",
+            "alice-123"
+        ));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_command_does_not_require_plugin() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory =
+            std::env::temp_dir().join(format!("dbdelve-cleanup-command-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let aws = directory.join("aws");
+        std::fs::write(&aws, "#!/bin/sh\nprintf '{\"SessionId\":\"alice-123\"}'\n").unwrap();
+        std::fs::set_permissions(&aws, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config = SsmTunnel {
+            aws_cli: Some(aws),
+            session_manager_plugin: Some(directory.join("missing-plugin")),
+            ..config()
+        };
+        let command = cleanup_command(&config, &[]).unwrap();
+        assert!(run_cleanup(command, "alice-123", Duration::from_secs(3)));
+        std::fs::remove_dir_all(directory).unwrap();
     }
     #[test]
     fn windows_plugin_override_refuses_a_shadowing_cli_directory() {
@@ -812,6 +989,125 @@ mod lifecycle_tests {
             thread::sleep(Duration::from_millis(20));
         }
     }
+    #[test]
+    fn cleanup_result_waits_for_last_tunnel_owner() {
+        let mut fixture = Fixture::new("ready");
+        let attempt = ConnectAttempt::default();
+        fixture.config.attempt = Some(attempt.clone());
+        let tunnel = Arc::new(fixture.open());
+        let last = tunnel.clone();
+        let mut receiver = attempt.observe_cleanup();
+        drop(tunnel);
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        drop(last);
+        let result = cleanup_result(receiver);
+        assert!(!result.accepted, "fake CLI returns no JSON");
+        assert!(result.session.is_some());
+    }
+    fn cleanup_result(
+        mut receiver: tokio::sync::oneshot::Receiver<CleanupResult>,
+    ) -> CleanupResult {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match receiver.try_recv() {
+                Ok(result) => return result,
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "cleanup result was never delivered"
+                    );
+                    thread::sleep(Duration::from_millis(20));
+                }
+                Err(error) => panic!("cleanup sender disappeared: {error}"),
+            }
+        }
+    }
+
+    #[test]
+    fn cleanup_success_reports_the_original_session_and_configuration() {
+        let mut fixture = Fixture::new("ready");
+        let attempt = ConnectAttempt::default();
+        fixture.config.attempt = Some(attempt.clone());
+        fixture.config.profile = Some("test-profile".into());
+        fixture.config.region = Some("test-region".into());
+        let tunnel = fixture.open();
+        fs::write(
+            fixture.config.aws_cli.as_ref().unwrap(),
+            "#!/bin/sh\nprintf '{\"SessionId\":\"test-session\"}'\n",
+        )
+        .unwrap();
+        let receiver = attempt.observe_cleanup();
+        drop(tunnel);
+        assert_eq!(
+            cleanup_result(receiver),
+            CleanupResult {
+                accepted: true,
+                session: Some("test-session".into()),
+                profile: Some("test-profile".into()),
+                region: Some("test-region".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn cleanup_timeout_does_not_hold_the_local_listener_open() {
+        let mut fixture = Fixture::new("ready");
+        let attempt = ConnectAttempt::default();
+        fixture.config.attempt = Some(attempt.clone());
+        let tunnel = fixture.open();
+        let address = tunnel.dial().unwrap();
+        fs::write(
+            fixture.config.aws_cli.as_ref().unwrap(),
+            "#!/bin/sh\nsleep 60\n",
+        )
+        .unwrap();
+        let mut receiver = attempt.observe_cleanup();
+        let started = Instant::now();
+        drop(tunnel);
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "drop waited for AWS"
+        );
+        while TcpStream::connect(address).is_ok() {
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "listener waited for AWS timeout"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            matches!(
+                receiver.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ),
+            "remote termination should still be waiting after the local listener closes"
+        );
+        assert!(!cleanup_result(receiver).accepted);
+    }
+
+    #[test]
+    fn cleanup_without_a_session_id_reports_uncertainty() {
+        let mut fixture = Fixture::new("hang");
+        let attempt = ConnectAttempt::default();
+        fixture.config.attempt = Some(attempt.clone());
+        let receiver = attempt.observe_cleanup();
+        assert!(
+            Tunnel::open_with_timeout(
+                &fixture.config,
+                "db.example",
+                5432,
+                Duration::from_millis(100)
+            )
+            .is_err()
+        );
+        let result = cleanup_result(receiver);
+        assert!(!result.accepted);
+        assert!(result.session.is_none());
+    }
+
     #[test]
     fn plugin_exit_is_not_a_live_tunnel() {
         let fixture = Fixture::new("exit");
