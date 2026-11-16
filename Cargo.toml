@@ -308,6 +308,9 @@ serde_json = { version = "1", features = ["raw_value"] }
 jsonc-parser = { version = "=0.34.0", features = ["serde"] }
 toml = "0.9"   # profiles.toml
 url = "2"
+# Import from DBDelve copies a data directory whole. Already in the graph
+# (gpui-component and font-kit), so naming it adds no copy.
+walkdir = "2"
 
 # ISO-8601 dates in mongosh statements (`ISODate(…)`, `{"$date": …}`), for
 # `mql.rs`, and in the cells of a MongoDB result. Already in the graph through

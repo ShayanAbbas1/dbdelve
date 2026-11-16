@@ -781,6 +781,7 @@ impl Workspace {
             Command::NewConnection => self.open_connection_form(&NewConnection, window, cx),
             Command::NewProject => self.new_project(&NewProject, window, cx),
             Command::ImportConnections(source) => self.import_connections(source, window, cx),
+            Command::ImportFromStable => self.import_from_stable(cx),
             Command::RefreshConnection => {
                 self.clear_notice();
                 self.refresh_schema(cx);

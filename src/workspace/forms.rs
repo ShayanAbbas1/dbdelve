@@ -1313,6 +1313,7 @@ impl Workspace {
                     .is_some_and(|pending| pending.every_row.is_ok());
                 if all { 3 } else { 2 }
             }
+            Some("stable-import") => self.stable_import_buttons(),
             Some("import-rows") | None => 0,
             Some(_) => 2 + checkbox,
         }
@@ -1432,6 +1433,7 @@ impl Workspace {
                 self.pending_import = None;
                 cx.notify();
             }
+            ("stable-import", choice) => self.answer_stable_import(choice, cx),
             ("stale-edit", 3) if editing => self.toggle_stale_dont_ask(cx),
             ("stale-edit", 0) if editing => self.edit_stale_anyway(window, cx),
             ("stale-edit", 0) => self.refresh_stale(window, cx),

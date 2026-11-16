@@ -1309,6 +1309,9 @@ impl Workspace {
     /// Every profile's buffer, for the one moment there is nowhere to report a
     /// failure to: the application is closing.
     pub(crate) fn persist_buffers(&self, cx: &App) {
+        if self.data_replaced {
+            return;
+        }
         for profile in &self.profiles {
             write_grids(profile, cx);
             let _ = write_buffer(profile, cx);

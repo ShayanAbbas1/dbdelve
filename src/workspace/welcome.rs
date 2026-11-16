@@ -81,6 +81,8 @@ pub(crate) fn recognise(text: &str) -> Recognised {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Row {
     NewProject,
+    /// A nightly's Import from DBDelve.
+    FromStable,
     Import(Source),
     Theme,
     Settings,
@@ -90,6 +92,7 @@ impl Row {
     fn label(self) -> String {
         match self {
             Row::NewProject => "New project".into(),
+            Row::FromStable => "Import from DBDelve".into(),
             Row::Import(source) => format!("Import from {}", source.label()),
             Row::Theme => "Theme".into(),
             Row::Settings => "Settings".into(),
@@ -99,27 +102,31 @@ impl Row {
     fn icon(self) -> &'static str {
         match self {
             Row::NewProject => icon::ADD_TO_PROJECT,
-            Row::Import(_) => icon::IMPORT,
+            Row::FromStable | Row::Import(_) => icon::IMPORT,
             Row::Theme => icon::THEME,
             Row::Settings => icon::SETTINGS,
         }
     }
 
-    /// The keybinding whose chord the row wears.
-    fn action(self) -> &'static str {
+    /// The keybinding whose chord the row wears. Import from DBDelve has
+    /// none: a binding would list it in Stable's keyboard settings too.
+    fn action(self) -> Option<&'static str> {
         match self {
-            Row::NewProject => "new_project",
-            Row::Import(Source::DBeaver) => "import_dbeaver",
-            Row::Import(Source::TablePlus) => "import_tableplus",
-            Row::Theme => "cycle_theme",
-            Row::Settings => "open_settings",
+            Row::NewProject => Some("new_project"),
+            Row::FromStable => None,
+            Row::Import(Source::DBeaver) => Some("import_dbeaver"),
+            Row::Import(Source::TablePlus) => Some("import_tableplus"),
+            Row::Theme => Some("cycle_theme"),
+            Row::Settings => Some("open_settings"),
         }
     }
 }
 
-/// An import is offered only for a client that is installed here.
-pub(crate) fn rows(importable: &[Source]) -> Vec<Row> {
+/// An import is offered only for a client that is installed here, and
+/// DBDelve's only to a nightly with no connections of its own yet.
+pub(crate) fn rows(from_stable: bool, importable: &[Source]) -> Vec<Row> {
     std::iter::once(Row::NewProject)
+        .chain(from_stable.then_some(Row::FromStable))
         .chain(importable.iter().copied().map(Row::Import))
         .chain([Row::Theme, Row::Settings])
         .collect()
@@ -709,6 +716,8 @@ impl Workspace {
     fn render_welcome_rows(&self, t: Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let overrides = &self.settings.custom_keybindings;
         let naming = self.project_name.is_some() && self.renaming_project.is_none();
+        let offers_stable =
+            self.stable_connections > 0 && self.profiles.is_empty() && self.unavailable.is_empty();
         div()
             .flex()
             .flex_col()
@@ -717,23 +726,34 @@ impl Workspace {
             .border_color(t.border)
             .p(px(layout::WELCOME_SECTION_PADDING))
             .children(
-                rows(&self.importable)
+                rows(offers_stable, &self.importable)
                     .into_iter()
                     .enumerate()
                     .map(|(index, row)| {
                         if row == Row::NewProject && naming {
                             return self.render_project_naming(t, cx).into_any_element();
                         }
-                        let detail = (row == Row::Theme).then(|| {
+                        let detail = match row {
+                            Row::Theme => Some(theme(cx).name.to_string()),
+                            Row::FromStable => Some(match self.stable_connections {
+                                1 => "1 connection".to_string(),
+                                count => format!("{count} connections"),
+                            }),
+                            _ => None,
+                        }
+                        .map(|detail| {
                             div()
                                 .flex_shrink_0()
                                 .text_size(px(layout::chrome(layout::TEXT_SM)))
                                 .text_color(t.text_faint)
-                                .child(theme(cx).name)
+                                .child(detail)
                         });
                         item(("welcome-row", index))
                             .when(matches!(row, Row::Import(_)), |item| {
                                 item.disabled(self.importing)
+                            })
+                            .when(row == Row::FromStable, |item| {
+                                item.disabled(self.stable_import.is_some())
                             })
                             .child(
                                 item_content(t)
@@ -748,12 +768,14 @@ impl Workspace {
                                     .child(div().flex_1())
                                     .children(detail)
                                     .children(
-                                        chord_for(row.action(), overrides)
+                                        row.action()
+                                            .and_then(|action| chord_for(action, overrides))
                                             .map(|chord| keycaps(&chord, t)),
                                     ),
                             )
                             .on_click(cx.listener(move |workspace, _, window, cx| match row {
                                 Row::NewProject => workspace.new_project(&NewProject, window, cx),
+                                Row::FromStable => workspace.import_from_stable(cx),
                                 Row::Import(source) => {
                                     workspace.import_connections(source, window, cx)
                                 }
@@ -1147,9 +1169,12 @@ mod tests {
 
     #[test]
     fn an_import_row_is_offered_only_for_a_client_that_is_installed() {
-        assert_eq!(rows(&[]), [Row::NewProject, Row::Theme, Row::Settings]);
         assert_eq!(
-            rows(&[Source::TablePlus]),
+            rows(false, &[]),
+            [Row::NewProject, Row::Theme, Row::Settings]
+        );
+        assert_eq!(
+            rows(false, &[Source::TablePlus]),
             [
                 Row::NewProject,
                 Row::Import(Source::TablePlus),
@@ -1157,6 +1182,17 @@ mod tests {
                 Row::Settings
             ]
         );
+        assert_eq!(
+            rows(true, &[Source::TablePlus]),
+            [
+                Row::NewProject,
+                Row::FromStable,
+                Row::Import(Source::TablePlus),
+                Row::Theme,
+                Row::Settings
+            ]
+        );
+        assert_eq!(Row::FromStable.label(), "Import from DBDelve".to_string());
         assert_eq!(
             Row::Import(Source::DBeaver).label(),
             "Import from DBeaver".to_string()
@@ -1173,16 +1209,21 @@ mod tests {
             Row::Settings,
         ];
         for row in rows {
+            let action = row.action().unwrap();
             assert!(
-                keybindings::available_registry().any(|spec| spec.id == row.action()),
+                keybindings::available_registry().any(|spec| spec.id == action),
                 "{row:?}"
             );
         }
+        assert_eq!(Row::FromStable.action(), None);
         let overrides = std::collections::HashMap::new();
         assert_eq!(
-            chord_for(Row::Settings.action(), &overrides).as_deref(),
+            chord_for(Row::Settings.action().unwrap(), &overrides).as_deref(),
             Some("secondary-,")
         );
-        assert_eq!(chord_for(Row::NewProject.action(), &overrides), None);
+        assert_eq!(
+            chord_for(Row::NewProject.action().unwrap(), &overrides),
+            None
+        );
     }
 }

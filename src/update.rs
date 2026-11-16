@@ -207,6 +207,16 @@ fn tag_version(tag: &str) -> &str {
     tag.trim_start_matches('v')
 }
 
+/// What relaunches this install as it is: the AppImage file for one running
+/// from it, since its executable lives in a mount that goes with this process,
+/// and on every other install what `App::restart` finds for itself.
+pub(crate) fn this_install() -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "linux")]
+    return linux::running_appimage();
+    #[cfg(not(target_os = "linux"))]
+    None
+}
+
 /// Just ahead of `App::restart` into an install.
 pub(crate) fn before_restart() {
     #[cfg(target_os = "linux")]

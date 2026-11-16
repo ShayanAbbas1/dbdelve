@@ -879,6 +879,12 @@ impl Workspace {
             cx.notify();
             return;
         }
+        // Only the question backs out. Once the import has started there is
+        // nothing to go back to, and what is under it is no longer on disk.
+        if self.stable_import.is_some() {
+            self.cancel_stable_import(cx);
+            return;
+        }
         if self.project_name.is_some() {
             self.drop_project_name();
             cx.notify();

@@ -94,6 +94,16 @@ pub(super) fn remember_install() {
     }
 }
 
+pub(super) fn running_appimage() -> Option<PathBuf> {
+    let exe = std::env::current_exe().and_then(fs::canonicalize).ok()?;
+    appimage_of(
+        &exe,
+        std::env::var_os("APPIMAGE").as_deref(),
+        std::env::var_os("APPDIR").as_deref(),
+    )
+    .map(Path::to_path_buf)
+}
+
 fn remember(appimage: &Path, at_start: &OnceLock<Identity>) {
     match Identity::of(appimage) {
         Ok(identity) => {

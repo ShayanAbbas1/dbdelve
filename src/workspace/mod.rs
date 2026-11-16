@@ -22,6 +22,7 @@ mod objects;
 mod profiles;
 mod projects;
 mod queries;
+mod stable_import;
 mod tabs;
 mod welcome;
 
@@ -36,6 +37,7 @@ pub(crate) use profiles::unavailable_reason;
 pub(crate) use projects::project_name_refusal;
 pub(crate) use queries::error_in_buffer;
 
+use crate::channel::Channel;
 use crate::connection_form::{Origin, passphrase_to_persist, password_to_persist};
 use crate::session::{catalog_relation, write_buffer, write_grids};
 use crate::settings_panel::{SettingMatch, SettingsTab, filter_settings, render_settings_panel};
@@ -318,6 +320,13 @@ pub(crate) struct Workspace {
     /// The other clients installed here, looked for once at launch rather
     /// than on every frame of the welcome surface.
     pub(crate) importable: Vec<crate::import::Source>,
+    /// How many connections a DBDelve install here has for a nightly to
+    /// import, looked for once at launch like `importable`.
+    pub(crate) stable_connections: usize,
+    pub(crate) stable_import: Option<stable_import::StableImport>,
+    /// The data directory holds an import now, which this session's state is
+    /// not, so nothing of it is written there before the restart.
+    pub(crate) data_replaced: bool,
     /// What `note` says while there is no connection and no form to say it
     /// on: the welcome surface's line.
     pub(crate) welcome_notice: Option<String>,
@@ -519,6 +528,9 @@ impl Workspace {
                 .into_iter()
                 .filter(|source| source.found())
                 .collect(),
+            stable_connections: stable_import::stable_connections(),
+            stable_import: None,
+            data_replaced: false,
             welcome_notice: None,
             runs_on_connect: Vec::new(),
             project_name_error: None,
@@ -1150,11 +1162,18 @@ impl Workspace {
         let t = *theme(cx);
         let update = self.update.as_ref()?;
         let version = update.release.version.clone();
-        let name = crate::channel::Channel::current().display_name();
+        let channel = Channel::current();
+        let name = channel.display_name();
+        // A nightly's version is mostly a date stamp, too long for the
+        // titlebar beside the name, which already says nightly.
+        let available = match channel {
+            Channel::Stable => format!("{name} {version} available"),
+            Channel::Nightly => "New nightly available".to_string(),
+        };
         let url = update.release.url.clone();
         let (label, menu): (String, Rc<dyn Fn(PopupMenu) -> PopupMenu>) = match &update.state {
             update::State::Link => (
-                format!("{name} {version} available"),
+                available,
                 Rc::new(move |menu| {
                     menu.label("Update it with your package manager,")
                         .label("or download it from GitHub.")
@@ -1165,7 +1184,7 @@ impl Workspace {
             update::State::Ready(_) => {
                 let workspace = cx.weak_entity();
                 (
-                    format!("{name} {version} available"),
+                    available,
                     Rc::new(move |menu| {
                         let workspace = workspace.clone();
                         menu.item(PopupMenuItem::new("Update and restart").on_click(
@@ -1180,7 +1199,12 @@ impl Workspace {
                 )
             }
             update::State::Running(progress) => {
-                let status = format!("{name} {version} opens once it is installed.");
+                let status = match channel {
+                    Channel::Stable => {
+                        format!("{name} {version} opens once it is installed.")
+                    }
+                    Channel::Nightly => "The new nightly opens once it is installed.".to_string(),
+                };
                 (
                     progress.label(),
                     Rc::new(move |menu| {
@@ -1193,7 +1217,7 @@ impl Workspace {
             &update::State::Failed(reason, _) => {
                 let workspace = cx.weak_entity();
                 (
-                    format!("{name} {version} available"),
+                    available,
                     Rc::new(move |menu| {
                         let workspace = workspace.clone();
                         menu.label(reason)
@@ -1655,7 +1679,10 @@ impl Render for Workspace {
                         .child(self.render_connection_form(window, cx)),
                 )
                 .children(self.dialog_layer(
-                    [("import-choice", self.render_import_choice(cx))],
+                    [
+                        ("import-choice", self.render_import_choice(cx)),
+                        ("stable-import", self.render_stable_import(cx)),
+                    ],
                     window,
                     cx,
                 ))
@@ -1698,7 +1725,10 @@ impl Render for Workspace {
                 ))
                 .child(self.beside_settings(self.render_welcome(window, cx).into_any_element(), cx))
                 .children(self.dialog_layer(
-                    [("import-choice", self.render_import_choice(cx))],
+                    [
+                        ("import-choice", self.render_import_choice(cx)),
+                        ("stable-import", self.render_stable_import(cx)),
+                    ],
                     window,
                     cx,
                 ))
@@ -2539,6 +2569,7 @@ impl Render for Workspace {
                     ("queue-failure", self.render_queue_failure(cx)),
                     ("stale-edit", self.render_stale_edit(cx)),
                     ("import-choice", self.render_import_choice(cx)),
+                    ("stable-import", self.render_stable_import(cx)),
                 ],
                 window,
                 cx,

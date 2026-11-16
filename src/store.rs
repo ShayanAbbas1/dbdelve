@@ -12,6 +12,8 @@ use crate::db::{
     Stopped, odbc_string,
 };
 
+pub(crate) mod stable_import;
+
 const PROFILES_FILE: &str = "profiles.toml";
 /// The buffer file a build before per-tab buffers wrote. Read-only now, and
 /// only for tab 0 -- see [`read_scratch`].

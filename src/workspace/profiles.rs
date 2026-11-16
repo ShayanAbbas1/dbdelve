@@ -66,7 +66,7 @@ impl Workspace {
         // The file we could not read at startup is still the user's, and what
         // this session holds is not what they have -- so it must not flatten
         // it. The notice said nothing would be saved.
-        if self.store_unreadable {
+        if self.store_unreadable || self.data_replaced {
             return Ok(());
         }
         let profiles = self
