@@ -22,6 +22,15 @@ impl Workspace {
     /// so the structure is all it refreshes.
     pub(crate) fn refresh_relation(&mut self, id: u64, cx: &mut Context<Self>) {
         self.clear_notice();
+        // Users and roles has no relation behind it: its refresh reads the
+        // roles again.
+        if self.profile().is_some_and(|profile| {
+            (profile.session.objects.iter())
+                .any(|tab| tab.id == id && matches!(tab.body, ObjectBody::Users { .. }))
+        }) {
+            self.refresh_roles(cx);
+            return;
+        }
         if let Some((schema, relation)) = self
             .profile()
             .and_then(|profile| profile.session.objects.iter().find(|tab| tab.id == id))
@@ -113,7 +122,8 @@ impl Workspace {
                 }
                 ObjectBody::Routine(_)
                 | ObjectBody::Structure { .. }
-                | ObjectBody::Diagram { .. } => None,
+                | ObjectBody::Diagram { .. }
+                | ObjectBody::Users { .. } => None,
             }
         }) else {
             return;
@@ -442,9 +452,10 @@ impl Workspace {
     pub(crate) fn filter_rows_mut(&mut self, id: u64) -> Option<&mut Vec<FilterRow>> {
         match self.object_body_mut(id)? {
             ObjectBody::Relation { filters, .. } => Some(filters),
-            ObjectBody::Routine(_) | ObjectBody::Structure { .. } | ObjectBody::Diagram { .. } => {
-                None
-            }
+            ObjectBody::Routine(_)
+            | ObjectBody::Structure { .. }
+            | ObjectBody::Diagram { .. }
+            | ObjectBody::Users { .. } => None,
         }
     }
 

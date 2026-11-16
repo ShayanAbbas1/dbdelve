@@ -13,6 +13,7 @@ mod explorer;
 mod export;
 mod filter;
 mod fuzzy;
+mod grants;
 mod import;
 mod import_rows;
 // Nothing calls it until the MongoDB engine is wired in (phase 1b).
@@ -41,6 +42,7 @@ mod theme;
 mod tls;
 mod ui;
 mod update;
+mod users_view;
 
 use std::{borrow::Cow, path::PathBuf, rc::Rc, sync::Arc};
 
@@ -94,9 +96,9 @@ use palette::{Command, Mode as PaletteMode, Palette, PaletteEvent, Scope, Stroke
 use result_grid::{NewValue, ResultGrid};
 use session::{
     ApplyReview, CatalogState, Explained, Focus, InsertField, InsertForm, ObjectBody, ObjectTab,
-    OpenedObject, Profile, ProfileState, QueryState, QueryTab, Refresh, Routines, RowCount,
-    Session, Sorting, StructureState, Tab, TabKey, insert_value, matching_tab, relation_kind,
-    restored_state, show_snapshot,
+    OpenedObject, Profile, ProfileState, QueryState, QueryTab, Refresh, RolesState, Routines,
+    RowCount, Session, Sorting, StructureState, Tab, TabKey, insert_value, matching_tab,
+    relation_kind, restored_state, show_snapshot,
 };
 use sql::{Buffer, SortKey};
 use theme::{ConnectionColor, FontSlot, Fonts, Theme, fonts, layout, popup_theme, theme};

@@ -4028,6 +4028,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
                         NodeAction::NewQueryHere => icon::PLUS,
                         NodeAction::CopyName(_) => icon::COPY,
                         NodeAction::ShowDdl => icon::STRUCTURE,
+                        NodeAction::ShowGrants => icon::SHIELD,
                         NodeAction::Refresh => icon::REFRESH,
                     };
                     command(

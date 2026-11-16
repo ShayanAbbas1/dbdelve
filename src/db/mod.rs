@@ -37,6 +37,7 @@ mod password_command;
 pub(crate) mod plugin;
 mod postgres;
 mod redis;
+pub mod roles;
 mod snowflake;
 mod spec;
 mod sqlite;
@@ -2246,6 +2247,49 @@ impl Connection {
                 "This engine declares no foreign keys to draw.".into(),
             )),
             Self::External(connection) => connection.schema_graph(schema),
+        }
+    }
+
+    /// The server's logins and roles and who belongs to whom. Asked only
+    /// where [`Target::manages_roles`], on a connection from
+    /// [`Connection::apart`].
+    pub fn roles(&self) -> Result<roles::Roles, DbError> {
+        match self {
+            Self::Postgres(connection) => connection.roles(),
+            _ => Err(plain_error("This connection lists no roles.".into())),
+        }
+    }
+
+    /// Who holds which privilege on the relation or sequence `schema.name`.
+    pub fn object_grants(&self, schema: &str, name: &str) -> Result<roles::ObjectGrants, DbError> {
+        match self {
+            Self::Postgres(connection) => connection.object_grants(schema, name),
+            _ => Err(plain_error("This connection lists no grants.".into())),
+        }
+    }
+
+    /// What the role `name` can reach in the connection's database.
+    pub fn role_reach(&self, name: &str) -> Result<roles::Reach, DbError> {
+        match self {
+            Self::Postgres(connection) => connection.role_reach(name),
+            _ => Err(plain_error("This connection lists no grants.".into())),
+        }
+    }
+
+    /// Every privilege the role `name` holds on a relation of the
+    /// connection's database.
+    pub fn role_grants(&self, name: &str) -> Result<roles::RoleGrants, DbError> {
+        match self {
+            Self::Postgres(connection) => connection.role_grants(name),
+            _ => Err(plain_error("This connection lists no grants.".into())),
+        }
+    }
+
+    /// The audit lists of the Users and roles tab's Reports.
+    pub fn role_reports(&self, roles: &roles::Roles) -> Result<roles::Reports, DbError> {
+        match self {
+            Self::Postgres(connection) => connection.role_reports(roles),
+            _ => Err(plain_error("This connection lists no roles.".into())),
         }
     }
 

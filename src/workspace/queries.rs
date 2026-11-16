@@ -355,7 +355,7 @@ impl Workspace {
             // keystroke on is what lets that one have it.
             if matches!(
                 profile.session.active_object().map(|tab| &tab.body),
-                Some(ObjectBody::Diagram { .. })
+                Some(ObjectBody::Diagram { .. } | ObjectBody::Users { .. })
             ) {
                 cx.propagate();
                 return;
@@ -2498,7 +2498,8 @@ impl Workspace {
                     ObjectBody::Relation { limit, .. } => *limit,
                     ObjectBody::Routine(_)
                     | ObjectBody::Structure { .. }
-                    | ObjectBody::Diagram { .. } => None,
+                    | ObjectBody::Diagram { .. }
+                    | ObjectBody::Users { .. } => None,
                 }),
             Tab::Object(_) | Tab::Query(_) => None,
         };
@@ -3212,6 +3213,7 @@ impl Workspace {
                             }
                             Refresh::Return => {}
                             Refresh::Relation(id) => workspace.refresh_relation(id, cx),
+                            Refresh::Roles => workspace.load_roles(&id, cx),
                         }
                     }
                     // A refresh belongs to a generated edit, so the run that

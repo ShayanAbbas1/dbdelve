@@ -2150,6 +2150,7 @@ dependencies = [
  "nucleo-matcher",
  "num-bigint 0.4.8",
  "percent-encoding",
+ "postgres-protocol",
  "redis",
  "resvg 0.46.0",
  "ring",

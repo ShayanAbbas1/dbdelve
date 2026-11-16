@@ -766,7 +766,9 @@ fn enter_opens_a_sidebar_row_and_its_structure_takes_the_keyboard(cx: &mut TestA
                     ObjectBody::Structure { grid, .. } => {
                         (true, grid.focus_handle(cx).is_focused(window))
                     }
-                    ObjectBody::Routine(_) | ObjectBody::Diagram { .. } => {
+                    ObjectBody::Routine(_)
+                    | ObjectBody::Diagram { .. }
+                    | ObjectBody::Users { .. } => {
                         panic!("birds is a table")
                     }
                 }
@@ -3307,6 +3309,150 @@ fn show_ddl_opens_a_read_only_view_of_a_tables_definition_and_hands_the_keyboard
         press(cx, "escape");
         assert_eq!(front_dialog(&workspace, cx), None);
         assert_eq!(ddl_text(&workspace, cx), None);
+        assert!(editor_has_keyboard(&workspace, cx));
+        quit(workspace, cx);
+    });
+}
+
+/// A table's grants as Postgres would list them: an owner, a role with one
+/// member, and PUBLIC holding nothing.
+fn birds_grants() -> crate::db::roles::ObjectGrants {
+    use crate::db::roles::{Grant, ObjectGrants, Role, Roles};
+    let role = |name: &str, login: bool| Role {
+        name: name.into(),
+        login,
+        superuser: false,
+        password_expires: None,
+        expired: false,
+        connection_limit: None,
+        has_password: None,
+        last_login: None,
+    };
+    ObjectGrants {
+        owner: "keeper".into(),
+        privileges: vec!["SELECT".into(), "INSERT".into()],
+        grants: vec![
+            Grant {
+                grantee: Some("keeper".into()),
+                privilege: "SELECT".into(),
+                grantable: false,
+            },
+            Grant {
+                grantee: Some("watchers".into()),
+                privilege: "SELECT".into(),
+                grantable: false,
+            },
+        ],
+        roles: Roles {
+            roles: vec![
+                role("keeper", true),
+                role("watchers", false),
+                role("ana", true),
+            ],
+            memberships: vec![("ana".into(), "watchers".into())],
+            ..Roles::default()
+        },
+    }
+}
+
+#[gpui::test]
+fn show_grants_draws_roles_by_privileges_and_hands_the_keyboard_back(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        assert!(editor_has_keyboard(&workspace, cx));
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let profile = workspace.profile().expect("a connection is in front");
+            let (id, generation) = (profile.id.clone(), profile.generation);
+            let request = workspace.open_grants_view(
+                &id,
+                "Grants on birds".into(),
+                "table · main".into(),
+                true,
+                window,
+                cx,
+            );
+            workspace.land_grants(
+                &id,
+                generation,
+                request,
+                Ok(super::GrantsOf::Object(birds_grants())),
+                cx,
+            );
+        });
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("show-grants"));
+        assert!(in_dialog(&workspace, cx), "the dialog holds the keyboard");
+        for row in [
+            "show-grants-row-keeper",
+            "show-grants-row-watchers",
+            "show-grants-row-ana",
+            "show-grants-row-PUBLIC",
+        ] {
+            assert!(cx.debug_bounds(row).is_some(), "{row} is drawn");
+        }
+
+        // Roles alone: the member listed under its role goes.
+        workspace.update(cx, |workspace, cx| workspace.set_grants_members(false, cx));
+        settle(cx);
+        assert!(cx.debug_bounds("show-grants-row-ana").is_none());
+        assert!(cx.debug_bounds("show-grants-row-watchers").is_some());
+
+        press(cx, "escape");
+        assert_eq!(front_dialog(&workspace, cx), None);
+        assert!(workspace.read_with(cx, |workspace, _| workspace.grants_view.is_none()));
+        assert!(editor_has_keyboard(&workspace, cx));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_role_form_opens_on_its_first_field_and_escape_puts_it_away(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        // The form belongs to a Users and roles tab, which SQLite never
+        // opens itself: one is put behind the editor for it.
+        workspace.update_in(cx, |workspace, window, cx| {
+            let view = cx.new(|_| crate::users_view::UsersView::new("main".into()));
+            let results = crate::result_grid::new_grid(window, cx);
+            let profile = workspace.profile_mut().expect("a connection is in front");
+            let id = profile.session.next_object_id;
+            profile.session.next_object_id += 1;
+            profile.session.objects.push(crate::session::ObjectTab {
+                id,
+                database: None,
+                schema: String::new(),
+                name: crate::sidebar::USERS_AND_ROLES.into(),
+                kind: None,
+                body: ObjectBody::Users {
+                    view,
+                    query: QueryState::Idle,
+                    results,
+                },
+            });
+            let profile = profile.id.clone();
+            workspace.open_role_form(
+                &profile,
+                super::RoleFormKind::New { login: true },
+                window,
+                cx,
+            );
+        });
+        settle(cx);
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("role-form"));
+
+        cx.simulate_input("ana");
+        settle(cx);
+        let typed = workspace.read_with(cx, |workspace, cx| {
+            let form = workspace.role_form.as_ref().expect("the form is up");
+            form.name.read(cx).value().to_string()
+        });
+        assert_eq!(typed, "ana", "the name field took the keystrokes");
+
+        press(cx, "escape");
+        assert_eq!(front_dialog(&workspace, cx), None);
+        assert!(workspace.read_with(cx, |workspace, _| workspace.role_form.is_none()));
         assert!(editor_has_keyboard(&workspace, cx));
         quit(workspace, cx);
     });

@@ -24,7 +24,7 @@ use crate::db::Syntax;
 /// The gpui-component widgets ask for their own paths — those are Lucide names
 /// too, so they resolve here as well. Add a row when something asks for one;
 /// an unlisted path simply draws nothing.
-const ICONS: [(&str, &IconData); 86] = [
+const ICONS: [(&str, &IconData); 91] = [
     ("icons/git-fork.svg", icondata_lu::LuGitFork),
     ("icons/chevron-down.svg", icondata_lu::LuChevronDown),
     ("icons/chevron-right.svg", icondata_lu::LuChevronRight),
@@ -59,6 +59,14 @@ const ICONS: [(&str, &IconData); 86] = [
     ("icons/eye-off.svg", icondata_lu::LuEyeOff),
     ("icons/hard-drive.svg", icondata_lu::LuHardDrive),
     ("icons/globe.svg", icondata_lu::LuGlobe),
+    ("icons/users.svg", icondata_lu::LuUsers),
+    ("icons/user.svg", icondata_lu::LuUser),
+    ("icons/shield.svg", icondata_lu::LuShield),
+    ("icons/lock.svg", icondata_lu::LuLock),
+    (
+        "icons/corner-down-right.svg",
+        icondata_lu::LuCornerDownRight,
+    ),
     ("icons/list-tree.svg", icondata_lu::LuListTree),
     ("icons/square-function.svg", icondata_lu::LuSquareFunction),
     ("icons/square-play.svg", icondata_lu::LuSquarePlay),
@@ -204,6 +212,18 @@ pub mod icon {
     pub const SEQUENCE: &str = "icons/list-ordered.svg";
     pub const STRUCTURE: &str = "icons/list-tree.svg";
     pub const DIAGRAM: &str = "icons/network.svg";
+    /// Users and roles, and a role others belong to.
+    pub const USERS: &str = "icons/users.svg";
+    /// One login.
+    pub const USER: &str = "icons/user.svg";
+    /// Show Grants, and a superuser.
+    pub const SHIELD: &str = "icons/shield.svg";
+    /// A role that cannot log in.
+    pub const LOCK: &str = "icons/lock.svg";
+    /// PUBLIC, every role.
+    pub const PUBLIC: &str = "icons/globe.svg";
+    /// Held through a role the holder belongs to.
+    pub const THROUGH: &str = "icons/corner-down-right.svg";
     pub const FIT: &str = "icons/scan.svg";
     pub const EXPORT: &str = "icons/download.svg";
     pub const PLUS: &str = "icons/plus.svg";

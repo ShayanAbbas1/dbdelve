@@ -257,6 +257,10 @@ impl Workspace {
                 self.load_diagram(id, cx);
                 return;
             }
+            ObjectBody::Users { .. } => {
+                self.show_users(cx);
+                return;
+            }
             ObjectBody::Routine(_) => return,
         };
         // A tab restored from a snapshot is `Complete` over rows nothing has
@@ -691,6 +695,14 @@ impl Workspace {
                     _ => {}
                 }
             }
+            NodeAction::ShowGrants => {
+                let kind = match node.kind {
+                    NodeKind::Relation(kind) => relation_kind_label(kind),
+                    NodeKind::Sequence => "sequence",
+                    _ => return,
+                };
+                self.show_object_grants(node, kind, window, cx);
+            }
             NodeAction::NewQueryHere => {
                 if !self.make_front(&node.profile, cx) {
                     return;
@@ -886,7 +898,11 @@ impl Workspace {
     /// `id`, in front or not, by id and generation, with how to reach it.
     /// Another database's is its session, which a read with none open opens
     /// first.
-    fn route_in(&self, id: &str, database: Option<String>) -> Option<(String, u64, Routed)> {
+    pub(super) fn route_in(
+        &self,
+        id: &str,
+        database: Option<String>,
+    ) -> Option<(String, u64, Routed)> {
         let profile = self.profiles.iter().find(|found| found.id == id)?;
         let own = profile.active_database();
         let database = database.filter(|database| own.as_ref() != Some(database));
@@ -1372,7 +1388,9 @@ impl Workspace {
                             }
                             *structure = loaded(result);
                         }
-                        ObjectBody::Routine(_) | ObjectBody::Diagram { .. } => {}
+                        ObjectBody::Routine(_)
+                        | ObjectBody::Diagram { .. }
+                        | ObjectBody::Users { .. } => {}
                     }
                     let pages_by_key = profile.config.engine().pages_by_key();
                     cx.notify();
@@ -2715,6 +2733,17 @@ fn loaded(result: Result<Structure, DbError>) -> StructureState {
     match result {
         Ok(structure) => StructureState::Loaded(structure),
         Err(error) => StructureState::Failed(error.message),
+    }
+}
+
+/// What Show Grants calls a relation of `kind` under its title.
+fn relation_kind_label(kind: RelationKind) -> &'static str {
+    match kind {
+        RelationKind::Table | RelationKind::PartitionedTable => "table",
+        RelationKind::View => "view",
+        RelationKind::MaterializedView => "materialized view",
+        RelationKind::ForeignTable => "foreign table",
+        RelationKind::Dictionary => "dictionary",
     }
 }
 

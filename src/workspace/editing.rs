@@ -61,7 +61,8 @@ impl Workspace {
                     ObjectBody::Relation { structure, .. } => structure,
                     ObjectBody::Structure { .. }
                     | ObjectBody::Routine(_)
-                    | ObjectBody::Diagram { .. } => return,
+                    | ObjectBody::Diagram { .. }
+                    | ObjectBody::Users { .. } => return,
                 };
                 if !tab.takes_inserts(self.target()) {
                     self.note("This view takes no inserts.".into(), cx);
@@ -1782,6 +1783,12 @@ impl Workspace {
         // Without the refresh the grid would show the UPDATE's empty result set
         // and the user would watch their table vanish.
         let refresh = match tab {
+            Tab::Object(id)
+                if (profile.session.objects.iter())
+                    .any(|tab| tab.id == id && matches!(tab.body, ObjectBody::Users { .. })) =>
+            {
+                Refresh::Roles
+            }
             Tab::Object(id) => Refresh::Relation(id),
             Tab::Query(id) => match profile
                 .session
@@ -1832,7 +1839,7 @@ impl Workspace {
     ///
     /// Asked last, once the creator has nothing left of its own to refuse:
     /// a creator that would have refused anyway must not move the user.
-    fn review_slot_free(
+    pub(super) fn review_slot_free(
         &mut self,
         from: Tab,
         replaces_own: bool,

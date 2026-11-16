@@ -292,6 +292,12 @@ impl Workspace {
                         }
                         _ => Vec::new(),
                     },
+                    roles: match (&profile.state, &profile.catalog) {
+                        (ProfileState::Connected(_), CatalogState::Loaded(..)) => {
+                            Self::roles_listing(profile)
+                        }
+                        _ => None,
+                    },
                     levels,
                     database,
                 }
@@ -706,7 +712,11 @@ impl Workspace {
                 let scoped = model::unscoped(id)?;
                 self.row_node(scoped.profile, scoped.database, scoped.inner, *leaf)
             }
-            Node::Group | Node::Notice => None,
+            Node::Group
+            | Node::Notice
+            | Node::Users { .. }
+            | Node::RoleGroup { .. }
+            | Node::Role { .. } => None,
         }
     }
 
@@ -796,6 +806,16 @@ impl Workspace {
                     self.open_database(&id, database, cx);
                 }
             }
+            // Read when first opened, and again after a failure.
+            Some(Node::Users { profile }) => {
+                let profile = profile.clone();
+                if self.profiles.iter().any(|found| {
+                    found.id == profile
+                        && matches!(found.roles, RolesState::Unloaded | RolesState::Failed(_))
+                }) {
+                    self.load_roles(&profile, cx);
+                }
+            }
             _ => {}
         }
     }
@@ -809,6 +829,19 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        match self.connections.nodes.get(id) {
+            Some(Node::Users { profile }) => {
+                let profile = profile.clone();
+                self.open_users(&profile, None, window, cx);
+                return true;
+            }
+            Some(Node::Role { profile, name, .. }) => {
+                let (profile, name) = (profile.clone(), name.clone());
+                self.open_users(&profile, Some(name), window, cx);
+                return true;
+            }
+            _ => {}
+        }
         let Some(model::Scoped {
             profile,
             database,
@@ -947,7 +980,20 @@ impl Workspace {
                     highlighted(label, matched, t),
                     ListItem::new(index).text_color(t.text),
                 ),
-                Some(Node::Group | Node::Connection { .. } | Node::Database { .. }) => (
+                Some(Node::Role { .. }) => (
+                    highlighted(label, matched, t),
+                    ListItem::new(index).text_color(t.text),
+                ),
+                Some(Node::RoleGroup { .. }) => (
+                    highlighted(label, matched, t),
+                    ListItem::new(index).text_color(t.text),
+                ),
+                Some(
+                    Node::Group
+                    | Node::Connection { .. }
+                    | Node::Database { .. }
+                    | Node::Users { .. },
+                ) => (
                     highlighted(label, matched, t),
                     ListItem::new(index)
                         .text_color(t.text)
@@ -972,6 +1018,8 @@ impl Workspace {
             // of object it is. Both occupy the same slot, so the labels line up.
             let lead = match (node, leaf, shortcut) {
                 (Some(Node::Notice), ..) => None,
+                (Some(Node::Role { login: true, .. }), ..) => Some(icon::USER),
+                (Some(Node::Role { login: false, .. }), ..) => Some(icon::LOCK),
                 (_, Some(leaf), _) => Some(object_icon(leaf.kind)),
                 (
                     _,
@@ -991,6 +1039,9 @@ impl Workspace {
                 Some(Node::Group) => Some(icon::PROJECT),
                 Some(Node::Connection { .. }) => target.map(|(logo, ..)| *logo),
                 Some(Node::Database { .. }) => Some(icon::DATABASE),
+                Some(Node::Users { .. }) => Some(icon::USERS),
+                Some(Node::RoleGroup { logins: true, .. }) => Some(icon::USER),
+                Some(Node::RoleGroup { logins: false, .. }) => Some(icon::USERS),
                 _ if inner == Some(QUERIES_GROUP) => {
                     target.map(|(_, syntax, _)| queries_group_icon(*syntax))
                 }
@@ -1063,6 +1114,12 @@ impl Workspace {
                                             format!("connections-logo-{profile}")
                                         })
                                         .child(row_icon_tinted(t, path, look.color))
+                                        .into_any_element()
+                                }
+                                // Users and roles wears the accent the
+                                // design draws it in.
+                                None if matches!(node, Some(Node::Users { .. })) => {
+                                    row_icon_tinted(t, path, Some(ConnectionColor::Purple))
                                         .into_any_element()
                                 }
                                 None => row_icon(t, path).into_any_element(),
@@ -1168,7 +1225,10 @@ impl Workspace {
             if matches!(node, Some(Node::Notice)) {
                 return row;
             }
-            let opens = !missing && (leaf.is_some() || query.is_some());
+            let opens = !missing
+                && (leaf.is_some()
+                    || query.is_some()
+                    || matches!(node, Some(Node::Users { .. } | Node::Role { .. })));
             let workspace = workspace.clone();
             let id = id.to_string();
             row.on_click(move |event, window, cx| {

@@ -292,6 +292,7 @@ impl Workspace {
             catalog: CatalogState::Loading,
             schema_refresh: None,
             databases: Databases::default(),
+            roles: RolesState::default(),
             bound: HashMap::new(),
             database_catalogs: HashMap::new(),
             left_database: false,
@@ -364,6 +365,7 @@ impl Workspace {
             catalog: CatalogState::Loading,
             schema_refresh: None,
             databases: Databases::default(),
+            roles: RolesState::default(),
             bound: HashMap::new(),
             database_catalogs: HashMap::new(),
             left_database: false,
@@ -1509,6 +1511,7 @@ impl Workspace {
         profile.session.apply_review = None;
         profile.session.insert_form = None;
         profile.databases = Databases::default();
+        profile.roles = RolesState::default();
     }
 
     /// The connect's half of [`Self::leave_database`], for a profile whose
@@ -1923,6 +1926,7 @@ impl Workspace {
         // onto another database, and `active_database` reads this first, so a
         // folder would go on naming the old one.
         profile.databases = Databases::default();
+        profile.roles = RolesState::default();
 
         let id = profile.id.clone();
         let mut config = profile.config.clone();
