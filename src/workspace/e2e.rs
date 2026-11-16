@@ -6199,6 +6199,8 @@ fn ssm_cleanup_notice_survives_form_and_connected_workspace(cx: &mut TestAppCont
 
 #[gpui::test]
 fn ssm_cleanup_notice_keyboard_dismiss_keeps_actions_available(cx: &mut TestAppContext) {
+    // CI's PG* settings must not replace this welcome-screen fixture.
+    crate::IGNORE_ENVIRONMENT.set(true);
     store::tests::with_home(|| {
         let (workspace, cx) = launch(cx);
         workspace.update(cx, |workspace, cx| {
@@ -6216,10 +6218,15 @@ fn ssm_cleanup_notice_keyboard_dismiss_keeps_actions_available(cx: &mut TestAppC
         cx.update(|window, cx| {
             window.blur(cx);
             window.focus_next(cx);
+            window.draw(cx).clear(cx);
         });
         press(cx, "enter");
+        // Focus restoration happens during rendering. Draw its dispatch path
+        // before sending the next shortcut on the headless platform.
+        cx.update(|window, cx| window.draw(cx).clear(cx));
         workspace.read_with(cx, |workspace, _| {
-            assert!(workspace.cleanup_notices.is_empty())
+            assert!(workspace.cleanup_notices.is_empty());
+            assert!(workspace.form.is_none());
         });
         cx.update(|window, cx| {
             assert!(
