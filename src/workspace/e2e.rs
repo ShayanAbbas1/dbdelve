@@ -6233,3 +6233,78 @@ fn ssm_cleanup_notice_keyboard_dismiss_keeps_actions_available(cx: &mut TestAppC
         quit(workspace, cx);
     });
 }
+
+#[gpui::test]
+fn ssm_disconnect_delivers_failed_cleanup_notice(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let attempt = crate::db::ConnectAttempt::default();
+        attempt.finish().unwrap();
+        let profile_index = workspace.update(cx, |workspace, _| {
+            let index = workspace.active.unwrap();
+            let profile = &mut workspace.profiles[index];
+            assert!(matches!(profile.state, ProfileState::Connected(_)));
+            profile.cleanup_attempt = Some(attempt.clone());
+            index
+        });
+        disconnect(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.active.is_none());
+            assert!(matches!(
+                workspace.profiles[profile_index].state,
+                ProfileState::Idle
+            ));
+            assert!(workspace.profiles[profile_index].cleanup_attempt.is_none());
+            assert!(workspace.cleanup_notices.is_empty());
+        });
+        // Deliver after disconnect returns, as the background AWS request does.
+        let result = crate::db::ssm::CleanupResult {
+            accepted: false,
+            session: Some("alice-123".into()),
+            profile: Some("development".into()),
+            region: Some("test-region".into()),
+        };
+        attempt.report_cleanup(result.clone());
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.cleanup_notices, vec![result]);
+        });
+        assert!(cx.debug_bounds("cleanup-copy-0").is_some());
+        assert!(cx.debug_bounds("cleanup-dismiss-0").is_some());
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn ssm_disconnect_does_not_warn_after_successful_cleanup(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let attempt = crate::db::ConnectAttempt::default();
+        attempt.finish().unwrap();
+        let profile_index = workspace.update(cx, |workspace, _| {
+            let index = workspace.active.unwrap();
+            let profile = &mut workspace.profiles[index];
+            assert!(matches!(profile.state, ProfileState::Connected(_)));
+            profile.cleanup_attempt = Some(attempt.clone());
+            index
+        });
+        disconnect(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.active.is_none());
+            assert!(workspace.profiles[profile_index].cleanup_attempt.is_none());
+        });
+        attempt.report_cleanup(crate::db::ssm::CleanupResult {
+            accepted: true,
+            session: Some("alice-123".into()),
+            profile: Some("development".into()),
+            region: Some("test-region".into()),
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.cleanup_notices.is_empty())
+        });
+        assert!(cx.debug_bounds("cleanup-copy-0").is_none());
+        assert!(cx.debug_bounds("cleanup-dismiss-0").is_none());
+        quit(workspace, cx);
+    });
+}

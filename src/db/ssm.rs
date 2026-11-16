@@ -78,7 +78,7 @@ impl ConnectAttempt {
         *self.0.cleanup.lock().unwrap_or_else(|p| p.into_inner()) = Some(send);
         receive
     }
-    fn report_cleanup(&self, result: CleanupResult) {
+    pub(crate) fn report_cleanup(&self, result: CleanupResult) {
         if let Some(send) = self
             .0
             .cleanup
