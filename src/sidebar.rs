@@ -926,7 +926,14 @@ fn connection_item(
                 .builder
                 .name_matches(&database_row(connection.id, database), database)
         });
-    if search.filtering && !named && !has_rows && !database_named {
+    // Its Users and roles row is its own too, listed once its objects have
+    // loaded, and a role's name keeps the connection even where none of its
+    // objects match.
+    let users = match (&connection.content, connection.roles) {
+        (Content::Loaded(_), Some(roles)) => users_item(tree, connection.id, roles, folds, search),
+        _ => None,
+    };
+    if search.filtering && !named && !has_rows && !database_named && users.is_none() {
         return None;
     }
     tree.nodes.insert(
@@ -976,16 +983,19 @@ fn connection_item(
             if connection.levels != Levels::DatabaseThenSchema {
                 catalog_left_out = content.left_out;
             }
-            (
-                followed,
-                vec![notice(
+            // Kept only by a role, it has objects, just none the filter matches.
+            let mut children = match search.filtering && users.is_some() {
+                true => Vec::new(),
+                false => vec![notice(
                     tree,
                     connection.id,
                     None,
                     "notice",
                     &empty_catalog_line(connection.levels, content.left_out),
                 )],
-            )
+            };
+            children.extend(users);
+            (search.filtering || followed, children)
         }
         Content::Loaded(content) => {
             let ExplorerTree {
@@ -1069,9 +1079,7 @@ fn connection_item(
             // Each database row is one more of what the connection counts.
             count = count.map(|count| count + others.len());
             children.extend(others);
-            if let Some(roles) = connection.roles {
-                children.extend(users_item(tree, connection.id, roles, folds, search));
-            }
+            children.extend(users);
             (search.filtering || followed, children)
         }
     };
@@ -3248,6 +3256,25 @@ mod tests {
         let ids = all_ids(&tree.items);
         assert!(ids.contains(&role_row("a", false, "reporting")));
         assert!(!ids.contains(&role_row("a", true, "ana")));
+
+        // The caller narrows the objects too, so none matching leaves them empty.
+        let no_objects = |roles| Listed {
+            roles: Some(roles),
+            ..listed("a", "a", Content::Loaded(ExplorerTree::default()))
+        };
+        let tree = filtered(&[], vec![no_objects(read())], "report");
+        let ids = all_ids(&tree.items);
+        assert!(
+            ids.contains(&role_row("a", false, "reporting")),
+            "a role alone keeps its connection"
+        );
+        let tree = filtered(&[], vec![no_objects(read())], "users and");
+        assert!(
+            all_ids(&tree.items).contains(&users_row("a")),
+            "and so does the Users and roles row's own name"
+        );
+        let tree = filtered(&[], vec![no_objects(read())], "zzz");
+        assert!(tree.items.is_empty(), "nothing matching keeps nothing");
     }
 
     #[test]
