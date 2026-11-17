@@ -116,6 +116,10 @@ pub(crate) struct ConnectionsSidebar {
     pub(crate) folds_before_filter: Option<HashMap<String, bool>>,
     /// The rows a modifier click gathered; complex mode only.
     pub(crate) selection: Selection,
+    /// Whether the selection is still the one stored, untouched since: rows
+    /// of it under a connection that has not loaded yet wait for it, and join
+    /// the selection as they appear. A selection of the user's ends it.
+    restoring: bool,
     /// The rows the last build closed because nothing had loaded under them.
     unloaded: HashSet<String>,
     /// The rows the last build left folded with their rows left out, and the
@@ -160,6 +164,7 @@ impl ConnectionsSidebar {
             filter,
             folds_before_filter: None,
             selection: Selection::default(),
+            restoring: true,
             unloaded: HashSet::new(),
             pruned: HashSet::new(),
             hidden: HashMap::new(),
@@ -315,12 +320,19 @@ impl Workspace {
             self.connections.selection.retain(&present);
         }
         // No selection of the user's yet, and the tree's row only the one it
-        // falls to: what was stored comes back as its rows appear.
+        // falls to or one of what came back: what was stored comes back as
+        // its rows appear, a connection loading later adding its own.
         let restored = filter.is_empty()
-            && self.connections.selection.rows.is_empty()
-            && selected
-                .as_ref()
-                .is_none_or(|row| front.as_ref().is_some_and(|front| front == row));
+            && self.connections.restoring
+            && selected.as_ref().is_none_or(|row| {
+                front.as_ref().is_some_and(|front| front == row)
+                    || self
+                        .connections
+                        .selection
+                        .rows
+                        .iter()
+                        .any(|kept| kept == row)
+            });
         if restored {
             let rows: Vec<String> = self
                 .profiles
@@ -329,7 +341,7 @@ impl Workspace {
                 .filter(|row| built.nodes.contains_key(row.as_str()))
                 .cloned()
                 .collect();
-            if !rows.is_empty() {
+            if !rows.is_empty() && rows != self.connections.selection.rows {
                 self.connections.selection = Selection {
                     anchor: rows.last().cloned(),
                     rows,
@@ -393,7 +405,9 @@ impl Workspace {
     /// one that was never made.
     fn remember_selection(&mut self) {
         let rows = &self.connections.selection.rows;
-        if rows.is_empty() {
+        // While it is still the one stored, what is stored is already it, and
+        // holds the rows of connections not loaded yet besides.
+        if rows.is_empty() || self.connections.restoring {
             return;
         }
         for profile in &mut self.profiles {
@@ -505,6 +519,7 @@ impl Workspace {
         }
         if let Some(front) = self.connections.tree.read(cx).selected_item() {
             let front = front.id.to_string();
+            self.connections.restoring = false;
             self.connections.selection.click(&front);
             cx.notify();
         }
@@ -605,6 +620,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> bool {
         if (modifiers.secondary() || modifiers.shift) && self.connections_node(id).is_some() {
+            self.connections.restoring = false;
             // The tree's own row is where a range or a toggle starts, whether
             // or not a modifier click has been there before.
             let current = self.selected_rows(cx);
@@ -636,6 +652,7 @@ impl Workspace {
             cx.notify();
             return true;
         }
+        self.connections.restoring = false;
         self.connections.selection.click(id);
         // Saved by what the click does next, if it does anything: a fold, a
         // tab opened.

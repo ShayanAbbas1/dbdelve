@@ -11913,3 +11913,72 @@ fn a_session_opened_for_a_connection_that_has_ended_is_not_kept(cx: &mut TestApp
         quit(workspace, cx);
     });
 }
+
+#[gpui::test]
+fn a_stored_selection_waits_for_a_connection_that_loads_later(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = remembering_fixture(cx);
+        let (a_birds, b_birds) = (table_row("a", "birds"), table_row("b", "birds"));
+        open_connections_rows(
+            &workspace,
+            cx,
+            &[
+                connection_row("a"),
+                scoped_row("a", None, "schema-main"),
+                scoped_row("a", None, "category-Tables-main"),
+                connection_row("b"),
+                scoped_row("b", None, "schema-main"),
+                scoped_row("b", None, "category-Tables-main"),
+            ],
+        );
+        click_connections_row_with(&workspace, cx, &a_birds, gpui::Modifiers::default());
+        click_connections_row_with(&workspace, cx, &b_birds, gpui::Modifiers::secondary_key());
+        assert_eq!(
+            selected_rows(&workspace, cx).0,
+            [a_birds.clone(), b_birds.clone()]
+        );
+
+        let (workspace, cx) = relaunch_closing(workspace, cx);
+        cx.simulate_resize(gpui::size(gpui::px(1024.), gpui::px(900.)));
+        settle(cx);
+        assert_eq!(profile_state(&workspace, cx, "b"), "idle");
+        assert_eq!(
+            selected_rows(&workspace, cx).0,
+            std::slice::from_ref(&a_birds)
+        );
+        let stored = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                workspace
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.id == "b")
+                    .expect("b is listed")
+                    .selected_rows
+                    .clone()
+            })
+        };
+        assert_eq!(
+            stored(&workspace, cx),
+            std::slice::from_ref(&b_birds),
+            "b's rows wait for it rather than being lost to a's"
+        );
+
+        // Connected without a click, which would be a selection of its own.
+        workspace.update(cx, |workspace, cx| {
+            let at = workspace
+                .profiles
+                .iter()
+                .position(|profile| profile.id == "b")
+                .expect("b is listed");
+            workspace.begin_connect(at, cx);
+        });
+        settle(cx);
+        assert_eq!(profile_state(&workspace, cx, "b"), "connected");
+        assert_eq!(
+            selected_rows(&workspace, cx).0,
+            [a_birds, b_birds],
+            "and join the selection once b has loaded"
+        );
+        quit(workspace, cx);
+    });
+}
