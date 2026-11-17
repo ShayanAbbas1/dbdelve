@@ -2898,6 +2898,20 @@ impl ResultGrid {
         self.send_failure.take_if(|(marked, _)| *marked == row);
     }
 
+    /// [`Self::pending_cells`] of every fetched row that has any, in row
+    /// order, read in one pass over the draft rather than one per row.
+    pub fn pending_by_row(&self) -> Vec<(usize, Vec<(usize, NewValue)>)> {
+        let mut rows = std::collections::BTreeMap::<usize, Vec<_>>::new();
+        for edit in &self.pending {
+            rows.entry(edit.row)
+                .or_default()
+                .push((edit.col, edit.value.clone()));
+        }
+        rows.into_iter()
+            .filter(|(row, _)| *row < self.result.rows.len())
+            .collect()
+    }
+
     /// The staged edits of `row`, by column, as a send carries them.
     pub fn pending_cells(&self, row: usize) -> Vec<(usize, NewValue)> {
         self.pending
@@ -9164,6 +9178,20 @@ mod tests {
         grid.select_row(2);
         assert_eq!(grid.active().map(|(row, _)| row), Some(1));
         assert!(grid.selected_draft_rows().iter().all(|&row| row < 2));
+    }
+
+    #[test]
+    fn the_draft_by_row_is_each_rows_pending_cells() {
+        let mut grid = editable_grid();
+        assert!(grid.set_pending(1, 1, NewValue::Value("b".into())));
+        assert!(grid.set_pending(0, 1, NewValue::Value("a".into())));
+        assert_eq!(grid.add_row(), Some(2));
+        assert!(grid.set_pending(2, 1, NewValue::Value("added".into())));
+        let expected: Vec<_> = (0..grid.result.rows.len())
+            .map(|row| (row, grid.pending_cells(row)))
+            .filter(|(_, cells)| !cells.is_empty())
+            .collect();
+        assert_eq!(grid.pending_by_row(), expected);
     }
 
     #[test]

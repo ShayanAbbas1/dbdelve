@@ -2561,13 +2561,7 @@ impl Workspace {
         // columns open, which leaves `pending_updates` no row to drop.
         let sent = carries.then(|| {
             let grid = results.read(cx).delegate();
-            let cells: Vec<_> = (0..grid.result().rows.len())
-                .filter_map(|row| {
-                    let cells = grid.pending_cells(row);
-                    (!cells.is_empty()).then_some((row, cells))
-                })
-                .collect();
-            (grid.rows_id(), cells)
+            (grid.rows_id(), grid.pending_by_row())
         });
         // A Row send's one row, the cells it carries and where the ring went
         // as it was left, taken now: the landing clears those cells and no
