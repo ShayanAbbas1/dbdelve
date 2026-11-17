@@ -22,6 +22,7 @@ mod objects;
 mod profiles;
 mod projects;
 mod queries;
+mod sidebar;
 mod stable_import;
 mod tabs;
 mod welcome;
@@ -41,6 +42,9 @@ use crate::channel::Channel;
 use crate::connection_form::{Origin, passphrase_to_persist, password_to_persist};
 use crate::session::{catalog_relation, write_buffer, write_grids};
 use crate::settings_panel::{SettingMatch, SettingsTab, filter_settings, render_settings_panel};
+use crate::sidebar::{
+    Density, ListingScope, ViewMode, effective_listing_scope, effective_view_mode,
+};
 use crate::sql::{Mode, appended_statement, remember_statement, update_batch};
 use crate::theme::{install_fonts, install_theme, restored_fonts, restored_theme};
 use crate::*;
@@ -93,6 +97,18 @@ pub(crate) struct Settings {
     /// Keybinding overrides, keyed by action id. Applied to the keymap on
     /// the next launch -- see `src/keybindings.rs`.
     pub(crate) custom_keybindings: HashMap<String, String>,
+    /// Which sidebar is drawn: the tree of the connection in front, or every
+    /// connection under its project.
+    pub(crate) view_mode: ViewMode,
+    /// Which connections that sidebar lists: every project's, or only those
+    /// of the project in front.
+    pub(crate) listing_scope: ListingScope,
+    /// How tall the connections tree's rows are.
+    pub(crate) density: Density,
+    /// Whether the connections tree's rows show their host.
+    pub(crate) show_host: bool,
+    /// Whether either tree shows sizes, and whether any is read.
+    pub(crate) show_sizes: bool,
 }
 
 impl Settings {
@@ -130,6 +146,11 @@ impl Default for Settings {
             verbose_logging: false,
             welcomed: false,
             custom_keybindings: HashMap::new(),
+            view_mode: ViewMode::default(),
+            listing_scope: ListingScope::default(),
+            density: Density::default(),
+            show_host: true,
+            show_sizes: true,
         }
     }
 }
@@ -225,6 +246,19 @@ pub(crate) struct PendingImport {
 
 pub(crate) struct Workspace {
     pub(crate) profiles: Vec<Profile>,
+    /// How many connections each mode change's read-only hold was handed to,
+    /// in order: what the tests ask of the fan-out, which runs on the
+    /// blocking pool where nothing can be counted.
+    #[cfg(test)]
+    pub(crate) held: Vec<usize>,
+    /// The database each session opened for another database was issued for,
+    /// in order: a landing that opens again is a second entry.
+    #[cfg(test)]
+    pub(crate) opened: Vec<String>,
+    /// How many size reads were started, which run on the blocking pool where
+    /// nothing can be counted.
+    #[cfg(test)]
+    pub(crate) size_reads: usize,
     /// Profiles on an engine this build cannot open, held as they were read
     /// and written back by `remember_profiles`; never restored.
     pub(crate) unavailable: Vec<store::UnavailableProfile>,
@@ -368,6 +402,13 @@ pub(crate) struct Workspace {
     /// The theme in force when the theme picker opened, while it is open. The
     /// installed one is only a preview until a row is confirmed.
     pub(crate) theme_before_preview: Option<Theme>,
+    /// The `Show DDL` dialog: one object's definition, read-only. Only the
+    /// relation menu's Show DDL opens it and only its own Close and `escape`
+    /// end it.
+    pub(crate) ddl_view: Option<DdlView>,
+    /// Numbers each Show DDL read, so an answer that comes back after the
+    /// dialog was closed, or put up for another object, is not drawn.
+    pub(crate) last_ddl_request: u64,
     /// The opacity field in the settings panel. Kept here rather than built
     /// with the card, because an input is state the user is part-way through
     /// typing into and a fresh one every frame would swallow the keystroke.
@@ -378,6 +419,8 @@ pub(crate) struct Workspace {
     /// Around the sidebar's tree, whose own handle the library keeps to
     /// itself: what tells an `escape` in the tree from one anywhere else.
     pub(crate) explorer_focus: FocusHandle,
+    /// Complex mode's tree: every connection under its project.
+    pub(crate) connections: sidebar::ConnectionsSidebar,
     /// The dialogs' own, so `enter` answers the one in front instead of
     /// editing the buffer or the grid it covers.
     pub(crate) dialog_focus: FocusHandle,
@@ -542,9 +585,18 @@ impl Workspace {
             palette_recents: Vec::new(),
             collapsed_projects: HashSet::new(),
             theme_before_preview: None,
+            ddl_view: None,
+            last_ddl_request: 0,
             opacity_input,
+            #[cfg(test)]
+            held: Vec::new(),
+            #[cfg(test)]
+            opened: Vec::new(),
+            #[cfg(test)]
+            size_reads: 0,
             focus: cx.focus_handle(),
             explorer_focus: cx.focus_handle(),
+            connections: sidebar::ConnectionsSidebar::new(window, cx),
             dialog_focus: cx.focus_handle(),
             dialog_in_front: std::cell::Cell::default(),
             dialog_choice: std::cell::Cell::default(),
@@ -644,6 +696,14 @@ impl Workspace {
                     .custom_keybindings
                     .clone()
                     .unwrap_or_default();
+                workspace.settings.view_mode =
+                    ViewMode::from_slug(stored_settings.view_mode.as_deref());
+                workspace.settings.listing_scope =
+                    ListingScope::from_slug(stored_settings.listing_scope.as_deref());
+                workspace.settings.density =
+                    Density::from_slug(stored_settings.sidebar_density.as_deref());
+                workspace.settings.show_host = stored_settings.sidebar_show_host.unwrap_or(true);
+                workspace.settings.show_sizes = stored_settings.sidebar_show_sizes.unwrap_or(true);
                 // Ahead of the restore, which must not prune grids an
                 // unavailable profile under the same id still owns.
                 workspace.unavailable = unavailable;
@@ -708,6 +768,10 @@ impl Workspace {
                 workspace.form = Some(form);
             }
         }
+
+        // A connection nothing connects at launch gets no other rebuild, and
+        // the tree would sit empty over profiles that are all there.
+        workspace.rebuild_connections(cx);
 
         // After the environment's form, which takes the notice over the
         // welcome surface when there is one. A load failure's last, since it
@@ -1635,6 +1699,7 @@ impl Render for Workspace {
         // take it -- which is what closing the palette asks for just before a
         // row of it opens the form. The ask waits for the form to close.
         let form_open = self.form.is_some();
+        let front_chip = self.front_chip();
         let take_focus = self.profile_mut().and_then(|profile| {
             if form_open {
                 return None;
@@ -1653,12 +1718,7 @@ impl Render for Workspace {
             // it, one-shot the same way: a tab just opened or activated off
             // screen is a tab the strip should show, not one it leaves the
             // user to go scroll for.
-            if let Some(index) = profile
-                .session
-                .strip_order()
-                .iter()
-                .position(|key| profile.session.tab_of(key) == Some(profile.session.active))
-            {
+            if let Some(index) = front_chip {
                 crate::scroller::scroll_to("tab-strip", "", index, cx);
             }
             // Whatever the surface in front is: a keystroke reaches the
@@ -1943,13 +2003,17 @@ impl Render for Workspace {
             });
         let engine = profile.config.engine();
         let relation_rows = relation.and_then(|(tab, count, filter, query, limit, offset)| {
-            let estimate = match &profile.catalog {
-                CatalogState::Loaded(catalog, _) => {
-                    catalog_relation(catalog, &tab.schema, &tab.name)
-                        .and_then(|relation| relation.rows)
-                }
-                _ => None,
-            };
+            // Read from the catalog of the database the tab is on, which may
+            // hold a relation of the same name with other numbers.
+            let own = profile.active_database();
+            let database = tab
+                .database
+                .as_deref()
+                .filter(|database| own.as_deref() != Some(*database));
+            let estimate = profile
+                .catalog_of(database)
+                .and_then(|catalog| catalog_relation(catalog, &tab.schema, &tab.name))
+                .and_then(|relation| relation.rows);
             let whole = offset == 0
                 && matches!(
                     query,
@@ -2163,7 +2227,7 @@ impl Render for Workspace {
             let insert = engine.syntax() == db::Syntax::Sql
                 && matches!(structure, StructureState::Loaded(loaded) if !loaded.columns.is_empty());
             Some((
-                connected.then(|| (tab.schema.clone(), tab.name.clone(), kind)),
+                connected.then(|| (tab.schema.clone(), tab.name.clone(), kind, tab.database.clone())),
                 insert,
             ))
         });
@@ -2315,7 +2379,7 @@ impl Render for Workspace {
                                 .flex()
                                 .items_center()
                                 .gap(px(layout::SPACE_SM))
-                                .children(ddl.map(|(schema, relation, kind)| {
+                                .children(ddl.map(|(schema, relation, kind, database)| {
                                     button(
                                         "copy-create",
                                         "Copy CREATE",
@@ -2325,10 +2389,14 @@ impl Render for Workspace {
                                     )
                                     .on_click(
                                         move |_, _, cx| {
-                                            let (schema, relation) =
-                                                (schema.clone(), relation.clone());
+                                            let (schema, relation, database) = (
+                                                schema.clone(),
+                                                relation.clone(),
+                                                database.clone(),
+                                            );
                                             _ = ddl_workspace.update(cx, |workspace, cx| {
-                                                workspace.copy_ddl(schema, relation, kind, cx);
+                                                workspace
+                                                    .copy_ddl(database, schema, relation, kind, cx);
                                             });
                                         },
                                     )
@@ -2438,6 +2506,9 @@ impl Render for Workspace {
             .flex_col()
             .child(div().flex_1().min_h_0().child(views::render_main_content(
                 profile,
+                &self.profiles,
+                self.view_mode(),
+                self.settings.color_titlebar,
                 self.editor_size(),
                 (self.chrome_zoom, self.editor_zoom, self.grid_zoom),
                 &self.row_panel,
@@ -2480,12 +2551,14 @@ impl Render for Workspace {
                                 .size_full()
                                 .flex()
                                 .flex_col()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_h_0()
-                                        .child(self.render_explorer(profile, cx)),
-                                )
+                                .child(div().flex_1().min_h_0().child(match self.view_mode() {
+                                    ViewMode::Complex => {
+                                        self.render_connections(cx).into_any_element()
+                                    }
+                                    ViewMode::Simple => {
+                                        self.render_explorer(profile, cx).into_any_element()
+                                    }
+                                }))
                                 .child(
                                     div()
                                         .h(px(layout::chrome(layout::STATUS_HEIGHT)))
@@ -2684,6 +2757,7 @@ impl Render for Workspace {
             .child(self.beside_settings(main_pane, cx))
             .children(self.dialog_layer(
                 [
+                    ("show-ddl", self.render_show_ddl(cx)),
                     ("apply-review", self.render_apply_review(cx)),
                     ("import-rows", self.render_import_rows(window, cx)),
                     ("delete", self.render_delete_confirmation(cx)),
@@ -2701,6 +2775,42 @@ impl Render for Workspace {
             .children(self.palette.clone())
             .children(self.render_reference_popup(cx))
     }
+}
+
+/// What the `Show DDL` dialog shows, and which object it was asked about: the
+/// answer lands only while the view still names the same request.
+pub(crate) struct DdlView {
+    /// The connection the object belongs to, by id; of several, the one acted
+    /// on last.
+    pub(crate) profile: String,
+    pub(crate) name: String,
+    /// One definition for one object, one per object for several.
+    pub(crate) sections: Vec<DdlSection>,
+    pub(crate) request: u64,
+}
+
+impl DdlView {
+    /// What the dialog's header says: the object's, or how many it lists.
+    pub(crate) fn heading(&self) -> String {
+        match self.sections.as_slice() {
+            [only] => only.title.clone(),
+            sections => format!("{} definitions", sections.len()),
+        }
+    }
+}
+
+/// One object's definition in the dialog, under its name.
+pub(crate) struct DdlSection {
+    pub(crate) title: String,
+    pub(crate) text: DdlText,
+}
+
+/// The definition as the dialog has it.
+pub(crate) enum DdlText {
+    Loading,
+    /// Empty when the server returned no definition.
+    Ready(String),
+    Failed(String),
 }
 
 /// A relation a reference arrow lists, by its index into the structure's

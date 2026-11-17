@@ -17,6 +17,161 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   (`ConnectionForm::project`), an edited one in its own, and "New project…"
   names one that saving makes, or joins if the name is taken
   (`projects::chosen_project`).
+- **The sidebar has two view modes**, `view_mode` in `[settings]`
+  (`sidebar::ViewMode`; absent or unknown reads as `simple`). Simple is the
+  tree of the connection in front, as it always was. Complex
+  (`workspace/sidebar.rs`) is one tree for the window: every connection under
+  its project, No project first and only while a project exists. The rows
+  under a connection are the ones simple mode builds for it
+  (`profiles::explorer_content`), with every id prefixed
+  `connection:{len}:{profile id}/` (`sidebar::scoped_row`, the length keeping a
+  `/` in a name from moving the seam), so two connections that list
+  `main.birds` never share a row, and folds and the selection survive a
+  rebuild by id. An idle connection is folded whatever its stored fold says,
+  over one static `Loading…` row (no spinner: `AGENTS.md` GPUI hazards), and
+  its first expand connects it without making it the front connection; a
+  failed connect leaves its reason on a row under that connection alone. Rows
+  under a connection start folded, so a connect never unfolds a catalog.
+  Acting on a row of another connection makes it the front connection first
+  (`Workspace::open_connection_row`), because the gate, the mode and the
+  engine a statement meets are the front connection's. Every landing that
+  rebuilds a connection's own tree (`rebuild_explorer`) rebuilds this one
+  last. So does every change to what it lists, at the place that makes it
+  (`create_profile`, `save_profile`, `remove_profile`, `activate`,
+  `disconnect`, the project verbs, a lost connection) rather than from
+  `remember_profiles`, which every tab change and run also calls.
+  The view mode and `listing_scope` (`all` or `current`, the connections of
+  the project in front only, with no group row) are each global, in
+  `[settings]`, and each overridable by a project (`[[projects]] view_mode`,
+  `listing_scope`, from its palette actions). The front connection's project
+  decides (`Workspace::view_mode`, `Workspace::listing_scope`), so moving
+  between projects set differently flips the sidebar; with none in front, or
+  in No project, the global value applies. A value this build cannot read
+  follows the global one. With every project listed, the group in front starts
+  open and the others folded, each launch; a fold the user makes is kept for
+  the session, and a rebuild for another front group opens that one. A switch
+  moves no tab, binding or connection.
+  The rows a connection has open and the rows selected under it come back
+  after a restart: `open_rows` and `selected_rows` on its `[[profiles]]` entry
+  (`StoredProfile`, before `ssh`, each left out when empty and each read and
+  written no further than `sidebar::OPEN_ROWS_CAP`), complex mode only, so
+  simple mode stores nothing new. They are ids, compared with the rows a
+  loaded subtree has and never parsed into an action: an idle connection stays
+  folded at launch whatever was stored, and when it is opened and has loaded
+  its stored inner rows open as they were left, so a stored row never connects
+  or loads anything. A row that names something gone opens nothing. The tree is
+  put on the profiles at a rebuild, a fold and a modifier click
+  (`Workspace::capture_tree`), never while a filter has opened it, and the
+  profile's own save writes it; stored rows the tree has no say over yet (not
+  built, or an idle connection's) are kept, and a row the tree holds is as the
+  tree has it. A project's fold is not stored. A folded row of a loaded
+  connection is built as one disabled `{row}/folded` row until it is opened
+  (`sidebar::prune`), which is what keeps ten large catalogs cheap to redraw:
+  opening it rebuilds (`Workspace::expand_node`), and a row under a folded one
+  is revealed by opening what is above it (`Workspace::reveal_connections_row`,
+  from the keyboard focus), not by `TreeState::reveal_item`, which only finds
+  rows already built. Counts and selection still see every row: they come
+  from the whole content.
+  On a shape that draws databases over its schemas or objects
+  (`Levels::lists_other_databases`), the server's other databases are listed
+  once per connection into `profile.databases` (`Workspace::list_databases`)
+  and each is a row folded until first expanded. Expanding one opens a session
+  for that (profile, database) from the live connection
+  (`Connection::on_database`, `Workspace::open_database`), registered in
+  `profile.bound` with its catalog in `profile.database_catalogs`. The session
+  takes the Read-only hold inside the open, before it is stored; a mode change
+  reaches every one, each ordered on a hold line of its own
+  (`Profile::sessions_to_hold`, `Bound::holds`, `set_mode`); all of them end
+  with the connection they were opened from (`Profile::drop_sessions`). The
+  agent keeps its own lanes and reaches none of them.
+- **New Query Here opens a tab bound to a database** (`QueryTab::binding`,
+  `session::Binding`), from the connections tree's menu. A database row binds
+  that database; a schema row binds by its connection's levels
+  (`Binding::for_schema_row`): where the catalog lists databases as schemas
+  the row is the database, and under a database the row is the schema, kept
+  only where the engine picks one. A connection row names no database, so it
+  opens an ordinary tab, and so does a target that switches none. Plain New
+  Query is an ordinary tab in both modes and keeps Commit, Roll Back,
+  auto-commit and reads at once. A bound tab runs on the (profile, database)
+  session in `profile.bound`, shared by every tab bound to that database;
+  when none is open the run opens it (held to reads when the profile is
+  Read-only) and keeps it (`Workspace::keep_session`) before anything is sent
+  on it. Before every run the session is put back on the binding by the
+  driver's own call, in the same acquisition of its lock as the statement
+  (`Connection::query_bound`): the database where the session can move
+  (DuckDB, MySQL, MariaDB, ClickHouse, Redis), the schema where the target picks one
+  (Postgres, DuckDB, Snowflake, which sends it with the request). Two tabs on
+  different schemas of one session therefore each run in their own. No `USE`
+  or `SET` is written into the buffer or the statement, and the profile's own
+  database, schema, `in_transaction` and `session_changed` never move. An edit
+  applied from a bound tab's grid goes to the same session
+  (`Connection::generated_bound`), and a Cancel is a token that stops that
+  session only while it runs this tab's statement. A statement that ends a
+  transaction goes as it is, because a session inside one cannot be moved and
+  applying the binding first would stop the `COMMIT` that frees it. The
+  binding is stored with the tab (`StoredQueryTab.{database, schema}`, each
+  absent for an unbound tab) and read back as data: after a relaunch the tab is
+  bound again, and a database the server no longer has fails the run with the
+  open's own words and never retargets the tab. A `USE` or `SET` the user runs
+  in a bound tab is reset, not rewritten: the binding stays what the tab was
+  opened for, the run's notice says `The next run in this tab starts again on
+  {database}.` (`Binding::label`), and the next run puts the session back
+  there. A bound session is auto-commit and its tabs never
+  run reads at once (`ponytail:` upgrade: a session of the tab's own, which
+  would also give a tab its own transaction and queue). A bound tab completes
+  from the profile's own catalog (`ponytail:` upgrade: a provider per
+  (profile, database) catalog). Exporting every row of a bound tab's result is
+  refused with a sentence (`Workspace::refetch`): that re-read runs on the
+  profile's own session, which is another database's.
+- **An object tab carries its database** (`ObjectTab::database`, stored as
+  `StoredObject.database`, absent for the connection's own). Clicking a table
+  under another database in the connections tree opens it through the catalog
+  read for that database (`Workspace::open_object_on`), never the profile's
+  own, so `main.t` under two databases is two tabs: the tab's identity and its
+  grid snapshot key include the database (`matching_tab`,
+  `store::object_grid_key_in`). **One accessor routes every tab-scoped read and
+  write** (`Profile::connection_for(tab)` -> `Routed`, resolved on the blocking
+  pool; `Workspace::run_routed` for the reads that are not a run): the
+  preview, page and count, the structure and references, the check behind a
+  reference arrow, Export, Import Rows (the dialog carries its table's
+  database), a grid edit and the re-read after it, and the filter bars'
+  completion columns. A query tab's bound run goes through the same accessor
+  (`Profile::route`). The profile's own session keeps what is the connection's:
+  refresh, Select Database, disconnect, `set_schema`, its catalog chain, Copy
+  DDL (until it is routed by database), the transaction readout, a data file
+  opened into a new tab, and the database opens themselves. Select Database
+  closes the object tabs of the database it leaves; a tab of another database
+  stays, and its session opens again on its next read. A restored tab of
+  another database comes back by name before any connection, and a routine of
+  one waits for that database's catalog.
+- **A bound tab makes its connection the one in front.** Running or opening
+  one is acting on a row of that connection (`Workspace::new_query_here`
+  activates it), because the gate, the mode and the engine a statement meets
+  are the front connection's, never the binding's. So the titlebar names that
+  connection, the status bar shows that profile's mode, the palette's Objects
+  and Commands scopes act on that profile, and in simple mode the explorer
+  shows that profile's own tree, its own database and schema and not the
+  tab's binding. The profile's own database and schema do not move: a tab's
+  binding is where its statements run, not where the connection is.
+- **In complex mode the tab strip lists every connection's tabs**
+  (`Workspace::strip_chips`; `views::render_tab_strip`): connections in the
+  order the profiles are kept, each one's chips in its own strip order. A chip
+  names its connection, and for a bound tab its database
+  (`views::chip_context`, `Binding::label`); in simple mode the strip is the
+  front connection's alone and only a bound chip says where it runs. A chip of
+  a connection that is not in front is clicked through
+  `Workspace::activate_chip`, which brings the connection forward and then the
+  tab, so the gate, the mode and the engine of what runs next are that
+  connection's; a middle click or the close button does the same
+  (`close_chip`), because a close acts on the front connection and two
+  connections' tab ids collide. Next Tab and Previous Tab walk the whole strip
+  and bring a connection forward when they step onto its chip. A coloured
+  connection's chips carry its colour only while `color_titlebar` is on: a bar
+  in its swatch on every chip, the front chip's ground its band (legibility:
+  `a_tinted_tab_chip_reads_in_every_theme`). Only the front connection's chips
+  drag, because the strip's bounds and glide are keyed by `TabKey`, which is
+  per connection (`ponytail:` in `render_tab_strip`: key them by connection and
+  tab to lift it); another connection's chip is reordered after a click.
 - **The titlebar's project and connection open the palette on Connections**
   (`Workspace::open_connections`, also `SwitchConnection`, no default chord);
   there is no switcher panel of its own. That scope is a tree

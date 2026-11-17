@@ -151,6 +151,19 @@ pub struct StoredProfile {
     /// removing the field would drop it on the next save.
     #[serde(default)]
     pub open_query: Option<String>,
+    /// The rows of the connections tree this profile had open, by row id, in
+    /// tree order: complex mode only. Rows, not objects: an id is compared
+    /// against the rows a loaded subtree has and never parsed into an action,
+    /// so one that names something gone opens nothing. Left out when empty,
+    /// which is every profile written before the tree remembered, and every
+    /// profile in simple mode. A build without the key drops it on its next
+    /// save, and the tree then starts folded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub open_rows: Vec<String>,
+    /// The rows of the connections tree this profile held selected, in the
+    /// order they were picked. Same rules as `open_rows`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_rows: Vec<String>,
     /// The SSH tunnel this profile dials through, or absent for a direct
     /// connection -- which is every profile written before tunnels existed. A
     /// table, so it has to come after every scalar above. Nothing secret is in
@@ -354,6 +367,14 @@ pub struct StoredQueryTab {
     /// rest.
     #[serde(default)]
     pub queued_results: usize,
+    /// The database this tab runs on, as the server listed it, or absent for
+    /// a tab on the connection's own session. A name the server no longer
+    /// has fails the tab's run; it never retargets the tab.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
+    /// The schema in that database the tab runs in, where the engine picks one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
 }
 
 /// An opened table, view or routine, stored by name rather than by content: the
@@ -409,6 +430,11 @@ pub struct StoredObject {
     /// it was kept, and goes back to any data tab for the relation.
     #[serde(default)]
     pub origin: Option<String>,
+    /// The database this tab's object is in, as the server listed it, or
+    /// absent for the connection's own. A name the server no longer has fails
+    /// the tab's reads; it never retargets the tab.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
     /// The filter bars [`Self::filter`] was derived from. The bars are the
     /// editable state and the expression is what runs, so both are kept:
     /// nothing here parses a `WHERE` back into controls. Last, because TOML
@@ -668,6 +694,27 @@ pub struct StoredSettings {
     /// before there was one.
     #[serde(default)]
     pub welcomed: Option<bool>,
+    /// Which sidebar the window draws, `simple` or `complex`. Absent reads as
+    /// simple, which is what every file written before it showed. A scalar,
+    /// so it stays above the tables below.
+    #[serde(default)]
+    pub view_mode: Option<String>,
+    /// Which connections the sidebar lists, `all` or `current` (only the
+    /// project in front). Absent reads as `all`. A scalar, above the tables.
+    #[serde(default)]
+    pub listing_scope: Option<String>,
+    /// How tall the connections tree's rows are: `compact`, `standard` or
+    /// `comfortable`. Absent reads as standard, and is not written back until
+    /// a save has a value. A scalar, above the tables.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidebar_density: Option<String>,
+    /// Whether the connections tree's rows show their host. Absent reads as on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidebar_show_host: Option<bool>,
+    /// Whether either tree shows table sizes, and whether DBDelve reads them
+    /// at all. Absent reads as on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidebar_show_sizes: Option<bool>,
     /// Keybinding overrides, keyed by the action id in
     /// `keybindings::REGISTRY`. Only the ones a user actually changed --
     /// everything else stays on whatever the running build defaults to.
@@ -699,6 +746,16 @@ pub struct StoredProject {
     /// Profile ids, in the order they were added.
     #[serde(default)]
     pub connections: Vec<String>,
+    /// `simple` or `complex`: this project's sidebar, over the global
+    /// `[settings] view_mode`. Absent follows the global value, as does one
+    /// this build does not know.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_mode: Option<String>,
+    /// `all` or `current`: which connections the sidebar lists while this
+    /// project is in front, over `[settings] listing_scope`. Absent follows
+    /// the global value, as does one this build does not know.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listing_scope: Option<String>,
 }
 
 /// A decoded profile file: the profiles, the id of the one that was in front,
@@ -1934,6 +1991,23 @@ pub fn object_grid_key(schema: &str, name: &str, filter: &str) -> String {
     }
 }
 
+/// [`object_grid_key`] for a tab of `database`, another database of the
+/// connection's server, where the same schema and name name another table.
+/// Under a prefix of its own, so it collides with no key of the connection's
+/// own tabs; a tab with none has the key it always had.
+pub fn object_grid_key_in(
+    database: Option<&str>,
+    schema: &str,
+    name: &str,
+    filter: &str,
+) -> String {
+    let key = object_grid_key(schema, name, filter);
+    match database {
+        Some(database) => format!("d-{}.{key}", escape_grid_key(database)),
+        None => key,
+    }
+}
+
 fn escape_grid_key(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for byte in value.bytes() {
@@ -2396,6 +2470,102 @@ pub(crate) mod tests {
         assert_eq!(resaved(include_str!("testdata/every-engine.toml")), golden);
         // Saving what was saved changes nothing.
         assert_eq!(resaved(golden), golden);
+    }
+
+    #[test]
+    fn a_query_tabs_binding_round_trips_and_an_old_tab_reads_unbound() {
+        let text = supported_stub(
+            None,
+            "[[profiles.open_queries]]\nid = 0\n\n\
+             [[profiles.open_queries]]\nid = 1\ndatabase = \"other\"\nschema = \"s\"\n\n\
+             [[profiles.open_queries]]\nid = 2\ndatabase = \"main\"\n",
+        );
+        let decoded = decode_profiles(&text, &[]).expect("the file loads");
+        let tabs = &decoded.profiles[0].open_queries;
+        assert_eq!(
+            (tabs[0].database.clone(), tabs[0].schema.clone()),
+            (None, None)
+        );
+        assert_eq!(
+            (tabs[1].database.as_deref(), tabs[1].schema.as_deref()),
+            (Some("other"), Some("s"))
+        );
+        assert_eq!(
+            (tabs[2].database.as_deref(), tabs[2].schema.as_deref()),
+            (Some("main"), None)
+        );
+
+        let saved = resaved(&text);
+        assert_eq!(saved.matches("database = \"other\"").count(), 1, "{saved}");
+        assert_eq!(saved.matches("schema = ").count(), 1, "{saved}");
+        let again = decode_profiles(&saved, &[]).expect("what was written loads");
+        assert_eq!(again.profiles[0].open_queries, *tabs);
+        assert_eq!(
+            resaved(&saved),
+            saved,
+            "saving what was saved changes nothing"
+        );
+
+        // A file from before the keys held tabs with neither, and writes
+        // them back with neither.
+        let old = supported_stub(None, "[[profiles.open_queries]]\nid = 0\n");
+        let old_saved = resaved(&old);
+        assert_eq!(old_saved.matches("database = ").count(), 1, "{old_saved}");
+        assert!(!old_saved.contains("schema = "), "{old_saved}");
+    }
+
+    #[test]
+    fn a_database_is_part_of_an_object_tabs_grid_key() {
+        assert_eq!(
+            object_grid_key_in(None, "main", "t", ""),
+            object_grid_key("main", "t", ""),
+            "a tab of the connection's own database keeps the key it always had"
+        );
+        let keys = [
+            object_grid_key_in(None, "main", "t", ""),
+            object_grid_key_in(Some("other"), "main", "t", ""),
+            object_grid_key_in(Some("third"), "main", "t", ""),
+            object_grid_key_in(Some("other"), "main", "t", "id = 1"),
+        ];
+        for (at, key) in keys.iter().enumerate() {
+            assert_eq!(keys.iter().filter(|other| *other == key).count(), 1, "{at}");
+        }
+    }
+
+    #[test]
+    fn an_object_tabs_database_round_trips_and_an_old_tab_reads_as_the_profiles() {
+        let text = supported_stub(
+            None,
+            "[[profiles.open_objects]]\nschema = \"main\"\nname = \"t\"\n\n\
+             [[profiles.open_objects]]\nschema = \"main\"\nname = \"t\"\ndatabase = \"other\"\n",
+        );
+        let decoded = decode_profiles(&text, &[]).expect("the file loads");
+        let tabs = &decoded.profiles[0].open_objects;
+        assert_eq!(
+            tabs.iter()
+                .map(|tab| tab.database.as_deref())
+                .collect::<Vec<_>>(),
+            [None, Some("other")]
+        );
+
+        let saved = resaved(&text);
+        assert_eq!(saved.matches("database = \"other\"").count(), 1, "{saved}");
+        let again = decode_profiles(&saved, &[]).expect("what was written loads");
+        assert_eq!(again.profiles[0].open_objects, *tabs);
+        assert_eq!(
+            resaved(&saved),
+            saved,
+            "saving what was saved changes nothing"
+        );
+
+        // A file from before the key held tabs without it, and writes them
+        // back without it: the profile's own `database` is the only one.
+        let old = supported_stub(
+            None,
+            "[[profiles.open_objects]]\nschema = \"main\"\nname = \"t\"\n",
+        );
+        let old_saved = resaved(&old);
+        assert_eq!(old_saved.matches("database = ").count(), 1, "{old_saved}");
     }
 
     /// `decode_profiles` as it was before any profile could be unavailable:
@@ -3311,6 +3481,8 @@ user = "shayan"
                 confirmed: vec!["drop".into(), "truncate".into()],
                 open_query: None,
                 ssm: None,
+                open_rows: Vec::new(),
+                selected_rows: Vec::new(),
                 ssh: None,
                 open_queries: Vec::new(),
                 open_objects: Vec::new(),
@@ -3370,10 +3542,13 @@ user = "shayan"
             confirmed: Vec::new(),
             open_query: Some("daily".into()),
             ssm: None,
+            open_rows: Vec::new(),
+            selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![
                 StoredObject {
+                    database: None,
                     schema: "public".into(),
                     name: "accounts".into(),
                     routine: false,
@@ -3389,6 +3564,7 @@ user = "shayan"
                     bars: Vec::new(),
                 },
                 StoredObject {
+                    database: None,
                     schema: "public".into(),
                     name: "total(integer)".into(),
                     routine: true,
@@ -3515,6 +3691,8 @@ open_objects = []
             confirmed: Vec::new(),
             open_query: None,
             ssm: None,
+            open_rows: Vec::new(),
+            selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: Vec::new(),
@@ -3534,6 +3712,54 @@ open_objects = []
             unavailable: Vec::new(),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn open_rows_round_trip_capped_and_an_old_file_reads_none() {
+        let mut profile = a_stored_profile();
+        profile.open_rows = vec![
+            "connection:3:dev".into(),
+            "connection:3:dev/schema-public".into(),
+        ];
+        profile.selected_rows = vec![
+            "connection:3:dev/table:public.a".into(),
+            "connection:3:dev/table:public.b".into(),
+        ];
+        profile.ssh = Some(SshTunnel {
+            host: "bastion".into(),
+            ..Default::default()
+        });
+        let text = written_alone(profile.clone());
+        let open = text.find("open_rows").expect("the open rows are written");
+        let selected = text.find("selected_rows").expect("so is the selection");
+        let tunnel = text.find("[profiles.ssh]").expect("and the tunnel");
+        assert!(
+            open < selected && selected < tunnel,
+            "TOML cannot emit a scalar after a table, so both come before `ssh`:\n{text}"
+        );
+        let decoded = decode_profiles(&text, &[]).expect("the file loads");
+        assert_eq!(decoded.profiles[0].open_rows, profile.open_rows);
+        assert_eq!(decoded.profiles[0].selected_rows, profile.selected_rows);
+        assert_eq!(
+            written_alone(decoded.profiles[0].clone()),
+            text,
+            "saving what was saved changes nothing"
+        );
+
+        let bare = written_alone(a_stored_profile());
+        assert!(
+            !bare.contains("open_rows") && !bare.contains("selected_rows"),
+            "a profile with none is written as it always was:\n{bare}"
+        );
+        let old = decode_profiles(&bare, &[]).expect("an older file loads");
+        assert!(old.profiles[0].open_rows.is_empty());
+        assert!(old.profiles[0].selected_rows.is_empty());
+        let golden = include_str!("testdata/every-engine.resaved.toml");
+        assert_eq!(resaved(include_str!("testdata/every-engine.toml")), golden);
+        assert!(
+            !golden.contains("open_rows"),
+            "the fixtures hold neither key"
+        );
     }
 
     #[test]
@@ -3565,6 +3791,7 @@ open_objects = []
         };
         let profile = StoredProfile {
             open_objects: vec![StoredObject {
+                database: None,
                 schema: "public".into(),
                 name: "accounts".into(),
                 routine: false,
@@ -3864,6 +4091,8 @@ folder = "Hot"
     fn an_ssh_tunnel_with_every_field_survives_the_round_trip_through_toml() {
         let profile = StoredProfile {
             ssm: None,
+            open_rows: Vec::new(),
+            selected_rows: Vec::new(),
             ssh: Some(SshTunnel {
                 host: "dbdelve-bastion".into(),
                 port: Some(2222),
@@ -3892,6 +4121,8 @@ folder = "Hot"
     fn an_ssh_tunnel_with_only_a_host_survives_the_round_trip_through_toml() {
         let profile = StoredProfile {
             ssm: None,
+            open_rows: Vec::new(),
+            selected_rows: Vec::new(),
             ssh: Some(SshTunnel {
                 host: "dbdelve-bastion".into(),
                 port: None,
@@ -3957,6 +4188,8 @@ folder = "Hot"
         let profile = StoredProfile {
             schema: Some(r#"Sales "EU""#.into()),
             ssm: None,
+            open_rows: Vec::new(),
+            selected_rows: Vec::new(),
             ssh: Some(SshTunnel {
                 host: "dbdelve-bastion".into(),
                 ..SshTunnel::default()
@@ -4082,9 +4315,12 @@ folder = "Hot"
             confirmed: Vec::new(),
             open_query: None,
             ssm: None,
+            open_rows: Vec::new(),
+            selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![StoredObject {
+                database: None,
                 schema: "public".into(),
                 name: "accounts".into(),
                 routine: false,
@@ -4167,9 +4403,12 @@ folder = "Hot"
             confirmed: Vec::new(),
             open_query: None,
             ssm: None,
+            open_rows: Vec::new(),
+            selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![StoredObject {
+                database: None,
                 schema: "main".into(),
                 name: "accounts".into(),
                 routine: false,
@@ -4238,6 +4477,8 @@ folder = "Hot"
             confirmed: Vec::new(),
             open_query: None,
             ssm: None,
+            open_rows: Vec::new(),
+            selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: Vec::new(),
@@ -4356,9 +4597,12 @@ open_objects = []
             confirmed: Vec::new(),
             open_query: None,
             ssm: None,
+            open_rows: Vec::new(),
+            selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![StoredObject {
+                database: None,
                 schema: "main".into(),
                 name: "accounts".into(),
                 routine: false,
@@ -4442,6 +4686,11 @@ open_objects = []
                 run_unreadable: Some(true),
                 verbose_logging: Some(true),
                 welcomed: Some(true),
+                view_mode: Some("complex".into()),
+                listing_scope: Some("current".into()),
+                sidebar_density: Some("compact".into()),
+                sidebar_show_host: Some(false),
+                sidebar_show_sizes: Some(false),
                 custom_keybindings: Some(HashMap::from([(
                     "apply_edits".to_string(),
                     "cmd-shift-s".to_string(),
@@ -4452,10 +4701,14 @@ open_objects = []
                 StoredProject {
                     name: "Billing".into(),
                     connections: vec!["dev".into(), "local".into()],
+                    view_mode: None,
+                    listing_scope: None,
                 },
                 StoredProject {
                     name: "Empty".into(),
                     connections: Vec::new(),
+                    view_mode: None,
+                    listing_scope: None,
                 },
             ],
             profiles: vec![
@@ -4491,6 +4744,8 @@ open_objects = []
                     confirmed: Vec::new(),
                     open_query: None,
                     ssm: None,
+                    open_rows: Vec::new(),
+                    selected_rows: Vec::new(),
                     ssh: None,
                     open_queries: Vec::new(),
                     open_objects: Vec::new(),
@@ -4530,6 +4785,8 @@ open_objects = []
                     confirmed: Vec::new(),
                     open_query: None,
                     ssm: None,
+                    open_rows: Vec::new(),
+                    selected_rows: Vec::new(),
                     ssh: None,
                     open_queries: Vec::new(),
                     open_objects: Vec::new(),
@@ -4554,6 +4811,110 @@ open_objects = []
             .expect("a file predating settings must load")
             .settings;
         assert_eq!(missing, None);
+    }
+
+    #[test]
+    fn the_view_mode_round_trips_and_an_old_file_reads_as_simple() {
+        let complex =
+            decode_profiles("[settings]\nview_mode = \"complex\"\n", &[]).expect("the file loads");
+        assert_eq!(
+            complex
+                .settings
+                .as_ref()
+                .and_then(|s| s.view_mode.as_deref()),
+            Some("complex")
+        );
+        let text = encode_profiles(&complex).expect("the file encodes");
+        assert!(text.contains("view_mode = \"complex\""), "{text}");
+
+        let old = decode_profiles("[settings]\ncheck_for_updates = false\n", &[])
+            .expect("the file loads");
+        assert_eq!(old.settings.expect("settings").view_mode, None);
+    }
+
+    #[test]
+    fn a_projects_view_mode_round_trips_and_an_old_file_reads_with_none() {
+        let file = "[[projects]]\nname = \"Zoo\"\nconnections = [\"b\"]\nview_mode = \"complex\"\n\n\
+                    [[projects]]\nname = \"Plain\"\nconnections = []\n";
+        let list = decode_profiles(file, &[]).expect("the file loads");
+        assert_eq!(list.projects[0].view_mode.as_deref(), Some("complex"));
+        assert_eq!(list.projects[1].view_mode, None);
+
+        let text = encode_profiles(&list).expect("the file encodes");
+        assert_eq!(text.matches("view_mode").count(), 1, "{text}");
+        let again = decode_profiles(&text, &[]).expect("the file loads again");
+        assert_eq!(again.projects, list.projects);
+
+        // A file written before the key resaves without it.
+        let old = decode_profiles("[[projects]]\nname = \"Old\"\nconnections = []\n", &[])
+            .expect("the file loads");
+        assert_eq!(old.projects[0].view_mode, None);
+        assert!(
+            !encode_profiles(&old)
+                .expect("it encodes")
+                .contains("view_mode")
+        );
+    }
+
+    #[test]
+    fn the_listing_scope_round_trips_and_an_old_file_reads_with_none() {
+        let file = "[settings]\nlisting_scope = \"current\"\n\n\
+                    [[projects]]\nname = \"Zoo\"\nconnections = []\nlisting_scope = \"all\"\n\n\
+                    [[projects]]\nname = \"Plain\"\nconnections = []\n";
+        let list = decode_profiles(file, &[]).expect("the file loads");
+        let settings = list.settings.as_ref().expect("settings");
+        assert_eq!(settings.listing_scope.as_deref(), Some("current"));
+        assert_eq!(list.projects[0].listing_scope.as_deref(), Some("all"));
+        assert_eq!(list.projects[1].listing_scope, None);
+
+        let text = encode_profiles(&list).expect("the file encodes");
+        assert_eq!(text.matches("listing_scope").count(), 2, "{text}");
+        let again = decode_profiles(&text, &[]).expect("the file loads again");
+        assert_eq!(again, list);
+
+        let old = decode_profiles(
+            "[settings]\ncheck_for_updates = false\n\n[[projects]]\nname = \"Old\"\nconnections = []\n",
+            &[],
+        )
+        .expect("the file loads");
+        assert_eq!(old.settings.as_ref().expect("settings").listing_scope, None);
+        assert_eq!(old.projects[0].listing_scope, None);
+        assert!(
+            !encode_profiles(&old)
+                .expect("it encodes")
+                .contains("listing_scope")
+        );
+    }
+
+    #[test]
+    fn the_sidebar_display_settings_round_trip_and_an_old_file_reads_the_defaults() {
+        let file = "[settings]\nsidebar_density = \"compact\"\nsidebar_show_host = false\n\
+                    sidebar_show_sizes = false\n";
+        let list = decode_profiles(file, &[]).expect("the file loads");
+        let settings = list.settings.as_ref().expect("settings");
+        assert_eq!(settings.sidebar_density.as_deref(), Some("compact"));
+        assert_eq!(settings.sidebar_show_host, Some(false));
+        assert_eq!(settings.sidebar_show_sizes, Some(false));
+        let text = encode_profiles(&list).expect("the file encodes");
+        assert_eq!(text.matches("sidebar_").count(), 3, "{text}");
+        assert_eq!(decode_profiles(&text, &[]).expect("it loads again"), list);
+
+        let old = decode_profiles("[settings]\ncheck_for_updates = false\n", &[])
+            .expect("the file loads");
+        let settings = old.settings.as_ref().expect("settings");
+        assert_eq!(
+            (
+                &settings.sidebar_density,
+                settings.sidebar_show_host,
+                settings.sidebar_show_sizes
+            ),
+            (&None, None, None)
+        );
+        assert!(
+            !encode_profiles(&old)
+                .expect("it encodes")
+                .contains("sidebar_")
+        );
     }
 
     #[test]
@@ -5247,6 +5608,8 @@ open_objects = []
             confirmed: Vec::new(),
             open_query: Some("daily".into()),
             ssm: None,
+            open_rows: Vec::new(),
+            selected_rows: Vec::new(),
             ssh: None,
             open_queries: vec![
                 StoredQueryTab {
@@ -5254,15 +5617,20 @@ open_objects = []
                     name: None,
                     active: false,
                     queued_results: 0,
+                    database: None,
+                    schema: None,
                 },
                 StoredQueryTab {
                     id: 4,
                     name: Some("daily".into()),
                     active: true,
                     queued_results: 2,
+                    database: None,
+                    schema: None,
                 },
             ],
             open_objects: vec![StoredObject {
+                database: None,
                 schema: "public".into(),
                 name: "accounts".into(),
                 routine: false,
@@ -5560,6 +5928,7 @@ name = \"accounts\"
     #[test]
     fn a_structure_tab_keeps_the_data_tab_it_came_from() {
         let object = StoredObject {
+            database: None,
             schema: "public".into(),
             name: "customers".into(),
             routine: false,
@@ -5601,6 +5970,7 @@ name = \"accounts\"
             filter: String::new(),
             filter_engine: None,
             origin: None,
+            database: None,
             filters: Vec::new(),
             active: false,
             bars: vec![StoredFilter {
@@ -5859,10 +6229,13 @@ name = \"accounts\"
             confirmed: Vec::new(),
             open_query: None,
             ssm: None,
+            open_rows: Vec::new(),
+            selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![
                 StoredObject {
+                    database: None,
                     schema: "public".into(),
                     name: "customers".into(),
                     routine: false,
@@ -5878,6 +6251,7 @@ name = \"accounts\"
                     bars: Vec::new(),
                 },
                 StoredObject {
+                    database: None,
                     schema: "public".into(),
                     name: "customers".into(),
                     routine: false,
@@ -5923,6 +6297,7 @@ name = \"accounts\"
         // have to survive the file -- values with a quote and a separator in
         // them included.
         let object = StoredObject {
+            database: None,
             schema: "public".into(),
             name: "customers".into(),
             routine: false,
@@ -5984,6 +6359,8 @@ name = \"accounts\"
             confirmed: Vec::new(),
             open_query: None,
             ssm: None,
+            open_rows: Vec::new(),
+            selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![object],

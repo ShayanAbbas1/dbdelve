@@ -233,6 +233,28 @@ impl Connection {
         Ok(connection)
     }
 
+    /// A session on `database`, for the (connection, database) pair, which
+    /// the name lists as `db{n}`: the number is read first, so a name that is
+    /// not one opens nothing and dials nothing. Built from this live
+    /// connection's server config and tunnel, with a session and a `running`
+    /// of its own: nothing moves with this connection's. It carries no
+    /// read-only hold; there is no session setting for one, and the caller's
+    /// gate is the boundary.
+    pub fn on_database(&self, database: &str) -> Result<Self, DbError> {
+        let number = database_number(database)?;
+        let connection = Self {
+            session: Arc::default(),
+            running: Arc::default(),
+            server: ServerConfig {
+                database: number.to_string(),
+                ..self.server.clone()
+            },
+            ..self.clone()
+        };
+        *lock(&connection.session) = Some(connection.connect()?);
+        Ok(connection)
+    }
+
     fn connect(&self) -> Result<Session, DbError> {
         let server = &self.server;
         let dial = self.tunnel.as_deref().map(Tunnel::dial).transpose()?;
@@ -307,17 +329,41 @@ impl Connection {
     /// reaches its `EXEC`, and keep the last one's result. Nothing is sent
     /// from a text holding a line that cannot be read or may not be sent.
     pub fn query(&self, text: &str, fetch: Fetch) -> Result<QueryResult, DbError> {
-        self.run(text, fetch, false)
+        self.run(text, fetch, false, false)
+    }
+
+    /// [`Self::query`] for a tab bound to this session's database, the one it
+    /// was opened on ([`Self::on_database`]): the session is `SELECT`ed onto
+    /// it again before the commands, under the lock that runs them. Redis
+    /// refuses a `SELECT` in the user's text, so a script is what could have
+    /// moved it. Not inside a `MULTI`, where the `SELECT` would only be queued
+    /// into the user's own transaction.
+    pub fn query_bound(&self, text: &str, fetch: Fetch) -> Result<QueryResult, DbError> {
+        self.run(text, fetch, false, true)
     }
 
     /// [`Connection::query`] for commands DBDelve wrote, where a reply saying
     /// the write did nothing is an error ([`unapplied`]) and stops the rest.
     pub fn generated(&self, text: &str, fetch: Fetch) -> Result<QueryResult, DbError> {
-        self.run(text, fetch, true)
+        self.run(text, fetch, true, false)
     }
 
-    fn run(&self, text: &str, fetch: Fetch, generated: bool) -> Result<QueryResult, DbError> {
-        let database = format!("db{}", database_number(&self.server.database)?);
+    /// [`Self::generated`] for a tab bound to this session's database, put
+    /// back on it first as [`Self::query_bound`] does.
+    pub fn generated_bound(&self, text: &str, fetch: Fetch) -> Result<QueryResult, DbError> {
+        self.run(text, fetch, true, true)
+    }
+
+    /// `bound` puts the session back on its own database first.
+    fn run(
+        &self,
+        text: &str,
+        fetch: Fetch,
+        generated: bool,
+        bound: bool,
+    ) -> Result<QueryResult, DbError> {
+        let number = database_number(&self.server.database)?;
+        let database = format!("db{number}");
         let commands = redis_cmd::parse(text).map_err(|error| DbError {
             message: error.message,
             position: Some(error.at),
@@ -338,7 +384,7 @@ impl Connection {
                     .into(),
             ));
         }
-        fetch.hold()?;
+        let _held = fetch.hold()?;
         let started = Instant::now();
         let run = {
             let mut running = lock(&self.running);
@@ -354,6 +400,15 @@ impl Connection {
         let mut watching = false;
         let mut step = || {
             let mut result = QueryResult::default();
+            // After the `Running` reset above, which a Cancel's leftover mark
+            // would otherwise turn into a dropped session. A session that is
+            // not there is dialled on the database by the first command.
+            if bound && session.is_some() && !in_multi(&session) {
+                self.send(&mut session, |client| {
+                    client.req_command(::redis::cmd("SELECT").arg(number))
+                })
+                .map_err(super::unplaced)?;
+            }
             // What a collection edit's `ECHO` says the next read must find.
             let mut echoed: Option<Vec<u8>> = None;
             for (at, command) in commands.iter().enumerate() {
@@ -629,6 +684,7 @@ impl Connection {
                     rows,
                 }],
                 routines: Vec::new(),
+                sequences: Vec::new(),
             }],
             database: None,
         })
@@ -2387,6 +2443,35 @@ mod tests {
         assert!(!refusal("NOPERM no permissions"));
     }
 
+    #[test]
+    fn a_database_name_that_is_not_a_database_number_is_refused_by_name() {
+        assert_eq!(database_number("db3").unwrap(), 3);
+        assert_eq!(database_number("3").unwrap(), 3);
+        // Nothing is dialled below: a session that dialled would fail with
+        // the server's words and not with the name's.
+        let connection = Connection {
+            session: Arc::default(),
+            running: Arc::default(),
+            server: ServerConfig::default(),
+            tunnel: None,
+        };
+        for name in ["dbx", "db-1", "db99999999999999999999", "db 1x", "1.5"] {
+            let refusal = database_number(name).unwrap_err();
+            assert_eq!(
+                refusal.message,
+                format!("Database {name} is not a database number.")
+            );
+            assert_eq!(
+                connection
+                    .on_database(name)
+                    .err()
+                    .map(|error| error.message),
+                Some(refusal.message),
+                "{name}"
+            );
+        }
+    }
+
     fn live_config() -> ServerConfig {
         let url = std::env::var("dbdelve_REDIS_URL").expect("dbdelve_REDIS_URL is required");
         config_from_url(&url).expect("dbdelve_REDIS_URL should parse")
@@ -2423,6 +2508,117 @@ mod tests {
                 .query("BLPOP live:never 0", Fetch::default())
                 .unwrap_err()
         })
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
+    fn live_a_session_on_another_database_selects_its_number() {
+        const KEY: &str = "dbdelve_session_probe";
+        let first = live();
+        let other = Connection::open(&ServerConfig {
+            database: "db1".into(),
+            ..live_config()
+        })
+        .unwrap();
+        let clean = || {
+            ran(&first, &format!("DEL {KEY}"));
+            ran(&other, &format!("DEL {KEY}"));
+        };
+        clean();
+
+        let session = first.on_database("db1").expect("the session should open");
+        ran(&session, &format!("SET {KEY} 1"));
+        let exists = |connection: &Connection| cells(&ran(connection, &format!("EXISTS {KEY}")));
+        assert_eq!(exists(&other), [some(&["1"])], "written into database 1");
+        assert_eq!(exists(&first), [some(&["0"])], "and not into database 0");
+        clean();
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
+    fn live_a_bound_run_selects_its_database_again() {
+        const KEY: &str = "dbdelve_bound_probe";
+        let first = live();
+        let other = Connection::open(&ServerConfig {
+            database: "db1".into(),
+            ..live_config()
+        })
+        .unwrap();
+        let clean = || {
+            ran(&first, &format!("DEL {KEY}"));
+            ran(&other, &format!("DEL {KEY}"));
+        };
+        clean();
+
+        let session = first.on_database("db1").expect("the session should open");
+        // Redis refuses a `SELECT` in a user's text, so the session is moved
+        // the way a script could, under the driver's own client.
+        {
+            let mut held = lock(&session.session);
+            let live = held.as_mut().expect("the session is dialled");
+            ::redis::cmd("SELECT")
+                .arg(0)
+                .query::<()>(&mut live.client)
+                .expect("the session moves");
+        }
+        let cancel = crate::db::CancelToken::default();
+        let session = crate::db::Connection::Redis(session);
+        let exists = |connection: &Connection| cells(&ran(connection, &format!("EXISTS {KEY}")));
+
+        session
+            .query_bound(None, &format!("SET {KEY} 1"), &cancel, Fetch::default())
+            .expect("the bound run goes through");
+        assert_eq!(exists(&other), [some(&["1"])], "written into database 1");
+        assert_eq!(exists(&first), [some(&["0"])], "and not into database 0");
+
+        // The same for an edit applied from a bound tab's grid.
+        if let crate::db::Connection::Redis(inner) = &session {
+            let mut held = lock(&inner.session);
+            let live = held.as_mut().expect("the session is dialled");
+            ::redis::cmd("SELECT")
+                .arg(0)
+                .query::<()>(&mut live.client)
+                .expect("the session moves");
+        }
+        session
+            .generated_bound(None, &format!("SET {KEY} 2"), &cancel, None, None)
+            .expect("the bound edit goes through");
+        assert_eq!(
+            cells(&ran(&other, &format!("GET {KEY}"))),
+            [some(&["2"])],
+            "an edit lands in the database the tab is bound to"
+        );
+        assert_eq!(exists(&first), [some(&["0"])]);
+        clean();
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
+    fn live_a_cancel_stops_an_edit_running_on_a_bound_session() {
+        let session = crate::db::Connection::Redis(
+            live().on_database("db1").expect("the session should open"),
+        );
+        // The token a bound run is issued: it stops only what its own
+        // statement has registered the session for.
+        let cancel = crate::db::CancelToken::alongside();
+        let started = Instant::now();
+        let error = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(500));
+                session
+                    .cancel(&cancel)
+                    .expect("the kill should reach the server");
+            });
+            session
+                .generated_bound(None, "BLPOP live:never 5", &cancel, None, None)
+                .expect_err("a cancelled run is an error")
+        });
+        assert!(
+            is_cancel(crate::db::Target::built_in(Engine::Redis), &error),
+            "{}",
+            error.message
+        );
+        assert!(started.elapsed() < Duration::from_secs(4));
     }
 
     #[test]

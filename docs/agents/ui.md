@@ -55,10 +55,10 @@ object tab's grid, with no buffer to go to, it still does.
 It does **not** provide a fuzzy matcher, and its `command` palette filters by
 substring in a fixed layout. Both are ours: `src/fuzzy.rs` is the one matcher
 (`nucleo-matcher`) every list that narrows as it is typed into goes through --
-the palette and its pickers (the connection form's engine among them), completions, the explorer's filter and the settings search -- so a query that finds something in one finds it in the others, and
-each draws the matched characters with `ui::highlighted`. A palette row carries a `Command`; `Workspace::run_command` routes every one into
+the palette and its pickers (the connection form's engine among them), completions, the explorer's filter, the connections filter over the complex sidebar (`explorer::Builder`, over every loaded subtree and the connection, database and project names; it never connects or loads anything, and a connection that has not loaded is kept only by its own name) and the settings search -- so a query that finds something in one finds it in the others, and
+each draws the matched characters with `ui::highlighted`. The connections tree's `Loading…` row is static text, not a spinner: nothing new moves. A palette row carries a `Command`; `Workspace::run_command` routes every one into
 the method its button or keystroke already calls, so the palette is never a
-second implementation of anything. `cmd+p` (`FuzzyOpen`, "Go to Object")
+second implementation of anything. What a sidebar node offers is one list, `sidebar::node_actions` (New Query Here, Copy Name, Show DDL, Refresh, as its kind and target allow): both trees' menus and the Commands scope's rows for the selected node read it, as `explorer::relation_copies` is the one list of a relation's copies. A node row carries the node it was built for, and `run_node_action` brings that connection forward before it acts. Show DDL is a read-only dialog, never a buffer, and no node action sends a statement dbdelve writes. The connections tree (complex mode only; simple mode keeps one selected row) also keeps a selection of several rows: a Cmd-click (Ctrl elsewhere) adds or removes a row and a Shift-click selects every showing row from the last one clicked, while a plain click is the one row again. The set is DBDelve's (`ConnectionsSidebar.selection`, by row id, kept across rebuilds and dropping rows that no longer exist): `TreeState` selects one row, which is the anchor. With several selected, the menu and the Commands scope offer what `sidebar::selection_actions` says applies to every row (Open All, Copy Names, Copy DDL, Show DDL, Pin, Refresh), under `N tables selected`; Show DDL lists each definition in the one dialog and no selection action sends a statement dbdelve writes. `cmd+p` (`FuzzyOpen`, "Go to Object")
 opens it on Objects, `cmd+shift+p` on Commands, `SearchEverything` (no default chord) on All and the titlebar's project or
 connection on Connections; the stroke that opened it, or the one for the scope it
 shows, closes it, and another scope's stroke moves it there (`palette::stroke`).
@@ -94,6 +94,30 @@ accept a library default appearance; map it to our theme tokens.
 
 ---
 
+
+A connection row in the complex sidebar reads, left to right, logo (in the
+connection's colour; an uncoloured connection's logo wears its engine's
+brand), name, host (`ConnectionConfig::endpoint()`, which gives way first: it
+takes only the width the name leaves and shortens with an ellipsis down to
+nothing before the name shortens), count and status dot, with a coloured
+connection's whole row filled with `ConnectionColor::fill()` under the
+selection and hover `ListItem` draws over it. The dot is the connection's own
+state (`ProfileState`). `a_tinted_sidebar_row_reads_in_every_theme` holds the
+fill to the floors the other tints keep; `Theme::text_faint` is under any floor
+on some surfaces untinted, so the host and the count are held to what a tint
+takes from them instead. While the filter has text, a line under the tree
+counts the listed connections that have not loaded, which it could not search.
+
+Settings > General > Sidebar carries three display settings, stored in
+`[settings]` (`sidebar_density`, `sidebar_show_host`, `sidebar_show_sizes`, each
+absent when never set). Density (Compact, Standard, Comfortable: row height and
+indent step 22/12, 26/14 and 30/16 px) is the connections tree's alone: the
+simple explorer keeps its own rows whatever it is, since no density reproduces
+its row exactly (its indent step is 12 px, Compact's, but not its height). Show host drops the host from connection rows. Show sizes off
+draws no size in either tree and means no read: `load_sizes` and the database
+sizes step return before sending `sizes()`, and turning it on again reads every
+connected profile and loaded database (`sidebar::shown_size` decides the slot;
+the agent's own catalog read is not part of it).
 
 ## Titlebar and appearance
 

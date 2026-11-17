@@ -37,7 +37,7 @@ use super::{
     Catalog, Cell, Column, DbError, EditTarget, Engine, Fetch, GraphCancel, QueryResult, Reference,
     RelationKind, Row, SchemaGraph, ServerConfig, SslMode, Stopped, Structure, assemble_catalog,
     assemble_databases, assemble_foreign_keys, assemble_references, assemble_schema_graph,
-    assemble_structure, create_table, plain_error, required_cell, terminated,
+    assemble_sequences, assemble_structure, create_table, plain_error, required_cell, terminated,
 };
 
 const DATABASES_SQL: &str = "
@@ -75,6 +75,35 @@ LEFT JOIN (
 WHERE o.type IN ('U', 'V')
     AND o.is_ms_shipped = 0
 ORDER BY s.name, o.name
+";
+
+// The names alone: a sequence's `current_value` is not needed to list it, and
+// reading it asks for more than the catalog view does. `sys.sequences` is SQL
+// Server 2012 and later; an older server refuses it and the routines stay.
+const SEQUENCES_SQL: &str = "
+SELECT SCHEMA_NAME(schema_id) AS schema_name,
+       name AS sequence_name
+FROM sys.sequences
+ORDER BY 1, 2
+";
+
+// The definition and not the sequence's position: `current_value` is not read.
+// `cache_size` is null for the server's default cache, which is its own clause.
+const SEQUENCE_PARTS_SQL: &str = "
+SELECT CASE WHEN TYPE_NAME(system_type_id) IN (N'decimal', N'numeric')
+            THEN TYPE_NAME(system_type_id) + N'(' + CAST(precision AS nvarchar(5))
+                 + N',' + CAST(scale AS nvarchar(5)) + N')'
+            ELSE TYPE_NAME(system_type_id) END AS data_type,
+       CAST(start_value AS nvarchar(100)) AS start_value,
+       CAST(increment AS nvarchar(100)) AS increment,
+       CAST(minimum_value AS nvarchar(100)) AS minimum_value,
+       CAST(maximum_value AS nvarchar(100)) AS maximum_value,
+       CASE WHEN is_cycling = 1 THEN N'yes' ELSE N'no' END AS cycle,
+       CASE WHEN is_cached = 0 THEN N'NO CACHE'
+            WHEN cache_size IS NULL THEN N'CACHE'
+            ELSE N'CACHE ' + CAST(cache_size AS nvarchar(20)) END AS cache
+FROM sys.sequences
+WHERE object_id = {object}
 ";
 
 // `COALESCE` throughout because the assembler refuses a null, and these are
@@ -578,6 +607,10 @@ enum Lost {
     /// The `SET ROWCOUNT` a capped read went out under could not be taken
     /// back, and every statement after it would be capped too.
     Capped,
+    /// A batch moved the session to another database and the `USE` back
+    /// failed: what was said, and the session left there would run the next
+    /// statement, an edit's among them, on that database.
+    Unmoved(String),
 }
 
 impl Session {
@@ -892,6 +925,36 @@ impl Connection {
         }
     }
 
+    /// A session on `database`, for the (connection, database) pair: a login
+    /// from this connection's live server config -- its resolved password,
+    /// over the tunnel it already holds -- with the database replaced, so the
+    /// login itself lands there and no `USE` is written. Its `server` names
+    /// that database, which is what [`held_to_database`] restores after a
+    /// batch moves the session. It shares no session or stop state with this
+    /// connection, and carries no read-only hold of its own; the caller
+    /// applies it.
+    pub fn on_database(&self, database: &str) -> Result<Self, DbError> {
+        let mut connection = Self {
+            session: Arc::new(Mutex::new(None)),
+            in_flight: Arc::default(),
+            server: ServerConfig {
+                database: database.to_string(),
+                ..self.server.clone()
+            },
+            alongside: false,
+            // Its own: a Cancel on this session would otherwise drop the next
+            // statement of a diagram read on the first.
+            graph: GraphCancel::default(),
+            ..self.clone()
+        };
+        let mut session = connection.connect()?;
+        // The server's spelling, as `open` asks for it: a restore after a
+        // `USE` and a reconnect then name it as the server does.
+        connection.server.database = current_database(&mut session)?;
+        *connection.session.lock().expect("unshared until returned") = Some(session);
+        Ok(connection)
+    }
+
     fn in_flight(&self) -> std::sync::MutexGuard<'_, InFlight> {
         // Nothing panics while holding it, and it holds plain flags.
         self.in_flight
@@ -985,15 +1048,21 @@ impl Connection {
         connected?;
         let session = guard.as_mut().expect("connected above");
 
-        if cancellable {
+        let held = if cancellable {
             // Under the lock Cancel takes, so a Cancel either finds the
             // statement running or keeps it from being sent.
             let mut in_flight = self.in_flight();
-            fetch.hold()?;
+            let held = fetch.hold()?;
             in_flight.running = true;
             in_flight.stopped = false;
-        }
+            Some(held)
+        } else {
+            None
+        };
         let ran = self.execute(session, sql, origin, fetch);
+        // While it still reads as running: a Cancel let in after this would
+        // find nothing running and keep itself for the next statement queued.
+        drop(held);
         let stopped = {
             let mut in_flight = self.in_flight();
             in_flight.running = false;
@@ -1012,6 +1081,7 @@ impl Connection {
                 ),
                 (None, Some(Lost::Panicked(message))) => message,
                 (None, Some(Lost::Capped)) => UNCAPPED.into(),
+                (None, Some(Lost::Unmoved(message))) => format!("The statement ran, but {message}"),
                 (None, None) => CANCELLED.into(),
                 // What dbdelve asks after the statement is what was stopped,
                 // and the statement's own work stands.
@@ -1023,6 +1093,7 @@ impl Connection {
                         ),
                         Some(Lost::Panicked(message)) => format!("then {message}"),
                         Some(Lost::Capped) => UNCAPPED.into(),
+                        Some(Lost::Unmoved(message)) => message,
                         None => "Cancel arrived after that.".into(),
                     };
                     match ran.result {
@@ -1283,6 +1354,33 @@ impl Connection {
             QueryResult::default(),
             self.internal_query(&ROUTINES_SQL.replace("{type}", TYPE_SQL))?,
         )
+    }
+
+    pub fn sequences(&self) -> Result<Catalog, DbError> {
+        assemble_sequences(self.internal_query(SEQUENCES_SQL)?)
+    }
+
+    /// `CREATE SEQUENCE` for `schema.name`, composed from `sys.sequences`.
+    pub fn sequence_ddl(&self, schema: &str, name: &str) -> Result<String, DbError> {
+        let parts = self.internal_query(&structure_sql(SEQUENCE_PARTS_SQL, schema, name))?;
+        let row = parts
+            .rows
+            .first()
+            .ok_or_else(|| plain_error(format!("{schema} has no sequence {name}.")))?;
+        let cell = |column| required_cell(&parts, row, column);
+        Ok(compose_sequence(
+            schema,
+            name,
+            &SequenceParts {
+                data_type: cell("data_type")?,
+                start: cell("start_value")?,
+                increment: cell("increment")?,
+                minimum: cell("minimum_value")?,
+                maximum: cell("maximum_value")?,
+                cycle: cell("cycle")? == "yes",
+                cache: cell("cache")?,
+            },
+        ))
     }
 
     pub fn references(&self, schema: &str, relation: &str) -> Result<Vec<Reference>, DbError> {
@@ -2065,6 +2163,34 @@ fn structure_sql(template: &str, schema: &str, relation: &str) -> String {
     template.replace("{object}", &object)
 }
 
+/// What `sys.sequences` says of a sequence's definition, each as text.
+struct SequenceParts<'a> {
+    data_type: &'a str,
+    start: &'a str,
+    increment: &'a str,
+    minimum: &'a str,
+    maximum: &'a str,
+    cycle: bool,
+    /// `NO CACHE`, `CACHE`, or `CACHE n`.
+    cache: &'a str,
+}
+
+/// SQL Server has no function that writes a sequence out, so the statement is
+/// composed from `sys.sequences`, every name quoted.
+fn compose_sequence(schema: &str, name: &str, parts: &SequenceParts) -> String {
+    format!(
+        "CREATE SEQUENCE {} AS {} START WITH {} INCREMENT BY {} MINVALUE {} MAXVALUE {} {} {};",
+        Engine::SqlServer.qualified(schema, name),
+        parts.data_type,
+        parts.start,
+        parts.increment,
+        parts.minimum,
+        parts.maximum,
+        if parts.cycle { "CYCLE" } else { "NO CYCLE" },
+        parts.cache,
+    )
+}
+
 /// A literal for a value bound for a column of `data_type`, where the type
 /// changes how it is spelled, or `None` for the plain literal.
 ///
@@ -2263,7 +2389,17 @@ fn held_to_database(session: &mut Session, database: &str) -> Result<(), DbError
     if current.eq_ignore_ascii_case(database) {
         return Ok(());
     }
-    ask(session, &format!("USE [{}]", database.replace(']', "]]")))?;
+    if let Err(error) = ask(session, &format!("USE [{}]", database.replace(']', "]]"))) {
+        // Lost, so the run closes it and logs in again on `database`.
+        if session.lost.is_none() {
+            session.lost = Some(Lost::Unmoved(format!(
+                "it moved the session to database {current}, and moving it back to {database} \
+                 failed: {}",
+                error.message
+            )));
+        }
+        return Err(error);
+    }
     Err(plain_error(format!(
         "The statement moved the session to database {current}, and dbdelve moved it back to \
          {database}: this connection's explorer, and every statement dbdelve writes, name \
@@ -2365,6 +2501,108 @@ mod tests {
 
     fn live() -> Connection {
         Connection::open(&live_config()).expect("connection should open")
+    }
+
+    #[test]
+    fn a_composed_sequence_quotes_names_whatever_they_hold() {
+        let parts = SequenceParts {
+            data_type: "bigint",
+            start: "5",
+            increment: "2",
+            minimum: "1",
+            maximum: "1000",
+            cycle: true,
+            cache: "NO CACHE",
+        };
+        assert_eq!(
+            compose_sequence("we\"ird]", "t\u{ef}cket no", &parts),
+            // As `quote_identifier` spells a name: double quotes, which the
+            // server reads under its default `QUOTED_IDENTIFIER ON`, as the
+            // table statements do.
+            "CREATE SEQUENCE \"we\"\"ird]\".\"t\u{ef}cket no\" AS bigint START WITH 5 \
+             INCREMENT BY 2 MINVALUE 1 MAXVALUE 1000 CYCLE NO CACHE;"
+        );
+        let parts = SequenceParts {
+            cycle: false,
+            cache: "CACHE 50",
+            ..parts
+        };
+        assert!(compose_sequence("s", "n", &parts).ends_with(" NO CYCLE CACHE 50;"));
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_composed_sequence_recreates_it() {
+        const SCHEMA: &str = "dbdelve_sequence_probe";
+        let connection = live();
+        // A plain sequence, whose cache the server leaves null, a cached one and
+        // a decimal one, whose precision the type's name alone drops.
+        let probes = [
+            ("t\u{ef}cket no", "AS int INCREMENT BY 3 START WITH 7"),
+            ("cached", "AS bigint CACHE 25"),
+            ("wide", "AS decimal(9, 0) NO CACHE CYCLE"),
+        ];
+        let drop = |connection: &Connection| {
+            let sequences: String = probes
+                .iter()
+                .map(|(name, _)| {
+                    format!(
+                        "DROP SEQUENCE IF EXISTS {SCHEMA}.{}; ",
+                        Engine::SqlServer.quote_identifier(name)
+                    )
+                })
+                .collect();
+            connection
+                .query(
+                    &format!("{sequences}DROP SCHEMA IF EXISTS {SCHEMA}"),
+                    Fetch::default(),
+                )
+                .expect("the probes should drop");
+        };
+        let row = |connection: &Connection, name: &str| {
+            connection
+                .internal_query(&structure_sql(SEQUENCE_PARTS_SQL, SCHEMA, name))
+                .expect("the sequence row is read")
+                .rows
+        };
+        drop(&connection);
+        // `CREATE SCHEMA` must open its own batch.
+        connection
+            .query(&format!("CREATE SCHEMA {SCHEMA}"), Fetch::default())
+            .expect("the probe schema should be created");
+        for (name, options) in probes {
+            connection
+                .query(
+                    &format!(
+                        "CREATE SEQUENCE {SCHEMA}.{} {options}",
+                        Engine::SqlServer.quote_identifier(name)
+                    ),
+                    Fetch::default(),
+                )
+                .expect("the probe sequence should be created");
+            let before = row(&connection, name);
+            let ddl = connection
+                .sequence_ddl(SCHEMA, name)
+                .expect("the definition is read");
+            connection
+                .query(
+                    &format!(
+                        "DROP SEQUENCE {SCHEMA}.{}",
+                        Engine::SqlServer.quote_identifier(name)
+                    ),
+                    Fetch::default(),
+                )
+                .expect("the probe sequence should drop");
+            let recreated = connection.query(&ddl, Fetch::default());
+            let after = row(&connection, name);
+            if recreated.is_err() || after != before {
+                drop(&connection);
+            }
+            recreated.expect(&ddl);
+            assert_eq!(before.len(), 1, "{name} exists");
+            assert_eq!(after, before, "{ddl}");
+        }
+        drop(&connection);
     }
 
     /// The compose server as the bastion sees it, by service name and the port
@@ -2876,6 +3114,45 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_sequence_is_listed_in_its_own_kind() {
+        let connection = live();
+        let drop = |connection: &Connection| {
+            connection
+                .query(
+                    "DROP SEQUENCE IF EXISTS dbdelve_sequence_probe.ticket; \
+                     DROP SCHEMA IF EXISTS dbdelve_sequence_probe",
+                    Fetch::default(),
+                )
+                .expect("the probe should drop");
+        };
+        drop(&connection);
+        // `CREATE SCHEMA` must open its own batch.
+        connection
+            .query("CREATE SCHEMA dbdelve_sequence_probe", Fetch::default())
+            .expect("the probe schema should be created");
+        connection
+            .query(
+                "CREATE SEQUENCE dbdelve_sequence_probe.ticket",
+                Fetch::default(),
+            )
+            .expect("the probe sequence should be created");
+
+        let second = crate::db::Connection::SqlServer(live())
+            .routines()
+            .expect("the second half should read");
+        let listed: Vec<_> = second
+            .schemas
+            .iter()
+            .filter(|schema| schema.name == "dbdelve_sequence_probe")
+            .map(|schema| schema.sequences.clone())
+            .collect();
+
+        drop(&connection);
+        assert_eq!(listed, vec![vec!["ticket".to_string()]]);
+    }
+
+    #[test]
     #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
     fn live_a_database_named_in_another_case_is_held_as_the_server_spells_it() {
         let named = live_config().database;
@@ -2886,6 +3163,70 @@ mod tests {
         .expect("a database name is read in any case");
 
         assert_eq!(connection.current_database(), named);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_session_on_another_database_is_on_it() {
+        let profile = live();
+        let named = |connection: &Connection| {
+            let here = connection
+                .query("SELECT DB_NAME()", Fetch::default())
+                .unwrap();
+            first(&here).first().copied().flatten().map(str::to_string)
+        };
+        let session = profile
+            .on_database("master")
+            .expect("a session on another database should open");
+        assert_eq!(named(&session).as_deref(), Some("master"));
+
+        let error = session
+            .query("USE dbdelve_dev; SELECT 1", Fetch::default())
+            .expect_err("leaving the session's database is reported");
+        assert!(error.message.contains("moved it back"), "{}", error.message);
+        assert_eq!(
+            named(&session).as_deref(),
+            Some("master"),
+            "the hold restores the session's own database, not the profile's"
+        );
+        assert_eq!(
+            named(&profile).as_deref(),
+            Some("dbdelve_dev"),
+            "the profile's own connection is where it was"
+        );
+    }
+
+    /// The bound entry points of [`crate::db::Connection`] are what a bound
+    /// tab and an object tab of that database run through, so this drives them
+    /// rather than the driver: a `USE` through `query_bound` must not carry a
+    /// later `generated_bound` statement, which names its schema and no
+    /// database, to another database.
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_bound_session_is_put_back_by_the_server_after_a_use() {
+        let session = crate::db::Connection::SqlServer(
+            live()
+                .on_database("master")
+                .expect("a session on another database should open"),
+        );
+        let cancel = crate::db::CancelToken::alongside();
+        let named = |session: &crate::db::Connection| {
+            let read = session
+                .generated_bound(None, "SELECT DB_NAME()", &cancel, None, None)
+                .expect("the read runs");
+            first(&read).first().copied().flatten().map(str::to_string)
+        };
+        assert_eq!(named(&session).as_deref(), Some("master"));
+
+        let moved = session
+            .query_bound(None, "USE dbdelve_dev", &cancel, Fetch::default())
+            .expect_err("a statement that moves the session says it was moved back");
+        assert!(moved.message.contains("moved it back"), "{}", moved.message);
+        assert_eq!(
+            named(&session).as_deref(),
+            Some("master"),
+            "an edit applied from a bound tab's grid is not carried to the database a USE named"
+        );
     }
 
     #[test]

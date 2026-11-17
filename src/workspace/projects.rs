@@ -21,6 +21,82 @@ impl Workspace {
             .and_then(|profile| self.group_of(&profile.id))
     }
 
+    /// The sidebar in effect: the front connection's project's own choice,
+    /// else the global setting. With nothing in front, or a connection in no
+    /// project, it is the global setting.
+    pub(crate) fn view_mode(&self) -> ViewMode {
+        effective_view_mode(self.settings.view_mode, self.front_project())
+    }
+
+    /// The connections the sidebar lists: the front connection's project's
+    /// own choice, else the global setting.
+    pub(crate) fn listing_scope(&self) -> ListingScope {
+        effective_listing_scope(self.settings.listing_scope, self.front_project())
+    }
+
+    /// The global sidebar. A project's own choice still wins where it has one.
+    pub(crate) fn set_view_mode(&mut self, mode: ViewMode, cx: &mut Context<Self>) {
+        self.settings.view_mode = mode;
+        self.sidebar_changed(cx);
+    }
+
+    /// The global listing scope. A project's own choice still wins where it
+    /// has one.
+    pub(crate) fn set_listing_scope(&mut self, scope: ListingScope, cx: &mut Context<Self>) {
+        self.settings.listing_scope = scope;
+        self.sidebar_changed(cx);
+    }
+
+    /// How tall the connections tree's rows are. The simple tree keeps its own.
+    pub(crate) fn set_density(&mut self, density: Density, cx: &mut Context<Self>) {
+        self.settings.density = density;
+        self.sidebar_changed(cx);
+    }
+
+    pub(crate) fn set_show_host(&mut self, show: bool, cx: &mut Context<Self>) {
+        self.settings.show_host = show;
+        self.sidebar_changed(cx);
+    }
+
+    /// Whether either tree draws sizes. Off, none is read; turned on again,
+    /// every connected profile and every database already loaded is read.
+    pub(crate) fn set_show_sizes(&mut self, show: bool, cx: &mut Context<Self>) {
+        let was = std::mem::replace(&mut self.settings.show_sizes, show);
+        self.sidebar_changed(cx);
+        if show && !was {
+            self.read_sizes_again(cx);
+        }
+    }
+
+    /// A project's listing scope: its own choice, or with `None` the global
+    /// setting's.
+    pub(crate) fn set_project_listing(
+        &mut self,
+        at: usize,
+        scope: Option<ListingScope>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project) = self.projects.get_mut(at) else {
+            return;
+        };
+        project.listing_scope = scope.map(|scope| scope.slug().to_string());
+        self.sidebar_changed(cx);
+    }
+
+    /// A setting of the sidebar changed: saved, and the tree drawn again. Only
+    /// what the window draws changes, so no tab, binding or connection moves.
+    fn sidebar_changed(&mut self, cx: &mut Context<Self>) {
+        self.remember_profiles(cx);
+        self.rebuild_connections(cx);
+        cx.notify();
+    }
+
+    /// The project the connection in front is in.
+    fn front_project(&self) -> Option<&store::StoredProject> {
+        let name = self.current_group()?;
+        self.projects.iter().find(|project| project.name == name)
+    }
+
     pub(crate) fn in_current_group(&self, index: usize) -> bool {
         self.profiles
             .get(index)
@@ -53,6 +129,22 @@ impl Workspace {
             self.collapsed_projects.insert(project.name.clone());
         }
         cx.notify();
+    }
+
+    /// A project's sidebar: its own choice, or with `None` the global
+    /// setting's. Only what the window draws changes: no tab, binding or
+    /// connection moves, so nothing runs anywhere new because of it.
+    pub(crate) fn set_project_view_mode(
+        &mut self,
+        at: usize,
+        mode: Option<ViewMode>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project) = self.projects.get_mut(at) else {
+            return;
+        };
+        project.view_mode = mode.map(|mode| mode.slug().to_string());
+        self.sidebar_changed(cx);
     }
 
     pub(crate) fn open_connections(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -169,6 +261,7 @@ impl Workspace {
         }
         self.drop_project_name();
         self.remember_profiles(cx);
+        self.rebuild_connections(cx);
         cx.notify();
     }
 
@@ -182,6 +275,7 @@ impl Workspace {
             ..Default::default()
         });
         self.remember_profiles(cx);
+        self.rebuild_connections(cx);
         cx.notify();
     }
 
@@ -218,6 +312,7 @@ impl Workspace {
         self.collapsed_projects.remove(name);
         self.projects.retain(|project| project.name != name);
         self.remember_profiles(cx);
+        self.rebuild_connections(cx);
         cx.notify();
     }
 
@@ -244,6 +339,7 @@ impl Workspace {
             }
         }
         self.remember_profiles(cx);
+        self.rebuild_connections(cx);
         cx.notify();
     }
 }
@@ -316,6 +412,7 @@ mod tests {
         store::StoredProject {
             name: name.into(),
             connections: connections.iter().map(|id| id.to_string()).collect(),
+            ..Default::default()
         }
     }
 

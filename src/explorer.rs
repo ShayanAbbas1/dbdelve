@@ -21,7 +21,7 @@ pub const PREVIEW_ROW_LIMIT: usize = ROW_LIMITS[1];
 /// `LIMIT`, and Postgres reads that as a `bigint`.
 pub const MAX_ROW_LIMIT: usize = i64::MAX as usize;
 
-const RELATION_CATEGORIES: [(RelationKind, &str); 6] = [
+pub(crate) const RELATION_CATEGORIES: [(RelationKind, &str); 6] = [
     (RelationKind::Table, "Tables"),
     (RelationKind::PartitionedTable, "Partitioned Tables"),
     (RelationKind::View, "Views"),
@@ -48,6 +48,13 @@ const QUERY_ROW: &str = "query:";
 /// "Queries" included.
 pub fn is_schema_row(id: &str) -> bool {
     id.starts_with(SCHEMA_ROW)
+}
+
+/// The schema a schema row (see [`is_schema_row`]) is, as the server listed
+/// it: taken from the row's id, which holds the name whole, and not from its
+/// label.
+pub fn schema_row_name(id: &str) -> Option<&str> {
+    id.strip_prefix(SCHEMA_ROW)
 }
 
 const SCHEMA_ROW: &str = "schema-";
@@ -135,6 +142,11 @@ fn routine_row(schema: &str, routine: &Routine) -> String {
     routine_id(routine.kind, schema, &crate::session::routine_name(routine))
 }
 
+/// The row id of a sequence, by name like a relation's.
+pub fn sequence_row(schema: &str, name: &str) -> String {
+    format!("sequence-{schema}\0{name}")
+}
+
 /// `name` is a routine's name and arguments, as its tab is named.
 fn routine_id(kind: RoutineKind, schema: &str, name: &str) -> String {
     format!("routine-{kind:?}-{schema}\0{name}")
@@ -159,6 +171,11 @@ pub fn object_row(catalog: &Catalog, schema: &str, name: &str, kind: ObjectKind)
             .iter()
             .find(|routine| routine.kind == kind && crate::session::routine_name(routine) == name)
             .map(|routine| routine_row(&schema.name, routine)),
+        ObjectKind::Sequence => schema
+            .sequences
+            .iter()
+            .find(|sequence| *sequence == name)
+            .map(|sequence| sequence_row(&schema.name, sequence)),
     }
 }
 
@@ -182,6 +199,11 @@ pub enum ExplorerTarget {
         schema_index: usize,
         routine_index: usize,
     },
+    /// Listed and nothing more: a sequence opens no tab (D-24).
+    Sequence {
+        schema_index: usize,
+        sequence_index: usize,
+    },
 }
 
 /// What kind of object a row stands for. The sidebar draws an icon from this;
@@ -191,6 +213,9 @@ pub enum ExplorerTarget {
 pub enum ObjectKind {
     Relation(RelationKind),
     Routine(RoutineKind),
+    /// Its own kind and never a [`RelationKind`], so no path that reads,
+    /// edits, drops or imports into a relation can be reached with one.
+    Sequence,
 }
 
 /// What the sidebar knows about one openable row: where it points, and what it
@@ -216,6 +241,7 @@ impl ObjectKind {
             ObjectKind::Relation(RelationKind::Dictionary) => "dictionary",
             ObjectKind::Routine(RoutineKind::Function) => "function",
             ObjectKind::Routine(RoutineKind::Procedure) => "procedure",
+            ObjectKind::Sequence => "sequence",
         }
     }
 
@@ -224,6 +250,7 @@ impl ObjectKind {
             .map(|(kind, _)| ObjectKind::Relation(kind))
             .into_iter()
             .chain(ROUTINE_CATEGORIES.map(|(kind, _)| ObjectKind::Routine(kind)))
+            .chain([ObjectKind::Sequence])
             .find(|kind| kind.slug() == slug)
     }
 }
@@ -251,7 +278,7 @@ impl ExplorerTree {
 
 /// One filter pass over the catalog: the query parsed once, and what the rows
 /// it keeps record as they are built.
-struct Builder {
+pub(crate) struct Builder {
     query: Query,
     fuzzy: Fuzzy,
     lowercase: String,
@@ -260,7 +287,7 @@ struct Builder {
 }
 
 impl Builder {
-    fn new(filter: &str) -> Self {
+    pub(crate) fn new(filter: &str) -> Self {
         Self {
             query: Query::new(filter),
             fuzzy: Fuzzy::new(),
@@ -271,7 +298,7 @@ impl Builder {
     }
 
     /// Whether the row `id`'s own name matches, noting which characters did.
-    fn name_matches(&mut self, id: &str, name: &str) -> bool {
+    pub(crate) fn name_matches(&mut self, id: &str, name: &str) -> bool {
         if self.query.is_empty() {
             return true;
         }
@@ -283,6 +310,11 @@ impl Builder {
             self.highlights.insert(id.to_string(), ranges);
         }
         true
+    }
+
+    /// The characters each matched name had matched, by the row id given.
+    pub(crate) fn into_highlights(self) -> HashMap<String, Vec<Range<usize>>> {
+        self.highlights
     }
 
     // Substring, not fuzzy: these are searched for a word like `bigint` or
@@ -372,6 +404,33 @@ pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
                 if !children.is_empty() {
                     groups.push(category(label, &schema.name, children));
                 }
+            }
+
+            let sequences = schema
+                .sequences
+                .iter()
+                .enumerate()
+                .filter_map(|(sequence_index, name)| {
+                    let id = sequence_row(&schema.name, name);
+                    if !(builder.name_matches(&id, name) || schema_matches) {
+                        return None;
+                    }
+                    builder.leaves.insert(
+                        id.clone(),
+                        ExplorerLeaf {
+                            target: ExplorerTarget::Sequence {
+                                schema_index,
+                                sequence_index,
+                            },
+                            kind: ObjectKind::Sequence,
+                            size: None,
+                        },
+                    );
+                    Some(TreeItem::new(id, name.clone()))
+                })
+                .collect::<Vec<_>>();
+            if !sequences.is_empty() {
+                groups.push(category("Sequences", &schema.name, sequences));
             }
 
             if !schema_matches && groups.is_empty() {
@@ -502,6 +561,7 @@ impl ObjectRef {
         match self.kind {
             ObjectKind::Relation(_) => relation_row(&self.schema, &self.name),
             ObjectKind::Routine(kind) => routine_id(kind, &self.schema, &self.name),
+            ObjectKind::Sequence => sequence_row(&self.schema, &self.name),
         }
     }
 
@@ -540,6 +600,18 @@ impl ObjectRef {
                         routine_index,
                     },
                     kind: self.kind,
+                    size: None,
+                }),
+            ObjectKind::Sequence => schema
+                .sequences
+                .iter()
+                .position(|sequence| *sequence == self.name)
+                .map(|sequence_index| ExplorerLeaf {
+                    target: ExplorerTarget::Sequence {
+                        schema_index,
+                        sequence_index,
+                    },
+                    kind: ObjectKind::Sequence,
                     size: None,
                 }),
         }
@@ -1267,7 +1339,7 @@ pub fn relation_copies(
     kind: RelationKind,
 ) -> [Vec<(&'static str, Option<String>)>; 2] {
     let engine = target.engine;
-    let mut reads = Vec::new();
+    let mut reads = vec![("Copy Name", Some(relation.to_string()))];
     if target.copies_ddl() {
         reads.push(("Copy DDL", None));
     }
@@ -1425,6 +1497,7 @@ mod tests {
                 name: "aardvark".into(),
                 relations: Vec::new(),
                 routines: Vec::new(),
+                sequences: Vec::new(),
             },
         );
         after.schemas[2].relations.insert(
@@ -1489,6 +1562,7 @@ mod tests {
                         rows: None,
                     }],
                     routines: Vec::new(),
+                    sequences: Vec::new(),
                 },
                 Schema {
                     name: "public".into(),
@@ -1526,6 +1600,7 @@ mod tests {
                             definition: String::new(),
                         },
                     ],
+                    sequences: Vec::new(),
                 },
             ],
             database: None,
@@ -1572,6 +1647,7 @@ mod tests {
                     },
                 ],
                 routines: Vec::new(),
+                sequences: Vec::new(),
             }],
             database: None,
         }
@@ -2458,7 +2534,184 @@ mod tests {
             let kind = ObjectKind::Routine(kind);
             assert_eq!(ObjectKind::from_slug(kind.slug()), Some(kind));
         }
-        assert_eq!(ObjectKind::from_slug("sequence"), None);
+        assert_eq!(ObjectKind::from_slug("sequence-ish"), None);
+    }
+
+    #[test]
+    fn the_sequence_kind_reads_back_from_its_slug() {
+        assert_eq!(
+            ObjectKind::from_slug("sequence"),
+            Some(ObjectKind::Sequence)
+        );
+        assert_eq!(ObjectKind::Sequence.slug(), "sequence");
+    }
+
+    fn with_sequences(catalog: &mut Catalog, schema: &str, names: &[&str]) {
+        let names = names.iter().map(|name| name.to_string()).collect();
+        match catalog.schemas.iter_mut().find(|held| held.name == schema) {
+            Some(held) => held.sequences = names,
+            None => catalog.schemas.push(Schema {
+                name: schema.into(),
+                relations: Vec::new(),
+                routines: Vec::new(),
+                sequences: names,
+            }),
+        }
+    }
+
+    fn row_ids(items: &[TreeItem]) -> Vec<String> {
+        let mut ids = Vec::new();
+        let mut stack: Vec<&TreeItem> = items.iter().collect();
+        while let Some(item) = stack.pop() {
+            ids.push(item.id.to_string());
+            stack.extend(&item.children);
+        }
+        ids.sort();
+        ids
+    }
+
+    #[test]
+    fn a_duckdb_sequence_reaches_a_sequences_category_of_its_own() {
+        use crate::db::{CancelToken, Connection, ConnectionConfig, DUCKDB_IN_MEMORY, Fetch};
+        let connection =
+            Connection::open(ConnectionConfig::duckdb(DUCKDB_IN_MEMORY.to_string(), 0)).unwrap();
+        connection
+            .query(
+                "CREATE TABLE t (id INTEGER); CREATE SEQUENCE s;",
+                &CancelToken::default(),
+                Fetch::default(),
+            )
+            .unwrap();
+        let mut catalog = connection.catalog().unwrap();
+        catalog.merge(connection.routines().unwrap());
+
+        let tree = tree(&catalog, "");
+        let ids = row_ids(&tree.items);
+        assert!(
+            ids.contains(&"category-Sequences-main".to_string()),
+            "{ids:?}"
+        );
+        let id = "sequence-main\0s";
+        assert!(ids.contains(&id.to_string()), "{ids:?}");
+        let sequences = tree
+            .items
+            .iter()
+            .flat_map(|schema| &schema.children)
+            .find(|category| category.id == "category-Sequences-main")
+            .expect("the category is in the schema");
+        assert_eq!(
+            sequences
+                .children
+                .iter()
+                .map(|row| &*row.id)
+                .collect::<Vec<_>>(),
+            [id]
+        );
+        let leaf = tree.leaves[id];
+        assert_eq!(leaf.kind, ObjectKind::Sequence);
+        assert!(matches!(leaf.target, ExplorerTarget::Sequence { .. }));
+        assert_eq!(leaf.size, None);
+    }
+
+    fn sequence(schema: &str, name: &str) -> Member {
+        Member::Object(ObjectRef {
+            database: None,
+            schema: schema.into(),
+            name: name.into(),
+            kind: ObjectKind::Sequence,
+        })
+    }
+
+    #[test]
+    fn a_pinned_sequence_is_a_shortcut_to_its_row() {
+        let mut held = catalog();
+        with_sequences(&mut held, "public", &["s"]);
+        let shortcuts = Shortcuts {
+            folders: Vec::new(),
+            pins: vec![Pin::Member(sequence("public", "s"))],
+        };
+        let built = |catalog: &Catalog| {
+            super::shortcuts(
+                &shortcuts,
+                Some(catalog),
+                &[],
+                &ShortcutDatabase::Unnamed,
+                "",
+            )
+        };
+
+        let pinned = built(&held);
+        let row = &pinned.items[0].children[0];
+        let Shortcut::Member { missing, .. } = &pinned.shortcuts[row.id.as_ref()] else {
+            panic!("a pinned object is a member shortcut");
+        };
+        assert!(!missing);
+        assert_eq!(
+            pinned.shortcuts[row.id.as_ref()].repeats().as_deref(),
+            Some("sequence-public\0s")
+        );
+        assert_eq!(pinned.leaves[row.id.as_ref()].kind, ObjectKind::Sequence);
+
+        let gone = built(&catalog());
+        let row = &gone.items[0].children[0];
+        let Shortcut::Member { missing, .. } = &gone.shortcuts[row.id.as_ref()] else {
+            panic!("a pinned object is a member shortcut");
+        };
+        assert!(missing);
+        assert!(!gone.leaves.contains_key(row.id.as_ref()));
+    }
+
+    #[test]
+    fn a_sequence_matches_the_filter_by_its_name() {
+        let mut held = catalog();
+        with_sequences(&mut held, "main", &["s"]);
+
+        let found = tree(&held, "s");
+        let ids = row_ids(&found.items);
+        assert!(ids.contains(&"sequence-main\0s".to_string()), "{ids:?}");
+        assert!(found.highlights.contains_key("sequence-main\0s"));
+
+        let none = row_ids(&tree(&held, "zzz").items);
+        assert!(
+            none.iter().all(|id| !id.starts_with("category-Sequences-")),
+            "{none:?}"
+        );
+    }
+
+    #[test]
+    fn a_schema_without_sequences_draws_exactly_as_before() {
+        let ids = row_ids(&tree(&catalog(), "").items);
+        assert!(ids.iter().all(|id| !id.contains("Sequences")), "{ids:?}");
+        assert!(ids.iter().all(|id| !id.starts_with("sequence-")), "{ids:?}");
+        let mut again = catalog();
+        with_sequences(&mut again, "public", &[]);
+        assert_eq!(row_ids(&tree(&again, "").items), ids);
+    }
+
+    #[test]
+    fn a_flagged_target_with_no_sequence_shows_no_sequences_category_and_a_schema_of_only_sequences_is_listed()
+     {
+        // DuckDB lists sequences, and this schema of its has none.
+        assert!(Target::built_in(Engine::DuckDb).abilities().lists_sequences);
+        let ids = row_ids(&tree(&catalog(), "").items);
+        assert!(ids.iter().all(|id| !id.starts_with("category-Sequences-")));
+
+        let mut only = catalog();
+        with_sequences(&mut only, "queues", &["jobs"]);
+        let tree = tree(&only, "");
+        let queues = tree
+            .items
+            .iter()
+            .find(|schema| schema.id == "schema-queues")
+            .expect("a schema of only sequences is listed");
+        assert_eq!(
+            queues
+                .children
+                .iter()
+                .map(|row| &*row.id)
+                .collect::<Vec<_>>(),
+            ["category-Sequences-queues"]
+        );
     }
 
     #[test]
@@ -2837,5 +3090,22 @@ mod tests {
             })
         );
         assert_eq!(land(&hot_c, folder), None);
+    }
+
+    #[test]
+    fn copy_name_is_the_first_thing_a_relation_menu_copies() {
+        for name in ["birds", "b\"ü rds"] {
+            let [reads, _] = relation_copies(
+                Target::built_in(Engine::Postgres),
+                "public",
+                name,
+                RelationKind::Table,
+            );
+            assert_eq!(
+                reads[0],
+                ("Copy Name", Some(name.to_string())),
+                "the name as the catalog lists it, unquoted"
+            );
+        }
     }
 }

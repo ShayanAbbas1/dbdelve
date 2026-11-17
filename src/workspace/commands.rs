@@ -757,6 +757,8 @@ impl Workspace {
             Command::ProjectActions(at) => {
                 self.open_palette(PaletteMode::ProjectActions(at), window, cx)
             }
+            Command::SetProjectViewMode(at, mode) => self.set_project_view_mode(at, mode, cx),
+            Command::SetProjectListing(at, scope) => self.set_project_listing(at, scope, cx),
             Command::EditConnection(index) => self.edit_profile(index, window, cx),
             Command::DuplicateConnection(index) => self.duplicate_profile(index, window, cx),
             Command::ChooseProject(index) => {
@@ -793,7 +795,7 @@ impl Workspace {
             }
             Command::SelectTheme => self.select_theme(&SelectTheme, window, cx),
             Command::SelectDatabase => self.select_database(&SelectDatabase, window, cx),
-            Command::SetDatabase(name) => self.set_database(name, window, cx),
+            Command::SetDatabase(name) => _ = self.set_database(name, window, cx),
             Command::SetTarget(target) => {
                 if let Some(form) = &mut self.form {
                     form.set_target(target);
@@ -801,7 +803,7 @@ impl Workspace {
                 cx.notify();
             }
             Command::SelectSchema => self.select_schema(window, cx),
-            Command::SetSchema(name) => self.set_schema(name, cx),
+            Command::SetSchema(name) => _ = self.set_schema(name, cx),
             Command::SetTheme(side, theme) => self.set_theme(side, *theme, window, cx),
             Command::BrowseThemes(source, side) => {
                 self.open_palette(PaletteMode::ImportTheme(source, side), window, cx)
@@ -848,17 +850,22 @@ impl Workspace {
                 let front = self.profile().and_then(|profile| {
                     let tab = profile.session.active_object()?;
                     match tab.kind? {
-                        ObjectKind::Relation(kind) => {
-                            Some((tab.schema.clone(), tab.name.clone(), kind))
-                        }
-                        ObjectKind::Routine(_) => None,
+                        ObjectKind::Relation(kind) => Some((
+                            tab.database.clone(),
+                            tab.schema.clone(),
+                            tab.name.clone(),
+                            kind,
+                        )),
+                        ObjectKind::Routine(_) | ObjectKind::Sequence => None,
                     }
                 });
-                if let Some((schema, relation, kind)) = front {
-                    self.copy_ddl(schema, relation, kind, cx);
+                if let Some((database, schema, relation, kind)) = front {
+                    self.copy_ddl(database, schema, relation, kind, cx);
                 }
             }
             Command::CopyText(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+            Command::NodeAction(node, action) => self.run_node_action(&node, action, window, cx),
+            Command::SelectionAction(action) => self.run_selection_action(action, window, cx),
             Command::SetViewSorting(client) => self.set_view_sorting(client, window, cx),
             Command::FollowForeignKey => self.follow_foreign_key(&FollowForeignKey, window, cx),
             // The button only adds the bar, and the pointer that pressed it

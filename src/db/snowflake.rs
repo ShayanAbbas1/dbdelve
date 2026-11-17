@@ -25,8 +25,8 @@ use serde_json::{Value, json};
 use super::{
     CancelToken, Cancelling, Catalog, Column, Databases, DbError, Engine, Fetch, ForeignKey,
     NamedDefinition, QueryResult, RelationKind, Row, RowBuilder, SchemaGraph, Stopped, Structure,
-    assemble_catalog, assemble_databases, assemble_schema_graph, assemble_structure, plain_error,
-    terminated,
+    assemble_catalog, assemble_databases, assemble_schema_graph, assemble_sequences,
+    assemble_structure, plain_error, terminated,
 };
 
 /// What it takes to reach one database in one Snowflake account.
@@ -664,6 +664,21 @@ impl Connection {
         Ok(connection)
     }
 
+    /// A session on `database`, as `SHOW DATABASES` lists it, for the
+    /// (connection, database) pair: the same account, key and agent, with a
+    /// config naming the database and an active schema of its own, so a
+    /// schema picked on either never reaches the other. It carries no
+    /// read-only hold; the gate holds every statement to reads here.
+    pub(super) fn on_database(&self, database: &str) -> Self {
+        let mut config = (*self.config).clone();
+        config.set_database(database.to_string());
+        Self {
+            config: Arc::new(config),
+            schema: Arc::new(Mutex::new(None)),
+            ..self.clone()
+        }
+    }
+
     /// The user's statements resolve in `schema` from here on. dbdelve's own
     /// are qualified and never sent one.
     pub fn set_schema(&self, schema: Option<&str>) {
@@ -824,6 +839,19 @@ impl Connection {
         self.submit(sql, Cancellable::Yes(cancel), fetch, schema.as_deref())
     }
 
+    /// [`Self::query_with`] in `schema` of the database this session was
+    /// opened on, for a tab bound to them: both ride on the request, so
+    /// nothing a tab or the session's own active schema holds can move it.
+    pub fn query_bound(
+        &self,
+        schema: Option<&str>,
+        sql: &str,
+        cancel: &CancelToken,
+        fetch: Fetch,
+    ) -> Result<QueryResult, DbError> {
+        self.submit(sql, Cancellable::Yes(cancel), fetch, schema)
+    }
+
     /// [`Self::query_with`] outside the active schema, for a statement dbdelve
     /// wrote for the user to run: a relation's preview or an applied edit.
     pub fn generated(
@@ -855,6 +883,14 @@ impl Connection {
         let started = Instant::now();
         let host = self.config.host();
         let body = request_body(&self.config, sql, schema);
+        // A Cancel pressed while the statement waited its turn, behind another
+        // edit on a bound session, found nothing to stop: it is carried out by
+        // never sending it.
+        if let Cancellable::Yes(CancelToken(running)) = cancellable
+            && running.lock().is_ok_and(|running| running.asked)
+        {
+            return Err(plain_error("Cancelled.".into()));
+        }
 
         // A synchronous submit answers with the result itself, and only hands
         // back a handle when the statement outlives the API's own 45-second
@@ -1056,9 +1092,16 @@ impl Connection {
         )
     }
 
-    pub fn structure(&self, schema: &str, relation: &str) -> Result<Structure, DbError> {
-        let literal = |value: &str| Engine::Snowflake.quote_literal(value);
+    /// Asked for after the routines, on a round of its own.
+    ///
+    /// ponytail: one more `INFORMATION_SCHEMA` round beside the routines'
+    /// `at_once` pair, so the ceiling is a warehouse that takes seconds to
+    /// answer each view; the upgrade is to fold this query into that pair.
+    pub fn sequences(&self) -> Result<Catalog, DbError> {
+        assemble_sequences(self.internal_query(SEQUENCES_SQL)?)
+    }
 
+    pub fn structure(&self, schema: &str, relation: &str) -> Result<Structure, DbError> {
         // `INFORMATION_SCHEMA` names a constraint and its type but has no view
         // of the columns in it, so the keys come from `SHOW`.
         //
@@ -1075,10 +1118,12 @@ impl Connection {
         let database = self.config.stored_database();
         let within = Engine::Snowflake.qualified(&database, schema);
         let [columns, primary, unique, imported] = self.at_once([
-            COLUMNS_SQL
-                .replace("{type}", TYPE_SQL)
-                .replace("{schema}", &literal(schema))
-                .replace("{relation}", &literal(relation)),
+            super::structure_sql(
+                Engine::Snowflake,
+                &COLUMNS_SQL.replace("{type}", TYPE_SQL),
+                schema,
+                relation,
+            ),
             format!("SHOW PRIMARY KEYS IN SCHEMA {within}"),
             format!("SHOW UNIQUE KEYS IN SCHEMA {within}"),
             format!("SHOW IMPORTED KEYS IN SCHEMA {within}"),
@@ -1177,11 +1222,6 @@ impl Connection {
     /// Named from the database down, like a `SHOW`, so the answer does not
     /// hang on which database the request's field resolves a schema in.
     pub fn ddl(&self, schema: &str, relation: &str, kind: RelationKind) -> Result<String, DbError> {
-        let name = format!(
-            "{}.{}",
-            Engine::Snowflake.qualified(&self.config.stored_database(), schema),
-            Engine::Snowflake.quote_identifier(relation)
-        );
         let kind = match kind {
             RelationKind::View | RelationKind::MaterializedView => "VIEW",
             RelationKind::Table
@@ -1189,6 +1229,25 @@ impl Connection {
             | RelationKind::ForeignTable
             | RelationKind::Dictionary => "TABLE",
         };
+        self.get_ddl(kind, schema, relation)
+    }
+
+    /// `GET_DDL('SEQUENCE', ..)`, named from the database down like
+    /// [`Self::ddl`]. Whether its `START WITH` is the original start or the
+    /// counter's next value is not verified against an account;
+    /// `live_a_sequences_ddl_comes_from_get_ddl` advances the counter first to
+    /// settle it.
+    pub fn sequence_ddl(&self, schema: &str, name: &str) -> Result<String, DbError> {
+        self.get_ddl("SEQUENCE", schema, name)
+    }
+
+    /// `kind` is one of `GET_DDL`'s object types, a fixed word and not a name.
+    fn get_ddl(&self, kind: &str, schema: &str, name: &str) -> Result<String, DbError> {
+        let name = format!(
+            "{}.{}",
+            Engine::Snowflake.qualified(&self.config.stored_database(), schema),
+            Engine::Snowflake.quote_identifier(name)
+        );
         let result = self.internal_query(&format!(
             "SELECT GET_DDL('{kind}', {})",
             Engine::Snowflake.quote_literal(&name)
@@ -1254,6 +1313,14 @@ SELECT TABLE_SCHEMA AS "schema_name",
        ROW_COUNT AS "row_estimate"
 FROM INFORMATION_SCHEMA.TABLES
 WHERE TABLE_SCHEMA <> 'INFORMATION_SCHEMA'
+ORDER BY 1, 2"#;
+
+// The names alone: `NEXT_VALUE` is not needed to list a sequence.
+const SEQUENCES_SQL: &str = r#"
+SELECT SEQUENCE_SCHEMA AS "schema_name",
+       SEQUENCE_NAME AS "sequence_name"
+FROM INFORMATION_SCHEMA.SEQUENCES
+WHERE SEQUENCE_SCHEMA <> 'INFORMATION_SCHEMA'
 ORDER BY 1, 2"#;
 
 const FUNCTIONS_SQL: &str = r#"
@@ -1905,9 +1972,8 @@ mod tests {
     #[test]
     fn a_handle_leaves_the_running_list_however_the_query_ends() {
         let running = Mutex::new(Cancelling {
-            asked: false,
             handles: vec!["other".to_string()],
-            alongside: None,
+            ..Cancelling::default()
         });
         let attempt = || -> Result<(), DbError> {
             running
@@ -2080,6 +2146,71 @@ mod tests {
             )
             .expect("runs");
         assert_eq!(shown.rows[0].get(0), Some("INFORMATION_SCHEMA"));
+    }
+
+    #[test]
+    #[ignore = "requires a Snowflake account configured through DBDELVE_SNOWFLAKE_*"]
+    fn live_a_sequences_ddl_comes_from_get_ddl() {
+        let connection = Connection::open(&live_config()).expect("connects");
+        let drop = |connection: &Connection| {
+            connection
+                .query("DROP SCHEMA IF EXISTS dbdelve_sequence_probe")
+                .expect("the probe schema should drop");
+        };
+        drop(&connection);
+        connection
+            .query("CREATE SCHEMA dbdelve_sequence_probe")
+            .expect("the probe schema should be created");
+        connection
+            .query("CREATE SEQUENCE dbdelve_sequence_probe.ticket START 5 INCREMENT 2")
+            .expect("the probe sequence should be created");
+        for _ in 0..2 {
+            connection
+                .query("SELECT dbdelve_sequence_probe.ticket.NEXTVAL")
+                .expect("the counter moves");
+        }
+        // Unquoted names are folded to upper case by the server.
+        let ddl = connection.sequence_ddl("DBDELVE_SEQUENCE_PROBE", "TICKET");
+        drop(&connection);
+        let ddl = ddl.expect("the definition is read");
+        assert!(ddl.to_uppercase().contains("CREATE"), "{ddl}");
+        assert!(ddl.contains("TICKET"), "{ddl}");
+        assert!(
+            ddl.to_uppercase().contains("START WITH 5"),
+            "the statement carries the start and not the counter: {ddl}"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a Snowflake account configured through DBDELVE_SNOWFLAKE_*"]
+    fn live_a_sequence_is_listed_in_its_own_kind() {
+        let connection = Connection::open(&live_config()).expect("connects");
+        let drop = |connection: &Connection| {
+            connection
+                .query("DROP SCHEMA IF EXISTS dbdelve_sequence_probe")
+                .expect("the probe schema should drop");
+        };
+        drop(&connection);
+        connection
+            .query("CREATE SCHEMA dbdelve_sequence_probe")
+            .expect("the probe schema should be created");
+        connection
+            .query("CREATE SEQUENCE dbdelve_sequence_probe.ticket")
+            .expect("the probe sequence should be created");
+
+        let second = crate::db::Connection::Snowflake(connection.clone())
+            .routines()
+            .expect("the second half should read");
+        let listed: Vec<_> = second
+            .schemas
+            .iter()
+            .filter(|schema| schema.name == "DBDELVE_SEQUENCE_PROBE")
+            .map(|schema| schema.sequences.clone())
+            .collect();
+
+        drop(&connection);
+        // Unquoted names are folded to upper case by the server.
+        assert_eq!(listed, vec![vec!["TICKET".to_string()]]);
     }
 
     #[test]
@@ -2656,6 +2787,116 @@ mod tests {
     }
 
     #[test]
+    fn a_session_on_another_database_names_it_and_shares_no_schema_with_the_first() {
+        let mock = Mock::start();
+        let sql = "SELECT 1 AS one, NULL AS nothing, '' AS blank, DATE '2024-02-29' AS leap";
+        mock.answer(sql, "query");
+        let connection = connected(&mock);
+        connection.set_schema(Some("Sales EU"));
+        let session = connection.on_database("OTHER_DB");
+        session.set_schema(Some("Archive"));
+        for connection in [&connection, &session] {
+            connection
+                .query_with(sql, &CancelToken::default(), Fetch::default())
+                .expect("runs");
+        }
+
+        let requests = mock.requests();
+        let sent = requests
+            .iter()
+            .filter(|request| request.body["statement"] == sql)
+            .map(|request| {
+                (
+                    request.body["database"].clone(),
+                    request.body["schema"].clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sent,
+            [
+                (json!("DBDELVE_TEST"), json!(r#""Sales EU""#)),
+                (json!("OTHER_DB"), json!(r#""Archive""#)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_bound_run_sends_its_own_schema_and_never_the_sessions() {
+        let mock = Mock::start();
+        let sql = "SELECT 1 AS one, NULL AS nothing, '' AS blank, DATE '2024-02-29' AS leap";
+        mock.answer(sql, "query");
+        let session = connected(&mock).on_database("OTHER_DB");
+        session.set_schema(Some("Archive"));
+        let session = crate::db::Connection::Snowflake(session);
+        for schema in [Some("Sales EU"), None] {
+            session
+                .query_bound(schema, sql, &CancelToken::default(), Fetch::default())
+                .expect("runs");
+        }
+
+        let sent = mock
+            .requests()
+            .iter()
+            .filter(|request| request.body["statement"] == sql)
+            .map(|request| {
+                (
+                    request.body["database"].clone(),
+                    request.body["schema"].clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sent,
+            [
+                (json!("OTHER_DB"), json!(r#""Sales EU""#)),
+                (json!("OTHER_DB"), json!(null)),
+            ],
+            "the tab's schema, or none, and not the one the session had picked"
+        );
+    }
+
+    /// Nothing a statement does stays on the server between requests: the
+    /// database rides on every one, and what dbdelve wrote names its schema,
+    /// so it is sent none. A `USE` through a bound run cannot move the edit
+    /// applied from a bound tab's grid.
+    #[test]
+    fn a_bound_edit_names_its_sessions_database_whatever_a_use_ran_before_it() {
+        let mock = Mock::start();
+        let sql = "SELECT 1 AS one, NULL AS nothing, '' AS blank, DATE '2024-02-29' AS leap";
+        let usage = "USE DATABASE THIRD_DB";
+        mock.answer(sql, "query");
+        mock.answer(usage, "query");
+        let session = connected(&mock).on_database("OTHER_DB");
+        session.set_schema(Some("Archive"));
+        let session = crate::db::Connection::Snowflake(session);
+        let cancel = CancelToken::default();
+        session
+            .query_bound(Some("Sales EU"), usage, &cancel, Fetch::default())
+            .expect("runs");
+        session
+            .generated_bound(Some("Sales EU"), sql, &cancel, None, None)
+            .expect("runs");
+
+        let sent = mock
+            .requests()
+            .iter()
+            .filter(|request| request.body["statement"] == sql)
+            .map(|request| {
+                (
+                    request.body["database"].clone(),
+                    request.body["schema"].clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sent,
+            [(json!("OTHER_DB"), json!(null))],
+            "the session's database, and no schema of the session's or the tab's"
+        );
+    }
+
+    #[test]
     fn a_statement_still_running_is_polled_until_it_finishes() {
         let mock = Mock::start();
         let sql = "SELECT 1 AS one, NULL AS nothing, '' AS blank, DATE '2024-02-29' AS leap";
@@ -3046,6 +3287,28 @@ mod tests {
         // Nothing left running, so a second cancel sends nothing.
         connection.cancel(&run).expect("nothing to cancel");
         assert_eq!(mock.hits("POST", &format!("/{handle}/cancel")), 1);
+    }
+
+    #[test]
+    fn a_statement_cancelled_before_it_is_submitted_is_never_sent() {
+        let mock = Mock::start();
+        let sql = "UPDATE T SET A = 1 WHERE ID = 1";
+        mock.answer(sql, "query");
+        let connection = connected(&mock);
+        let submitted = mock.hits("POST", "?async=true");
+        let run = CancelToken::default();
+        // Pressed while the edit waited its turn: nothing was running yet.
+        connection.cancel(&run).expect("nothing to cancel");
+
+        let error = connection
+            .generated(sql, &run, Fetch::default())
+            .expect_err("cancelled");
+        assert_eq!(error.message, "Cancelled.");
+        assert_eq!(
+            mock.hits("POST", "?async=true"),
+            submitted,
+            "nothing was submitted"
+        );
     }
 
     /// Waits for a statement to be polled, which is when it is cancellable.

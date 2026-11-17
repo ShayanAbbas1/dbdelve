@@ -12,8 +12,8 @@ use crate::result_grid::{ColumnView, ColumnWidth};
 
 use super::*;
 use crate::session::{
-    Finished, Lane, PendingDelete, PendingDiscard, PendingRun, QueryRename, Queue, Resume, Step,
-    TabKey, next_step, query_name_refusal, reveals_results,
+    Binding, Bound, Finished, Lane, PendingDelete, PendingDiscard, PendingRun, QueryRename, Queue,
+    Resume, Routed, Step, TabKey, next_step, query_name_refusal, reveals_results,
 };
 
 impl Workspace {
@@ -100,7 +100,13 @@ impl Workspace {
     /// dies on the thread the driver is running on. Nothing tokio-shaped is
     /// handed to GPUI's executor, which is the thing that panics.
     pub(crate) fn cancel_query(&mut self, _: &CancelQuery, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(connection) = self.profile().and_then(Profile::connection) else {
+        // The session a bound tab runs on, which is where the statements that
+        // are stopped by what the connection holds of them (MongoDB's, and
+        // ClickHouse's fallback) are kept.
+        let Some(connection) = self
+            .profile()
+            .and_then(|profile| profile.connection_to_stop(profile.session.active))
+        else {
             return;
         };
         let Some(profile) = self.profile_mut() else {
@@ -394,9 +400,14 @@ impl Workspace {
             // statement apiece at once instead, as they do on every other
             // engine; any batch a split would change stays whole.
             let reads = sql::split_reads(engine, &text, &statements, selection.clone());
+            // Never a bound tab's: its statements share the session of its
+            // database, and one at once would run on a fresh session, which
+            // is not on the binding.
+            // ponytail: a bound alongside session that re-applies the
+            // binding would let them go at once.
             let reads_at_once = reads.len() > 1
                 && self.profile().is_some_and(|profile| {
-                    profile.in_turn().is_none() && {
+                    !profile.session.is_bound(tab) && profile.in_turn().is_none() && {
                         let texts: Vec<&str> =
                             reads.iter().map(|range| &text[range.clone()]).collect();
                         session::runs_at_once(engine, profile.mode, &texts)
@@ -512,7 +523,7 @@ impl Workspace {
             .iter()
             .map(|range| &text[range.clone()])
             .collect();
-        if session::runs_at_once(engine, profile.mode, &texts) {
+        if !profile.session.is_bound(tab) && session::runs_at_once(engine, profile.mode, &texts) {
             match profile.in_turn() {
                 Some(why) => profile.session.notice = Some(why.into()),
                 None => {
@@ -704,11 +715,13 @@ impl Workspace {
         let Tab::Query(id) = tab else {
             return;
         };
-        let (mode, client_keys) = Self::landing_view(
-            self.issued_to(&lane.profile, lane.generation)
-                .map(|profile| &*profile),
-            tab,
-        );
+        let issued = self
+            .issued_to(&lane.profile, lane.generation)
+            .map(|profile| &*profile);
+        let engine = issued
+            .map(|profile| profile.config.engine())
+            .unwrap_or_default();
+        let (mode, client_keys) = Self::landing_view(issued, tab);
         let (extra, dropped, out) = {
             let Some(queue) = self
                 .issued_to(&lane.profile, lane.generation)
@@ -729,7 +742,7 @@ impl Workspace {
             });
             (extra, dropped, out)
         };
-        self.show_sets(extra, dropped, mode, client_keys.as_deref(), cx);
+        self.show_sets(extra, dropped, engine, mode, client_keys.as_deref(), cx);
         if out {
             self.start_lane(tab, &lane.profile, lane.generation, cx);
             return;
@@ -775,17 +788,39 @@ impl Workspace {
     /// SQL Server batch ever has. They land as results of their own, so the
     /// strip reads one chip per result set however many submissions produced
     /// them.
-    fn advance_queue(&mut self, tab: Tab, rest: Vec<db::QueryResult>, cx: &mut Context<Self>) {
+    ///
+    /// On the profile the statement was issued to, `profile` on `generation`,
+    /// which need not be the one in front by now.
+    fn advance_queue(
+        &mut self,
+        profile: &str,
+        generation: u64,
+        tab: Tab,
+        rest: Vec<db::QueryResult>,
+        cx: &mut Context<Self>,
+    ) {
         let Tab::Query(id) = tab else {
             return;
         };
-        let (mode, client_keys) = Self::landing_view(self.profile(), tab);
+        let issued = self.issued_to(profile, generation).map(|profile| &*profile);
+        let engine = issued
+            .map(|profile| profile.config.engine())
+            .unwrap_or_default();
+        let (mode, client_keys) = Self::landing_view(issued, tab);
         let (step, extra, dropped) = {
-            let Some(profile) = self.profile_mut() else {
+            let Some(profile) = self.issued_to(profile, generation) else {
                 return;
             };
-            let engine = profile.config.engine();
-            let uncertain = profile.in_transaction || profile.session_changed;
+            // A bound tab's statements run on its database's session, whose
+            // transaction and settings are its own; with none open there is
+            // nothing certain to say.
+            let uncertain = match profile.binding_of(tab) {
+                None => profile.in_transaction || profile.session_changed,
+                Some(binding) => profile
+                    .route(Some(binding))
+                    .bound()
+                    .is_none_or(|session| session.changed()),
+            };
             let Some(query) = profile.session.query_tab_mut(id) else {
                 return;
             };
@@ -828,7 +863,12 @@ impl Workspace {
             (next_step(failed, &queue.remaining), extra, dropped)
         };
 
-        self.show_sets(extra, dropped, mode, client_keys.as_deref(), cx);
+        self.show_sets(extra, dropped, engine, mode, client_keys.as_deref(), cx);
+        // The next statement is sent and gated through the profile in front,
+        // whose tab ids count from zero like every other's.
+        let in_front = self
+            .profile()
+            .is_some_and(|front| front.id == profile && front.generation == generation);
 
         match step {
             Step::Finished => {
@@ -837,7 +877,7 @@ impl Workspace {
                 // so the tab is exactly what an ordinary run leaves behind and
                 // nothing writes a second snapshot of the same grid.
                 if let Some(query) = self
-                    .profile_mut()
+                    .issued_to(profile, generation)
                     .and_then(|profile| profile.session.query_tab_mut(id))
                     && query
                         .queue
@@ -849,12 +889,19 @@ impl Workspace {
                 cx.notify();
             }
             Step::Ask => {
-                if let Some(profile) = self.profile_mut() {
+                if let Some(profile) = self.issued_to(profile, generation) {
                     profile.session.queue_failure = Some(tab);
                 }
                 cx.notify();
             }
-            Step::Next(_) => self.send_next_statement(tab, cx),
+            Step::Next(_) if in_front => self.send_next_statement(tab, cx),
+            // Sent on when the connection comes forward (`resume_parked`).
+            Step::Next(_) => {
+                if let Some(profile) = self.issued_to(profile, generation) {
+                    profile.session.parked.push((tab, generation));
+                }
+                cx.notify();
+            }
         }
     }
 
@@ -876,11 +923,11 @@ impl Workspace {
         &mut self,
         extra: Vec<(Entity<TableState<ResultGrid>>, QueryResult)>,
         dropped: usize,
+        engine: Engine,
         mode: Mode,
         client_keys: Option<&[SortKey]>,
         cx: &mut Context<Self>,
     ) {
-        let engine = self.engine();
         for (grid, set) in extra {
             // The server's sort is not carried over -- a header click reads
             // the statement in the buffer, and this set is not the one the
@@ -912,6 +959,41 @@ impl Workspace {
     /// Take the next statement off the queue and send it, with the empty grid
     /// it will fill — the one the last statement produced is in `done` and is
     /// never written to again.
+    /// Send on the queues of the profile in front that were parked while
+    /// another connection was. One parked on an earlier generation ran on a
+    /// session that is gone, with whatever it had open, so its rest is
+    /// dropped and said to be.
+    pub(crate) fn resume_parked(&mut self, cx: &mut Context<Self>) {
+        let Some(profile) = self.profile_mut() else {
+            return;
+        };
+        let generation = profile.generation;
+        for (tab, ran_on) in std::mem::take(&mut profile.session.parked) {
+            if ran_on == generation {
+                self.send_next_statement(tab, cx);
+                continue;
+            }
+            let Some(profile) = self.profile_mut() else {
+                return;
+            };
+            if let Tab::Query(id) = tab
+                && let Some(queue) = profile
+                    .session
+                    .query_tab_mut(id)
+                    .and_then(|query| query.queue.as_mut())
+                && !queue.remaining.is_empty()
+            {
+                queue.remaining.clear();
+                profile.session.notice = Some(
+                    "The rest of the selection was not run: the connection it ran on was opened \
+                     again since."
+                        .into(),
+                );
+            }
+        }
+        cx.notify();
+    }
+
     fn send_next_statement(&mut self, tab: Tab, cx: &mut Context<Self>) {
         let Tab::Query(id) = tab else {
             return;
@@ -1480,6 +1562,17 @@ impl Workspace {
     /// persisted and then emptied: one editor meant a new query had nowhere to
     /// go but on top of the old one.
     pub(crate) fn new_query(&mut self, _: &NewQuery, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_query_tab(None, window, cx);
+    }
+
+    /// [`Workspace::new_query`]'s tab, bound to a database where `binding`
+    /// says so (New Query Here).
+    pub(crate) fn open_query_tab(
+        &mut self,
+        binding: Option<Binding>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Err(message) = self.persist_buffer(cx) {
             self.note(message, cx);
             return;
@@ -1500,6 +1593,8 @@ impl Workspace {
                 name: None,
                 active: true,
                 queued_results: 0,
+                database: None,
+                schema: None,
             },
             self.engine(),
             Sorting::new(self.settings.client_sort),
@@ -1511,11 +1606,16 @@ impl Workspace {
             return;
         };
         let profile_id = profile.id.clone();
+        let mut tab = tab;
+        tab.binding = binding;
         profile.session.queries.push(tab);
         // Placed at the end of the strip rather than left for `strip_order`'s
         // default, which groups every unsaved buffer ahead of the saved
         // queries and objects regardless of when each was opened.
         profile.session.place_last(TabKey::Unsaved(id));
+        // ponytail: a bound tab completes from the profile's own catalog, not
+        // its database's; the upgrade is a provider per (profile, database)
+        // catalog.
         self.install_completions(&profile_id, cx);
         self.activate_tab(Tab::Query(id), window, cx);
     }
@@ -1625,6 +1725,8 @@ impl Workspace {
                 name: Some(name.clone()),
                 active: true,
                 queued_results: 0,
+                database: None,
+                schema: None,
             },
             self.engine(),
             Sorting::new(self.settings.client_sort),
@@ -1682,16 +1784,18 @@ impl Workspace {
 
     /// A new query tab holding `statement`, run at once: a row opened as a
     /// result of its own, by a command that is then the user's to read, edit
-    /// and run again, through the same gate as any they type.
+    /// and run again, through the same gate as any they type. Bound where
+    /// the row was read, since the statement does not name its database.
     pub(crate) fn run_in_new_query(
         &mut self,
         statement: String,
+        binding: Option<Binding>,
         at_most: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let id = self.profile().map(|profile| profile.session.next_query_id);
-        self.new_query(&NewQuery, window, cx);
+        self.open_query_tab(binding, window, cx);
         // Not whatever tab is in front if the new one could not be made: that
         // buffer is the user's.
         let Some(editor) = self
@@ -2034,7 +2138,7 @@ impl Workspace {
         let verdict = sql::classify(self.engine(), &sql);
         let stopped = self
             .profile()
-            .and_then(|profile| self.gate_run(profile, &verdict, own_run));
+            .and_then(|profile| self.gate_run(profile, tab, &verdict, own_run));
 
         if stopped.is_some() {
             if let Some(profile) = self.profile_mut() {
@@ -2109,11 +2213,32 @@ impl Workspace {
         // Read before the task, which outlives the borrow of `self`.
         let target = profile.config.target();
         let engine = target.engine;
-        let connection = profile.connection();
         let id = profile.id.clone();
         let generation = profile.generation;
-        let read_only = profile.mode == Mode::ReadOnly;
+        let issued_under = profile.mode;
+        let read_only = issued_under == Mode::ReadOnly;
         let alongside = lane.is_some();
+        // A tab bound to a database -- a query tab opened with New Query Here,
+        // an object tab of another database -- runs on the session of that
+        // database: the one open for it, else one this run opens first. A lane
+        // belongs to the profile's own tabs, which are never bound.
+        let binding = match &lane {
+            None => profile.binding_of(tab),
+            Some(_) => None,
+        };
+        let routed = profile.route(binding.clone());
+        // An edit of dbdelve's, which a bound tab shares its session with
+        // others for: not sent while a transaction is open on that session,
+        // asked now and again once it is the edit's turn there (`Bound::edit`).
+        let refusal_applies = binding.is_some()
+            && matches!(
+                refresh,
+                Some(Refresh::Statement(_) | Refresh::Earlier { .. } | Refresh::Relation(_))
+            );
+        let refusal = binding
+            .as_ref()
+            .filter(|_| refusal_applies)
+            .and_then(|binding| profile.bound_write_refusal(binding));
         // A statement the user typed as an `EXPLAIN` is theirs, run and kept in
         // the history as typed; only its answer goes where the Explain
         // command's does. Not in a queue, where every result holds a grid.
@@ -2136,7 +2261,7 @@ impl Workspace {
             return;
         }
 
-        let Some(connection) = connection else {
+        if !routed.is_available() {
             *state = QueryState::Failed(DbError {
                 message: "The connection is not open.".into(),
                 position: None,
@@ -2147,7 +2272,7 @@ impl Workspace {
                 self.land_lane(tab, lane, Vec::new(), cx);
             }
             return;
-        };
+        }
         // Lent only now the run is certain to start, so nothing refused above
         // leaves it lent.
         if let (Tab::Query(query), None, Some(Refresh::Earlier { index, .. })) =
@@ -2160,9 +2285,12 @@ impl Workspace {
             return;
         };
         // A lane's own, so a Cancel on its chip stops it and not the others.
-        let cancel = match lane {
-            Some(_) => CancelToken::alongside(),
-            None => CancelToken::default(),
+        // A bound tab's too, because its session is shared with other tabs: a
+        // Cancel stops what that session is running only while it is running
+        // this tab's statement (`Connection::query_bound`).
+        let cancel = match (&lane, &binding) {
+            (None, None) => CancelToken::default(),
+            _ => CancelToken::alongside(),
         };
         let started = std::time::Instant::now();
         let previous = std::mem::replace(
@@ -2330,13 +2458,29 @@ impl Workspace {
         };
         // Marked on the way out, like the history: a statement that failed
         // part way may still have opened a transaction.
-        if !generated && let Some(profile) = self.issued_to(&id, generation) {
+        // Not a bound tab's: what it leaves is left on the session of its
+        // database, which is not the profile's own.
+        if !generated
+            && binding.is_none()
+            && let Some(profile) = self.issued_to(&id, generation)
+        {
             let leaves = sql::leaves(engine, explained.as_deref().unwrap_or(&sql));
             if let Some(open) = leaves.transaction {
                 profile.in_transaction = open;
             }
             profile.session_changed |= leaves.settings;
         }
+        // The same, for the session of a bound tab's database, which a
+        // transaction holds for every tab bound to it: marked on the session
+        // as the statement goes (`Bound::leave`).
+        let leaves_bound = (!generated && binding.is_some()).then(|| {
+            let text = explained.as_deref().unwrap_or(&sql);
+            let leaves = sql::leaves(engine, text);
+            let open = leaves
+                .transaction
+                .or_else(|| sql::transaction_uncertain(engine, text).then_some(true));
+            (open, leaves.settings)
+        });
         // A plan is never cut short: its rows are the plan, not data.
         let limit = match tab {
             Tab::Query(query) if explaining.is_none() => self
@@ -2413,31 +2557,161 @@ impl Workspace {
         }
         let fed = feed.clone();
         let reads_only = sql::stoppable(engine, &sql);
-        let work = move || {
+        // A statement that ends a transaction goes as it is, with the binding
+        // not applied first: a session inside one cannot be moved (Postgres
+        // refuses inside any, DuckDB inside an aborted one, and Redis would
+        // queue the move into the MULTI), so applying it first would stop the
+        // COMMIT or ROLLBACK that frees the session.
+        // ponytail: a bound session is auto-commit until the user's own
+        // statement opens a transaction on it, which every tab bound to its
+        // database shares. An edit of dbdelve's is refused while one is open
+        // (`Profile::bound_write_refusal`), and the user's statements go on
+        // running as typed; the upgrade is a session of the tab's own.
+        let ends_transaction =
+            binding.is_some() && sql::leaves(engine, &sql).transaction == Some(false);
+        let bound_db = binding.as_ref().map(|binding| binding.database.clone());
+        // A `USE` or `SET` in a bound tab is undone, not rewritten: the
+        // binding stays what the tab was opened for, and the next run puts the
+        // session back on it first. Said once the run has landed.
+        let reset = binding
+            .as_ref()
+            .filter(|_| !generated && sql::leaves(engine, &sql).settings)
+            .map(|binding| {
+                format!(
+                    "The next run in this tab starts again on {}.",
+                    binding.label()
+                )
+            });
+        // The verdict the mode is asked again of once a session this run opens
+        // has landed, which can take as long as a connect.
+        let reopened = matches!(routed, Routed::Open { .. }).then(|| sql::classify(engine, &sql));
+        let work = move |connection: Connection, bound: Option<Arc<Bound>>| {
             let fetch = Fetch {
                 limit,
                 feed: fed.as_ref(),
                 reads_only,
                 held: None,
+                let_go: None,
             };
-            let result = match (generated, alongside) {
-                (true, _) => connection.generated(&sql, &cancel, fed.as_ref(), preview_limit),
-                (false, false) => connection.query(&sql, &cancel, fetch),
-                (false, true) => connection.query_alongside(&sql, &cancel, fetch, read_only),
+            let run = || match (generated, alongside, binding.as_ref()) {
+                // An edit applied from a bound tab's grid belongs to its
+                // database whichever way the session has been moved.
+                (true, _, Some(binding)) => connection.generated_bound(
+                    binding.schema.as_deref(),
+                    &sql,
+                    &cancel,
+                    fed.as_ref(),
+                    preview_limit,
+                ),
+                (true, ..) => connection.generated(&sql, &cancel, fed.as_ref(), preview_limit),
+                (false, false, Some(binding)) if !ends_transaction => {
+                    connection.query_bound(binding.schema.as_deref(), &sql, &cancel, fetch)
+                }
+                (false, false, Some(_)) => connection.query_unplaced(&sql, &cancel, fetch),
+                (false, false, None) => connection.query(&sql, &cancel, fetch),
+                (false, true, _) => connection.query_alongside(&sql, &cancel, fetch, read_only),
+            };
+            let result = match (&bound, &binding, leaves_bound) {
+                // Asked again under the session's turn, which a transaction
+                // opened since the edit was issued has taken before it.
+                (Some(bound), Some(binding), _) if refusal_applies => {
+                    bound.edit(&binding.database, run)
+                }
+                (Some(bound), _, Some((open, settings))) => bound.leave(open, settings, run),
+                _ => run(),
             };
             // A connection of the lane's own that failed is gone with it, and
             // says nothing about the profile's.
             let lost = !alongside && result.is_err() && connection.is_lost();
             (result, lost)
         };
-        // Blocks for as long as the server takes, and statements queued
-        // behind it on the same session block on its lock, so none of them
-        // may hold one of the executor's threads (`spawn_blocking`).
-        let query_task = spawn_blocking(cx.background_executor(), work);
         let number = crate::logging::connection_number(&id);
+        // The database to open a session for, when none is open for it.
+        let opens = match &routed {
+            Routed::Open { database, .. } => Some(database.clone()),
+            _ => None,
+        };
 
         cx.spawn(async move |workspace, cx| {
-            let (result, lost) = query_task.await;
+            // A bound tab with no session open for its database opens one
+            // first, and keeps it where the tree and a Cancel find it before
+            // anything is sent on it (`Workspace::keep_session`).
+            let ready = if let Some(message) = refusal {
+                Err(DbError {
+                    message,
+                    position: None,
+                })
+            } else {
+                match opens {
+                    None => {
+                        let bound = routed.bound();
+                        routed.resolve().map(|(connection, _)| (connection, bound))
+                    }
+                    Some(database) => {
+                        let opening =
+                            spawn_blocking(cx.background_executor(), move || routed.resolve())
+                                .await;
+                        match opening {
+                            Ok((session, _)) => match workspace.update(cx, |workspace, cx| {
+                                let Some(session) = workspace
+                                    .keep_session(&id, generation, database, read_only, session, cx)
+                                else {
+                                    return Err(DbError {
+                                        message: Self::SESSION_OUTLIVED.into(),
+                                        position: None,
+                                    });
+                                };
+                                // Gated under the mode it was issued in, and the
+                                // session it was waiting for was opened under
+                                // that one: a mode picked since has not been put
+                                // on it, and the statement is still unsent. A
+                                // move to or from Read-only refuses it whatever
+                                // it reads as: the server's hold is what keeps a
+                                // read such as `SELECT write_fn()` to reading,
+                                // and the session holds the old mode's.
+                                let moved = workspace
+                                    .issued_to(&id, generation)
+                                    .map(|profile| profile.mode)
+                                    .filter(|mode| {
+                                        *mode != issued_under
+                                            && ((*mode == Mode::ReadOnly) != read_only
+                                                || reopened
+                                                    .as_ref()
+                                                    .is_some_and(|verdict| verdict.mode > *mode))
+                                    });
+                                match moved {
+                                    Some(mode) => Err(DbError {
+                                        message: format!(
+                                            "Not sent: the connection moved to {} while the session opened.",
+                                            mode.label()
+                                        ),
+                                        position: None,
+                                    }),
+                                    None => Ok((session.connection.clone(), Some(session))),
+                                }
+                            }) {
+                                Ok(session) => session,
+                                Err(_) => return,
+                            },
+                            Err(error) => Err(error),
+                        }
+                    }
+                }
+            };
+            // Blocks for as long as the server takes, and statements queued
+            // behind it on the same session block on its lock, so none of them
+            // may hold one of the executor's threads (`spawn_blocking`).
+            let (result, lost, bound) = match ready {
+                Ok((connection, bound)) => {
+                    let (result, lost) = spawn_blocking(cx.background_executor(), {
+                        let bound = bound.clone();
+                        move || work(connection, bound)
+                    })
+                    .await;
+                    (result, lost, bound)
+                }
+                Err(error) => (Err(error), false, None),
+            };
             // Outcome and duration only. Not even at debug the server's text:
             // some engines quote the statement back in a syntax error.
             let (origin, elapsed) = (
@@ -2514,10 +2788,27 @@ impl Workspace {
                         // Before `slot`: a tab closed mid-run still ran on the
                         // session that died.
                         if lost {
-                            profile.state = ProfileState::Failed(format!(
-                                "Connection to {} was lost.",
-                                profile.config.endpoint()
-                            ));
+                            // A bound tab's session is not the profile's own:
+                            // losing it takes that session out, so the next
+                            // run opens another, and says nothing of the
+                            // connection the profile is on.
+                            match (&bound_db, &bound) {
+                                (Some(database), Some(bound)) => {
+                                    profile.lose_session(database, bound)
+                                }
+                                (Some(_), None) => {}
+                                // The sessions opened for other databases end
+                                // with it, as a disconnect ends them: nothing
+                                // reaches them once it is gone, and one may
+                                // hold a transaction's locks.
+                                (None, _) => {
+                                    profile.drop_sessions();
+                                    profile.state = ProfileState::Failed(format!(
+                                        "Connection to {} was lost.",
+                                        profile.config.endpoint()
+                                    ))
+                                }
+                            }
                             // Nothing left in the queue can run on a dead
                             // session, so it ends here rather than asking
                             // whether to Continue into "not open".
@@ -2532,6 +2823,11 @@ impl Workspace {
                         }
                         let Some((state, results)) = profile.session.slot_at(tab, lane.as_ref())
                         else {
+                            // A tab closed mid-run has no slot, but the
+                            // connection's row still has to say it failed.
+                            if lost && bound_db.is_none() {
+                                workspace.rebuild_connections(cx);
+                            }
                             return;
                         };
 
@@ -2791,6 +3087,11 @@ impl Workspace {
                     {
                         profile.session.tab_notice = Some((tab, notice));
                     }
+                    if let Some(reset) = reset
+                        && let Some(profile) = workspace.issued_to(&id, generation)
+                    {
+                        profile.session.tab_notice = Some((tab, reset));
+                    }
                     if succeeded && let Some(profile) = workspace.issued_to(&id, generation) {
                         // A statement that returned no columns produced no grid,
                         // so it is not the statement to go back to — which is
@@ -2852,6 +3153,10 @@ impl Workspace {
                     // marked again from the structure the tab already holds.
                     if succeeded && let Tab::Object(object) = tab {
                         workspace.mark_columns(object, cx);
+                    }
+                    if lost && bound_db.is_none() {
+                        // The connection's row says it failed.
+                        workspace.rebuild_connections(cx);
                     }
                     cx.notify();
 
@@ -2918,7 +3223,9 @@ impl Workspace {
                     // keeps the edit's own result out of `done`.
                     match lane {
                         Some(lane) => workspace.land_lane(tab, lane, rest, cx),
-                        None if !had_refresh => workspace.advance_queue(tab, rest, cx),
+                        None if !had_refresh => {
+                            workspace.advance_queue(&id, generation, tab, rest, cx)
+                        }
                         None => {}
                     }
                 })

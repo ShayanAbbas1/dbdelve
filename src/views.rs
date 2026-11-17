@@ -56,10 +56,11 @@ use crate::{
         Explained, ObjectBody, ObjectTab, Profile, ProfileState, QueryState, QueryTab, Said,
         Session, StructureState, Tab, insert_left_out, query_label, result_pane_is_expanded,
     },
+    sidebar::ViewMode,
     sql::Mode,
     structure_grid::{Section, StructureGrid},
     tab_drag::{DragTab, TabStrip},
-    theme::{Theme, fonts, layout, theme},
+    theme::{ConnectionColor, Theme, fonts, layout, theme},
     ui::{
         Code, Control, Tone, button, choice_button, chord_hint, code_highlights, compact_count,
         group_thousands, icon_button, icon_label_button, key_hint, keycap_text, kind_color,
@@ -157,6 +158,9 @@ pub struct RowInput {
 #[allow(clippy::too_many_arguments)]
 pub fn render_main_content(
     profile: &Profile,
+    profiles: &[Profile],
+    mode: ViewMode,
+    color_titlebar: bool,
     editor_font_size: f32,
     zoom: (u32, u32, u32),
     row_panel: &RowPanel,
@@ -171,7 +175,9 @@ pub fn render_main_content(
             tab,
             &profile.id,
             profile.config.target(),
-            profile.draws_diagrams(),
+            // A diagram reads the connection's own database, so a tab of
+            // another one offers none.
+            profile.draws_diagrams() && tab.database.is_none(),
             matches!(profile.state, ProfileState::Failed(_)),
             row_panel,
             profile
@@ -199,7 +205,15 @@ pub fn render_main_content(
         .flex_col()
         // Chrome, so the strip reads as the frame the surfaces sit in --
         // and chrome is the frost, which is already painted beneath it.
-        .child(render_tab_strip(profile, zoom, strip, cx))
+        .child(render_tab_strip(
+            profile,
+            profiles,
+            mode,
+            color_titlebar,
+            zoom,
+            strip,
+            cx,
+        ))
         .child(div().flex_1().min_h_0().child(body))
         .into_any_element()
 }
@@ -3085,23 +3099,53 @@ pub(crate) fn render_view_sorting(
     })
 }
 
+/// The element name of a chip, or of `part` of it (`context`, `tint`), for a
+/// test to find. `profile` is in it because two connections' tabs can share an
+/// id.
+pub(crate) fn chip_selector(part: &str, profile: &str, tab: Tab) -> String {
+    let (kind, id) = match tab {
+        Tab::Query(id) => ('q', id),
+        Tab::Object(id) => ('o', id),
+    };
+    match part {
+        "" => format!("tab-chip-{profile}-{kind}{id}"),
+        part => format!("tab-chip-{part}-{profile}-{kind}{id}"),
+    }
+}
+
+/// What a chip says besides the tab's name: the connection it belongs to in
+/// complex mode, where one strip holds several, and the database (and schema)
+/// it is bound to in either.
+pub(crate) fn chip_context(profile: &Profile, tab: Tab, complex: bool) -> Option<String> {
+    let binding = profile.binding_of(tab).map(|binding| binding.label());
+    match (complex, binding) {
+        (true, Some(binding)) => Some(format!("{} \u{b7} {binding}", profile.name)),
+        (true, None) => Some(profile.name.clone()),
+        (false, binding) => binding,
+    }
+}
+
 /// The tab strip. It sits directly above the tab's surface and starts where the
 /// editor's text does, so a tab labels the surface under it rather than the
 /// window: the active one is lifted to the editor's tone, the rest are names
 /// that reveal a wash on hover. No boxes, no hairlines — tone carries the
 /// state.
 fn render_tab_strip(
-    profile: &Profile,
+    front: &Profile,
+    profiles: &[Profile],
+    mode: ViewMode,
+    color_titlebar: bool,
     (chrome_zoom, editor_zoom, grid_zoom): (u32, u32, u32),
     strip: &TabStrip,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     let t = *theme(cx);
     let workspace = cx.entity().downgrade();
-    let session = &profile.session;
+    let session = &front.session;
     let runnable = session.editor(session.active).is_some();
+    let complex = mode == ViewMode::Complex;
 
-    let chip = |active: bool| {
+    let chip = |active: bool, tint: Option<ConnectionColor>| {
         div()
             .h(px(layout::chrome(layout::TAB_CHIP_HEIGHT)))
             .flex()
@@ -3111,7 +3155,11 @@ fn render_tab_strip(
             .rounded(px(layout::RADIUS_CONTROL))
             .map(|tab| {
                 if active {
-                    tab.bg(t.panel).text_color(t.text)
+                    // The band's own flattening, as its legibility test reads
+                    // it: `t.text` over this stays above the floor in every
+                    // theme (`a_tinted_tab_chip_reads_in_every_theme`).
+                    let ground = tint.map_or(t.panel, |color| color.band(t).flatten(t.panel));
+                    tab.bg(ground).text_color(t.text)
                 } else {
                     tab.text_color(t.text_muted)
                         .hover(|style| style.bg(t.element_hover))
@@ -3126,17 +3174,56 @@ fn render_tab_strip(
             .whitespace_nowrap()
             .child(name)
     };
+    // The connection a tab runs on and the database it is bound to, after its
+    // name. A chip of another connection is the only way to tell whose tab it
+    // is.
+    let context_label = |profile: &Profile, tab: Tab| {
+        let text = chip_context(profile, tab, complex)?;
+        Some(
+            div()
+                .debug_selector({
+                    let name = chip_selector("context", &profile.id, tab);
+                    move || name
+                })
+                .max_w(px(160.))
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                // In the chip's own ink, smaller: it tells two tabs of one
+                // name apart, so it has to read as well as the name does.
+                .text_size(px(layout::chrome(layout::TEXT_XS)))
+                .child(text),
+        )
+    };
+    // A coloured connection's chips wear its colour, as its titlebar and its
+    // sidebar row do, while the setting that colours them is on. A bar in the
+    // swatch on every chip; the front chip's ground is the band (see `chip`).
+    let tint_of = |profile: &Profile| profile.color.filter(|_| complex && color_titlebar);
+    let tint_bar = |color: ConnectionColor, profile: &Profile, tab: Tab| {
+        div()
+            .debug_selector({
+                let name = chip_selector("tint", &profile.id, tab);
+                move || name
+            })
+            .w(px(2.))
+            .h(px(layout::chrome(layout::TAB_CHIP_HEIGHT) * 0.6))
+            .flex_shrink_0()
+            .rounded_full()
+            .bg(color.swatch())
+    };
 
     // Middle-click closes the tab, as it does in every browser and editor,
-    // through the same guard on unapplied edits as `cmd+w`.
-    let close_on_middle_click = |chip: Stateful<Div>, target: Tab| {
+    // through the same guard on unapplied edits as `cmd+w`. A chip of another
+    // connection brings it forward first: a close acts on the connection in
+    // front, and two connections' tabs can share an id.
+    let close_on_middle_click = |chip: Stateful<Div>, index: usize, target: Tab| {
         let workspace = workspace.clone();
         chip.on_aux_click(move |event, window, cx| {
             if !event.is_middle_click() {
                 return;
             }
             _ = workspace.update(cx, |workspace, cx| {
-                workspace.ask_before_close(target, window, cx);
+                workspace.close_chip(index, target, window, cx);
             });
         })
     };
@@ -3186,92 +3273,200 @@ fn render_tab_strip(
                 }
             })
     };
+    // A chip's last wiring: the middle click, and the drag where it can be had.
+    //
+    // ponytail: only the front connection's chips drag. The strip's bounds and
+    // its glide are keyed by `TabKey`, which is per connection (two
+    // connections both have an `Unsaved(1)`), so registering another
+    // connection's chips would make them collide. A chip of another connection
+    // is reordered once a click has brought its connection forward. Keying the
+    // bounds by connection and tab would lift this.
+    let wire = |chip: Stateful<Div>, key: TabKey, index: usize, tab: Tab, is_front: bool| {
+        let chip = close_on_middle_click(chip, index, tab);
+        match is_front {
+            true => draggable(chip, key),
+            false => chip,
+        }
+        .into_any_element()
+    };
 
-    let mut tabs = session
-        .queries
-        .iter()
-        .filter(|tab| tab.open_query.is_none())
-        .enumerate()
-        .map(|(index, tab)| {
+    // The chips of one connection, in the order its strip keeps them.
+    let chips_of = |index: usize, profile: &Profile| -> Vec<AnyElement> {
+        let session = &profile.session;
+        let is_front = profile.id == front.id;
+        let pid = profile.id.as_str();
+        let tint = tint_of(profile);
+        // The chip in front is one of the connection in front only; every
+        // connection keeps its own tab in front for when it comes back.
+        let active_is = |tab: Tab| is_front && session.active == tab;
+        let leading = |tab: Tab| tint.map(|color| tint_bar(color, profile, tab));
+        let mut tabs = session
+            .queries
+            .iter()
+            .filter(|tab| tab.open_query.is_none())
+            .enumerate()
+            .map(|(position, tab)| {
+                let id = tab.id;
+                let this = Tab::Query(id);
+                let group = format!("unsaved-query-tab-{pid}-{id}");
+                let open_workspace = workspace.clone();
+                let close_workspace = workspace.clone();
+                let label = match position {
+                    0 => "New Query".to_string(),
+                    _ => format!("New Query {}", position + 1),
+                };
+                chip(active_is(this), tint)
+                    .id(SharedString::from(format!("unsaved-query-tab-{pid}-{id}")))
+                    .debug_selector({
+                        let name = chip_selector("", pid, this);
+                        move || name
+                    })
+                    .group(group.clone())
+                    .px(px(layout::SPACE_SM))
+                    .children(leading(this))
+                    // A pen, not a file: an unsaved buffer is a place to write, and
+                    // the distinction is what makes the saved tabs read as files.
+                    .child(row_icon(t, icon::SCRATCH_QUERY))
+                    .child(label)
+                    .children(context_label(profile, this))
+                    .child(
+                        div()
+                            .opacity(0.)
+                            .group_hover(group, |style| style.opacity(1.))
+                            .child(
+                                icon_button(
+                                    SharedString::from(format!("close-unsaved-query-{pid}-{id}")),
+                                    icon::CLOSE,
+                                    Tone::Quiet,
+                                    Control::Inline,
+                                    t,
+                                )
+                                .tooltip("Close tab")
+                                .on_click(move |_, window, cx| {
+                                    // Or the chip underneath activates the tab
+                                    // this just closed, in the same click.
+                                    cx.stop_propagation();
+                                    _ = close_workspace.update(cx, |workspace, cx| {
+                                        workspace.close_chip(index, this, window, cx);
+                                    });
+                                }),
+                            ),
+                    )
+                    .on_click(move |_, window, cx| {
+                        _ = open_workspace.update(cx, |workspace, cx| {
+                            workspace.activate_chip(index, this, window, cx);
+                        });
+                    })
+                    .map(|chip| wire(chip, TabKey::Unsaved(id), index, this, is_front))
+            })
+            .collect::<Vec<_>>();
+
+        // A saved query's chip closes like any other: the file stays, and the
+        // sidebar's Queries group is where it is opened again or deleted.
+        tabs.extend(session.queries.iter().filter_map(|tab| {
+            let name = tab.open_query.clone()?;
             let id = tab.id;
-            let group = format!("unsaved-query-tab-{id}");
+            let this = Tab::Query(id);
+            let group = format!("saved-query-tab-{pid}-{id}");
             let open_workspace = workspace.clone();
             let close_workspace = workspace.clone();
-            let label = match index {
-                0 => "New Query".to_string(),
-                _ => format!("New Query {}", index + 1),
-            };
-            chip(session.active == Tab::Query(id))
-                .id(("unsaved-query-tab", id as usize))
-                .group(group.clone())
-                .px(px(layout::SPACE_SM))
-                // A pen, not a file: an unsaved buffer is a place to write, and
-                // the distinction is what makes the saved tabs read as files.
-                .child(row_icon(t, icon::SCRATCH_QUERY))
-                .child(label)
-                .child(
-                    div()
-                        .opacity(0.)
-                        .group_hover(group, |style| style.opacity(1.))
-                        .child(
-                            icon_button(
-                                ("close-unsaved-query", id as usize),
-                                icon::CLOSE,
-                                Tone::Quiet,
-                                Control::Inline,
-                                t,
-                            )
-                            .tooltip("Close tab")
-                            .on_click(move |_, window, cx| {
-                                // Or the chip underneath activates the tab
-                                // this just closed, in the same click.
-                                cx.stop_propagation();
-                                _ = close_workspace.update(cx, |workspace, cx| {
-                                    workspace.ask_before_close(Tab::Query(id), window, cx);
-                                });
-                            }),
-                        ),
-                )
-                .on_click(move |_, window, cx| {
-                    _ = open_workspace.update(cx, |workspace, cx| {
-                        workspace.activate_tab(Tab::Query(id), window, cx);
-                    });
-                })
-                .map(|chip| {
-                    draggable(
-                        close_on_middle_click(chip, Tab::Query(id)),
-                        TabKey::Unsaved(id),
+            Some(
+                chip(active_is(this), tint)
+                    .id(SharedString::from(format!("saved-query-tab-{pid}-{id}")))
+                    .debug_selector({
+                        let name = chip_selector("", pid, this);
+                        move || name
+                    })
+                    .group(group.clone())
+                    .px(px(layout::SPACE_SM))
+                    .children(leading(this))
+                    .child(row_icon(
+                        t,
+                        saved_query_icon(profile.config.engine().syntax()),
+                    ))
+                    .child(name_label(name.clone()))
+                    .children(context_label(profile, this))
+                    .child(
+                        div()
+                            .opacity(0.)
+                            .group_hover(group, |style| style.opacity(1.))
+                            .child(
+                                icon_button(
+                                    SharedString::from(format!("close-saved-query-{pid}-{id}")),
+                                    icon::CLOSE,
+                                    Tone::Quiet,
+                                    Control::Inline,
+                                    t,
+                                )
+                                .tooltip("Close tab")
+                                .on_click(move |_, window, cx| {
+                                    // Or the chip underneath activates the tab
+                                    // this just closed, in the same click.
+                                    cx.stop_propagation();
+                                    _ = close_workspace.update(cx, |workspace, cx| {
+                                        workspace.close_chip(index, this, window, cx);
+                                    });
+                                }),
+                            ),
                     )
-                })
-                .into_any_element()
-        })
-        .collect::<Vec<_>>();
+                    .on_click(move |_, window, cx| {
+                        _ = open_workspace.update(cx, |workspace, cx| {
+                            workspace.activate_chip(index, this, window, cx);
+                        });
+                    })
+                    .map(|chip| wire(chip, TabKey::Saved(name), index, this, is_front)),
+            )
+        }));
 
-    // A saved query's chip closes like any other: the file stays, and the
-    // sidebar's Queries group is where it is opened again or deleted.
-    tabs.extend(session.queries.iter().filter_map(|tab| {
-        let name = tab.open_query.clone()?;
-        let id = tab.id;
-        let group = format!("saved-query-tab-{id}");
-        let open_workspace = workspace.clone();
-        let close_workspace = workspace.clone();
-        Some(
-            chip(session.active == Tab::Query(id))
-                .id(("saved-query-tab", id as usize))
+        // Opened objects sit after the queries, in the order they were opened.
+        tabs.extend(session.objects.iter().map(|object| {
+            let id = object.id;
+            let this = Tab::Object(id);
+            let group = format!("object-tab-{pid}-{id}");
+            let open_workspace = workspace.clone();
+            let close_workspace = workspace.clone();
+            chip(active_is(this), tint)
+                .id(SharedString::from(format!("object-tab-{pid}-{id}")))
+                .debug_selector({
+                    let name = chip_selector("", pid, this);
+                    move || name
+                })
                 .group(group.clone())
                 .px(px(layout::SPACE_SM))
+                .children(leading(this))
                 .child(row_icon(
                     t,
-                    saved_query_icon(profile.config.engine().syntax()),
+                    match object.body {
+                        ObjectBody::Structure { .. } => icon::STRUCTURE,
+                        ObjectBody::Diagram { .. } => icon::DIAGRAM,
+                        _ => object.kind.map_or(icon::TABLE, object_icon),
+                    },
                 ))
-                .child(name_label(name.clone()))
+                .child(name_label(object.label().to_string()))
+                // One relation can have as many tabs as it has filters (spec §6.3),
+                // so a strip that labelled them all `customers` would cost a click
+                // each to tell apart. Bounded and ellipsized: a filter can be long.
+                .children((!object.filter().is_empty()).then(|| {
+                    div()
+                        .max_w(px(120.))
+                        .px(px(layout::SPACE_XS))
+                        .rounded(px(layout::RADIUS_CONTROL))
+                        .bg(t.element_active)
+                        .text_size(px(layout::chrome(layout::TEXT_XS)))
+                        .text_color(t.text_muted)
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(object.filter().to_string())
+                }))
+                .children(context_label(profile, this))
                 .child(
                     div()
                         .opacity(0.)
                         .group_hover(group, |style| style.opacity(1.))
                         .child(
                             icon_button(
-                                ("close-saved-query", id as usize),
+                                SharedString::from(format!("close-object-{pid}-{id}")),
                                 icon::CLOSE,
                                 Tone::Quiet,
                                 Control::Inline,
@@ -3283,105 +3478,35 @@ fn render_tab_strip(
                                 // this just closed, in the same click.
                                 cx.stop_propagation();
                                 _ = close_workspace.update(cx, |workspace, cx| {
-                                    workspace.ask_before_close(Tab::Query(id), window, cx);
+                                    workspace.close_chip(index, this, window, cx);
                                 });
                             }),
                         ),
                 )
                 .on_click(move |_, window, cx| {
                     _ = open_workspace.update(cx, |workspace, cx| {
-                        workspace.activate_tab(Tab::Query(id), window, cx);
+                        workspace.activate_chip(index, this, window, cx);
                     });
                 })
-                .map(|chip| {
-                    draggable(
-                        close_on_middle_click(chip, Tab::Query(id)),
-                        TabKey::Saved(name),
-                    )
-                })
-                .into_any_element(),
-        )
-    }));
+                .map(|chip| wire(chip, TabKey::Object(id), index, this, is_front))
+        }));
 
-    // Opened objects sit after the queries, in the order they were opened.
-    tabs.extend(session.objects.iter().map(|object| {
-        let id = object.id;
-        let group = format!("object-tab-{id}");
-        let open_workspace = workspace.clone();
-        let close_workspace = workspace.clone();
-        chip(session.active == Tab::Object(id))
-            .id(("object-tab", id as usize))
-            .group(group.clone())
-            .px(px(layout::SPACE_SM))
-            .child(row_icon(
-                t,
-                match object.body {
-                    ObjectBody::Structure { .. } => icon::STRUCTURE,
-                    ObjectBody::Diagram { .. } => icon::DIAGRAM,
-                    _ => object.kind.map_or(icon::TABLE, object_icon),
-                },
-            ))
-            .child(name_label(object.label().to_string()))
-            // One relation can have as many tabs as it has filters (spec §6.3),
-            // so a strip that labelled them all `customers` would cost a click
-            // each to tell apart. Bounded and ellipsized: a filter can be long.
-            .children((!object.filter().is_empty()).then(|| {
-                div()
-                    .max_w(px(120.))
-                    .px(px(layout::SPACE_XS))
-                    .rounded(px(layout::RADIUS_CONTROL))
-                    .bg(t.element_active)
-                    .text_size(px(layout::chrome(layout::TEXT_XS)))
-                    .text_color(t.text_muted)
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .whitespace_nowrap()
-                    .child(object.filter().to_string())
-            }))
-            .child(
-                div()
-                    .opacity(0.)
-                    .group_hover(group, |style| style.opacity(1.))
-                    .child(
-                        icon_button(
-                            ("close-object", id as usize),
-                            icon::CLOSE,
-                            Tone::Quiet,
-                            Control::Inline,
-                            t,
-                        )
-                        .tooltip("Close tab")
-                        .on_click(move |_, window, cx| {
-                            // Or the chip underneath activates the tab
-                            // this just closed, in the same click.
-                            cx.stop_propagation();
-                            _ = close_workspace.update(cx, |workspace, cx| {
-                                workspace.ask_before_close(Tab::Object(id), window, cx);
-                            });
-                        }),
-                    ),
-            )
-            .on_click(move |_, window, cx| {
-                _ = open_workspace.update(cx, |workspace, cx| {
-                    workspace.activate_tab(Tab::Object(id), window, cx);
-                });
-            })
-            .map(|chip| {
-                draggable(
-                    close_on_middle_click(chip, Tab::Object(id)),
-                    TabKey::Object(id),
-                )
-            })
-            .into_any_element()
-    }));
-
-    // Left to right as the user dragged them; a chip they have not placed yet
-    // follows the placed ones.
-    let default_keys = session.default_chips();
-    let order = session.strip_order();
-    let mut placed: Vec<(TabKey, AnyElement)> = default_keys.into_iter().zip(tabs).collect();
-    placed.sort_by_key(|(key, _)| order.iter().position(|placed| placed == key));
-    let tabs: Vec<AnyElement> = placed.into_iter().map(|(_, chip)| chip).collect();
+        // Left to right as the user dragged them; a chip they have not placed yet
+        // follows the placed ones.
+        let default_keys = session.default_chips();
+        let order = session.strip_order();
+        let mut placed: Vec<(TabKey, AnyElement)> = default_keys.into_iter().zip(tabs).collect();
+        placed.sort_by_key(|(key, _)| order.iter().position(|placed| placed == key));
+        placed.into_iter().map(|(_, chip)| chip).collect()
+    };
+    // Simple mode draws the connection in front; complex mode every one, in
+    // the order the profiles are kept.
+    let tabs: Vec<AnyElement> = profiles
+        .iter()
+        .enumerate()
+        .filter(|(_, profile)| complex || profile.id == front.id)
+        .flat_map(|(index, profile)| chips_of(index, profile))
+        .collect();
 
     // 100% is not information; a pane's readout appears only once its zoom
     // has somewhere to return to.

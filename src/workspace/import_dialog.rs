@@ -396,8 +396,8 @@ impl Workspace {
                 .flex_1()
                 .text_color(t.text_muted)
                 .child(format!(
-                    "Reading the columns of `{}.{}`…",
-                    dialog.schema, dialog.table
+                    "Reading the columns of `{}`…",
+                    dialog.target_name()
                 ))
                 .into_any_element(),
             None => div().flex_1().into_any_element(),
@@ -1297,7 +1297,11 @@ fn import_preview(editing: &Editing, cx: &mut Context<Workspace>) -> AnyElement 
 fn import_header(dialog: &ImportDialog, cx: &mut Context<Workspace>) -> impl IntoElement {
     let t = popup_theme(cx);
     let workspace = cx.entity().downgrade();
-    let (schema, table) = (dialog.schema.clone(), dialog.table.clone());
+    let (database, schema, table) = (
+        dialog.database.clone(),
+        dialog.schema.clone(),
+        dialog.table.clone(),
+    );
     let name = dialog.source.name();
     let rows = match &dialog.prepared {
         Some(Ok(prepared)) => Some(row_readout(
@@ -1337,7 +1341,13 @@ fn import_header(dialog: &ImportDialog, cx: &mut Context<Workspace>) -> impl Int
             .disabled(running)
             .on_click(move |_, window, cx| {
                 _ = workspace.update(cx, |workspace, cx| {
-                    workspace.prompt_import_file(schema.clone(), table.clone(), window, cx);
+                    workspace.prompt_import_file(
+                        database.clone(),
+                        schema.clone(),
+                        table.clone(),
+                        window,
+                        cx,
+                    );
                 });
             }),
         )
@@ -1349,7 +1359,7 @@ fn import_header(dialog: &ImportDialog, cx: &mut Context<Workspace>) -> impl Int
                 .text_ellipsis()
                 .whitespace_nowrap()
                 .text_color(t.text_muted)
-                .child(format!("{}.{}", dialog.schema, dialog.table)),
+                .child(dialog.target_name()),
         )
         .children(rows.map(|rows| div().flex_shrink_0().child(rows)))
 }

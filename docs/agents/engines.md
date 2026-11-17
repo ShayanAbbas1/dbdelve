@@ -376,6 +376,99 @@ Decided, and not to be re-litigated:
   `Catalog::by_name` is the display order. Until `Routines::Loaded`, a stored
   routine tab stays pending rather than being resolved against a catalog that
   cannot have it yet.
+- **Sequences are their own kind, read in the second half.** They are never a
+  relation, so no preview, DROP, TRUNCATE, insert or import path can reach one.
+  `Connection::routines` reads them only where `Abilities.lists_sequences` is
+  set, joins them into the routines catalog with `Catalog::join_sequences`,
+  and `Catalog::merge` carries both onto the schema on screen, so a slow or
+  missing sequence catalog never holds back the relations. A schema holding only
+  sequences arrives in that half and is appended like a routines-only one. A
+  sequence read that fails lists none and leaves the routines. The agent reads
+  `Connection::catalog` alone, the first half, so it never sees a sequence.
+  Each engine's source, in its own driver, by name alone (no current value is
+  read, which needs privileges the listing does not):
+  - DuckDB: `duckdb_sequences()`, the current database only.
+  - Postgres: `pg_catalog.pg_sequences`.
+  - SQL Server: `sys.sequences`; a server before 2012 refuses it and lists none.
+  - Snowflake: `INFORMATION_SCHEMA.SEQUENCES`, one more round after the
+    routines. Written against the documented view and not run against an
+    account.
+  - MariaDB: `information_schema.TABLES` where `TABLE_TYPE = 'SEQUENCE'`; a
+    server before 10.3 answers no rows. MySQL has none and sends no statement.
+
+  Show DDL on a sequence reads its definition through `Connection::sequence_ddl`
+  (`Connection::ddl` takes a `RelationKind`, which a sequence is not), drawn and
+  copied and never run. No current value is read by the composed ones, and
+  every name in a composed statement or a lookup goes through
+  `quote_identifier` or `quote_literal`:
+  - Postgres has no `pg_get_*def` for a sequence, so `CREATE SEQUENCE` is
+    composed from `pg_sequences` (`data_type`, `increment_by`, `min_value`,
+    `max_value`, `start_value`, `cache_size`, `cycle`; not `last_value`).
+  - SQL Server composes it from `sys.sequences` (type, `start_value`,
+    `increment`, `minimum_value`, `maximum_value`, `is_cycling`, `is_cached`
+    and `cache_size`; not `current_value`), the `sql_variant` columns cast to
+    text and a `decimal`'s precision and scale kept.
+  - DuckDB composes it from `duckdb_sequences()`. Its `sql` column is not used:
+    it writes `START` as the counter's current value, so it moves with every
+    `nextval`.
+  - Snowflake asks `GET_DDL('SEQUENCE', ..)`; written against the documented
+    function and not run against an account, so whether its `START WITH` is the
+    original start or the counter's next value is not verified (the ignored live
+    test advances the counter and asserts the start).
+  - MariaDB asks `SHOW CREATE SEQUENCE`; MySQL has none and the call is refused.
+- **Sessions on other databases.** A database of a server other than the
+  profile's gets one session per (profile, database), opened lazily the first
+  time it is expanded by `Connection::on_database` and sharing nothing mutable
+  with the profile's own session, so moving one never moves the other. Each is
+  built from the live connection -- its resolved password and its tunnel --
+  and never from `profile.config`, which holds neither. It moves by the
+  driver's own call, and `on_database` writes no SQL the user could see or the
+  gates would judge:
+  - Postgres: `connect` with the database replaced and no schema picked (the
+    profile's schema may not exist there), over the same route, with a server
+    config and a side session of its own; it is not `alongside`, which shares
+    both. Not warmed, so its side session opens when a sizes read asks.
+  - SQL Server: a login whose default database is the one named, over the
+    tunnel the connection holds; `held_to_database` then restores that
+    database, not the profile's, after a batch of the user's moves it.
+  - ClickHouse: the config with the database replaced, a session, hold,
+    running requests and described tables of its own; the first request enters
+    the database as it does for the profile's.
+  - MySQL and MariaDB: a connection whose handshake names the database.
+  - DuckDB: a `go` to the attached database on a pick of its own. Redis:
+    `SELECT` of the number the name carries, refused before dialling when the
+    name is none. Snowflake: the config with the database set and no schema.
+    MongoDB: the same client reading the database, with its own statements in
+    flight.
+  A session is shared by every tab bound to its database, and a `USE` of one
+  moves it for all, so nothing is left to what the last statement did. A bound
+  statement (`Connection::query_bound`) and the reads dbdelve makes for those
+  tabs put the session back on its database first, in the same hold of it as
+  what follows, through the driver's own calls and never in the user's text; a
+  failure to put it back means the statement was not sent. Per engine:
+  - Postgres, MySQL, MariaDB, DuckDB and Redis re-apply the database (and the
+    schema, where the engine picks one) before every bound statement. DuckDB's
+    session also does before a definition, structure, sequence or catalog read,
+    which name `current_database()`. The profile's own DuckDB connection never
+    does: its catalog follows the user's `USE`.
+  - ClickHouse sends `USE` again before a bound user statement, on the same
+    `session_id` and with `session_check`, so a session the server let go of
+    is reported rather than quietly replaced. dbdelve's own statements and
+    reads carry no session and name the database.
+  - SQL Server needs no re-apply: `held_to_database` restores the session's
+    database inside the run of any batch that mentions `USE`, and the run says
+    so. Snowflake needs none: nothing a statement does stays between requests,
+    each names its database, and what dbdelve wrote names its schema and is
+    sent none. MongoDB needs none: a session's database is fixed, `getSiblingDB`
+    names another for one statement, and `use` is not a statement.
+  - Postgres, MySQL and MariaDB reads of a definition or structure name their
+    schema; Redis's structure is the same whatever it is on.
+  Every one is held to reads when the profile is Read-only, inside the open
+  before it is stored and again on every mode change (`Profile::sessions_to_hold`).
+  The cost is one server connection per database in use -- about two on
+  Postgres while its catalog reads, the second being the side session sizes
+  use -- counted against a tunnel's or a pooler's limits like any other, and
+  all end when the profile's connection does.
 - **Snowflake's catalog needs a running warehouse.** It is read through
   `INFORMATION_SCHEMA`, so connecting resumes a suspended warehouse and so does
   opening a Structure tab. That view has nothing naming the columns of a key,

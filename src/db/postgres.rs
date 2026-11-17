@@ -22,8 +22,8 @@ use super::{
     Catalog, Column, DbError, EditTarget, Engine, Feed, Fetch, GraphCancel, QueryResult, Reference,
     RelationKind, Row, RowBuilder, SchemaGraph, ServerConfig, Sizes, Stopped, Structure,
     assemble_catalog, assemble_databases, assemble_foreign_keys, assemble_references,
-    assemble_schema_graph, assemble_sizes, assemble_structure, create_table, non_utf8_error,
-    optional_cell, plain_error, required_cell, terminated,
+    assemble_schema_graph, assemble_sequences, assemble_sizes, assemble_structure, create_table,
+    non_utf8_error, optional_cell, plain_error, required_cell, terminated,
 };
 
 mod pgpass;
@@ -152,6 +152,30 @@ SELECT
     ELSE parent.row_estimate
     END AS row_estimate
 FROM sized AS parent
+";
+
+// The names alone: a sequence's current value is null without USAGE or SELECT
+// on it, and a listing has no use for it.
+const SEQUENCES_SQL: &str = "
+SELECT schemaname AS schema_name,
+       sequencename AS sequence_name
+FROM pg_catalog.pg_sequences
+WHERE schemaname <> 'information_schema'
+    AND schemaname NOT LIKE 'pg\\_%' ESCAPE '\\'
+ORDER BY 1, 2
+";
+
+// The definition and not the sequence's position: `last_value` is not read.
+const SEQUENCE_PARTS_SQL: &str = "
+SELECT data_type::text AS data_type,
+       increment_by::text AS increment_by,
+       min_value::text AS min_value,
+       max_value::text AS max_value,
+       start_value::text AS start_value,
+       cache_size::text AS cache_size,
+       cycle::text AS cycle
+FROM pg_catalog.pg_sequences
+WHERE schemaname = {schema} AND sequencename = {relation}
 ";
 
 const ROUTINES_SQL: &str = "
@@ -677,27 +701,39 @@ fn connection_string(server: &ServerConfig) -> String {
 }
 
 /// `schema` ahead of the session's default `search_path`, as the role,
-/// database or server set it, so `"$user"` and extension schemas stay on it.
+/// database or server set it, so `"$user"` and extension schemas stay on it;
+/// that default alone where there is no `schema`, as `RESET` would put back.
 /// `reset_val` is that default however many switches came before. Sets nothing
 /// inside a transaction block, where the block's first statement has already
 /// moved `statement_timestamp` past its start: a ROLLBACK would undo the set.
-fn set_search_path_sql(schema: &str) -> String {
+/// There it answers only when the path is already the one it would set, so a
+/// bound tab goes on inside the transaction its own statement opened, and a
+/// tab bound to another schema is still refused.
+fn set_search_path_sql(schema: Option<&str>) -> String {
     // An `E''` literal reads the same whatever `standard_conforming_strings` is.
-    let first = Engine::Postgres
-        .quote_identifier(schema)
-        .replace('\\', r"\\")
-        .replace('\'', "''");
+    // `concat_ws` skips the NULL that stands for no schema.
+    let first = schema.map_or_else(
+        || "NULL".to_string(),
+        |schema| {
+            let quoted = Engine::Postgres
+                .quote_identifier(schema)
+                .replace('\\', r"\\")
+                .replace('\'', "''");
+            format!("E'{quoted}'")
+        },
+    );
     format!(
-        "SELECT pg_catalog.set_config('search_path', \
-         pg_catalog.concat_ws(', ', E'{first}', NULLIF(reset_val, '')), false) \
-         FROM pg_catalog.pg_settings WHERE name = 'search_path' \
-         AND pg_catalog.transaction_timestamp() = pg_catalog.statement_timestamp()"
+        "SELECT CASE WHEN outside THEN pg_catalog.set_config('search_path', path, false) END \
+         FROM (SELECT pg_catalog.concat_ws(', ', {first}, NULLIF(reset_val, '')) AS path, \
+         pg_catalog.transaction_timestamp() = pg_catalog.statement_timestamp() AS outside \
+         FROM pg_catalog.pg_settings WHERE name = 'search_path') AS wanted \
+         WHERE outside OR pg_catalog.current_setting('search_path') = path"
     )
 }
 
 /// A `SET` after connecting rather than a startup option: PgBouncer and other
 /// poolers refuse a connection that sends `options` at all.
-fn set_search_path(client: &mut Client, schema: &str) -> Result<(), DbError> {
+fn set_search_path(client: &mut Client, schema: Option<&str>) -> Result<(), DbError> {
     let set = set_search_path_sql(schema);
     let Client { client, driver, .. } = client;
     let messages = driver
@@ -1112,7 +1148,7 @@ impl Connection {
         let pid = row.as_ref().and_then(|row| row.get(0)?.parse().ok());
         let current_schema = row.and_then(|row| row.get(1).map(str::to_string));
         if let Some(schema) = &server.schema {
-            set_search_path(&mut client, schema)?;
+            set_search_path(&mut client, Some(schema))?;
         }
 
         Ok(Self {
@@ -1163,11 +1199,11 @@ impl Connection {
         let Some(schema) = self.server().schema else {
             return Ok(());
         };
-        set_search_path(&mut client, &schema)?;
+        set_search_path(&mut client, Some(&schema))?;
         if let Ok(mut side) = self.side.lock()
             && side.as_ref().is_some_and(|side| {
                 side.client.lock().map_or(true, |mut side| {
-                    set_search_path(&mut side, &schema).is_err()
+                    set_search_path(&mut side, Some(&schema)).is_err()
                 })
             })
         {
@@ -1186,6 +1222,25 @@ impl Connection {
             server: self.server.clone(),
             ..Self::connect(&self.server(), self.route.clone())?
         })
+    }
+
+    /// A session on `database`, for the (connection, database) pair: a new
+    /// connection from this one's live server config -- its resolved password
+    /// and its route -- with the database replaced and no schema picked, which
+    /// that database may not have. It is not [`Self::alongside`], which shares
+    /// `server` and `side`: a schema picked here would move the first's, and
+    /// a size read would run on the first's side session. It is not warmed, so
+    /// the side session opens only when a sizes read asks for it. It carries
+    /// no read-only hold of its own; the caller applies it.
+    pub fn on_database(&self, database: &str) -> Result<Self, DbError> {
+        Self::connect(
+            &ServerConfig {
+                database: database.to_string(),
+                schema: None,
+                ..self.server()
+            },
+            self.route.clone(),
+        )
     }
 
     /// A poisoned mutex counts: every later statement would fail on it too.
@@ -1239,7 +1294,36 @@ impl Connection {
     /// dropped, so the statement runs to completion exactly as typed. Kept
     /// rows go to `feed` when there is one; see [`super::Connection::query`].
     pub fn query(&self, sql: &str, fetch: Fetch) -> Result<QueryResult, DbError> {
-        let result = self.run(sql, true, fetch);
+        self.query_as(sql, fetch, None)
+    }
+
+    /// [`Self::query`] for a tab bound to this session's database: `schema`
+    /// goes first on the `search_path`, or the session's own default is put
+    /// back where the tab binds none, before the statement and under the lock
+    /// that runs it. A statement of another tab, or one of the user's own,
+    /// may have moved it since, and two tabs bound to different schemas of one
+    /// database share this session, so applying and running as two
+    /// acquisitions would let one run in the other's schema.
+    ///
+    /// Inside a transaction block the `search_path` cannot be moved
+    /// ([`set_search_path`]): a statement whose schema it is already on goes
+    /// on, and any other is not sent.
+    pub fn query_bound(
+        &self,
+        schema: Option<&str>,
+        sql: &str,
+        fetch: Fetch,
+    ) -> Result<QueryResult, DbError> {
+        self.query_as(sql, fetch, Some(schema))
+    }
+
+    fn query_as(
+        &self,
+        sql: &str,
+        fetch: Fetch,
+        bound: Option<Option<&str>>,
+    ) -> Result<QueryResult, DbError> {
+        let result = self.run(sql, true, fetch, bound);
         if let Some(feed) = fetch.feed {
             feed.release();
         }
@@ -1249,15 +1333,26 @@ impl Connection {
     /// dbdelve's own SQL. Its column types are never shown, so it does not pay
     /// for the extra round trip that learns them.
     fn internal_query(&self, sql: &str) -> Result<QueryResult, DbError> {
-        self.run(sql, false, Fetch::default())
+        self.run(sql, false, Fetch::default(), None)
     }
 
-    fn run(&self, sql: &str, typed: bool, fetch: Fetch) -> Result<QueryResult, DbError> {
+    /// `bound` is the schema to put the session back on first, itself `None`
+    /// for its own default, when the run is a bound tab's.
+    fn run(
+        &self,
+        sql: &str,
+        typed: bool,
+        fetch: Fetch,
+        bound: Option<Option<&str>>,
+    ) -> Result<QueryResult, DbError> {
         let mut client = self.client.lock().map_err(|_| DbError {
             message: "The connection is unavailable after an earlier internal failure.".into(),
             position: None,
         })?;
-        fetch.hold()?;
+        let held = fetch.hold()?;
+        if let Some(schema) = bound {
+            set_search_path(&mut client, schema).map_err(super::unplaced)?;
+        }
 
         // Timed from here, not from the call: one client serialises a profile's
         // queries, and time spent waiting behind the catalog load is not time
@@ -1276,7 +1371,13 @@ impl Connection {
                 .map_err(failed)?
                 .map_err(failed)?,
         );
-        if typed && let Some(feed) = fetch.feed {
+        // Not for a run in a schema of a tab's: the side session lacks that
+        // `search_path` and would type streamed rows from another table of
+        // the same name. They are typed once the statement is done instead.
+        if typed
+            && !matches!(bound, Some(Some(_)))
+            && let Some(feed) = fetch.feed
+        {
             self.describe_aside(sql, feed);
         }
         let mut assembly = Assembly::new(sql, fetch, started);
@@ -1332,6 +1433,7 @@ impl Connection {
 
         // The client mutex is not reentrant and `edit_target` runs its catalog
         // query through it, so the lock has to go before the question is asked.
+        drop(held);
         drop(client);
         result.edit = self.edit_target(&probed);
 
@@ -1473,6 +1575,33 @@ impl Connection {
         assemble_catalog(QueryResult::default(), self.internal_query(ROUTINES_SQL)?)
     }
 
+    pub fn sequences(&self) -> Result<Catalog, DbError> {
+        assemble_sequences(self.internal_query(SEQUENCES_SQL)?)
+    }
+
+    /// `CREATE SEQUENCE` for `schema.name`, composed from `pg_sequences`.
+    pub fn sequence_ddl(&self, schema: &str, name: &str) -> Result<String, DbError> {
+        let parts = self.internal_query(&structure_sql(SEQUENCE_PARTS_SQL, schema, name))?;
+        let row = parts
+            .rows
+            .first()
+            .ok_or_else(|| plain_error(format!("{schema} has no sequence {name}.")))?;
+        let cell = |column| required_cell(&parts, row, column);
+        Ok(compose_sequence(
+            schema,
+            name,
+            &SequenceParts {
+                data_type: cell("data_type")?,
+                increment: cell("increment_by")?,
+                minimum: cell("min_value")?,
+                maximum: cell("max_value")?,
+                start: cell("start_value")?,
+                cache: cell("cache_size")?,
+                cycle: cell("cycle")? == "true",
+            },
+        ))
+    }
+
     /// On a connection of its own, opened exactly as this one was, so a size
     /// waiting on a relation's lock never holds the mutex a user's query waits
     /// on. The side connection is dropped on return.
@@ -1513,7 +1642,7 @@ impl Connection {
                     held: Some(held),
                     ..Fetch::default()
                 };
-                self.run(&schema_sql(template, schema), false, held)
+                self.run(&schema_sql(template, schema), false, held, None)
             };
             let columns = query(GRAPH_COLUMNS_SQL)?;
             let unique_keys = query(GRAPH_UNIQUE_KEYS_SQL)?;
@@ -1770,12 +1899,35 @@ fn schema_sql(template: &str, schema: &str) -> String {
 
 /// A relation name is user data and can contain a quote.
 fn structure_sql(template: &str, schema: &str, relation: &str) -> String {
-    template
-        .replace("{schema}", &super::Engine::Postgres.quote_literal(schema))
-        .replace(
-            "{relation}",
-            &super::Engine::Postgres.quote_literal(relation),
-        )
+    super::structure_sql(super::Engine::Postgres, template, schema, relation)
+}
+
+/// What `pg_sequences` says of a sequence's definition, each as text.
+struct SequenceParts<'a> {
+    data_type: &'a str,
+    increment: &'a str,
+    minimum: &'a str,
+    maximum: &'a str,
+    start: &'a str,
+    cache: &'a str,
+    cycle: bool,
+}
+
+/// Postgres has no `pg_get_*def` for a sequence, so the statement is written
+/// out of what `pg_sequences` holds, every name quoted.
+fn compose_sequence(schema: &str, name: &str, parts: &SequenceParts) -> String {
+    format!(
+        "CREATE SEQUENCE {} AS {} INCREMENT BY {} MINVALUE {} MAXVALUE {} START WITH {} \
+         CACHE {} {};",
+        Engine::Postgres.qualified(schema, name),
+        parts.data_type,
+        parts.increment,
+        parts.minimum,
+        parts.maximum,
+        parts.start,
+        parts.cache,
+        if parts.cycle { "CYCLE" } else { "NO CYCLE" },
+    )
 }
 
 /// A result read off the wire, held across the reads [`Connection::run`]
@@ -2175,6 +2327,80 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_composed_sequence_quotes_names_whatever_they_hold() {
+        let parts = SequenceParts {
+            data_type: "bigint",
+            increment: "2",
+            minimum: "1",
+            maximum: "1000",
+            start: "5",
+            cache: "10",
+            cycle: true,
+        };
+        assert_eq!(
+            compose_sequence("we \"ird\"", "t\u{ef}cket no", &parts),
+            "CREATE SEQUENCE \"we \"\"ird\"\"\".\"t\u{ef}cket no\" AS bigint INCREMENT BY 2 \
+             MINVALUE 1 MAXVALUE 1000 START WITH 5 CACHE 10 CYCLE;"
+        );
+        let parts = SequenceParts {
+            cycle: false,
+            ..parts
+        };
+        assert!(compose_sequence("s", "n", &parts).ends_with(" NO CYCLE;"));
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_composed_sequence_recreates_it() {
+        const SCHEMA: &str = "dbdelve_sequence_probe";
+        // A double quote, a space and letters outside ASCII.
+        const NAME: &str = "t\"\u{ef}cket no";
+        let quoted = Engine::Postgres.quote_identifier(NAME);
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        let clean = |connection: &Connection| {
+            connection
+                .query(
+                    &format!("DROP SCHEMA IF EXISTS {SCHEMA} CASCADE"),
+                    Fetch::default(),
+                )
+                .expect("the probe schema should drop");
+        };
+        // The columns `compose_sequence` writes, as they stand on the server.
+        let row = |connection: &Connection| {
+            let result = connection
+                .internal_query(&structure_sql(SEQUENCE_PARTS_SQL, SCHEMA, NAME))
+                .expect("the sequence row is read");
+            result.rows
+        };
+        clean(&connection);
+        connection
+            .query(
+                &format!(
+                    "CREATE SCHEMA {SCHEMA}; \
+                     CREATE SEQUENCE {SCHEMA}.{quoted} AS integer INCREMENT 3 START 7"
+                ),
+                Fetch::default(),
+            )
+            .expect("the probe sequence should be created");
+        let before = row(&connection);
+        let ddl = connection
+            .sequence_ddl(SCHEMA, NAME)
+            .expect("the definition is read");
+        connection
+            .query(
+                &format!("DROP SEQUENCE {SCHEMA}.{quoted}"),
+                Fetch::default(),
+            )
+            .expect("the probe sequence should drop");
+        let recreated = connection.query(&ddl, Fetch::default());
+        let after = row(&connection);
+        clean(&connection);
+        recreated.expect(&ddl);
+        assert_eq!(before.len(), 1, "the probe sequence exists");
+        assert_eq!(after, before, "{ddl}");
+    }
+
     /// The compose database as the bastion sees it, by service name and the
     /// port inside the network.
     fn live_tunnelled(alias: &str) -> ServerConfig {
@@ -2291,10 +2517,21 @@ mod tests {
 
     #[test]
     fn the_active_schema_is_quoted_then_escaped_into_the_literal() {
-        assert!(set_search_path_sql("Sales").contains(r#"E'"Sales"'"#));
+        assert!(set_search_path_sql(Some("Sales")).contains(r#"E'"Sales"'"#));
         assert!(
-            set_search_path_sql(r#"it's "odd" \here"#).contains(r#"E'"it''s ""odd"" \\here"'"#)
+            set_search_path_sql(Some(r#"it's "odd" \here"#))
+                .contains(r#"E'"it''s ""odd"" \\here"'"#)
         );
+    }
+
+    #[test]
+    fn no_schema_puts_back_the_default_path_under_the_same_transaction_rule() {
+        let sql = set_search_path_sql(None);
+        assert!(
+            sql.contains("concat_ws(', ', NULL, NULLIF(reset_val, ''))"),
+            "{sql}"
+        );
+        assert!(sql.contains("WHERE outside OR"), "{sql}");
     }
 
     /// Run again in a child process, `PGSERVICEFILE` set before it starts, as
@@ -2349,6 +2586,44 @@ mod tests {
             assert!(crate::db::Connection::open(config.clone()).is_err());
         }
         assert_eq!(std::fs::read_to_string(&runs).unwrap(), "svcusersvcuser");
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_sequence_is_listed_in_its_own_kind() {
+        let plain = Connection::open(&live_config()).expect("connection should open");
+        plain
+            .query(
+                "DROP SCHEMA IF EXISTS dbdelve_sequence_probe CASCADE",
+                Fetch::default(),
+            )
+            .expect("an earlier run's schema should drop");
+        plain
+            .query(
+                "CREATE SCHEMA dbdelve_sequence_probe; \
+                 CREATE SEQUENCE dbdelve_sequence_probe.ticket",
+                Fetch::default(),
+            )
+            .expect("the probe sequence should be created");
+
+        let second = super::super::Connection::Postgres(plain)
+            .routines()
+            .expect("the second half should read");
+        let listed: Vec<_> = second
+            .schemas
+            .iter()
+            .filter(|schema| schema.name == "dbdelve_sequence_probe")
+            .map(|schema| schema.sequences.clone())
+            .collect();
+
+        let plain = Connection::open(&live_config()).expect("connection should open");
+        plain
+            .query(
+                "DROP SCHEMA dbdelve_sequence_probe CASCADE",
+                Fetch::default(),
+            )
+            .expect("the probe schema should drop");
+        assert_eq!(listed, vec![vec!["ticket".to_string()]]);
     }
 
     /// Run again in a child process, for the same reason as the password file
@@ -3044,6 +3319,58 @@ mod tests {
     }
 
     #[test]
+    fn a_placeholder_inside_a_name_is_not_replaced_again() {
+        assert_eq!(
+            structure_sql(
+                "WHERE namespace.nspname = {schema} AND class.relname = {relation}",
+                "a{relation}",
+                "; DROP TABLE t; --",
+            ),
+            "WHERE namespace.nspname = 'a{relation}' AND class.relname = '; DROP TABLE t; --'"
+        );
+    }
+
+    /// Show DDL on a sequence whose schema is named like a placeholder sends
+    /// one read of the catalog and nothing a name could splice into it.
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_show_ddl_of_a_sequence_in_a_schema_named_like_a_placeholder_runs_nothing_else() {
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        let schema = "a{relation}";
+        let sequence = "; CREATE TABLE public.pr267_pwned(); --";
+        let clean = || {
+            connection
+                .query(
+                    "DROP SCHEMA IF EXISTS \"a{relation}\" CASCADE; \
+                     DROP TABLE IF EXISTS public.pr267_pwned",
+                    Fetch::default(),
+                )
+                .expect("the probe objects should drop");
+        };
+        clean();
+        connection
+            .query(
+                "CREATE SCHEMA \"a{relation}\"; \
+                 CREATE SEQUENCE \"a{relation}\".\"; CREATE TABLE public.pr267_pwned(); --\"",
+                Fetch::default(),
+            )
+            .expect("the probe sequence should be created");
+        let ddl = connection.sequence_ddl(schema, sequence);
+        let created = connection
+            .query(
+                "SELECT to_regclass('public.pr267_pwned') IS NOT NULL",
+                Fetch::default(),
+            )
+            .expect("the check reads");
+        clean();
+        assert!(
+            ddl.expect("the definition is read")
+                .starts_with("CREATE SEQUENCE")
+        );
+        assert_eq!(created.rows[0].get(0), Some("f"), "nothing else ran");
+    }
+
+    #[test]
     fn structure_sql_quotes_a_name_containing_a_quote() {
         let sql = structure_sql(
             "WHERE namespace.nspname = {schema} AND class.relname = {relation}",
@@ -3244,6 +3571,228 @@ mod tests {
             error.message
         );
         assert!(connection.query("SELECT 1", Fetch::default()).is_ok());
+    }
+
+    /// The hold is applied by the caller, through the same call every engine's
+    /// session gets; a session that was not asked for it is not held, and one
+    /// that was refuses a write in the server's own words.
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_session_on_another_database_is_held_to_reads_when_asked() {
+        let original = Connection::open(&live_config()).expect("connection should open");
+        let session =
+            |connection: &Connection| super::super::Connection::Postgres(connection.clone());
+        let database = |connection: &super::super::Connection| {
+            connection
+                .query(
+                    "SELECT current_database()",
+                    &crate::db::CancelToken::default(),
+                    Fetch::default(),
+                )
+                .expect("the database should read")
+                .rows[0]
+                .iter()
+                .next()
+                .flatten()
+                .map(str::to_string)
+        };
+        let other = original
+            .on_database("postgres")
+            .expect("a session on another database should open");
+        let other = session(&other);
+        assert_eq!(database(&other).as_deref(), Some("postgres"));
+
+        other.set_read_only(true).expect("the hold should take");
+        let refusal = other
+            .query(
+                "CREATE TABLE dbdelve_held_probe (id int)",
+                &crate::db::CancelToken::default(),
+                Fetch::default(),
+            )
+            .expect_err("a held session must refuse a write");
+        assert!(
+            refusal.message.contains("read-only"),
+            "the server's own words: {}",
+            refusal.message
+        );
+        assert_eq!(
+            database(&session(&original)).as_deref(),
+            Some("dbdelve_dev"),
+            "the profile's own connection is where it was"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_session_on_another_database_shares_no_schema_with_the_first() {
+        let original = Connection::open(&ServerConfig {
+            schema: Some("dbdelve_missing_schema".into()),
+            ..live_config()
+        })
+        .expect("connection should open");
+        let other = original
+            .on_database("postgres")
+            .expect("a schema the other database lacks must not stop it opening");
+        assert_eq!(
+            other.server().schema,
+            None,
+            "the first's picked schema is not applied to the other database"
+        );
+
+        other.set_schema(Some("public"));
+        other.apply_schema().expect("the pick should apply");
+        assert_eq!(other.server().schema.as_deref(), Some("public"));
+        assert_eq!(
+            original.server().schema.as_deref(),
+            Some("dbdelve_missing_schema"),
+            "picking a schema on the new session leaves the first's pick as it was"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_two_tabs_on_one_session_each_run_in_their_own_schema() {
+        let plain = Connection::open(&live_config()).expect("connection should open");
+        let clean = || {
+            plain
+                .query(
+                    "DROP SCHEMA IF EXISTS dbdelve_bound_a CASCADE; \
+                     DROP SCHEMA IF EXISTS dbdelve_bound_b CASCADE",
+                    Fetch::default(),
+                )
+                .expect("the probe schemas should drop");
+        };
+        clean();
+        plain
+            .query(
+                "CREATE SCHEMA dbdelve_bound_a; CREATE SCHEMA dbdelve_bound_b; \
+                 CREATE TABLE dbdelve_bound_a.t (which text); \
+                 CREATE TABLE dbdelve_bound_b.t (which text); \
+                 INSERT INTO dbdelve_bound_a.t VALUES ('a'); \
+                 INSERT INTO dbdelve_bound_b.t VALUES ('b')",
+                Fetch::default(),
+            )
+            .expect("the probe tables should be created");
+
+        let session = super::super::Connection::Postgres(plain.clone())
+            .on_database(&live_config().database)
+            .expect("a session should open");
+        let cancel = crate::db::CancelToken::default();
+        let answer = |schema: Option<&str>, sql: &str| {
+            let result = session.query_bound(schema, sql, &cancel, Fetch::default());
+            result
+                .ok()
+                .and_then(|result| result.rows.first()?.get(0).map(str::to_string))
+        };
+        // One session, two tabs, run in turn: each in its own schema.
+        for _ in 0..2 {
+            assert_eq!(
+                answer(Some("dbdelve_bound_a"), "SELECT which FROM t"),
+                Some("a".into())
+            );
+            assert_eq!(
+                answer(Some("dbdelve_bound_b"), "SELECT which FROM t"),
+                Some("b".into())
+            );
+        }
+        // A tab that binds no schema starts from the session's default, not
+        // from where the last tab left it.
+        let path = answer(None, "SHOW search_path").expect("the search_path reads");
+        assert!(!path.contains("dbdelve_bound"), "{path}");
+
+        // Inside a transaction the schema cannot be moved: the statement is
+        // not sent, and the transaction can still be ended.
+        let refused = session
+            .query("BEGIN", &cancel, Fetch::default())
+            .and_then(|_| {
+                session.query_bound(
+                    Some("dbdelve_bound_a"),
+                    "SELECT 1",
+                    &cancel,
+                    Fetch::default(),
+                )
+            })
+            .expect_err("the schema cannot be switched inside a transaction");
+        assert!(
+            refused.message.starts_with("The statement was not sent"),
+            "{}",
+            refused.message
+        );
+        assert_eq!(refused.position, None);
+        session
+            .query("ROLLBACK", &cancel, Fetch::default())
+            .expect("a statement that ends the transaction goes as it is");
+
+        // A transaction a bound tab opened goes on in its schema, and a tab
+        // bound to another is still refused inside it.
+        session
+            .query_bound(Some("dbdelve_bound_a"), "BEGIN", &cancel, Fetch::default())
+            .expect("a bound tab opens a transaction");
+        assert_eq!(
+            answer(Some("dbdelve_bound_a"), "SELECT which FROM t"),
+            Some("a".into())
+        );
+        assert_eq!(answer(Some("dbdelve_bound_b"), "SELECT which FROM t"), None);
+        assert_eq!(
+            answer(Some("dbdelve_bound_a"), "SELECT which FROM t"),
+            Some("a".into()),
+            "the refusal sent nothing that failed the transaction"
+        );
+        // What dbdelve writes names its schema and needs none set, so a table
+        // tab of the database still reads inside that transaction.
+        let generated = session
+            .generated_bound(
+                None,
+                "SELECT which FROM dbdelve_bound_b.t",
+                &cancel,
+                None,
+                None,
+            )
+            .expect("a statement of dbdelve's goes as it is");
+        assert_eq!(generated.rows[0].get(0), Some("b"));
+        session
+            .query("ROLLBACK", &cancel, Fetch::default())
+            .expect("the transaction ends");
+        clean();
+    }
+
+    /// The reads behind Show DDL, the diagram and an object tab's structure
+    /// name their schema, so a search path a tab's own text set cannot send
+    /// them to another relation of the same name.
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_bound_sessions_reads_name_their_schema_whatever_its_search_path_is() {
+        let plain = Connection::open(&live_config()).expect("connection should open");
+        let clean = || {
+            plain
+                .query(
+                    "DROP SCHEMA IF EXISTS dbdelve_read_a CASCADE",
+                    Fetch::default(),
+                )
+                .expect("the probe schema should drop");
+        };
+        clean();
+        plain
+            .query(
+                "CREATE SCHEMA dbdelve_read_a; CREATE TABLE dbdelve_read_a.t (only_in_a text)",
+                Fetch::default(),
+            )
+            .expect("the probe table should be created");
+        let session = plain
+            .on_database(&live_config().database)
+            .expect("a session should open");
+        session
+            .query("SET search_path TO pg_catalog", Fetch::default())
+            .expect("the path moves");
+        let columns = session
+            .structure("dbdelve_read_a", "t")
+            .expect("structure reads");
+        assert_eq!(columns.columns[0].name, "only_in_a");
+        let ddl = session
+            .ddl("dbdelve_read_a", "t", RelationKind::Table)
+            .expect("the definition reads");
+        assert!(ddl.contains("only_in_a"), "{ddl}");
+        clean();
     }
 
     #[test]
@@ -3960,6 +4509,7 @@ mod tests {
                     reads_only: true,
                     feed: Some(&feed),
                     held: None,
+                    let_go: None,
                 },
             );
             let _ = sender.send(result);

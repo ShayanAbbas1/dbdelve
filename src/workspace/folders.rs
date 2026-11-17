@@ -1,6 +1,7 @@
 //! The explorer's folders and pins: shortcuts to its rows, kept per
 //! connection on its profile.
 
+use super::objects::catalog_in;
 use super::*;
 use crate::explorer::{Container, Landing, Member, ObjectRef, Pin, ShortcutDatabase, folder_row};
 use crate::session::{PendingDelete, routine_name};
@@ -50,15 +51,16 @@ impl Render for DragLabel {
 }
 
 impl Workspace {
-    /// What a folder or a pin names the object a sidebar row opens by. None
-    /// while the database it is in is not known.
-    pub(crate) fn member_at(&self, target: ExplorerTarget) -> Option<Member> {
-        let database = match self.profile()?.shortcut_database() {
+    /// What a folder or a pin names the object a row of `profile`'s sidebar
+    /// opens by. None while the database it is in is not known.
+    pub(crate) fn member_in(&self, profile: &str, target: ExplorerTarget) -> Option<Member> {
+        let profile = self.profiles.iter().find(|found| found.id == profile)?;
+        let database = match profile.shortcut_database() {
             ShortcutDatabase::Unnamed => None,
             ShortcutDatabase::On(database) => Some(database),
             ShortcutDatabase::Unknown => return None,
         };
-        let catalog = self.catalog()?;
+        let catalog = catalog_in(profile, None)?;
         let (schema, name, kind) = match target {
             ExplorerTarget::Relation {
                 schema_index,
@@ -83,6 +85,14 @@ impl Workspace {
                     routine_name(routine),
                     ObjectKind::Routine(routine.kind),
                 )
+            }
+            ExplorerTarget::Sequence {
+                schema_index,
+                sequence_index,
+            } => {
+                let schema = catalog.schemas.get(schema_index)?;
+                let sequence = schema.sequences.get(sequence_index)?;
+                (schema, sequence.clone(), ObjectKind::Sequence)
             }
         };
         Some(Member::Object(ObjectRef {

@@ -428,6 +428,19 @@ pub struct Connection {
 }
 
 impl Connection {
+    /// A session on `database`, for the (connection, database) pair: the
+    /// same client and login, reading `database` where this one reads its
+    /// own, so the one never follows the other. The statements in flight are
+    /// its own to stop. It carries no read-only hold; the gate holds every
+    /// statement to reads here.
+    pub(super) fn on_database(&self, database: &str) -> Self {
+        Self {
+            database: database.to_string(),
+            stops: Arc::default(),
+            ..self.clone()
+        }
+    }
+
     pub fn open(config: &MongoConfig) -> Result<Self, DbError> {
         if config.server.ssm.is_some() {
             return Err(plain_error("SSM is not supported on MongoDB: its background connections cannot check tunnel liveness before opening sockets.".into()));
@@ -1234,6 +1247,7 @@ impl Connection {
                 name: self.database.clone(),
                 relations,
                 routines: Vec::new(),
+                sequences: Vec::new(),
             }],
             database: None,
         })
@@ -4370,6 +4384,38 @@ mod tests {
 
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_MONGO_URL"]
+    fn live_a_session_on_another_database_reads_there() {
+        let profile = live();
+        // The app user holds a role on this one besides the profile's own.
+        let session = profile.on_database("dbdelve_archive");
+        let scratch = Scratch(&session, format!("dbdelve_test_{}", ObjectId::new()));
+        ran(
+            &session,
+            &format!("db.getCollection('{}').insertOne({{ _id: 1 }})", scratch.1),
+        );
+
+        let listed = |connection: &Connection| {
+            connection
+                .catalog()
+                .expect("catalog should load")
+                .schemas
+                .iter()
+                .flat_map(|schema| schema.relations.iter())
+                .any(|relation| relation.name == scratch.1)
+        };
+        assert!(listed(&session), "the session lists what it wrote");
+        assert!(
+            !listed(&profile),
+            "the profile's own database does not hold it"
+        );
+        assert_eq!(
+            profile.databases().unwrap().current.as_deref(),
+            Some("dbdelve_dev")
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MONGO_URL"]
     fn live_a_blank_database_is_in_none_and_lists_no_collections() {
         let mut config = live_config();
         config.server.database = String::new();
@@ -4454,6 +4500,45 @@ mod tests {
         assert!(sizes["sensor_readings"].size.is_some());
         assert_eq!(sizes["sensor_readings"].rows, None);
         assert!(!sizes.contains_key("account_overview"));
+    }
+
+    /// A session reads the database it was opened on and no statement moves
+    /// it: `db.getSiblingDB` names another for one statement, and `use` is not
+    /// a statement of the language at all. So a statement another tab ran
+    /// cannot carry a bound run, or an edit applied from a bound tab's grid,
+    /// to another database.
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MONGO_URL"]
+    fn live_a_bound_run_stays_in_its_database_whatever_ran_before_it() {
+        let session = crate::db::Connection::MongoDb(live().on_database("dbdelve_archive"));
+        let cancel = crate::db::CancelToken::alongside();
+        let rows = |statement: &str| {
+            session
+                .query_bound(None, statement, &cancel, Fetch::default())
+                .unwrap_or_else(|error| panic!("{statement}: {}", error.message))
+                .rows
+                .len()
+        };
+        assert_eq!(rows("db.closed_accounts.find()"), 2);
+
+        assert_eq!(
+            rows("db.getSiblingDB('dbdelve_dev').accounts.countDocuments()"),
+            1
+        );
+        let moved = session
+            .query_bound(None, "use dbdelve_dev", &cancel, Fetch::default())
+            .expect_err("`use` is not a statement a session can be moved by");
+        assert!(!moved.message.is_empty());
+        assert_eq!(rows("db.closed_accounts.find()"), 2);
+
+        let edit = session
+            .generated_bound(None, "db.closed_accounts.find()", &cancel, None, None)
+            .expect("the read runs");
+        assert_eq!(
+            edit.rows.len(),
+            2,
+            "an unqualified read is still the session's"
+        );
     }
 
     #[test]

@@ -56,6 +56,10 @@ use crate::{
         CatalogState, ObjectBody, Profile, QueryState, RowCount, Session, StructureState, Tab,
         routine_name,
     },
+    sidebar::{
+        ListingScope, NodeAction, SelectedNode, SelectionAction, ViewMode, node_actions,
+        selection_header,
+    },
     sql,
     store::{HistoryEntry, StoredProject},
     structure_grid::Section,
@@ -378,6 +382,11 @@ pub enum Command {
     ToggleProject(usize),
     /// Put the palette back up over what can be done to this project.
     ProjectActions(usize),
+    /// A project's sidebar: its own choice, or with `None` the global setting.
+    SetProjectViewMode(usize, Option<ViewMode>),
+    /// A project's listing scope: its own choice, or with `None` the global
+    /// setting.
+    SetProjectListing(usize, Option<ListingScope>),
     EditConnection(usize),
     DuplicateConnection(usize),
     /// Put the palette back up over the projects this connection can join.
@@ -463,6 +472,14 @@ pub enum Command {
     /// The explorer menu's other copies: put this on the clipboard, and
     /// nothing else.
     CopyText(String),
+    /// What the sidebar's menu offers on the node the row was built for: one
+    /// of [`crate::sidebar::node_actions`], acting on that node and not on
+    /// whatever is selected when it is confirmed.
+    NodeAction(SelectedNode, NodeAction),
+    /// What the connections tree's menu offers on several selected rows, one
+    /// of [`crate::sidebar::selection_actions`], acting on the rows selected
+    /// when it is confirmed.
+    SelectionAction(SelectionAction),
     CopyRows(RowsAs),
     FollowForeignKey,
     /// Add a filter bar and put the cursor in it.
@@ -1062,6 +1079,8 @@ pub fn waits_for_import(scope: Scope, command: &Command) -> bool {
             Command::SwitchConnection
                 | Command::ConnectionActions(_)
                 | Command::ProjectActions(_)
+                | Command::SetProjectViewMode(..)
+                | Command::SetProjectListing(..)
                 | Command::ChooseProject(_)
                 | Command::MoveToProject(..)
                 | Command::Confirm(_)
@@ -1214,7 +1233,7 @@ impl Palette {
             (Mode::ProjectActions(at), _) => workspace
                 .projects
                 .get(at)
-                .map(|project| project_action_items(at, &project.name, Group::Bare))
+                .map(|project| project_action_items(at, project, Group::Bare))
                 .unwrap_or_default(),
             (Mode::MoveToProject(index), _) => workspace
                 .profiles
@@ -1498,6 +1517,15 @@ impl Palette {
     #[cfg(test)]
     pub fn labels(&self) -> Vec<&str> {
         self.items.iter().map(|item| item.label.as_str()).collect()
+    }
+
+    /// Each row's label with the detail drawn beside it.
+    #[cfg(test)]
+    pub fn labels_with_details(&self) -> Vec<(&str, Option<&str>)> {
+        self.items
+            .iter()
+            .map(|item| (item.label.as_str(), item.detail.as_deref()))
+            .collect()
     }
 
     #[cfg(test)]
@@ -2697,7 +2725,7 @@ fn connection_action_items(workspace: &Workspace, index: usize) -> Vec<Item> {
     if let Some(at) = project {
         items.extend(project_action_items(
             at,
-            &workspace.projects[at].name,
+            &workspace.projects[at],
             Group::Named(PROJECT),
         ));
     }
@@ -2705,7 +2733,11 @@ fn connection_action_items(workspace: &Workspace, index: usize) -> Vec<Item> {
 }
 
 /// Everything that can be done to one project.
-fn project_action_items(at: usize, name: &str, group: Group) -> Vec<Item> {
+fn project_action_items(at: usize, project: &StoredProject, group: Group) -> Vec<Item> {
+    let name = project.name.as_str();
+    let view = ViewMode::parse(project.view_mode.as_deref());
+    let scope = ListingScope::parse(project.listing_scope.as_deref());
+    let hint = |here: bool| if here { "current" } else { "" };
     [
         Item::new(
             format!("New connection in {name}…"),
@@ -2722,6 +2754,42 @@ fn project_action_items(at: usize, name: &str, group: Group) -> Vec<Item> {
             icon::DELETE,
             Command::Confirm(Target::Project(at)),
         ),
+        Item::new(
+            format!("Sidebar in {name}: follow the setting"),
+            icon::SIDEBAR,
+            Command::SetProjectViewMode(at, None),
+        )
+        .hint(hint(view.is_none())),
+        Item::new(
+            format!("Sidebar in {name}: the connection in front"),
+            icon::SIDEBAR,
+            Command::SetProjectViewMode(at, Some(ViewMode::Simple)),
+        )
+        .hint(hint(view == Some(ViewMode::Simple))),
+        Item::new(
+            format!("Sidebar in {name}: every connection"),
+            icon::SIDEBAR,
+            Command::SetProjectViewMode(at, Some(ViewMode::Complex)),
+        )
+        .hint(hint(view == Some(ViewMode::Complex))),
+        Item::new(
+            format!("Connections in {name}: follow the setting"),
+            icon::SIDEBAR,
+            Command::SetProjectListing(at, None),
+        )
+        .hint(hint(scope.is_none())),
+        Item::new(
+            format!("Connections in {name}: only this project"),
+            icon::SIDEBAR,
+            Command::SetProjectListing(at, Some(ListingScope::Current)),
+        )
+        .hint(hint(scope == Some(ListingScope::Current))),
+        Item::new(
+            format!("Connections in {name}: every project"),
+            icon::SIDEBAR,
+            Command::SetProjectListing(at, Some(ListingScope::All)),
+        )
+        .hint(hint(scope == Some(ListingScope::All))),
     ]
     .into_iter()
     .map(|item| item.group(group.clone()))
@@ -3508,6 +3576,7 @@ const CELL: &str = "Cell";
 const EDITS: &str = "Edits";
 const RESULTS: &str = "Results";
 const TAB: &str = "Tab";
+const SIDEBAR: &str = "Sidebar";
 const CONNECTION: &str = "Connection";
 const PROJECT: &str = "Project";
 const APPEARANCE: &str = "Appearance";
@@ -3869,6 +3938,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             )
             && crate::workspace::drawn_in_diagrams(kind)
             && profile.draws_diagrams()
+            && tab.database.is_none()
             && profile.connection().is_some()
         {
             items.push(command(
@@ -3905,6 +3975,63 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             command("Close tab", icon::CLOSE, Command::CloseObject(tab.id), TAB),
             "close_tab",
         ));
+    }
+
+    // What the sidebar's menu offers on the node selected there, from the
+    // same list; each row carries the node it was built for.
+    let selection = match workspace.view_mode() {
+        ViewMode::Complex => workspace.selected_nodes(cx),
+        ViewMode::Simple => Vec::new(),
+    };
+    if selection.len() > 1 {
+        let header = selection_header(&selection.iter().map(|node| node.kind).collect::<Vec<_>>());
+        items.extend(
+            workspace
+                .selection_offers(&selection)
+                .into_iter()
+                .map(|action| {
+                    let icon = match action {
+                        SelectionAction::OpenAll => icon::BROWSE,
+                        SelectionAction::CopyNames | SelectionAction::CopyDdl => icon::COPY,
+                        SelectionAction::ShowDdl => icon::STRUCTURE,
+                        SelectionAction::Pin => icon::PIN,
+                        SelectionAction::Refresh => icon::REFRESH,
+                    };
+                    command(
+                        action.label(),
+                        icon,
+                        Command::SelectionAction(action),
+                        SIDEBAR,
+                    )
+                    .detail(header.clone())
+                }),
+        );
+    } else if let Some(node) = workspace.selected_node(cx)
+        && let Some(target) = workspace
+            .profiles
+            .iter()
+            .find(|found| found.id == node.profile)
+            .map(|found| found.config.target())
+    {
+        items.extend(
+            node_actions(node.kind, &node.name, target)
+                .into_iter()
+                .map(|action| {
+                    let icon = match action {
+                        NodeAction::NewQueryHere => icon::PLUS,
+                        NodeAction::CopyName(_) => icon::COPY,
+                        NodeAction::ShowDdl => icon::STRUCTURE,
+                        NodeAction::Refresh => icon::REFRESH,
+                    };
+                    command(
+                        action.label(),
+                        icon,
+                        Command::NodeAction(node.clone(), action),
+                        SIDEBAR,
+                    )
+                    .detail(node.name.clone())
+                }),
+        );
     }
 
     if let Some((_, limit)) = row_limit_target(session) {
@@ -4540,7 +4667,7 @@ fn beside_import(command: &Command) -> bool {
     )
 }
 
-fn kind_label(kind: ObjectKind) -> &'static str {
+pub(crate) fn kind_label(kind: ObjectKind) -> &'static str {
     match kind {
         ObjectKind::Relation(RelationKind::Table) => "table",
         ObjectKind::Relation(RelationKind::PartitionedTable) => "partitioned table",
@@ -4550,6 +4677,7 @@ fn kind_label(kind: ObjectKind) -> &'static str {
         ObjectKind::Relation(RelationKind::Dictionary) => "dictionary",
         ObjectKind::Routine(RoutineKind::Function) => "function",
         ObjectKind::Routine(RoutineKind::Procedure) => "procedure",
+        ObjectKind::Sequence => "sequence",
     }
 }
 
@@ -5105,6 +5233,7 @@ mod tests {
         StoredProject {
             name: name.into(),
             connections: connections.iter().map(|id| id.to_string()).collect(),
+            ..Default::default()
         }
     }
 
@@ -5415,13 +5544,110 @@ mod tests {
     }
 
     #[test]
+    fn a_projects_actions_offer_its_sidebar_view_with_its_own_choice_marked() {
+        let rows = |project: &StoredProject| {
+            project_action_items(0, project, Group::Bare)
+                .into_iter()
+                .filter(|item| item.label.starts_with("Sidebar in "))
+                .map(|item| (item.label, item.hint.to_string(), item.command))
+                .collect::<Vec<_>>()
+        };
+        let complex = StoredProject {
+            view_mode: Some("complex".into()),
+            ..project("Zoo", &[])
+        };
+        let rows_of_complex = rows(&complex);
+        let marked: Vec<(&str, &str)> = rows_of_complex
+            .iter()
+            .map(|(label, hint, _)| (label.as_str(), hint.as_str()))
+            .collect();
+        assert_eq!(
+            marked,
+            [
+                ("Sidebar in Zoo: follow the setting", ""),
+                ("Sidebar in Zoo: the connection in front", ""),
+                ("Sidebar in Zoo: every connection", "current"),
+            ]
+        );
+        assert!(matches!(
+            rows_of_complex[0].2,
+            Command::SetProjectViewMode(0, None)
+        ));
+        assert!(matches!(
+            rows_of_complex[1].2,
+            Command::SetProjectViewMode(0, Some(ViewMode::Simple))
+        ));
+        assert!(matches!(
+            rows_of_complex[2].2,
+            Command::SetProjectViewMode(0, Some(ViewMode::Complex))
+        ));
+
+        // A project with no choice of its own marks the one that follows.
+        let following = rows(&project("Zoo", &[]));
+        let current: Vec<&str> = following
+            .iter()
+            .filter(|(_, hint, _)| hint == "current")
+            .map(|(label, ..)| label.as_str())
+            .collect();
+        assert_eq!(current, ["Sidebar in Zoo: follow the setting"]);
+    }
+
+    #[test]
+    fn a_projects_actions_offer_its_listing_scope_with_its_own_choice_marked() {
+        let rows = |project: &StoredProject| {
+            project_action_items(0, project, Group::Bare)
+                .into_iter()
+                .filter(|item| item.label.starts_with("Connections in "))
+                .map(|item| (item.label, item.hint.to_string(), item.command))
+                .collect::<Vec<_>>()
+        };
+        let current = StoredProject {
+            listing_scope: Some("current".into()),
+            ..project("Zoo", &[])
+        };
+        let rows_of_current = rows(&current);
+        let marked: Vec<(&str, &str)> = rows_of_current
+            .iter()
+            .map(|(label, hint, _)| (label.as_str(), hint.as_str()))
+            .collect();
+        assert_eq!(
+            marked,
+            [
+                ("Connections in Zoo: follow the setting", ""),
+                ("Connections in Zoo: only this project", "current"),
+                ("Connections in Zoo: every project", ""),
+            ]
+        );
+        assert!(matches!(
+            rows_of_current[0].2,
+            Command::SetProjectListing(0, None)
+        ));
+        assert!(matches!(
+            rows_of_current[1].2,
+            Command::SetProjectListing(0, Some(ListingScope::Current))
+        ));
+        assert!(matches!(
+            rows_of_current[2].2,
+            Command::SetProjectListing(0, Some(ListingScope::All))
+        ));
+
+        let following = rows(&project("Zoo", &[]));
+        let marked: Vec<&str> = following
+            .iter()
+            .filter(|(_, hint, _)| hint == "current")
+            .map(|(label, ..)| label.as_str())
+            .collect();
+        assert_eq!(marked, ["Connections in Zoo: follow the setting"]);
+    }
+
+    #[test]
     fn a_projects_row_folds_on_enter_and_offers_its_actions() {
         let (listed, projects) = connections();
         let items = listed_connections(&listed, &projects, Some(0));
         let billing = items.iter().find(|item| item.label == "Billing").unwrap();
         assert!(matches!(billing.command, Command::ToggleProject(0)));
         assert!(!billing.in_all);
-        let actions: Vec<String> = project_action_items(0, "Billing", Group::Bare)
+        let actions: Vec<String> = project_action_items(0, &project("Billing", &[]), Group::Bare)
             .into_iter()
             .map(|item| item.label)
             .collect();
@@ -5430,7 +5656,13 @@ mod tests {
             [
                 "New connection in Billing…",
                 "Rename Billing…",
-                "Delete Billing…"
+                "Delete Billing…",
+                "Sidebar in Billing: follow the setting",
+                "Sidebar in Billing: the connection in front",
+                "Sidebar in Billing: every connection",
+                "Connections in Billing: follow the setting",
+                "Connections in Billing: only this project",
+                "Connections in Billing: every project",
             ]
         );
         assert!(waits_for_import(

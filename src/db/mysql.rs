@@ -32,8 +32,8 @@ use super::{
     Catalog, Column, DbError, EditTarget, Engine, Fetch, GraphCancel, Index, IndexKind,
     QueryResult, Reference, RowBuilder, Schema, SchemaGraph, ServerConfig, Sizes, SslMode, Stopped,
     Structure, assemble_catalog, assemble_databases, assemble_foreign_keys, assemble_references,
-    assemble_schema_graph, assemble_sizes, assemble_structure, non_utf8_error, optional_cell,
-    plain_error, required_cell,
+    assemble_schema_graph, assemble_sequences, assemble_sizes, assemble_structure, non_utf8_error,
+    optional_cell, plain_error, required_cell,
 };
 
 /// Without this the driver waits out the OS SYN retry budget, so a host that
@@ -66,9 +66,9 @@ const SYSTEM_SCHEMAS: &str = "('information_schema', 'mysql', 'performance_schem
 /// the history of apart.
 const STORED_TABLES: &str = "('BASE TABLE', 'SYSTEM VERSIONED')";
 
-/// Every table, with MariaDB's sequence among them: there is no kind of its
-/// own for one, and it reads as the one-row table it is to a `SELECT`.
-const TABLES: &str = "('BASE TABLE', 'SYSTEM VERSIONED', 'SEQUENCE')";
+/// Every table. MariaDB's sequence is a `TABLE_TYPE` of its own and is listed
+/// apart, as a sequence (`SEQUENCES_SQL`): it is not a relation rows go into.
+const TABLES: &str = "('BASE TABLE', 'SYSTEM VERSIONED')";
 
 /// `SYSTEM VIEW` is `information_schema`'s own, and listed only where it is
 /// the database selected.
@@ -144,6 +144,17 @@ FROM information_schema.ROUTINES AS routine
 WHERE (routine.ROUTINE_SCHEMA NOT IN {system} OR routine.ROUTINE_SCHEMA = DATABASE())
   AND routine.ROUTINE_TYPE IN ('FUNCTION', 'PROCEDURE')
 ORDER BY routine.ROUTINE_SCHEMA, routine.ROUTINE_NAME
+";
+
+// The names alone: reading a sequence's own table for its current value is not
+// needed to list it.
+const SEQUENCES_SQL: &str = "
+SELECT TABLE_SCHEMA AS schema_name,
+       TABLE_NAME AS sequence_name
+FROM information_schema.TABLES
+WHERE TABLE_TYPE = 'SEQUENCE'
+  AND TABLE_SCHEMA NOT IN {system}
+ORDER BY 1, 2
 ";
 
 // The four structure queries name one relation, so they carry `{schema}` and
@@ -647,6 +658,31 @@ impl Connection {
         })
     }
 
+    /// A session on `database`, for the (connection, database) pair: a new
+    /// connection from this one's live server config -- its resolved password
+    /// and its tunnel -- with the database replaced, selected by the driver's
+    /// own handshake and not a `USE` statement. It shares no mutable state
+    /// with this connection: `alongside` shares the `side` session a cancel
+    /// reads through, and this has one of its own. It carries no read-only
+    /// hold of its own; the caller applies it.
+    pub fn on_database(&self, database: &str) -> Result<Self, DbError> {
+        let server = ServerConfig {
+            database: database.to_string(),
+            ..self.server.clone()
+        };
+        let connection = connect(&server, self.engine, self.dial()?)?;
+        Ok(Self {
+            connection_id: connection.connection_id(),
+            server,
+            connection: Arc::new(Mutex::new(connection)),
+            side: Arc::default(),
+            // Its own: a Cancel on this session would otherwise drop the next
+            // statement of a diagram read on the first.
+            graph: GraphCancel::default(),
+            ..self.clone()
+        })
+    }
+
     /// A round trip, unlike Postgres's check: the driver keeps no closed flag.
     /// `COM_PING` is answered inside a failed transaction too, so a statement
     /// that merely errored is not mistaken for a dropped session.
@@ -692,13 +728,24 @@ impl Connection {
     /// rows are read off the socket as they come, so one past the limit is
     /// dropped as soon as it is counted.
     pub fn query(&self, sql: &str, fetch: Fetch) -> Result<QueryResult, DbError> {
-        self.run(sql, true, fetch)
+        self.run(sql, true, fetch, false)
+    }
+
+    /// [`Self::query`] for a tab bound to this session's database, which is
+    /// the one it was opened on ([`Self::on_database`]): the session is put
+    /// back on it, by the driver's own call and not a `USE`, before the
+    /// statement and under the lock that runs it. A `USE` of the user's, in
+    /// this tab or another bound to the same database, may have moved it
+    /// since, and applying and running as two acquisitions would let a run
+    /// land in the other's database.
+    pub fn query_bound(&self, sql: &str, fetch: Fetch) -> Result<QueryResult, DbError> {
+        self.run(sql, true, fetch, true)
     }
 
     /// dbdelve's own SQL. Its rows are never editable, so it does not pay for the
     /// round trip that reads a primary key.
     fn internal_query(&self, sql: &str) -> Result<QueryResult, DbError> {
-        self.run(sql, false, Fetch::default())
+        self.run(sql, false, Fetch::default(), false)
     }
 
     /// `ask` on the side session, opened if there is none. A failure is taken
@@ -747,12 +794,24 @@ impl Connection {
         }) == Some(true)
     }
 
-    fn run(&self, sql: &str, editable: bool, fetch: Fetch) -> Result<QueryResult, DbError> {
+    /// `bound` puts the session back on its own database first.
+    fn run(
+        &self,
+        sql: &str,
+        editable: bool,
+        fetch: Fetch,
+        bound: bool,
+    ) -> Result<QueryResult, DbError> {
         let mut connection = self.connection.lock().map_err(|_| DbError {
             message: "The connection is unavailable after an earlier internal failure.".into(),
             position: None,
         })?;
-        fetch.hold()?;
+        let held = fetch.hold()?;
+        if bound {
+            connection
+                .select_db(&self.server.database)
+                .map_err(|error| super::unplaced(query_error(&error)))?;
+        }
 
         let mut result = QueryResult::default();
         let mut probed = Vec::new();
@@ -900,6 +959,7 @@ impl Connection {
 
         // The connection mutex is not reentrant and `edit_target` runs a catalog
         // query through it, so the lock has to go before the question is asked.
+        drop(held);
         drop(connection);
         if editable {
             result.edit = self.edit_target(&probed);
@@ -946,6 +1006,7 @@ impl Connection {
                     name,
                     relations: Vec::new(),
                     routines: Vec::new(),
+                    sequences: Vec::new(),
                 });
             }
         }
@@ -955,6 +1016,25 @@ impl Connection {
     pub fn routines(&self) -> Result<Catalog, DbError> {
         let routines = self.internal_query(&ROUTINES_SQL.replace("{system}", SYSTEM_SCHEMAS))?;
         assemble_catalog(QueryResult::default(), routines)
+    }
+
+    /// MariaDB's only: MySQL has no sequences, and a MariaDB before 10.3 answers
+    /// the filter with no rows, so there is no version probe.
+    pub fn sequences(&self) -> Result<Catalog, DbError> {
+        if self.engine != Engine::MariaDb {
+            return Ok(Catalog::default());
+        }
+        let sequences = self.internal_query(&SEQUENCES_SQL.replace("{system}", SYSTEM_SCHEMAS))?;
+        assemble_sequences(sequences)
+    }
+
+    /// MariaDB's `SHOW CREATE SEQUENCE`, whose second column is the statement,
+    /// as [`Self::ddl`] reads `SHOW CREATE TABLE`'s. MySQL has no sequences.
+    pub fn sequence_ddl(&self, schema: &str, name: &str) -> Result<String, DbError> {
+        if self.engine != Engine::MariaDb {
+            return Err(plain_error("MySQL has no sequences.".into()));
+        }
+        self.show_create("SEQUENCE", schema, name)
     }
 
     /// On a connection of its own, as [`Self::cancel`] is, so opening every
@@ -1018,7 +1098,7 @@ impl Connection {
                     held: Some(held),
                     ..Fetch::default()
                 };
-                self.run(&graph_sql(template, schema), false, held)
+                self.run(&graph_sql(template, schema), false, held, false)
             };
             let columns = query(GRAPH_COLUMNS_SQL)?;
             let unique_keys = query(GRAPH_UNIQUE_KEYS_SQL)?;
@@ -1030,16 +1110,22 @@ impl Connection {
     /// `SHOW CREATE TABLE` answers for a view too, with its `CREATE VIEW` in
     /// the same second column.
     pub fn ddl(&self, schema: &str, relation: &str) -> Result<String, DbError> {
+        self.show_create("TABLE", schema, relation)
+    }
+
+    /// `SHOW CREATE {what}` for `schema.name`, the statement being the second
+    /// column.
+    fn show_create(&self, what: &str, schema: &str, name: &str) -> Result<String, DbError> {
         let shown = self.internal_query(&format!(
-            "SHOW CREATE TABLE {}",
-            self.engine.qualified(schema, relation)
+            "SHOW CREATE {what} {}",
+            self.engine.qualified(schema, name)
         ))?;
         shown
             .rows
             .first()
             .and_then(|row| row.get(1))
             .map(|definition| format!("{definition};"))
-            .ok_or_else(|| plain_error(format!("{schema}.{relation} has no definition to show.")))
+            .ok_or_else(|| plain_error(format!("{schema}.{name} has no definition to show.")))
     }
 }
 
@@ -1266,9 +1352,7 @@ fn graph_sql(template: &str, schema: &str) -> String {
 }
 
 fn structure_sql(template: &str, schema: &str, relation: &str) -> String {
-    template
-        .replace("{schema}", &Engine::MySql.quote_literal(schema))
-        .replace("{relation}", &Engine::MySql.quote_literal(relation))
+    super::structure_sql(Engine::MySql, template, schema, relation)
 }
 
 /// Every row's value for one column, for the catalog queries that return a
@@ -1848,6 +1932,18 @@ mod tests {
     }
 
     #[test]
+    fn a_placeholder_inside_a_name_is_not_replaced_again() {
+        assert_eq!(
+            structure_sql(
+                "WHERE TABLE_SCHEMA = {schema} AND TABLE_NAME = {relation}",
+                "a{relation}",
+                "; DROP TABLE t; --",
+            ),
+            "WHERE TABLE_SCHEMA = 'a{relation}' AND TABLE_NAME = '; DROP TABLE t; --'"
+        );
+    }
+
+    #[test]
     fn structure_sql_quotes_a_name_containing_a_quote() {
         assert_eq!(
             structure_sql(
@@ -1901,6 +1997,172 @@ mod tests {
         let started = Instant::now();
         let _ = connection.query("SELECT SLEEP(30)", Fetch::default());
         assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    /// A session on another database is held to reads when it is asked to be,
+    /// from the moment it exists; one that was not asked is not.
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_session_on_another_database_is_held_to_reads_when_asked() {
+        for engine in [Engine::MySql, Engine::MariaDb] {
+            let plain = live(engine);
+            let clean = || {
+                plain
+                    .query("DROP TABLE IF EXISTS dbdelve_held_probe", Fetch::default())
+                    .unwrap_or_else(|error| panic!("{engine:?}: {error}"));
+            };
+            clean();
+            for statement in [
+                "CREATE TABLE dbdelve_held_probe (id int)",
+                "INSERT INTO dbdelve_held_probe VALUES (1)",
+            ] {
+                plain
+                    .query(statement, Fetch::default())
+                    .unwrap_or_else(|error| panic!("{engine:?}: {statement}: {error}"));
+            }
+
+            let profile = live_profile(engine);
+            let unheld = profile
+                .on_database("dbdelve_dev")
+                .expect("a session should open");
+            let write = |session: &super::super::Connection| {
+                session.query(
+                    "INSERT INTO dbdelve_held_probe VALUES (2)",
+                    &crate::db::CancelToken::default(),
+                    Fetch::default(),
+                )
+            };
+            write(&unheld).unwrap_or_else(|error| panic!("{engine:?}: unheld: {error}"));
+
+            let held = profile
+                .on_database("dbdelve_dev")
+                .expect("a session should open");
+            held.set_read_only(true).expect("the hold should take");
+            let refusal = write(&held)
+                .err()
+                .unwrap_or_else(|| panic!("{engine:?}: a held session accepted a write"));
+            assert!(
+                refusal.message.contains("READ ONLY"),
+                "{engine:?}, the server's own words: {}",
+                refusal.message
+            );
+            clean();
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_session_on_another_database_is_on_it() {
+        for engine in [Engine::MySql, Engine::MariaDb] {
+            let profile = live_profile(engine);
+            let database = |connection: &super::super::Connection| {
+                connection
+                    .query(
+                        "SELECT DATABASE()",
+                        &crate::db::CancelToken::default(),
+                        Fetch::default(),
+                    )
+                    .unwrap_or_else(|error| panic!("{engine:?}: {error}"))
+                    .rows[0]
+                    .iter()
+                    .next()
+                    .flatten()
+                    .map(str::to_string)
+            };
+            let session = profile
+                .on_database("information_schema")
+                .expect("a session should open");
+            assert_eq!(database(&session).as_deref(), Some("information_schema"));
+            assert_eq!(
+                database(&profile).as_deref(),
+                Some("dbdelve_dev"),
+                "{engine:?}: the profile's own connection is where it was"
+            );
+        }
+    }
+
+    /// A Cancel on a session opened for another database is that session's,
+    /// and the next diagram read on the first is sent as usual.
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_cancel_on_another_databases_session_leaves_the_firsts_diagram_alone() {
+        for engine in [Engine::MySql, Engine::MariaDb] {
+            let first = live(engine);
+            let other = first
+                .on_database("information_schema")
+                .expect("a session should open");
+            other.cancel().expect("the cancel should be asked");
+            first
+                .schema_graph("dbdelve_dev")
+                .unwrap_or_else(|error| panic!("{engine:?}: {error}"));
+        }
+    }
+
+    /// A used session is put back on its own database by a bound run, whichever
+    /// database a statement of the user's moved it to.
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_bound_run_moves_a_used_session_back_to_its_database() {
+        for engine in [Engine::MySql, Engine::MariaDb] {
+            let session = live_profile(engine)
+                .on_database("information_schema")
+                .expect("a session should open");
+            let cancel = crate::db::CancelToken::default();
+            let database = |bound: bool| {
+                let sql = "SELECT DATABASE()";
+                let result = match bound {
+                    true => session.query_bound(None, sql, &cancel, Fetch::default()),
+                    false => session.query(sql, &cancel, Fetch::default()),
+                };
+                result
+                    .ok()
+                    .and_then(|result| result.rows.first()?.get(0).map(str::to_string))
+            };
+            session
+                .query("USE dbdelve_dev", &cancel, Fetch::default())
+                .unwrap_or_else(|error| panic!("{engine:?}: {error}"));
+            assert_eq!(database(false), Some("dbdelve_dev".into()), "{engine:?}");
+            assert_eq!(
+                database(true),
+                Some("information_schema".into()),
+                "{engine:?}: put back before the statement"
+            );
+            assert_eq!(
+                database(false),
+                Some("information_schema".into()),
+                "{engine:?}: and it stays there"
+            );
+        }
+    }
+
+    /// The reads behind Show DDL, the diagram and an object tab's structure
+    /// name their schema, so a `USE` of a tab's own cannot send them to a table
+    /// of the same name in the database it named.
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_used_sessions_reads_name_their_schema() {
+        for engine in [Engine::MySql, Engine::MariaDb] {
+            let session = live(engine)
+                .on_database("information_schema")
+                .expect("a session should open");
+            session
+                .query("USE dbdelve_dev", Fetch::default())
+                .unwrap_or_else(|error| panic!("{engine:?}: {error}"));
+            let structure = session
+                .structure("information_schema", "SCHEMATA")
+                .unwrap_or_else(|error| panic!("{engine:?}: {error}"));
+            assert!(
+                structure
+                    .columns
+                    .iter()
+                    .any(|column| column.name == "SCHEMA_NAME"),
+                "{engine:?}"
+            );
+            let ddl = session
+                .ddl("information_schema", "SCHEMATA")
+                .unwrap_or_else(|error| panic!("{engine:?}: {error}"));
+            assert!(ddl.contains("SCHEMA_NAME"), "{engine:?}: {ddl}");
+        }
     }
 
     fn live_profile(engine: Engine) -> super::super::Connection {
@@ -2350,6 +2612,7 @@ mod tests {
             )
             .expect("the fixtures should create");
         let catalog = connection.catalog();
+        let sequences = connection.sequences();
         let sizes = connection.sizes();
         let versioned = connection.query("SELECT * FROM dbdelve_test_versioned", Fetch::default());
         let sequence = connection.query("SELECT * FROM dbdelve_test_sequence", Fetch::default());
@@ -2367,14 +2630,29 @@ mod tests {
             .find(|schema| schema.name == "dbdelve_dev")
             .expect("dbdelve_dev should exist")
             .relations;
-        for name in ["dbdelve_test_versioned", "dbdelve_test_sequence"] {
-            assert!(
-                relations
+        assert!(
+            relations
+                .iter()
+                .any(|relation| relation.name == "dbdelve_test_versioned"
+                    && relation.kind == RelationKind::Table)
+        );
+        assert!(
+            !relations
+                .iter()
+                .any(|relation| relation.name == "dbdelve_test_sequence"),
+            "a sequence is listed as a sequence and not among the relations"
+        );
+        let sequences = sequences.expect("sequences should load");
+        assert!(
+            sequences
+                .schemas
+                .iter()
+                .find(|schema| schema.name == "dbdelve_dev")
+                .is_some_and(|schema| schema
+                    .sequences
                     .iter()
-                    .any(|relation| relation.name == name && relation.kind == RelationKind::Table),
-                "{name}"
-            );
-        }
+                    .any(|name| name == "dbdelve_test_sequence"))
+        );
         assert!(
             sizes.expect("sizes should load")["dbdelve_dev"].contains_key("dbdelve_test_versioned")
         );
@@ -2817,6 +3095,116 @@ mod tests {
         connection
             .cancel()
             .expect("the cancel's login should sign in too");
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_mariadb_lists_a_sequence_in_its_own_kind() {
+        // In the database the login owns, which cannot create another.
+        let connection = live(Engine::MariaDb);
+        let drop = |connection: &Connection| {
+            connection
+                .query(
+                    "DROP SEQUENCE IF EXISTS dbdelve_sequence_probe_ticket",
+                    Fetch::default(),
+                )
+                .expect("the probe sequence should drop");
+        };
+        drop(&connection);
+        connection
+            .query(
+                "CREATE SEQUENCE dbdelve_sequence_probe_ticket",
+                Fetch::default(),
+            )
+            .expect("the probe sequence should be created");
+
+        let second = super::super::Connection::MySql(live(Engine::MariaDb))
+            .routines()
+            .expect("the second half should read");
+        let listed: Vec<_> = second
+            .schemas
+            .iter()
+            .filter(|schema| schema.name == "dbdelve_dev")
+            .flat_map(|schema| schema.sequences.clone())
+            .filter(|name| name == "dbdelve_sequence_probe_ticket")
+            .collect();
+
+        drop(&connection);
+        assert_eq!(listed, vec!["dbdelve_sequence_probe_ticket".to_string()]);
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_mariadb_shows_a_sequences_create_statement() {
+        let connection = live(Engine::MariaDb);
+        let drop = |connection: &Connection| {
+            connection
+                .query(
+                    "DROP SEQUENCE IF EXISTS dbdelve_sequence_probe_ticket",
+                    Fetch::default(),
+                )
+                .expect("the probe sequence should drop");
+        };
+        drop(&connection);
+        connection
+            .query(
+                "CREATE SEQUENCE dbdelve_sequence_probe_ticket START WITH 5 INCREMENT BY 2",
+                Fetch::default(),
+            )
+            .expect("the probe sequence should be created");
+        connection
+            .query(
+                "SELECT NEXTVAL(dbdelve_sequence_probe_ticket)",
+                Fetch::default(),
+            )
+            .expect("the counter moves");
+        let database = live_config(Engine::MariaDb).database;
+        let ddl = connection.sequence_ddl(&database, "dbdelve_sequence_probe_ticket");
+        drop(&connection);
+        let ddl = ddl.expect("the definition is read");
+        assert!(ddl.starts_with("CREATE SEQUENCE"), "{ddl}");
+        assert!(ddl.contains("dbdelve_sequence_probe_ticket"), "{ddl}");
+        assert!(ddl.ends_with(';'), "{ddl}");
+        assert!(
+            ddl.to_lowercase().contains("start with 5"),
+            "the statement carries the start and not the counter: {ddl}"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_mysql_shows_no_sequence_definition() {
+        let connection = live(Engine::MySql);
+        assert!(connection.sequence_ddl("dbdelve_dev", "anything").is_err());
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_mysql_lists_no_sequence_and_sends_no_sequence_statement() {
+        let connection = live(Engine::MySql);
+        let second = super::super::Connection::MySql(live(Engine::MySql))
+            .routines()
+            .expect("the second half should read");
+        assert!(
+            second
+                .schemas
+                .iter()
+                .all(|schema| schema.sequences.is_empty())
+        );
+
+        // A statement sent to a lost session fails, and a MySQL server answers
+        // a `TABLE_TYPE = 'SEQUENCE'` filter with no rows anyway, so only a
+        // dead session tells a statement never sent from one that found nothing.
+        assert!(
+            connection
+                .query("KILL CONNECTION_ID()", Fetch::default())
+                .is_err()
+        );
+        assert!(connection.is_lost());
+        let catalog = connection
+            .sequences()
+            .expect("a MySQL connection sends no sequence statement");
+        assert!(catalog.schemas.is_empty());
     }
 
     /// Each `live_` body above, run once against each server the driver

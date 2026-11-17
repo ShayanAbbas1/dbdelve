@@ -5,8 +5,28 @@
 
 use super::*;
 
+use super::sidebar::new_query_binding;
 use crate::db::{ColumnDefinition, Structure};
-use crate::session::{Explained, Finished, Queue, TabKey};
+use crate::explorer::Pin;
+use crate::session::{Binding, BoundSession, Explained, Finished, Queue, Routed, TabKey};
+use crate::sidebar::{
+    NodeAction, NodeKind, SelectedNode, SelectionAction, schema_row_is_a_database,
+};
+
+/// A definition being read: the connection it was asked of, by id and
+/// generation, and the read itself.
+type DdlRead = (String, u64, gpui::Task<Result<String, DbError>>);
+
+/// An object's title in the Show DDL dialog, with its database when that is
+/// not the connection's own: the same `main.birds` can be in both.
+fn ddl_title(kind: ObjectKind, database: Option<&str>, schema: &str, name: &str) -> String {
+    let kind = crate::palette::kind_label(kind);
+    let named = match database {
+        Some(database) => format!("{database}.{schema}.{name}"),
+        None => format!("{schema}.{name}"),
+    };
+    format!("{}{} {named}", kind[..1].to_uppercase(), &kind[1..])
+}
 
 impl Workspace {
     pub(crate) fn open_explorer_target(
@@ -19,35 +39,44 @@ impl Workspace {
             return;
         };
 
-        let opened = match target {
-            ExplorerTarget::Relation {
-                schema_index,
-                relation_index,
-            } => catalog.schemas.get(schema_index).and_then(|schema| {
-                let relation = schema.relations.get(relation_index)?;
-                Some(OpenedObject::Relation {
-                    schema: schema.name.clone(),
-                    name: relation.name.clone(),
-                    kind: relation.kind,
-                    // A click in the explorer opens the whole relation.
-                    filter: String::new(),
-                    filters: Vec::new(),
-                })
-            }),
-            ExplorerTarget::Routine {
-                schema_index,
-                routine_index,
-            } => catalog.schemas.get(schema_index).and_then(|schema| {
-                let routine = schema.routines.get(routine_index)?;
-                Some(OpenedObject::Routine {
-                    schema: schema.name.clone(),
-                    routine: routine.clone(),
-                })
-            }),
-        };
+        if let Some(opened) = opened_from(catalog, target)
+            && let Some(id) = self.open_object(opened, None, window, cx)
+        {
+            self.activate_tab(Tab::Object(id), window, cx);
+            self.remember_profiles(cx);
+        }
+    }
 
-        if let Some(opened) = opened
-            && let Some(id) = self.open_object(opened, window, cx)
+    /// Open the object `target` names in the catalog read for `database`,
+    /// another database of `profile`'s server, as a tab bound to it: the
+    /// profile comes to the front first, and a database whose catalog has not
+    /// loaded opens nothing. `target` indexes that catalog, not the
+    /// profile's own, which could hold a `main.t` of its own to open instead
+    /// of this one's. The connection's own database opens as it always has.
+    pub(crate) fn open_object_on(
+        &mut self,
+        profile: &str,
+        database: String,
+        target: ExplorerTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.profiles.iter().position(|found| found.id == profile) else {
+            return;
+        };
+        if self.active != Some(index) {
+            self.activate(index, cx);
+        }
+        let found = &self.profiles[index];
+        if found.active_database().as_deref() == Some(database.as_str()) {
+            self.open_explorer_target(target, window, cx);
+            return;
+        }
+        let Some(CatalogState::Loaded(catalog, _)) = found.database_catalogs.get(&database) else {
+            return;
+        };
+        if let Some(opened) = opened_from(catalog, target)
+            && let Some(id) = self.open_object(opened, Some(database), window, cx)
         {
             self.activate_tab(Tab::Object(id), window, cx);
             self.remember_profiles(cx);
@@ -60,6 +89,7 @@ impl Workspace {
     pub(crate) fn open_object(
         &mut self,
         opened: OpenedObject,
+        database: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<u64> {
@@ -75,7 +105,16 @@ impl Workspace {
                 .objects
                 .iter()
                 .filter(|tab| matches!(tab.body, ObjectBody::Structure { .. }) == structure)
-                .map(|tab| (tab.id, tab.schema.as_str(), tab.name.as_str(), tab.filter())),
+                .map(|tab| {
+                    (
+                        tab.id,
+                        tab.database.as_deref(),
+                        tab.schema.as_str(),
+                        tab.name.as_str(),
+                        tab.filter(),
+                    )
+                }),
+            database.as_deref(),
             &schema,
             &name,
             opened.filter(),
@@ -103,7 +142,12 @@ impl Workspace {
                         ObjectBody::Relation {
                             structure: StructureState::Loaded(loaded),
                             ..
-                        } if tab.schema == schema && tab.name == name => Some(loaded.clone()),
+                        } if tab.database == database
+                            && tab.schema == schema
+                            && tab.name == name =>
+                        {
+                            Some(loaded.clone())
+                        }
                         _ => None,
                     })
             })
@@ -160,6 +204,7 @@ impl Workspace {
             schema,
             name,
             kind: Some(kind),
+            database,
             body,
         });
         // See `new_query`'s own `place_last`. A session restored at launch
@@ -250,7 +295,7 @@ impl Workspace {
         let Some(profile) = self.profile_mut() else {
             return;
         };
-        let connected = profile.connection().is_some();
+        let connected = profile.connection_for(Tab::Object(id)).is_available();
         let Some(tab) = profile.session.objects.iter_mut().find(|tab| tab.id == id) else {
             return;
         };
@@ -379,10 +424,11 @@ impl Workspace {
         let Some(profile) = self.profile_mut() else {
             return;
         };
-        let Some(connection) = profile.connection() else {
+        let routed = profile.connection_for(Tab::Object(id));
+        if !routed.is_available() {
             self.note("The connection is not open.".into(), cx);
             return;
-        };
+        }
         let (profile_id, generation, mode) = (profile.id.clone(), profile.generation, profile.mode);
         let confirmed = profile.confirmed.clone();
         let Some(tab) = profile.session.objects.iter_mut().find(|tab| tab.id == id) else {
@@ -416,7 +462,13 @@ impl Workspace {
         }
         let asked = filter.clone();
         let started = std::time::Instant::now();
-        let cancel = CancelToken::default();
+        // On a session shared with other tabs a Cancel stops only what this
+        // count runs there, as a bound tab's run does (`CancelToken::alongside`).
+        let bound = !matches!(routed, Routed::Own(_));
+        let cancel = match bound {
+            true => CancelToken::alongside(),
+            false => CancelToken::default(),
+        };
         *count = RowCount::Counting {
             filter: asked.clone(),
             started,
@@ -428,9 +480,16 @@ impl Workspace {
         remember_statement(&mut profile.session.history, recorded.clone());
         cx.notify();
 
-        let task = spawn_blocking(cx.background_executor(), move || {
-            connection.generated(&sql, &cancel, None, None)
-        });
+        let task = self.run_routed(
+            &profile_id,
+            generation,
+            routed,
+            move |connection| match bound {
+                true => connection.generated_bound(None, &sql, &cancel, None, None),
+                false => connection.generated(&sql, &cancel, None, None),
+            },
+            cx,
+        );
         cx.spawn(async move |workspace, cx| {
             let result = task.await;
             // Before the checks below: a filter changed or a tab closed under
@@ -492,7 +551,10 @@ impl Workspace {
     /// Stop a relation tab's count. Like Cancel on a run, it records only that
     /// the request went out; the count's own answer says what happened.
     pub(crate) fn cancel_count(&mut self, id: u64, cx: &mut Context<Self>) {
-        let Some(connection) = self.profile().and_then(Profile::connection) else {
+        let Some(connection) = self
+            .profile()
+            .and_then(|profile| profile.connection_for(Tab::Object(id)).existing().cloned())
+        else {
             return;
         };
         let Some(ObjectBody::Relation {
@@ -549,41 +611,532 @@ impl Workspace {
         );
     }
 
-    pub(crate) fn relation_at(
+    /// The object `target` names in the catalog `profile` read for `database`
+    /// (`None` for its own): its schema, its name as the catalog lists it, and
+    /// what kind of node it is.
+    pub(crate) fn object_in(
         &self,
+        profile: &str,
+        database: Option<&str>,
         target: ExplorerTarget,
-    ) -> Option<(String, String, RelationKind)> {
-        let ExplorerTarget::Relation {
-            schema_index,
-            relation_index,
-        } = target
-        else {
-            return None;
+    ) -> Option<(String, String, NodeKind)> {
+        let profile = self.profiles.iter().find(|found| found.id == profile)?;
+        let catalog = catalog_in(profile, database)?;
+        match target {
+            ExplorerTarget::Relation {
+                schema_index,
+                relation_index,
+            } => {
+                let schema = catalog.schemas.get(schema_index)?;
+                let relation = schema.relations.get(relation_index)?;
+                Some((
+                    schema.name.clone(),
+                    relation.name.clone(),
+                    NodeKind::Relation(relation.kind),
+                ))
+            }
+            ExplorerTarget::Routine {
+                schema_index,
+                routine_index,
+            } => {
+                let schema = catalog.schemas.get(schema_index)?;
+                let routine = schema.routines.get(routine_index)?;
+                Some((schema.name.clone(), routine.name.clone(), NodeKind::Routine))
+            }
+            ExplorerTarget::Sequence {
+                schema_index,
+                sequence_index,
+            } => {
+                let schema = catalog.schemas.get(schema_index)?;
+                let sequence = schema.sequences.get(sequence_index)?;
+                Some((schema.name.clone(), sequence.clone(), NodeKind::Sequence))
+            }
+        }
+    }
+
+    /// What `action` does to `node`, from a menu or the palette alike. The
+    /// node's connection comes to the front first, so the gate, the mode and
+    /// the engine anything it sends meets are that connection's. Nothing here
+    /// sends a statement dbdelve writes: a definition is the driver's own read
+    /// and a refresh its own catalog read.
+    pub(crate) fn run_node_action(
+        &mut self,
+        node: &SelectedNode,
+        action: NodeAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            NodeAction::CopyName(name) => cx.write_to_clipboard(ClipboardItem::new_string(name)),
+            NodeAction::ShowDdl => {
+                if !self.make_front(&node.profile, cx) {
+                    return;
+                }
+                match (node.kind, node.schema.clone(), node.leaf) {
+                    (NodeKind::Relation(kind), Some(schema), _) => self.show_ddl(
+                        node.database.clone(),
+                        schema,
+                        node.name.clone(),
+                        ObjectKind::Relation(kind),
+                        cx,
+                    ),
+                    (NodeKind::Sequence, Some(schema), _) => self.show_ddl(
+                        node.database.clone(),
+                        schema,
+                        node.name.clone(),
+                        ObjectKind::Sequence,
+                        cx,
+                    ),
+                    (NodeKind::Routine, _, Some(_)) => self.open_node(node, window, cx),
+                    _ => {}
+                }
+            }
+            NodeAction::NewQueryHere => {
+                if !self.make_front(&node.profile, cx) {
+                    return;
+                }
+                match self.view_mode() {
+                    ViewMode::Complex => {
+                        let target = self.target();
+                        let (database, schema) = new_query_binding(node, target);
+                        self.new_query_here(&node.profile, database, schema, window, cx);
+                    }
+                    // Simple mode has one active schema for every tab, so it
+                    // moves before the tab opens, and a move that is refused
+                    // leaves no tab on the schema it did not reach.
+                    ViewMode::Simple => {
+                        let moved = match node.kind {
+                            NodeKind::Schema => {
+                                let is_database = schema_row_is_a_database(self.target().levels());
+                                self.move_to_schema_row(node.name.clone(), is_database, window, cx)
+                            }
+                            _ => true,
+                        };
+                        if moved {
+                            self.open_query_tab(None, window, cx);
+                        }
+                    }
+                }
+            }
+            NodeAction::Refresh => {
+                if !self.make_front(&node.profile, cx) {
+                    return;
+                }
+                // Another database is read over its own session, and only it:
+                // the connection's own catalog is not asked again for it.
+                match self.elsewhere(node.database.clone()) {
+                    Some(database) => self.reload_database(&node.profile, database, cx),
+                    None => self.refresh_schema(cx),
+                }
+            }
+        }
+    }
+
+    /// What `action` does to every row the connections tree has selected. An
+    /// action the rows do not all offer does nothing. Nothing here sends a
+    /// statement dbdelve writes: a definition is the driver's own read, and a
+    /// refresh its own catalog read.
+    pub(crate) fn run_selection_action(
+        &mut self,
+        action: SelectionAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let nodes = self.selected_nodes(cx);
+        if !self.selection_offers(&nodes).contains(&action) {
+            return;
+        }
+        match action {
+            SelectionAction::OpenAll => {
+                for node in &nodes {
+                    self.open_node(node, window, cx);
+                }
+            }
+            SelectionAction::CopyNames => {
+                let names: Vec<&str> = nodes.iter().map(|node| node.name.as_str()).collect();
+                cx.write_to_clipboard(ClipboardItem::new_string(names.join("\n")));
+            }
+            SelectionAction::CopyDdl => self.copy_definitions(nodes, cx),
+            SelectionAction::ShowDdl => match nodes.as_slice() {
+                [only] => self.run_node_action(only, NodeAction::ShowDdl, window, cx),
+                _ => self.show_definitions(nodes, cx),
+            },
+            SelectionAction::Pin => self.pin_all(&nodes, cx),
+            SelectionAction::Refresh => self.refresh_all(&nodes, cx),
+        }
+    }
+
+    /// Pin every object of `nodes` that is not pinned yet, each on its own
+    /// connection. A row of another database names an object the shortcuts
+    /// cannot hold, which is why it is not offered the pin either.
+    fn pin_all(&mut self, nodes: &[SelectedNode], cx: &mut Context<Self>) {
+        for node in nodes {
+            let Some(leaf) = node.leaf else {
+                continue;
+            };
+            if !self.make_front(&node.profile, cx)
+                || self.elsewhere(node.database.clone()).is_some()
+            {
+                continue;
+            }
+            let Some(member) = self.member_in(&node.profile, leaf.target) else {
+                continue;
+            };
+            let pin = Pin::Member(member);
+            if self
+                .profile()
+                .is_some_and(|profile| profile.shortcuts.pinned(&pin))
+            {
+                continue;
+            }
+            self.toggle_pin(pin, cx);
+        }
+    }
+
+    /// Read again each connection or database `nodes` belong to, once. A
+    /// connection's own refresh reads every database of it that is open as
+    /// well, so those are not asked for twice.
+    fn refresh_all(&mut self, nodes: &[SelectedNode], cx: &mut Context<Self>) {
+        // Which database a row is in depends on the connection being in
+        // front, so each is brought there to be asked.
+        let mut targets: Vec<(String, Option<String>)> = Vec::new();
+        for node in nodes {
+            if self.make_front(&node.profile, cx) {
+                let target = (node.profile.clone(), self.elsewhere(node.database.clone()));
+                if !targets.contains(&target) {
+                    targets.push(target);
+                }
+            }
+        }
+        // A connection's own first: it reads the open databases after it.
+        for (profile, _) in targets.iter().filter(|(_, database)| database.is_none()) {
+            if self.make_front(profile, cx) {
+                self.refresh_schema(cx);
+            }
+        }
+        for (profile, database) in &targets {
+            let Some(database) = database else {
+                continue;
+            };
+            let covered = targets.contains(&(profile.clone(), None))
+                && self.profiles.iter().any(|found| {
+                    found.id == *profile
+                        && matches!(found.bound.get(database), Some(BoundSession::Open(_)))
+                });
+            if !covered {
+                self.reload_database(profile, database.clone(), cx);
+            }
+        }
+    }
+
+    /// Open the object `node` is on its own connection, which comes to the
+    /// front first, as a click on its row does.
+    fn open_node(&mut self, node: &SelectedNode, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(leaf) = node.leaf else {
+            return;
         };
-        let schema = self.catalog()?.schemas.get(schema_index)?;
-        let relation = schema.relations.get(relation_index)?;
-        Some((schema.name.clone(), relation.name.clone(), relation.kind))
+        if !self.make_front(&node.profile, cx) {
+            return;
+        }
+        match node.database.clone() {
+            Some(database) => self.open_object_on(&node.profile, database, leaf.target, window, cx),
+            None => self.open_explorer_target(leaf.target, window, cx),
+        }
+    }
+
+    /// Move the connection in front onto the schema row `name`, which is a
+    /// database where `is_database`. Whether it is there now: a refusal is the
+    /// notice it set, and nothing moved.
+    pub(crate) fn move_to_schema_row(
+        &mut self,
+        name: String,
+        is_database: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match is_database {
+            true => self.set_database(name, window, cx),
+            false if self.target().picks_schema() => self.set_schema(name, cx),
+            // A target that picks no schema has nothing to move.
+            false => true,
+        }
+    }
+
+    /// Bring the connection `id` in front, as acting on one of its rows
+    /// does. Whether there is one.
+    pub(crate) fn make_front(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
+        let Some(index) = self.profiles.iter().position(|found| found.id == id) else {
+            return false;
+        };
+        if self.active != Some(index) {
+            self.activate(index, cx);
+        }
+        true
+    }
+
+    /// `database` as an object's own database says it: `None` for the
+    /// profile's own, which is the profile's connection and not a session of
+    /// its own, where asking it for itself by name would open a second one.
+    pub(super) fn elsewhere(&self, database: Option<String>) -> Option<String> {
+        let own = self.profile()?.active_database();
+        database.filter(|database| own.as_ref() != Some(database))
+    }
+
+    /// The connection of `database` (`None` for its own) of the connection
+    /// `id`, in front or not, by id and generation, with how to reach it.
+    /// Another database's is its session, which a read with none open opens
+    /// first.
+    fn route_in(&self, id: &str, database: Option<String>) -> Option<(String, u64, Routed)> {
+        let profile = self.profiles.iter().find(|found| found.id == id)?;
+        let own = profile.active_database();
+        let database = database.filter(|database| own.as_ref() != Some(database));
+        let routed = profile.route(database.map(|database| Binding {
+            database,
+            schema: None,
+        }));
+        routed
+            .is_available()
+            .then(|| (profile.id.clone(), profile.generation, routed))
+    }
+
+    /// Ask for `schema.name`'s definition over the connection of its
+    /// database, `None` for the profile's own: another database's is read over
+    /// that database's session, which a read with none open opens first.
+    /// Nothing is sent but the driver's own DDL read.
+    fn read_ddl(
+        &mut self,
+        database: Option<String>,
+        schema: String,
+        name: String,
+        kind: ObjectKind,
+        cx: &mut Context<Self>,
+    ) -> Option<DdlRead> {
+        let id = self.profile()?.id.clone();
+        self.read_ddl_on(&id, database, schema, name, kind, cx)
+    }
+
+    /// [`Self::read_ddl`] of an object of the connection `id`, in front or not.
+    fn read_ddl_on(
+        &mut self,
+        id: &str,
+        database: Option<String>,
+        schema: String,
+        name: String,
+        kind: ObjectKind,
+        cx: &mut Context<Self>,
+    ) -> Option<DdlRead> {
+        let (profile_id, generation, routed) = self.route_in(id, database)?;
+        let task = self.run_routed(
+            &profile_id,
+            generation,
+            routed,
+            move |connection| match kind {
+                ObjectKind::Relation(kind) => connection.ddl(&schema, &name, kind),
+                ObjectKind::Sequence => connection.sequence_ddl(&schema, &name),
+                // A routine's definition is its tab, which `run_node_action`
+                // opens; nothing asks for one here.
+                ObjectKind::Routine(_) => Err(DbError {
+                    message: "A routine's definition is shown in its own tab.".into(),
+                    position: None,
+                }),
+            },
+            cx,
+        );
+        Some((profile_id, generation, task))
+    }
+
+    /// Read the definition of each of `nodes` in turn, one at a time, over
+    /// the connection and database it is in. `each` is told as every one
+    /// lands, and says whether to go on; `done` is given them all. A read
+    /// that fails is its own answer, and the rest are still read.
+    fn read_definitions(
+        &mut self,
+        nodes: Vec<SelectedNode>,
+        mut each: impl FnMut(&mut Self, usize, &Result<String, String>, &mut Context<Self>) -> bool
+        + 'static,
+        done: impl FnOnce(&mut Self, Vec<Result<String, String>>, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |workspace, cx| {
+            let mut results = Vec::new();
+            for (index, node) in nodes.iter().enumerate() {
+                let Ok(read) = workspace.update(cx, |workspace, cx| {
+                    let kind = match node.kind {
+                        NodeKind::Relation(kind) => ObjectKind::Relation(kind),
+                        NodeKind::Sequence => ObjectKind::Sequence,
+                        _ => return None,
+                    };
+                    workspace.read_ddl_on(
+                        &node.profile,
+                        node.database.clone(),
+                        node.schema.clone()?,
+                        node.name.clone(),
+                        kind,
+                        cx,
+                    )
+                }) else {
+                    return;
+                };
+                let result = match read {
+                    Some((profile, generation, task)) => {
+                        let answer = task.await;
+                        let current = workspace
+                            .update(cx, |workspace, _| {
+                                workspace.issued_to(&profile, generation).is_some()
+                            })
+                            .unwrap_or(false);
+                        match answer {
+                            _ if !current => {
+                                Err("The connection was closed before the definition arrived."
+                                    .to_string())
+                            }
+                            Ok(ddl) => Ok(ddl),
+                            Err(error) => Err(format!("Could not read the definition: {error}")),
+                        }
+                    }
+                    None => Err("The connection is not open.".to_string()),
+                };
+                match workspace.update(cx, |workspace, cx| each(workspace, index, &result, cx)) {
+                    Ok(true) => results.push(result),
+                    _ => return,
+                }
+            }
+            _ = workspace.update(cx, |workspace, cx| done(workspace, results, cx));
+        })
+        .detach();
+    }
+
+    /// Put every definition of `nodes` on the clipboard, a blank line between
+    /// them. A definition that could not be read is said so and left out.
+    fn copy_definitions(&mut self, nodes: Vec<SelectedNode>, cx: &mut Context<Self>) {
+        self.clear_notice();
+        let names: Vec<String> = nodes.iter().map(|node| node.name.clone()).collect();
+        self.read_definitions(
+            nodes,
+            |_, _, _, _| true,
+            move |workspace, results, cx| {
+                let mut texts = Vec::new();
+                let mut refusals = Vec::new();
+                for (name, result) in names.iter().zip(results) {
+                    match result {
+                        Ok(text) if !text.is_empty() => texts.push(text),
+                        Ok(_) => {}
+                        Err(error) => refusals.push(format!("{name}: {error}")),
+                    }
+                }
+                let copied = texts.len();
+                if copied > 0 {
+                    cx.write_to_clipboard(ClipboardItem::new_string(texts.join("\n\n")));
+                }
+                match (refusals.is_empty(), copied) {
+                    (true, _) => workspace.confirm(
+                        match copied {
+                            1 => "Copied the CREATE statement.".to_string(),
+                            n => format!("Copied {n} CREATE statements."),
+                        },
+                        cx,
+                    ),
+                    (false, _) => workspace.note(refusals.join(" "), cx),
+                }
+            },
+            cx,
+        );
+    }
+
+    /// The `Show DDL` dialog over several objects: each definition under its
+    /// name, read one after the other and drawn as it lands. The connection
+    /// of the last is in front, which is the one whose dialog is drawn.
+    fn show_definitions(&mut self, nodes: Vec<SelectedNode>, cx: &mut Context<Self>) {
+        let Some(last) = nodes.last() else {
+            return;
+        };
+        self.clear_notice();
+        if !self.make_front(&last.profile.clone(), cx) {
+            return;
+        }
+        let across = nodes.iter().any(|node| node.profile != nodes[0].profile);
+        let sections: Vec<DdlSection> = nodes
+            .iter()
+            .map(|node| {
+                let kind = match node.kind {
+                    NodeKind::Relation(kind) => ObjectKind::Relation(kind),
+                    _ => ObjectKind::Sequence,
+                };
+                // The connection's own database is the connection, as
+                // `elsewhere` says it; only another one is named.
+                let own = self
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.id == node.profile)
+                    .and_then(|profile| profile.active_database());
+                let database = node
+                    .database
+                    .as_deref()
+                    .filter(|database| own.as_deref() != Some(*database));
+                let mut title = ddl_title(
+                    kind,
+                    database,
+                    node.schema.as_deref().unwrap_or(""),
+                    &node.name,
+                );
+                // Two connections can hold the same `main.birds`.
+                if across && let Some(profile) = self.profiles.iter().find(|p| p.id == node.profile)
+                {
+                    title = format!("{title} ({})", profile.name);
+                }
+                DdlSection {
+                    title,
+                    text: DdlText::Loading,
+                }
+            })
+            .collect();
+        self.last_ddl_request += 1;
+        let request = self.last_ddl_request;
+        self.ddl_view = Some(DdlView {
+            profile: nodes[nodes.len() - 1].profile.clone(),
+            name: String::new(),
+            sections,
+            request,
+        });
+        cx.notify();
+        self.read_definitions(
+            nodes,
+            move |workspace, index, result, cx| {
+                // Closed, or put up for another object, since: that answer is
+                // not this dialog's, nor are the ones to come.
+                let Some(view) = workspace
+                    .ddl_view
+                    .as_mut()
+                    .filter(|view| view.request == request)
+                else {
+                    return false;
+                };
+                view.sections[index].text = match result {
+                    Ok(ddl) => DdlText::Ready(ddl.clone()),
+                    Err(error) => DdlText::Failed(error.clone()),
+                };
+                cx.notify();
+                true
+            },
+            |_, _, _| {},
+            cx,
+        );
     }
 
     pub(crate) fn copy_ddl(
         &mut self,
+        database: Option<String>,
         schema: String,
         relation: String,
         kind: RelationKind,
         cx: &mut Context<Self>,
     ) {
         self.clear_notice();
-        let Some(profile) = self.profile() else {
+        let Some((profile_id, generation, task)) =
+            self.read_ddl(database, schema, relation, ObjectKind::Relation(kind), cx)
+        else {
             return;
         };
-        let Some(connection) = profile.connection() else {
-            return;
-        };
-        let profile_id = profile.id.clone();
-        let generation = profile.generation;
-        let task = spawn_blocking(cx.background_executor(), move || {
-            connection.ddl(&schema, &relation, kind)
-        });
 
         cx.spawn(async move |workspace, cx| {
             let result = task.await;
@@ -607,6 +1160,130 @@ impl Workspace {
         .detach();
     }
 
+    /// Open the `Show DDL` dialog over `schema.relation` of `database` (`None`
+    /// for the profile's own): the text is read over that database's
+    /// connection and drawn read-only. It is not a buffer, so nothing in it
+    /// can be run. A relation or a sequence; a routine's definition is its
+    /// tab and is not shown here.
+    pub(crate) fn show_ddl(
+        &mut self,
+        database: Option<String>,
+        schema: String,
+        relation: String,
+        kind: ObjectKind,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_notice();
+        let shown = relation.clone();
+        let shown_database = self.elsewhere(database.clone());
+        let title = ddl_title(kind, shown_database.as_deref(), &schema, &relation);
+        let Some((profile_id, generation, task)) =
+            self.read_ddl(database, schema, relation, kind, cx)
+        else {
+            return;
+        };
+        self.last_ddl_request += 1;
+        let request = self.last_ddl_request;
+        self.ddl_view = Some(DdlView {
+            profile: profile_id.clone(),
+            name: shown,
+            sections: vec![DdlSection {
+                title,
+                text: DdlText::Loading,
+            }],
+            request,
+        });
+        cx.notify();
+
+        cx.spawn(async move |workspace, cx| {
+            let result = task.await;
+            workspace
+                .update(cx, |workspace, cx| {
+                    if workspace.issued_to(&profile_id, generation).is_none() {
+                        return;
+                    }
+                    // Closed, or put up for another object, since: that answer
+                    // is not this dialog's.
+                    let Some(view) = workspace
+                        .ddl_view
+                        .as_mut()
+                        .filter(|view| view.request == request)
+                    else {
+                        return;
+                    };
+                    view.sections[0].text = match result {
+                        Ok(ddl) => DdlText::Ready(ddl),
+                        Err(error) => {
+                            DdlText::Failed(format!("Could not read the definition: {error}"))
+                        }
+                    };
+                    cx.notify();
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    /// The `Show DDL` dialog, when it is the front connection's: one left up
+    /// for a connection that is no longer in front is not drawn and `escape`
+    /// does not stop at it.
+    pub(crate) fn ddl_view_in_front(&self) -> Option<&DdlView> {
+        let profile = self.profile()?;
+        self.ddl_view
+            .as_ref()
+            .filter(|view| view.profile == profile.id)
+    }
+
+    /// Close the dialog and hand the keyboard back. Answers whether it was
+    /// drawn, so `escape` is only spent on a dialog that was.
+    pub(crate) fn close_ddl_view(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.ddl_view_in_front().is_none() {
+            return false;
+        }
+        self.ddl_view = None;
+        self.refocus_front();
+        cx.notify();
+        true
+    }
+
+    /// Put the shown definitions on the clipboard, a blank line between them.
+    /// Nothing when there is none to put there: still loading, failed, or
+    /// empty.
+    pub(crate) fn copy_shown_ddl(&mut self, cx: &mut Context<Self>) {
+        let Some(view) = self.ddl_view_in_front() else {
+            return;
+        };
+        let ready: Vec<&str> = view
+            .sections
+            .iter()
+            .filter_map(|section| match &section.text {
+                DdlText::Ready(text) if !text.is_empty() => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        if ready.is_empty() {
+            return;
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(ready.join("\n\n")));
+        self.confirm("Copied the CREATE statement.".into(), cx);
+    }
+
+    /// Put one of the listed definitions on the clipboard.
+    pub(crate) fn copy_ddl_section(&mut self, at: usize, cx: &mut Context<Self>) {
+        let Some(DdlText::Ready(text)) = self
+            .ddl_view_in_front()
+            .and_then(|view| view.sections.get(at))
+            .map(|section| &section.text)
+        else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+        self.confirm("Copied the CREATE statement.".into(), cx);
+    }
+
     pub(crate) fn load_structure(
         &mut self,
         id: u64,
@@ -617,9 +1294,10 @@ impl Workspace {
         let Some(profile) = self.profile_mut() else {
             return;
         };
-        let Some(connection) = profile.connection() else {
+        let routed = profile.connection_for(Tab::Object(id));
+        if !routed.is_available() {
             return;
-        };
+        }
         let profile_id = profile.id.clone();
         let generation = profile.generation;
         // Numbered across tabs and refreshes: a refresh forgets what was asked
@@ -629,15 +1307,21 @@ impl Workspace {
         let request = profile.session.last_structure_request;
         profile.session.structure_requests.insert(id, request);
         let key = (schema.clone(), relation.clone());
-        let structure_task = spawn_blocking(cx.background_executor(), move || {
-            let mut structure = connection.structure(&schema, &relation)?;
-            // Only an arrow hangs off this, so a failed lookup is no arrows
-            // and not a failed structure.
-            structure.referenced_by = connection
-                .references(&schema, &relation)
-                .unwrap_or_default();
-            Ok::<_, DbError>(structure)
-        });
+        let structure_task = self.run_routed(
+            &profile_id,
+            generation,
+            routed,
+            move |connection| {
+                let mut structure = connection.structure(&schema, &relation)?;
+                // Only an arrow hangs off this, so a failed lookup is no arrows
+                // and not a failed structure.
+                structure.referenced_by = connection
+                    .references(&schema, &relation)
+                    .unwrap_or_default();
+                Ok::<_, DbError>(structure)
+            },
+            cx,
+        );
 
         cx.spawn(async move |workspace, cx| {
             let result = structure_task.await;
@@ -652,8 +1336,15 @@ impl Workspace {
                         return;
                     }
                     // The same call completion makes, so completion should not
-                    // make it again for this relation.
-                    if let Ok(structure) = &result {
+                    // make it again for this relation. Not for another
+                    // database's: the cache is keyed by schema and name alone,
+                    // and this would answer for the profile's own `main.t`.
+                    let own = !profile
+                        .session
+                        .objects
+                        .iter()
+                        .any(|tab| tab.id == id && tab.database.is_some());
+                    if own && let Ok(structure) = &result {
                         profile
                             .session
                             .completion_columns
@@ -683,18 +1374,100 @@ impl Workspace {
                         }
                         ObjectBody::Routine(_) | ObjectBody::Diagram { .. } => {}
                     }
+                    let pages_by_key = profile.config.engine().pages_by_key();
                     cx.notify();
+                    // Both act on the profile in front, whose tab ids count
+                    // from zero like every other's: after a switch they would
+                    // reach another connection's tab of the same id. The page
+                    // held back is still `Idle`, which a visit to the tab runs.
+                    let in_front = workspace.profile().is_some_and(|profile| {
+                        profile.id == profile_id && profile.generation == generation
+                    });
+                    if !in_front {
+                        return;
+                    }
                     // The rows and the structure are two requests and either can
                     // land last, so both sides mark.
                     workspace.mark_columns(id, cx);
                     // The page `requery_relation` held back for this key.
-                    if waited && workspace.engine().pages_by_key() {
+                    if waited && pages_by_key {
                         workspace.requery_relation(id, |_, _, _, _| true, cx);
                     }
                 })
                 .ok();
         })
         .detach();
+    }
+
+    /// Run `work` on the connection `routed` names, on the blocking pool. A
+    /// database with no session open has one opened there first, and kept
+    /// where the connections tree and later reads find it
+    /// ([`Workspace::keep_session`]) before `work` sends anything on it.
+    /// `work` is told whether it runs on a session shared with other tabs,
+    /// which a Cancel must reach only while it holds.
+    pub(crate) fn run_routed<T: Send + 'static>(
+        &mut self,
+        id: &str,
+        generation: u64,
+        routed: Routed,
+        work: impl FnOnce(Connection) -> Result<T, DbError> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) -> gpui::Task<Result<T, DbError>> {
+        let opens = match &routed {
+            Routed::Open {
+                database,
+                read_only,
+                ..
+            } => Some((database.clone(), *read_only)),
+            _ => None,
+        };
+        // The session already open, to take out if the read finds it lost.
+        let bound = routed.bound();
+        let id = id.to_string();
+        cx.spawn(async move |workspace, cx| {
+            let resolved = match opens {
+                Some(_) => spawn_blocking(cx.background_executor(), move || routed.resolve()).await,
+                None => routed.resolve(),
+            };
+            let (connection, _) = resolved?;
+            let (connection, bound) = match opens {
+                Some((database, held)) => {
+                    let session = workspace
+                        .update(cx, |workspace, cx| {
+                            workspace.keep_session(&id, generation, database, held, connection, cx)
+                        })
+                        .map_err(|_| DbError {
+                            message: "The window is closing.".into(),
+                            position: None,
+                        })?
+                        .ok_or_else(|| DbError {
+                            message: Self::SESSION_OUTLIVED.into(),
+                            position: None,
+                        })?;
+                    (session.connection.clone(), Some(session))
+                }
+                None => (connection, bound),
+            };
+            let (result, lost) = spawn_blocking(cx.background_executor(), move || {
+                let result = work(connection.clone());
+                let lost = result.is_err() && connection.is_lost();
+                (result, lost)
+            })
+            .await;
+            // A session of another database found lost is taken out, as a
+            // run's is, so the next read opens another rather than failing on
+            // the closed one. A replacement registered since is left alone.
+            if lost && let Some(bound) = bound {
+                _ = workspace.update(cx, |workspace, _| {
+                    if let Some(profile) = workspace.issued_to(&id, generation) {
+                        profile.bound.retain(|_, open| {
+                            !matches!(open, BoundSession::Open(open) if Arc::ptr_eq(open, &bound))
+                        });
+                    }
+                });
+            }
+            result
+        })
     }
 
     /// Tell a relation tab's grid what its structure says about its columns:
@@ -769,6 +1542,7 @@ impl Workspace {
         let Some(tab) = profile.session.active_object() else {
             return;
         };
+        let database = tab.database.clone();
         let ObjectBody::Relation {
             structure: StructureState::Loaded(structure),
             results,
@@ -803,13 +1577,14 @@ impl Workspace {
                 .settings
                 .row_limit
                 .unwrap_or(explorer::PREVIEW_ROW_LIMIT);
+            let binding = profile.binding_of(profile.session.active);
             let opened = grid.active().and_then(|(row, _)| {
                 explorer::open_row_sql(engine, rows, |column| {
                     grid.cell(row, grid.column_named(column)?)
                 })
             });
             match opened {
-                Some(statement) => self.run_in_new_query(statement, rows, window, cx),
+                Some(statement) => self.run_in_new_query(statement, binding, rows, window, cx),
                 None => self.note("There is no read for this row's type.".into(), cx),
             }
             return;
@@ -832,13 +1607,12 @@ impl Workspace {
         let filter = derived_filter(engine, &filters, &columns);
         // The catalog is the only authority on what the referenced relation is;
         // a default is what a tab opened before it loaded would have worn too.
-        let kind = match &profile.catalog {
-            CatalogState::Loaded(catalog, _) => {
+        let kind = profile
+            .catalog_of(database.as_deref())
+            .and_then(|catalog| {
                 relation_kind(catalog, &key.referenced_schema, &key.referenced_table)
-                    .unwrap_or_default()
-            }
-            _ => RelationKind::default(),
-        };
+            })
+            .unwrap_or_default();
         let opened = OpenedObject::Relation {
             schema: key.referenced_schema,
             name: key.referenced_table,
@@ -847,7 +1621,7 @@ impl Workspace {
             filters,
         };
 
-        if let Some(id) = self.open_object(opened, window, cx) {
+        if let Some(id) = self.open_object(opened, database, window, cx) {
             self.activate_tab(Tab::Object(id), window, cx);
             self.remember_profiles(cx);
         }
@@ -915,13 +1689,14 @@ impl Workspace {
         let Some(profile) = self.profile() else {
             return;
         };
-        let Some(connection) = profile.connection() else {
-            return;
-        };
-        let (profile_id, generation) = (profile.id.clone(), profile.generation);
         let Some(tab) = profile.session.active_object() else {
             return;
         };
+        let routed = profile.connection_for(Tab::Object(tab.id));
+        if !routed.is_available() {
+            return;
+        }
+        let (profile_id, generation) = (profile.id.clone(), profile.generation);
         let ObjectBody::Relation {
             structure: StructureState::Loaded(structure),
             results,
@@ -976,28 +1751,47 @@ impl Workspace {
         });
         cx.notify();
 
-        let task = spawn_blocking(cx.background_executor(), move || {
-            reference_answers(
-                candidates
-                    .into_iter()
-                    .map(|(index, label, sql)| {
-                        let answer = match sql {
-                            Some(sql) => connection
-                                .generated(&sql, &CancelToken::default(), None, None)
-                                .map(|result| !result.rows.is_empty())
-                                .map_err(|error| error.message),
-                            None => Err(
-                                "dbdelve will not run a check it cannot read as a single read."
-                                    .into(),
-                            ),
-                        };
-                        (index, label, answer)
-                    })
-                    .collect(),
-            )
-        });
+        let labels: Vec<_> = candidates
+            .iter()
+            .map(|(index, label, _)| (*index, label.clone()))
+            .collect();
+        let task = self.run_routed(
+            &profile_id,
+            generation,
+            routed,
+            move |connection| {
+                Ok(reference_answers(
+                    candidates
+                        .into_iter()
+                        .map(|(index, label, sql)| {
+                            let answer = match sql {
+                                Some(sql) => connection
+                                    .generated(&sql, &CancelToken::default(), None, None)
+                                    .map(|result| !result.rows.is_empty())
+                                    .map_err(|error| error.message),
+                                None => Err("dbdelve will not run a check it cannot read as a \
+                                     single read."
+                                    .into()),
+                            };
+                            (index, label, answer)
+                        })
+                        .collect(),
+                ))
+            },
+            cx,
+        );
         cx.spawn_in(window, async move |workspace, cx| {
-            let found = task.await;
+            // A session that would not open fails every check, each with the
+            // open's own words.
+            let found = match task.await {
+                Ok(found) => found,
+                Err(error) => reference_answers(
+                    labels
+                        .into_iter()
+                        .map(|(index, label)| (index, label, Err(error.message.clone())))
+                        .collect(),
+                ),
+            };
             _ = workspace.update_in(cx, |workspace, window, cx| {
                 if workspace.issued_to(&profile_id, generation).is_none() {
                     return;
@@ -1054,6 +1848,7 @@ impl Workspace {
         let Some(tab) = profile.session.active_object() else {
             return;
         };
+        let database = tab.database.clone();
         let ObjectBody::Relation {
             structure: StructureState::Loaded(structure),
             results,
@@ -1092,12 +1887,10 @@ impl Workspace {
             .collect();
         let filters = vec![bar];
         let filter = derived_filter(engine, &filters, &columns);
-        let kind = match &profile.catalog {
-            CatalogState::Loaded(catalog, _) => {
-                relation_kind(catalog, &reference.schema, &reference.table).unwrap_or_default()
-            }
-            _ => RelationKind::default(),
-        };
+        let kind = profile
+            .catalog_of(database.as_deref())
+            .and_then(|catalog| relation_kind(catalog, &reference.schema, &reference.table))
+            .unwrap_or_default();
         let opened = OpenedObject::Relation {
             schema: reference.schema,
             name: reference.table,
@@ -1106,7 +1899,7 @@ impl Workspace {
             filters,
         };
 
-        if let Some(id) = self.open_object(opened, window, cx) {
+        if let Some(id) = self.open_object(opened, database, window, cx) {
             self.activate_tab(Tab::Object(id), window, cx);
             self.remember_profiles(cx);
         }
@@ -1114,8 +1907,13 @@ impl Workspace {
 
     /// Open a relation's rows or its structure, or bring forward the tab
     /// already showing them. The rows open unfiltered.
+    // The relation's identity is its database, schema and name, with the kind
+    // and which view: a struct for these would be a type three call sites pass
+    // through and nothing else reads.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn open_relation_view(
         &mut self,
+        database: Option<String>,
         schema: String,
         name: String,
         kind: RelationKind,
@@ -1123,6 +1921,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<u64> {
+        let database = self.elsewhere(database);
         let opened = match structure {
             true => OpenedObject::Structure {
                 schema,
@@ -1138,7 +1937,7 @@ impl Workspace {
                 filters: Vec::new(),
             },
         };
-        let id = self.open_object(opened, window, cx)?;
+        let id = self.open_object(opened, database, window, cx)?;
         self.activate_tab(Tab::Object(id), window, cx);
         self.remember_profiles(cx);
         Some(id)
@@ -1181,9 +1980,9 @@ impl Workspace {
             ObjectBody::Relation { .. } if structure => Some(tab.filter().to_string()),
             _ => return,
         };
-        let (schema, name) = (tab.schema.clone(), tab.name.clone());
+        let (database, schema, name) = (tab.database.clone(), tab.schema.clone(), tab.name.clone());
         if structure {
-            let id = self.open_relation_view(schema, name, kind, true, window, cx);
+            let id = self.open_relation_view(database, schema, name, kind, true, window, cx);
             let tab = id.and_then(|id| {
                 let profile = self.profile_mut()?;
                 profile.session.objects.iter_mut().find(|tab| tab.id == id)
@@ -1203,6 +2002,7 @@ impl Workspace {
             let rows = || {
                 profile.session.objects.iter().filter(|tab| {
                     matches!(tab.body, ObjectBody::Relation { .. })
+                        && tab.database == database
                         && tab.schema == schema
                         && tab.name == name
                 })
@@ -1215,7 +2015,7 @@ impl Workspace {
         match data {
             Some(id) => self.activate_tab(Tab::Object(id), window, cx),
             None => {
-                self.open_relation_view(schema, name, kind, false, window, cx);
+                self.open_relation_view(database, schema, name, kind, false, window, cx);
             }
         }
     }
@@ -1380,7 +2180,12 @@ impl Workspace {
                 else {
                     return;
                 };
-                let key = store::object_grid_key(&object.schema, &object.name, object.filter());
+                let key = store::object_grid_key_in(
+                    object.database.as_deref(),
+                    &object.schema,
+                    &object.name,
+                    object.filter(),
+                );
                 let ObjectBody::Relation {
                     query, hydrated, ..
                 } = &mut object.body
@@ -1616,7 +2421,14 @@ impl Workspace {
                 .objects
                 .iter()
                 .find(|tab| tab.id == id && matches!(tab.body, ObjectBody::Relation { .. }))
-                .map(|tab| store::object_grid_key(&tab.schema, &tab.name, tab.filter()));
+                .map(|tab| {
+                    store::object_grid_key_in(
+                        tab.database.as_deref(),
+                        &tab.schema,
+                        &tab.name,
+                        tab.filter(),
+                    )
+                });
             let profile_id = profile.id.clone();
             profile.session.objects.retain(|tab| tab.id != id);
             profile.session.structure_requests.remove(&id);
@@ -1647,12 +2459,23 @@ impl Workspace {
         if pending == 0 {
             return;
         }
-        let (opened, still_pending) = restorable(
-            profile.config.engine(),
-            profile.draws_diagrams(),
-            &profile.catalog,
-            &profile.session.pending_objects,
-        );
+        // Resolved one at a time, in stored order: each against the catalog
+        // of its own database, which for another one may be a while coming.
+        let mut opened = Vec::new();
+        let mut still_pending = Vec::new();
+        for stored in &profile.session.pending_objects {
+            let (got, waiting) = restorable(
+                profile.config.engine(),
+                profile.draws_diagrams(),
+                profile.catalog_state_of(stored.database.as_deref()),
+                std::slice::from_ref(stored),
+            );
+            opened.extend(
+                got.into_iter()
+                    .map(|(object, active)| (object, active, stored.database.clone())),
+            );
+            still_pending.extend(waiting);
+        }
         // Called on every frame, so a pass that could do nothing has to change
         // nothing: rewriting the profile here would write to disk per frame.
         if opened.is_empty() && still_pending.len() == pending {
@@ -1663,9 +2486,9 @@ impl Workspace {
             profile.session.pending_objects = still_pending;
         }
         let mut restored_active = None;
-        for (opened, active) in opened {
+        for (opened, active, database) in opened {
             let id = match opened {
-                Reopened::Object(opened) => self.open_object(opened, window, cx),
+                Reopened::Object(opened) => self.open_object(opened, database, window, cx),
                 Reopened::Diagram(schema, view) => self.diagram_tab(schema, Some(view), window, cx),
             };
             if active {
@@ -1693,6 +2516,55 @@ impl Workspace {
 enum Reopened {
     Object(OpenedObject),
     Diagram(String, store::StoredDiagram),
+}
+
+/// The catalog `profile` has read for `database`: its own for `None` or its
+/// own database's name, another database's from the session opened on it.
+pub(crate) fn catalog_in<'a>(profile: &'a Profile, database: Option<&str>) -> Option<&'a Catalog> {
+    let state = match database {
+        Some(database) if profile.active_database().as_deref() != Some(database) => {
+            profile.database_catalogs.get(database)?
+        }
+        _ => &profile.catalog,
+    };
+    match state {
+        CatalogState::Loaded(catalog, _) => Some(catalog),
+        _ => None,
+    }
+}
+
+/// The object `target` names in `catalog`, ready to open.
+fn opened_from(catalog: &Catalog, target: ExplorerTarget) -> Option<OpenedObject> {
+    match target {
+        ExplorerTarget::Relation {
+            schema_index,
+            relation_index,
+        } => {
+            let schema = catalog.schemas.get(schema_index)?;
+            let relation = schema.relations.get(relation_index)?;
+            Some(OpenedObject::Relation {
+                schema: schema.name.clone(),
+                name: relation.name.clone(),
+                kind: relation.kind,
+                // A click in the explorer opens the whole relation.
+                filter: String::new(),
+                filters: Vec::new(),
+            })
+        }
+        ExplorerTarget::Routine {
+            schema_index,
+            routine_index,
+        } => {
+            let schema = catalog.schemas.get(schema_index)?;
+            let routine = schema.routines.get(routine_index)?;
+            Some(OpenedObject::Routine {
+                schema: schema.name.clone(),
+                routine: routine.clone(),
+            })
+        }
+        // A sequence is listed and nothing more: it has no tab to open (D-24).
+        ExplorerTarget::Sequence { .. } => None,
+    }
 }
 
 /// Split the stored tabs into those that can open now and those still waiting.
@@ -1854,6 +2726,7 @@ mod tests {
 
     fn stored(name: &str, routine: bool) -> store::StoredObject {
         store::StoredObject {
+            database: None,
             schema: "public".into(),
             name: name.into(),
             routine,
@@ -1961,6 +2834,7 @@ mod tests {
                         Routines::Loaded => vec![digest],
                         _ => Vec::new(),
                     },
+                    sequences: Vec::new(),
                 }],
                 database: None,
             },
@@ -1996,6 +2870,7 @@ mod tests {
     fn a_stored_structure_tab_comes_back_as_a_structure_tab() {
         let pending = [
             store::StoredObject {
+                database: None,
                 structure: true,
                 ..stored("accounts", false)
             },
@@ -2017,6 +2892,7 @@ mod tests {
     #[test]
     fn a_stored_relation_opens_before_the_connection_and_the_catalog() {
         let pending = [store::StoredObject {
+            database: None,
             active: true,
             ..stored("accounts", false)
         }];

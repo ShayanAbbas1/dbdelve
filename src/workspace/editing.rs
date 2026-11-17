@@ -652,6 +652,7 @@ impl Workspace {
         let tab_id = tab.id;
         let editor = tab.editor.clone();
         let (in_turn, mode) = (profile.in_turn(), profile.mode);
+        let bound = profile.session.is_bound(Tab::Query(tab_id));
         // A header click refuses this itself; the sorting chips come here
         // without asking.
         let running = profile.session.running(Tab::Query(tab_id));
@@ -761,6 +762,12 @@ impl Workspace {
                     "Only the last result can be sorted by the server while this connection \
                      has a transaction open or changed session settings. Use Client sorting \
                      for this one.",
+                ),
+                // A lane runs on the profile's own connection, which is not
+                // the database the tab is bound to.
+                None if bound => Some(
+                    "Only the last result can be sorted by the server in a tab bound to a \
+                     database. Use Client sorting for this one.",
                 ),
                 None if !session::runs_at_once(engine, mode, &[&sorted]) => Some(
                     "Only the last result can be sorted by the server unless its statement \

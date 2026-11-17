@@ -39,8 +39,8 @@ use crate::sql::Projected;
 use super::{
     Catalog, Column, Databases, DbError, EditTarget, Engine, Fetch, QueryResult, Reference,
     RowBuilder, SchemaGraph, Stopped, Structure, Unpicked, assemble_catalog, assemble_foreign_keys,
-    assemble_references, assemble_schema_graph, assemble_structure, plain_error, required_cell,
-    terminated,
+    assemble_references, assemble_schema_graph, assemble_sequences, assemble_structure,
+    plain_error, required_cell, terminated,
 };
 
 // Workaround for duckdb-rs#920, fixed upstream by #923 but unreleased past
@@ -94,6 +94,13 @@ pub struct Connection {
     /// The database and schema a connection of this instance starts on.
     home: Arc<(String, String)>,
     unpicked: Option<Unpicked>,
+    /// Opened by [`Self::on_database`] for the tabs bound to its database,
+    /// which share it. A `USE` of one moves it for all, so what dbdelve reads
+    /// over it for those tabs (a definition, a structure, a catalog) puts it
+    /// back on its database first. The connection of the profile is never
+    /// held: there a `USE` of the user's is meant to stay, and the catalog
+    /// follows it.
+    held: bool,
 }
 
 /// The database and schema unqualified names resolve in, None for where the
@@ -154,6 +161,7 @@ impl Connection {
             pick: Arc::default(),
             home: Arc::new(home),
             unpicked: None,
+            held: false,
         })
     }
 
@@ -216,6 +224,32 @@ impl Connection {
         })
     }
 
+    /// A session on `database` of this instance, for the (connection,
+    /// database) pair: opened from the instance as [`Self::alongside`] is,
+    /// but with a `pick` of its own, which `alongside` shares with the
+    /// connection it came from, so moving either never moves the other. It
+    /// starts on the database with no schema picked, through the same `USE`
+    /// every move makes. It carries no read-only hold; there is none to take
+    /// on DuckDB, whose gate is the boundary.
+    pub fn on_database(&self, database: &str) -> Result<Self, DbError> {
+        let connection = lock(&self.origin)?
+            .try_clone()
+            .map_err(|error| plain_error(error.to_string()))?;
+        let pick = Pick {
+            database: Some(database.to_string()),
+            schema: None,
+        };
+        self.go(&connection, &pick)?;
+        Ok(Self {
+            interrupt: connection.interrupt_handle(),
+            connection: Arc::new(Mutex::new(connection)),
+            pick: Arc::new(Mutex::new(pick)),
+            unpicked: None,
+            held: true,
+            ..self.clone()
+        })
+    }
+
     fn pick(&self) -> std::sync::MutexGuard<'_, Pick> {
         self.pick
             .lock()
@@ -244,6 +278,24 @@ impl Connection {
         // take it out of order both apply the later one.
         let pick = self.pick().clone();
         self.go(&connection, &pick)
+    }
+
+    /// A session opened for a database back on it, and on `schema` of it (its
+    /// own default when `None`), through the same `USE` every move makes.
+    /// `connection` is held by the caller, so the statement that follows runs
+    /// where this left it, and the pick is read once it is, as
+    /// [`Self::apply_pick`] reads it. Failing is the caller's statement not
+    /// being sent.
+    fn put_back(
+        &self,
+        connection: &duckdb::Connection,
+        schema: Option<&str>,
+    ) -> Result<(), DbError> {
+        let pick = Pick {
+            database: self.pick().database.clone(),
+            schema: schema.map(str::to_string),
+        };
+        self.go(connection, &pick).map_err(super::unplaced)
     }
 
     fn go_here(&self, pick: &Pick) -> Result<(), DbError> {
@@ -339,11 +391,43 @@ impl Connection {
     /// prepares it, and the last one streams: its rows arrive a batch at a
     /// time, so a read is stopped past the limit by fetching no further.
     pub fn query(&self, sql: &str, fetch: Fetch) -> Result<QueryResult, DbError> {
+        self.submit(sql, fetch, None)
+    }
+
+    /// [`Self::query`] for a tab bound to this session's database: the
+    /// database the session was opened on, and `schema` of it (the database's
+    /// own default when `None`), are put back with the same `USE` every move
+    /// makes before the statement, under the lock that runs it. A statement
+    /// of another tab, or one of the user's own, may have moved the session
+    /// since, and two tabs bound to different schemas of one database share
+    /// it, so applying and running as two acquisitions would let one run in
+    /// the other's schema. The pick the connection keeps for sessions opened
+    /// from it is never written.
+    pub fn query_bound(
+        &self,
+        schema: Option<&str>,
+        sql: &str,
+        fetch: Fetch,
+    ) -> Result<QueryResult, DbError> {
+        self.submit(sql, fetch, Some(schema))
+    }
+
+    /// `bound` is the schema to put the session back on first, itself `None`
+    /// for the database's default, when the run is a bound tab's.
+    fn submit(
+        &self,
+        sql: &str,
+        fetch: Fetch,
+        bound: Option<Option<&str>>,
+    ) -> Result<QueryResult, DbError> {
         // Armed before the lock, so time queued behind another statement on
         // this connection counts against the limit too.
         let _deadline = self.deadline();
         let connection = lock(&self.connection)?;
-        fetch.hold()?;
+        let _held = fetch.hold()?;
+        if let Some(schema) = bound {
+            self.put_back(&connection, schema)?;
+        }
         let mut result =
             run(&connection, sql, fetch).map_err(|error| rolled_back(&connection, sql, error))?;
         if !result.columns.is_empty() {
@@ -356,6 +440,9 @@ impl Connection {
     fn internal_query(&self, sql: &str) -> Result<QueryResult, DbError> {
         let _deadline = self.deadline();
         let connection = lock(&self.connection)?;
+        if self.held {
+            self.put_back(&connection, None)?;
+        }
         run(&connection, sql, Fetch::default())
             .map_err(|error| rolled_back(&connection, sql, error))
     }
@@ -366,6 +453,9 @@ impl Connection {
     pub fn catalog(&self) -> Result<Catalog, DbError> {
         let _deadline = self.deadline();
         let connection = lock(&self.connection)?;
+        if self.held {
+            self.put_back(&connection, None)?;
+        }
         // Both under the one lock, so no statement moves the connection
         // between the database named and the objects listed.
         let read = |sql: &str| {
@@ -402,6 +492,63 @@ impl Connection {
     /// show the way a routine tab does; none are listed.
     pub fn routines(&self) -> Result<Catalog, DbError> {
         Ok(Catalog::default())
+    }
+
+    /// The sequences of the database the connection is on, as a catalog holding
+    /// nothing else, for [`Catalog::join_sequences`]. The same database
+    /// [`Self::catalog`] reads, and the temporary ones left out as it leaves
+    /// out the internal tables.
+    ///
+    /// Read apart from the catalog, so a `USE` between the two would list
+    /// another database's: each row names the database it was read in, which
+    /// [`Catalog::merge`] holds against the catalog's.
+    pub fn sequences(&self) -> Result<Catalog, DbError> {
+        let result = self.internal_query(
+            "SELECT database_name, schema_name, sequence_name FROM duckdb_sequences()
+             WHERE NOT temporary AND database_name = current_database()
+             ORDER BY 2, 3",
+        )?;
+        let database = match result.rows.first() {
+            Some(row) => Some(required_cell(&result, row, "database_name")?.to_string()),
+            None => None,
+        };
+        Ok(Catalog {
+            database,
+            ..assemble_sequences(result)?
+        })
+    }
+
+    /// The CREATE statement of `schema.name`, in the database the connection
+    /// is on, composed from the sequence's definition. `duckdb_sequences().sql`
+    /// is not used: it writes `START` as the counter's current value, so each
+    /// `nextval` would change the statement and the read would disclose it.
+    pub fn sequence_ddl(&self, schema: &str, name: &str) -> Result<String, DbError> {
+        let listed = self.internal_query(&format!(
+            "SELECT increment_by::VARCHAR AS increment_by, min_value::VARCHAR AS min_value,
+                        max_value::VARCHAR AS max_value, start_value::VARCHAR AS start_value,
+                        CASE WHEN cycle THEN 'CYCLE' ELSE 'NO CYCLE' END AS cycle
+                 FROM duckdb_sequences()
+                 WHERE NOT temporary AND database_name = current_database()
+                   AND schema_name = {} AND sequence_name = {}",
+            Engine::DuckDb.quote_literal(schema),
+            Engine::DuckDb.quote_literal(name),
+        ))?;
+        let row = listed
+            .rows
+            .first()
+            .ok_or_else(|| plain_error(format!("{schema} has no sequence {name}.")))?;
+        let cell = |column| required_cell(&listed, row, column);
+        Ok(compose_sequence(
+            schema,
+            name,
+            [
+                cell("increment_by")?,
+                cell("min_value")?,
+                cell("max_value")?,
+                cell("start_value")?,
+            ],
+            cell("cycle")?,
+        ))
     }
 
     pub fn structure(&self, schema: &str, relation: &str) -> Result<Structure, DbError> {
@@ -603,6 +750,18 @@ impl Connection {
         }
         Ok(statements.join("\n"))
     }
+}
+
+/// `CREATE SEQUENCE` for `schema.name`, every name quoted. `numbers` are
+/// increment, minimum, maximum and start, as the server prints them; `cycle`
+/// is `CYCLE` or `NO CYCLE`.
+fn compose_sequence(schema: &str, name: &str, numbers: [&str; 4], cycle: &str) -> String {
+    let [increment, minimum, maximum, start] = numbers;
+    format!(
+        "CREATE SEQUENCE {} INCREMENT BY {increment} MINVALUE {minimum} MAXVALUE {maximum} \
+         START {start} {cycle};",
+        Engine::DuckDb.qualified(schema, name)
+    )
 }
 
 /// Arrow's export of a DuckDB type it has no type of its own for: tagged
@@ -1336,6 +1495,155 @@ mod tests {
             connection.query(setup, Fetch::default()).expect("setup");
         }
         connection
+    }
+
+    #[test]
+    fn a_sequences_ddl_is_its_create_statement() {
+        let connection = memory("CREATE SEQUENCE ticket START 5 INCREMENT 2;");
+        let ddl = connection
+            .sequence_ddl("main", "ticket")
+            .expect("the definition is read");
+        assert!(ddl.starts_with("CREATE SEQUENCE"), "{ddl}");
+        assert!(ddl.contains("ticket"), "{ddl}");
+        assert!(ddl.contains("START 5"), "{ddl}");
+        assert!(ddl.contains("INCREMENT BY 2"), "{ddl}");
+    }
+
+    #[test]
+    fn a_sequences_ddl_does_not_move_with_its_counter() {
+        let connection = memory("CREATE SEQUENCE ticket START 5 INCREMENT 2;");
+        let before = connection.sequence_ddl("main", "ticket").unwrap();
+        connection
+            .query(
+                "SELECT nextval('ticket'); SELECT nextval('ticket');",
+                Fetch::default(),
+            )
+            .expect("the counter moves");
+        assert_eq!(
+            connection.sequence_ddl("main", "ticket").unwrap(),
+            before,
+            "the definition carries no current value"
+        );
+    }
+
+    #[test]
+    fn a_composed_sequence_quotes_names_whatever_they_hold() {
+        assert_eq!(
+            compose_sequence(
+                "we \"ird\"",
+                "t\u{ef}cket no",
+                ["-3", "-9", "-1", "-1"],
+                "CYCLE"
+            ),
+            "CREATE SEQUENCE \"we \"\"ird\"\"\".\"t\u{ef}cket no\" INCREMENT BY -3 MINVALUE -9 \
+             MAXVALUE -1 START -1 CYCLE;"
+        );
+    }
+
+    #[test]
+    fn a_composed_sequence_recreates_it() {
+        let setup = "CREATE SCHEMA \"we \"\"ird\"\"\"; \
+                     CREATE SEQUENCE \"we \"\"ird\"\"\".\"t\u{ef}cket no\" \
+                     START 7 INCREMENT 3 MAXVALUE 100 CYCLE;";
+        let connection = memory(setup);
+        let ddl = connection
+            .sequence_ddl("we \"ird\"", "t\u{ef}cket no")
+            .expect("the definition is read");
+        connection
+            .query(
+                "DROP SEQUENCE \"we \"\"ird\"\"\".\"t\u{ef}cket no\"",
+                Fetch::default(),
+            )
+            .expect("dropped");
+        connection.query(&ddl, Fetch::default()).expect(&ddl);
+        assert_eq!(
+            connection
+                .sequence_ddl("we \"ird\"", "t\u{ef}cket no")
+                .unwrap(),
+            ddl,
+            "the statement names the sequence it was read from and defines it the same"
+        );
+    }
+
+    #[test]
+    fn a_missing_sequence_has_no_definition() {
+        let connection = memory("");
+        let error = connection
+            .sequence_ddl("main", "nope")
+            .expect_err("there is none");
+        assert!(error.message.contains("nope"), "{}", error.message);
+    }
+
+    fn sequences_by_schema(catalog: &Catalog) -> Vec<(&str, Vec<&str>)> {
+        catalog
+            .schemas
+            .iter()
+            .filter(|schema| !schema.sequences.is_empty())
+            .map(|schema| {
+                let names = schema.sequences.iter().map(String::as_str).collect();
+                (schema.name.as_str(), names)
+            })
+            .collect()
+    }
+
+    const WITH_SEQUENCES: &str = "CREATE TABLE t (id INTEGER); CREATE SEQUENCE s; \
+                                  CREATE SCHEMA other; CREATE SEQUENCE other.n;";
+
+    #[test]
+    fn a_sequence_lands_in_the_second_half_of_the_catalog() {
+        let connection = memory(WITH_SEQUENCES);
+        let wanted = vec![("main", vec!["s"]), ("other", vec!["n"])];
+
+        let read = connection.sequences().expect("the sequences are read");
+        assert_eq!(sequences_by_schema(&read), wanted);
+
+        let connection = crate::db::Connection::DuckDb(connection);
+        let second = connection.routines().expect("the second half is read");
+        assert_eq!(sequences_by_schema(&second), wanted);
+
+        let mut screen = connection.catalog().expect("the first half is read");
+        screen.merge(second);
+        assert_eq!(sequences_by_schema(&screen), wanted);
+        let main = &screen.schemas[0];
+        assert_eq!(main.name, "main");
+        assert_eq!(main.relations.len(), 1);
+        assert_eq!(main.relations[0].name, "t");
+        // Only sequences in it, so the second half brings it in, last.
+        assert_eq!(
+            screen.schemas.last().map(|s| s.name.as_str()),
+            Some("other")
+        );
+    }
+
+    #[test]
+    fn the_first_half_of_the_catalog_lists_no_sequences() {
+        let connection = memory(WITH_SEQUENCES);
+        let first = connection.catalog().expect("the first half is read");
+        assert!(sequences_by_schema(&first).is_empty());
+    }
+
+    #[test]
+    fn sequences_read_after_a_use_are_not_merged_into_the_first_databases_catalog() {
+        let connection = memory(WITH_SEQUENCES);
+        connection
+            .query(
+                "ATTACH ':memory:' AS b; CREATE SEQUENCE b.main.elsewhere",
+                Fetch::default(),
+            )
+            .expect("attached");
+        let mut screen = connection.catalog().expect("the first half is read");
+        connection.query("USE b", Fetch::default()).expect("moved");
+        let second = crate::db::Connection::DuckDb(connection)
+            .routines()
+            .expect("the second half is read");
+        assert_eq!(second.database.as_deref(), Some("b"));
+
+        screen.merge(second);
+        assert!(
+            sequences_by_schema(&screen).is_empty(),
+            "b's are not listed"
+        );
+        assert_eq!(screen.schemas.len(), 1, "nor a schema that held only them");
     }
 
     fn cells(result: &QueryResult) -> Vec<Vec<Option<&str>>> {
@@ -2411,6 +2719,168 @@ mod tests {
         // it sees one made on another.
         let beside = connection.alongside().unwrap();
         assert_eq!(beside.databases().unwrap().names, ["memory", "other"]);
+    }
+
+    #[test]
+    fn a_session_on_another_database_leaves_the_first_where_it_was() {
+        let connection = memory("ATTACH ':memory:' AS other");
+        let session = connection.on_database("other").unwrap();
+        assert_eq!(at(&session), on("other", "main"));
+        assert_eq!(at(&connection), on("memory", "main"));
+        // The pick is the session's own: a schema picked on the first would
+        // otherwise land on the second when it is next applied.
+        connection.set_schema(Some("x"));
+        session.apply_pick().unwrap();
+        assert_eq!(at(&session), on("other", "main"));
+        // And the other way: moving the session's pick leaves the first's.
+        session.set_database(Some("memory"));
+        connection.set_schema(None);
+        connection.apply_pick().unwrap();
+        assert_eq!(at(&connection), on("memory", "main"));
+        // The database it names has to be there.
+        assert!(connection.on_database("gone").is_err());
+    }
+
+    /// The one cell a statement answers, as text.
+    fn cell(result: Result<QueryResult, DbError>) -> Option<String> {
+        let result = result.unwrap();
+        result.rows[0].get(0).map(str::to_string)
+    }
+
+    #[test]
+    fn a_bound_run_puts_its_database_and_schema_back_first() {
+        let connection =
+            memory("ATTACH ':memory:' AS other; CREATE SCHEMA other.s1; CREATE SCHEMA other.s2;");
+        let session = connection.on_database("other").unwrap();
+        assert_eq!(
+            cell(session.query_bound(Some("s1"), "SELECT current_schema()", Fetch::default())),
+            Some("s1".into())
+        );
+        // A statement of the user's moved it away, as a `USE` in a tab would.
+        session.query("USE memory", Fetch::default()).unwrap();
+        assert_eq!(
+            cell(session.query_bound(
+                Some("s1"),
+                "SELECT current_database() || '.' || current_schema()",
+                Fetch::default()
+            )),
+            Some("other.s1".into())
+        );
+        assert_eq!(
+            cell(session.query_bound(None, "SELECT current_schema()", Fetch::default())),
+            Some("main".into()),
+            "no schema is where the database starts"
+        );
+        // Neither run moved the connection it was opened from.
+        assert_eq!(at(&connection), on("memory", "main"));
+    }
+
+    #[test]
+    fn a_bound_run_reaches_a_database_whatever_its_name_holds() {
+        let connection = memory(r#"ATTACH ':memory:' AS "odd ""name""""#);
+        let session = connection.on_database(r#"odd "name""#).unwrap();
+        assert_eq!(
+            cell(session.query_bound(None, "SELECT current_database()", Fetch::default())),
+            Some(r#"odd "name""#.into())
+        );
+    }
+
+    #[test]
+    fn a_cancel_asked_before_a_bound_statement_holds_its_session_drops_it_unsent() {
+        let session = crate::db::Connection::DuckDb(memory("CREATE TABLE t (n INTEGER)"));
+        let cancel = crate::db::CancelToken::alongside();
+        session.cancel(&cancel).unwrap();
+        let error = session
+            .query_bound(None, "INSERT INTO t VALUES (1)", &cancel, Fetch::default())
+            .unwrap_err();
+        assert_eq!(error.message, "Cancelled before it was sent.");
+        let rows = session
+            .query(
+                "SELECT count(*) FROM t",
+                &crate::db::CancelToken::default(),
+                Fetch::default(),
+            )
+            .unwrap();
+        assert_eq!(rows.rows[0].get(0), Some("0"), "nothing was sent");
+    }
+
+    /// A COMMIT or ROLLBACK of a bound tab goes without the binding, and a
+    /// Cancel asked while it waits for the session stops it all the same.
+    #[test]
+    fn a_cancel_asked_before_an_unplaced_statement_holds_its_session_drops_it_unsent() {
+        let session = crate::db::Connection::DuckDb(memory("CREATE TABLE t (n INTEGER)"));
+        let cancel = crate::db::CancelToken::alongside();
+        session.cancel(&cancel).unwrap();
+        let error = session
+            .query_unplaced("INSERT INTO t VALUES (1)", &cancel, Fetch::default())
+            .unwrap_err();
+        assert_eq!(error.message, "Cancelled before it was sent.");
+    }
+
+    #[test]
+    fn a_bound_sessions_reads_are_of_its_database_after_a_use_moved_it() {
+        let connection = memory(
+            "CREATE TABLE t (id INTEGER);
+             ATTACH ':memory:' AS other;
+             CREATE TABLE other.t (id INTEGER, extra TEXT);
+             CREATE TABLE other.u (id INTEGER);
+             CREATE SEQUENCE other.counter;",
+        );
+        let session = connection.on_database("other").unwrap();
+        let moved = || session.query("USE memory", Fetch::default()).unwrap();
+        let columns = |structure: &Structure| {
+            structure
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect::<Vec<_>>()
+        };
+
+        moved();
+        assert_eq!(
+            columns(&session.structure("main", "t").unwrap()),
+            ["id", "extra"]
+        );
+        moved();
+        assert!(session.ddl("main", "t").unwrap().contains("extra"));
+        moved();
+        assert!(session.sequence_ddl("main", "counter").is_ok());
+        moved();
+        let read = session.catalog().unwrap();
+        assert_eq!(read.database.as_deref(), Some("other"));
+        assert!(
+            read.schemas
+                .iter()
+                .flat_map(|schema| &schema.relations)
+                .any(|relation| relation.name == "u"),
+            "`u` is in `other` alone"
+        );
+        moved();
+        let sequences = session.sequences().unwrap();
+        assert_eq!(sequences.schemas[0].sequences.len(), 1);
+
+        // The profile's own connection follows the user's `USE`: its
+        // catalog is the point of one.
+        connection.query("USE other", Fetch::default()).unwrap();
+        assert!(connection.ddl("main", "t").unwrap().contains("extra"));
+    }
+
+    #[test]
+    fn a_bound_run_that_cannot_put_its_schema_back_says_nothing_was_sent() {
+        let connection = memory("ATTACH ':memory:' AS other");
+        let session = connection.on_database("other").unwrap();
+        let error = session
+            .query_bound(Some("gone"), "SELECT 1", Fetch::default())
+            .unwrap_err();
+        assert!(
+            error.message.starts_with("The statement was not sent"),
+            "{}",
+            error.message
+        );
+        assert_eq!(
+            error.position, None,
+            "no byte of the user's text is at fault"
+        );
     }
 
     #[test]

@@ -30,12 +30,16 @@ impl Workspace {
         // The server-side backstop behind the gate this door already guards --
         // see `Connection::set_read_only`. `query` blocks on the connection
         // mutex, so it goes to the background executor rather than running
-        // here, same as `cancel_query` (queries.rs). Where
+        // here, same as `cancel_query` (queries.rs). It reaches every session
+        // the profile holds, not only its own connection: one opened for
+        // another database is as able to run a statement, and takes the hold
+        // from its first moment (`open_database`). Where
         // `Engine::holds_read_only`, a statement the gate cannot read may run
         // in Read-only on the strength of this hold, unasked once the user has
         // opted in, so `held` stays false until the latest one lands
         // (`HoldLine`). A connect under way has no connection here at all; its
         // landing checks the mode again (`begin_connect`).
+        let entering_read_only = mode == Mode::ReadOnly;
         let Some(profile) = self.profile() else {
             return;
         };
@@ -47,8 +51,12 @@ impl Workspace {
             profile.generation,
             profile.holds.clone(),
         );
+        // The sessions opened for other databases, each on a hold line of its
+        // own (`Bound::holds`).
+        let others = profile.sessions_to_hold();
+        #[cfg(test)]
+        self.held.push(others.len() + 1);
         let stamp = holds.stamp();
-        let entering_read_only = mode == Mode::ReadOnly;
         let read_only_task = spawn_blocking(cx.background_executor(), {
             let holds = holds.clone();
             move || holds.send(stamp, || connection.set_read_only(entering_read_only))
@@ -75,6 +83,23 @@ impl Workspace {
             });
         })
         .detach();
+
+        for session in others {
+            let stamp = session.holds.stamp();
+            let read_only_task = spawn_blocking(cx.background_executor(), move || {
+                session.holds.send(stamp, || {
+                    session.connection.set_read_only(entering_read_only)
+                })
+            });
+            cx.spawn(async move |workspace, cx| {
+                if let Err(error) = read_only_task.await
+                    && entering_read_only
+                {
+                    _ = workspace.update(cx, |workspace, cx| workspace.note(error.message, cx));
+                }
+            })
+            .detach();
+        }
     }
 
     /// Whether this connection may do `mode`-level work, raising the prompt
@@ -174,15 +199,21 @@ impl Workspace {
         cx.notify();
     }
 
-    /// `sql::gate` for a run on `profile`, with `Settings::run_unreadable`
-    /// applied where `session::skips_run_once` allows it: whether a prompt
-    /// goes up at all. A prompt already up re-derives with the plain gate.
+    /// `sql::gate` for a run of `tab` on `profile`, with
+    /// `Settings::run_unreadable` applied where `session::skips_run_once`
+    /// allows it: whether a prompt goes up at all. A prompt already up
+    /// re-derives with the plain gate.
     pub(crate) fn gate_run(
         &self,
         profile: &Profile,
+        tab: Tab,
         verdict: &sql::Verdict,
         own_run: bool,
     ) -> Option<Stop> {
+        // `held` is the profile's own connection's hold. A bound tab runs on
+        // the session of its database, whose hold lands on its own and is not
+        // tracked, so it is never counted as held there.
+        let held = profile.held && profile.binding_of(tab).is_none();
         sql::gate_own_run(
             verdict,
             profile.mode,
@@ -191,7 +222,7 @@ impl Workspace {
                 self.settings.run_unreadable,
                 own_run,
                 profile.mode,
-                profile.held,
+                held,
             ),
         )
     }
