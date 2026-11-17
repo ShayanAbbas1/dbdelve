@@ -3276,6 +3276,7 @@ impl Workspace {
                                                 if grid.rows_id() == *rows_id {
                                                     for (row, cells) in rows {
                                                         grid.clear_sent(*row, cells);
+                                                        grid.write_sent(*row, cells);
                                                     }
                                                 }
                                             }

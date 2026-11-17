@@ -2920,6 +2920,33 @@ impl ResultGrid {
         });
     }
 
+    /// Puts the cells of `row` a kept apply wrote into the row as sent: with
+    /// edits left, the rows are not read again, and a cell still showing its
+    /// old value would compare the next apply's re-read against it, and take
+    /// an edit back to that value for no edit at all ([`Self::holds`]).
+    // ponytail: a `DEFAULT` has no value to put here and shows the old one
+    // until the rows are read again; reading the row back is the upgrade.
+    pub fn write_sent(&mut self, row: usize, sent: &[(usize, NewValue)]) {
+        let texts: Vec<(usize, Option<String>)> = sent
+            .iter()
+            .filter_map(|(col, value)| match value {
+                NewValue::Value(text) => Some((*col, Some(text.to_string()))),
+                NewValue::Null => Some((*col, None)),
+                NewValue::Bytes(bytes) => {
+                    self.engine.bytes_text(bytes).map(|text| (*col, Some(text)))
+                }
+                NewValue::Default => None,
+            })
+            .collect();
+        let edits: Vec<(usize, Option<&str>)> = texts
+            .iter()
+            .map(|(col, text)| (*col, text.as_deref()))
+            .collect();
+        if let Some(held) = self.result.rows.get_mut(row) {
+            held.replace(&edits);
+        }
+    }
+
     /// Marks the cells of `row` in `sent` as out in a Row send, until
     /// [`Self::end_send`]. `Workspace::save_row` is the caller, once the send
     /// is running.

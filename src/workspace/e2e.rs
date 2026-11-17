@@ -12298,30 +12298,26 @@ fn an_edit_staged_while_an_apply_is_in_flight_stays_staged(cx: &mut TestAppConte
             );
         });
 
-        // The rows were not read again, so the grid still holds row 1 as it
-        // was before the first batch: the second apply finds the server's row
-        // is not the one it was written for, and sends nothing.
+        // The rows were not read again, but the sent cell holds what was
+        // sent: the grid shows it, and the second apply's re-read of row 1
+        // matches it, so the edits kept are applied rather than refused as
+        // drift the first apply caused.
+        assert_eq!(cell_of(&grid, cx, 0, 1).as_deref(), Some("robin"));
         cx.dispatch_action(crate::actions::ApplyEdits);
         settle(cx);
         workspace.update(cx, |workspace, cx| workspace.run_apply_review(cx));
         settle(cx);
+        assert_eq!(front_review(&workspace, cx), None);
         assert_eq!(
-            front_review(&workspace, cx),
-            Some((
-                "Apply edits",
-                true,
-                Some(
-                    "Nothing was applied. Row id = 1 does not match the row as it was read."
-                        .to_string()
-                )
-            ))
+            on_disk("select name from birds where id = 1").as_deref(),
+            Some("finch")
         );
         assert_eq!(
             on_disk("select name from birds where id = 2").as_deref(),
-            Some("tit")
+            Some("jay")
         );
         grid.read_with(cx, |grid, _| {
-            assert_eq!(grid.delegate().pending_count(), 2, "the edits are kept");
+            assert_eq!(grid.delegate().pending_count(), 0);
         });
         quit(workspace, cx);
     });
