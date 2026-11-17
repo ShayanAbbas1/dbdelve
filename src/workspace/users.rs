@@ -18,6 +18,11 @@ use crate::users_view::{Loaded, UsersEvent, UsersView, reports_csv};
 
 use super::exports::{choose_path, could_not_write, write_replacing};
 
+/// Refuses a role change while a transaction is open on its connection: run
+/// inside it, the change would be undone by its rollback.
+pub(super) const ROLE_CHANGE_IN_TRANSACTION: &str =
+    "A transaction is open on this connection. A role change would run inside it.";
+
 /// What the role form is for.
 #[derive(Clone)]
 pub(crate) enum RoleFormKind {
@@ -612,11 +617,7 @@ impl Workspace {
         // by its rollback while the tab, reading on a side connection, never
         // showed it.
         if self.profile().is_some_and(|profile| profile.in_transaction) {
-            self.note(
-                "A transaction is open on this connection. A role change would run inside it."
-                    .into(),
-                cx,
-            );
+            self.note(ROLE_CHANGE_IN_TRANSACTION.into(), cx);
             return;
         }
         self.activate_tab(Tab::Object(tab), window, cx);
