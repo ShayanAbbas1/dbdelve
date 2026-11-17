@@ -13599,6 +13599,49 @@ fn a_row_send_under_read_only_raises_the_mode_prompt_and_keeps_the_edits(cx: &mu
     });
 }
 
+/// A Row send the mode prompt held is marked out once it is approved and runs,
+/// as one sent straight away is: Esc leaves its row alone until it lands.
+#[gpui::test]
+fn a_row_send_approved_at_the_mode_prompt_is_out_until_it_lands(cx: &mut TestAppContext) {
+    use crate::result_grid::NewValue;
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, THREE_BIRDS);
+        let (_, grid) = open_in_row_mode(&workspace, cx);
+        focus_grid(&grid, cx);
+        ring_on(&grid, cx, 0, 1);
+        stage(&grid, cx, 0, 1, NewValue::Value("robin".into()));
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_mode(crate::sql::Mode::ReadOnly, cx)
+        });
+        settle(cx);
+        press(cx, "down");
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.profile().unwrap().session.pending_run.is_some());
+        });
+
+        workspace.update(cx, |workspace, cx| workspace.approve_pending_run(cx));
+        assert_eq!(state_kind(&workspace, cx), "running");
+        assert_eq!(
+            grid.read_with(cx, |table, _| table.delegate().sending_row()),
+            Some(0),
+            "the approved send is marked out"
+        );
+
+        settle(cx);
+        assert_eq!(
+            on_disk("select name from birds where id = 1").as_deref(),
+            Some("robin")
+        );
+        assert_eq!(pending_of(&grid, cx), 0);
+        assert_eq!(
+            grid.read_with(cx, |table, _| table.delegate().sending_row()),
+            None
+        );
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn a_second_row_left_while_the_first_is_saving_stays_staged(cx: &mut TestAppContext) {
     use crate::result_grid::NewValue;

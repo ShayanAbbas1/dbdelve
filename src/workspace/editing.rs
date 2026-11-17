@@ -2142,7 +2142,6 @@ impl Workspace {
                 }
             }
         };
-        let out = sent.clone();
         self.execute_and_then(
             update,
             tab,
@@ -2161,12 +2160,6 @@ impl Workspace {
         let running = self
             .profile()
             .is_some_and(|profile| profile.session.running(tab));
-        // The grid knows the cells are out until the send lands, so that one
-        // put back to its fetched value meanwhile stays staged, and Esc leaves
-        // the row alone.
-        if running {
-            results.update(cx, |table, _| table.delegate_mut().begin_send(row, &out));
-        }
         // Not sent: the mode stopped it and raised its prompt, or the
         // connection was gone. Nothing went, the row is still dirty, and the
         // ring the user moved off it goes back (`to` is where it moved to).

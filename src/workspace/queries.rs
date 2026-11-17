@@ -2483,6 +2483,13 @@ impl Workspace {
         // to it on either outcome, since `Failed` would draw the error over
         // the rows the draft is staged on.
         let restored = (keep_rows || kept).then_some(previous);
+        // Here, where a Row send starts, rather than where it was asked for:
+        // one the mode prompt held starts only once approved. The grid knows
+        // the cells are out until the send lands, so that one put back to its
+        // fetched value meanwhile stays staged, and Esc leaves the row alone.
+        if let Some(Refresh::Row { row, sent, .. }) = &refresh {
+            results.update(cx, |table, _| table.delegate_mut().begin_send(*row, sent));
+        }
         // The spinner beside the clock redraws every frame, but not under
         // reduce motion, so the clock cannot lean on it to tick.
         cx.spawn({
