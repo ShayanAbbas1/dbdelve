@@ -11787,3 +11787,44 @@ fn focusing_the_sidebar_reveals_the_front_row_inside_a_folded_subtree(cx: &mut T
         quit(workspace, cx);
     });
 }
+
+#[gpui::test]
+fn a_refresh_inside_a_failed_transaction_lists_the_databases_apart_from_it(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = duckdb_with_other_attached(cx);
+        run_in_front(&workspace, cx, "BEGIN");
+        cx.update(|window, cx| {
+            let editor = workspace
+                .read(cx)
+                .profile()
+                .and_then(|profile| profile.session.active_query_tab())
+                .expect("the tab is still there")
+                .editor
+                .clone();
+            editor.update(cx, |input, cx| {
+                input.set_value("SELECT error('the transaction fails')", window, cx)
+            });
+        });
+        cx.dispatch_action(crate::actions::RunQuery);
+        settle(cx);
+        workspace.update(cx, |workspace, cx| {
+            let profile = workspace.profile_mut().expect("the connection is in front");
+            assert!(profile.in_transaction, "the transaction is still open");
+            profile.session.notice = None;
+            workspace.refresh_schema(cx);
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the connection is in front");
+            assert_eq!(
+                profile.session.notice.as_deref(),
+                Some("Schema refreshed."),
+                "nothing was read on the session inside the failed transaction"
+            );
+            assert!(profile.databases.names.iter().any(|name| name == "other"));
+        });
+        quit(workspace, cx);
+    });
+}

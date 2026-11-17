@@ -2148,9 +2148,11 @@ impl Workspace {
         let Some(connection) = profile.connection() else {
             return;
         };
-        let engine = profile.config.engine();
+        let (engine, in_transaction) = (profile.config.engine(), profile.in_transaction);
+        // A refresh lists them again, and inside the user's transaction a
+        // failed read would fail it on Postgres, as `refresh_schema` says.
         let listing = spawn_blocking(cx.background_executor(), move || {
-            connection.databases(engine)
+            metadata_reader(&connection, in_transaction).and_then(|reader| reader.databases(engine))
         });
         let id = id.to_string();
         cx.spawn(async move |workspace, cx| {
