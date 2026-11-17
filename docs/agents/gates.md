@@ -186,11 +186,13 @@ passes first. It admits exactly five shapes:
   holding at least one `INSERT` or `DELETE`, with no comment anywhere in it
   (`sql::draft_sequence`). The count of `delete` nodes in the whole tree must
   equal the count of top-level statements that are such a `DELETE`, so one
-  hidden in a CTE beside an `UPDATE` is refused. Refused on ClickHouse, whose
-  one-row guard a sequence cannot carry. A sequence's `UPDATE`s are read as a
-  batch's are: every set value one the first shape admits (the bytes literal
-  included), and the predicate not read on an engine that names a row by its
-  key, so the draft's writer, not the gate, is what keeps an `UPDATE` to one
+  hidden in a CTE beside an `UPDATE` is refused. Admitted only on a spec whose
+  grid writes a draft (`SqlSpec::drafts`: the six verified engines), so refused
+  on Snowflake, Turso and Generic, and on ClickHouse, whose one-row guard a
+  sequence cannot carry. A sequence's `UPDATE`s are read as a batch's are:
+  every set value one the first shape admits (the bytes literal included), and
+  the predicate not read on an engine that names a row by its key, so
+  `sql::draft_deletes_match`, not the gate, is what holds an `UPDATE` to one
   row;
 - a submission that is exactly one lone `BEGIN`, `BEGIN TRANSACTION`,
   `COMMIT` or `ROLLBACK`, compared as text. These are the brackets of an

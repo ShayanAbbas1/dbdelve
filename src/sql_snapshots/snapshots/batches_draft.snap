@@ -181,7 +181,7 @@ source: src/sql_snapshots.rs
   |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', 'a');|
   |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('10', 'b');|
   |COMMIT;|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [turso] one delete
   |DELETE FROM "public"."accounts" WHERE "id" = '7';|
@@ -200,14 +200,14 @@ source: src/sql_snapshots.rs
   |DELETE FROM "public"."accounts" WHERE "id" = '7';|
   |DELETE FROM "public"."accounts" WHERE "id" = '8';|
   |COMMIT;|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [turso] adds only
   |BEGIN;|
   |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', 'a');|
   |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('10', 'b');|
   |COMMIT;|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [turso] an insert holding a null
   |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);|
@@ -269,7 +269,7 @@ source: src/sql_snapshots.rs
   |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', 'a');|
   |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('10', 'b');|
   |COMMIT;|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [snowflake] one delete
   |DELETE FROM "public"."accounts" WHERE "id" = '7';|
@@ -288,14 +288,14 @@ source: src/sql_snapshots.rs
   |DELETE FROM "public"."accounts" WHERE "id" = '7';|
   |DELETE FROM "public"."accounts" WHERE "id" = '8';|
   |COMMIT;|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [snowflake] adds only
   |BEGIN;|
   |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', 'a');|
   |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('10', 'b');|
   |COMMIT;|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [snowflake] an insert holding a null
   |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);|
@@ -395,7 +395,7 @@ source: src/sql_snapshots.rs
   |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', 'a');|
   |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('10', 'b');|
   |COMMIT;|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [generic] one delete
   |DELETE FROM "public"."accounts" WHERE "id" = '7';|
@@ -414,14 +414,14 @@ source: src/sql_snapshots.rs
   |DELETE FROM "public"."accounts" WHERE "id" = '7';|
   |DELETE FROM "public"."accounts" WHERE "id" = '8';|
   |COMMIT;|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [generic] adds only
   |BEGIN;|
   |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', 'a');|
   |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('10', 'b');|
   |COMMIT;|
-  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
 
 [generic] an insert holding a null
   |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);|

@@ -413,7 +413,8 @@ fn draft_gate_corpus_per_engine() {
                     );
                     assert_eq!(sql::gate(&verdict, Mode::ReadWrite, &[]), None);
                     assert_eq!(sql::gate(&verdict, Mode::Full, &[]), None);
-                } else if engine == Engine::ClickHouse {
+                } else {
+                    // No draft is written there, so none is admitted.
                     assert!(
                         !sql::is_generated_write_on(engine, &text),
                         "{engine:?} {case}: {text}"

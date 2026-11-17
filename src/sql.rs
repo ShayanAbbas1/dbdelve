@@ -827,6 +827,8 @@ pub fn is_generated_write(sql: &str) -> bool {
 const STRICTEST: SqlSpec = SqlSpec {
     backslash_escapes: true,
     identifier_quote: IdentifierQuote::Backtick,
+    // The draft arm's own checks, read as strictly as the rest.
+    drafts: true,
     ..SqlSpec::ANSI
 };
 
@@ -869,8 +871,10 @@ pub(crate) fn generated_write(spec: &SqlSpec, sql: &str) -> bool {
     }
 
     // A reviewed draft: several statements of the three kinds the grid writes,
-    // holding at least one that a batch of updates does not.
-    if kinds.len() > 1
+    // holding at least one that a batch of updates does not, on a spec whose
+    // grid writes one.
+    if spec.drafts
+        && kinds.len() > 1
         && kinds
             .iter()
             .all(|kind| matches!(*kind, "update" | "insert" | "delete"))
