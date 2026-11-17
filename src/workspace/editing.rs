@@ -2278,6 +2278,33 @@ impl Workspace {
             grid.commit_closed_input(cx);
             (grid.take_left_row(), grid.active().map(|(row, _)| row))
         });
+        // Text typed in the row panel is part of the row the ring left: its
+        // inputs are put away only on the next render, after this leave has
+        // decided what to send, and a row with nothing staged yet would not
+        // have been marked as left.
+        let panel = self
+            .row_panel
+            .inputs
+            .as_ref()
+            .filter(|inputs| inputs.grid == *grid && Some(inputs.row) != ring)
+            .map(|inputs| {
+                let fields: Vec<_> = inputs
+                    .fields
+                    .iter()
+                    .flatten()
+                    .map(|field| field.input.clone())
+                    .collect();
+                (inputs.row, fields)
+            });
+        let left = match panel {
+            Some((row, fields)) => {
+                for input in &fields {
+                    self.commit_row_input(input, cx);
+                }
+                left.or(Some(row))
+            }
+            None => left,
+        };
         let Some(row) = left.filter(|row| Some(*row) != ring) else {
             return;
         };

@@ -14930,6 +14930,63 @@ fn closing_a_row_mode_tab_saves_its_dirty_row_first(cx: &mut TestAppContext) {
     });
 }
 
+/// The row panel's input of the row in front, `col`'s.
+fn row_panel_input(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    col: usize,
+) -> Entity<gpui_component::input::TextareaState> {
+    workspace.read_with(cx, |workspace, _| {
+        let inputs = workspace.row_panel.inputs.as_ref().expect("Edit mode");
+        inputs.fields[col].as_ref().expect("an input").input.clone()
+    })
+}
+
+/// Text typed into the row panel and not yet staged is part of the row a
+/// click on another row leaves, and goes with its grid edits.
+#[gpui::test]
+fn row_panel_text_goes_with_the_row_a_click_leaves(cx: &mut TestAppContext) {
+    use crate::result_grid::NewValue;
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, THREE_BIRDS);
+        let (_, grid) = open_in_row_mode(&workspace, cx);
+        focus_grid(&grid, cx);
+        ring_on(&grid, cx, 0, 1);
+        cx.simulate_keystrokes("secondary-k r");
+        settle(cx);
+        press(cx, "secondary-shift-e");
+        let input = row_panel_input(&workspace, cx, 1);
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| input.set_value("robin", window, cx));
+        });
+        settle(cx);
+        assert_eq!(pending_of(&grid, cx), 0, "typed, not staged");
+
+        ring_on(&grid, cx, 1, 1);
+        assert_eq!(
+            on_disk("select name from birds where id = 1").as_deref(),
+            Some("robin")
+        );
+        assert_eq!(pending_of(&grid, cx), 0);
+
+        // Beside an edit already staged on the row, both go in one send.
+        stage(&grid, cx, 1, 2, NewValue::Value("9".into()));
+        let input = row_panel_input(&workspace, cx, 1);
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| input.set_value("jay", window, cx));
+        });
+        settle(cx);
+        ring_on(&grid, cx, 2, 1);
+        assert_eq!(
+            on_disk("select name || ':' || n from birds where id = 2").as_deref(),
+            Some("jay:9")
+        );
+        assert_eq!(pending_of(&grid, cx), 0);
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn row_to_draft_saves_the_dirty_row_first(cx: &mut TestAppContext) {
     use crate::{result_grid::NewValue, session::EditMode};
