@@ -883,6 +883,14 @@ impl Connection {
         let started = Instant::now();
         let host = self.config.host();
         let body = request_body(&self.config, sql, schema);
+        // A Cancel pressed while the statement waited its turn, behind another
+        // edit on a bound session, found nothing to stop: it is carried out by
+        // never sending it.
+        if let Cancellable::Yes(CancelToken(running)) = cancellable
+            && running.lock().is_ok_and(|running| running.asked)
+        {
+            return Err(plain_error("Cancelled.".into()));
+        }
 
         // A synchronous submit answers with the result itself, and only hands
         // back a handle when the statement outlives the API's own 45-second
@@ -3279,6 +3287,28 @@ mod tests {
         // Nothing left running, so a second cancel sends nothing.
         connection.cancel(&run).expect("nothing to cancel");
         assert_eq!(mock.hits("POST", &format!("/{handle}/cancel")), 1);
+    }
+
+    #[test]
+    fn a_statement_cancelled_before_it_is_submitted_is_never_sent() {
+        let mock = Mock::start();
+        let sql = "UPDATE T SET A = 1 WHERE ID = 1";
+        mock.answer(sql, "query");
+        let connection = connected(&mock);
+        let submitted = mock.hits("POST", "?async=true");
+        let run = CancelToken::default();
+        // Pressed while the edit waited its turn: nothing was running yet.
+        connection.cancel(&run).expect("nothing to cancel");
+
+        let error = connection
+            .generated(sql, &run, Fetch::default())
+            .expect_err("cancelled");
+        assert_eq!(error.message, "Cancelled.");
+        assert_eq!(
+            mock.hits("POST", "?async=true"),
+            submitted,
+            "nothing was submitted"
+        );
     }
 
     /// Waits for a statement to be polled, which is when it is cancellable.
