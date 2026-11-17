@@ -18388,6 +18388,42 @@ fn new_row_and_delete_row_are_refused_before_their_form_and_review_inside_the_us
     });
 }
 
+/// A view already in Row when the user opens a transaction on the profile's
+/// own session sends nothing on Save: the send's `BEGIN` and `COMMIT` would
+/// end the user's transaction, and its `ROLLBACK` would undo the send.
+#[gpui::test]
+fn a_row_send_is_refused_inside_a_transaction_opened_after_the_view_went_row(
+    cx: &mut TestAppContext,
+) {
+    use crate::result_grid::NewValue;
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, BIRDS);
+        let (_, grid) = open_in_row_mode(&workspace, cx);
+        workspace.update(cx, |workspace, _| {
+            workspace.profile_mut().unwrap().in_transaction = true;
+        });
+        stage(&grid, cx, 0, 1, NewValue::Value("finch".into()));
+        save(&workspace, cx);
+        assert_eq!(
+            grid.read_with(cx, |table, _| table
+                .delegate()
+                .send_failure()
+                .map(|(row, why)| (row, why.to_string()))),
+            Some((
+                0,
+                "A transaction is open on this connection; the row was not sent.".into()
+            ))
+        );
+        assert_eq!(pending_of(&grid, cx), 1, "the edit is kept");
+        assert_eq!(
+            on_disk("select name from birds where id = 1").as_deref(),
+            Some("wren")
+        );
+        quit(workspace, cx);
+    });
+}
+
 /// A Row view sends nothing inside the user's open transaction, so a view is
 /// not switched into Row while one is open; Draft is still offered.
 #[gpui::test]
