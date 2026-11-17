@@ -984,6 +984,10 @@ struct ProbedColumn {
     schema: Option<String>,
     table: Option<String>,
     column: Option<String>,
+    /// A row read held a BLOB here. SQLite stores one in a column of any
+    /// declared type, and its rendering, `x'…'`, is also a text such a column
+    /// can hold, so no predicate spelled from it names that row alone.
+    blob: bool,
 }
 
 /// The one table every column that came from a table came from.
@@ -1112,6 +1116,15 @@ fn resolve_keyless_target(
             "A table without a primary key is edited by matching every column, and {what}."
         ))
     };
+    if let Some(column) = probed.iter().find(|column| column.blob) {
+        return (
+            None,
+            refusal(format!(
+                "{} holds a BLOB, which cannot be matched by its value",
+                origin_of(column).unwrap_or_default()
+            )),
+        );
+    }
     if let Some(column) = described
         .iter()
         .find(|column| !is_matchable(&column.declared))
@@ -1427,13 +1440,14 @@ fn ran(
                     data_type: column.decl_type().map(str::to_lowercase),
                 })
                 .collect();
-            let described: Vec<ProbedColumn> = statement
+            let mut described: Vec<ProbedColumn> = statement
                 .columns_with_metadata()
                 .iter()
                 .map(|column| ProbedColumn {
                     schema: column.database_name().map(str::to_string),
                     table: column.table_name().map(str::to_string),
                     column: column.origin_name().map(str::to_string),
+                    blob: false,
                 })
                 .collect();
 
@@ -1488,6 +1502,11 @@ fn ran(
                     let value = row
                         .get_ref(index)
                         .map_err(|error| query_error(&error, sql))?;
+                    if matches!(value, ValueRef::Blob(_))
+                        && let Some(column) = described.get_mut(index)
+                    {
+                        column.blob = true;
+                    }
                     let cell = render(value, &columns, index)?;
                     builder.push(cell.as_deref());
                 }
@@ -2335,6 +2354,7 @@ RETURNING n
                 schema: table.map(|_| "main".to_string()),
                 table: table.map(str::to_string),
                 column: column.map(str::to_string),
+                blob: false,
             })
             .collect()
     }
@@ -2698,6 +2718,39 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
             .expect("a read");
         assert_eq!(keyed.edit.expect("keyed").row_match, RowMatch::Key);
         assert_eq!(keyed.read_only_reason, None);
+    }
+
+    /// A BLOB stored in a column declared as text renders as `x'…'`, which is
+    /// also a text the column can hold: the predicate spelled from it would
+    /// name that text row, so a result holding one is not edited by value.
+    #[test]
+    fn a_blob_in_a_text_column_leaves_a_keyless_result_read_only() {
+        let connection = memory(
+            "create table marks (c text, label text);
+             insert into marks values (x'68', 'old'), ('x''68''', 'old');",
+        );
+        let blob = connection
+            .query(
+                "SELECT c, label FROM marks WHERE typeof(c) = 'blob'",
+                Fetch::default(),
+            )
+            .expect("a read");
+        assert_eq!(blob.rows[0].get(0), Some("x'68'"));
+        assert!(blob.edit.is_none());
+        assert_eq!(
+            blob.read_only_reason.as_deref(),
+            Some(
+                "A table without a primary key is edited by matching every column, \
+                 and c holds a BLOB, which cannot be matched by its value."
+            )
+        );
+        let text = connection
+            .query(
+                "SELECT c, label FROM marks WHERE typeof(c) = 'text'",
+                Fetch::default(),
+            )
+            .expect("a read");
+        assert!(text.edit.is_some(), "the text row is still edited");
     }
 
     /// Why a blob makes a keyless table read-only: the every-column predicate
