@@ -1785,9 +1785,14 @@ impl Palette {
                             .min_w_0()
                             .overflow_hidden()
                             .whitespace_nowrap()
+                            // The name keeps its width and the detail gives
+                            // way first: a long host otherwise squeezes the
+                            // name to nothing, and the name is what tells two
+                            // connections on similar hosts apart.
                             .child(
                                 div()
-                                    .min_w_0()
+                                    .flex_shrink_0()
+                                    .max_w_full()
                                     .overflow_hidden()
                                     .text_ellipsis()
                                     .text_color(if item.muted { t.text_muted } else { t.text })
@@ -1799,7 +1804,9 @@ impl Palette {
                             )
                             .children(item.detail.clone().map(|detail| {
                                 div()
-                                    .flex_shrink_0()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
                                     .font_family(mono.clone())
                                     .text_size(px(layout::chrome(layout::TEXT_SM)))
                                     .text_color(t.text_faint)
