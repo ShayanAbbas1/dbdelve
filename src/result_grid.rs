@@ -2146,6 +2146,11 @@ impl ResultGrid {
     /// while the ring itself moved on. Not for the echo of a pointer
     /// selection, which has already chosen the rows.
     pub fn select_row(&mut self, row: usize) {
+        // The table's selection outlives a removed added row, and a step from
+        // it names a row that no longer exists.
+        if row >= self.rows_total() {
+            return;
+        }
         self.selected_row = Some(row);
         if self.pointer_row.take() != Some(row) {
             self.click_row(row, false, false);
@@ -9123,6 +9128,12 @@ mod tests {
         assert_eq!(grid.added_count(), 0);
         assert!(!grid.has_pending());
         assert_eq!(grid.active().map(|(row, _)| row), Some(1));
+
+        // The table's own selection can still name the row that went, and a
+        // step down from it lands on nothing.
+        grid.select_row(2);
+        assert_eq!(grid.active().map(|(row, _)| row), Some(1));
+        assert!(grid.selected_draft_rows().iter().all(|&row| row < 2));
     }
 
     #[test]
