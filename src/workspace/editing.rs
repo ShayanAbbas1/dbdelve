@@ -2726,6 +2726,14 @@ impl Workspace {
         if !profile.session.apply_review_covers(profile.session.active) {
             return false;
         }
+        // Not while its batch runs: the review holds the grid against staging,
+        // and an edit staged now would be dropped unsaid by the success that
+        // clears the draft. Taken, so Esc goes no further.
+        if let Some(review) = &profile.session.apply_review
+            && profile.session.running(review.tab)
+        {
+            return true;
+        }
         let closed = profile.session.apply_review.take().is_some();
         if closed {
             cx.notify();

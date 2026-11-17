@@ -13599,6 +13599,46 @@ fn a_row_send_under_read_only_raises_the_mode_prompt_and_keeps_the_edits(cx: &mu
     });
 }
 
+/// The review stays while its batch runs: closed, it would let an edit be
+/// staged that the batch's success then drops unsaid.
+#[gpui::test]
+fn the_apply_review_does_not_close_while_its_batch_runs(cx: &mut TestAppContext) {
+    use crate::result_grid::NewValue;
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, BIRDS);
+        draft_by_default(&workspace, cx);
+        let id = open_own_table(&workspace, cx, "birds");
+        let grid = relation_grid(&workspace, cx, id);
+        stage(&grid, cx, 0, 1, NewValue::Value("finch".into()));
+        cx.dispatch_action(crate::actions::ApplyEdits);
+        settle(cx);
+        assert!(front_review(&workspace, cx).is_some());
+
+        workspace.update(cx, |workspace, cx| workspace.run_apply_review(cx));
+        assert_eq!(state_kind(&workspace, cx), "running");
+        workspace.update(cx, |workspace, cx| workspace.close_apply_review(cx));
+        assert!(front_review(&workspace, cx).is_some(), "the review stays");
+        workspace.read_with(cx, |workspace, _| {
+            assert!(
+                !workspace
+                    .profile()
+                    .unwrap()
+                    .session
+                    .may_stage_into(crate::session::Tab::Object(id))
+            );
+        });
+
+        settle(cx);
+        assert_eq!(
+            on_disk("select name from birds where id = 1").as_deref(),
+            Some("finch")
+        );
+        assert_eq!(front_review(&workspace, cx), None);
+        quit(workspace, cx);
+    });
+}
+
 /// A Row send whose landing a reconnect drops still ends: its row is no longer
 /// out, so Esc reverts it again.
 #[gpui::test]
