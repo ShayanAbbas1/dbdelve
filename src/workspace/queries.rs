@@ -2853,7 +2853,7 @@ impl Workspace {
                     if let ApplyOutcome::Applied { read_back, .. } = &mut outcome {
                         verified_read = read_back.take().map(|rows| Ok(*rows));
                     }
-                    unknown = matches!(outcome, ApplyOutcome::Unknown(_));
+                    unknown = unknown_outcome(&outcome, ordered);
                     if ordered {
                         applied = verify
                             .identities
@@ -4414,6 +4414,22 @@ fn verified_result(
     }
 }
 
+/// Whether nobody can know what `outcome` left on the server: a `COMMIT` with
+/// no answer, or on an ordered target, which has no transaction to undo it, a
+/// write that failed, which may have reached the server before its answer was
+/// lost. Kept in the draft, that write would otherwise go again on the next
+/// Apply, and an insert with no `_id` of its own would land twice.
+fn unknown_outcome(outcome: &ApplyOutcome, ordered: bool) -> bool {
+    match outcome {
+        ApplyOutcome::Unknown(_) => true,
+        ApplyOutcome::Failed {
+            stage: ApplyStage::Write(_),
+            ..
+        } => ordered,
+        _ => false,
+    }
+}
+
 /// How many statements of an ordered apply were written when it stopped, the
 /// ones before the step it names: a statement the server refused, or counted
 /// other than one row. Nothing was sent after it. A drift and a failure
@@ -5024,6 +5040,22 @@ mod tests {
             read_back_after_write(refused(error.clone())),
             (refused(error), None)
         );
+    }
+
+    #[test]
+    fn an_ordered_write_that_failed_leaves_the_outcome_unknown() {
+        let error = DbError {
+            message: "connection reset by peer".into(),
+            position: None,
+        };
+        let failed_at = |stage| ApplyOutcome::Failed {
+            stage,
+            error: error.clone(),
+        };
+        assert!(unknown_outcome(&failed_at(ApplyStage::Write(1)), true));
+        assert!(!unknown_outcome(&failed_at(ApplyStage::Write(1)), false));
+        assert!(!unknown_outcome(&failed_at(ApplyStage::Reread(0)), true));
+        assert!(unknown_outcome(&ApplyOutcome::Unknown(error), false));
     }
 
     #[test]

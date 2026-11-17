@@ -3688,7 +3688,9 @@ pub(crate) enum ApplyOutcome {
     /// send: nothing the apply opened stayed applied.
     ///
     /// On MongoDB, which has no transaction to roll back, that is not so:
-    /// see [`ApplyOutcome::Miscounted`].
+    /// see [`ApplyOutcome::Miscounted`]. And a write that failed there may
+    /// itself have reached the server, so the workspace takes its outcome as
+    /// unknown until the rows are read again.
     Failed { stage: ApplyStage, error: DbError },
     /// `COMMIT` was sent and its answer did not come back: whether it landed
     /// is not known.
