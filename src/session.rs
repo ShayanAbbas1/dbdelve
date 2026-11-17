@@ -1916,6 +1916,23 @@ impl Bound {
         ran
     }
 
+    /// Runs a read of dbdelve's own, such as the catalog, on this session, or
+    /// on one apart while a transaction is open on it: a failed read inside
+    /// the transaction would fail it on Postgres. Under `turn`, so a `BEGIN`
+    /// cannot be sent between the check and the read and have the read run
+    /// inside it. A `BEGIN` would queue behind the read on the session anyway.
+    pub(crate) fn metadata<T>(
+        &self,
+        read: impl FnOnce(&Connection) -> Result<T, DbError>,
+    ) -> Result<T, DbError> {
+        let turn = self.turn.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.in_transaction() {
+            drop(turn);
+            return read(&self.connection.apart()?);
+        }
+        read(&self.connection)
+    }
+
     /// Runs an edit of dbdelve's on this session, the session of `database`,
     /// unless a transaction is open on it: the edit would run inside it and
     /// read back as applied while nothing has committed it.
@@ -3651,6 +3668,53 @@ pub(crate) fn reveals_results(landed: &QueryState, produced_grid: bool) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_metadata_read_waits_out_a_begin_being_sent_and_then_stays_off_its_transaction() {
+        let connection = Connection::open(crate::db::ConnectionConfig::duckdb(
+            crate::db::DUCKDB_IN_MEMORY.to_string(),
+            0,
+        ))
+        .expect("an in-memory database opens");
+        let run = |connection: &Connection, sql: &str| {
+            connection.query(
+                sql,
+                &crate::db::CancelToken::default(),
+                crate::db::Fetch::default(),
+            )
+        };
+        let bound = Bound::new(connection);
+        let read = Arc::new(AtomicBool::new(false));
+        // A tab's BEGIN holds the turn while it is sent (`Bound::leave`).
+        let begin = bound.turn.lock().expect("the turn is free");
+        let reader = {
+            let (bound, read) = (bound.clone(), read.clone());
+            std::thread::spawn(move || {
+                bound.metadata(|connection| {
+                    read.store(true, Ordering::SeqCst);
+                    run(
+                        connection,
+                        "SELECT count(*) FROM duckdb_tables() WHERE table_name = 'uncommitted'",
+                    )
+                })
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(!read.load(Ordering::SeqCst), "the read waits for the BEGIN");
+        bound.transaction.store(true, Ordering::SeqCst);
+        run(&bound.connection, "BEGIN").expect("the transaction opens");
+        run(&bound.connection, "CREATE TABLE uncommitted (id INTEGER)").expect("created");
+        drop(begin);
+        let counted = reader
+            .join()
+            .expect("the read does not panic")
+            .expect("the read runs apart");
+        assert_eq!(
+            counted.rows[0].iter().next().flatten(),
+            Some("0"),
+            "the read did not run inside the transaction"
+        );
+    }
 
     #[test]
     fn a_hold_overtaken_by_a_newer_one_is_skipped_and_the_newer_one_sent() {

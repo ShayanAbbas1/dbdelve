@@ -2351,8 +2351,7 @@ impl Workspace {
         let task = spawn_blocking(cx.background_executor(), {
             let session = session.clone();
             move || {
-                let result = metadata_reader(&session.connection, session.in_transaction())
-                    .and_then(|reader| reader.catalog());
+                let result = session.metadata(Connection::catalog);
                 let lost = result.is_err() && session.connection.is_lost();
                 (result, lost)
             }
@@ -2429,10 +2428,7 @@ impl Workspace {
         };
         let task = spawn_blocking(cx.background_executor(), {
             let session = session.clone();
-            move || {
-                metadata_reader(&session.connection, session.in_transaction())
-                    .and_then(|reader| reader.routines())
-            }
+            move || session.metadata(Connection::routines)
         });
         let (id, database) = (id.to_string(), database.to_string());
         cx.spawn(async move |workspace, cx| {
@@ -2519,10 +2515,7 @@ impl Workspace {
         }
         let task = spawn_blocking(cx.background_executor(), {
             let session = session.clone();
-            move || {
-                metadata_reader(&session.connection, session.in_transaction())
-                    .and_then(|reader| reader.sizes())
-            }
+            move || session.metadata(Connection::sizes)
         });
         let (id, database) = (id.to_string(), database.to_string());
         cx.spawn(async move |workspace, cx| {
