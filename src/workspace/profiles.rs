@@ -2290,6 +2290,12 @@ impl Workspace {
         .detach();
     }
 
+    /// What a read or run says when the connection a session was opened for
+    /// has ended or been replaced before the session could be kept
+    /// ([`Workspace::keep_session`]).
+    pub(super) const SESSION_OUTLIVED: &str =
+        "Not sent: the connection ended while the session opened.";
+
     /// A session a bound tab's run opened for itself, kept before the run
     /// sends anything on it, so the tree reads the database over it too and a
     /// Cancel on the run finds it. Returns the session the run goes on using:
@@ -2299,7 +2305,9 @@ impl Workspace {
     /// was held), which would store a session `sessions_to_hold` had never
     /// seen. A tree's open of the
     /// same database still under way is overtaken: its session is dropped
-    /// when it lands (`open_database`).
+    /// when it lands (`open_database`). `None`, the session dropped, when the
+    /// connection it was opened for has ended or been replaced meanwhile:
+    /// nothing is sent for a connection that is gone.
     pub(crate) fn keep_session(
         &mut self,
         id: &str,
@@ -2308,16 +2316,16 @@ impl Workspace {
         held: bool,
         session: Connection,
         cx: &mut Context<Self>,
-    ) -> Arc<Bound> {
+    ) -> Option<Arc<Bound>> {
         let session = Bound::new(session);
-        let Some(profile) = self.issued_to(id, generation) else {
-            return session;
-        };
+        let profile = self
+            .issued_to(id, generation)
+            .filter(|profile| profile.connection().is_some())?;
         if let Some(BoundSession::Open(open)) = profile.bound.get(&database) {
-            return open.clone();
+            return Some(open.clone());
         }
         if (profile.mode == Mode::ReadOnly) != held {
-            return session;
+            return Some(session);
         }
         profile
             .bound
@@ -2331,7 +2339,7 @@ impl Workspace {
                 .or_insert(CatalogState::Loading);
             self.load_database_catalog(id, database, generation, cx);
         }
-        session
+        Some(session)
     }
 
     /// Read the catalog of `database` over its open session, then its

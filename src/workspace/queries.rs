@@ -2653,8 +2653,14 @@ impl Workspace {
                                 .await;
                         match opening {
                             Ok((session, _)) => match workspace.update(cx, |workspace, cx| {
-                                let session = workspace
-                                    .keep_session(&id, generation, database, read_only, session, cx);
+                                let Some(session) = workspace
+                                    .keep_session(&id, generation, database, read_only, session, cx)
+                                else {
+                                    return Err(DbError {
+                                        message: Self::SESSION_OUTLIVED.into(),
+                                        position: None,
+                                    });
+                                };
                                 // Gated under the mode it was issued in, and the
                                 // session it was waiting for was opened under
                                 // that one: a mode picked since has not been put

@@ -11828,3 +11828,40 @@ fn a_refresh_inside_a_failed_transaction_lists_the_databases_apart_from_it(
         quit(workspace, cx);
     });
 }
+
+#[gpui::test]
+fn a_session_opened_for_a_connection_that_has_ended_is_not_kept(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = duckdb_with_other_attached(cx);
+        workspace.update(cx, |workspace, cx| {
+            let profile = workspace.profile_mut().expect("the connection is in front");
+            let (id, generation) = (profile.id.clone(), profile.generation);
+            let connection = profile.connection().expect("the connection is open");
+            let held = profile.mode == crate::sql::Mode::ReadOnly;
+            assert!(
+                workspace
+                    .keep_session(
+                        &id,
+                        generation + 1,
+                        "other".into(),
+                        held,
+                        connection.clone(),
+                        cx
+                    )
+                    .is_none(),
+                "a connection replaced since keeps nothing and runs nothing"
+            );
+            let profile = workspace.profile_mut().expect("the connection is in front");
+            profile.state = ProfileState::Failed("lost".into());
+            assert!(
+                workspace
+                    .keep_session(&id, generation, "other".into(), held, connection, cx)
+                    .is_none(),
+                "nor does one that was lost"
+            );
+            let profile = workspace.profile().expect("the connection is in front");
+            assert!(profile.bound.is_empty(), "and no session is registered");
+        });
+        quit(workspace, cx);
+    });
+}

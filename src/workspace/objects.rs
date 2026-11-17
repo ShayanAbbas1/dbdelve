@@ -1421,6 +1421,8 @@ impl Workspace {
             } => Some((database.clone(), *read_only)),
             _ => None,
         };
+        // The session already open, to take out if the read finds it lost.
+        let bound = routed.bound();
         let id = id.to_string();
         cx.spawn(async move |workspace, cx| {
             let resolved = match opens {
@@ -1428,21 +1430,43 @@ impl Workspace {
                 None => routed.resolve(),
             };
             let (connection, _) = resolved?;
-            let connection = match opens {
-                Some((database, held)) => workspace
-                    .update(cx, |workspace, cx| {
-                        workspace
-                            .keep_session(&id, generation, database, held, connection, cx)
-                            .connection
-                            .clone()
-                    })
-                    .map_err(|_| DbError {
-                        message: "The window is closing.".into(),
-                        position: None,
-                    })?,
-                None => connection,
+            let (connection, bound) = match opens {
+                Some((database, held)) => {
+                    let session = workspace
+                        .update(cx, |workspace, cx| {
+                            workspace.keep_session(&id, generation, database, held, connection, cx)
+                        })
+                        .map_err(|_| DbError {
+                            message: "The window is closing.".into(),
+                            position: None,
+                        })?
+                        .ok_or_else(|| DbError {
+                            message: Self::SESSION_OUTLIVED.into(),
+                            position: None,
+                        })?;
+                    (session.connection.clone(), Some(session))
+                }
+                None => (connection, bound),
             };
-            spawn_blocking(cx.background_executor(), move || work(connection)).await
+            let (result, lost) = spawn_blocking(cx.background_executor(), move || {
+                let result = work(connection.clone());
+                let lost = result.is_err() && connection.is_lost();
+                (result, lost)
+            })
+            .await;
+            // A session of another database found lost is taken out, as a
+            // run's is, so the next read opens another rather than failing on
+            // the closed one. A replacement registered since is left alone.
+            if lost && let Some(bound) = bound {
+                _ = workspace.update(cx, |workspace, _| {
+                    if let Some(profile) = workspace.issued_to(&id, generation) {
+                        profile.bound.retain(|_, open| {
+                            !matches!(open, BoundSession::Open(open) if Arc::ptr_eq(open, &bound))
+                        });
+                    }
+                });
+            }
+            result
         })
     }
 
