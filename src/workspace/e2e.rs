@@ -11788,6 +11788,54 @@ fn focusing_the_sidebar_reveals_the_front_row_inside_a_folded_subtree(cx: &mut T
     });
 }
 
+/// Sets the connections filter to `text`.
+fn filter_connections(workspace: &Entity<Workspace>, cx: &mut VisualTestContext, text: &str) {
+    cx.update(|window, cx| {
+        let filter = workspace.read(cx).connections.filter.clone();
+        filter.update(cx, |input, cx| input.set_value(text, window, cx));
+    });
+    workspace.update(cx, |workspace, cx| workspace.rebuild_connections(cx));
+    settle(cx);
+}
+
+#[gpui::test]
+fn a_filter_naming_the_connection_keeps_its_other_databases_whole(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = duckdb_with_other_attached(cx);
+        let other = database_row("e2e", "other");
+        open_connections_rows(
+            &workspace,
+            cx,
+            &[
+                other,
+                scoped_row("e2e", Some("other"), "schema-main"),
+                scoped_row("e2e", Some("other"), "category-Tables-main"),
+            ],
+        );
+        let u = scoped_row("e2e", Some("other"), &explorer::relation_row("main", "u"));
+        assert!(connections_row(&workspace, cx, &u).is_some());
+        // A name neither database has, so only the connection can match it.
+        workspace.update(cx, |workspace, _| {
+            workspace
+                .profile_mut()
+                .expect("the connection is in front")
+                .name = "Prod".into();
+        });
+
+        filter_connections(&workspace, cx, "Prod");
+        assert!(
+            connections_row(&workspace, cx, &u).is_some(),
+            "a connection the filter names lists every database of it whole"
+        );
+        filter_connections(&workspace, cx, "e2e");
+        assert!(
+            connections_row(&workspace, cx, &u).is_none(),
+            "its own database named by the filter keeps no other database whole"
+        );
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn a_refresh_inside_a_failed_transaction_lists_the_databases_apart_from_it(
     cx: &mut TestAppContext,

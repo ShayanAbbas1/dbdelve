@@ -266,8 +266,18 @@ impl Workspace {
                                 .into_iter()
                                 .map(|name| {
                                     // A name the filter matches keeps its rows
-                                    // whole, as the connection's own does.
-                                    let narrowed = match model::database_kept_whole(filter, name) {
+                                    // whole, as the connection's own does, and
+                                    // so does every database of a connection
+                                    // named for it. One named for the filter
+                                    // alongside it does not.
+                                    let whole = model::database_kept_whole(filter, name)
+                                        || model::keeps_rows_whole(
+                                            filter,
+                                            &profile.name,
+                                            levels,
+                                            None,
+                                        );
+                                    let narrowed = match whole {
                                         true => "",
                                         false => filter,
                                     };
