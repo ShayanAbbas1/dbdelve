@@ -15899,6 +15899,53 @@ fn a_cell_put_back_while_its_row_is_saving_stays_staged_after_the_save(cx: &mut 
     });
 }
 
+/// Text a binary column cannot read, closed by a click on another row: the
+/// input opens again on it, saying why, and the row is not sent without it.
+#[gpui::test]
+fn a_binary_input_holding_no_bytes_closed_by_a_click_stays_open_and_sends_nothing(
+    cx: &mut TestAppContext,
+) {
+    use crate::result_grid::NewValue;
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            "create table birds (id integer primary key, name text not null, b blob); \
+             insert into birds values (1, 'wren', x'6869'), (2, 'tit', x'6869');",
+        );
+        let (_, grid) = open_in_row_mode(&workspace, cx);
+        stage(&grid, cx, 0, 1, NewValue::Value("robin".into()));
+        focus_grid(&grid, cx);
+        ring_on(&grid, cx, 0, 2);
+        cx.dispatch_action(crate::actions::EditCell);
+        settle(cx);
+        cx.simulate_keystrokes("secondary-a");
+        cx.simulate_input("zz");
+        settle(cx);
+
+        click_cell_of_row(cx, 1);
+        assert_eq!(
+            shown_notice(&workspace, cx).as_deref(),
+            Some("This is not hex: pairs of digits 0-9 and A-F, so it was not staged.")
+        );
+        assert_eq!(ring_of(&grid, cx), Some((0, 2)), "back on the refused cell");
+        grid.read_with(cx, |grid, cx| {
+            assert!(
+                grid.delegate().commit_refusal(cx).is_some(),
+                "its input is open again on the text"
+            )
+        });
+        assert_eq!(
+            on_disk("select name from birds where id = 1").as_deref(),
+            Some("wren"),
+            "nothing is sent"
+        );
+        assert_eq!(pending_of(&grid, cx), 1);
+        assert!(history_sql(&workspace, cx).is_empty());
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn escape_leaves_a_row_alone_while_it_is_saving(cx: &mut TestAppContext) {
     use crate::result_grid::NewValue;

@@ -2210,11 +2210,26 @@ impl ResultGrid {
     /// Stage, once, the text of the input a ring move closed, by the rule every
     /// close commits with ([`Self::commit_text`]), and a mode that refuses the
     /// write stages nothing and says nothing, as the Row path always did.
-    pub(crate) fn commit_closed_input(&mut self, cx: &App) {
-        let Some((row, col, input)) = self.closed_input.take() else {
-            return;
-        };
-        self.commit_text(row, col, input.read(cx).value().clone());
+    ///
+    /// Text that spells nothing the cell holds ([`Self::staging_refusal`]) is
+    /// not dropped: the input opens again on its cell, with the ring, and the
+    /// row and the reason come back for the caller to say and to send nothing.
+    pub(crate) fn commit_closed_input(&mut self, cx: &App) -> Option<(usize, &'static str)> {
+        let (row, col, input) = self.closed_input.take()?;
+        let text = input.read(cx).value().clone();
+        if *text != *self.edit_seed(row, col)
+            && let Some(reason) = self.staging_refusal(row, col, &NewValue::Value(text.clone()))
+        {
+            self.editing = Some(Editing {
+                row,
+                col,
+                input: Some(input),
+            });
+            self.active = Some((row, col));
+            return Some((row, reason));
+        }
+        self.commit_text(row, col, text);
+        None
     }
 
     /// The row whose send the server refused and the words it said, drawn on

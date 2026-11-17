@@ -2273,11 +2273,24 @@ impl Workspace {
         // The input is staged and the left row taken first and whatever comes
         // of them, so a grid with no Row view to ask does not hold either for a
         // later move.
-        let (left, ring) = grid.update(cx, |table, cx| {
+        let (refused, left, ring) = grid.update(cx, |table, cx| {
+            let refused = table.delegate_mut().commit_closed_input(cx);
+            if let Some((row, _)) = refused {
+                table.set_selected_row(row, cx);
+            }
             let grid = table.delegate_mut();
-            grid.commit_closed_input(cx);
-            (grid.take_left_row(), grid.active().map(|(row, _)| row))
+            (
+                refused,
+                grid.take_left_row(),
+                grid.active().map(|(row, _)| row),
+            )
         });
+        // The ring is back on the input the text was refused in, and the row
+        // is not sent without it.
+        if let Some((_, reason)) = refused {
+            self.note(reason.into(), cx);
+            return;
+        }
         // Text typed in the row panel is part of the row the ring left: its
         // inputs are put away only on the next render, after this leave has
         // decided what to send, and a row with nothing staged yet would not
