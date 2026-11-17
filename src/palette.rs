@@ -1800,6 +1800,7 @@ impl Palette {
                                         label.font_weight(FontWeight::MEDIUM)
                                     })
                                     .when(item.mono, |label| label.font_family(mono.clone()))
+                                    .debug_selector(|| format!("palette-label-{}", item.label))
                                     .child(highlighted(item.label.clone(), &ranges, t)),
                             )
                             .children(item.detail.clone().map(|detail| {
