@@ -346,9 +346,10 @@ fn convert(entry: Entry) -> Theme {
 /// selection over it, or of the edited cell wash over it is moved off in
 /// lightness the way [`apart_from`] moves chrome (Zed's `modified` is its
 /// `warning`, the edited amber, and is sometimes the selection's own hue); and
-/// a wash within [`ROW_WASHES_APART`] of an earlier one, or that no move
-/// rescues, is `base`'s instead, since two states drawn alike are worse than
-/// a borrowed colour. `bg` is what the washes are flattened over.
+/// a wash within [`ROW_WASHES_APART`] of an earlier one, of the `base` wash a
+/// later unnamed slot keeps, or that no move rescues, is `base`'s instead,
+/// since two states drawn alike are worse than a borrowed colour. `bg` is what
+/// the washes are flattened over.
 pub(super) fn row_washes(
     base: &Theme,
     bg: Srgb,
@@ -373,6 +374,7 @@ pub(super) fn row_washes(
         .all(|step| step >= ROW_WASH_FROM_SELECTION)
     };
     let mut washes = own;
+    let unnamed = named.map(|color| color.is_none());
     for (i, named) in named.into_iter().enumerate() {
         let Some(color) = named else { continue };
         let color = if i == 1 {
@@ -400,9 +402,12 @@ pub(super) fn row_washes(
         washes[i] = color
             .map(|color| color.alpha(alphas[i]))
             .filter(|wash| {
-                washes[..i].iter().all(|earlier| {
-                    wash.flatten(bg).distance(earlier.flatten(bg)) >= ROW_WASHES_APART
-                })
+                let later_defaults = (i + 1..own.len()).filter(|&j| unnamed[j]).map(|j| own[j]);
+                washes[..i]
+                    .iter()
+                    .copied()
+                    .chain(later_defaults)
+                    .all(|other| wash.flatten(bg).distance(other.flatten(bg)) >= ROW_WASHES_APART)
             })
             .unwrap_or(own[i]);
     }
@@ -713,6 +718,30 @@ mod tests {
         let updated = crowded.updated.flatten(crowded.bg);
         assert!(updated.distance(crowded.selection.flatten(crowded.bg)) >= ROW_WASH_FROM_SELECTION);
         assert!(crowded.selection.flatten(updated).distance(updated) >= ROW_WASH_FROM_SELECTION);
+    }
+
+    /// A named wash is kept apart from the default a later, unnamed slot
+    /// keeps, not only from the washes named before it.
+    #[test]
+    fn a_partial_import_keeps_its_named_wash_apart_from_the_defaults() {
+        let dark = Theme::dark();
+        let updated = Srgb {
+            r: dark.updated.r,
+            g: dark.updated.g,
+            b: dark.updated.b,
+        };
+        let [added, updated, _] = row_washes(
+            &dark,
+            dark.bg,
+            dark.selection,
+            dark.edited,
+            [Some(updated), None, None],
+        );
+        assert!(
+            added.flatten(dark.bg).distance(updated.flatten(dark.bg)) >= ROW_WASHES_APART,
+            "added and updated rows drawn alike"
+        );
+        assert_eq!(added, dark.added);
     }
 
     #[test]
