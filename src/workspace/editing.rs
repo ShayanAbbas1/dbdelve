@@ -654,6 +654,20 @@ impl Workspace {
             return;
         };
         let tab = profile.session.active;
+        // A Row send's landing names its row by an index into the rows as they
+        // were sent; reordered under it, the sent edit would stay staged and
+        // go again.
+        if client
+            && profile.session.edit_mode(tab) == EditMode::Row
+            && profile.session.running(tab)
+            && profile
+                .session
+                .sorting(tab)
+                .is_some_and(|sorting| sorting.client_keys().is_none())
+        {
+            self.note("The previous row is still being saved.".into(), cx);
+            return;
+        }
         // Either way the result in front: `reorder_query` splices into the
         // statement behind it.
         let Some(results) = profile.session.active_results().cloned() else {

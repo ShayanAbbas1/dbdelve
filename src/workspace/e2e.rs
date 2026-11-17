@@ -13451,6 +13451,46 @@ fn a_refused_rows_mark_and_escape_follow_the_row_into_a_client_sort(cx: &mut Tes
     });
 }
 
+/// Sorting in memory reorders the rows the send's landing names its row in,
+/// so the switch waits for the send, which then lands and clears its edit.
+#[gpui::test]
+fn entering_client_sorting_is_refused_while_a_row_send_is_out(cx: &mut TestAppContext) {
+    use crate::result_grid::NewValue;
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, THREE_BIRDS);
+        let (id, grid) = open_in_row_mode(&workspace, cx);
+        stage(&grid, cx, 0, 1, NewValue::Value("robin".into()));
+        // Not through the action, which runs the executor to the answer.
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.apply_edits(&crate::actions::ApplyEdits, window, cx);
+                workspace.set_view_sorting(true, window, cx);
+            })
+        });
+        settle(cx);
+
+        assert_eq!(
+            on_disk("select name from birds where id = 1").as_deref(),
+            Some("robin")
+        );
+        assert_eq!(pending_of(&grid, cx), 0, "the landing cleared the edit");
+        workspace.read_with(cx, |workspace, _| {
+            let sorting = workspace
+                .profile()
+                .unwrap()
+                .session
+                .sorting(Tab::Object(id))
+                .cloned();
+            assert!(
+                sorting.is_some_and(|sorting| sorting.client_keys().is_none()),
+                "still sorted by the server"
+            );
+        });
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn escape_reverts_nothing_in_a_draft_view(cx: &mut TestAppContext) {
     use crate::result_grid::NewValue;
