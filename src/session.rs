@@ -105,6 +105,9 @@ pub(crate) struct Profile {
     /// The server's logins and roles, read for the connections tree's Users
     /// and roles row and its tab.
     pub(crate) roles: RolesState,
+    /// The latest read of `roles` started: an earlier one landing after it
+    /// would put back what a role change since has altered.
+    pub(crate) roles_request: u64,
     /// The session opened for each other database of the server, by name,
     /// for the connections tree to read its catalog over. Never the profile's
     /// own connection, and dropped with it.
