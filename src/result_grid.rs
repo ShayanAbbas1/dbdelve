@@ -2551,14 +2551,20 @@ impl ResultGrid {
         if self.unconfirmed || !self.editable(row, col) {
             return false;
         }
-        self.forget_failure(row);
         // Before the no-op test below: an added cell has no fetched value to
         // equal, so a NULL staged there would read as one already held.
         if let Some(index) = self.added_index(row) {
-            return self.set_added(index, col, value);
+            let staged = self.set_added(index, col, value);
+            if staged {
+                self.forget_failure(row);
+            }
+            return staged;
         }
+        // The row's failure mark goes only once the value is taken: a refused
+        // one leaves the row as unsent as it was.
         let value = if self.binary_seed_returned(row, col, &value) {
             if !self.out_in_send(row, col) {
+                self.forget_failure(row);
                 self.pending
                     .retain(|edit| (edit.row, edit.col) != (row, col));
                 return true;
@@ -2597,6 +2603,7 @@ impl ResultGrid {
         // then, and dropping it would leave the sent value showing with
         // nothing staged to put it back.
         if self.holds(row, col, &value) && !self.out_in_send(row, col) {
+            self.forget_failure(row);
             self.pending
                 .retain(|edit| (edit.row, edit.col) != (row, col));
             return true;
@@ -2609,6 +2616,7 @@ impl ResultGrid {
         if self.mode < Mode::ReadWrite {
             return false;
         }
+        self.forget_failure(row);
 
         let shown = match &value {
             NewValue::Bytes(bytes) => Some(clip(&self.bytes_text(col, bytes)).into()),
@@ -9134,6 +9142,19 @@ mod tests {
         grid.select_row(2);
         assert_eq!(grid.active().map(|(row, _)| row), Some(1));
         assert!(grid.selected_draft_rows().iter().all(|&row| row < 2));
+    }
+
+    #[test]
+    fn a_refused_value_leaves_the_rows_failure_mark() {
+        let mut grid = editable_grid();
+        grid.set_send_failure(0, "refused".into());
+        grid.mode = Mode::ReadOnly;
+        assert!(!grid.set_pending(0, 1, NewValue::Value("late".into())));
+        assert_eq!(grid.send_failure(), Some((0, "refused")));
+
+        grid.mode = Mode::ReadWrite;
+        assert!(grid.set_pending(0, 1, NewValue::Value("late".into())));
+        assert_eq!(grid.send_failure(), None);
     }
 
     #[test]
