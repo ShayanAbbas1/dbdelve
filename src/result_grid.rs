@@ -609,16 +609,6 @@ struct PendingEdit {
 /// column left out is one the server's default fills, which is a different
 /// write from `''` or `NULL`.
 struct AddedRow {
-    /// Unique across the process, drawn from the counter `next_rows_id` draws
-    /// on, so a row can be named after others are added or removed.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the delete marks and the added accent are its first readers"
-        )
-    )]
-    id: u64,
     /// The touched cells by column index. Never `NewValue::Default`: staging
     /// that takes the cell back out, since leaving it out is what it means.
     cells: Vec<(usize, NewValue)>,
@@ -2429,10 +2419,7 @@ impl ResultGrid {
         if self.unconfirmed || self.mode < Mode::ReadWrite || self.result.edit.is_none() {
             return None;
         }
-        self.added.push(AddedRow {
-            id: next_rows_id(),
-            cells: Vec::new(),
-        });
+        self.added.push(AddedRow { cells: Vec::new() });
         let row = self.fetched_rows() + self.added.len() - 1;
         self.set_active(row, self.view.first().copied().unwrap_or(0));
         Some(row)
@@ -8811,10 +8798,6 @@ mod tests {
         assert_eq!(grid.add_row(), Some(2));
         assert_eq!(grid.add_row(), Some(3));
         assert!(grid.set_pending(3, 1, NewValue::Value("fourth".into())));
-        assert_ne!(
-            grid.added[0].id, grid.added[1].id,
-            "each row has its own id"
-        );
         assert_eq!(
             grid.draft_inserts().err(),
             Some(2),
