@@ -3596,11 +3596,17 @@ impl Workspace {
                                 error.position = error
                                     .position
                                     .and_then(|position| position.checked_sub(prefix));
+                                // The Users tab draws no result pane, so a
+                                // role change the server refused says why in
+                                // the status bar. A cancel was the user's own.
+                                let refused = (!cancelled
+                                    && matches!(refresh, Some(Refresh::Roles)))
+                                .then(|| error.message.clone());
                                 *state = match restored {
                                     Some(previous) if cancelled => previous,
                                     _ => QueryState::Failed(error),
                                 };
-                                (false, false, None, Vec::new(), None, landed)
+                                (false, false, None, Vec::new(), refused, landed)
                             }
                         }
                     };
