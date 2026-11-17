@@ -17541,6 +17541,37 @@ fn new_row_in_a_draft_view_adds_a_grid_row(cx: &mut TestAppContext) {
     });
 }
 
+/// Copy Row on an added row copies nothing: the row is not in the result, so
+/// there is no read value to copy, and slicing for one panicked.
+#[gpui::test]
+fn copy_row_on_an_added_row_copies_nothing(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, BIRDS);
+        draft_by_default(&workspace, cx);
+        let id = open_own_table(&workspace, cx, "birds");
+        let grid = relation_grid(&workspace, cx, id);
+        cx.dispatch_action(crate::actions::NewRow);
+        settle(cx);
+        assert_eq!(
+            grid.read_with(cx, |table, _| table.delegate().active()),
+            Some((2, 0))
+        );
+
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string("before".into()));
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.copy_row(&crate::actions::CopyRow, window, cx)
+        });
+        settle(cx);
+        assert_eq!(
+            cx.read_from_clipboard()
+                .and_then(|item| item.text())
+                .as_deref(),
+            Some("before")
+        );
+        quit(workspace, cx);
+    });
+}
+
 /// The tracer: a row added in the grid is typed, read in `Apply draft`, inserted
 /// by Run, and the draft is empty and the table read again.
 #[gpui::test]

@@ -1668,10 +1668,11 @@ impl Workspace {
             return;
         };
         let result = grid.result();
-        let (rows, cell_types) = (
-            &result.rows[row..=row],
-            result.cell_types.get(row..=row).unwrap_or_default(),
-        );
+        // An added row is not in the result; it has no read value to copy.
+        let Some(rows) = result.rows.get(row..=row) else {
+            return;
+        };
+        let (rows, cell_types) = (rows, result.cell_types.get(row..=row).unwrap_or_default());
         let text = export::render_rows(Format::Tsv, &result.columns, rows, cell_types);
         cx.write_to_clipboard(result_grid::copied_row_slice(
             text,
