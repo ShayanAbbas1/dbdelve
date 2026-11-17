@@ -1449,24 +1449,41 @@ impl Connection {
         // lost test, which cannot take the lock `send` holds: only an error at
         // `COMMIT` with the socket gone is an outcome nobody can know.
         let closed = std::cell::Cell::new(false);
-        let mut send = |sql: &str, _: Sending| {
+        // The grid shows a spatial cell as the WKT it rendered after the
+        // fetch, and an untyped read returns the server's EWKB, so each read
+        // renders those columns, named by the cells as fetched, the same way:
+        // a change confined to one is a change like any other.
+        let spatial: HashSet<&str> = steps
+            .iter()
+            .flat_map(|step| &step.before)
+            .filter(|cell| cell.column_type.as_deref().is_some_and(is_spatial))
+            .map(|cell| cell.column.as_str())
+            .collect();
+        let mut send = |sql: &str, sending: Sending| {
             let result = self
                 .ran(&mut client, sql, false, Fetch::default(), None)
-                .map(|(result, _)| result);
+                .map(|(mut result, _)| {
+                    if sending == Sending::Read && !spatial.is_empty() {
+                        let columns: Vec<bool> = result
+                            .columns
+                            .iter()
+                            .map(|column| spatial.contains(column.name.as_str()))
+                            .collect();
+                        for row in &mut result.rows {
+                            format_spatial_row(row, &columns);
+                        }
+                    }
+                    result
+                });
             closed.set(client.client.is_closed());
             result
         };
-        // ponytail: a spatial cell is left out of the compare. The grid shows
-        // it as the WKT it rendered after the fetch, and an untyped re-read
-        // returns the server's EWKB, so the two cannot be compared as text.
-        // A change confined to a spatial column is not seen; the key and the
-        // count still hold. The upgrade is a re-read that renders the same way.
         super::run_verified(
             Engine::Postgres,
             steps,
             &mut send,
             proceed,
-            &|cell| cell.column_type.as_deref().is_some_and(is_spatial),
+            &|_| false,
             &|_| closed.get(),
         )
     }
@@ -4611,7 +4628,7 @@ mod tests {
 
     #[test]
     #[ignore = "requires a local Postgres server configured through PG*"]
-    fn live_a_spatial_cell_rendered_after_the_fetch_is_not_compared() {
+    fn live_a_spatial_cell_rendered_after_the_fetch_is_compared_as_rendered() {
         let connection = live_profile();
         let table = "verified_spatial_cell";
         let scratch = ScratchTable(&connection, table);
@@ -4681,6 +4698,22 @@ mod tests {
             apply(stale, "c"),
             ApplyOutcome::Drifted(vec![(0, Drift::Changed)]),
             "a changed non-spatial cell is still compared"
+        );
+
+        // Another session moves the point after the fetch: the re-read, as
+        // rendered, differs from the WKT the grid holds.
+        let held = read();
+        connection
+            .query(
+                &format!("UPDATE {table} SET geom = ST_GeomFromText('POINT(3 4)') WHERE id = 1"),
+                &CancelToken::default(),
+                Fetch::default(),
+            )
+            .expect("the point moves");
+        assert_eq!(
+            apply(held, "d"),
+            ApplyOutcome::Drifted(vec![(0, Drift::Changed)]),
+            "a change confined to a spatial cell is seen"
         );
     }
 

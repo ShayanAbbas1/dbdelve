@@ -3595,9 +3595,8 @@ pub(crate) struct FetchedCell {
     /// The cell's own type where the result types each cell, as MongoDB's
     /// does; `None` on every SQL engine, whose columns are typed whole.
     pub cell_type: Option<String>,
-    /// The fetched column's [`Column::data_type`]. Never compared: an arm's
-    /// skip predicate reads it to leave out a cell the grid renders after the
-    /// fetch.
+    /// The fetched column's [`Column::data_type`]. Never compared: an arm
+    /// reads it to render a re-read's cell as the grid rendered the fetch's.
     pub column_type: Option<String>,
 }
 

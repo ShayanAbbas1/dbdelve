@@ -109,10 +109,10 @@ Decided, and not to be re-litigated:
   keeps what the trigger left it. Postgres's text carries no bracket, so the
   apply sends its own `BEGIN`, and none of its
   statements is described, because a refused describe aborts the transaction.
-  Spatial cells (`geometry`, `geography`) are left out of the compare: the grid
-  shows the WKT it rendered after the fetch, the re-read returns the server's
-  EWKB, and the two are different text for one value, so a change confined to a
-  spatial column is not seen while the key and the count still hold. An error at
+  Spatial cells (`geometry`, `geography`) are compared as rendered: the grid
+  shows the WKT it rendered after the fetch and the re-read returns the server's
+  EWKB, so each read renders the columns the fetched cells name as spatial the
+  same way before the compare. An error at
   `COMMIT` is an unknown outcome only when the session is gone (`Unknown`); one
   on a live session, and any error before `COMMIT`, is a failure that rolled back.
   DuckDB counts the rows a statement matched too (its `Count` column), takes no
