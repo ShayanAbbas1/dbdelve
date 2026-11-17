@@ -13599,6 +13599,39 @@ fn a_row_send_under_read_only_raises_the_mode_prompt_and_keeps_the_edits(cx: &mu
     });
 }
 
+/// A Row send whose landing a reconnect drops still ends: its row is no longer
+/// out, so Esc reverts it again.
+#[gpui::test]
+fn a_row_send_dropped_by_a_reconnect_is_no_longer_out(cx: &mut TestAppContext) {
+    use crate::result_grid::NewValue;
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, THREE_BIRDS);
+        let (id, grid) = open_in_row_mode(&workspace, cx);
+        stage(&grid, cx, 0, 1, NewValue::Value("robin".into()));
+        // Not through Save, which runs the executor to the answer.
+        workspace.update(cx, |workspace, cx| {
+            assert!(workspace.save_row(id, 0, None, None, cx))
+        });
+        assert_eq!(state_kind(&workspace, cx), "running");
+        assert_eq!(
+            grid.read_with(cx, |table, _| table.delegate().sending_row()),
+            Some(0)
+        );
+        workspace.update(cx, |workspace, cx| {
+            let index = workspace.active.expect("a profile is in front");
+            workspace.reconnect(index, cx)
+        });
+        settle(cx);
+        assert_eq!(
+            grid.read_with(cx, |table, _| table.delegate().sending_row()),
+            None,
+            "the dropped send ended"
+        );
+        quit(workspace, cx);
+    });
+}
+
 /// A Row send the mode prompt held is marked out once it is approved and runs,
 /// as one sent straight away is: Esc leaves its row alone until it lands.
 #[gpui::test]

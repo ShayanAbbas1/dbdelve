@@ -3065,6 +3065,22 @@ impl Workspace {
                     let mut part_way = false;
                     let (succeeded, produced_grid, plan, rest, notice, landed) = {
                         let Some(profile) = workspace.issued_to(&id, generation) else {
+                            // A Row send a reconnect dropped still ends: its
+                            // row is no longer out, and the action it carried
+                            // goes back as a refused send's does.
+                            if row_sent.is_some()
+                                && let Some(profile) =
+                                    workspace.profiles.iter_mut().find(|profile| profile.id == id)
+                            {
+                                if let Some(results) = profile.session.results(tab) {
+                                    results.update(cx, |table, _| {
+                                        table.delegate_mut().end_send(false)
+                                    });
+                                }
+                                if let Some(then) = row_then {
+                                    profile.session.put_back(tab, then);
+                                }
+                            }
                             workspace.drop_stale_run(&id, tab, lane.as_ref(), cx);
                             return;
                         };
