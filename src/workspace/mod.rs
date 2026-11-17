@@ -2003,13 +2003,17 @@ impl Render for Workspace {
             });
         let engine = profile.config.engine();
         let relation_rows = relation.and_then(|(tab, count, filter, query, limit, offset)| {
-            let estimate = match &profile.catalog {
-                CatalogState::Loaded(catalog, _) => {
-                    catalog_relation(catalog, &tab.schema, &tab.name)
-                        .and_then(|relation| relation.rows)
-                }
-                _ => None,
-            };
+            // Read from the catalog of the database the tab is on, which may
+            // hold a relation of the same name with other numbers.
+            let own = profile.active_database();
+            let database = tab
+                .database
+                .as_deref()
+                .filter(|database| own.as_deref() != Some(*database));
+            let estimate = profile
+                .catalog_of(database)
+                .and_then(|catalog| catalog_relation(catalog, &tab.schema, &tab.name))
+                .and_then(|relation| relation.rows);
             let whole = offset == 0
                 && matches!(
                     query,
