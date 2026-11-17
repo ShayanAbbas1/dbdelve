@@ -348,7 +348,7 @@ impl Workspace {
             });
         // Only the cells that need an input made or refilled are copied out,
         // since this runs every frame and a value can be a whole document.
-        type Binary = Option<(Option<result_grid::BinaryForm>, Option<NewValue>)>;
+        type Binary = Option<(Option<result_grid::BinaryForm>, Option<NewValue>, u64)>;
         let changed: Vec<(usize, Option<(gpui::SharedString, Binary)>)> = {
             let grid = results.read(cx).delegate();
             inputs.fields.resize_with(grid.columns().len(), || None);
@@ -365,17 +365,16 @@ impl Workspace {
                     // again only when what it is made from changed.
                     if binary.is_some()
                         && field.as_ref().is_some_and(|field| {
-                            field
-                                .binary
-                                .as_ref()
-                                .map(|(form, pending)| (*form, pending.as_ref()))
-                                == binary
+                            field.binary.as_ref().map(|(form, pending, replaced)| {
+                                (*form, pending.as_ref(), *replaced)
+                            }) == binary
                         })
                     {
                         return None;
                     }
                     let seed = grid.edit_seed(row, col);
-                    let binary = binary.map(|(form, pending)| (form, pending.cloned()));
+                    let binary =
+                        binary.map(|(form, pending, replaced)| (form, pending.cloned(), replaced));
                     (field
                         .as_ref()
                         .map(|field| (field.seed.as_ref(), &field.binary))
@@ -413,7 +412,7 @@ impl Workspace {
                         .binary
                         .as_ref()
                         .zip(binary.as_ref())
-                        .is_some_and(|((was, _), (now, _))| was != now);
+                        .is_some_and(|((was, _, _), (now, _, _))| was != now);
                     if typed != field.seed && typed != seed && !reformed {
                         continue;
                     }

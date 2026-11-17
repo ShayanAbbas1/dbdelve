@@ -152,7 +152,7 @@ pub struct RowInput {
     /// [`ResultGrid::binary_seed_key`] as `seed` was made: a binary cell's
     /// seed is decoded again only when it changes, and a draft typed in one
     /// form is never read in another.
-    pub binary: Option<(Option<result_grid::BinaryForm>, Option<NewValue>)>,
+    pub binary: Option<(Option<result_grid::BinaryForm>, Option<NewValue>, u64)>,
 }
 
 #[allow(clippy::too_many_arguments)]

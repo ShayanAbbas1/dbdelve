@@ -12598,6 +12598,43 @@ fn a_row_send_is_recorded_in_history(cx: &mut TestAppContext) {
     });
 }
 
+/// A trigger that changes an unedited binary column during a Row send: the
+/// row panel shows the bytes read back, not the ones fetched before.
+#[gpui::test]
+fn the_row_panel_shows_binary_bytes_a_row_send_read_back(cx: &mut TestAppContext) {
+    use crate::result_grid::NewValue;
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            "create table birds (id integer primary key, name text not null, b blob); \
+             insert into birds values (1, 'wren', x'4142'), (2, 'tit', x'4142'); \
+             create trigger rewrites after update of name on birds \
+             begin update birds set b = x'4344' where id = new.id; end;",
+        );
+        let (_, grid) = open_in_row_mode(&workspace, cx);
+        focus_grid(&grid, cx);
+        ring_on(&grid, cx, 0, 1);
+        cx.simulate_keystrokes("secondary-k r");
+        settle(cx);
+        press(cx, "secondary-shift-e");
+        let shown = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, cx| {
+                let inputs = workspace.row_panel.inputs.as_ref().expect("Edit mode");
+                let field = inputs.fields[2].as_ref().expect("an input on the blob");
+                field.input.read(cx).value().to_string()
+            })
+        };
+        assert_eq!(shown(&workspace, cx), "x'4142'");
+
+        stage(&grid, cx, 0, 1, NewValue::Value("robin".into()));
+        save(&workspace, cx);
+        assert_eq!(cell_of(&grid, cx, 0, 1).as_deref(), Some("robin"));
+        assert_eq!(shown(&workspace, cx), "x'4344'");
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn a_row_that_is_gone_after_its_update_says_so_and_rereads(cx: &mut TestAppContext) {
     use crate::result_grid::NewValue;

@@ -350,6 +350,9 @@ pub struct ResultGrid {
     /// Which rows sit at which index: new with every grid and every reorder,
     /// so whatever holds a row by its index can tell it now names another.
     rows_id: u64,
+    /// Bumped whenever [`Self::replace_row`] swaps a row's cells in place,
+    /// which leaves `rows_id` as it was.
+    replaced: u64,
     columns: Vec<Column>,
     /// Per column, how it came by its width.
     sizing: Vec<Sizing>,
@@ -705,6 +708,7 @@ impl ResultGrid {
 
         let mut grid = Self {
             rows_id: next_rows_id(),
+            replaced: 0,
             view: (0..result.columns.len()).collect(),
             pinned: 0,
             columns,
@@ -2997,6 +3001,7 @@ impl ResultGrid {
             return false;
         }
         *held = fetched;
+        self.replaced += 1;
         self.forget_failure(row);
         // A value may now be longer or shorter than the width fitted to it.
         self.refit_from_the_top();
@@ -3368,14 +3373,20 @@ impl ResultGrid {
     /// value fetched, `None` on any other cell: an input seeded from the same
     /// is seeded alike, without decoding the whole value again to find out.
     /// The fetched value is not in it, since a refresh that changes it
-    /// changes `rows_id` and the row panel builds its inputs again.
+    /// changes `rows_id` and the row panel builds its inputs again; a row
+    /// read back in place by a Row send counts in it instead.
     pub fn binary_seed_key(
         &self,
         row: usize,
         col: usize,
-    ) -> Option<(Option<BinaryForm>, Option<&NewValue>)> {
-        self.holds_binary(row, col)
-            .then(|| (self.parsed_as(col), self.pending_value(row, col)))
+    ) -> Option<(Option<BinaryForm>, Option<&NewValue>, u64)> {
+        self.holds_binary(row, col).then(|| {
+            (
+                self.parsed_as(col),
+                self.pending_value(row, col),
+                self.replaced,
+            )
+        })
     }
 
     /// Text a binary cell's input was seeded with as fetched, typed back.
