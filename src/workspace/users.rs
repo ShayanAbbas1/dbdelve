@@ -148,6 +148,8 @@ impl Workspace {
             return;
         };
         profile.roles = RolesState::Loading;
+        profile.roles_request += 1;
+        let request = profile.roles_request;
         let generation = profile.generation;
         let id = id.to_string();
         let read = spawn_blocking(cx.background_executor(), move || {
@@ -160,7 +162,10 @@ impl Workspace {
         cx.spawn(async move |workspace, cx| {
             let result = read.await;
             _ = workspace.update(cx, |workspace, cx| {
-                let Some(profile) = workspace.issued_to(&id, generation) else {
+                let Some(profile) = workspace
+                    .issued_to(&id, generation)
+                    .filter(|profile| profile.roles_request == request)
+                else {
                     return;
                 };
                 let loaded = match result {
