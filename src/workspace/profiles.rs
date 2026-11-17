@@ -969,8 +969,23 @@ impl Workspace {
         let profile = &mut self.profiles[index];
         // A profile left idle, disconnected or never opened, opens on the
         // edited config whenever it is next picked.
-        let reconnect =
-            profile.config.needs_reconnect(&config) && !matches!(profile.state, ProfileState::Idle);
+        let retargeted = profile.config.needs_reconnect(&config);
+        let reconnect = retargeted && !matches!(profile.state, ProfileState::Idle);
+        // Edits staged against the rows the old config reached say nothing
+        // about the new one's, where the same key can name another row; kept,
+        // a Row view's next leave would send one there unread.
+        let grids: Vec<_> = match retargeted {
+            true => profile
+                .session
+                .objects
+                .iter()
+                .filter_map(|tab| match &tab.body {
+                    ObjectBody::Relation { results, .. } => Some(results.clone()),
+                    _ => None,
+                })
+                .collect(),
+            false => Vec::new(),
+        };
         let syntax = config.engine().syntax();
         if profile.config.engine().syntax() != syntax {
             profile.session.set_syntax(syntax, window, cx);
@@ -1002,6 +1017,25 @@ impl Workspace {
         self.remember_profiles(cx);
         // The name is the row's label.
         self.rebuild_connections(cx);
+
+        let mut discarded = false;
+        for results in grids {
+            results.update(cx, |table, cx| {
+                let grid = table.delegate_mut();
+                if grid.has_pending() {
+                    grid.discard_pending();
+                    discarded = true;
+                    table.refresh(cx);
+                }
+            });
+        }
+        if discarded {
+            self.note(
+                "The connection now reaches a different target, so the unapplied edits of its tables were discarded."
+                    .into(),
+                cx,
+            );
+        }
 
         if reconnect {
             self.reconnect(index, cx);

@@ -16132,6 +16132,40 @@ fn a_profile_saved_onto_a_target_without_row_mode_takes_its_tables_out_of_it(
     });
 }
 
+/// A profile edited to reach another database drops the edits its table tabs
+/// staged against the old one: kept, a Row view's next leave would send one,
+/// unread, to rows the edit was never made against.
+#[gpui::test]
+fn a_profile_saved_onto_another_target_discards_its_tables_edits(cx: &mut TestAppContext) {
+    use crate::result_grid::NewValue;
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, BIRDS);
+        let (_, grid) = open_in_row_mode(&workspace, cx);
+        stage(&grid, cx, 0, 1, NewValue::Value("finch".into()));
+        workspace.update_in(cx, |workspace, window, cx| {
+            let profile = workspace.profile_mut().unwrap();
+            let mut config = profile.config.clone();
+            let ConnectionConfig::Sqlite { path, .. } = &mut config else {
+                panic!("the profile is SQLite");
+            };
+            path.push_str(".other");
+            let (profile_id, name) = (profile.id.clone(), profile.name.clone());
+            workspace.save_profile(&profile_id, name, config, None, window, cx);
+        });
+        settle(cx);
+        assert_eq!(
+            grid.read_with(cx, |table, _| table.delegate().pending_count()),
+            0
+        );
+        assert_eq!(
+            on_disk("select name from birds where id = 1").as_deref(),
+            Some("wren")
+        );
+        quit(workspace, cx);
+    });
+}
+
 /// Picks an edit mode from the status bar's menu: the button must be drawn,
 /// and the pick is the action its menu rows carry.
 fn pick_edit_mode(
