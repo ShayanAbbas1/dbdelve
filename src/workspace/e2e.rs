@@ -13677,6 +13677,36 @@ fn a_cell_being_typed_in_is_kept_when_its_row_is_clicked_away_from_in_row_mode(
     });
 }
 
+/// Save with a cell's input open sends what it holds with the row's other
+/// staged cells, as Enter then Save would.
+#[gpui::test]
+fn save_in_row_mode_sends_the_open_inputs_text_with_the_rows_edits(cx: &mut TestAppContext) {
+    use crate::result_grid::NewValue;
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, THREE_BIRDS);
+        let (_, grid) = open_in_row_mode(&workspace, cx);
+        stage(&grid, cx, 0, 2, NewValue::Value("7".into()));
+        focus_grid(&grid, cx);
+        ring_on(&grid, cx, 0, 1);
+        cx.dispatch_action(crate::actions::EditCell);
+        settle(cx);
+        cx.simulate_keystrokes("secondary-a");
+        cx.simulate_input("robin");
+        settle(cx);
+
+        cx.simulate_keystrokes("secondary-s");
+        settle(cx);
+        assert_eq!(
+            on_disk("select name || ':' || n from birds where id = 1").as_deref(),
+            Some("robin:7")
+        );
+        assert_eq!(pending_of(&grid, cx), 0);
+        assert!(cx.update(|window, cx| grid.focus_handle(cx).is_focused(window)));
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn a_refused_typed_edit_carried_down_returns_with_the_keyboard_and_the_mark_drawn(
     cx: &mut TestAppContext,

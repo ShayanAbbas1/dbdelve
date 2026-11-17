@@ -2198,6 +2198,11 @@ impl ResultGrid {
         self.left_row.take()
     }
 
+    /// Whether a cell's input is open.
+    pub(crate) fn input_open(&self) -> bool {
+        self.editing.is_some()
+    }
+
     /// Stage, once, the text of the input a ring move closed, by the rule every
     /// close commits with ([`Self::commit_text`]), and a mode that refuses the
     /// write stages nothing and says nothing, as the Row path always did.

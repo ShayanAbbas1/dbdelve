@@ -2406,6 +2406,15 @@ impl Workspace {
         if let Tab::Object(object) = tab
             && profile.session.edit_mode(tab) == EditMode::Row
         {
+            // The open input's text goes with the row, committed as Enter
+            // commits it; text it refuses keeps the input open and sends nothing.
+            if results.read(cx).delegate().input_open()
+                && !results.update(cx, |table, cx| {
+                    result_grid::commit_from_input(table, window, cx)
+                })
+            {
+                return;
+            }
             if let Some(row) = results.read(cx).delegate().row_to_send() {
                 self.save_row(object, row, None, None, cx);
             }
