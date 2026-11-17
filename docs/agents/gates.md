@@ -109,7 +109,11 @@ mode, always where the user can read it before it runs:
   so the compare catches a change made between the fetch and the apply, not one
   made in the milliseconds between the re-read and the write, and the count
   still catches a row that vanished in that window. Targets that do not verify
-  keep `Connection::generated`.
+  keep `Connection::generated`. On MySQL and MariaDB a table whose storage
+  engine has no transactions (`information_schema.ENGINES.TRANSACTIONS`, so
+  MyISAM, Aria, MEMORY) is not editable at all: the `ROLLBACK` would undo
+  nothing, and a draft kept after a failure part way would send what already
+  ran again.
 - Import Rows shows every statement it will send in its dialog's SQL view
   before any runs.
 - **Explain** puts the engine's `EXPLAIN` prefix on a copy of the

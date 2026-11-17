@@ -341,6 +341,18 @@ WHERE TABLE_SCHEMA = {schema}
 ORDER BY SEQ_IN_INDEX
 ";
 
+/// The storage engine of a table whose engine cannot roll back: no row when
+/// it can, or when it has none (a view). Read from the server's own list of
+/// engines rather than a list of names: MyISAM, Aria and MEMORY answer `NO`.
+const UNTRANSACTIONAL_SQL: &str = "
+SELECT t.ENGINE AS engine
+FROM information_schema.TABLES AS t
+JOIN information_schema.ENGINES AS e ON e.ENGINE = t.ENGINE
+WHERE t.TABLE_SCHEMA = {schema}
+  AND t.TABLE_NAME = {relation}
+  AND e.TRANSACTIONS <> 'YES'
+";
+
 /// What a table with no primary key is edited by: each of its columns, the type
 /// the catalog names and whether the server computes it. Answers for a base
 /// table alone; a view has no row of its own to name by its values.
@@ -1103,6 +1115,17 @@ impl Connection {
         let Some((schema, table)) = sole_table(probed) else {
             return (None, None);
         };
+        // An apply is verified inside a transaction, and its `ROLLBACK` is what
+        // undoes a write that drifted, counted wrong or failed part way. On an
+        // engine with none, that write stays and a kept draft sends it again.
+        let Ok(untransactional) =
+            self.internal_query(&structure_sql(UNTRANSACTIONAL_SQL, &schema, &table))
+        else {
+            return (None, None);
+        };
+        if let Some(reason) = untransactional_reason(&untransactional) {
+            return (None, Some(reason));
+        }
         // ponytail: one catalog round trip per result set, no cache. A map from
         // table to key held on the connection is the upgrade path if the trip
         // shows up in query timings.
@@ -1632,6 +1655,16 @@ fn resolve_keyless_target(
 
 fn structure_sql(template: &str, schema: &str, relation: &str) -> String {
     super::structure_sql(Engine::MySql, template, schema, relation)
+}
+
+/// Why a table [`UNTRANSACTIONAL_SQL`] found is not edited, `None` when it
+/// found none.
+fn untransactional_reason(result: &QueryResult) -> Option<String> {
+    let engine = column_of(result, "engine").ok()?.into_iter().next()?;
+    Some(format!(
+        "The table's storage engine, {engine}, has no transactions, so a failed edit \
+         could not be rolled back; dbdelve will not edit it."
+    ))
 }
 
 /// Every row's value for one column, for the catalog queries that return a
@@ -2455,6 +2488,24 @@ mod tests {
             ),
             "WHERE TABLE_SCHEMA = 'a{relation}' AND TABLE_NAME = '; DROP TABLE t; --'"
         );
+    }
+
+    #[test]
+    fn a_table_found_without_transactions_is_named_in_the_refusal() {
+        let found = QueryResult {
+            columns: vec![Column {
+                name: "engine".into(),
+                data_type: None,
+            }],
+            rows: crate::db::rows(vec![vec![Some("MyISAM".into())]]),
+            ..QueryResult::default()
+        };
+        assert!(untransactional_reason(&found).is_some_and(|reason| reason.contains("MyISAM")));
+        let none = QueryResult {
+            rows: Vec::new(),
+            ..found
+        };
+        assert_eq!(untransactional_reason(&none), None);
     }
 
     #[test]
@@ -3299,6 +3350,32 @@ mod tests {
             vec![Some("id".to_string()), None, Some("name".to_string())]
         );
         assert_eq!(edit.keys, vec![0]);
+    }
+
+    /// A table on an engine with no transactions is not edited: the verified
+    /// apply's `ROLLBACK` would not undo what it wrote.
+    fn live_a_table_without_transactions_is_not_editable(engine: Engine) {
+        let connection = live(engine);
+        // Not a temporary table: `information_schema.TABLES` does not list one.
+        connection
+            .query(
+                "DROP TABLE IF EXISTS dbdelve_test_myisam; \
+                 CREATE TABLE dbdelve_test_myisam (id INT PRIMARY KEY, name TEXT) \
+                 ENGINE = MyISAM",
+                Fetch::default(),
+            )
+            .expect("a MyISAM table is created");
+        let result = connection.query("SELECT id, name FROM dbdelve_test_myisam", Fetch::default());
+        connection
+            .query("DROP TABLE dbdelve_test_myisam", Fetch::default())
+            .expect("the table is dropped");
+        let result = result.expect("query should succeed");
+        assert!(result.edit.is_none());
+        assert!(
+            result
+                .read_only_reason
+                .is_some_and(|reason| reason.contains("MyISAM")),
+        );
     }
 
     fn live_a_join_an_aggregate_or_a_missing_key_is_not_editable(engine: Engine) {
@@ -4214,6 +4291,7 @@ mod tests {
         live_a_single_table_select_is_editable_by_its_primary_key,
         live_an_aliased_or_computed_column_reports_what_the_table_calls_it,
         live_a_join_an_aggregate_or_a_missing_key_is_not_editable,
+        live_a_table_without_transactions_is_not_editable,
         live_the_foreign_key_fixtures_are_seeded,
         live_a_composite_foreign_key_arrives_as_one_key_per_column_in_key_order,
         live_a_foreign_key_across_databases_names_the_database_it_references,
