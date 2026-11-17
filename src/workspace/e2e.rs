@@ -11411,6 +11411,39 @@ fn palette_rows(
 }
 
 #[gpui::test]
+fn a_long_host_shortens_before_its_connections_name_in_the_palette(cx: &mut TestAppContext) {
+    // CI's live job sets `PG*`, whose profile would be put in front on launch.
+    crate::IGNORE_ENVIRONMENT.set(true);
+    store::tests::with_home(|| {
+        let host = format!("{}.example.com", "a-very-long-host-name".repeat(8));
+        let (workspace, cx) = launch_connections(
+            cx,
+            "",
+            "",
+            &format!(
+                "{}[[profiles]]\nid = \"far\"\nname = \"Faraway\"\nhost = {host:?}\n\
+                 database = \"d\"\nuser = \"u\"\nengine = \"postgres\"\n",
+                sqlite_profile("e2e", "E2E", "")
+            ),
+        );
+        cx.update(|window, cx| {
+            window.dispatch_action(Box::new(crate::actions::SwitchConnection), cx)
+        });
+        settle(cx);
+        let name = cx
+            .debug_bounds("palette-label-Faraway")
+            .expect("the connection's row is drawn");
+        assert!(
+            name.size.width > gpui::px(20.),
+            "the name keeps its width beside a host wider than the row: {name:?}"
+        );
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn the_palette_offers_the_selections_actions_as_its_menu_does(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = selection_fixture(cx);
