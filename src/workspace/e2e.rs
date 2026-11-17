@@ -13534,7 +13534,12 @@ fn escape_reverts_nothing_in_a_draft_view(cx: &mut TestAppContext) {
 
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite_holding(cx, THREE_BIRDS);
+        draft_by_default(&workspace, cx);
         let id = open_own_table(&workspace, cx, "birds");
+        assert_eq!(
+            edit_mode_of(&workspace, cx, id),
+            crate::session::EditMode::Draft
+        );
         let grid = relation_grid(&workspace, cx, id);
         focus_grid(&grid, cx);
         ring_on(&grid, cx, 0, 1);
@@ -16388,6 +16393,10 @@ fn a_cell_being_typed_in_is_kept_as_a_staged_edit_when_its_row_is_clicked_away_f
         let (workspace, cx) = launch_on_sqlite_holding(cx, THREE_BIRDS);
         draft_by_default(&workspace, cx);
         let id = open_own_table(&workspace, cx, "birds");
+        assert_eq!(
+            edit_mode_of(&workspace, cx, id),
+            crate::session::EditMode::Draft
+        );
         let grid = relation_grid(&workspace, cx, id);
         focus_grid(&grid, cx);
         ring_on(&grid, cx, 0, 1);
@@ -16439,6 +16448,10 @@ fn a_cell_being_typed_in_is_kept_when_another_cell_of_its_row_is_clicked_in_draf
         let (workspace, cx) = launch_on_sqlite_holding(cx, THREE_BIRDS);
         draft_by_default(&workspace, cx);
         let id = open_own_table(&workspace, cx, "birds");
+        assert_eq!(
+            edit_mode_of(&workspace, cx, id),
+            crate::session::EditMode::Draft
+        );
         let grid = relation_grid(&workspace, cx, id);
         focus_grid(&grid, cx);
         ring_on(&grid, cx, 0, 1);
