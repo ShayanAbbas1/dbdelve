@@ -1177,7 +1177,7 @@ fn updates_itself<'sql>(assignments: Node, sql: &'sql str) -> Option<&'sql str> 
     (assignment.named_child_count() == 2
         && [left, right]
             .iter()
-            .all(|side| side.kind() == "field" && column_name(*side, sql).is_some())
+            .all(|side| side.kind() == "field" && field_name(*side, sql).is_some())
         && sql.get(right.byte_range()) == Some(text))
     .then_some(text)
 }
@@ -1844,7 +1844,7 @@ fn one_row_update<'tree>(
         {
             return None;
         }
-        columns.push(column_name(*left, sql)?);
+        columns.push(column_name(spec, *left, sql)?);
     }
     distinct(&columns)?;
     let predicate = predicate_of(filter)?;
@@ -1913,11 +1913,11 @@ fn equality_columns(
                 && equality_columns(spec, *right, sql, columns);
         }
         "=" if literal_value(*right, sql) => match left.kind() {
-            "invocation" if spec.row_terms && quoted(*right, sql) => stringified(*left, sql),
-            _ => column_name(*left, sql),
+            "invocation" if spec.row_terms && quoted(*right, sql) => stringified(spec, *left, sql),
+            _ => column_name(spec, *left, sql),
         },
         "keyword_is" if (spec.row_terms || spec.null_terms) && null_literal(*right, sql) => {
-            column_name(*left, sql)
+            column_name(spec, *left, sql)
         }
         _ => None,
     };
@@ -1933,7 +1933,7 @@ fn equality_columns(
 /// The column of `toString(<column>)`, spelled exactly so: one argument, a
 /// bare or quoted unqualified column, the function's own name unquoted and
 /// unqualified.
-fn stringified(invocation: Node, sql: &str) -> Option<String> {
+fn stringified(spec: &SqlSpec, invocation: Node, sql: &str) -> Option<String> {
     let mut cursor = invocation.walk();
     let parts: Vec<_> = invocation.children(&mut cursor).collect();
     let [function, open, argument, close] = parts.as_slice() else {
@@ -1950,7 +1950,7 @@ fn stringified(invocation: Node, sql: &str) -> Option<String> {
     {
         return None;
     }
-    column_name(*value, sql)
+    column_name(spec, *value, sql)
 }
 
 fn null_literal(node: Node, sql: &str) -> bool {
@@ -2127,22 +2127,32 @@ fn escaped_quote(text: &str, quotes: &[u8]) -> bool {
 /// kind from `'id'`, so the quote character is what tells them apart. That
 /// matters because Postgres and SQLite quote identifiers with `"`, which is
 /// what `delete_row` writes on both.
-fn column_name(node: tree_sitter::Node, sql: &str) -> Option<String> {
+/// The column `node` names: a bare or backticked name, or a `"…"` one, which
+/// this grammar reads as a `literal`, except on a spec where `"…"` is a string
+/// ([`SqlSpec::double_quoted_strings`]), whose `WHERE "id" = 'id'` holds on
+/// every row.
+fn column_name(spec: &SqlSpec, node: tree_sitter::Node, sql: &str) -> Option<String> {
     let text = sql.get(node.byte_range())?;
     match node.kind() {
-        // `t.id` puts an `object_reference` under the field beside the
-        // identifier. A qualified column is not one this reads.
-        "field" => {
-            let mut cursor = node.walk();
-            let named: Vec<_> = node.named_children(&mut cursor).collect();
-            let [identifier] = named.as_slice() else {
-                return None;
-            };
-            (identifier.kind() == "identifier").then(|| unquote(text, '`'))
+        "field" => field_name(node, sql),
+        "literal" if text.starts_with('"') && !spec.double_quoted_strings => {
+            Some(unquote(text, '"'))
         }
-        "literal" if text.starts_with('"') => Some(unquote(text, '"')),
         _ => None,
     }
+}
+
+/// [`column_name`] of a `field`: a bare or backticked name.
+fn field_name(node: tree_sitter::Node, sql: &str) -> Option<String> {
+    let text = sql.get(node.byte_range())?;
+    // `t.id` puts an `object_reference` under the field beside the
+    // identifier. A qualified column is not one this reads.
+    let mut cursor = node.walk();
+    let named: Vec<_> = node.named_children(&mut cursor).collect();
+    let [identifier] = named.as_slice() else {
+        return None;
+    };
+    (node.kind() == "field" && identifier.kind() == "identifier").then(|| unquote(text, '`'))
 }
 
 fn unquote(text: &str, quote: char) -> String {
@@ -8074,6 +8084,42 @@ mod tests {
         );
         assert_eq!(row_reread(Engine::Redis, &statements[0]), None);
         assert_eq!(generated_writes(Engine::Redis, &statements[0]), None);
+    }
+
+    /// `"id"` is a string on MySQL and MariaDB, so `WHERE "id" = 'id'` holds on
+    /// every row there; ClickHouse quotes with backticks too but reads it as a
+    /// name, as Postgres does.
+    #[test]
+    fn a_double_quoted_name_is_a_string_on_mysql_and_mariadb_only() {
+        for (engine, name) in [
+            (Engine::MySql, false),
+            (Engine::MariaDb, false),
+            (Engine::Postgres, true),
+            (Engine::ClickHouse, true),
+        ] {
+            let q = engine.qualified("s", "t");
+            let delete = format!("DELETE FROM {q} WHERE \"id\" = 'id'");
+            assert_eq!(
+                is_generated_write_on(engine, &delete),
+                name,
+                "{engine:?}: {delete}"
+            );
+            assert_eq!(
+                delete_matches_key_on(engine, &delete, &["id"]),
+                name,
+                "{engine:?}: {delete}"
+            );
+            if engine != Engine::ClickHouse {
+                let id = engine.quote_identifier("id");
+                let insert = format!("INSERT INTO {q} ({id}) VALUES ('9')");
+                let draft = format!("{delete};\n{insert};");
+                assert_eq!(
+                    draft_deletes_match(engine, &draft, &["id"], "s", "t").is_some(),
+                    name,
+                    "{engine:?}: {draft}"
+                );
+            }
+        }
     }
 
     fn set(value: &str) -> NewValue {

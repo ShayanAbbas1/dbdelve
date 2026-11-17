@@ -242,6 +242,10 @@ source: src/sql_snapshots.rs
   |GRANT ALL ON "public"."accounts" TO u|
   = write_on=false select=false classify=Full [] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=None confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
+[postgres] delete by a double-quoted name
+  |DELETE FROM "public"."accounts" WHERE "id" = 'id'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=true matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
 [postgres] delete no where
   |DELETE FROM "public"."accounts"|
   = write_on=false select=false classify=Full [UnfilteredDelete] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(UnfilteredDelete)) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(UnfilteredDelete)) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(UnfilteredDelete)) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(UnfilteredDelete)) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
@@ -529,6 +533,10 @@ source: src/sql_snapshots.rs
 [mysql] grant
   |GRANT ALL ON `public`.`accounts` TO u|
   = write_on=false select=false classify=Full [] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=None confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[mysql] delete by a double-quoted name
+  |DELETE FROM `public`.`accounts` WHERE "id" = 'id'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [mysql] delete no where
   |DELETE FROM `public`.`accounts`|
@@ -818,6 +826,10 @@ source: src/sql_snapshots.rs
   |GRANT ALL ON `public`.`accounts` TO u|
   = write_on=false select=false classify=Full [] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=None confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
+[mariadb] delete by a double-quoted name
+  |DELETE FROM `public`.`accounts` WHERE "id" = 'id'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
 [mariadb] delete no where
   |DELETE FROM `public`.`accounts`|
   = write_on=false select=false classify=Full [UnfilteredDelete] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(UnfilteredDelete)) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(UnfilteredDelete)) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(UnfilteredDelete)) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(UnfilteredDelete)) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
@@ -1105,6 +1117,10 @@ source: src/sql_snapshots.rs
 [sqlite] grant
   |GRANT ALL ON "public"."accounts" TO u|
   = write_on=false select=false classify=Full [] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=None confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[sqlite] delete by a double-quoted name
+  |DELETE FROM "public"."accounts" WHERE "id" = 'id'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=true matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [sqlite] delete no where
   |DELETE FROM "public"."accounts"|
@@ -1394,6 +1410,10 @@ source: src/sql_snapshots.rs
   |GRANT ALL ON "public"."accounts" TO u|
   = write_on=false select=false classify=Full [] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=None confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
+[turso] delete by a double-quoted name
+  |DELETE FROM "public"."accounts" WHERE "id" = 'id'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=true matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
 [turso] delete no where
   |DELETE FROM "public"."accounts"|
   = write_on=false select=false classify=Full [UnfilteredDelete] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(UnfilteredDelete)) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(UnfilteredDelete)) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(UnfilteredDelete)) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(UnfilteredDelete)) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
@@ -1681,6 +1701,10 @@ source: src/sql_snapshots.rs
 [duckdb] grant
   |GRANT ALL ON "public"."accounts" TO u|
   = write_on=false select=false classify=Full [] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=None confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[duckdb] delete by a double-quoted name
+  |DELETE FROM "public"."accounts" WHERE "id" = 'id'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=true matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [duckdb] delete no where
   |DELETE FROM "public"."accounts"|
@@ -1970,6 +1994,10 @@ source: src/sql_snapshots.rs
   |GRANT ALL ON "public"."accounts" TO u|
   = write_on=false select=false classify=Full [] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=None confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
+[snowflake] delete by a double-quoted name
+  |DELETE FROM "public"."accounts" WHERE "id" = 'id'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=true matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
 [snowflake] delete no where
   |DELETE FROM "public"."accounts"|
   = write_on=false select=false classify=Full [UnfilteredDelete] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(UnfilteredDelete)) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(UnfilteredDelete)) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(UnfilteredDelete)) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(UnfilteredDelete)) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
@@ -2257,6 +2285,10 @@ source: src/sql_snapshots.rs
 [clickhouse] grant
   |GRANT ALL ON `public`.`accounts` TO u|
   = write_on=false select=false classify=Full [] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=None confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[clickhouse] delete by a double-quoted name
+  |DELETE FROM `public`.`accounts` WHERE "id" = 'id'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=true matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [clickhouse] delete no where
   |DELETE FROM `public`.`accounts`|
@@ -2546,6 +2578,10 @@ source: src/sql_snapshots.rs
   |GRANT ALL ON "public"."accounts" TO u|
   = write_on=false select=false classify=Full [] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=None confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
+[mssql] delete by a double-quoted name
+  |DELETE FROM "public"."accounts" WHERE "id" = 'id'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=true matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
 [mssql] delete no where
   |DELETE FROM "public"."accounts"|
   = write_on=false select=false classify=Full [UnfilteredDelete] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(UnfilteredDelete)) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(UnfilteredDelete)) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(UnfilteredDelete)) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(UnfilteredDelete)) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
@@ -2833,6 +2869,10 @@ source: src/sql_snapshots.rs
 [generic] grant
   |GRANT ALL ON "public"."accounts" TO u|
   = write_on=false select=false classify=Full [] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=None confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+
+[generic] delete by a double-quoted name
+  |DELETE FROM "public"."accounts" WHERE "id" = 'id'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=true matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [generic] delete no where
   |DELETE FROM "public"."accounts"|

@@ -475,6 +475,10 @@ pub struct SqlSpec {
     /// holding a one-row `INSERT` or `DELETE`. Only where the grid writes one,
     /// since admitting a shape nothing writes widens the gate for nobody.
     pub drafts: bool,
+    /// Whether `"…"` is a string literal rather than a name, as under MySQL's
+    /// and MariaDB's default `sql_mode`. Not read off `identifier_quote`:
+    /// ClickHouse quotes with backticks and still reads `"x"` as a name.
+    pub double_quoted_strings: bool,
     /// What completion offers beside the catalog: the functions and value
     /// expressions the dialect has built in.
     pub builtins: &'static [Builtin],
@@ -521,6 +525,7 @@ impl SqlSpec {
         binary_literal: None,
         null_terms: false,
         drafts: false,
+        double_quoted_strings: false,
         builtins: &[],
     };
 
@@ -963,6 +968,7 @@ pub(crate) const MYSQL: EngineSpec = EngineSpec {
     sql: SqlSpec {
         null_terms: true,
         drafts: true,
+        double_quoted_strings: true,
         identifier_quote: IdentifierQuote::Backtick,
         // Unless `NO_BACKSLASH_ESCAPES` is set, which is not dbdelve's to know
         // or to set.
@@ -1031,6 +1037,7 @@ pub(crate) const MARIADB: EngineSpec = EngineSpec {
     sql: SqlSpec {
         null_terms: true,
         drafts: true,
+        double_quoted_strings: true,
         identifier_quote: IdentifierQuote::Backtick,
         backslash_escapes: true,
         // Refused even into a `timestamp`, which MariaDB reads in the

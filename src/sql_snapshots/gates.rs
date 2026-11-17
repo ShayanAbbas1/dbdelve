@@ -228,6 +228,10 @@ fn sql_gate_corpus_per_engine() {
             ("alter", format!("ALTER TABLE {q} ADD c int")),
             ("create", "CREATE TABLE t (a int)".into()),
             ("grant", format!("GRANT ALL ON {q} TO u")),
+            (
+                "delete by a double-quoted name",
+                format!("DELETE FROM {q} WHERE \"id\" = 'id'"),
+            ),
             ("delete no where", format!("DELETE FROM {q}")),
             ("delete always true", format!("DELETE FROM {q} WHERE 1 = 1")),
             ("delete or", format!("{del} OR {id} = '8'")),
