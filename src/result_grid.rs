@@ -1797,7 +1797,7 @@ impl ResultGrid {
     /// for -- the staged one where the cell has an edit pending, as the grid
     /// paints it. This is what the row inspector reads.
     pub fn fields(&self, row_ix: usize) -> Vec<Field> {
-        if row_ix >= self.result.rows.len() {
+        if row_ix >= self.rows_total() {
             return Vec::new();
         }
 
@@ -8633,6 +8633,22 @@ mod tests {
         // Ten rows in all: the last number has a digit more than nine did.
         assert_eq!(grid.fetched_rows() + grid.added_count(), 10);
         assert!(grid.gutter_width() > narrow);
+    }
+
+    #[test]
+    fn an_added_row_reads_out_its_fields_with_what_is_typed() {
+        let mut grid = editable_grid();
+        assert_eq!(grid.add_row(), Some(2));
+        assert!(grid.set_pending(2, 1, NewValue::Value("third".into())));
+        let fields = grid.fields(2);
+        assert_eq!(
+            fields.len(),
+            grid.result.columns.len(),
+            "the inspector has a field per column"
+        );
+        assert_eq!(fields[0].value, None);
+        assert_eq!(fields[1].value.as_deref(), Some("third"));
+        assert!(grid.fields(3).is_empty());
     }
 
     #[test]
