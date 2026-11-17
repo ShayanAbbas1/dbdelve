@@ -3914,6 +3914,13 @@ pub(super) fn run_verified(
         }
         affected += count.unwrap_or_default();
         if let Some(read) = &step.read_back {
+            if !proceed() {
+                roll_back(send);
+                return ApplyOutcome::Failed {
+                    stage: ApplyStage::ReadBack(index),
+                    error: cancelled(),
+                };
+            }
             match send(read, Sending::Read) {
                 Ok(result) => read_back = Some(Box::new(result)),
                 Err(error) => {
@@ -3927,6 +3934,14 @@ pub(super) fn run_verified(
         }
     }
 
+    // A Cancel that came after the last write still stops the commit.
+    if !proceed() {
+        roll_back(send);
+        return ApplyOutcome::Failed {
+            stage: ApplyStage::Commit,
+            error: cancelled(),
+        };
+    }
     if let Err(error) = send("COMMIT", Sending::Bracket) {
         if lost(&error) {
             return ApplyOutcome::Unknown(error);
@@ -4603,6 +4618,41 @@ mod tests {
             before: vec![fetched("id", Some("1"))],
             read_back: None,
         }
+    }
+
+    #[test]
+    fn a_cancel_after_the_last_write_rolls_back_rather_than_committing() {
+        let sent = std::cell::RefCell::new(Vec::<String>::new());
+        let mut send = |sql: &str, _: Sending| {
+            sent.borrow_mut().push(sql.to_string());
+            Ok(match sql.starts_with("SELECT") {
+                true => reread(&["id"], &[&[Some("1")]]),
+                false => QueryResult {
+                    rows_affected: Some(1),
+                    ..QueryResult::default()
+                },
+            })
+        };
+        // A Cancel comes once the write has gone out.
+        let proceed = || !sent.borrow().iter().any(|sql| sql.starts_with("UPDATE"));
+        let outcome = run_verified(
+            Engine::Postgres,
+            &[update_step()],
+            &mut send,
+            &proceed,
+            &|_| false,
+            &|_| false,
+        );
+        assert_eq!(
+            outcome,
+            ApplyOutcome::Failed {
+                stage: ApplyStage::Commit,
+                error: plain_error("Cancelled before it was sent.".into()),
+            }
+        );
+        let sent = sent.into_inner();
+        assert_eq!(sent.last().map(String::as_str), Some("ROLLBACK"));
+        assert!(!sent.iter().any(|sql| sql == "COMMIT"), "{sent:?}");
     }
 
     #[test]
