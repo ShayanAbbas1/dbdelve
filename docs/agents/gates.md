@@ -280,7 +280,8 @@ predicate.
 
 The one exception is a table with no primary key: a row is named by all of its
 values as read, a NULL as `IS NULL`, and a write runs only when exactly one row
-matches. On the six verified engines the re-read must return one row and the
+matches. Only a plain read of that one table (`sql::table_read`) is edited so:
+a self-join's columns each name the table, but not which row of it. On the six verified engines the re-read must return one row and the
 write must count one, inside the apply's transaction
 (`sql::draft_deletes_match` holds a `DELETE` to every column of the grid's
 key, as a set). On ClickHouse, before each `UPDATE`, `DELETE` or `ALTER` write,

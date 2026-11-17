@@ -234,7 +234,7 @@ impl Connection {
         drop(held);
         drop(connection);
         if editable {
-            (result.edit, result.read_only_reason) = self.edit_target(&probed);
+            (result.edit, result.read_only_reason) = self.edit_target(sql, &probed);
         }
 
         Ok(result)
@@ -248,7 +248,11 @@ impl Connection {
     /// select omitted. A failure answers "no" too — this runs after the user's
     /// statement already succeeded, and a pragma that refused must not turn
     /// that success into an error.
-    fn edit_target(&self, probed: &[ProbedColumn]) -> (Option<EditTarget>, Option<String>) {
+    fn edit_target(
+        &self,
+        sql: &str,
+        probed: &[ProbedColumn],
+    ) -> (Option<EditTarget>, Option<String>) {
         let Some((schema, table)) = sole_table(probed) else {
             return (None, None);
         };
@@ -260,6 +264,13 @@ impl Connection {
         };
         if !key.is_empty() {
             return (resolve_edit_target(probed, &schema, &table, &key), None);
+        }
+        // Provenance names a column's table, never which instance of it: the
+        // two sides of a self-join each read `t`, and every-column matching
+        // would then name a row that is neither. Only a plain read of one
+        // table is edited by its values.
+        if let Err(why) = crate::sql::table_read_or_why(Engine::Sqlite, sql) {
+            return (None, Some(why.reason().into()));
         }
         match self.schema().table_columns(&schema, &table) {
             Ok(columns) => resolve_keyless_target(probed, &schema, &table, &columns),
@@ -2661,6 +2672,19 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
                  and place is not in the result."
             )
         );
+        // A disjoint self-join reads each column once, from two rows: the
+        // origins cannot tell the instances apart, so the statement must.
+        let disjoint = edit(
+            "SELECT x.bird, y.place, x.seen, y.weight FROM sightings x JOIN sightings y \
+             ON x.bird = 'a' AND y.bird = 'b'",
+        );
+        assert!(disjoint.edit.is_none());
+        assert_eq!(
+            disjoint.read_only_reason.as_deref(),
+            Some(crate::sql::Unread::Join.reason())
+        );
+        let reordered = edit("SELECT weight, bird, seen, place FROM sightings");
+        assert!(reordered.edit.is_some(), "a reordered projection is edited");
         // Computed beside real columns, and a self-join, are no table's rows.
         assert!(edit("SELECT *, 1 AS one FROM sightings").edit.is_none());
         assert!(

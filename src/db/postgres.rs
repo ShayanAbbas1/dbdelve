@@ -1524,7 +1524,7 @@ impl Connection {
         // query through it, so the lock has to go before the question is asked.
         drop(held);
         drop(client);
-        (result.edit, result.read_only_reason) = self.edit_target(&probed);
+        (result.edit, result.read_only_reason) = self.edit_target(sql, &probed);
 
         Ok(result)
     }
@@ -1536,7 +1536,11 @@ impl Connection {
     /// A failure answers "no" too — this runs after the user's statement
     /// already succeeded, and a catalog query refused inside a transaction the
     /// user has aborted must not turn that success into an error.
-    fn edit_target(&self, probed: &[ProbedColumn]) -> (Option<EditTarget>, Option<String>) {
+    fn edit_target(
+        &self,
+        sql: &str,
+        probed: &[ProbedColumn],
+    ) -> (Option<EditTarget>, Option<String>) {
         let Some(table) = sole_table(probed) else {
             return (None, None);
         };
@@ -1548,10 +1552,19 @@ impl Connection {
         // ponytail: one catalog round trip per result set, no cache. A map from
         // oid to key held on the connection is the upgrade path if the trip
         // shows up in query timings.
-        match keyed_table(&catalog) {
-            Some(table) => edit_outcome(probed, &table),
-            None => (None, None),
+        let Some(table) = keyed_table(&catalog) else {
+            return (None, None);
+        };
+        // Provenance names a column's table, never which instance of it: the
+        // two sides of a self-join each read `t`, and every-column matching
+        // would then name a row that is neither. Only a plain read of one
+        // table is edited by its values.
+        if table.key.is_empty()
+            && let Err(why) = crate::sql::table_read_or_why(Engine::Postgres, sql)
+        {
+            return (None, Some(why.reason().into()));
         }
+        edit_outcome(probed, &table)
     }
 
     /// `ask` on the side session, opened if there is none or the last one

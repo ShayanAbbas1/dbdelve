@@ -934,7 +934,7 @@ impl Connection {
         drop(held);
         drop(connection);
         if editable {
-            (result.edit, result.read_only_reason) = self.edit_target(&probed);
+            (result.edit, result.read_only_reason) = self.edit_target(sql, &probed);
         }
 
         Ok(result)
@@ -1111,7 +1111,11 @@ impl Connection {
     /// the select omitted. A failure answers "no" too — this runs after the
     /// user's statement already succeeded, and a catalog query that was refused
     /// must not turn that success into an error.
-    fn edit_target(&self, probed: &[ProbedColumn]) -> (Option<EditTarget>, Option<String>) {
+    fn edit_target(
+        &self,
+        sql: &str,
+        probed: &[ProbedColumn],
+    ) -> (Option<EditTarget>, Option<String>) {
         let Some((schema, table)) = sole_table(probed) else {
             return (None, None);
         };
@@ -1140,6 +1144,13 @@ impl Connection {
         }
         // No primary key: the table's rows are named by every column, which
         // takes the columns' types.
+        // Provenance names a column's table, never which instance of it: the
+        // two sides of a self-join each read `t`, and every-column matching
+        // would then name a row that is neither. Only a plain read of one
+        // table is edited by its values.
+        if let Err(why) = crate::sql::table_read_or_why(self.engine, sql) {
+            return (None, Some(why.reason().into()));
+        }
         let Ok(catalog) = self.internal_query(&structure_sql(
             &edit_columns_sql(self.engine),
             &schema,
