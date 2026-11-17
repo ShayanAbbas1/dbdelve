@@ -151,10 +151,11 @@ pub(crate) enum DraftRow {
 /// what names it and not by where it sits: a marked or edited document by the
 /// key values it was fetched with (a sort in memory moves the fetched rows while
 /// an apply is out), an added row by its place among the added rows, which a
-/// sort never moves.
+/// sort never moves. A key value is held with its cell's type: MongoDB draws
+/// the integer `1` and the string `"1"` alike, and they are two documents.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StepRow {
-    Fetched(Vec<(String, String)>),
+    Fetched(Vec<(String, String)>, Vec<Option<String>>),
     Added(usize),
 }
 
@@ -2477,6 +2478,19 @@ impl ResultGrid {
     /// `None` where the result traces to no table, where the index has outlived
     /// the rows, and where any key column came back NULL — `=` does not find a
     /// NULL, so a predicate built from one reaches nothing.
+    /// [`StepRow::Fetched`] of fetched row `row`: its key values as fetched,
+    /// and the type of each key cell.
+    fn fetched_identity(&self, row: usize) -> Option<StepRow> {
+        let (_, _, keys, _) = self.row_key(row)?;
+        let edit = self.result.edit.as_ref()?;
+        let types = edit
+            .keys
+            .iter()
+            .map(|&col| self.cell_type(row, col).map(str::to_string))
+            .collect();
+        Some(StepRow::Fetched(keys, types))
+    }
+
     pub fn row_key(&self, row: usize) -> Option<RowKey> {
         let edit = self.result.edit.as_ref()?;
         if row >= self.result.rows.len() {
@@ -3238,9 +3252,7 @@ impl ResultGrid {
         self.draft_order()
             .into_iter()
             .filter_map(|row| match row {
-                DraftRow::Marked(row) | DraftRow::Updated(row) => self
-                    .row_key(row)
-                    .map(|(_, _, keys, _)| StepRow::Fetched(keys)),
+                DraftRow::Marked(row) | DraftRow::Updated(row) => self.fetched_identity(row),
                 DraftRow::Added(place) => Some(StepRow::Added(place)),
             })
             .collect()
@@ -3255,12 +3267,9 @@ impl ResultGrid {
     /// apply is out, so no row was added or removed since the places were
     /// taken. What `applied` does not name stays.
     pub(crate) fn drop_applied(&mut self, applied: &[StepRow]) {
-        let fetched: Vec<&Vec<(String, String)>> = applied
+        let fetched: Vec<&StepRow> = applied
             .iter()
-            .filter_map(|step| match step {
-                StepRow::Fetched(keys) => Some(keys),
-                StepRow::Added(_) => None,
-            })
+            .filter(|step| matches!(step, StepRow::Fetched(..)))
             .collect();
         // Only a marked row or one holding staged cells is in the draft.
         let drafted: std::collections::BTreeSet<usize> = self
@@ -3271,8 +3280,8 @@ impl ResultGrid {
             .collect();
         for row in drafted {
             if self
-                .row_key(row)
-                .is_some_and(|(_, _, keys, _)| fetched.contains(&&keys))
+                .fetched_identity(row)
+                .is_some_and(|identity| fetched.contains(&&identity))
             {
                 self.marked.remove(&row);
                 self.discard_row(row);
@@ -3282,7 +3291,7 @@ impl ResultGrid {
             .iter()
             .filter_map(|step| match step {
                 StepRow::Added(place) => Some(*place),
-                StepRow::Fetched(_) => None,
+                StepRow::Fetched(..) => None,
             })
             .filter(|place| *place < self.added.len())
             .collect();
@@ -6051,6 +6060,44 @@ mod tests {
         );
     }
 
+    /// The integer `1` and the string `"1"` draw alike and are two documents:
+    /// one applied leaves the other's edit in the draft.
+    #[test]
+    fn an_applied_document_is_told_from_one_whose_key_draws_alike() {
+        let mut grid = ResultGrid::new(
+            QueryResult {
+                columns: vec![typed("_id", "mixed"), typed("name", "string")],
+                rows: rows(vec![
+                    vec![Some("1".into()), Some("int".into())],
+                    vec![Some("1".into()), Some("text".into())],
+                ]),
+                cell_types: vec![vec!["int", "string"], vec!["string", "string"]],
+                edit: Some(EditTarget {
+                    schema: "dbdelve_dev".into(),
+                    table: "accounts".into(),
+                    columns: vec![Some("_id".into()), Some("name".into())],
+                    keys: vec![0],
+                    ..Default::default()
+                }),
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        )
+        .with_engine(db::Engine::MongoDb);
+        assert!(grid.set_pending(0, 1, NewValue::Value("Ada".into())));
+        assert!(grid.set_pending(1, 1, NewValue::Value("Cy".into())));
+        let identities = grid.draft_identities();
+        assert_eq!(identities.len(), 2);
+        assert_ne!(identities[0], identities[1]);
+
+        grid.drop_applied(&identities[..1]);
+        assert!(grid.pending_cells(0).is_empty());
+        assert!(
+            !grid.pending_cells(1).is_empty(),
+            "the other document's edit stays"
+        );
+    }
+
     #[test]
     fn applied_rows_leave_a_mongo_draft_by_identity() {
         let id = |n: u8| format!("ObjectId('65a4f1c0ffffffffffffff{n:02x}')");
@@ -6133,7 +6180,10 @@ mod tests {
         assert!(statements[2].contains("insertOne") && statements[2].contains("\"B\""));
 
         // An identity no row has changes nothing.
-        grid.drop_applied(&[StepRow::Fetched(vec![("_id".into(), "nobody".into())])]);
+        grid.drop_applied(&[StepRow::Fetched(
+            vec![("_id".into(), "nobody".into())],
+            vec![Some("objectId".into())],
+        )]);
         assert_eq!(
             grid.pending_count(),
             3,
