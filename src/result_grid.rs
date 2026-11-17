@@ -2855,14 +2855,18 @@ impl ResultGrid {
     /// the eye does.
     fn pending_beside(&self, back: bool) -> Option<(usize, usize)> {
         let fetched = self.fetched_rows();
+        // A row with no cell of its own to stop on stops on the first column
+        // drawn, as `add_row` puts it: column 0 may be hidden, and stepping
+        // to an edit shows its column.
+        let drawn = self.view.first().copied().unwrap_or(0);
         let mut cells: Vec<_> = self
             .pending
             .iter()
             .map(|edit| (edit.row, edit.col))
-            .chain(self.marked.iter().map(|&row| (row, 0)))
+            .chain(self.marked.iter().map(|&row| (row, drawn)))
             .chain(self.added.iter().enumerate().map(|(place, added)| {
                 let first = added.cells.iter().map(|(col, _)| *col).min();
-                (fetched + place, first.unwrap_or(0))
+                (fetched + place, first.unwrap_or(drawn))
             }))
             .collect();
         cells.sort_unstable();
@@ -5781,6 +5785,14 @@ mod tests {
         assert_eq!(grid.add_row(), Some(3));
         grid.set_active(2, 1);
         assert_eq!(walk(&mut grid, false), (3, 0));
+
+        // With the first column hidden, a mark and an untouched added row
+        // stop on the first one drawn, which a step does not un-hide.
+        grid.hide_column(0);
+        grid.set_active(0, 1);
+        assert_eq!(walk(&mut grid, false), (1, 1), "the marked row");
+        grid.set_active(2, 1);
+        assert_eq!(walk(&mut grid, false), (3, 1), "the untouched added row");
     }
 
     #[test]
