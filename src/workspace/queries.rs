@@ -2239,6 +2239,14 @@ impl Workspace {
             .as_ref()
             .filter(|_| refusal_applies)
             .and_then(|binding| profile.bound_write_refusal(binding));
+        // Asked again as it runs, not only when it was put up for review: a
+        // transaction opened since would hold the change, and a rollback
+        // would undo what the tab reported as applied. A run resumed from the
+        // gate's prompt comes through here too.
+        if matches!(refresh, Some(Refresh::Roles)) && profile.in_transaction {
+            self.note(super::users::ROLE_CHANGE_IN_TRANSACTION.into(), cx);
+            return;
+        }
         // A statement the user typed as an `EXPLAIN` is theirs, run and kept in
         // the history as typed; only its answer goes where the Explain
         // command's does. Not in a queue, where every result holds a grid.
