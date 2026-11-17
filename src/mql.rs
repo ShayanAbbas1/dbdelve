@@ -2654,8 +2654,9 @@ pub(crate) fn delete_matches_key(text: &str, keys: &[&str]) -> bool {
 /// Every statement's method is read from the parse, never from the caller, and
 /// only the three a draft holds are read at all: any other method, text that
 /// does not parse, and text with no statement are `None`. An `updateOne` or an
-/// `insertOne` is not counted. Their shape is the gate's to check
-/// ([`is_generated_write`]), as is the order.
+/// `insertOne` is not counted, but must be on `collection` too, an
+/// `updateOne`'s filter naming exactly `keys`. Their shape is the gate's to
+/// check ([`is_generated_write`]), as is the order.
 pub(crate) fn draft_deletes_match(text: &str, keys: &[&str], collection: &str) -> Option<usize> {
     let statements = parse(text).ok()?;
     if statements.is_empty() {
@@ -2672,29 +2673,30 @@ pub(crate) fn draft_deletes_match(text: &str, keys: &[&str], collection: &str) -
         else {
             return None;
         };
-        match call.method {
-            Method::UpdateOne | Method::InsertOne => {}
-            Method::DeleteOne => {
-                let [
-                    Arg {
-                        value: Value::Document(fields),
-                        ..
-                    },
-                ] = call.args.as_slice()
-                else {
-                    return None;
-                };
-                let names_keys = distinct(fields)
+        let names_keys = |filter: Option<&Arg>| match filter {
+            Some(Arg {
+                value: Value::Document(fields),
+                ..
+            }) => {
+                distinct(fields)
                     && fields.len() == keys.len()
                     && fields
                         .iter()
-                        .all(|(field, _)| keys.contains(&field.as_str()));
-                if database.is_some() || named != collection || !names_keys {
-                    return None;
-                }
+                        .all(|(field, _)| keys.contains(&field.as_str()))
+            }
+            _ => false,
+        };
+        let keyed = match call.method {
+            Method::InsertOne => true,
+            Method::UpdateOne => names_keys(call.args.first()),
+            Method::DeleteOne => {
                 deletes += 1;
+                call.args.len() == 1 && names_keys(call.args.first())
             }
             _ => return None,
+        };
+        if database.is_some() || named != collection || !keyed {
+            return None;
         }
     }
     Some(deletes)
@@ -5008,6 +5010,10 @@ mod tests {
             "{c}.deleteOne({});",
             "{c}.deleteOne({_id: 1}, {_id: 1});",
             "{c}.deleteOne({_id: 1});\ndb.dropDatabase();",
+            // An update or insert is pinned to the collection, an update to the key.
+            "{c}.deleteOne({_id: 1});\ndb.getCollection(\"other\").updateOne({_id: 2}, {$set: {a: 1}});",
+            "{c}.deleteOne({_id: 1});\ndb.getCollection(\"other\").insertOne({a: 1});",
+            "{c}.deleteOne({_id: 1});\n{c}.updateOne({a: 2}, {$set: {a: 1}});",
         ] {
             let text = text.replace("{c}", c);
             assert_eq!(

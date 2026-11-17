@@ -265,7 +265,8 @@ one `DELETE` per marked row, each naming its own key and table, inside the
 covering several. The gate reads each `DELETE`'s shape and cannot know the key
 or the table, so `sql::draft_deletes_match` reads them out of the same parse
 tree, and the draft is reviewed only when both hold and the `DELETE`s it
-counts are the marks the grid holds.
+counts are the marks the grid holds. It holds the draft's `UPDATE`s to the
+same table and key, and its `INSERT`s to the same table.
 
 A cell is editable only when DBDelve can name its row by primary key; when
 it cannot, the grid stays read-only and says why, and never guesses at a

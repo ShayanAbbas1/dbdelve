@@ -372,6 +372,22 @@ fn draft_gate_corpus_per_engine() {
             key_level.push((case, body.clone()));
             key_level.push((case, bracket(&body)));
         }
+        // An `UPDATE` or `INSERT` the gate admits by shape is pinned to the
+        // grid's table and, an `UPDATE`, to its key, by the same readout.
+        let update_elsewhere = format!("UPDATE {other} SET {name} = 'x' WHERE {id} = '8'");
+        let update_everything = format!("UPDATE {q} SET {name} = 'x'");
+        let update_by_name = format!("UPDATE {q} SET {name} = 'x' WHERE {name} = 'y'");
+        let insert_elsewhere = format!("INSERT INTO {other} ({id}, {name}) VALUES ('9', NULL)");
+        for (case, statement) in [
+            ("update of another table", &update_elsewhere),
+            ("update without a where", &update_everything),
+            ("update by another column", &update_by_name),
+            ("insert into another table", &insert_elsewhere),
+        ] {
+            let body = joined(&[&del, statement]);
+            key_level.push((case, body.clone()));
+            key_level.push((case, bracket(&body)));
+        }
 
         for (case, parts) in &admitted {
             let body = joined(parts);

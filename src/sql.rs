@@ -1063,6 +1063,25 @@ struct InsertShape {
     tail: bool,
 }
 
+/// The table `INSERT INTO <t> …` names, read as [`literal_insert_shape`] reads it.
+fn insert_target(statement: Node) -> Option<Node> {
+    let insert = statement
+        .named_child(0)
+        .filter(|node| node.kind() == "insert")?;
+    let mut cursor = insert.walk();
+    let children: Vec<_> = insert.named_children(&mut cursor).collect();
+    match children.as_slice() {
+        [keyword, into, target, ..]
+            if keyword.kind() == "keyword_insert"
+                && into.kind() == "keyword_into"
+                && target.kind() == "object_reference" =>
+        {
+            Some(*target)
+        }
+        _ => None,
+    }
+}
+
 fn literal_insert_shape(statement: Node, sql: &str) -> Option<InsertShape> {
     // `RETURNING` hangs beside the insert, not under it.
     let insert = statement
@@ -1264,15 +1283,17 @@ pub fn delete_matches_key_on(engine: Engine, statement: &str, keys: &[&str]) -> 
 }
 
 /// How many `DELETE`s `batch` holds, when every one of them names exactly
-/// `keys` on `schema.table`: the readout [`is_generated_write_on`] cannot give,
+/// `keys` on `schema.table`, every `UPDATE` does too, and every `INSERT` is
+/// into `schema.table`: the readout [`is_generated_write_on`] cannot give,
 /// because no key or table reaches it. The caller compares the count with the
 /// rows the user marked.
 ///
-/// A reviewed draft needs both answers. The gate reads a `DELETE`'s shape and
-/// admits any one-row `WHERE` on any table; this reads which columns and which
-/// table, so a `DELETE` of another table, or by half a composite key, is `None`
-/// here though the gate admitted it. Like [`delete_matches_key_on`] it is a
-/// readout and admits nothing.
+/// A reviewed draft needs both answers. The gate reads a statement's shape and
+/// admits any one-row `WHERE` on any table, and an `UPDATE`'s set values but
+/// not its `WHERE`; this reads which columns and which table, so a statement
+/// on another table, an `UPDATE` with no `WHERE`, or one by half a composite
+/// key, is `None` here though the gate admitted it. Like
+/// [`delete_matches_key_on`] it is a readout and admits nothing.
 ///
 /// Kinds are read from the same parse tree the gate reads, never from the
 /// caller's word: a statement is a `DELETE` when the tree says so, and an
@@ -1306,21 +1327,31 @@ pub fn draft_deletes_match(
     if statements.is_empty() {
         return None;
     }
+    let names_key = |predicate: Node| {
+        row_columns(&spec.sql, predicate, &sql).is_some_and(|columns| {
+            columns.len() == keys.len() && keys.iter().all(|key| columns.iter().any(|c| c == key))
+        })
+    };
     for statement in statements {
         if statement.kind() != "statement" {
             return None;
         }
-        if statement.named_child(0).map(|node| node.kind()) != Some("delete") {
-            continue;
-        }
-        let (target, predicate) = one_row_delete(statement)?;
-        let columns = row_columns(&spec.sql, predicate, &sql)?;
-        let names_key =
-            columns.len() == keys.len() && keys.iter().all(|key| columns.iter().any(|c| c == key));
-        if !names_key || sql.get(target.byte_range()) != Some(relation.as_str()) {
+        let (target, keyed) = match statement.named_child(0).map(|node| node.kind()) {
+            Some("delete") => {
+                let (target, predicate) = one_row_delete(statement)?;
+                deletes += 1;
+                (target, names_key(predicate))
+            }
+            Some("update") => {
+                let (target, _, filter) = update_parts(statement)?;
+                (target, names_key(predicate_of(filter)?))
+            }
+            Some("insert") => (insert_target(statement)?, true),
+            _ => return None,
+        };
+        if !keyed || sql.get(target.byte_range()) != Some(relation.as_str()) {
             return None;
         }
-        deletes += 1;
     }
     Some(deletes)
 }
