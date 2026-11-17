@@ -13719,6 +13719,40 @@ fn a_cell_being_typed_in_is_kept_when_its_row_is_clicked_away_from_in_row_mode(
     });
 }
 
+/// An input left untouched stages nothing when it closes, even when the cell
+/// under it changed since it opened, as a Row send landing changes it: its
+/// text is the old value, which was never typed.
+#[gpui::test]
+fn an_untouched_input_whose_cell_changed_under_it_stages_nothing_when_clicked_away(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, THREE_BIRDS);
+        let (_, grid) = open_in_row_mode(&workspace, cx);
+        focus_grid(&grid, cx);
+        ring_on(&grid, cx, 0, 1);
+        cx.dispatch_action(crate::actions::EditCell);
+        settle(cx);
+
+        // What a landing whose trigger rewrote the cell leaves under the input.
+        let landed = crate::db::Row::new([Some("1"), Some("WREN"), Some("1")]).unwrap();
+        grid.update(cx, |table, cx| {
+            assert!(table.delegate_mut().replace_row(0, landed));
+            table.refresh(cx);
+        });
+
+        click_cell_of_row(cx, 1);
+        assert_eq!(pending_of(&grid, cx), 0, "nothing was typed");
+        assert_eq!(cell_of(&grid, cx, 0, 1).as_deref(), Some("WREN"));
+        assert_eq!(
+            on_disk("select name from birds where id = 1").as_deref(),
+            Some("wren"),
+            "nothing was sent"
+        );
+        quit(workspace, cx);
+    });
+}
+
 /// Save with a cell's input open sends what it holds with the row's other
 /// staged cells, as Enter then Save would.
 #[gpui::test]

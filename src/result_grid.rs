@@ -426,7 +426,7 @@ pub struct ResultGrid {
     /// the workspace stages it ([`Self::commit_closed_input`]): what was typed
     /// in it is kept as a staged edit in every view, and a Row view sends it
     /// with its row.
-    closed_input: Option<(usize, usize, Entity<InputState>)>,
+    closed_input: Option<(usize, usize, OpenInput)>,
     /// The row whose send the server refused, and what it said, until that row
     /// is edited, reverted or sent.
     send_failure: Option<(usize, String)>,
@@ -629,7 +629,16 @@ struct Editing {
     col: usize,
     /// Built on the first render of the cell, because an input needs a window
     /// and opening an edit deliberately does not.
-    input: Option<Entity<InputState>>,
+    input: Option<OpenInput>,
+}
+
+/// A cell's input and the text it opened with. Untouched text is compared
+/// against that seed, not the cell's current one: a Row send landing under
+/// an open input changes the cell, and the old text would read as typed.
+#[derive(Clone)]
+struct OpenInput {
+    input: Entity<InputState>,
+    seed: SharedString,
 }
 
 /// One row's worth of pending edits, resolved to real column names and ready
@@ -2215,20 +2224,20 @@ impl ResultGrid {
     /// not dropped: the input opens again on its cell, with the ring, and the
     /// row and the reason come back for the caller to say and to send nothing.
     pub(crate) fn commit_closed_input(&mut self, cx: &App) -> Option<(usize, &'static str)> {
-        let (row, col, input) = self.closed_input.take()?;
-        let text = input.read(cx).value().clone();
-        if *text != *self.edit_seed(row, col)
+        let (row, col, open) = self.closed_input.take()?;
+        let text = open.input.read(cx).value().clone();
+        if text != open.seed
             && let Some(reason) = self.staging_refusal(row, col, &NewValue::Value(text.clone()))
         {
             self.editing = Some(Editing {
                 row,
                 col,
-                input: Some(input),
+                input: Some(open),
             });
             self.active = Some((row, col));
             return Some((row, reason));
         }
-        self.commit_text(row, col, text);
+        self.commit_text(row, col, text, &open.seed);
         None
     }
 
@@ -2657,7 +2666,7 @@ impl ResultGrid {
     /// What the open input holds would be refused by [`Self::staging_refusal`].
     pub(crate) fn commit_refusal(&self, cx: &App) -> Option<&'static str> {
         let editing = self.editing.as_ref()?;
-        let text = editing.input.as_ref()?.read(cx).value().clone();
+        let text = editing.input.as_ref()?.input.read(cx).value().clone();
         self.staging_refusal(editing.row, editing.col, &NewValue::Value(text))
     }
 
@@ -3453,22 +3462,25 @@ impl ResultGrid {
         if (editing.row, editing.col) != (row, col) {
             return None;
         }
-        if let Some(input) = &editing.input {
-            return Some(input.clone());
+        if let Some(open) = &editing.input {
+            return Some(open.input.clone());
         }
 
         let seed = SharedString::from(self.edit_seed(row, col).into_owned());
         let input = cx.new(|cx| InputState::new(window, cx));
         // `set_value` rather than `default_value`: only the former leaves the
         // caret after the text, and an edit starts from the end of the value.
-        input.update(cx, |input, cx| input.set_value(seed, window, cx));
+        input.update(cx, |input, cx| input.set_value(seed.clone(), window, cx));
         // The keystrokes that follow belong to the value rather than to the
         // grid's selection, so the input takes focus as it appears. Through
         // `InputState::focus`, not its handle: the state's own focus listener,
         // which starts the caret blinking, is only activated once this frame's
         // effects flush, after the focus event it would have caught has fired.
         input.update(cx, |input, cx| input.focus(window, cx));
-        self.editing.as_mut()?.input = Some(input.clone());
+        self.editing.as_mut()?.input = Some(OpenInput {
+            input: input.clone(),
+            seed,
+        });
         Some(input)
     }
 
@@ -3480,11 +3492,11 @@ impl ResultGrid {
             return true;
         };
         let (row, col) = (editing.row, editing.col);
-        let Some(input) = editing.input.clone() else {
+        let Some(open) = editing.input.clone() else {
             self.editing = None;
             return true;
         };
-        if !self.commit_text(row, col, input.read(cx).value().clone()) {
+        if !self.commit_text(row, col, open.input.read(cx).value().clone(), &open.seed) {
             return false;
         }
         self.editing = None;
@@ -3497,14 +3509,14 @@ impl ResultGrid {
     /// Every close of a cell's input commits by this rule: Enter; Tab,
     /// Shift-Tab, Up and Down through [`commit_and_step`]; a Row view's edge
     /// key through `Workspace::step_past_edge`; a click away through
-    /// [`Self::commit_closed_input`]. Text equal to what the input was seeded
+    /// [`Self::commit_closed_input`]. Text equal to `seed`, what the input was seeded
     /// with is nothing typed, on every row: a NULL, a staged NULL or DEFAULT and
     /// an added row's untouched cell all seed empty, and writing that back would
     /// put `''` over them or in the `INSERT` over the server's default. Nothing
     /// staged asks nothing of the mode. The empty string over a NULL is
     /// `SetEmpty`'s, which stages through [`Self::set_pending`] and not here.
-    fn commit_text(&mut self, row: usize, col: usize, text: SharedString) -> bool {
-        if *text == *self.edit_seed(row, col) {
+    fn commit_text(&mut self, row: usize, col: usize, text: SharedString, seed: &str) -> bool {
+        if *text == *seed {
             return true;
         }
         self.set_pending(row, col, NewValue::Value(text))
@@ -4631,8 +4643,8 @@ impl ResultGrid {
                         .as_ref()
                         .filter(|editing| (editing.row, editing.col) == (row_ix, col_ix))
                     {
-                        if let Some(input) = editing.input.clone() {
-                            input.focus_handle(cx).focus(window, cx);
+                        if let Some(open) = editing.input.clone() {
+                            open.input.focus_handle(cx).focus(window, cx);
                         }
                         window.prevent_default();
                         return;
@@ -8687,6 +8699,11 @@ mod tests {
         assert_eq!(grid.added_count(), 1);
     }
 
+    /// `commit_text` with the seed the cell's input would have opened with now.
+    fn commit_unseeded(grid: &mut ResultGrid, row: usize, col: usize, text: &str) -> bool {
+        let seed = grid.edit_seed(row, col).into_owned();
+        grid.commit_text(row, col, text.into(), &seed)
+    }
     #[test]
     fn closing_an_untouched_added_cell_without_typing_does_not_touch_it() {
         let mut grid = editable_grid();
@@ -8694,7 +8711,7 @@ mod tests {
         assert!(grid.begin_edit(2, 1));
         // The input seeds empty and closes empty: that is not a value, so the
         // column stays out of the INSERT and the server's default applies.
-        assert!(grid.commit_text(2, 1, "".into()));
+        assert!(commit_unseeded(&mut grid, 2, 1, ""));
         assert_eq!(grid.pending_value(2, 1), None);
         assert_eq!(grid.draft_inserts().err(), Some(2));
 
@@ -8710,7 +8727,7 @@ mod tests {
         // Reopened and closed unchanged, a staged NULL stays one.
         assert!(grid.set_pending(2, 1, NewValue::Null));
         assert!(grid.begin_edit(2, 1));
-        assert!(grid.commit_text(2, 1, "".into()));
+        assert!(commit_unseeded(&mut grid, 2, 1, ""));
         assert_eq!(grid.pending_value(2, 1), Some(&NewValue::Null));
     }
 
@@ -8718,12 +8735,12 @@ mod tests {
     fn an_input_closed_as_it_opened_records_nothing_on_a_fetched_row_and_asks_no_mode() {
         let mut grid = grid_with_a_null();
         assert!(grid.begin_edit(0, 1));
-        assert!(grid.commit_text(0, 1, "".into()));
+        assert!(commit_unseeded(&mut grid, 0, 1, ""));
         assert_eq!(grid.pending_value(0, 1), None, "a NULL stays a NULL");
 
         assert!(grid.set_pending(0, 1, NewValue::Default));
         assert!(grid.begin_edit(0, 1));
-        assert!(grid.commit_text(0, 1, "".into()));
+        assert!(commit_unseeded(&mut grid, 0, 1, ""));
         assert_eq!(grid.pending_value(0, 1), Some(&NewValue::Default));
 
         // `set_pending` takes nulling a fetched NULL for no edit, so the staged
@@ -8731,18 +8748,18 @@ mod tests {
         let mut grid = editable_grid();
         assert!(grid.set_pending(0, 1, NewValue::Null));
         assert!(grid.begin_edit(0, 1));
-        assert!(grid.commit_text(0, 1, "".into()));
+        assert!(commit_unseeded(&mut grid, 0, 1, ""));
         assert_eq!(grid.pending_value(0, 1), Some(&NewValue::Null));
 
         let mut grid = grid_with_a_null();
         grid.set_mode(Mode::ReadOnly);
         assert!(
-            grid.commit_text(0, 1, "".into()),
+            commit_unseeded(&mut grid, 0, 1, ""),
             "nothing was typed, so no mode is asked for"
         );
         assert_eq!(grid.pending_count(), 0);
         assert!(
-            !grid.commit_text(0, 1, "x".into()),
+            !commit_unseeded(&mut grid, 0, 1, "x"),
             "typed text still meets the mode"
         );
     }
