@@ -5494,7 +5494,7 @@ mod tests {
         }];
         let trancount = || {
             let count = connection
-                .query("SELECT @@TRANCOUNT AS open", Fetch::default())
+                .query("SELECT @@TRANCOUNT AS depth", Fetch::default())
                 .unwrap();
             first(&count)[0].map(str::to_string)
         };
