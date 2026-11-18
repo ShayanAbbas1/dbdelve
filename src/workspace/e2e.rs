@@ -20026,3 +20026,39 @@ fn entering_client_sorting_is_refused_while_a_query_tabs_apply_runs(cx: &mut Tes
         quit(workspace, cx);
     });
 }
+
+/// Text in the row panel the grid refuses (bytes it cannot read) keeps the
+/// row from going: sent without it, the row would be written half edited.
+#[gpui::test]
+fn a_row_whose_panel_text_is_refused_is_not_sent_without_it(cx: &mut TestAppContext) {
+    use crate::result_grid::NewValue;
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            "create table birds (id integer primary key, name text not null, b blob); \
+             insert into birds values (1, 'wren', x'4142'), (2, 'tit', x'4142');",
+        );
+        let (_, grid) = open_in_row_mode(&workspace, cx);
+        focus_grid(&grid, cx);
+        ring_on(&grid, cx, 0, 1);
+        cx.simulate_keystrokes("secondary-k r");
+        settle(cx);
+        press(cx, "secondary-shift-e");
+        stage(&grid, cx, 0, 1, NewValue::Value("robin".into()));
+        let input = row_panel_input(&workspace, cx, 2);
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| input.set_value("0xZZ", window, cx));
+        });
+        settle(cx);
+
+        ring_on(&grid, cx, 1, 1);
+        assert_eq!(
+            on_disk("select name from birds where id = 1").as_deref(),
+            Some("wren"),
+            "the row was not sent without its panel value"
+        );
+        assert_eq!(pending_of(&grid, cx), 1, "the grid's edit is kept");
+        quit(workspace, cx);
+    });
+}

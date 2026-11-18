@@ -1146,19 +1146,23 @@ impl Workspace {
     /// Stage what a row panel input holds, if it is not what it was filled
     /// with: focus passing through an input is not an edit, and an input on a
     /// NULL holds the empty string, which committing would write.
+    ///
+    /// `false` when the text was refused (bytes it does not spell, or the
+    /// stale-rows prompt raised for it), so a row leave sends nothing without
+    /// it; `true` when it was staged or there was nothing to stage.
     pub(crate) fn commit_row_input(
         &mut self,
         input: &Entity<gpui_component::input::TextareaState>,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let Some(inputs) = &self.row_panel.inputs else {
-            return;
+            return true;
         };
         let Some((col, seed)) = inputs.fields.iter().enumerate().find_map(|(col, field)| {
             let field = field.as_ref().filter(|field| field.input == *input)?;
             Some((col, field.seed.clone()))
         }) else {
-            return;
+            return true;
         };
         let (grid, row, rows) = (inputs.grid.clone(), inputs.row, inputs.rows);
         let owner = (inputs.profile.clone(), inputs.tab);
@@ -1166,7 +1170,7 @@ impl Workspace {
         // Rows replaced or reordered since: another record is at `row` now,
         // and the text goes the way the grid's own open input does.
         if text == seed || grid.read(cx).delegate().rows_id() != rows {
-            return;
+            return true;
         }
         let in_front = self
             .profile()
@@ -1186,6 +1190,7 @@ impl Workspace {
         {
             field.seed = text;
         }
+        staged
     }
 
     /// Stage typed text on a grid no longer in front, which is where a blur
@@ -2320,8 +2325,14 @@ impl Workspace {
             });
         let left = match panel {
             Some((row, fields)) => {
+                // Every input is staged, then a refused one keeps the row
+                // from going without it, as a refused grid input does above.
+                let mut refused = false;
                 for input in &fields {
-                    self.commit_row_input(input, cx);
+                    refused |= !self.commit_row_input(input, cx);
+                }
+                if refused {
+                    return;
                 }
                 left.or(Some(row))
             }
