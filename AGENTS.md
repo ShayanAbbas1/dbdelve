@@ -32,11 +32,13 @@ require it, stop and raise it instead.
    server sorts, a header sort
    splices its `ORDER BY` into the buffer (one sorted in memory reorders its
    rows and writes nothing); grid edits on a query tab are appended to the buffer
-   (`sql::appended_statement`) only where the target neither guards nor
-   verifies them (`Target::reviews_query_apply`); elsewhere, and always on an
+   (`sql::appended_statement`) only where the target does not review them
+   (`Target::reviews_query_apply`), which includes MongoDB: its object-tab apply
+   is verified, but a query tab's batch goes to the buffer and runs as typed,
+   unverified; elsewhere, and always on an
    object tab, which has no buffer, they are shown in a review dialog: on a
    query tab of an engine whose rows are named by every value, or of a plugin,
-   whose writes must run behind their guard, and on one of an engine whose
+   whose writes must run behind their guard, and on one of an SQL engine whose
    apply is verified, which a copy in the buffer would run without; Import
    Rows shows every statement before any runs; Explain prefixes a copy, never
    the buffer; Format Query rewrites on command only, at the token level
@@ -87,7 +89,8 @@ require it, stop and raise it instead.
    A reviewed draft may carry one `DELETE` per marked row, each naming its own
    key and table, checked against the parse tree (`sql::draft_deletes_match`)
    and counted against the marks, inside the `BEGIN`/`COMMIT` multi-row edits
-   use, never one predicate covering several.
+   use (MongoDB has no transaction: its draft runs one statement at a time, in
+   order, and stops at the first failure), never one predicate covering several.
 
 3. **No environment-specific behaviour.** No vendor binary names in error
    strings, no assumption that a loopback host means plaintext, no hardcoded
