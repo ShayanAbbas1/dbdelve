@@ -993,6 +993,9 @@ struct ProbedColumn {
     /// declared type, and its rendering, `x'…'`, is also a text such a column
     /// can hold, so no predicate spelled from it names that row alone.
     blob: bool,
+    /// A row read held an infinite REAL here, which renders as `inf`, also a
+    /// text the column can hold.
+    infinite: bool,
 }
 
 /// The one table every column that came from a table came from.
@@ -1126,6 +1129,15 @@ fn resolve_keyless_target(
             None,
             refusal(format!(
                 "{} holds a BLOB, which cannot be matched by its value",
+                origin_of(column).unwrap_or_default()
+            )),
+        );
+    }
+    if let Some(column) = probed.iter().find(|column| column.infinite) {
+        return (
+            None,
+            refusal(format!(
+                "{} holds an infinite REAL, which cannot be matched by its value",
                 origin_of(column).unwrap_or_default()
             )),
         );
@@ -1453,6 +1465,7 @@ fn ran(
                     table: column.table_name().map(str::to_string),
                     column: column.origin_name().map(str::to_string),
                     blob: false,
+                    infinite: false,
                 })
                 .collect();
 
@@ -1507,10 +1520,12 @@ fn ran(
                     let value = row
                         .get_ref(index)
                         .map_err(|error| query_error(&error, sql))?;
-                    if matches!(value, ValueRef::Blob(_))
-                        && let Some(column) = described.get_mut(index)
-                    {
-                        column.blob = true;
+                    if let Some(column) = described.get_mut(index) {
+                        match value {
+                            ValueRef::Blob(_) => column.blob = true,
+                            ValueRef::Real(real) if !real.is_finite() => column.infinite = true,
+                            _ => {}
+                        }
                     }
                     let cell = render(value, &columns, index)?;
                     builder.push(cell.as_deref());
@@ -2398,6 +2413,7 @@ RETURNING n
                 table: table.map(str::to_string),
                 column: column.map(str::to_string),
                 blob: false,
+                infinite: false,
             })
             .collect()
     }
@@ -2794,6 +2810,36 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
             )
             .expect("a read");
         assert!(text.edit.is_some(), "the text row is still edited");
+    }
+
+    /// An infinite REAL renders as `inf`, which is also a text a REAL column
+    /// can hold: the predicate spelled from it would name the text row, so a
+    /// result holding one is not edited by value.
+    #[test]
+    fn an_infinite_real_leaves_a_keyless_result_read_only() {
+        let connection = memory(
+            "create table marks (n real, label text);
+             insert into marks values (1e999, 'old'), ('inf', 'old'), (1.5, 'old');",
+        );
+        let infinite = connection
+            .query(
+                "SELECT n, label FROM marks WHERE typeof(n) = 'real' AND n > 2",
+                Fetch::default(),
+            )
+            .expect("a read");
+        assert_eq!(infinite.rows[0].get(0), Some("inf"));
+        assert!(infinite.edit.is_none());
+        assert_eq!(
+            infinite.read_only_reason.as_deref(),
+            Some(
+                "A table without a primary key is edited by matching every column, \
+                 and n holds an infinite REAL, which cannot be matched by its value."
+            )
+        );
+        let finite = connection
+            .query("SELECT n, label FROM marks WHERE n = 1.5", Fetch::default())
+            .expect("a read");
+        assert!(finite.edit.is_some(), "a finite row is still edited");
     }
 
     /// Why a blob makes a keyless table read-only: the every-column predicate
