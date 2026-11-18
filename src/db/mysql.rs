@@ -4064,7 +4064,7 @@ mod tests {
     fn live_an_apply_with_autocommit_off_is_refused_and_leaves_the_users_write_open(
         engine: Engine,
     ) {
-        use crate::db::{ApplyOutcome, ApplyStage, CancelToken, StepKind, conformance::verified_steps};
+        use crate::db::{ApplyOutcome, ApplyStage, CancelToken, StepKind};
 
         let connection = live_profile(engine);
         let table = engine.qualified("dbdelve_dev", "conformance");
@@ -4083,7 +4083,16 @@ mod tests {
             engine.quote_identifier("id"),
             engine.quote_identifier("label"),
         );
-        let steps = verified_steps(engine, &insert, vec![(StepKind::Insert, Vec::new())]);
+        let steps = [VerifiedStep {
+            sql: crate::sql::generated_writes(engine, &insert)
+                .and_then(|mut statements| statements.pop())
+                .unwrap_or_else(|| panic!("{engine:?}: the gate refuses `{insert}`")),
+            kind: StepKind::Insert,
+            reread: None,
+            before: Vec::new(),
+            read_back: None,
+            by_key: true,
+        }];
         run("SET autocommit = 0");
         run(&format!(
             "UPDATE {table} SET label = 'users' WHERE id = 931"
