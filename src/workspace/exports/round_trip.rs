@@ -991,12 +991,13 @@ fn live_a_rows_only_file_turns_checks_off_where_the_engine_does() {
         "dbdelve_dev",
         "rows",
     );
-    let Some(ForeignKeyReplay::ChecksOff { off, on }) = Target::built_in(Engine::MySql)
-        .exports_schema()
-        .map(|export| export.foreign_keys)
-    else {
-        panic!("MySQL turns its checks off");
-    };
+    assert_eq!(
+        Target::built_in(Engine::MySql)
+            .exports_schema()
+            .map(|export| export.foreign_keys),
+        Some(ForeignKeyReplay::ChecksOff)
+    );
+    let (off, on) = crate::db::checks_off(Engine::MySql).expect("MySQL turns its checks off");
     let sql = fixture
         .export(&fixture.everything(), false, true)
         .expect("the export finishes");

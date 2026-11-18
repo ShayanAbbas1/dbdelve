@@ -128,7 +128,7 @@ pub(super) fn export_schema(
     // With the checks off or none enforced, no order of the rows fails.
     if matches!(
         export.foreign_keys,
-        ForeignKeyReplay::ChecksOff { .. } | ForeignKeyReplay::NotEnforced
+        ForeignKeyReplay::ChecksOff | ForeignKeyReplay::NotEnforced
     ) {
         ordered.cyclic.clear();
     }
@@ -167,7 +167,10 @@ pub(super) fn export_schema(
         after_rows.extend(owned);
     }
     let checks = match export.foreign_keys {
-        ForeignKeyReplay::ChecksOff { off, on } => Some((off, on)),
+        ForeignKeyReplay::ChecksOff => Some(
+            crate::db::checks_off(engine)
+                .ok_or_else(|| refused("this engine has no way to turn its checks off.".into()))?,
+        ),
         _ => None,
     };
     let sequenced = !before_tables.is_empty() || !after_rows.is_empty();
@@ -477,20 +480,19 @@ mod tests {
             Target::built_in(Engine::ClickHouse).exports_schema(),
             export(DdlNames::Qualified, ForeignKeyReplay::NotEnforced)
         );
-        // The pair saves and restores the session's own setting, so a session
-        // that had checks off is not left with them on.
         for engine in [Engine::MySql, Engine::MariaDb] {
             assert_eq!(
                 Target::built_in(engine).exports_schema(),
-                export(
-                    DdlNames::Unqualified,
-                    ForeignKeyReplay::ChecksOff {
-                        off: "SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0;",
-                        on: "SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS;",
-                    }
-                ),
+                export(DdlNames::Unqualified, ForeignKeyReplay::ChecksOff),
                 "{engine:?}"
             );
+        }
+        // Every engine that turns its checks off has the statements to.
+        for engine in Engine::ALL {
+            let turns_off = Target::built_in(engine)
+                .exports_schema()
+                .is_some_and(|export| export.foreign_keys == ForeignKeyReplay::ChecksOff);
+            assert_eq!(crate::db::checks_off(engine).is_some(), turns_off, "{engine:?}");
         }
         assert_eq!(
             Target::built_in(Engine::DuckDb).exports_schema(),

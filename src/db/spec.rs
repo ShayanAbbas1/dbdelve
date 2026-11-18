@@ -830,8 +830,9 @@ pub struct SchemaExport {
 pub enum ForeignKeyReplay {
     /// Created without their keys, which are added after the rows.
     AddedAfterRows,
-    /// The file's session runs with checks off: `off` first, `on` last.
-    ChecksOff { off: &'static str, on: &'static str },
+    /// The file's session runs with checks off, by the pair of statements
+    /// [`checks_off`](super::checks_off) gives.
+    ChecksOff,
     /// Declared and never enforced, or not had at all.
     NotEnforced,
     /// A cycle has no file that runs back, so it is refused by name.
@@ -1054,10 +1055,7 @@ pub(crate) const MYSQL: EngineSpec = EngineSpec {
         copies_ddl: true,
         exports_schema: Some(SchemaExport {
             names: DdlNames::Unqualified,
-            foreign_keys: ForeignKeyReplay::ChecksOff {
-                off: "SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0;",
-                on: "SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS;",
-            },
+            foreign_keys: ForeignKeyReplay::ChecksOff,
         }),
         switches_database: true,
         // No `picks_schema`: the database is the schema.
@@ -1129,10 +1127,7 @@ pub(crate) const MARIADB: EngineSpec = EngineSpec {
         copies_ddl: true,
         exports_schema: Some(SchemaExport {
             names: DdlNames::Unqualified,
-            foreign_keys: ForeignKeyReplay::ChecksOff {
-                off: "SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0;",
-                on: "SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS;",
-            },
+            foreign_keys: ForeignKeyReplay::ChecksOff,
         }),
         switches_database: true,
         catalog_lists_databases: true,

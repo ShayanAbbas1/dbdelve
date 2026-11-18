@@ -3288,6 +3288,21 @@ pub enum Stopped {
     Cancelled,
 }
 
+/// The statements a file opens and closes with to write rows past the
+/// foreign keys, on an engine whose schema export turns its checks off
+/// ([`ForeignKeyReplay::ChecksOff`]). The pair saves and restores the
+/// session's own setting, so a session that had checks off is not left with
+/// them on.
+pub fn checks_off(engine: Engine) -> Option<(&'static str, &'static str)> {
+    match engine {
+        Engine::MySql | Engine::MariaDb => Some((
+            "SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0;",
+            "SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS;",
+        )),
+        _ => None,
+    }
+}
+
 /// How many of a failed statement's own writes stay applied: the documents an
 /// ordered `insertMany` wrote ahead of the one that failed. Every other engine
 /// undoes the whole statement.
