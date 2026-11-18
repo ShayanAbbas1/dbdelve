@@ -91,7 +91,8 @@ mode, always where the user can read it before it runs:
   them one at a time on one held session: a `BEGIN` of the apply's own
   (`Engine::transaction_start`, or `BEGIN` where one submission is already
   atomic), a `SELECT * … WHERE <the statement's own
-  predicate>` for every `UPDATE` and `DELETE` (`sql::row_reread`, cut from the
+  predicate> LIMIT 2` (two rows already prove it ambiguous; SQL Server's arm
+  re-spells it as a preview is) for every `UPDATE` and `DELETE` (`sql::row_reread`, cut from the
   statement's own parse tree and admitted by `sql::is_generated_select`) before
   any write, the writes in the order the text holds them with each one's row
   count checked, then `COMMIT`, or `ROLLBACK` on any refusal or failure before

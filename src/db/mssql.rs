@@ -1093,6 +1093,13 @@ impl Connection {
             // is set inside the read's own `sp_executesql`, which puts the
             // session's back when it returns.
             session.repeatable_read = sending == Sending::Read;
+            // A read is gated in the `LIMIT` spelling the grammar reads, and
+            // sent in T-SQL's, as a preview is.
+            let paged = match sending {
+                Sending::Read => crate::sql::paged(Engine::SqlServer, sql, &[]),
+                _ => None,
+            };
+            let sql = paged.as_deref().unwrap_or(sql);
             let result = self
                 .run_held(&mut guard, sql, Origin::Generated, Fetch::default(), true)
                 .and_then(|(result, _)| kept_transaction(sql, result));

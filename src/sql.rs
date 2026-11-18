@@ -1508,9 +1508,10 @@ fn conjuncts<'tree>(node: Node<'tree>, terms: &mut Vec<Node<'tree>>) {
     }
 }
 
-/// `SELECT * FROM <t> WHERE <p>` for one generated `UPDATE` or one-row `DELETE`:
-/// the read of the row it writes, taken inside the apply's transaction before
-/// any write so the row can be compared with the one the user read.
+/// `SELECT * FROM <t> WHERE <p> LIMIT 2` for one generated `UPDATE` or one-row
+/// `DELETE`: the read of the row it writes, taken inside the apply's
+/// transaction before any write so the row can be compared with the one the
+/// user read, and bounded at the two rows that prove it ambiguous.
 ///
 /// Cut as [`row_read`] is, from the tree the write gate reads and never from
 /// the generator's word, and returned only when [`is_generated_select`] admits
@@ -1541,11 +1542,16 @@ pub(crate) fn row_reread(engine: Engine, statement: &str) -> Option<String> {
             Some((table, predicate_of(filter)?))
         })
         .filter(|(_, predicate)| row_columns(spec, *predicate, &text).is_some())?;
-    let read = format!(
-        "SELECT * FROM {} WHERE {}",
+    // Two rows already prove the predicate names more than one, so no more
+    // are read: a table holding a million copies of the row is not loaded
+    // whole before the apply refuses it.
+    let (table, predicate) = (
         text.get(table.byte_range())?,
-        text.get(predicate.byte_range())?
+        text.get(predicate.byte_range())?,
     );
+    // SQL Server's is re-spelled by its arm after the gate, as a preview is
+    // (`paged`): the grammar reads `LIMIT`, and none of T-SQL's paging.
+    let read = format!("SELECT * FROM {table} WHERE {predicate} LIMIT 2");
     is_generated_select(engine, &read).then_some(read)
 }
 
@@ -7980,8 +7986,8 @@ mod tests {
                         .unwrap_or_else(|| panic!("{engine:?} read nothing of {statement}"));
                     assert_eq!(
                         reread,
-                        format!("SELECT * FROM {table} WHERE {predicate}"),
-                        "{engine:?}"
+                        format!("SELECT * FROM {table} WHERE {predicate} LIMIT 2"),
+                        "{engine:?}: two rows already prove it names more than one"
                     );
                     assert!(is_generated_select(engine, &reread), "{engine:?} {reread}");
                     // The apply sends a draft's statements one at a time, so

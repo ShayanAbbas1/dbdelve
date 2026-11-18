@@ -4529,7 +4529,12 @@ fn verified_message(
                 }
                 Drift::Gone => format!("Row {} is no longer on the server.", row(*step)),
                 Drift::Ambiguous(rows) => {
-                    format!("Row {} matches {rows} rows on the server.", row(*step))
+                    // The re-read stops at two, which is all it takes.
+                    let _ = rows;
+                    format!(
+                        "Row {} matches more than one row on the server.",
+                        row(*step)
+                    )
                 }
             })
             .collect(),
@@ -4810,7 +4815,7 @@ mod tests {
         );
         assert_eq!(
             said(ApplyOutcome::Drifted(vec![(1, Drift::Ambiguous(2))])).as_deref(),
-            Some("Nothing was applied. Row id = 2 matches 2 rows on the server.")
+            Some("Nothing was applied. Row id = 2 matches more than one row on the server.")
         );
         assert_eq!(
             said(ApplyOutcome::Miscounted {

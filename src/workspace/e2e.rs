@@ -19632,7 +19632,7 @@ const TWO_IDENTICAL_SIGHTINGS: &str = "create table sightings (bird text, place 
      insert into sightings values ('wren', 'oak'), ('wren', 'oak');";
 
 const DUPLICATE_SENTENCE: &str =
-    "Nothing was applied. Row bird = wren, place = oak matches 2 rows on the server.";
+    "Nothing was applied. Row bird = wren, place = oak matches more than one row on the server.";
 
 /// Two rows alike in every column cannot be told apart by their values, so an
 /// edit of one is refused before any write and says which row, and neither
