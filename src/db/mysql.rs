@@ -836,11 +836,24 @@ impl Connection {
         }
         // Asked of the held connection when a statement fails, and read by the
         // lost test, which cannot take the lock `send` holds: only an error at
-        // `COMMIT` with the session gone is an outcome nobody can know.
+        // `COMMIT` with the session gone, or the `COMMIT` interrupted, is an
+        // outcome nobody can know.
         let gone = std::cell::Cell::new(false);
         let mut send = |sql: &str, sending: Sending| {
             if sending == Sending::Open {
                 return open_verified(&mut connection, sql);
+            }
+            // A Cancel's `KILL QUERY` that lands on the `COMMIT` answers 1317
+            // on a live session, while InnoDB may have committed already: as
+            // unknown as a `COMMIT` whose session went.
+            if sending == Sending::Bracket && sql == "COMMIT" {
+                return match connection.query_drop(sql) {
+                    Ok(()) => Ok(QueryResult::default()),
+                    Err(error) => {
+                        gone.set(interrupted(&error) || connection.ping().is_err());
+                        Err(query_error(&error))
+                    }
+                };
             }
             let update = sending == Sending::Write(StepKind::Update);
             let result = self
