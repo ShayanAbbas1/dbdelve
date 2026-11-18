@@ -802,6 +802,19 @@ pub enum UnreadableFloor {
 pub enum DdlNames {
     Qualified,
     Unqualified,
+    /// Qualified, but for a table of the schema named, which is bare.
+    QualifiedOutside(&'static str),
+}
+
+impl DdlNames {
+    /// Whether the DDL of a table of `schema` names it with its schema.
+    pub fn qualifies(self, schema: &str) -> bool {
+        match self {
+            Self::Qualified => true,
+            Self::Unqualified => false,
+            Self::QualifiedOutside(bare) => schema != bare,
+        }
+    }
 }
 
 /// What a schema export's file has to do to run back on this engine: name
@@ -1295,7 +1308,9 @@ pub(crate) const DUCKDB: EngineSpec = EngineSpec {
         assigns_default: true,
         copies_ddl: true,
         exports_schema: Some(SchemaExport {
-            names: DdlNames::Unqualified,
+            // `duckdb_tables().sql` names the schema of a table outside
+            // `main`, and never its database.
+            names: DdlNames::QualifiedOutside("main"),
             foreign_keys: ForeignKeyReplay::RefusesCycles,
         }),
         // The databases attached to the instance the profile opened.

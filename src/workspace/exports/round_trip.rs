@@ -872,7 +872,7 @@ fn assert_a_schema_runs_back(connection: Connection, engine: Engine, schema: &'s
     let qualified = format!("INSERT INTO {}.", engine.quote_identifier(schema));
     assert_eq!(
         sql.contains(&qualified),
-        replay.names == crate::db::DdlNames::Qualified,
+        replay.names.qualifies(schema),
         "{engine:?}: {sql}"
     );
 
@@ -913,6 +913,46 @@ fn assert_a_schema_runs_back(connection: Connection, engine: Engine, schema: &'s
 fn a_schema_exported_as_sql_runs_back_on_duckdb() {
     let file = DuckDbFile::new("schema");
     assert_a_schema_runs_back(file.open(), Engine::DuckDb, "main");
+}
+
+/// DuckDB's DDL names a table outside `main` with its schema, so each `INSERT`
+/// has to as well, or the rows fill a table of the same name in `main`.
+#[test]
+fn a_schema_outside_main_fills_its_own_tables_on_duckdb() {
+    let file = DuckDbFile::new("outside");
+    let connection = file.open();
+    let table = Throwaway::new(connection.clone(), Engine::DuckDb, "analytics", "outside");
+    table.run("CREATE SCHEMA IF NOT EXISTS {schema}");
+    table.run("CREATE TABLE {table} (id integer PRIMARY KEY, body varchar)");
+    table.run("INSERT INTO {table} VALUES (1, 'one'), (2, 'two')");
+    table.run("CREATE TABLE main.\"{name}\" (id integer PRIMARY KEY, body varchar)");
+    let before = table.rows();
+    let path = table.directory.join("schema.sql");
+    let request = SchemaRequest {
+        tables: vec![table.name.clone()],
+        structure: true,
+        rows: true,
+        partitioned: Vec::new(),
+    };
+    export_schema(
+        &connection,
+        "analytics",
+        &request,
+        false,
+        Engine::DuckDb,
+        &path,
+        &ExportProgress::default(),
+    )
+    .expect("the export finishes");
+    let sql = std::fs::read_to_string(&path).unwrap();
+
+    table.run("DROP TABLE {table}");
+    let problems = table.replay(&sql);
+    assert!(problems.is_empty(), "{sql}\n{}", problems.join("\n"));
+    let problems = differences(&before, &table.rows(), None);
+    assert!(problems.is_empty(), "{sql}\n{}", problems.join("\n"));
+    let in_main = table.run("SELECT count(*) FROM main.\"{name}\"");
+    assert_eq!(in_main.rows[0].get(0), Some("0"), "{sql}");
 }
 
 #[test]

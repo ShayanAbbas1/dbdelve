@@ -4,7 +4,7 @@
 use std::io::Write;
 
 use super::*;
-use crate::db::{DdlNames, ExportDdl, ForeignKey, ForeignKeyReplay, Sequences, Structure, Target};
+use crate::db::{ExportDdl, ForeignKey, ForeignKeyReplay, Sequences, Structure, Target};
 
 impl Workspace {
     /// Asked again once the save panel has answered, as `start_export` is.
@@ -142,7 +142,7 @@ pub(super) fn export_schema(
             .map_err(|reason| refused(reason.into()))?;
         let target = InsertTarget {
             relation: Some((schema.to_string(), name.clone())),
-            unqualified: export.names == DdlNames::Unqualified,
+            unqualified: !export.names.qualifies(schema),
             ..InsertTarget::default()
         }
         .knowing(engine, &table.structure.columns);
@@ -426,7 +426,7 @@ pub(super) fn dependency_order(schema: &str, tables: Vec<(String, Vec<ForeignKey
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{ForeignKeyReplay, SchemaExport};
+    use crate::db::{DdlNames, ForeignKeyReplay, SchemaExport};
 
     #[test]
     fn only_an_engine_whose_ddl_replays_as_written_exports_a_schema() {
@@ -479,7 +479,10 @@ mod tests {
         }
         assert_eq!(
             Target::built_in(Engine::DuckDb).exports_schema(),
-            export(DdlNames::Unqualified, ForeignKeyReplay::RefusesCycles)
+            export(
+                DdlNames::QualifiedOutside("main"),
+                ForeignKeyReplay::RefusesCycles
+            )
         );
     }
 

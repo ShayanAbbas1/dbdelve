@@ -70,15 +70,15 @@ pub use mongo::MongoConfig;
 pub use postgres::PostgresConfig;
 pub use snowflake::{SnowflakeConfig, account_identifier, normalize_host};
 #[cfg(test)]
+pub use spec::DdlNames;
+#[cfg(test)]
 pub use spec::{Abilities, Hints, Hooks};
 pub use spec::{
     BinaryLiteral, EngineSpec, ExplainPrefix, ForeignTable, FormatDialect, IdentifierQuote,
     MaterializedViewDrop, Paging, Params, ParserDialect, RegexMatch, SelectTop, SkipDuplicates,
     SqlSpec, StatementSplit, SubstringMatch, Truncate, TypedExplain,
 };
-pub use spec::{
-    DdlNames, ForeignKeyReplay, IdentityInsert, ReadOnlySession, SchemaExport, UnreadableFloor,
-};
+pub use spec::{ForeignKeyReplay, IdentityInsert, ReadOnlySession, SchemaExport, UnreadableFloor};
 pub use target::{Driver, Levels, Target, cancel_cost, is_cancel};
 
 /// One run's claim on Cancel: [`Connection::query`] runs under it, and
