@@ -1101,7 +1101,7 @@ impl Connection {
         let (mut result, probed) = self.run_held(&mut guard, sql, origin, fetch, cancellable)?;
         if !probed.is_empty() {
             drop(guard);
-            (result.edit, result.read_only_reason) = self.edit_target(&probed);
+            (result.edit, result.read_only_reason) = self.edit_target(sql, &probed);
         }
         Ok(result)
     }
@@ -1426,7 +1426,11 @@ impl Connection {
     /// join, a computed column, a key the select omitted. A failure answers
     /// "no" too -- this runs after the user's statement already succeeded, and
     /// must not turn that into an error.
-    fn edit_target(&self, probed: &[ProbedColumn]) -> (Option<EditTarget>, Option<String>) {
+    fn edit_target(
+        &self,
+        sql: &str,
+        probed: &[ProbedColumn],
+    ) -> (Option<EditTarget>, Option<String>) {
         let Some((schema, table)) = sole_table(probed) else {
             return (None, None);
         };
@@ -1449,6 +1453,9 @@ impl Connection {
         }
         // No primary key: the table's rows are named by every column, which
         // takes the columns' types.
+        if let Some(why) = not_a_plain_read(sql) {
+            return (None, Some(why));
+        }
         let Ok(catalog) = self.internal_query(&structure_sql(EDIT_COLUMNS_SQL, &schema, &table))
         else {
             return (None, None);
@@ -2269,6 +2276,17 @@ fn resolve_edit_target(
         keys,
         ..Default::default()
     })
+}
+
+/// Why `sql`'s rows are not edited by their values, `None` when they may be.
+/// Provenance names a column's table, never which instance of it: the two
+/// sides of a self-join each read `t`, and every-column matching would then
+/// name a row that is neither. Only a plain read of one table qualifies, read
+/// in the `LIMIT` spelling a preview was paged from ([`crate::sql::unpaged`]).
+fn not_a_plain_read(sql: &str) -> Option<String> {
+    crate::sql::table_read_or_why(Engine::SqlServer, &crate::sql::unpaged(sql))
+        .err()
+        .map(|why| why.reason().into())
 }
 
 /// One column of a table as [`EDIT_COLUMNS_SQL`] describes it.
@@ -3262,6 +3280,27 @@ mod tests {
         assert_eq!(sets_rowcount("set rowcount @n; SELECT 1"), Some(true));
         assert_eq!(sets_rowcount("SET ROWCOUNT 5; SET ROWCOUNT 0"), Some(false));
         assert_eq!(sets_rowcount("SET NOCOUNT ON"), None);
+    }
+
+    /// A self-join reads one table twice, so a row of it is no row of the
+    /// table; a preview, paged or not, and a plain read of it are.
+    #[test]
+    fn only_a_plain_read_of_a_keyless_table_is_edited_by_its_values() {
+        for read in [
+            "SELECT * FROM \"dbo\".\"t\" ORDER BY (SELECT NULL) \
+             OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY",
+            "SELECT * FROM \"dbo\".\"t\" WHERE \"bird\" = N'wren' ORDER BY \"bird\" DESC \
+             OFFSET 20 ROWS FETCH NEXT 10 ROWS ONLY",
+            "SELECT bird, place FROM dbo.t",
+        ] {
+            assert_eq!(not_a_plain_read(read), None, "{read}");
+        }
+        for joined in [
+            "SELECT a.bird, b.place FROM dbo.t a CROSS JOIN dbo.t b",
+            "SELECT a.bird, b.place FROM dbo.t AS a JOIN dbo.t AS b ON a.bird = b.bird",
+        ] {
+            assert!(not_a_plain_read(joined).is_some(), "{joined}");
+        }
     }
 
     #[test]
