@@ -699,7 +699,9 @@ Decided, and not to be re-litigated:
   - MySQL and MariaDB share one list, by the catalog's `DATA_TYPE`: `tinyint`,
     `smallint`, `mediumint`, `int`, `bigint`, `decimal`, `double`, `char`,
     `varchar`, `tinytext`, `text`, `mediumtext`, `longtext`, `date`, `time`,
-    `datetime`, `timestamp`, `year`, `enum` and `set`. Left off: `float` and
+    `datetime`, `timestamp`, `year`, `enum` and `set`; `timestamp` only while
+    `@@session.time_zone` is `UTC` or a fixed offset, since in the hour a
+    daylight-saving change repeats two instants render alike. Left off: `float` and
     `json`, because an `=` against their own rendered text matches nothing (a
     `FLOAT` is held as a single and compared as a double, a JSON value is never
     equal to a string), so a row that is there would read as gone; the byte

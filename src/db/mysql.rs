@@ -363,7 +363,10 @@ const EDIT_COLUMNS_SQL: &str = "
 SELECT c.COLUMN_NAME AS column_name,
        {data_type} AS data_type,
        IF(c.EXTRA LIKE '%VIRTUAL GENERATED%' OR c.EXTRA LIKE '%STORED GENERATED%',
-          'yes', 'no') AS is_generated
+          'yes', 'no') AS is_generated,
+       IF(@@session.time_zone IN ('UTC', '+00:00')
+          OR @@session.time_zone REGEXP '^[+-][0-9][0-9]:[0-9][0-9]$',
+          'yes', 'no') AS fixed_time_zone
 FROM information_schema.COLUMNS AS c
 JOIN information_schema.TABLES AS t
   ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME
@@ -1551,6 +1554,10 @@ struct TableColumn {
     data_type: String,
     /// Computed by the server: matched, never set.
     generated: bool,
+    /// A `timestamp` read under a session time zone that is not a fixed
+    /// offset: in the hour a daylight-saving change repeats, two instants
+    /// render as the same local text, whose literal names only one of them.
+    zoned: bool,
 }
 
 /// The table's columns in order, or `None` where the catalog said none (a view,
@@ -1560,9 +1567,12 @@ fn table_columns(result: &QueryResult) -> Option<Vec<TableColumn>> {
         .rows
         .iter()
         .map(|row| {
+            let data_type = required_cell(result, row, "data_type").ok()?.to_string();
             Some(TableColumn {
                 name: required_cell(result, row, "column_name").ok()?.to_string(),
-                data_type: required_cell(result, row, "data_type").ok()?.to_string(),
+                zoned: data_type == "timestamp"
+                    && required_cell(result, row, "fixed_time_zone").ok()? != "yes",
+                data_type,
                 generated: required_cell(result, row, "is_generated").ok()? == "yes",
             })
         })
@@ -1640,6 +1650,16 @@ fn resolve_keyless_target(
             "A table without a primary key is edited by matching every column, and {what}."
         ))
     };
+    if let Some(column) = columns.iter().find(|column| column.zoned) {
+        return (
+            None,
+            refusal(format!(
+                "{} (timestamp) cannot be matched by its value under a session time zone \
+                 that is not a fixed offset",
+                column.name
+            )),
+        );
+    }
     if let Some(column) = columns
         .iter()
         .find(|column| !is_matchable(&column.data_type))
@@ -2229,8 +2249,56 @@ mod tests {
                 name: (*name).to_string(),
                 data_type: (*data_type).to_string(),
                 generated: *generated,
+                zoned: false,
             })
             .collect()
+    }
+
+    /// A `timestamp` renders in the session's time zone, so under one with
+    /// daylight saving the hour that repeats names two instants by one text:
+    /// such a table is read-only unless the zone is a fixed offset.
+    #[test]
+    fn a_timestamp_under_a_zone_with_daylight_saving_is_not_matched_by_its_value() {
+        let catalog = |fixed: &str| QueryResult {
+            columns: [
+                "column_name",
+                "data_type",
+                "is_generated",
+                "fixed_time_zone",
+            ]
+            .map(|name| Column {
+                name: name.into(),
+                data_type: None,
+            })
+            .into(),
+            rows: vec![
+                crate::db::Row::new([Some("bird"), Some("varchar"), Some("no"), Some(fixed)])
+                    .unwrap(),
+                crate::db::Row::new([Some("at"), Some("timestamp"), Some("no"), Some(fixed)])
+                    .unwrap(),
+            ],
+            ..QueryResult::default()
+        };
+        let resolve = |fixed: &str| {
+            let columns = table_columns(&catalog(fixed)).expect("two columns");
+            let probed = probed(&[
+                (Some("sightings"), Some("bird")),
+                (Some("sightings"), Some("at")),
+            ]);
+            resolve_keyless_target(&probed, "dbdelve_dev", "sightings", &columns)
+        };
+        let (target, reason) = resolve("no");
+        assert!(target.is_none());
+        assert_eq!(
+            reason.as_deref(),
+            Some(
+                "A table without a primary key is edited by matching every column, and at \
+                 (timestamp) cannot be matched by its value under a session time zone that \
+                 is not a fixed offset."
+            )
+        );
+        let (target, reason) = resolve("yes");
+        assert!(target.is_some(), "{reason:?}");
     }
 
     /// A result over `sightings` carrying these columns, in this order.
