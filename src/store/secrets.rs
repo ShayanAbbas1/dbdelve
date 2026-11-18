@@ -13,6 +13,7 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
@@ -226,11 +227,20 @@ pub(crate) struct Vaults {
 
 /// Where the lock files are.
 enum Locks {
-    /// Beside each variant's data directory, as the instance lock is: an
-    /// import moves the directory.
+    /// In [`LOCK_DIRECTORY`] under the data root, rather than in a variant's
+    /// data directory, which an import moves.
     DataRoot,
     #[cfg(test)]
-    In(std::path::PathBuf),
+    In(PathBuf),
+}
+
+/// A name no variant's data directory can take: each is `dbdelve` or starts
+/// `dbdelve-`. A lock file beside the directories instead would be some
+/// variant's directory, as a variant may hold dots.
+const LOCK_DIRECTORY: &str = "dbdelve.locks";
+
+fn lock_file(directory: &Path, variant: &str) -> PathBuf {
+    directory.join(format!("{variant}.secrets.lock"))
 }
 
 pub(crate) static VAULTS: Vaults = Vaults::new();
@@ -264,7 +274,7 @@ impl Vaults {
     /// Held until dropped, as the lock goes with the file.
     fn hold(&self, variant: &str) -> Result<File, String> {
         let directory = match &self.locks {
-            Locks::DataRoot => data_root()?,
+            Locks::DataRoot => data_root()?.join(LOCK_DIRECTORY),
             #[cfg(test)]
             Locks::In(directory) => directory.clone(),
         };
@@ -275,7 +285,7 @@ impl Vaults {
             .write(true)
             .create(true)
             .truncate(false)
-            .open(directory.join(format!("{variant}.secrets.lock")))
+            .open(lock_file(&directory, variant))
             .map_err(failed)?;
         file.lock().map_err(failed)?;
         Ok(file)
@@ -537,8 +547,10 @@ pub(crate) mod fake {
 
 #[cfg(test)]
 mod tests {
+    use super::super::variant_of;
     use super::fake::FakeKeychain;
     use super::*;
+    use crate::channel::Channel;
 
     const VARIANT: &str = "dbdelve";
 
@@ -552,6 +564,32 @@ mod tests {
         assert_ne!(vault, VARIANT);
         assert_ne!(vault, passphrase_service(VARIANT));
         assert!(vault.contains('/'));
+    }
+
+    #[test]
+    fn no_variants_data_directory_is_a_lock() {
+        let root = Path::new("/support");
+        let locks = root.join(LOCK_DIRECTORY);
+        let mut variants = Vec::new();
+        for channel in [Channel::Stable, Channel::Nightly] {
+            for suffix in [None, Some("dev"), Some("dev.secrets.lock"), Some("locks")] {
+                if let Ok(variant) = variant_of(channel, suffix) {
+                    variants.push(variant);
+                }
+            }
+        }
+        for variant in &variants {
+            let directory = root.join(variant);
+            assert!(
+                !directory
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(&locks.to_string_lossy()),
+                "{variant}"
+            );
+            for other in &variants {
+                assert_ne!(directory, lock_file(&locks, other), "{variant} {other}");
+            }
+        }
     }
 
     #[test]
