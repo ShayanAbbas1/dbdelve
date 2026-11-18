@@ -2664,6 +2664,7 @@ impl Render for Workspace {
                     .on_action(cx.listener(Self::new_row))
                     .on_action(cx.listener(Self::save_query))
                     .on_action(cx.listener(Self::close_tab))
+                    .on_action(cx.listener(Self::close_all_tabs))
                     .on_action(cx.listener(Self::go_to_column))
                     .on_action(cx.listener(Self::toggle_results))
                     .on_action(cx.listener(Self::toggle_row_panel))

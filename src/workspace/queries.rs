@@ -2028,7 +2028,7 @@ impl Workspace {
         if let Some(tab) = holder.filter(|tab| self.has_unapplied_edits(*tab, cx)) {
             if let Some(profile) = self.profile_mut() {
                 profile.session.pending_discard = Some(PendingDiscard {
-                    tab,
+                    tabs: vec![tab],
                     deleting: Some(name),
                 });
             }

@@ -1230,6 +1230,44 @@ impl Workspace {
         self.ask_before_close(tab, window, cx);
     }
 
+    /// Close every tab in the strip. The ones holding unapplied cell edits are
+    /// left for a single question once the rest have gone.
+    pub(crate) fn close_all_tabs(
+        &mut self,
+        _: &CloseAllTabs,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.palette.is_some() {
+            return;
+        }
+        let Some(profile) = self.profile() else {
+            return;
+        };
+        let active = profile.session.active;
+        // The tab in front goes last: closing it earlier would bring each
+        // neighbour forward in turn, and a tab coming forward reads its
+        // snapshot and refreshes its rows only to be closed straight after.
+        let mut tabs = profile.session.strip_tabs();
+        tabs.sort_by_key(|tab| *tab == active);
+        let (dirty, clean): (Vec<Tab>, Vec<Tab>) = tabs
+            .into_iter()
+            .partition(|tab| self.has_unapplied_edits(*tab, cx));
+        for tab in clean {
+            self.close_now(tab, window, cx);
+        }
+        if dirty.is_empty() {
+            return;
+        }
+        if let Some(profile) = self.profile_mut() {
+            profile.session.pending_discard = Some(PendingDiscard {
+                tabs: dirty,
+                deleting: None,
+            });
+        }
+        cx.notify();
+    }
+
     /// Close a tab, asking first if it holds cell edits nobody has applied.
     ///
     /// Every gesture that takes a tab away comes through here -- `cmd+w`, the
@@ -1248,7 +1286,7 @@ impl Workspace {
         }
         if let Some(profile) = self.profile_mut() {
             profile.session.pending_discard = Some(PendingDiscard {
-                tab,
+                tabs: vec![tab],
                 deleting: None,
             });
         }
@@ -1335,7 +1373,11 @@ impl Workspace {
         };
         match discard.deleting {
             Some(name) => self.delete_saved_query_now(name, window, cx),
-            None => self.close_now(discard.tab, window, cx),
+            None => {
+                for tab in discard.tabs {
+                    self.close_now(tab, window, cx);
+                }
+            }
         }
         self.refocus_front();
     }

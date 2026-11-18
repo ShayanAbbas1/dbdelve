@@ -1719,9 +1719,10 @@ pub(crate) enum PendingDelete {
 }
 
 /// A close held up by the unapplied-edits question, and the saved query to
-/// delete once the tab goes, when deleting it is what closes the tab.
+/// delete once the tab goes, when deleting it is what closes the tab. More
+/// than one tab only when Close All Tabs found edits in several.
 pub(crate) struct PendingDiscard {
-    pub(crate) tab: Tab,
+    pub(crate) tabs: Vec<Tab>,
     pub(crate) deleting: Option<String>,
 }
 
