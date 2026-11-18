@@ -2091,7 +2091,17 @@ impl Workspace {
                 return false;
             }
         };
-        if !sql::is_generated_write_on(self.engine(), &update) {
+        // The gate admits any one-row `WHERE` on any table; the key check reads
+        // which table and which columns, as a draft's statements are held to.
+        let names_its_row = {
+            let grid = results.read(cx).delegate();
+            let keys = grid.key_columns();
+            let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+            grid.insert_target().is_some_and(|(schema, table, _)| {
+                sql::draft_deletes_match(self.engine(), &update, &keys, &schema, &table) == Some(0)
+            })
+        };
+        if !sql::is_generated_write_on(self.engine(), &update) || !names_its_row {
             self.note(
                 "dbdelve refused to run a statement it wrote itself: it is not an UPDATE.".into(),
                 cx,
