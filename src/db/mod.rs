@@ -4338,6 +4338,9 @@ pub(super) fn assemble_structure(
 pub struct Sequences {
     /// `CREATE SEQUENCE`, written before the tables whose defaults name them.
     pub before_tables: Vec<String>,
+    /// `ALTER TABLE … ALTER COLUMN … SET`, which gives an identity column's
+    /// sequence the options its `CREATE TABLE` does not name, before any row.
+    pub identity: Vec<String>,
     /// `ALTER SEQUENCE … OWNED BY`, which ties each to the column the
     /// structure creates.
     pub owned_by: Vec<String>,

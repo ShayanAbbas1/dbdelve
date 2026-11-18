@@ -1961,12 +1961,34 @@ impl Connection {
                         Engine::Postgres.quote_literal(&sequence)
                     ));
                 }
-            } else if let Some(set) = set {
-                sequences.values.push(format!(
-                    "SELECT pg_catalog.setval(pg_catalog.pg_get_serial_sequence({}, {}), {set});",
-                    Engine::Postgres.quote_literal(&table),
-                    Engine::Postgres.quote_literal(cell("column_name")?),
+            } else {
+                let start = cell("start_value")?;
+                // The table's `GENERATED … AS IDENTITY` names none of its
+                // sequence's options, so the column is given them as they were.
+                // The new sequence stands at the default start, which a
+                // descending one's bounds refuse, so it restarts in the same
+                // statement.
+                sequences.identity.push(format!(
+                    "ALTER TABLE {table} ALTER COLUMN {column} SET INCREMENT BY {} \
+                     SET MINVALUE {} SET MAXVALUE {} SET START WITH {start} RESTART WITH {start} \
+                     SET CACHE {} SET {};",
+                    cell("increment_by")?,
+                    cell("min_value")?,
+                    cell("max_value")?,
+                    cell("cache_size")?,
+                    if cell("cycle")? == "true" {
+                        "CYCLE"
+                    } else {
+                        "NO CYCLE"
+                    },
                 ));
+                if let Some(set) = set {
+                    sequences.values.push(format!(
+                        "SELECT pg_catalog.setval(pg_catalog.pg_get_serial_sequence({}, {}), {set});",
+                        Engine::Postgres.quote_literal(&table),
+                        Engine::Postgres.quote_literal(cell("column_name")?),
+                    ));
+                }
             }
         }
         Ok(sequences)
@@ -6202,6 +6224,10 @@ mod tests {
         );
         assert!(sequences.before_tables[0].starts_with(
             "CREATE SEQUENCE \"public\".\"dbdelve_test_seq_serial_id_seq\" AS integer INCREMENT BY 1"
+        ));
+        assert_eq!(sequences.identity.len(), 1, "{:?}", sequences.identity);
+        assert!(sequences.identity[0].starts_with(
+            "ALTER TABLE \"public\".\"dbdelve_test_seq_identity\" ALTER COLUMN \"id\" SET INCREMENT BY 1"
         ));
         // Each `setval` carries the 3 the rows reached.
         assert_eq!(sequences.values.len(), 2, "{:?}", sequences.values);

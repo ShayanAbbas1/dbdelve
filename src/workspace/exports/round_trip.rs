@@ -155,13 +155,16 @@ impl Throwaway {
                 let statement = &file[range];
                 // The gate's parser has no `OVERRIDING`, so a query tab asks
                 // once before running such a file. Nor `OWNED BY`, which a
-                // schema file ties each sequence to its column with: the file
-                // is for whoever runs it back, and DBDelve never runs it.
+                // schema file ties each sequence to its column with, nor an
+                // identity column's `SET INCREMENT BY …`: the file is for
+                // whoever runs it back, and DBDelve never runs it.
                 let verdict = sql::classify(self.engine, statement);
                 assert!(
                     statement.contains(" OVERRIDING SYSTEM VALUE ")
                         || (statement.starts_with("ALTER SEQUENCE ")
                             && statement.contains(" OWNED BY "))
+                        || (statement.starts_with("ALTER TABLE ")
+                            && statement.contains(" SET INCREMENT BY "))
                         || !verdict.destructive.contains(&Destructive::Unreadable),
                     "{:?} cannot read `{statement}`",
                     self.engine
@@ -1017,21 +1020,29 @@ fn live_a_schema_with_sequences_runs_back_on_postgres() {
     // Left behind if the file stops before its `OWNED BY` ties it to the table.
     serial.drop_after("DROP SEQUENCE IF EXISTS \"{schema}\".\"{name}_id_seq\"");
     let identity = Throwaway::new(postgres(), Engine::Postgres, "public", "identity");
+    // Its `CREATE TABLE` names none of these options, so a file that left them
+    // out would make an ascending sequence and refuse the `setval` to -5.
+    let descending = Throwaway::new(postgres(), Engine::Postgres, "public", "descending");
     serial.run("CREATE TABLE {table} (id serial PRIMARY KEY, body text)");
     identity.run(
         "CREATE TABLE {table} (id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY, body text)",
     );
-    for table in [&serial, &identity] {
+    descending.run(
+        "CREATE TABLE {table} (id integer GENERATED ALWAYS AS IDENTITY \
+         (START WITH -1 INCREMENT BY -1) PRIMARY KEY, body text)",
+    );
+    let tables = [&serial, &identity, &descending];
+    for table in tables {
         table.run("INSERT INTO {table} (body) VALUES ('one'), ('two'), ('three')");
         // A gap, so the next id comes from the sequence and not the row count,
         // and two values taken and never written, so not from `MAX(id)` either.
-        table.run("DELETE FROM {table} WHERE id = 2");
+        table.run("DELETE FROM {table} WHERE id IN (2, -2)");
         table.run("SELECT nextval(pg_catalog.pg_get_serial_sequence('{table}', 'id'))");
         table.run("SELECT nextval(pg_catalog.pg_get_serial_sequence('{table}', 'id'))");
     }
     let path = serial.directory.join("schema.sql");
     let request = SchemaRequest {
-        tables: vec![serial.name.clone(), identity.name.clone()],
+        tables: tables.iter().map(|table| table.name.clone()).collect(),
         structure: true,
         rows: true,
         partitioned: Vec::new(),
@@ -1052,14 +1063,14 @@ fn live_a_schema_with_sequences_runs_back_on_postgres() {
         "{sql}"
     );
 
-    for table in [&serial, &identity] {
+    for table in tables {
         table.run("DROP TABLE {table}");
     }
     let problems = serial.replay(&sql);
     assert!(problems.is_empty(), "{sql}\n{}", problems.join("\n"));
-    for table in [&serial, &identity] {
+    for (table, expected) in tables.into_iter().zip(["6", "6", "-6"]) {
         let next = table.run("INSERT INTO {table} (body) VALUES ('next') RETURNING id");
-        assert_eq!(next.rows[0].get(0), Some("6"), "{sql}");
+        assert_eq!(next.rows[0].get(0), Some(expected), "{sql}");
     }
 }
 

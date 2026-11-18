@@ -162,7 +162,9 @@ pub(super) fn export_schema(
         ),
         _ => None,
     };
-    let sequenced = !before_tables.is_empty() || (request.rows && !sequences.values.is_empty());
+    let sequenced = !before_tables.is_empty()
+        || (request.structure && !sequences.identity.is_empty())
+        || (request.rows && !sequences.values.is_empty());
 
     write_replacing(path, |out| {
         let failed = could_not_write(path);
@@ -177,6 +179,9 @@ pub(super) fn export_schema(
         if request.structure {
             for (table, _, _) in &planned {
                 write!(out, "{}\n\n", table.ddl.create).map_err(&failed)?;
+            }
+            for statement in &sequences.identity {
+                write!(out, "{statement}\n\n").map_err(&failed)?;
             }
         }
         let mut written = 0;
