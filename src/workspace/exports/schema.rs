@@ -370,12 +370,12 @@ pub(super) fn export_order(
 }
 
 /// The `tables` of `schema`, each after the ones its keys point at. Tables in a
-/// cycle, which no order runs back, and the ones waiting behind a cycle go on
-/// the end as they came; `cyclic` names the members of the cycles alone. A key
-/// to a table this export does not write holds nothing back, since the file
-/// cannot create it either way, and is reported in `missing`. Where nothing
-/// forces an order, the tables keep the one they came in, so the file reads as
-/// the catalog does.
+/// cycle, which no order runs back, go together, after what the cycle points
+/// at and before what points at it; `cyclic` names the members of the cycles,
+/// a table referencing itself included. A key to a table this export does not
+/// write holds nothing back, since the file cannot create it either way, and
+/// is reported in `missing`. Where nothing forces an order, the tables keep
+/// the one they came in, so the file reads as the catalog does.
 pub(super) fn dependency_order(schema: &str, tables: Vec<(String, Vec<ForeignKey>)>) -> Ordered {
     let names: Vec<String> = tables.iter().map(|(name, _)| name.clone()).collect();
     let mut missing: Vec<String> = tables
@@ -387,62 +387,73 @@ pub(super) fn dependency_order(schema: &str, tables: Vec<(String, Vec<ForeignKey
     missing.sort();
     missing.dedup();
 
-    let mut placed: Vec<String> = Vec::with_capacity(tables.len());
-    let mut waiting = tables;
-    while !waiting.is_empty() {
-        let before = waiting.len();
-        waiting.retain(|(name, keys)| {
-            let ready = keys.iter().all(|key| {
-                key.referenced_schema != schema
-                    || !names.contains(&key.referenced_table)
-                    || (key.referenced_table != *name && placed.contains(&key.referenced_table))
-            });
-            if ready {
-                placed.push(name.clone());
+    // The keys between the tables written, by position.
+    let points_at: Vec<Vec<usize>> = tables
+        .iter()
+        .map(|(_, keys)| {
+            keys.iter()
+                .filter(|key| key.referenced_schema == schema)
+                .filter_map(|key| names.iter().position(|name| *name == key.referenced_table))
+                .collect()
+        })
+        .collect();
+    // `reaches[from][to]`: following keys from `from` leads to `to`, which
+    // for `to == from` means `from` is in a cycle.
+    let reaches: Vec<Vec<bool>> = (0..names.len())
+        .map(|from| {
+            let mut seen = vec![false; names.len()];
+            let mut stack = points_at[from].clone();
+            while let Some(table) = stack.pop() {
+                if !seen[table] {
+                    seen[table] = true;
+                    stack.extend(&points_at[table]);
+                }
             }
-            !ready
-        });
-        if waiting.len() == before {
-            break;
+            seen
+        })
+        .collect();
+    // Each table's cycle, named by its first member: the tables it leads to
+    // that lead back to it, or itself alone.
+    let component: Vec<usize> = (0..names.len())
+        .map(|table| {
+            (0..table)
+                .find(|&other| reaches[table][other] && reaches[other][table])
+                .unwrap_or(table)
+        })
+        .collect();
+
+    let mut placed = vec![false; names.len()];
+    let mut order = Vec::with_capacity(names.len());
+    while order.len() < names.len() {
+        // The first table, in the order they came, whose cycle points only at
+        // tables already placed or in it. One always is: the cycles, each
+        // taken as one, point at one another in no cycle.
+        let ready = (0..names.len())
+            .find(|&table| {
+                !placed[table]
+                    && (0..names.len())
+                        .filter(|&member| component[member] == component[table])
+                        .all(|member| {
+                            points_at[member]
+                                .iter()
+                                .all(|&to| placed[to] || component[to] == component[table])
+                        })
+            })
+            .expect("the cycles, each taken as one, form no cycle");
+        for member in 0..names.len() {
+            if component[member] == component[ready] {
+                placed[member] = true;
+                order.push(names[member].clone());
+            }
         }
     }
 
-    // A waiting table is in a cycle when following keys between waiting tables
-    // leads back to it; one that only leads into a cycle never does.
-    let leads_to = |from: &str| -> Vec<&str> {
-        waiting
-            .iter()
-            .find(|(name, _)| name == from)
-            .into_iter()
-            .flat_map(|(_, keys)| keys)
-            .filter(|key| key.referenced_schema == schema)
-            .map(|key| key.referenced_table.as_str())
-            .filter(|table| waiting.iter().any(|(name, _)| name == table))
-            .collect()
-    };
-    let cyclic = waiting
-        .iter()
-        .map(|(name, _)| name.as_str())
-        .filter(|start| {
-            let mut seen: Vec<&str> = Vec::new();
-            let mut stack = leads_to(start);
-            while let Some(table) = stack.pop() {
-                if table == *start {
-                    return true;
-                }
-                if !seen.contains(&table) {
-                    seen.push(table);
-                    stack.extend(leads_to(table));
-                }
-            }
-            false
-        })
-        .map(str::to_string)
+    let cyclic = (0..names.len())
+        .filter(|&table| reaches[table][table])
+        .map(|table| names[table].clone())
         .collect();
-
-    placed.extend(waiting.into_iter().map(|(name, _)| name));
     Ordered {
-        order: placed,
+        order,
         cyclic,
         missing,
     }
@@ -565,6 +576,39 @@ mod tests {
         let ordered = dependency_order("s", own);
         assert_eq!(ordered.order, names(&["employees"]));
         assert_eq!(ordered.cyclic, names(&["employees"]));
+    }
+
+    #[test]
+    fn a_table_that_points_at_a_cycle_comes_after_it() {
+        // `z_orders` references itself, and `a_items` comes first in the
+        // catalog: its rows still need `z_orders`'s in first.
+        let tables = vec![
+            ("a_items".into(), vec![key("z_orders")]),
+            ("z_orders".into(), vec![key("z_orders")]),
+        ];
+        assert_eq!(
+            dependency_order("s", tables),
+            Ordered {
+                order: names(&["z_orders", "a_items"]),
+                cyclic: names(&["z_orders"]),
+                missing: vec![],
+            }
+        );
+        // A cycle goes after what it points at, its members together.
+        let tables = vec![
+            ("lines".into(), vec![key("b")]),
+            ("a".into(), vec![key("b"), key("base")]),
+            ("b".into(), vec![key("a")]),
+            ("base".into(), vec![]),
+        ];
+        assert_eq!(
+            dependency_order("s", tables),
+            Ordered {
+                order: names(&["base", "a", "b", "lines"]),
+                cyclic: names(&["a", "b"]),
+                missing: vec![],
+            }
+        );
     }
 
     #[test]
