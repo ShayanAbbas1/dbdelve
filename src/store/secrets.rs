@@ -128,15 +128,24 @@ const VAULT_ACCOUNT: &str = "vault";
 
 const VAULT_VERSION: u32 = 1;
 
-/// Every secret a build keeps, by profile id.
+/// Every secret a build keeps, by profile id. Strict, as a vault read as
+/// empty or short would be written back that way at the next save.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Vault {
     version: u32,
-    #[serde(default)]
     profiles: BTreeMap<String, Saved>,
 }
 
+/// Only the version, read before the rest, as a newer vault's fields are
+/// unknown here.
+#[derive(Deserialize)]
+struct Version {
+    version: u32,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Saved {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     password: Option<String>,
@@ -175,14 +184,14 @@ impl Vault {
     }
 
     fn decode(text: &str) -> Result<Self, String> {
-        let vault: Self =
-            serde_json::from_str(text).map_err(|_| "the saved item could not be read")?;
+        let unreadable = |_| "the saved item could not be read".to_string();
+        let Version { version } = serde_json::from_str(text).map_err(unreadable)?;
         // Written back, a newer vault would lose whatever this build can't
         // read in it.
-        if vault.version > VAULT_VERSION {
+        if version > VAULT_VERSION {
             return Err("the saved item is from a newer DBDelve".into());
         }
-        Ok(vault)
+        serde_json::from_str(text).map_err(unreadable)
     }
 
     fn encode(&self) -> String {
@@ -666,7 +675,13 @@ mod tests {
 
     #[test]
     fn a_vault_that_doesnt_parse_or_is_newer_is_never_written_over() {
-        for text in ["not json", r#"{"version":2,"profiles":{}}"#] {
+        for text in [
+            "not json",
+            r#"{"version":2,"profiles":{},"more":1}"#,
+            r#"{"version":1}"#,
+            r#"{"version":1,"profile":{"a":{"password":"pw-a"}}}"#,
+            r#"{"version":1,"profiles":{"a":{"pasword":"pw-a"}}}"#,
+        ] {
             let keychain = FakeKeychain::with(&[("dbdelve/secrets", "vault", text)]);
             let vaults = Vaults::scratch();
             assert!(
@@ -684,6 +699,16 @@ mod tests {
                 Some(text)
             );
         }
+        assert_eq!(
+            Vault::decode(r#"{"version":2,"profiles":{},"more":1}"#).unwrap_err(),
+            "the saved item is from a newer DBDelve"
+        );
+        assert!(
+            Vault::decode(r#"{"version":1,"profiles":{}}"#)
+                .unwrap()
+                .profiles
+                .is_empty()
+        );
     }
 
     #[test]
