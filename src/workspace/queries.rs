@@ -4594,10 +4594,12 @@ fn verified_message(
 /// holds the read back while edits remain, since it would drop them.
 ///
 /// An index into rows that were reordered while the send was out names
-/// another row, so nothing is placed or cleared by it then. Nor is a row named
-/// by every value placed: its read finds it by the values it was sent, which a
-/// trigger may have changed on it and another row may hold, so the read is no
-/// proof it is the row written.
+/// another row, so nothing is placed or cleared by it then. A row named by
+/// every value is placed as well: its read finds it by the values it was
+/// sent, so what lands is those values as the server stores them, and the
+/// row's next send names it by them. Reading the whole relation instead would
+/// drop an input open on another row, and with other rows' edits staged it is
+/// held back, leaving the row named by values it no longer has.
 fn land_row(
     grid: &mut ResultGrid,
     (row, rows_id, sent): (usize, u64, &[(usize, NewValue)]),
@@ -4613,13 +4615,8 @@ fn land_row(
             false,
         );
     }
-    let by_every_value = grid
-        .result()
-        .edit
-        .as_ref()
-        .is_some_and(|edit| matches!(edit.row_match, db::RowMatch::EveryColumn { .. }));
     match read {
-        Some(Ok(mut read)) if read.rows.len() == 1 && !by_every_value => {
+        Some(Ok(mut read)) if read.rows.len() == 1 => {
             if grid.replace_row(row, read.rows.remove(0)) {
                 grid.clear_sent(row, sent);
                 (status, false)
@@ -5318,24 +5315,30 @@ mod tests {
         }
 
         // A row named by every value is found again by the values it was
-        // sent, which another row can hold: its one-row read is not placed,
-        // and the relation is owed a read.
+        // sent: its one-row read is placed where it stood, as the server
+        // stores it, and the relation is not read again.
         let (mut grid, sent) = edited_as(db::RowMatch::EveryColumn { fixed: Vec::new() });
         let rows_id = grid.rows_id();
-        let other = QueryResult {
+        let stored = QueryResult {
             rows: crate::db::rows(vec![vec![
-                Some("9".into()),
+                Some("1".into()),
                 Some("robin".into()),
-                Some("9".into()),
+                Some("7".into()),
             ]]),
             ..QueryResult::default()
         };
-        let (_, reread) = land_row(&mut grid, (0, rows_id, &sent), Some(Ok(other)), "ok".into());
-        assert!(reread);
+        let (_, reread) = land_row(
+            &mut grid,
+            (0, rows_id, &sent),
+            Some(Ok(stored)),
+            "ok".into(),
+        );
+        assert!(!reread, "the relation is not read again");
+        assert_eq!(grid.cell(0, 1), Some("robin"));
         assert_eq!(
-            grid.cell(0, 0),
-            Some("1"),
-            "the slot is not given another row"
+            grid.cell(0, 2),
+            Some("7"),
+            "the row holds what the server stores"
         );
     }
 }

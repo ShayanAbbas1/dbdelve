@@ -20062,3 +20062,56 @@ fn a_row_whose_panel_text_is_refused_is_not_sent_without_it(cx: &mut TestAppCont
         quit(workspace, cx);
     });
 }
+
+/// A Row send of a row named by every value puts the row the server holds
+/// where it stood, rather than reading the whole relation again: the grid
+/// stays as it was, and the row is named by its new values on its next send,
+/// whatever other row has edits staged.
+#[gpui::test]
+fn a_row_send_by_every_value_shows_what_it_wrote_and_sends_again(cx: &mut TestAppContext) {
+    use crate::{result_grid::NewValue, session::EditMode};
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, SIGHTINGS);
+        let id = open_own_table(&workspace, cx, "sightings");
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_edit_mode(EditMode::Row, cx)
+        });
+        let grid = relation_grid(&workspace, cx, id);
+        let rows_id = grid.read_with(cx, |table, _| table.delegate().rows_id());
+
+        stage(&grid, cx, 0, 0, NewValue::Value("finch".into()));
+        workspace.update(cx, |workspace, cx| {
+            assert!(workspace.save_row(id, 0, None, None, cx))
+        });
+        settle(cx);
+        assert_eq!(cell_of(&grid, cx, 0, 0).as_deref(), Some("finch"));
+        assert_eq!(
+            grid.read_with(cx, |table, _| table.delegate().rows_id()),
+            rows_id,
+            "the relation was not read again"
+        );
+
+        // Beside another row's edit, which stays staged.
+        stage(&grid, cx, 2, 1, NewValue::Value("elm".into()));
+        stage(&grid, cx, 0, 0, NewValue::Value("robin".into()));
+        workspace.update(cx, |workspace, cx| {
+            assert!(workspace.save_row(id, 0, None, None, cx))
+        });
+        settle(cx);
+        assert_eq!(cell_of(&grid, cx, 0, 0).as_deref(), Some("robin"));
+        assert_eq!(pending_of(&grid, cx), 1, "the other row's edit stays");
+
+        stage(&grid, cx, 0, 0, NewValue::Value("jay".into()));
+        workspace.update(cx, |workspace, cx| {
+            assert!(workspace.save_row(id, 0, None, None, cx))
+        });
+        settle(cx);
+        assert_eq!(
+            on_disk("select bird from sightings where place is null").as_deref(),
+            Some("jay")
+        );
+        assert_eq!(refused_row(&grid, cx), None);
+        quit(workspace, cx);
+    });
+}
