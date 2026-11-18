@@ -15976,7 +15976,8 @@ fn drawn_whole(
 
 /// The pending edits' Discard and Apply edits are not what a narrow bar cuts:
 /// they are drawn whole at 700 px with the sidebar open and closed, beside the
-/// Edit menu and a notice too long for the bar.
+/// Edit menu and a notice too long for the bar. The notice is on a line of its
+/// own above the bar and wraps, so it is never cut either.
 #[gpui::test]
 fn the_staged_edit_buttons_are_drawn_whole_in_a_narrow_window(cx: &mut TestAppContext) {
     use crate::result_grid::NewValue;
@@ -15995,8 +15996,28 @@ fn the_staged_edit_buttons_are_drawn_whole_in_a_narrow_window(cx: &mut TestAppCo
             cx.debug_bounds(item)
                 .unwrap_or_else(|| panic!("{item} is drawn"))
         });
+        let wide_notice = cx
+            .debug_bounds("status-notice")
+            .expect("the notice is drawn");
         for hidden in [false, true] {
             resize_to(&workspace, cx, 700., hidden);
+            let (notice, bar) = (
+                cx.debug_bounds("status-notice")
+                    .expect("the notice is drawn"),
+                cx.debug_bounds("status-bar").expect("the bar is drawn"),
+            );
+            assert!(
+                notice.bottom() <= bar.top(),
+                "the notice is above the bar at 700px, sidebar hidden {hidden}"
+            );
+            assert!(
+                notice.left() >= bar.left() && notice.right() <= bar.right(),
+                "the notice is inside the bar's width at 700px, sidebar hidden {hidden}"
+            );
+            assert!(
+                notice.size.height > wide_notice.size.height,
+                "the notice wraps rather than being cut at 700px, sidebar hidden {hidden}"
+            );
             for (item, wide) in items.into_iter().zip(wide) {
                 assert!(
                     drawn_whole(cx, item, wide),

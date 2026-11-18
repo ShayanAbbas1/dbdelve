@@ -31,7 +31,6 @@ use std::collections::{HashMap, HashSet};
 
 use crate::export::ClipboardFormat;
 use gpui_component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
-use gpui_component::tooltip::Tooltip;
 
 pub(crate) use diagrams::{SideRead, drawn_in_diagrams};
 pub(crate) use import_dialog::PreviewGrid;
@@ -2275,7 +2274,6 @@ impl Render for Workspace {
             || left_stats.is_some()
             || count_control.is_some()
             || export_status.is_some()
-            || notice.is_some()
             || paging.is_some()
             || view_sorting.is_some()
             || edit_mode.is_some()
@@ -2286,10 +2284,25 @@ impl Render for Workspace {
             || structure_copies.is_some()
             || has_pending;
 
-        // The narrowest a notice is cut to before the bar gives way elsewhere.
-        const NOTICE_MIN_WIDTH: f32 = 120.;
+        // On a line of its own above the bar, free to wrap, so no width cuts it
+        // and the bar keeps its room for what a keystroke will do.
+        let notice_line = notice.map(|notice| {
+            div()
+                .id("status-notice")
+                .debug_selector(|| "status-notice".into())
+                .flex_shrink_0()
+                .min_w_0()
+                .border_t_1()
+                .border_color(t.border)
+                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                .px(px(layout::SPACE_MD))
+                .py(px(layout::SPACE_XS))
+                .bg(t.data_glass())
+                .text_color(t.text_muted)
+                .child(one_line(&notice))
+        });
 
-        let results_status = bar_has_content.then(|| {
+        let status_bar = bar_has_content.then(|| {
             div()
                 .debug_selector(|| "status-bar".into())
                 .h(px(layout::chrome(layout::STATUS_HEIGHT)))
@@ -2328,26 +2341,7 @@ impl Render for Workspace {
                                 .child(stats)
                         }))
                         .children(count_control)
-                        .children(export_status)
-                        // Whatever width the rest leaves, so a notice is cut
-                        // only when the bar is full, and then its tooltip has
-                        // all of it.
-                        .children(notice.map(|notice| {
-                            let whole = one_line(&notice);
-                            div()
-                                .id("status-notice")
-                                .debug_selector(|| "status-notice".into())
-                                .flex_1()
-                                .min_w(px(layout::chrome(NOTICE_MIN_WIDTH)))
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .whitespace_nowrap()
-                                .text_color(t.text_muted)
-                                .child(whole.clone())
-                                .tooltip(move |window, cx| {
-                                    Tooltip::new(whole.clone()).build(window, cx)
-                                })
-                        })),
+                        .children(export_status),
                 )
                 // Between two sides that share the free space equally, so
                 // it sits at the middle of the bar whatever either holds.
@@ -2555,6 +2549,16 @@ impl Render for Workspace {
                             }),
                         )
                 }))
+        });
+
+        let results_status = (status_bar.is_some() || notice_line.is_some()).then(|| {
+            div()
+                .flex_shrink_0()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .children(notice_line)
+                .children(status_bar)
         });
 
         let content = div()
