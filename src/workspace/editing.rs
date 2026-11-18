@@ -2665,9 +2665,11 @@ impl Workspace {
     /// there, and the `SELECT` that produced the grid runs after it.
     ///
     /// The append is what keeps a failure readable: the statement that was
-    /// attempted is still in the buffer. On a target that answers
-    /// `Target::keeps_edits` a failure leaves the edits staged as well; elsewhere
-    /// `execute_sql` clears the grid as it starts and they go with it.
+    /// attempted is still in the buffer. On a transactional target
+    /// (`Target::row_edits`) a failure leaves the edits staged as well;
+    /// elsewhere, MongoDB included, `execute_sql` clears the grid as it starts
+    /// and they go with it, since a batch there that failed part way has
+    /// applied some of them and nothing here says which.
     pub(crate) fn apply_in_buffer(
         &mut self,
         batch: String,

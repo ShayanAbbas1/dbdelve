@@ -2387,13 +2387,13 @@ impl Workspace {
             });
         // An edit sent to a transactional SQL engine leaves the grid and the
         // draft where they are until the server answers, so a refusal or a
-        // failure costs the user nothing. So does one sent to an ordered
-        // target, MongoDB, whose batch has no transaction: what failed part way
-        // there has applied some of the draft, and the landing removes exactly
-        // those rows from it by identity (`ResultGrid::drop_applied`), so the
-        // kept draft is never sent twice. Not for a target that is neither
-        // (`Target::keeps_edits`).
-        let kept = edit && target.keeps_edits();
+        // failure costs the user nothing. So does a verified one sent to an
+        // ordered target, MongoDB, whose batch has no transaction: what failed
+        // part way there has applied some of the draft, and the landing
+        // removes exactly those rows from it by identity
+        // (`ResultGrid::drop_applied`), so the kept draft is never sent twice
+        // (`keeps_draft`).
+        let kept = edit && keeps_draft(target, verification.is_some());
         // Whether a failed apply of this target has written the statements before
         // the one that failed (`Target::ordered_edits`).
         let ordered = target.ordered_edits();
@@ -4411,6 +4411,17 @@ fn verified_result(
     }
 }
 
+/// Whether an edit sent to `target` leaves the grid and its draft in place
+/// until the server answers. A transactional engine's failure rolls the whole
+/// batch back (`Target::row_edits`). An ordered target's (MongoDB's) failure
+/// leaves the statements before it applied, and only a `verified` apply says
+/// which, for the landing to take them out of the draft: a query tab's
+/// unverified batch there is not kept, or its next Apply would send again
+/// what already landed.
+fn keeps_draft(target: Target, verified: bool) -> bool {
+    target.row_edits() || (target.ordered_edits() && verified)
+}
+
 /// Whether nobody can know what `outcome` left on the server: a `COMMIT` with
 /// no answer, or on an ordered target, which has no transaction to undo it, a
 /// write that failed, which may have reached the server before its answer was
@@ -5065,6 +5076,19 @@ mod tests {
         assert!(!unknown_outcome(&failed_at(ApplyStage::Write(1)), false));
         assert!(!unknown_outcome(&failed_at(ApplyStage::Reread(0)), true));
         assert!(unknown_outcome(&ApplyOutcome::Unknown(error), false));
+    }
+
+    /// A MongoDB batch has no transaction: one a query tab appended to its
+    /// buffer is not verified, so nothing says which of its statements applied
+    /// before one failed, and its draft is not kept to be sent again.
+    #[test]
+    fn only_a_verified_mongo_apply_keeps_its_draft() {
+        let mongo = Target::built_in(Engine::MongoDb);
+        assert!(!keeps_draft(mongo, false), "a query tab's buffer apply");
+        assert!(keeps_draft(mongo, true), "a reviewed draft or a Row send");
+        let sqlite = Target::built_in(Engine::Sqlite);
+        assert!(keeps_draft(sqlite, false) && keeps_draft(sqlite, true));
+        assert!(!keeps_draft(Target::built_in(Engine::Redis), true));
     }
 
     #[test]
