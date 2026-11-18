@@ -844,7 +844,7 @@ impl Connection {
         let gone = std::cell::Cell::new(false);
         let mut send = |sql: &str, sending: Sending| {
             if sending == Sending::Open {
-                return open_verified(&mut connection, sql);
+                return open_verified(&mut connection, sql, steps, self.engine);
             }
             // A Cancel's `KILL QUERY` that lands on the `COMMIT` answers 1317
             // on a live session, while InnoDB may have committed already: as
@@ -1719,10 +1719,16 @@ fn structure_sql(template: &str, schema: &str, relation: &str) -> String {
 /// found none.
 fn untransactional_reason(result: &QueryResult) -> Option<String> {
     let engine = column_of(result, "engine").ok()?.into_iter().next()?;
-    Some(format!(
+    Some(untransactional(&engine))
+}
+
+/// Why a table on `engine`, a storage engine with no transactions, is not
+/// edited.
+fn untransactional(engine: &str) -> String {
+    format!(
         "The table's storage engine, {engine}, has no transactions, so a failed edit \
          could not be rolled back; dbdelve will not edit it."
-    ))
+    )
 }
 
 /// Every row's value for one column, for the catalog queries that return a
@@ -1812,12 +1818,53 @@ fn connect_error(error: &::mysql::Error, server: &ServerConfig) -> DbError {
 /// `SERIALIZABLE` InnoDB reads each re-read row with a shared lock held to the
 /// `COMMIT`, so no other session changes a row between its re-read and its
 /// write: a writer waits, or one side fails with a deadlock and rolls back.
-fn open_verified(connection: &mut Conn, opening: &str) -> Result<QueryResult, DbError> {
+fn open_verified(
+    connection: &mut Conn,
+    opening: &str,
+    steps: &[VerifiedStep],
+    engine: Engine,
+) -> Result<QueryResult, DbError> {
     let autocommit: Option<i64> = connection
         .query_first("SELECT @@autocommit")
         .map_err(|error| query_error(&error))?;
     if autocommit == Some(0) {
         return Err(super::in_a_transaction());
+    }
+    // A table's storage engine was asked when its grid loaded; it is asked
+    // again here, under the lock the apply holds, since an `ALTER TABLE …
+    // ENGINE` since then would leave the `ROLLBACK` undoing nothing. Before
+    // the `SET TRANSACTION`, which a read would use up.
+    let mut tables: Vec<Vec<String>> = Vec::new();
+    for step in steps {
+        let table = crate::sql::written_table(engine, &step.sql).ok_or_else(|| {
+            plain_error("The table an edit writes could not be read off its statement.".into())
+        })?;
+        if !tables.contains(&table) {
+            tables.push(table);
+        }
+    }
+    for table in &tables {
+        let (schema, relation) = match table.as_slice() {
+            [schema, relation] => (schema.clone(), relation.clone()),
+            [relation] => (
+                connection
+                    .query_first::<String, _>("SELECT DATABASE()")
+                    .map_err(|error| query_error(&error))?
+                    .unwrap_or_default(),
+                relation.clone(),
+            ),
+            _ => {
+                return Err(plain_error(
+                    "The table an edit writes could not be read off its statement.".into(),
+                ));
+            }
+        };
+        let engines: Vec<String> = connection
+            .query(structure_sql(UNTRANSACTIONAL_SQL, &schema, &relation))
+            .map_err(|error| query_error(&error))?;
+        if let Some(storage) = engines.first() {
+            return Err(plain_error(untransactional(storage)));
+        }
     }
     match connection.query_drop("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE") {
         Err(::mysql::Error::MySqlError(error)) if error.code == 1568 => {

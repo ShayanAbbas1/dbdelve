@@ -1508,6 +1508,42 @@ fn conjuncts<'tree>(node: Node<'tree>, terms: &mut Vec<Node<'tree>>) {
     }
 }
 
+/// The table one generated `INSERT`, `UPDATE` or `DELETE` writes, one entry
+/// per dotted part of its name with the quoting taken off, as `engine`'s
+/// dialect reads it. `None` for anything else, or for more than one table.
+pub(crate) fn written_table(engine: Engine, statement: &str) -> Option<Vec<String>> {
+    use sqlparser::ast::FromTable;
+
+    let dialect = dialect(engine)?;
+    let mut statements = SqlParser::parse_sql(dialect.as_ref(), statement).ok()?;
+    let one = statements.pop().filter(|_| statements.is_empty())?;
+    let relation = |factor: &TableFactor| match factor {
+        TableFactor::Table { name, .. } => Some(name.clone()),
+        _ => None,
+    };
+    let name: ObjectName = match &one {
+        Statement::Insert(Insert {
+            table: TableObject::TableName(name),
+            ..
+        }) => name.clone(),
+        Statement::Update(Update { table, .. }) if table.joins.is_empty() => {
+            relation(&table.relation)?
+        }
+        Statement::Delete(Delete { tables, from, .. }) if tables.is_empty() => {
+            let (FromTable::WithFromKeyword(from) | FromTable::WithoutKeyword(from)) = from;
+            match from.as_slice() {
+                [only] if only.joins.is_empty() => relation(&only.relation)?,
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    name.0
+        .iter()
+        .map(|part| part.as_ident().map(|ident| ident.value.clone()))
+        .collect()
+}
+
 /// `SELECT * FROM <t> WHERE <p> LIMIT 2` for one generated `UPDATE` or one-row
 /// `DELETE`: the read of the row it writes, taken inside the apply's
 /// transaction before any write so the row can be compared with the one the
@@ -11261,6 +11297,37 @@ mod tests {
         ] {
             assert_eq!(leaves(engine, statement), Leaves::default(), "{statement}");
         }
+    }
+
+    /// The table a generated write names is read whole, quoting and all, so
+    /// the apply can ask the catalog about the very table it writes.
+    #[test]
+    fn a_generated_writes_table_is_read_off_its_parse() {
+        let names = |engine: Engine, statement: &str| written_table(engine, statement);
+        let parts = |parts: &[&str]| Some(parts.iter().map(|part| part.to_string()).collect());
+        assert_eq!(
+            names(
+                Engine::MySql,
+                "UPDATE `dev`.`we``ird` SET `a` = 'it\\'s' WHERE `id` = '1'"
+            ),
+            parts(&["dev", "we`ird"])
+        );
+        assert_eq!(
+            names(Engine::MariaDb, "DELETE FROM `dev`.`t` WHERE `id` = '1'"),
+            parts(&["dev", "t"])
+        );
+        assert_eq!(
+            names(Engine::MySql, "INSERT INTO `dev`.`t` (`id`) VALUES ('1')"),
+            parts(&["dev", "t"])
+        );
+        assert_eq!(names(Engine::MySql, "SELECT * FROM `dev`.`t`"), None);
+        assert_eq!(
+            names(
+                Engine::MySql,
+                "DELETE FROM `a` WHERE 1; DELETE FROM `b` WHERE 1"
+            ),
+            None
+        );
     }
 
     /// MySQL's `autocommit` off and SQL Server's implicit transactions on
