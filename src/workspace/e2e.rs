@@ -19983,3 +19983,46 @@ fn a_review_that_was_open_and_a_row_save_are_refused_while_the_outcome_is_unknow
         quit(workspace, cx);
     });
 }
+
+/// A query tab's kept apply lands on the rows as they were sent: sorted in
+/// memory under it, the sent cells would stay staged and be refused as drift
+/// on the next apply. So the switch waits for the apply, as it does for a
+/// Row send.
+#[gpui::test]
+fn entering_client_sorting_is_refused_while_a_query_tabs_apply_runs(cx: &mut TestAppContext) {
+    use crate::result_grid::NewValue;
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, BIRDS);
+        draft_by_default(&workspace, cx);
+        run_in_front(&workspace, cx, "select * from birds");
+        let grid = query_tab(&workspace, cx, |tab, _, _| tab.results.clone());
+        let tab = workspace.read_with(cx, |workspace, _| {
+            workspace.profile().unwrap().session.active
+        });
+        stage(&grid, cx, 0, 1, NewValue::Value("finch".into()));
+        cx.dispatch_action(crate::actions::ApplyEdits);
+        settle(cx);
+        workspace.update(cx, |workspace, cx| workspace.run_apply_review(cx));
+        assert_eq!(state_kind(&workspace, cx), "running");
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.set_view_sorting(true, window, cx)
+        });
+        workspace.read_with(cx, |workspace, _| {
+            let sorting = workspace.profile().unwrap().session.sorting(tab).cloned();
+            assert!(
+                sorting.is_some_and(|sorting| sorting.client_keys().is_none()),
+                "still sorted by the server"
+            );
+        });
+
+        settle(cx);
+        assert_eq!(
+            on_disk("select name from birds where id = 1").as_deref(),
+            Some("finch")
+        );
+        assert_eq!(pending_of(&grid, cx), 0, "the landing cleared the edit");
+        quit(workspace, cx);
+    });
+}

@@ -3258,14 +3258,11 @@ impl Workspace {
                                             // added row is not left staged to
                                             // be sent twice.
                                             Tab::Object(_) => grid.discard_pending(),
-                                            // ponytail: the sent cells are
-                                            // matched by row index and value
-                                            // under an unchanged `rows_id`, so
-                                            // a sort in memory during the round
-                                            // trip leaves them staged (applying
-                                            // them again writes the same
-                                            // values); the upgrade is to match
-                                            // them by the row's key.
+                                            // The sent cells are matched by row
+                                            // index and value under an
+                                            // unchanged `rows_id`, which holds:
+                                            // a sort in memory waits for the
+                                            // run (`set_view_sorting`).
                                             Tab::Query(_) => {
                                                 if grid.rows_id() == *rows_id {
                                                     for (row, cells) in rows {
