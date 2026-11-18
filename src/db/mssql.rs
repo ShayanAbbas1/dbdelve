@@ -6297,7 +6297,7 @@ mod tests {
         let steps = [VerifiedStep {
             sql: "UPDATE \"dbo\".\"t\" SET \"a\" = N'x' WHERE \"id\" = '1'".into(),
             kind: StepKind::Update,
-            reread: Some("SELECT * FROM \"dbo\".\"t\" WHERE \"id\" = '1'".into()),
+            reread: Some("SELECT * FROM \"dbo\".\"t\" WHERE \"id\" = '1' LIMIT 2".into()),
             before: Vec::new(),
             read_back: None,
             by_key: true,

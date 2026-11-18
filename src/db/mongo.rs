@@ -2340,9 +2340,8 @@ struct Prepared {
 /// dbdelve would have written for it: the write must be exactly one `insertOne`,
 /// `updateOne` or `deleteOne` of its [`StepKind`] that [`mql::is_generated_write`]
 /// admits, its re-read exactly the `find` of the same `_id`
-/// ([`mql::browse::row_reread`]), and a read-back a read
-/// [`mql::browse::is_generated_read`] admits. Read off the parse, not off what
-/// the caller says the step is.
+/// ([`mql::browse::row_reread`]), and a read-back that same `find`. Read off
+/// the parse, not off what the caller says the step is.
 fn prepared(step: &VerifiedStep) -> Option<Prepared> {
     let one = |text: &str| {
         let mut statements = mql::parse(text).ok()?;
@@ -2381,9 +2380,16 @@ fn prepared(step: &VerifiedStep) -> Option<Prepared> {
         }
         _ => return None,
     };
+    // The read-back is the `find` of this step's own `_id`, as the re-read is,
+    // not just some read dbdelve could have written.
     let read_back = match &step.read_back {
         None => None,
-        Some(read) if mql::browse::is_generated_read(read) => Some(one(read)?),
+        Some(read)
+            if mql::browse::row_reread(&step.sql).as_deref() == Some(read)
+                && mql::browse::is_generated_read(read) =>
+        {
+            Some(one(read)?)
+        }
         Some(_) => return None,
     };
     Some(Prepared {
@@ -3737,6 +3743,47 @@ mod tests {
                 kind != StepKind::Insert
             );
         }
+    }
+
+    /// A Row send's read-back is the `find` of its own `_id`: one of another
+    /// document, though a read dbdelve could have written, is refused.
+    #[test]
+    fn a_read_back_of_another_document_is_refused() {
+        use crate::{NewValue, result_grid::PendingRow, sql};
+
+        let write = |n: u8| {
+            let update = PendingRow {
+                table: "accounts".into(),
+                keys: vec![(
+                    "_id".into(),
+                    format!("ObjectId('65a4f1c0ffffffffffffff{n:02x}')"),
+                )],
+                sets: vec![("name".into(), NewValue::Value("bee".into()))],
+                types: vec![
+                    ("_id".to_owned(), "objectId".to_owned()),
+                    ("name".to_owned(), "string".to_owned()),
+                ],
+                ..PendingRow::default()
+            };
+            let draft = sql::draft_batch(Engine::MongoDb, &[], &[update], &[])
+                .expect("the update is written");
+            sql::generated_writes(Engine::MongoDb, &draft)
+                .and_then(|mut statements| statements.pop())
+                .expect("one statement")
+        };
+        let step = |read_back: Option<String>| VerifiedStep {
+            reread: sql::row_reread(Engine::MongoDb, &write(1)),
+            sql: write(1),
+            kind: StepKind::Update,
+            before: Vec::new(),
+            read_back,
+            by_key: true,
+        };
+        let own = sql::row_reread(Engine::MongoDb, &write(1));
+        let other = sql::row_reread(Engine::MongoDb, &write(2));
+        assert!(own.is_some() && other.is_some() && own != other);
+        assert!(prepared(&step(own)).is_some_and(|prepared| prepared.read_back.is_some()));
+        assert!(prepared(&step(other)).is_none());
     }
 
     /// The server the `live_` tests talk to, from `dbdelve_MONGO_URL`.

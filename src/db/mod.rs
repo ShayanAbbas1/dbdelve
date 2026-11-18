@@ -3761,8 +3761,9 @@ pub(crate) fn drift(
 /// sends the opening bracket ([`Sending::Open`]), under the lock it holds.
 ///
 /// Every statement is gated again here, whoever built the steps: each write by
-/// [`crate::sql::is_generated_write_on`] as the one statement it must be, and
-/// each read by [`crate::sql::is_generated_select`], before anything is sent.
+/// [`crate::sql::is_generated_write_on`] as the one statement it must be, each
+/// re-read as the very [`crate::sql::row_reread`] of its write, and each
+/// read-back as its [`crate::sql::row_read`], before anything is sent.
 ///
 /// `send` runs one statement on the held session. `proceed` is asked before
 /// each statement and says no once a Cancel has come. `skipped` and `lost` are
@@ -3807,17 +3808,20 @@ pub(super) fn run_verified(
             .sql
             .get(..step.kind.keyword().len())
             .is_some_and(|word| word.eq_ignore_ascii_case(step.kind.keyword()));
+        // Each read is the one cut from this step's own statement, not just
+        // some read dbdelve could have written: one of another row would
+        // compare that row and write this one.
         let reads = match (step.kind, &step.reread) {
             (StepKind::Insert, None) => true,
             (StepKind::Insert, Some(_)) | (StepKind::Update | StepKind::Delete, None) => false,
             (StepKind::Update | StepKind::Delete, Some(read)) => {
-                crate::sql::is_generated_select(engine, read)
+                crate::sql::row_reread(engine, &step.sql).as_deref() == Some(read.as_str())
             }
         };
         let reads_back = step
             .read_back
             .as_deref()
-            .is_none_or(|read| crate::sql::is_generated_select(engine, read));
+            .is_none_or(|read| crate::sql::row_read(engine, &step.sql).as_deref() == Some(read));
         if !writes_one || !names_kind || !reads || !reads_back {
             return refused(
                 "dbdelve refused to run a statement it wrote itself: the draft and its \
@@ -4645,7 +4649,7 @@ mod tests {
         let step = VerifiedStep {
             sql: r#"UPDATE "main"."t" SET "a" = 'x' WHERE "id" = '1'"#.into(),
             kind: StepKind::Update,
-            reread: Some(r#"SELECT * FROM "main"."t" WHERE "id" = '1'"#.into()),
+            reread: Some(r#"SELECT * FROM "main"."t" WHERE "id" = '1' LIMIT 2"#.into()),
             before: vec![fetched("id", Some("1"))],
             read_back: None,
             by_key: true,
@@ -4681,11 +4685,60 @@ mod tests {
         VerifiedStep {
             sql: r#"UPDATE "public"."t" SET "a" = 'x' WHERE "id" = '1'"#.into(),
             kind: StepKind::Update,
-            reread: Some(r#"SELECT * FROM "public"."t" WHERE "id" = '1'"#.into()),
+            reread: Some(r#"SELECT * FROM "public"."t" WHERE "id" = '1' LIMIT 2"#.into()),
             before: vec![fetched("id", Some("1"))],
             read_back: None,
             by_key: true,
         }
+    }
+
+    /// A step's re-read and read-back must be the very reads cut from its own
+    /// statement: a read of another row, though a read dbdelve could have
+    /// written, is refused before anything is sent.
+    #[test]
+    fn a_read_of_another_row_than_the_steps_own_is_refused() {
+        let sent = std::cell::Cell::new(0);
+        let mut send = |_: &str, _: Sending| {
+            sent.set(sent.get() + 1);
+            Ok(QueryResult::default())
+        };
+        let own = update_step();
+        let other = crate::sql::row_reread(
+            Engine::Postgres,
+            r#"UPDATE "public"."t" SET "a" = 'x' WHERE "id" = '2'"#,
+        );
+        assert!(other.is_some());
+        let steps = [
+            VerifiedStep {
+                reread: other.clone(),
+                ..own.clone()
+            },
+            VerifiedStep {
+                read_back: other,
+                ..own.clone()
+            },
+        ];
+        for step in steps {
+            let outcome = run_verified(
+                Engine::Postgres,
+                &[step],
+                &mut send,
+                &|| true,
+                &|_| false,
+                &|_| false,
+            );
+            assert!(
+                matches!(
+                    outcome,
+                    ApplyOutcome::Failed {
+                        stage: ApplyStage::Begin,
+                        ..
+                    }
+                ),
+                "{outcome:?}"
+            );
+        }
+        assert_eq!(sent.get(), 0, "nothing was sent");
     }
 
     /// A `ROLLBACK` that fails is followed by the arm's abandon, which ends
@@ -4758,7 +4811,8 @@ mod tests {
                 sql: r#"DELETE FROM "public"."t" WHERE "code" = 'b' AND "parent" = 'a'"#.into(),
                 kind: StepKind::Delete,
                 reread: Some(
-                    r#"SELECT * FROM "public"."t" WHERE "code" = 'b' AND "parent" = 'a'"#.into(),
+                    r#"SELECT * FROM "public"."t" WHERE "code" = 'b' AND "parent" = 'a' LIMIT 2"#
+                        .into(),
                 ),
                 before: vec![fetched("code", Some("b"))],
                 read_back: None,
@@ -4871,7 +4925,7 @@ mod tests {
             sent.into_inner(),
             [
                 "BEGIN",
-                r#"SELECT * FROM "public"."t" WHERE "id" = '1'"#,
+                r#"SELECT * FROM "public"."t" WHERE "id" = '1' LIMIT 2"#,
                 "ROLLBACK"
             ],
             "no write went out, and the transaction the apply opened was ended"

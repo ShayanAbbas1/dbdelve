@@ -1747,7 +1747,7 @@ mod tests {
             sql: sql.into(),
             kind,
             reread: Some(format!(
-                r#"SELECT * FROM "main"."birds" WHERE "id" = '{id}'"#
+                r#"SELECT * FROM "main"."birds" WHERE "id" = '{id}' LIMIT 2"#
             )),
             before: before
                 .iter()
@@ -1872,16 +1872,15 @@ mod tests {
         assert_eq!(name_of(&connection, 2).as_deref(), Some("tit"));
         assert!(connection.connection.lock().unwrap().is_autocommit());
 
-        // An UPDATE that reaches two rows counts two, and both keep their values.
+        // An UPDATE that reaches two rows is read again by its own predicate,
+        // which finds both: nothing is written, and both keep their values.
         let connection = memory(birds);
         let mut both = update("1", "wren");
         both.sql = r#"UPDATE "main"."birds" SET "name" = 'robin' WHERE "label" = 'a'"#.into();
+        both.reread = crate::sql::row_reread(Engine::Sqlite, &both.sql);
         assert_eq!(
             apply(&connection, &[both]),
-            ApplyOutcome::Miscounted {
-                step: 0,
-                count: Some(2)
-            }
+            ApplyOutcome::Drifted(vec![(0, crate::db::Drift::Ambiguous(2))])
         );
         assert_eq!(name_of(&connection, 1).as_deref(), Some("wren"));
         assert_eq!(name_of(&connection, 2).as_deref(), Some("tit"));
@@ -1962,7 +1961,7 @@ mod tests {
             "1",
             &[("id", Some("1")), ("name", Some("wren"))],
         );
-        update.read_back = update.reread.clone();
+        update.read_back = crate::sql::row_read(Engine::Sqlite, &update.sql);
         let named = |outcome: ApplyOutcome| {
             let ApplyOutcome::Applied {
                 affected,
