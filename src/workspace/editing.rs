@@ -2973,7 +2973,7 @@ pub(super) fn verification(
 ) -> Result<Verification, String> {
     let statements = sql::generated_writes(engine, batch).ok_or(UNPAIRED)?;
     let order = grid.draft_order();
-    let identities = grid.draft_identities();
+    let identities = grid.identities_of(order.clone());
     if statements.len() != order.len() || identities.len() != order.len() {
         return Err(UNPAIRED.into());
     }

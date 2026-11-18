@@ -153,7 +153,7 @@ pub(crate) enum DraftRow {
 /// an apply is out), an added row by its place among the added rows, which a
 /// sort never moves. A key value is held with its cell's type: MongoDB draws
 /// the integer `1` and the string `"1"` alike, and they are two documents.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum StepRow {
     Fetched(Vec<(String, String)>, Vec<Option<String>>),
     Added(usize),
@@ -3115,24 +3115,11 @@ impl ResultGrid {
             return Vec::new();
         };
 
-        let mut rows: Vec<usize> = Vec::new();
-        for row in self
-            .pending
-            .iter()
-            .map(|edit| edit.row)
-            .filter(|row| wanted(*row))
-        {
-            if !rows.contains(&row) {
-                rows.push(row);
-            }
-        }
-
-        rows.into_iter()
-            .filter_map(|row| {
-                let sets: Vec<(String, NewValue)> = self
-                    .pending
+        self.pending_edits_by_row(wanted)
+            .into_iter()
+            .filter_map(|(row, edits)| {
+                let sets: Vec<(String, NewValue)> = edits
                     .iter()
-                    .filter(|pending| pending.row == row)
                     .filter_map(|pending| {
                         let name = edit.columns.get(pending.col)?.clone()?;
                         Some((name, pending.value.clone()))
@@ -3152,10 +3139,8 @@ impl ResultGrid {
                         null_keys,
                         update: edit.update,
                         types: self.row_types(row),
-                        held: self
-                            .pending
+                        held: edits
                             .iter()
-                            .filter(|pending| pending.row == row)
                             .filter_map(|pending| {
                                 let name = edit.columns.get(pending.col)?.clone()?;
                                 Some((name, self.cell(row, pending.col)?.to_string()))
@@ -3165,6 +3150,24 @@ impl ResultGrid {
                 ))
             })
             .collect()
+    }
+
+    /// The staged edits of the rows `wanted` names, grouped by row in the order
+    /// the rows were first edited, in one pass over the staged cells.
+    fn pending_edits_by_row(
+        &self,
+        wanted: impl Fn(usize) -> bool,
+    ) -> Vec<(usize, Vec<&PendingEdit>)> {
+        let mut places: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+        let mut groups: Vec<(usize, Vec<&PendingEdit>)> = Vec::new();
+        for edit in self.pending.iter().filter(|edit| wanted(edit.row)) {
+            let place = *places.entry(edit.row).or_insert_with(|| {
+                groups.push((edit.row, Vec::new()));
+                groups.len() - 1
+            });
+            groups[place].1.push(edit);
+        }
+        groups
     }
 
     /// The edit target's key columns by their real names: what a marked row is
@@ -3226,6 +3229,25 @@ impl ResultGrid {
             .collect()
     }
 
+    /// The rows [`Self::pending_rows_with_row`] writes an `UPDATE` for, in its
+    /// order, without building the statements' parts: a row is left out when no
+    /// staged cell is a named column or its key cannot be read.
+    fn updated_rows(&self) -> Vec<usize> {
+        let Some(edit) = &self.result.edit else {
+            return Vec::new();
+        };
+        self.pending_edits_by_row(|_| true)
+            .into_iter()
+            .filter(|(row, edits)| {
+                edits
+                    .iter()
+                    .any(|pending| edit.columns.get(pending.col).is_some_and(Option::is_some))
+                    && self.key_values(edit, *row).is_some()
+            })
+            .map(|(row, _)| row)
+            .collect()
+    }
+
     /// The row each statement of the draft's batch is written for, in the order
     /// [`crate::sql::draft_batch`] writes them: the marks, then the edited
     /// rows, then the added rows. Read from the sequences [`Self::draft_deletes`],
@@ -3237,10 +3259,7 @@ impl ResultGrid {
             .deletable()
             .into_iter()
             .map(|(row, _)| DraftRow::Marked(row));
-        let updated = self
-            .pending_rows_with_row(|_| true)
-            .into_iter()
-            .map(|(row, _)| DraftRow::Updated(row));
+        let updated = self.updated_rows().into_iter().map(DraftRow::Updated);
         let added = (0..self.added.len()).map(DraftRow::Added);
         marked.chain(updated).chain(added).collect()
     }
@@ -3248,8 +3267,15 @@ impl ResultGrid {
     /// The identity of each statement of the draft's batch, in the order
     /// [`Self::draft_order`] gives them, taken now so it still names the row
     /// after a sort in memory has moved it.
+    #[cfg(test)]
     pub(crate) fn draft_identities(&self) -> Vec<StepRow> {
-        self.draft_order()
+        self.identities_of(self.draft_order())
+    }
+
+    /// [`Self::draft_identities`] for an order already taken, so a caller that
+    /// holds one does not build it twice.
+    pub(crate) fn identities_of(&self, order: Vec<DraftRow>) -> Vec<StepRow> {
+        order
             .into_iter()
             .filter_map(|row| match row {
                 DraftRow::Marked(row) | DraftRow::Updated(row) => self.fetched_identity(row),
@@ -3267,7 +3293,7 @@ impl ResultGrid {
     /// apply is out, so no row was added or removed since the places were
     /// taken. What `applied` does not name stays.
     pub(crate) fn drop_applied(&mut self, applied: &[StepRow]) {
-        let fetched: Vec<&StepRow> = applied
+        let fetched: std::collections::HashSet<&StepRow> = applied
             .iter()
             .filter(|step| matches!(step, StepRow::Fetched(..)))
             .collect();
@@ -3278,13 +3304,26 @@ impl ResultGrid {
             .copied()
             .chain(self.pending.iter().map(|edit| edit.row))
             .collect();
+        let mut dropped: std::collections::HashSet<usize> = std::collections::HashSet::new();
         for row in drafted {
             if self
                 .fetched_identity(row)
-                .is_some_and(|identity| fetched.contains(&&identity))
+                .is_some_and(|identity| fetched.contains(&identity))
             {
                 self.marked.remove(&row);
-                self.discard_row(row);
+                self.forget_failure(row);
+                dropped.insert(row);
+            }
+        }
+        if !dropped.is_empty() {
+            // `Self::discard_row` for each row, with one pass over the cells.
+            self.pending.retain(|edit| !dropped.contains(&edit.row));
+            if self
+                .editing
+                .as_ref()
+                .is_some_and(|editing| dropped.contains(&editing.row))
+            {
+                self.editing = None;
             }
         }
         let mut places: Vec<usize> = applied
