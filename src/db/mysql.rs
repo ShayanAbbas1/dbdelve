@@ -4312,6 +4312,8 @@ mod tests {
         );
         scratch.drop_all();
         let run = |sql: &str| connection.query(sql, Fetch::default());
+        // A `timestamp` is matched by its value only under a fixed-offset zone.
+        run("SET SESSION time_zone = '+00:00'").expect("the session zone is set");
         let columns: Vec<String> = TYPE_SAMPLES
             .iter()
             .enumerate()
