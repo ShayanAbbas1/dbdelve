@@ -494,8 +494,26 @@ impl Workspace {
     /// the frame this runs in. Focus goes back to the front for the reason
     /// `searched` gives.
     fn drop_row_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let inputs = self.stage_row_inputs(cx);
+        if inputs
+            .iter()
+            .any(|input| input.focus_handle(cx).is_focused(window))
+        {
+            refocus_front_later(window, cx);
+        }
+        self.row_panel.inputs = None;
+    }
+
+    /// Stage whatever Edit mode's inputs hold that is not staged yet, and hand
+    /// back the inputs. A close needs this before it asks whether a tab is
+    /// clean: the chip's button and the chords take no focus, so no blur comes
+    /// to stage a draft before the tab is gone.
+    fn stage_row_inputs(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Vec<Entity<gpui_component::input::TextareaState>> {
         let Some(inputs) = self.row_panel.inputs.as_ref() else {
-            return;
+            return Vec::new();
         };
         let inputs: Vec<_> = inputs
             .fields
@@ -506,13 +524,7 @@ impl Workspace {
         for input in &inputs {
             self.commit_row_input(input, cx);
         }
-        if inputs
-            .iter()
-            .any(|input| input.focus_handle(cx).is_focused(window))
-        {
-            refocus_front_later(window, cx);
-        }
-        self.row_panel.inputs = None;
+        inputs
     }
 
     /// Edit mode's input on a cell of the grid in front, if one is built.
@@ -1241,6 +1253,7 @@ impl Workspace {
         if self.palette.is_some() {
             return;
         }
+        self.stage_row_inputs(cx);
         let Some(profile) = self.profile() else {
             return;
         };
@@ -1280,6 +1293,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.stage_row_inputs(cx);
         if !self.has_unapplied_edits(tab, cx) {
             self.close_now(tab, window, cx);
             return;
