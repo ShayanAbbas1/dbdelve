@@ -1876,7 +1876,9 @@ impl Connection {
                  CASE WHEN access.readable
                      THEN pg_catalog.pg_sequence_last_value(sequence_class.oid)::text
                  END AS last_value,
-                 access.readable::text AS readable
+                 access.readable::text AS readable,
+                 pg_catalog.has_sequence_privilege(sequence_class.oid, 'SELECT')::text
+                     AS selectable
              FROM pg_catalog.pg_depend AS dependency
              JOIN pg_catalog.pg_class AS sequence_class
                  ON sequence_class.oid = dependency.objid AND sequence_class.relkind = 'S'
@@ -1908,12 +1910,26 @@ impl Connection {
             let table = Engine::Postgres.qualified(schema, cell("table_name")?);
             let column = Engine::Postgres.quote_identifier(cell("column_name")?);
             let owned = cell("owner_kind")? == "a";
-            // `last_value` is NULL for a role that may not read the sequence as
-            // well as for one never used, and only the second starts again.
+            // `last_value` is NULL for a role that may not read the sequence,
+            // and for one whose next value is not yet taken: never used, or
+            // set by `setval(…, false)`. Only the sequence itself says where
+            // the second stands.
             let set = match optional_cell(&result, row, "last_value") {
                 Some(last) => Some(format!("{last}, true")),
-                None if cell("readable")? == "true" => {
-                    Some(format!("{}, false", cell("start_value")?))
+                None if cell("selectable")? == "true" => {
+                    let state = self.internal_query(&format!(
+                        "SELECT last_value::text AS last_value, is_called::text AS is_called \
+                         FROM {sequence}"
+                    ))?;
+                    let row = state
+                        .rows
+                        .first()
+                        .ok_or_else(|| plain_error(format!("{sequence} has no state to read.")))?;
+                    Some(format!(
+                        "{}, {}",
+                        required_cell(&state, row, "last_value")?,
+                        required_cell(&state, row, "is_called")?
+                    ))
                 }
                 None => {
                     sequences.unreadable.push(sequence.clone());
@@ -1936,17 +1952,17 @@ impl Connection {
                         "NO CYCLE"
                     },
                 ));
-                sequences.after_rows.push(format!(
+                sequences.owned_by.push(format!(
                     "ALTER SEQUENCE {sequence} OWNED BY {table}.{column};"
                 ));
                 if let Some(set) = set {
-                    sequences.after_rows.push(format!(
+                    sequences.values.push(format!(
                         "SELECT pg_catalog.setval({}, {set});",
                         Engine::Postgres.quote_literal(&sequence)
                     ));
                 }
             } else if let Some(set) = set {
-                sequences.after_rows.push(format!(
+                sequences.values.push(format!(
                     "SELECT pg_catalog.setval(pg_catalog.pg_get_serial_sequence({}, {}), {set});",
                     Engine::Postgres.quote_literal(&table),
                     Engine::Postgres.quote_literal(cell("column_name")?),
@@ -6187,20 +6203,21 @@ mod tests {
         assert!(sequences.before_tables[0].starts_with(
             "CREATE SEQUENCE \"public\".\"dbdelve_test_seq_serial_id_seq\" AS integer INCREMENT BY 1"
         ));
-        assert_eq!(sequences.after_rows.len(), 3, "{:?}", sequences.after_rows);
-        // `OWNED BY` carries no value; each `setval` carries the 3 the rows reached.
-        let setvals: Vec<_> = sequences
-            .after_rows
-            .iter()
-            .filter(|sql| sql.contains("setval"))
-            .collect();
-        assert_eq!(setvals.len(), 2, "{setvals:?}");
-        assert!(setvals.iter().all(|sql| sql.contains(", 3, true);")));
+        // Each `setval` carries the 3 the rows reached.
+        assert_eq!(sequences.values.len(), 2, "{:?}", sequences.values);
         assert!(
             sequences
-                .after_rows
+                .values
                 .iter()
-                .any(|sql| sql.contains("OWNED BY \"public\".\"dbdelve_test_seq_serial\".\"id\""))
+                .all(|sql| sql.contains(", 3, true);"))
+        );
+        assert_eq!(
+            sequences.owned_by,
+            vec![
+                "ALTER SEQUENCE \"public\".\"dbdelve_test_seq_serial_id_seq\" \
+                 OWNED BY \"public\".\"dbdelve_test_seq_serial\".\"id\";"
+                    .to_string()
+            ]
         );
 
         // The proof is the server: replay it into emptied tables and the next
@@ -6211,7 +6228,8 @@ mod tests {
                  nextval('public.dbdelve_test_seq_serial_id_seq')); \
              CREATE TABLE dbdelve_test_seq_identity (id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY)",
         );
-        setup(&sequences.after_rows.join("\n"));
+        setup(&sequences.values.join("\n"));
+        setup(&sequences.owned_by.join("\n"));
         let next = |table: &str| {
             connection
                 .query(
@@ -6234,29 +6252,42 @@ mod tests {
 
     #[test]
     #[ignore = "needs the dev Postgres"]
-    fn live_an_unused_sequence_is_set_to_start_again() {
+    fn live_a_sequence_whose_next_value_is_not_taken_is_set_where_it_stands() {
         let connection = Connection::open(&live_config()).expect("connection should open");
         let setup = |sql: &str| {
             connection
                 .query(sql, Fetch::default())
                 .expect("the fixture statements should run");
         };
+        // The catalog shows both a NULL `last_value`: one never used, and one
+        // `setval(…, false)` put at 50 for its next value.
         setup(
             "DROP TABLE IF EXISTS dbdelve_test_seq_unused; \
-             CREATE TABLE dbdelve_test_seq_unused (id serial PRIMARY KEY)",
+             DROP TABLE IF EXISTS dbdelve_test_seq_reset; \
+             CREATE TABLE dbdelve_test_seq_unused (id serial PRIMARY KEY); \
+             CREATE TABLE dbdelve_test_seq_reset (id serial PRIMARY KEY); \
+             SELECT setval('dbdelve_test_seq_reset_id_seq', 50, false)",
         );
-        let sequences =
-            connection.export_sequences("public", &["dbdelve_test_seq_unused".to_string()]);
-        setup("DROP TABLE dbdelve_test_seq_unused");
+        let sequences = connection.export_sequences(
+            "public",
+            &[
+                "dbdelve_test_seq_reset".to_string(),
+                "dbdelve_test_seq_unused".to_string(),
+            ],
+        );
+        setup("DROP TABLE dbdelve_test_seq_unused; DROP TABLE dbdelve_test_seq_reset");
         let sequences = sequences.expect("the sequences should load");
 
+        assert_eq!(sequences.values.len(), 2, "{:?}", sequences.values);
         assert!(
-            sequences
-                .after_rows
-                .last()
-                .is_some_and(|sql| sql.ends_with(", 1, false);")),
+            sequences.values[0].ends_with(", 50, false);"),
             "{:?}",
-            sequences.after_rows
+            sequences.values
+        );
+        assert!(
+            sequences.values[1].ends_with(", 1, false);"),
+            "{:?}",
+            sequences.values
         );
     }
 
@@ -6293,14 +6324,7 @@ mod tests {
             sequences.unreadable,
             vec!["\"public\".\"dbdelve_test_seq_hidden_id_seq\"".to_string()]
         );
-        assert!(
-            !sequences
-                .after_rows
-                .iter()
-                .any(|sql| sql.contains("setval")),
-            "{:?}",
-            sequences.after_rows
-        );
+        assert!(sequences.values.is_empty(), "{:?}", sequences.values);
     }
 
     #[test]

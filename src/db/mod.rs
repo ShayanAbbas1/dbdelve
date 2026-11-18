@@ -4338,10 +4338,13 @@ pub(super) fn assemble_structure(
 pub struct Sequences {
     /// `CREATE SEQUENCE`, written before the tables whose defaults name them.
     pub before_tables: Vec<String>,
-    /// `ALTER SEQUENCE … OWNED BY` and `setval`, written after the rows.
-    pub after_rows: Vec<String>,
+    /// `ALTER SEQUENCE … OWNED BY`, which ties each to the column the
+    /// structure creates.
+    pub owned_by: Vec<String>,
+    /// `setval`, which sets each where it stood when it was read.
+    pub values: Vec<String>,
     /// Sequences the role may not read where they stand, by qualified name,
-    /// which no `setval` can be written for: the catalog shows them unused.
+    /// which no `setval` can be written for.
     pub unreadable: Vec<String>,
 }
 

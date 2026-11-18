@@ -1023,8 +1023,11 @@ fn live_a_schema_with_sequences_runs_back_on_postgres() {
     );
     for table in [&serial, &identity] {
         table.run("INSERT INTO {table} (body) VALUES ('one'), ('two'), ('three')");
-        // A gap, so the next id comes from the sequence and not the row count.
+        // A gap, so the next id comes from the sequence and not the row count,
+        // and two values taken and never written, so not from `MAX(id)` either.
         table.run("DELETE FROM {table} WHERE id = 2");
+        table.run("SELECT nextval(pg_catalog.pg_get_serial_sequence('{table}', 'id'))");
+        table.run("SELECT nextval(pg_catalog.pg_get_serial_sequence('{table}', 'id'))");
     }
     let path = serial.directory.join("schema.sql");
     let request = SchemaRequest {
@@ -1056,7 +1059,7 @@ fn live_a_schema_with_sequences_runs_back_on_postgres() {
     assert!(problems.is_empty(), "{sql}\n{}", problems.join("\n"));
     for table in [&serial, &identity] {
         let next = table.run("INSERT INTO {table} (body) VALUES ('next') RETURNING id");
-        assert_eq!(next.rows[0].get(0), Some("4"), "{sql}");
+        assert_eq!(next.rows[0].get(0), Some("6"), "{sql}");
     }
 }
 

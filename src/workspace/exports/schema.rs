@@ -151,21 +151,10 @@ pub(super) fn export_schema(
 
     // An `OWNED BY` ties a sequence to a column the structure creates, so it
     // goes with the structure; a `setval` sets one where the rows left it.
-    let (owned, set): (Vec<&String>, Vec<&String>) = sequences
-        .after_rows
-        .iter()
-        .partition(|statement| statement.starts_with("ALTER SEQUENCE"));
-    let before_tables: &[String] = match request.structure {
-        true => &sequences.before_tables,
-        false => &[],
+    let (before_tables, owned_by): (&[String], &[String]) = match request.structure {
+        true => (&sequences.before_tables, &sequences.owned_by),
+        false => (&[], &[]),
     };
-    let mut after_rows = Vec::new();
-    if request.rows {
-        after_rows.extend(set);
-    }
-    if request.structure {
-        after_rows.extend(owned);
-    }
     let checks = match export.foreign_keys {
         ForeignKeyReplay::ChecksOff => Some(
             crate::db::checks_off(engine)
@@ -173,7 +162,7 @@ pub(super) fn export_schema(
         ),
         _ => None,
     };
-    let sequenced = !before_tables.is_empty() || !after_rows.is_empty();
+    let sequenced = !before_tables.is_empty() || (request.rows && !sequences.values.is_empty());
 
     write_replacing(path, |out| {
         let failed = could_not_write(path);
@@ -207,7 +196,20 @@ pub(super) fn export_schema(
                 out.write_all(b"\n").map_err(&failed)?;
             }
         }
-        for statement in &after_rows {
+        if request.rows && !sequences.values.is_empty() {
+            // Read again now the rows are, so a row another session added
+            // meanwhile is behind where the file sets its sequence.
+            let again = connection
+                .export_sequences(schema, &request.tables)
+                .map_err(|error| refused(format!("could not read its sequences: {error}")))?;
+            if let Some(reason) = sequence_refusal(request, &again) {
+                return Err(refused(reason));
+            }
+            for statement in &again.values {
+                write!(out, "{statement}\n\n").map_err(&failed)?;
+            }
+        }
+        for statement in owned_by {
             write!(out, "{statement}\n\n").map_err(&failed)?;
         }
         if request.structure {
@@ -492,7 +494,11 @@ mod tests {
             let turns_off = Target::built_in(engine)
                 .exports_schema()
                 .is_some_and(|export| export.foreign_keys == ForeignKeyReplay::ChecksOff);
-            assert_eq!(crate::db::checks_off(engine).is_some(), turns_off, "{engine:?}");
+            assert_eq!(
+                crate::db::checks_off(engine).is_some(),
+                turns_off,
+                "{engine:?}"
+            );
         }
         assert_eq!(
             Target::built_in(Engine::DuckDb).exports_schema(),
