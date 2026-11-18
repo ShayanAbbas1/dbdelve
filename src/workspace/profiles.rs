@@ -1333,6 +1333,18 @@ impl Workspace {
             );
             return false;
         }
+        // An export reads table after table on the connection a switch moves,
+        // so the rows after it would come from the other database.
+        if self
+            .profile()
+            .is_some_and(|profile| profile.session.exporting.is_some())
+        {
+            self.note(
+                "An export is running, so the database was not switched.".to_string(),
+                cx,
+            );
+            return false;
+        }
         let Some(profile) = self.profile() else {
             return false;
         };
@@ -1567,6 +1579,10 @@ impl Workspace {
         // Not running, which a switch refuses and a connect cannot have: the
         // dialog names a table of the database being left.
         self.abandon_import(&profile_id, cx);
+        // Its tables, and the keys read of them, are the database's being left.
+        if let Some(profile) = self.profile_mut() {
+            profile.session.schema_export = None;
+        }
         for id in closing {
             self.close_object(id, window, cx);
         }
