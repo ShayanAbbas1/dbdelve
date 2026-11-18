@@ -5144,6 +5144,36 @@ fn a_service_launch_does_not_reuse_a_profiles_explicit_port(cx: &mut TestAppCont
 }
 
 #[gpui::test]
+fn result_grid_scrollbars_stay_outside_the_viewport(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            "create table nests (id integer primary key); insert into nests values (1);",
+        );
+        cx.executor().allow_parking();
+        let nests = explorer_row(&workspace, "relation-main\0nests", cx).center();
+        cx.simulate_click(nests, gpui::Modifiers::default());
+        settle(cx);
+
+        let viewport = cx
+            .debug_bounds("table-viewport")
+            .expect("the grid is drawn");
+        let horizontal = cx
+            .debug_bounds("table-scrollbar-horizontal")
+            .expect("the horizontal track is laid out");
+        let vertical = cx
+            .debug_bounds("table-scrollbar-vertical")
+            .expect("the vertical track is laid out");
+        assert_eq!(horizontal.top(), viewport.bottom());
+        assert_eq!(vertical.left(), viewport.right());
+        assert_eq!(horizontal.right(), vertical.left());
+        assert_eq!(vertical.bottom(), horizontal.top());
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn a_click_on_an_empty_table_takes_the_keyboard_for_a_paste(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) =

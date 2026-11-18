@@ -2525,35 +2525,27 @@ where
         self._measure.clear();
     }
 
-    fn render_vertical_scrollbar(
-        &mut self,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) -> Option<impl IntoElement> {
-        Some(
-            div()
-                .absolute()
-                .top(self.header_band_height())
-                .right_0()
-                .bottom_0()
-                .w(Scrollbar::width())
-                .child(
-                    Scrollbar::vertical(&self.vertical_scroll_handle)
-                        .viewport_from_layout()
-                        .max_fps(60),
-                ),
-        )
-    }
-
-    fn render_horizontal_scrollbar(
-        &mut self,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render_vertical_scrollbar(&self, bottom_gutter: Pixels) -> impl IntoElement {
         div()
             .absolute()
-            .left(self.fixed_head_cols_bounds.size.width)
+            .debug_selector(|| "table-scrollbar-vertical".into())
+            .top(self.header_band_height())
             .right_0()
+            .bottom(bottom_gutter)
+            .w(Scrollbar::width())
+            .child(
+                Scrollbar::vertical(&self.vertical_scroll_handle)
+                    .viewport_from_layout()
+                    .max_fps(60),
+            )
+    }
+
+    fn render_horizontal_scrollbar(&self, right_gutter: Pixels) -> impl IntoElement {
+        div()
+            .absolute()
+            .debug_selector(|| "table-scrollbar-horizontal".into())
+            .left(self.fixed_head_cols_bounds.size.width)
+            .right(right_gutter)
             .bottom_0()
             .h(Scrollbar::width())
             .child(Scrollbar::horizontal(&self.horizontal_scroll_handle).viewport_from_layout())
@@ -2629,8 +2621,28 @@ where
             None
         };
 
+        // dbdelve patch: gutters for enabled axes also keep the viewport steady as bars fade.
+        // ponytail: gutters persist when content fits, revisit if that space is needed.
+        let show_horizontal = !loading && self.options.scrollbar_visible.bottom;
+        let show_vertical = !loading && self.options.scrollbar_visible.right && rows_count > 0;
+        let bottom_gutter = if show_horizontal {
+            Scrollbar::width()
+        } else {
+            px(0.)
+        };
+        let right_gutter = if show_vertical {
+            Scrollbar::width()
+        } else {
+            px(0.)
+        };
+
         let inner_table = v_flex()
             .id("table-inner")
+            .debug_selector(|| "table-viewport".into())
+            .on_prepaint({
+                let state = cx.entity();
+                move |bounds, _, cx| state.update(cx, |state, _| state.bounds = bounds)
+            })
             .size_full()
             .overflow_hidden()
             .child(self.render_table_header(left_columns_count, window, cx))
@@ -2741,6 +2753,8 @@ where
 
         div()
             .size_full()
+            .pr(right_gutter)
+            .pb(bottom_gutter)
             .children(loading_view)
             .when(!loading, |this| {
                 this.child(inner_table)
@@ -2765,24 +2779,13 @@ where
                         }))
                     })
             })
-            .on_prepaint({
-                let state = cx.entity();
-                move |bounds, _, cx| state.update(cx, |state, _| state.bounds = bounds)
-            })
             .when(!window.is_inspector_picking(cx), |this| {
-                this.child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .size_full()
-                        .when(self.options.scrollbar_visible.bottom, |this| {
-                            this.child(self.render_horizontal_scrollbar(window, cx))
-                        })
-                        .when(
-                            self.options.scrollbar_visible.right && rows_count > 0,
-                            |this| this.children(self.render_vertical_scrollbar(window, cx)),
-                        ),
-                )
+                this.when(show_horizontal, |this| {
+                    this.child(self.render_horizontal_scrollbar(right_gutter))
+                })
+                .when(show_vertical, |this| {
+                    this.child(self.render_vertical_scrollbar(bottom_gutter))
+                })
             })
     }
 }
