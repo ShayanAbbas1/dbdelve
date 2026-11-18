@@ -99,13 +99,22 @@ mode, always where the user can read it before it runs:
   the row as the grid fetched it (copied by value when the review was written);
   a row that differs or is gone writes nothing, keeps the draft and is named in
   the review. A statement that does not count exactly one row rolls the whole
-  sequence back; a `DELETE` may count none only when a second read of its row
-  finds it gone, which an earlier `DELETE` of the draft taking it along would
-  leave, and a statement something skipped (a trigger returning without writing)
-  leaves its row there. While a transaction the user opened is open on the
-  connection (`Profile::in_transaction`) a verified apply is refused, at
-  review and at Run (`session::APPLY_IN_TRANSACTION`), because its own `BEGIN`
-  and `COMMIT` would end that transaction; the draft is kept. There is no `FOR UPDATE`: the pinned grammar cannot read it,
+  sequence back; a `DELETE` may count none only when its row is named by its
+  key (`VerifiedStep::by_key`) and a second read of it finds it gone, which an
+  earlier `DELETE` of the draft taking it along would leave, and a statement
+  something skipped (a trigger returning without writing) leaves its row there.
+  A row named by every value reads as gone once an earlier write changed one of
+  them, so there a `DELETE` counting none is a miscount. While a transaction
+  the user opened is open on the connection (`Profile::in_transaction`, which
+  counts MySQL's `SET autocommit = 0` and SQL Server's `SET
+  IMPLICIT_TRANSACTIONS ON`) a verified apply is refused, at review and at Run
+  (`session::APPLY_IN_TRANSACTION`), because its own `BEGIN` and `COMMIT`
+  would end that transaction; the draft is kept. The arm asks the server too,
+  under the lock it holds, before its `BEGIN` (`Sending::Open`): SQLite and
+  DuckDB `is_autocommit`, MySQL and MariaDB `@@autocommit` and a `SET
+  TRANSACTION` refused with 1568 inside one, SQL Server `@@TRANCOUNT` and
+  `@@OPTIONS & 2`, Postgres the 25001 warning its `BEGIN` raises inside one.
+  There is no `FOR UPDATE`: the pinned grammar cannot read it,
   so the compare catches a change made between the fetch and the apply, not one
   made in the milliseconds between the re-read and the write, and the count
   still catches a row that vanished in that window. Targets that do not verify
