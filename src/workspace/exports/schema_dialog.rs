@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use gpui::{ElementId, SharedString};
 use gpui_component::checkbox::Checkbox;
 
-use super::schema::{Ordered, SchemaRequest, cycle_refusal, dependency_order};
+use super::schema::{Ordered, SchemaRequest, cycle_refusal, export_order};
 use super::*;
 use crate::db::{ForeignKey, ForeignKeyReplay, RelationKind};
 
@@ -127,7 +127,7 @@ impl SchemaExportDialog {
             .ticked()
             .map(|name| (name.clone(), keys.get(name).cloned().unwrap_or_default()))
             .collect();
-        Some(dependency_order(&self.schema, ticked))
+        Some(export_order(&self.schema, ticked, self.rows))
     }
 
     fn landed(&mut self, generation: u64, keys: Result<HashMap<String, Vec<ForeignKey>>, String>) {

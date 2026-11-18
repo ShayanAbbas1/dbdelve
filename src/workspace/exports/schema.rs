@@ -118,7 +118,7 @@ pub(super) fn export_schema(
         .iter()
         .map(|table| (table.name.clone(), table.structure.foreign_keys.clone()))
         .collect();
-    let mut ordered = dependency_order(schema, keys);
+    let mut ordered = export_order(schema, keys, request.rows);
     if export.foreign_keys == ForeignKeyReplay::RefusesCycles
         && request.structure
         && !ordered.cyclic.is_empty()
@@ -342,6 +342,21 @@ pub(super) struct Ordered {
     /// Tables of `schema` some exported table points at that are not exported,
     /// sorted, each once.
     pub missing: Vec<String>,
+}
+
+/// [`dependency_order`] for a file that writes `rows` or not. Without rows, a
+/// table's key to itself is created with it and holds nothing back.
+pub(super) fn export_order(
+    schema: &str,
+    mut tables: Vec<(String, Vec<ForeignKey>)>,
+    rows: bool,
+) -> Ordered {
+    if !rows {
+        for (name, keys) in &mut tables {
+            keys.retain(|key| key.referenced_schema != schema || key.referenced_table != *name);
+        }
+    }
+    dependency_order(schema, tables)
 }
 
 /// The `tables` of `schema`, each after the ones its keys point at. Tables in a

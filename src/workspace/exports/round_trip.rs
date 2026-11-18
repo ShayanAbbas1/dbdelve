@@ -1082,6 +1082,30 @@ fn a_rows_only_schema_names_its_missing_and_cyclic_tables_on_duckdb() {
     );
 }
 
+/// A table's key to itself is in its own `CREATE`, so without rows it is no
+/// cycle to refuse.
+#[test]
+fn a_self_reference_exports_as_structure_alone_on_duckdb() {
+    let file = DuckDbFile::new("schema-self");
+    let fixture = Fixture::new(file.open(), Engine::DuckDb, "main", "self");
+    let tables = [&fixture.employees, &fixture.child, &fixture.parent];
+    let sql = fixture
+        .export(&tables, true, false)
+        .expect("the structure alone exports");
+    assert!(!sql.contains("reference each other"), "{sql}");
+    fixture.drop_tables(&tables);
+    let problems = fixture.parent.replay(&sql);
+    assert!(problems.is_empty(), "{sql}\n{}", problems.join("\n"));
+    for table in tables {
+        assert!(table.rows().rows.is_empty(), "{}", table.name);
+    }
+    // With the rows, a manager may come after the employee who names them.
+    assert!(matches!(
+        fixture.export(&[&fixture.employees], true, true),
+        Err(Ended::Failed(message)) if message.contains(&fixture.employees.name)
+    ));
+}
+
 #[test]
 fn a_schema_export_that_ends_early_leaves_the_file_that_was_there() {
     let file = DuckDbFile::new("schema-ends");
