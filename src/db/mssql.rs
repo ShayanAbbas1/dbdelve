@@ -2305,7 +2305,9 @@ fn table_columns(result: &QueryResult) -> Option<Vec<TableColumn>> {
 /// `geometry`, `hierarchyid` and `sql_variant`, which this driver cannot read;
 /// `money` and `smallmoney`, which the driver hands over as an `f64`, so two
 /// amounts past about 1e12 render alike and one's literal names the other's
-/// row; `timestamp` (rowversion) and any alias type, never exercised.
+/// row; and any alias type, never exercised. `timestamp` is rowversion's
+/// `TYPE_NAME`, matched by its bare hex as `live_a_rowversion_filters_by_its_bare_hex`
+/// shows, and never set: the server writes it.
 fn is_matchable(data_type: &str) -> bool {
     matches!(
         data_type,
@@ -2331,6 +2333,7 @@ fn is_matchable(data_type: &str) -> bool {
             | "uniqueidentifier"
             | "binary"
             | "varbinary"
+            | "timestamp"
     )
 }
 
@@ -3396,8 +3399,7 @@ mod tests {
             ))
         };
         // The types `=` errors on, the CLR ones the driver cannot read at all,
-        // the money types the driver reads lossily, and rowversion, which no
-        // test matched.
+        // and the money types the driver reads lossily.
         for data_type in [
             "money",
             "smallmoney",
@@ -3409,7 +3411,6 @@ mod tests {
             "geometry",
             "hierarchyid",
             "sql_variant",
-            "timestamp",
             "sysname",
             "",
         ] {
@@ -3459,6 +3460,7 @@ mod tests {
             "uniqueidentifier",
             "binary",
             "varbinary",
+            "timestamp",
         ] {
             let (target, reason) = resolve_keyless_target(
                 &sightings(&["one"]),

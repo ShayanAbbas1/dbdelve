@@ -712,7 +712,8 @@ Decided, and not to be re-litigated:
   - SQL Server lists `tinyint`, `smallint`, `int`, `bigint`, `decimal`,
     `numeric`, `real`, `float`, `bit`, `char`, `varchar`, `nchar`,
     `nvarchar`, `date`, `time`, `datetime`, `datetime2`, `smalldatetime`,
-    `datetimeoffset`, `uniqueidentifier`, `binary` and `varbinary`, by
+    `datetimeoffset`, `uniqueidentifier`, `binary`, `varbinary` and
+    `timestamp` (rowversion, matched by its bare hex and never set), by
     `TYPE_NAME` of the column's user type. Left off: `money` and `smallmoney`
     (the driver hands them over as an `f64`, so two amounts past about 1e12
     render alike and one's literal names the other's row), `xml`,
@@ -721,8 +722,7 @@ Decided, and not to be re-litigated:
     `geography`, `geometry`, `hierarchyid` and `sql_variant` (the driver
     cannot read them: a statement that returns one is not run, and a table's
     preview reads it as text, which leaves that grid read-only naming the
-    column), `timestamp` (rowversion), and an alias type. Only a user table
-    qualifies.
+    column), and an alias type. Only a user table qualifies.
 - **The Structure tab reads more than one privilege level can see.** An alias
   type's `TYPE_NAME(user_type_id)` is null when the login cannot see it, and
   falls back to `TYPE_NAME(system_type_id)`, its base type. A computed column's
