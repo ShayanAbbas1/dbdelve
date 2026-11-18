@@ -332,15 +332,6 @@ WHERE TABLE_SCHEMA = {schema}
 ORDER BY TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION
 ";
 
-const PRIMARY_KEY_SQL: &str = "
-SELECT COLUMN_NAME AS column_name
-FROM information_schema.STATISTICS
-WHERE TABLE_SCHEMA = {schema}
-  AND TABLE_NAME = {relation}
-  AND INDEX_NAME = 'PRIMARY'
-ORDER BY SEQ_IN_INDEX
-";
-
 /// The storage engine of a table whose engine cannot roll back: no row when
 /// it can, or when it has none (a view). Read from the server's own list of
 /// engines rather than a list of names: MyISAM, Aria and MEMORY answer `NO`.
@@ -351,6 +342,26 @@ JOIN information_schema.ENGINES AS e ON e.ENGINE = t.ENGINE
 WHERE t.TABLE_SCHEMA = {schema}
   AND t.TABLE_NAME = {relation}
   AND e.TRANSACTIONS <> 'YES'
+";
+
+/// The primary key's columns, one row each in key order, and on every row the
+/// storage engine of the table when it cannot roll back (NULL when it can, or
+/// for a view). One round trip answers both: a table with no key still comes
+/// back as one row, with a NULL `column_name`. The engine is read from the
+/// server's own list of engines rather than a list of names: MyISAM, Aria and
+/// MEMORY answer `NO`.
+const PRIMARY_KEY_SQL: &str = "
+SELECT s.COLUMN_NAME AS column_name,
+       IF(e.TRANSACTIONS <> 'YES', t.ENGINE, NULL) AS untransactional_engine
+FROM information_schema.TABLES AS t
+LEFT JOIN information_schema.ENGINES AS e ON e.ENGINE = t.ENGINE
+LEFT JOIN information_schema.STATISTICS AS s
+  ON s.TABLE_SCHEMA = t.TABLE_SCHEMA
+  AND s.TABLE_NAME = t.TABLE_NAME
+  AND s.INDEX_NAME = 'PRIMARY'
+WHERE t.TABLE_SCHEMA = {schema}
+  AND t.TABLE_NAME = {relation}
+ORDER BY s.SEQ_IN_INDEX
 ";
 
 /// What a table with no primary key is edited by: each of its columns, the type
@@ -1152,23 +1163,18 @@ impl Connection {
         // An apply is verified inside a transaction, and its `ROLLBACK` is what
         // undoes a write that drifted, counted wrong or failed part way. On an
         // engine with none, that write stays and a kept draft sends it again.
-        let Ok(untransactional) =
-            self.internal_query(&structure_sql(UNTRANSACTIONAL_SQL, &schema, &table))
-        else {
-            return (None, None);
-        };
-        if let Some(reason) = untransactional_reason(&untransactional) {
-            return (None, Some(reason));
-        }
+        //
         // ponytail: one catalog round trip per result set, no cache. A map from
         // table to key held on the connection is the upgrade path if the trip
         // shows up in query timings.
-        let Ok(key) = self.internal_query(&structure_sql(PRIMARY_KEY_SQL, &schema, &table)) else {
+        let Ok(found) = self.internal_query(&structure_sql(PRIMARY_KEY_SQL, &schema, &table))
+        else {
             return (None, None);
         };
-        let Ok(key) = column_of(&key, "column_name") else {
-            return (None, None);
-        };
+        if let Some(reason) = untransactional_reason(&found) {
+            return (None, Some(reason));
+        }
+        let key = primary_key_columns(&found);
         if !key.is_empty() {
             return (resolve_edit_target(probed, &schema, &table, &key), None);
         }
@@ -1715,11 +1721,25 @@ fn structure_sql(template: &str, schema: &str, relation: &str) -> String {
     super::structure_sql(Engine::MySql, template, schema, relation)
 }
 
-/// Why a table [`UNTRANSACTIONAL_SQL`] found is not edited, `None` when it
-/// found none.
+/// The columns of the primary key [`PRIMARY_KEY_SQL`] found, in key order:
+/// none for a table without one, whose one row has a NULL column.
+fn primary_key_columns(result: &QueryResult) -> Vec<String> {
+    result
+        .rows
+        .iter()
+        .filter_map(|row| optional_cell(result, row, "column_name"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Why a table [`PRIMARY_KEY_SQL`] found is not edited, `None` when it
+/// found a transactional one.
 fn untransactional_reason(result: &QueryResult) -> Option<String> {
-    let engine = column_of(result, "engine").ok()?.into_iter().next()?;
-    Some(untransactional(&engine))
+    let engine = result
+        .rows
+        .iter()
+        .find_map(|row| optional_cell(result, row, "untransactional_engine"))?;
+    Some(untransactional(engine))
 }
 
 /// Why a table on `engine`, a storage engine with no transactions, is not
@@ -2675,20 +2695,41 @@ mod tests {
 
     #[test]
     fn a_table_found_without_transactions_is_named_in_the_refusal() {
+        let column = |name: &str| Column {
+            name: name.into(),
+            data_type: None,
+        };
         let found = QueryResult {
-            columns: vec![Column {
-                name: "engine".into(),
-                data_type: None,
-            }],
-            rows: crate::db::rows(vec![vec![Some("MyISAM".into())]]),
+            columns: vec![column("column_name"), column("untransactional_engine")],
+            rows: crate::db::rows(vec![
+                vec![Some("id".into()), Some("MyISAM".into())],
+                vec![Some("tenant".into()), Some("MyISAM".into())],
+            ]),
             ..QueryResult::default()
         };
         assert!(untransactional_reason(&found).is_some_and(|reason| reason.contains("MyISAM")));
-        let none = QueryResult {
-            rows: Vec::new(),
-            ..found
+        assert_eq!(primary_key_columns(&found), ["id", "tenant"]);
+        let transactional = QueryResult {
+            rows: crate::db::rows(vec![vec![Some("id".into()), None]]),
+            ..found.clone()
         };
-        assert_eq!(untransactional_reason(&none), None);
+        assert_eq!(untransactional_reason(&transactional), None);
+        assert_eq!(primary_key_columns(&transactional), ["id"]);
+    }
+
+    #[test]
+    fn a_table_with_no_primary_key_comes_back_as_one_row_with_no_column() {
+        let column = |name: &str| Column {
+            name: name.into(),
+            data_type: None,
+        };
+        let keyless = QueryResult {
+            columns: vec![column("column_name"), column("untransactional_engine")],
+            rows: crate::db::rows(vec![vec![None, None]]),
+            ..QueryResult::default()
+        };
+        assert_eq!(untransactional_reason(&keyless), None);
+        assert!(primary_key_columns(&keyless).is_empty());
     }
 
     #[test]
