@@ -1060,9 +1060,8 @@ pub(super) fn verified_draft_round_trip(subject: &Subject) {
     );
 
     // (c) A hand-written statement the gate admits whose `WHERE` matches two
-    // rows. Its re-read is the key-built one for the first of them, since a
-    // re-read of the label would itself find two rows and refuse before any
-    // write; the compare passes and the count is what refuses.
+    // rows. Its re-read is the one cut from it, which finds both and refuses
+    // before any write.
     put(913, "twin");
     put(914, "twin");
     let held = fetch(913);
@@ -1078,15 +1077,13 @@ pub(super) fn verified_draft_round_trip(subject: &Subject) {
     let keyed = draft(&[], &[update("913", "merged")]);
     let reread = steps(&keyed, vec![(StepKind::Update, held)]).remove(0);
     let twin = VerifiedStep {
+        reread: sql::row_reread(engine, &merge),
         sql: merge,
         ..reread
     };
     assert_eq!(
         apply(&[twin]),
-        ApplyOutcome::Miscounted {
-            step: 0,
-            count: Some(2)
-        },
+        ApplyOutcome::Drifted(vec![(0, Drift::Ambiguous(2))]),
         "{at}"
     );
     for id in ["913", "914"] {
