@@ -156,8 +156,9 @@ impl Throwaway {
                 // The gate's parser has no `OVERRIDING`, so a query tab asks
                 // once before running such a file. Nor `OWNED BY`, which a
                 // schema file ties each sequence to its column with, nor an
-                // identity column's `SET INCREMENT BY …`: the file is for
-                // whoever runs it back, and DBDelve never runs it.
+                // identity column's `SET INCREMENT BY …`, nor SQL Server's
+                // `WITH NOCHECK` for a key that does not check its rows: the
+                // file is for whoever runs it back, and DBDelve never runs it.
                 let verdict = sql::classify(self.engine, statement);
                 assert!(
                     statement.contains(" OVERRIDING SYSTEM VALUE ")
@@ -165,6 +166,7 @@ impl Throwaway {
                             && statement.contains(" OWNED BY "))
                         || (statement.starts_with("ALTER TABLE ")
                             && statement.contains(" SET INCREMENT BY "))
+                        || statement.contains(" WITH NOCHECK ADD CONSTRAINT ")
                         || !verdict.destructive.contains(&Destructive::Unreadable),
                     "{:?} cannot read `{statement}`",
                     self.engine
@@ -1072,6 +1074,88 @@ fn live_a_schema_with_sequences_runs_back_on_postgres() {
         let next = table.run("INSERT INTO {table} (body) VALUES ('next') RETURNING id");
         assert_eq!(next.rows[0].get(0), Some(expected), "{sql}");
     }
+}
+
+/// A key that does not check its rows holds an orphan the file has to carry,
+/// and comes back as unchecked as it was: disabled, or enabled and untrusted.
+#[test]
+#[ignore = "needs the dev SQL Server"]
+fn live_an_unchecked_foreign_key_runs_back_as_it_was_on_sql_server() {
+    let parent = Throwaway::new(
+        open("dbdelve_MSSQL_URL"),
+        Engine::SqlServer,
+        "dbo",
+        "nocheck_parent",
+    );
+    let disabled = Throwaway::new(
+        open("dbdelve_MSSQL_URL"),
+        Engine::SqlServer,
+        "dbo",
+        "nocheck_off",
+    );
+    let untrusted = Throwaway::new(
+        open("dbdelve_MSSQL_URL"),
+        Engine::SqlServer,
+        "dbo",
+        "nocheck_on",
+    );
+    for table in [&untrusted, &disabled, &parent] {
+        table.run("DROP TABLE IF EXISTS {table}");
+    }
+    parent.run("CREATE TABLE {table} (id int PRIMARY KEY)");
+    parent.run("INSERT INTO {table} VALUES (1)");
+    for child in [&disabled, &untrusted] {
+        child.run(&format!(
+            "CREATE TABLE {{table}} (id int PRIMARY KEY, parent_id int \
+             CONSTRAINT {{name}}_fk REFERENCES {} (id))",
+            parent.named("{table}")
+        ));
+        child.run("ALTER TABLE {table} NOCHECK CONSTRAINT {name}_fk");
+        child.run("INSERT INTO {table} VALUES (1, 1), (2, 99)");
+    }
+    untrusted.run("ALTER TABLE {table} WITH NOCHECK CHECK CONSTRAINT {name}_fk");
+    let state = |table: &Throwaway| {
+        let result = table.run(
+            "SELECT CONCAT(is_disabled, is_not_trusted) FROM sys.foreign_keys \
+             WHERE name = '{name}_fk'",
+        );
+        result.rows[0].get(0).map(str::to_string)
+    };
+    assert_eq!(state(&disabled).as_deref(), Some("11"));
+    assert_eq!(state(&untrusted).as_deref(), Some("01"));
+    let tables = [&untrusted, &disabled, &parent];
+    let befores: Vec<QueryResult> = tables.iter().map(|table| table.rows()).collect();
+
+    let path = parent.directory.join("schema.sql");
+    let request = SchemaRequest {
+        tables: tables.iter().map(|table| table.name.clone()).collect(),
+        structure: true,
+        rows: true,
+        partitioned: Vec::new(),
+    };
+    export_schema(
+        &parent.connection,
+        "dbo",
+        &request,
+        false,
+        Engine::SqlServer,
+        &path,
+        &ExportProgress::default(),
+    )
+    .expect("the export finishes");
+    let sql = std::fs::read_to_string(&path).unwrap();
+
+    for table in tables {
+        table.run("DROP TABLE {table}");
+    }
+    let problems = parent.replay(&sql);
+    assert!(problems.is_empty(), "{sql}\n{}", problems.join("\n"));
+    for (table, before) in tables.iter().zip(&befores) {
+        let problems = differences(before, &table.rows(), None);
+        assert!(problems.is_empty(), "{}", problems.join("\n"));
+    }
+    assert_eq!(state(&disabled).as_deref(), Some("11"), "{sql}");
+    assert_eq!(state(&untrusted).as_deref(), Some("01"), "{sql}");
 }
 
 #[test]

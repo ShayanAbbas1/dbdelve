@@ -1650,16 +1650,69 @@ impl Connection {
     /// table put in after `INDEX`.
     ///
     /// ponytail: a disabled or untrusted foreign key is written as an ordinary
-    /// one, and an XML or spatial index's options are not written; a `NOCHECK`
-    /// statement per such key and reading `sys.xml_indexes` /
-    /// `sys.spatial_index_tessellations` are the upgrade paths.
+    /// one, as a schema export's are not ([`Self::export_ddl`]), and an XML or
+    /// spatial index's options are not written; a `NOCHECK` statement per such
+    /// key and reading `sys.xml_indexes` / `sys.spatial_index_tessellations`
+    /// are the upgrade paths.
     pub fn ddl(&self, schema: &str, relation: &str, kind: RelationKind) -> Result<String, DbError> {
         Ok(self.render_ddl(schema, relation, kind, false)?.create)
     }
 
-    /// A table's DDL with its foreign keys left to statements of their own.
+    /// A table's DDL with its foreign keys left to statements of their own,
+    /// each as enforced as it is.
     pub fn export_ddl(&self, schema: &str, relation: &str) -> Result<ExportDdl, DbError> {
         self.render_ddl(schema, relation, RelationKind::Table, true)
+    }
+
+    /// `added`, the `ALTER TABLE … ADD CONSTRAINT` of each of the table's
+    /// foreign keys, as enforced as each is: one not trusted is added without
+    /// checking the rows already in, which it may not hold, and one disabled
+    /// is then disabled again.
+    fn as_enforced(
+        &self,
+        schema: &str,
+        relation: &str,
+        added: Vec<String>,
+    ) -> Result<Vec<String>, DbError> {
+        let unchecked = self.internal_query(&structure_sql(
+            "SELECT f.name AS name, CAST(f.is_disabled AS int) AS disabled
+             FROM sys.foreign_keys AS f
+             WHERE f.parent_object_id = {object} AND f.is_not_trusted = 1",
+            schema,
+            relation,
+        ))?;
+        let table = Engine::SqlServer.qualified(schema, relation);
+        let plain = format!("ALTER TABLE {table} ADD CONSTRAINT ");
+        let mut statements = Vec::with_capacity(added.len());
+        for statement in added {
+            let state = unchecked.rows.iter().find_map(|row| {
+                let name = Engine::SqlServer
+                    .quote_identifier(required_cell(&unchecked, row, "name").ok()?);
+                statement
+                    .strip_prefix(&plain)?
+                    .starts_with(&format!("{name} "))
+                    .then(|| {
+                        (
+                            name,
+                            required_cell(&unchecked, row, "disabled").ok() == Some("1"),
+                        )
+                    })
+            });
+            match state {
+                Some((name, disabled)) => {
+                    statements.push(statement.replacen(
+                        &plain,
+                        &format!("ALTER TABLE {table} WITH NOCHECK ADD CONSTRAINT "),
+                        1,
+                    ));
+                    if disabled {
+                        statements.push(format!("ALTER TABLE {table} NOCHECK CONSTRAINT {name};"));
+                    }
+                }
+                None => statements.push(statement),
+            }
+        }
+        Ok(statements)
     }
 
     fn render_ddl(
@@ -1693,7 +1746,11 @@ impl Connection {
             return Err(plain_error(format!("{schema} has no relation {relation}.")));
         }
         let (structure, foreign_keys) = match keys_apart {
-            true => split_foreign_keys(Engine::SqlServer, schema, relation, &structure),
+            true => {
+                let (rest, added) =
+                    split_foreign_keys(Engine::SqlServer, schema, relation, &structure);
+                (rest, self.as_enforced(schema, relation, added)?)
+            }
             false => (structure, Vec::new()),
         };
         let create = create_table(
