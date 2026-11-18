@@ -1736,6 +1736,7 @@ mod tests {
                 })
                 .collect(),
             read_back: None,
+            by_key: true,
         }
     }
 
@@ -1746,6 +1747,7 @@ mod tests {
             reread: None,
             before: Vec::new(),
             read_back: None,
+            by_key: true,
         }
     }
 

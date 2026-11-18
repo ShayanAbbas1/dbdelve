@@ -3617,6 +3617,10 @@ pub(crate) struct VerifiedStep {
     /// A read of the row, run after this statement's write inside the same
     /// transaction, so a Row-mode send shows what the server now holds.
     pub read_back: Option<String>,
+    /// Whether the row is named by its key, so a second read that finds
+    /// nothing proves it gone. A row named by every value is not: an earlier
+    /// write that changed one of its values also empties that read.
+    pub by_key: bool,
 }
 
 /// Where a verified apply stopped.
@@ -3667,11 +3671,12 @@ pub(crate) enum ApplyOutcome {
     Drifted(Vec<(usize, Drift)>),
     /// A statement counted another number of rows than the one it names; the
     /// whole sequence was rolled back. An `UPDATE` and an `INSERT` must count
-    /// one. A `DELETE` must count one, or none when a second read of its row
-    /// inside the transaction finds it gone, which an earlier `DELETE` of the
-    /// draft taking it along would leave; none with the row still there is a
-    /// statement something skipped. `count` is `None` when the driver gave no
-    /// count at all.
+    /// one. A `DELETE` must count one, or none when its row is named by its key
+    /// ([`VerifiedStep::by_key`]) and a second read of it inside the
+    /// transaction finds it gone, which an earlier `DELETE` of the draft
+    /// taking it along would leave; none with the row still there, or with the
+    /// row named by every value, is a statement something skipped. `count` is
+    /// `None` when the driver gave no count at all.
     ///
     /// The count is the server's own for that statement, and SQLite's
     /// `changes()` excludes what a trigger or a foreign key wrote, so a
@@ -3883,8 +3888,10 @@ pub(super) fn run_verified(
             (_, Some(1)) => true,
             // A `DELETE` an earlier one of the draft took the row of counts
             // none, and so does one something skipped. The second read of its
-            // row tells them apart: "cascaded" is observed, not inferred.
-            (StepKind::Delete, Some(0)) => {
+            // row tells them apart: "cascaded" is observed, not inferred. Only
+            // for a row named by its key: one named by every value reads as
+            // gone once an earlier write changed any of them.
+            (StepKind::Delete, Some(0)) if step.by_key => {
                 let Some(read) = &step.reread else {
                     roll_back(send);
                     return ApplyOutcome::Miscounted { step: index, count };
@@ -4583,6 +4590,7 @@ mod tests {
             reread: Some(r#"SELECT * FROM "main"."t" WHERE "id" = '1'"#.into()),
             before: vec![fetched("id", Some("1"))],
             read_back: None,
+            by_key: true,
         };
         let mut sent = Vec::new();
         let mut send = |sql: &str, _: Sending| {
@@ -4618,6 +4626,7 @@ mod tests {
             reread: Some(r#"SELECT * FROM "public"."t" WHERE "id" = '1'"#.into()),
             before: vec![fetched("id", Some("1"))],
             read_back: None,
+            by_key: true,
         }
     }
 
@@ -4654,6 +4663,63 @@ mod tests {
         let sent = sent.into_inner();
         assert_eq!(sent.last().map(String::as_str), Some("ROLLBACK"));
         assert!(!sent.iter().any(|sql| sql == "COMMIT"), "{sent:?}");
+    }
+
+    /// A `DELETE` that counts none is taken as its row already gone only when
+    /// the row is named by its key: a row named by every value reads as gone
+    /// once an earlier write changed one of them, with the row still there.
+    #[test]
+    fn a_delete_counting_none_is_gone_only_for_a_row_named_by_its_key() {
+        let run = |by_key: bool| {
+            let step = VerifiedStep {
+                sql: r#"DELETE FROM "public"."t" WHERE "code" = 'b' AND "parent" = 'a'"#.into(),
+                kind: StepKind::Delete,
+                reread: Some(
+                    r#"SELECT * FROM "public"."t" WHERE "code" = 'b' AND "parent" = 'a'"#.into(),
+                ),
+                before: vec![fetched("code", Some("b"))],
+                read_back: None,
+                by_key,
+            };
+            let reads = std::cell::Cell::new(0);
+            let mut send = |sql: &str, _: Sending| {
+                Ok(match sql.split_whitespace().next() {
+                    // The first read finds the row; by the second an earlier
+                    // write has changed its `parent`, so it matches none.
+                    Some("SELECT") => {
+                        reads.set(reads.get() + 1);
+                        match reads.get() {
+                            1 => reread(&["code"], &[&[Some("b")]]),
+                            _ => reread(&["code"], &[]),
+                        }
+                    }
+                    Some("DELETE") => QueryResult {
+                        rows_affected: Some(0),
+                        ..QueryResult::default()
+                    },
+                    _ => QueryResult::default(),
+                })
+            };
+            run_verified(
+                Engine::Postgres,
+                &[step],
+                &mut send,
+                &|| true,
+                &|_| false,
+                &|_| false,
+            )
+        };
+        assert_eq!(
+            run(false),
+            ApplyOutcome::Miscounted {
+                step: 0,
+                count: Some(0)
+            }
+        );
+        assert!(matches!(
+            run(true),
+            ApplyOutcome::Applied { affected: 0, .. }
+        ));
     }
 
     #[test]

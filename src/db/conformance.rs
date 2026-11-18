@@ -897,6 +897,7 @@ pub(super) fn verified_steps(
             kind,
             before,
             read_back: None,
+            by_key: true,
         })
         .collect()
 }

@@ -6121,6 +6121,7 @@ mod tests {
             reread: Some("SELECT * FROM \"dbo\".\"t\" WHERE \"id\" = '1'".into()),
             before: Vec::new(),
             read_back: None,
+            by_key: true,
         }];
         // Fails the one statement `at`, the way the arm's send closure would
         // answer it, and counts every other as the one row it wrote.

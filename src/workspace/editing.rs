@@ -2989,6 +2989,7 @@ pub(super) fn verification(
             reread,
             before,
             read_back: None,
+            by_key: !names_rows_by_every_column(grid),
         });
         rows.push(label);
     }
@@ -3045,6 +3046,9 @@ fn lone_verification(
             reread,
             before,
             read_back,
+            // One step has no earlier one to take its row along, so a
+            // `DELETE` of it that counts none is never taken as gone.
+            by_key: false,
         }],
         rows: vec![label],
         identities: Vec::new(),

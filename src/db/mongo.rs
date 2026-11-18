@@ -3728,6 +3728,7 @@ mod tests {
                 kind,
                 before: Vec::new(),
                 read_back: None,
+                by_key: true,
             };
             let prepared = prepared(&step);
             assert!(prepared.is_some(), "{kind:?}: {}", step.sql);
@@ -4530,6 +4531,7 @@ mod tests {
                         reread,
                         before,
                         read_back: None,
+                        by_key: true,
                     }
                 })
                 .collect()
@@ -4576,6 +4578,7 @@ mod tests {
             reread: None,
             before: Vec::new(),
             read_back: None,
+            by_key: true,
         });
         match connection.apply_verified(&refused, &cancel) {
             ApplyOutcome::Failed {
@@ -4710,6 +4713,7 @@ mod tests {
             reread: Some(read.clone()),
             before,
             read_back: Some(read.clone()),
+            by_key: true,
         };
         let name_of = || {
             let read = ran(&connection, &format!("{collection}.find({{_id: 1}})"));

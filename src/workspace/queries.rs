@@ -4683,6 +4683,7 @@ mod tests {
             reread: None,
             before: Vec::new(),
             read_back: None,
+            by_key: true,
         };
         Verification {
             steps: vec![
@@ -4862,6 +4863,7 @@ mod tests {
             reread: None,
             before: Vec::new(),
             read_back: None,
+            by_key: true,
         };
         // A delete, an update and three added documents, as a draft orders them.
         let verify = Verification {
