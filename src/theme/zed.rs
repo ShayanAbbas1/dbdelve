@@ -348,8 +348,10 @@ fn convert(entry: Entry) -> Theme {
 /// `warning`, the edited amber, and is sometimes the selection's own hue); and
 /// a wash within [`ROW_WASHES_APART`] of an earlier one, of the `base` wash a
 /// later unnamed slot keeps, or that no move rescues, is `base`'s instead,
-/// since two states drawn alike are worse than a borrowed colour. `bg` is what
-/// the washes are flattened over.
+/// since two states drawn alike are worse than a borrowed colour. That default
+/// is held to the same: an updated one on the selection is moved off it, and
+/// a wash named before it that it would be drawn like goes back to its own
+/// default. `bg` is what the washes are flattened over.
 pub(super) fn row_washes(
     base: &Theme,
     bg: Srgb,
@@ -373,43 +375,65 @@ pub(super) fn row_washes(
         .into_iter()
         .all(|step| step >= ROW_WASH_FROM_SELECTION)
     };
+    // The updated wash's colour, or the nearest lightness off it clear of
+    // the selection.
+    let rescued = |color: Srgb| {
+        let own = Oklch::from_srgb(color);
+        // Away from the selection first: toward the side with room.
+        let away = if Oklch::from_srgb(selection.flatten(bg)).l > own.l {
+            -0.02
+        } else {
+            0.02
+        };
+        // The colour as named first: a round trip through Oklch would
+        // nudge one that needs no move.
+        std::iter::once(color)
+            .chain(
+                (1..=20)
+                    .flat_map(|n| [away * n as f32, -away * n as f32])
+                    .map(|step| Oklch::new((own.l + step).clamp(0.0, 1.0), own.c, own.h).to_srgb()),
+            )
+            .find(|candidate| clear_of_selection(*candidate))
+    };
+    let apart = |a: Rgba, b: Rgba| a.flatten(bg).distance(b.flatten(bg)) >= ROW_WASHES_APART;
     let mut washes = own;
     let unnamed = named.map(|color| color.is_none());
     for (i, named) in named.into_iter().enumerate() {
         let Some(color) = named else { continue };
-        let color = if i == 1 {
-            let own = Oklch::from_srgb(color);
-            // Away from the selection first: toward the side with room.
-            let away = if Oklch::from_srgb(selection.flatten(bg)).l > own.l {
-                -0.02
-            } else {
-                0.02
-            };
-            // The colour as named first: a round trip through Oklch would
-            // nudge one that needs no move.
-            std::iter::once(color)
-                .chain(
-                    (1..=20)
-                        .flat_map(|n| [away * n as f32, -away * n as f32])
-                        .map(|step| {
-                            Oklch::new((own.l + step).clamp(0.0, 1.0), own.c, own.h).to_srgb()
-                        }),
-                )
-                .find(|candidate| clear_of_selection(*candidate))
-        } else {
-            Some(color)
+        let color = if i == 1 { rescued(color) } else { Some(color) };
+        let stands_apart = |wash: &Rgba, washes: &[Rgba]| {
+            let later_defaults = (i + 1..own.len()).filter(|&j| unnamed[j]).map(|j| own[j]);
+            washes[..i]
+                .iter()
+                .copied()
+                .chain(later_defaults)
+                .all(|other| apart(*wash, other))
         };
-        washes[i] = color
+        let picked = color
             .map(|color| color.alpha(alphas[i]))
-            .filter(|wash| {
-                let later_defaults = (i + 1..own.len()).filter(|&j| unnamed[j]).map(|j| own[j]);
-                washes[..i]
-                    .iter()
-                    .copied()
-                    .chain(later_defaults)
-                    .all(|other| wash.flatten(bg).distance(other.flatten(bg)) >= ROW_WASHES_APART)
-            })
-            .unwrap_or(own[i]);
+            .filter(|wash| stands_apart(wash, &washes));
+        washes[i] = match picked {
+            Some(wash) => wash,
+            None => {
+                // The default stands in, moved off the selection where it
+                // too sits on it, and a wash named before it that it would
+                // be drawn like goes back to its own default.
+                let fallback = (i == 1)
+                    .then(|| {
+                        rescued(Srgb::new(own[i].r, own[i].g, own[i].b))
+                            .map(|color| color.alpha(alphas[i]))
+                            .filter(|wash| stands_apart(wash, &washes))
+                    })
+                    .flatten()
+                    .unwrap_or(own[i]);
+                for j in 0..i {
+                    if !apart(washes[j], fallback) {
+                        washes[j] = own[j];
+                    }
+                }
+                fallback
+            }
+        };
     }
     washes
 }
@@ -742,6 +766,45 @@ mod tests {
             "added and updated rows drawn alike"
         );
         assert_eq!(added, dark.added);
+    }
+
+    /// A named wash refused for standing too close to another falls back to
+    /// its default, which is held to the same rules: a wash named before it
+    /// that it would be drawn like goes back to its own default, and an
+    /// updated default that sits on the selection is moved off it.
+    #[test]
+    fn a_refused_wash_falls_back_to_a_default_that_stands_apart() {
+        let dark = Theme::dark();
+        let rgb = |wash: Rgba| Srgb::new(wash.r, wash.g, wash.b);
+        let added_like_updated = rgb(dark.updated);
+        let washes = row_washes(
+            &dark,
+            dark.bg,
+            dark.selection,
+            dark.edited,
+            [Some(added_like_updated), Some(added_like_updated), None],
+        );
+        for (a, b) in [(0, 1), (0, 2), (1, 2)] {
+            assert!(
+                washes[a]
+                    .flatten(dark.bg)
+                    .distance(washes[b].flatten(dark.bg))
+                    >= ROW_WASHES_APART,
+                "washes {a} and {b} drawn alike"
+            );
+        }
+
+        // The selection is the default updated wash's own colour.
+        let selection = rgb(dark.updated).alpha(PALETTE_SELECTION_ALPHA);
+        let [_, updated, _] = row_washes(
+            &dark,
+            dark.bg,
+            selection,
+            dark.edited,
+            [None, Some(rgb(dark.added)), None],
+        );
+        let updated = updated.flatten(dark.bg);
+        assert!(updated.distance(selection.flatten(dark.bg)) >= ROW_WASH_FROM_SELECTION);
     }
 
     #[test]
