@@ -5143,12 +5143,15 @@ fn a_service_launch_does_not_reuse_a_profiles_explicit_port(cx: &mut TestAppCont
     });
 }
 
+#[cfg(debug_assertions)]
 #[gpui::test]
 fn result_grid_scrollbars_stay_outside_the_viewport(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite_holding(
             cx,
-            "create table nests (id integer primary key); insert into nests values (1);",
+            "create table nests (id integer primary key);
+             with recursive rows(n) as (values (1) union all select n + 1 from rows where n < 100)
+             insert into nests select n from rows;",
         );
         cx.executor().allow_parking();
         let nests = explorer_row(&workspace, "relation-main\0nests", cx).center();
@@ -5168,6 +5171,57 @@ fn result_grid_scrollbars_stay_outside_the_viewport(cx: &mut TestAppContext) {
         assert_eq!(vertical.left(), viewport.right());
         assert_eq!(horizontal.right(), vertical.left());
         assert_eq!(vertical.bottom(), horizontal.top());
+
+        let row_height = gpui::px(theme::layout::grid(
+            gpui_component::Size::Medium.table_row_height().into(),
+        ));
+        // The gutter takes the body from eight whole rows down to seven.
+        let window_size = cx.update(|window, _| window.viewport_size());
+        let viewport_height = row_height * 9. - horizontal.size.height / 2.;
+        cx.simulate_resize(gpui::size(
+            window_size.width,
+            window_size.height + viewport_height - viewport.size.height,
+        ));
+        settle(cx);
+
+        let viewport = cx.debug_bounds("table-viewport").unwrap();
+        let grid = workspace.read_with(cx, |workspace, _| {
+            let tab = workspace
+                .profile()
+                .unwrap()
+                .session
+                .active_object()
+                .unwrap();
+            let ObjectBody::Relation { results, .. } = &tab.body else {
+                panic!("expected the relation preview");
+            };
+            results.clone()
+        });
+        cx.update(|window, cx| {
+            grid.update(cx, |grid, cx| {
+                grid.focus_handle(cx).focus(window, cx);
+                grid.set_selected_cell(0, 0, cx);
+            });
+        });
+        settle(cx);
+        cx.simulate_keystrokes("pagedown");
+        settle(cx);
+        assert_eq!(
+            grid.read_with(cx, |grid, _| grid.selected_cell()),
+            Some((7, 0))
+        );
+
+        // Keep the table mounted to exercise the shared empty-table layout.
+        grid.update(cx, |grid, cx| {
+            drop(grid.delegate_mut().take_rows());
+            cx.notify();
+        });
+        settle(cx);
+        assert_eq!(
+            cx.debug_bounds("table-viewport").unwrap().right(),
+            viewport.right()
+        );
+        assert!(cx.debug_bounds("table-scrollbar-vertical").is_none());
 
         quit(workspace, cx);
     });

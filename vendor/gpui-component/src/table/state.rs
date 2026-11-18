@@ -2624,13 +2624,13 @@ where
         // dbdelve patch: gutters for enabled axes also keep the viewport steady as bars fade.
         // ponytail: gutters persist when content fits, revisit if that space is needed.
         let show_horizontal = !loading && self.options.scrollbar_visible.bottom;
-        let show_vertical = !loading && self.options.scrollbar_visible.right && rows_count > 0;
+        let reserve_right_gutter = !loading && self.options.scrollbar_visible.right;
         let bottom_gutter = if show_horizontal {
             Scrollbar::width()
         } else {
             px(0.)
         };
-        let right_gutter = if show_vertical {
+        let right_gutter = if reserve_right_gutter {
             Scrollbar::width()
         } else {
             px(0.)
@@ -2783,7 +2783,7 @@ where
                 this.when(show_horizontal, |this| {
                     this.child(self.render_horizontal_scrollbar(right_gutter))
                 })
-                .when(show_vertical, |this| {
+                .when(reserve_right_gutter && rows_count > 0, |this| {
                     this.child(self.render_vertical_scrollbar(bottom_gutter))
                 })
             })
