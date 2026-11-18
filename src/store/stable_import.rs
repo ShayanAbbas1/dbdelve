@@ -1403,7 +1403,7 @@ mod tests {
             ("dbdelve", "a", "pw-a"),
             ("dbdelve-nightly", "a", "nightly's own"),
         ]);
-        let vaults = Vaults::new();
+        let vaults = Vaults::scratch();
         let alone = || match settle_alone(&lock, &target, now()).unwrap().1 {
             Launch::Settled { secrets, .. } => secrets,
             Launch::Shared { .. } => panic!("no other instance runs"),
@@ -1537,7 +1537,7 @@ mod tests {
 
     /// Stable's vault holding `a`'s password and `c`'s passphrase.
     fn stables_vault(keychain: &FakeKeychain) {
-        let stable = Vaults::new();
+        let stable = Vaults::scratch();
         stable
             .write(keychain, "dbdelve", Secret::Password, "a", "pw-a")
             .unwrap();
@@ -1560,7 +1560,7 @@ mod tests {
             keychain.put(service, account, secret);
         }
         let stable_before = keychain.get("dbdelve/secrets", "vault");
-        let vaults = Vaults::new();
+        let vaults = Vaults::scratch();
 
         let failed = copy_into_vault(
             &[
@@ -1610,7 +1610,7 @@ mod tests {
         let keychain = FakeKeychain::with(&[("dbdelve", "b", "pw-b")]);
         stables_vault(&keychain);
         keychain.refuse_reads("dbdelve/secrets", "vault", true);
-        let vaults = Vaults::new();
+        let vaults = Vaults::scratch();
 
         let failed = copy_into_vault(
             &[connection("a", "Prod"), connection("b", "")],
@@ -1632,7 +1632,7 @@ mod tests {
         ]);
         stables_vault(&keychain);
         keychain.refuse_reads("dbdelve/ssh-passphrase", "a", true);
-        let vaults = Vaults::new();
+        let vaults = Vaults::scratch();
 
         let failed = copy_into_vault(
             &[connection("a", "Prod"), connection("b", "")],
@@ -1658,7 +1658,7 @@ mod tests {
             &Services::of("dbdelve"),
             &Services::of("dbdelve-nightly"),
             &keychain,
-            &Vaults::new(),
+            &Vaults::scratch(),
         );
         assert!(failed.is_empty());
     }
@@ -1667,7 +1667,7 @@ mod tests {
     fn on_macos_a_vault_here_that_wont_take_them_names_whatever_was_found() {
         let keychain = FakeKeychain::with(&[("dbdelve", "b", "pw-b")]);
         keychain.refuse_writes("dbdelve-nightly/secrets", "vault", true);
-        let vaults = Vaults::new();
+        let vaults = Vaults::scratch();
 
         let failed = copy_into_vault(
             &[connection("a", "A"), connection("b", "B")],

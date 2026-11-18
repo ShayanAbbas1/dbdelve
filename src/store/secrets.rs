@@ -11,11 +11,13 @@
 //! the first time it is read, and its item deleted once the vault holds it.
 
 use std::collections::BTreeMap;
+use std::fs::{self, File};
+use std::io;
 use std::sync::{Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
 
-use super::passphrase_service;
+use super::{data_root, passphrase_service};
 
 /// Whether this platform keeps a build's secrets in one item.
 pub(crate) const ONE_ITEM: bool = cfg!(target_os = "macos");
@@ -202,19 +204,93 @@ impl Vault {
 /// Each variant's vault, read once for the life of the process, as that is
 /// the read that can prompt. One that failed to read is not kept, so a later
 /// read tries again, as a denied prompt or a locked keychain may since have
-/// changed. A write reads the item again first, so another running instance's
-/// writes since are kept.
-pub(crate) struct Vaults(Mutex<BTreeMap<String, Vault>>);
+/// changed. A secret this copy lacks is looked for in the item again, as
+/// another running instance may have saved it since.
+///
+/// A change reads the item again, writes it back whole and deletes the items
+/// it replaced, all under a lock file every instance of the variant takes, so
+/// no instance writes over a change another made meanwhile.
+pub(crate) struct Vaults {
+    loaded: Mutex<BTreeMap<String, Vault>>,
+    locks: Locks,
+}
+
+/// Where the lock files are.
+enum Locks {
+    /// Beside each variant's data directory, as the instance lock is: an
+    /// import moves the directory.
+    DataRoot,
+    #[cfg(test)]
+    In(std::path::PathBuf),
+}
 
 pub(crate) static VAULTS: Vaults = Vaults::new();
 
 impl Vaults {
-    pub(crate) const fn new() -> Self {
-        Self(Mutex::new(BTreeMap::new()))
+    const fn new() -> Self {
+        Self {
+            loaded: Mutex::new(BTreeMap::new()),
+            locks: Locks::DataRoot,
+        }
     }
 
-    fn lock(&self) -> MutexGuard<'_, BTreeMap<String, Vault>> {
-        self.0.lock().unwrap_or_else(|poison| poison.into_inner())
+    /// Locking in a directory under the system's temporary one, shared by
+    /// every test in the process, so a test never reaches the data root.
+    #[cfg(test)]
+    pub(crate) fn scratch() -> Self {
+        Self {
+            loaded: Mutex::new(BTreeMap::new()),
+            locks: Locks::In(
+                std::env::temp_dir().join(format!("dbdelve-vault-locks-{}", std::process::id())),
+            ),
+        }
+    }
+
+    fn cache(&self) -> MutexGuard<'_, BTreeMap<String, Vault>> {
+        self.loaded
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    /// Held until dropped, as the lock goes with the file.
+    fn hold(&self, variant: &str) -> Result<File, String> {
+        let directory = match &self.locks {
+            Locks::DataRoot => data_root()?,
+            #[cfg(test)]
+            Locks::In(directory) => directory.clone(),
+        };
+        let failed = |error: io::Error| format!("the saved passwords could not be locked: {error}");
+        fs::create_dir_all(&directory).map_err(failed)?;
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(directory.join(format!("{variant}.secrets.lock")))
+            .map_err(failed)?;
+        file.lock().map_err(failed)?;
+        Ok(file)
+    }
+
+    /// `change` made to the vault as the keychain holds it now, written back
+    /// whole, and kept as this process's copy. Returns what `change` did, and
+    /// the lock, for whatever else belongs to the change to finish under it.
+    fn update<T>(
+        &self,
+        loaded: &mut BTreeMap<String, Vault>,
+        keychain: &impl Keychain,
+        variant: &str,
+        change: impl FnOnce(&mut Vault) -> T,
+    ) -> Result<(T, File), String> {
+        let held = self.hold(variant)?;
+        let current = Vault::load(keychain, variant)?;
+        let mut vault = current.clone();
+        let changed = change(&mut vault);
+        if vault != current {
+            keychain.write(&vault_service(variant), VAULT_ACCOUNT, &vault.encode())?;
+        }
+        loaded.insert(variant.to_string(), vault);
+        Ok((changed, held))
     }
 
     /// `Ok(None)` only when neither the vault nor an item of the profile's own
@@ -229,27 +305,44 @@ impl Vaults {
     ) -> Result<Option<String>, String> {
         // Held across the keychain calls, so reads waiting on the first one's
         // prompt don't each raise their own.
-        let mut loaded = self.lock();
-        if !loaded.contains_key(variant) {
-            let vault = Vault::load(keychain, variant)?;
-            loaded.insert(variant.to_string(), vault);
-        }
-        if let Some(secret) = loaded[variant].get(profile_id, kind) {
+        let mut loaded = self.cache();
+        if let Some(secret) = loaded
+            .get(variant)
+            .and_then(|vault| vault.get(profile_id, kind))
+        {
             return Ok(Some(secret.to_string()));
         }
+        let vault = Vault::load(keychain, variant)?;
+        let found = vault.get(profile_id, kind).map(str::to_string);
+        loaded.insert(variant.to_string(), vault);
+        if found.is_some() {
+            return Ok(found);
+        }
         let service = kind.item_service(variant);
-        let Some(secret) = keychain.read(&service, profile_id)? else {
+        let Some(legacy) = keychain.read(&service, profile_id)? else {
             return Ok(None);
         };
-        match update(&mut loaded, keychain, variant, |vault| {
-            vault.set(profile_id, kind, &secret)
-        }) {
-            Ok(()) => delete_item(keychain, &service, profile_id),
+        // Another instance may have saved one between the load above and this
+        // lock, which is newer than the item.
+        let moved = self.update(&mut loaded, keychain, variant, |vault| {
+            match vault.get(profile_id, kind) {
+                Some(saved) => saved.to_string(),
+                None => {
+                    vault.set(profile_id, kind, &legacy);
+                    legacy.clone()
+                }
+            }
+        });
+        match moved {
+            Ok((secret, _held)) => {
+                delete_item(keychain, &service, profile_id);
+                Ok(Some(secret))
+            }
             Err(error) => {
                 tracing::warn!("a saved {} stays in its own item: {error}", kind.what());
+                Ok(Some(legacy))
             }
         }
-        Ok(Some(secret))
     }
 
     pub(crate) fn write(
@@ -274,8 +367,8 @@ impl Vaults {
         if secrets.is_empty() {
             return Ok(());
         }
-        let mut loaded = self.lock();
-        update(&mut loaded, keychain, variant, |vault| {
+        let mut loaded = self.cache();
+        let ((), _held) = self.update(&mut loaded, keychain, variant, |vault| {
             for (profile_id, kind, secret) in secrets {
                 vault.set(profile_id, *kind, secret);
             }
@@ -288,34 +381,20 @@ impl Vaults {
 
     /// Every secret a profile keeps, in the vault and in items of its own.
     pub(crate) fn forget(&self, keychain: &impl Keychain, variant: &str, profile_id: &str) {
-        let mut loaded = self.lock();
-        if let Err(error) = update(&mut loaded, keychain, variant, |vault| {
+        let mut loaded = self.cache();
+        let _held = match self.update(&mut loaded, keychain, variant, |vault| {
             vault.remove(profile_id)
         }) {
-            tracing::warn!("a deleted connection's secrets stay in the keychain: {error}");
-        }
+            Ok(((), held)) => Some(held),
+            Err(error) => {
+                tracing::warn!("a deleted connection's secrets stay in the keychain: {error}");
+                None
+            }
+        };
         for kind in Secret::BOTH {
             delete_item(keychain, &kind.item_service(variant), profile_id);
         }
     }
-}
-
-/// `change` made to the vault as the keychain holds it now, written back
-/// whole, and kept as this process's copy.
-fn update(
-    loaded: &mut BTreeMap<String, Vault>,
-    keychain: &impl Keychain,
-    variant: &str,
-    change: impl FnOnce(&mut Vault),
-) -> Result<(), String> {
-    let current = Vault::load(keychain, variant)?;
-    let mut vault = current.clone();
-    change(&mut vault);
-    if vault != current {
-        keychain.write(&vault_service(variant), VAULT_ACCOUNT, &vault.encode())?;
-    }
-    loaded.insert(variant.to_string(), vault);
-    Ok(())
 }
 
 /// Best effort: an item left behind is only read when the vault has nothing
@@ -328,8 +407,9 @@ fn delete_item(keychain: &impl Keychain, service: &str, profile_id: &str) {
 
 #[cfg(test)]
 pub(crate) mod fake {
-    use std::cell::RefCell;
     use std::collections::HashMap;
+    use std::sync::{Mutex, MutexGuard};
+    use std::time::Duration;
 
     use super::Keychain;
 
@@ -339,13 +419,20 @@ pub(crate) mod fake {
         (service.to_string(), account.to_string())
     }
 
+    fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+        mutex.lock().unwrap_or_else(|poison| poison.into_inner())
+    }
+
     /// A keychain in memory, with items that refuse to be read or written,
-    /// as a denied prompt does.
+    /// as a denied prompt does, and that can be slow to read or change while
+    /// another is read, as another process's write would.
     #[derive(Default)]
     pub(crate) struct FakeKeychain {
-        items: RefCell<HashMap<Key, String>>,
-        unreadable: RefCell<Vec<Key>>,
-        unwritable: RefCell<Vec<Key>>,
+        items: Mutex<HashMap<Key, String>>,
+        unreadable: Mutex<Vec<Key>>,
+        unwritable: Mutex<Vec<Key>>,
+        slow: Mutex<Vec<(Key, Duration)>>,
+        meanwhile: Mutex<Vec<(Key, Key, String)>>,
     }
 
     impl FakeKeychain {
@@ -358,17 +445,15 @@ pub(crate) mod fake {
         }
 
         pub(crate) fn get(&self, service: &str, account: &str) -> Option<String> {
-            self.items.borrow().get(&key(service, account)).cloned()
+            locked(&self.items).get(&key(service, account)).cloned()
         }
 
         pub(crate) fn len(&self) -> usize {
-            self.items.borrow().len()
+            locked(&self.items).len()
         }
 
         pub(crate) fn put(&self, service: &str, account: &str, secret: &str) {
-            self.items
-                .borrow_mut()
-                .insert(key(service, account), secret.to_string());
+            locked(&self.items).insert(key(service, account), secret.to_string());
         }
 
         pub(crate) fn refuse_reads(&self, service: &str, account: &str, refused: bool) {
@@ -379,26 +464,55 @@ pub(crate) mod fake {
             Self::refuse(&self.unwritable, service, account, refused);
         }
 
-        fn refuse(list: &RefCell<Vec<Key>>, service: &str, account: &str, refused: bool) {
+        fn refuse(list: &Mutex<Vec<Key>>, service: &str, account: &str, refused: bool) {
             let key = key(service, account);
-            let mut list = list.borrow_mut();
+            let mut list = locked(list);
             list.retain(|listed| listed != &key);
             if refused {
                 list.push(key);
             }
         }
+
+        /// Every read of the item takes `delay`.
+        pub(crate) fn slow_reads(&self, service: &str, account: &str, delay: Duration) {
+            locked(&self.slow).push((key(service, account), delay));
+        }
+
+        /// The next read of `read` first puts `secret` in the other item.
+        pub(crate) fn meanwhile(&self, read: (&str, &str), put: (&str, &str), secret: &str) {
+            locked(&self.meanwhile).push((
+                key(read.0, read.1),
+                key(put.0, put.1),
+                secret.to_string(),
+            ));
+        }
     }
 
     impl Keychain for FakeKeychain {
         fn read(&self, service: &str, account: &str) -> Result<Option<String>, String> {
-            if self.unreadable.borrow().contains(&key(service, account)) {
+            let read = key(service, account);
+            if locked(&self.unreadable).contains(&read) {
                 return Err("User canceled the operation.".into());
             }
-            Ok(self.get(service, account))
+            let delay = locked(&self.slow)
+                .iter()
+                .find(|(slow, _)| slow == &read)
+                .map(|(_, delay)| *delay);
+            let value = self.get(service, account);
+            if let Some(delay) = delay {
+                std::thread::sleep(delay);
+            }
+            let mut meanwhile = locked(&self.meanwhile);
+            if let Some(at) = meanwhile.iter().position(|(on, ..)| on == &read) {
+                let (_, (service, account), secret) = meanwhile.remove(at);
+                drop(meanwhile);
+                self.put(&service, &account, &secret);
+            }
+            Ok(value)
         }
 
         fn write(&self, service: &str, account: &str, secret: &str) -> Result<(), String> {
-            if self.unwritable.borrow().contains(&key(service, account)) {
+            if locked(&self.unwritable).contains(&key(service, account)) {
                 return Err("User canceled the operation.".into());
             }
             self.put(service, account, secret);
@@ -406,7 +520,7 @@ pub(crate) mod fake {
         }
 
         fn delete(&self, service: &str, account: &str) -> Result<(), String> {
-            self.items.borrow_mut().remove(&key(service, account));
+            locked(&self.items).remove(&key(service, account));
             Ok(())
         }
     }
@@ -434,7 +548,7 @@ mod tests {
     #[test]
     fn secrets_written_read_back_from_one_item() {
         let keychain = FakeKeychain::default();
-        let vaults = Vaults::new();
+        let vaults = Vaults::scratch();
         vaults
             .write(&keychain, VARIANT, Secret::Password, "a", "pw-a")
             .unwrap();
@@ -445,7 +559,7 @@ mod tests {
             .write(&keychain, VARIANT, Secret::Password, "b", "")
             .unwrap();
 
-        let fresh = Vaults::new();
+        let fresh = Vaults::scratch();
         let read = |kind, id| fresh.read(&keychain, VARIANT, kind, id).unwrap();
         assert_eq!(read(Secret::Password, "a").as_deref(), Some("pw-a"));
         assert_eq!(read(Secret::SshPassphrase, "a").as_deref(), Some("pass-a"));
@@ -467,7 +581,7 @@ mod tests {
             ("dbdelve", "a", "pw-a"),
             ("dbdelve/ssh-passphrase", "a", "pass-a"),
         ]);
-        let vaults = Vaults::new();
+        let vaults = Vaults::scratch();
 
         assert_eq!(
             vaults
@@ -499,7 +613,7 @@ mod tests {
     fn a_vault_that_wont_take_the_secret_leaves_its_item_in_place() {
         let keychain = FakeKeychain::with(&[("dbdelve", "a", "pw-a")]);
         keychain.refuse_writes("dbdelve/secrets", "vault", true);
-        let vaults = Vaults::new();
+        let vaults = Vaults::scratch();
 
         assert_eq!(
             vaults
@@ -522,11 +636,11 @@ mod tests {
     #[test]
     fn a_vault_that_wont_read_is_an_error_and_is_read_again_next_time() {
         let keychain = FakeKeychain::default();
-        Vaults::new()
+        Vaults::scratch()
             .write(&keychain, VARIANT, Secret::Password, "a", "pw-a")
             .unwrap();
         keychain.refuse_reads("dbdelve/secrets", "vault", true);
-        let vaults = Vaults::new();
+        let vaults = Vaults::scratch();
 
         assert!(
             vaults
@@ -554,7 +668,7 @@ mod tests {
     fn a_vault_that_doesnt_parse_or_is_newer_is_never_written_over() {
         for text in ["not json", r#"{"version":2,"profiles":{}}"#] {
             let keychain = FakeKeychain::with(&[("dbdelve/secrets", "vault", text)]);
-            let vaults = Vaults::new();
+            let vaults = Vaults::scratch();
             assert!(
                 vaults
                     .read(&keychain, VARIANT, Secret::Password, "a")
@@ -575,8 +689,8 @@ mod tests {
     #[test]
     fn a_write_keeps_what_another_process_wrote_since_this_one_read() {
         let keychain = FakeKeychain::default();
-        let here = Vaults::new();
-        let there = Vaults::new();
+        let here = Vaults::scratch();
+        let there = Vaults::scratch();
         here.write(&keychain, VARIANT, Secret::Password, "a", "pw-a")
             .unwrap();
         there
@@ -592,15 +706,92 @@ mod tests {
     }
 
     #[test]
+    fn instances_changing_the_vault_at_once_take_turns() {
+        let variant = "dbdelve-turns";
+        let keychain = FakeKeychain::default();
+        keychain.slow_reads(
+            &vault_service(variant),
+            VAULT_ACCOUNT,
+            std::time::Duration::from_millis(100),
+        );
+        std::thread::scope(|scope| {
+            for id in ["a", "b"] {
+                let keychain = &keychain;
+                scope.spawn(move || {
+                    Vaults::scratch()
+                        .write(keychain, variant, Secret::Password, id, id)
+                        .unwrap();
+                });
+            }
+        });
+
+        let vault = Vault::load(&keychain, variant).unwrap();
+        assert_eq!(vault.get("a", Secret::Password), Some("a"));
+        assert_eq!(vault.get("b", Secret::Password), Some("b"));
+    }
+
+    #[test]
+    fn a_secret_another_instance_saved_is_read_though_this_one_had_none() {
+        let keychain = FakeKeychain::default();
+        let here = Vaults::scratch();
+        let there = Vaults::scratch();
+        assert_eq!(
+            here.read(&keychain, VARIANT, Secret::Password, "a")
+                .unwrap(),
+            None
+        );
+        there
+            .write(&keychain, VARIANT, Secret::Password, "a", "pw-a")
+            .unwrap();
+        assert_eq!(
+            here.read(&keychain, VARIANT, Secret::Password, "a")
+                .unwrap()
+                .as_deref(),
+            Some("pw-a")
+        );
+    }
+
+    #[test]
+    fn an_item_moving_in_never_replaces_what_another_instance_saved_meanwhile() {
+        let keychain = FakeKeychain::with(&[("dbdelve", "a", "old")]);
+        keychain.meanwhile(
+            ("dbdelve", "a"),
+            ("dbdelve/secrets", "vault"),
+            r#"{"version":1,"profiles":{"a":{"password":"new"}}}"#,
+        );
+        let vaults = Vaults::scratch();
+
+        assert_eq!(
+            vaults
+                .read(&keychain, VARIANT, Secret::Password, "a")
+                .unwrap()
+                .as_deref(),
+            Some("new")
+        );
+        assert_eq!(vault_of(&keychain).get("a", Secret::Password), Some("new"));
+        assert_eq!(keychain.get("dbdelve", "a"), None, "the item still goes");
+
+        keychain.refuse_reads("dbdelve/secrets", "vault", true);
+        assert_eq!(
+            vaults
+                .read(&keychain, VARIANT, Secret::Password, "a")
+                .unwrap()
+                .as_deref(),
+            Some("new"),
+            "and this process's copy has it"
+        );
+    }
+
+    #[test]
     fn a_write_deletes_the_item_it_replaces() {
         let keychain = FakeKeychain::with(&[("dbdelve", "a", "old")]);
-        let vaults = Vaults::new();
+        let vaults = Vaults::scratch();
         vaults
             .write(&keychain, VARIANT, Secret::Password, "a", "new")
             .unwrap();
         assert_eq!(keychain.get("dbdelve", "a"), None);
         assert_eq!(
-            Vaults::new()
+            Vaults::scratch()
                 .read(&keychain, VARIANT, Secret::Password, "a")
                 .unwrap()
                 .as_deref(),
@@ -615,7 +806,7 @@ mod tests {
             ("dbdelve/ssh-passphrase", "a", "pass-a"),
             ("dbdelve", "b", "pw-b"),
         ]);
-        let vaults = Vaults::new();
+        let vaults = Vaults::scratch();
         vaults
             .write(&keychain, VARIANT, Secret::Password, "a", "pw-a")
             .unwrap();
@@ -636,7 +827,7 @@ mod tests {
     #[test]
     fn each_variant_has_a_vault_of_its_own() {
         let keychain = FakeKeychain::default();
-        let vaults = Vaults::new();
+        let vaults = Vaults::scratch();
         vaults
             .write(&keychain, "dbdelve-dev", Secret::Password, "a", "dev")
             .unwrap();
