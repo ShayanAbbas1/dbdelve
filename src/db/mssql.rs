@@ -1051,14 +1051,17 @@ impl Connection {
         if !proceed() {
             return failed(plain_error("Cancelled before it was sent.".into()));
         }
-        let mut send = |sql: &str, _: Sending| {
+        let mut send = |sql: &str, sending: Sending| {
             // A statement that reset the session leaves a fresh one, or none
             // when the reconnect failed; only a `ROLLBACK` follows, whose
             // error the sequence does not report.
-            if guard.is_none() {
+            let Some(session) = guard.as_mut() else {
                 return Err(plain_error(
                     "The connection is unavailable after it was reset.".into(),
                 ));
+            };
+            if sending == Sending::Open {
+                outside_transaction(session)?;
             }
             self.run_held(&mut guard, sql, Origin::Generated, Fetch::default(), true)
                 .and_then(|(result, _)| kept_transaction(sql, result))
@@ -2664,6 +2667,38 @@ fn held_to_database(session: &mut Session, database: &str) -> Result<(), DbError
 /// returns.
 const RESET: &str = "The connection was reset: the server rolled back any transaction that was \
                      open, and temporary tables and SET options are gone with the session.";
+
+/// Whether `session` is outside any transaction, as a verified apply needs it
+/// before its `BEGIN TRANSACTION`: one already open would be nested, and the
+/// apply's `COMMIT` would leave its writes uncommitted inside it. So would
+/// `IMPLICIT_TRANSACTIONS` on, which opens one at the `BEGIN` itself. Asked
+/// bare, not under [`SESSION_OPTIONS`], which turn implicit transactions off
+/// inside the batch they scope.
+fn outside_transaction(session: &mut Session) -> Result<(), DbError> {
+    const PROBE: &str = "SELECT @@TRANCOUNT, @@OPTIONS & 2";
+    let collected = match session.trip(PROBE) {
+        Some(Ok(collected)) => collected,
+        Some(Err(error)) => return Err(query_error(&error, PROBE)),
+        None => {
+            return Err(plain_error(
+                "Whether a transaction is open on this connection could not be read; the \
+                 edits were not applied."
+                    .into(),
+            ));
+        }
+    };
+    let row = collected.result.rows.first();
+    let set = |at: usize| row.and_then(|row| row.get(at)).map(|value| value != "0");
+    match (set(0), set(1)) {
+        (Some(false), Some(false)) => Ok(()),
+        (Some(false), Some(true)) => Err(plain_error(IMPLICIT_TRANSACTIONS.into())),
+        _ => Err(super::in_a_transaction()),
+    }
+}
+
+/// What an apply says when the session opens a transaction at each statement.
+const IMPLICIT_TRANSACTIONS: &str = "Implicit transactions are on for this connection \
+     (SET IMPLICIT_TRANSACTIONS ON); the edits were not applied.";
 
 /// Whether `error` is [`Connection::stop`]'s: the session the statement ran on
 /// was closed and replaced, so whether a `COMMIT` that was on its way landed is
@@ -5336,6 +5371,62 @@ mod tests {
             first(&preview),
             vec![Some("1"), Some("POINT (2 1)"), Some("/1/2/"), Some("5")]
         );
+    }
+
+    /// An apply is refused before its `BEGIN TRANSACTION` while implicit
+    /// transactions are on, which would nest it and leave its writes
+    /// uncommitted, or while a transaction of the user's is open.
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_an_apply_under_implicit_transactions_or_the_users_own_is_refused() {
+        use crate::db::{ApplyOutcome, ApplyStage, StepKind};
+
+        let connection = live();
+        let steps = [VerifiedStep {
+            sql: "INSERT INTO \"dbo\".\"measurements\" (\"id\") VALUES ('1')".into(),
+            kind: StepKind::Insert,
+            reread: None,
+            before: Vec::new(),
+            read_back: None,
+            by_key: true,
+        }];
+        let trancount = || {
+            let count = connection
+                .query("SELECT @@TRANCOUNT AS open", Fetch::default())
+                .unwrap();
+            first(&count)[0].map(str::to_string)
+        };
+        connection
+            .query("SET IMPLICIT_TRANSACTIONS ON", Fetch::default())
+            .unwrap();
+        assert_eq!(
+            connection.apply_verified(&steps, &|| true),
+            ApplyOutcome::Failed {
+                stage: ApplyStage::Begin,
+                error: plain_error(IMPLICIT_TRANSACTIONS.into()),
+            }
+        );
+        assert_eq!(trancount().as_deref(), Some("0"), "nothing was opened");
+        connection
+            .query("SET IMPLICIT_TRANSACTIONS OFF", Fetch::default())
+            .unwrap();
+
+        connection
+            .query("BEGIN TRANSACTION", Fetch::default())
+            .unwrap();
+        assert_eq!(
+            connection.apply_verified(&steps, &|| true),
+            ApplyOutcome::Failed {
+                stage: ApplyStage::Begin,
+                error: crate::db::in_a_transaction(),
+            }
+        );
+        assert_eq!(
+            trancount().as_deref(),
+            Some("1"),
+            "the user's is still open"
+        );
+        connection.query("ROLLBACK", Fetch::default()).unwrap();
     }
 
     #[test]

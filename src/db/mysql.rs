@@ -839,6 +839,9 @@ impl Connection {
         // `COMMIT` with the session gone is an outcome nobody can know.
         let gone = std::cell::Cell::new(false);
         let mut send = |sql: &str, sending: Sending| {
+            if sending == Sending::Open {
+                return open_verified(&mut connection, sql);
+            }
             let update = sending == Sending::Write(StepKind::Update);
             let result = self
                 .ran(&mut connection, sql, false, Fetch::default(), update)
@@ -1753,6 +1756,36 @@ fn connect_error(error: &::mysql::Error, server: &ServerConfig) -> DbError {
     }
 
     plain_error(describe(error))
+}
+
+/// The opening of a verified apply, `opening`, sent only when the session is
+/// in no transaction. A `BEGIN` inside one commits it, the user's writes with
+/// it, so the server is asked first: `@@autocommit` off is a session whose
+/// every statement opens one, and `SET TRANSACTION` is refused with 1568
+/// while one is open, a `BEGIN`'s even before any statement ran in it.
+///
+/// The `SET` applies to the next transaction alone, the apply's. Under
+/// `SERIALIZABLE` InnoDB reads each re-read row with a shared lock held to the
+/// `COMMIT`, so no other session changes a row between its re-read and its
+/// write: a writer waits, or one side fails with a deadlock and rolls back.
+fn open_verified(connection: &mut Conn, opening: &str) -> Result<QueryResult, DbError> {
+    let autocommit: Option<i64> = connection
+        .query_first("SELECT @@autocommit")
+        .map_err(|error| query_error(&error))?;
+    if autocommit == Some(0) {
+        return Err(super::in_a_transaction());
+    }
+    match connection.query_drop("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE") {
+        Err(::mysql::Error::MySqlError(error)) if error.code == 1568 => {
+            return Err(super::in_a_transaction());
+        }
+        Err(error) => return Err(query_error(&error)),
+        Ok(()) => {}
+    }
+    connection
+        .query_drop(opening)
+        .map_err(|error| query_error(&error))?;
+    Ok(QueryResult::default())
 }
 
 /// `KILL QUERY`'s doing: "Query execution was interrupted", on both servers.
@@ -3933,6 +3966,58 @@ mod tests {
         live_a_same_value_update_counts_its_matched_row_in_any_server_language(Engine::MariaDb);
     }
 
+    /// An apply with `autocommit` off, after a write of the user's in it, is
+    /// refused before its `BEGIN`, which would commit that write; the user's
+    /// transaction is theirs to end, and `ROLLBACK` still undoes the write.
+    fn live_an_apply_with_autocommit_off_is_refused_and_leaves_the_users_write_open(
+        engine: Engine,
+    ) {
+        use crate::db::{ApplyOutcome, ApplyStage, CancelToken, StepKind, conformance::verified_steps};
+
+        let connection = live_profile(engine);
+        let table = engine.qualified("dbdelve_dev", "conformance");
+        let run = |sql: &str| {
+            connection
+                .query(sql, &CancelToken::default(), Fetch::default())
+                .unwrap_or_else(|error| panic!("{engine:?}: `{sql}` failed: {error}"))
+        };
+        let delete = format!("DELETE FROM {table} WHERE id IN (931, 932)");
+        run(&delete);
+        run(&format!(
+            "INSERT INTO {table} (id, label) VALUES (931, 'old')"
+        ));
+        let insert = format!(
+            "INSERT INTO {table} ({}, {}) VALUES ('932', 'new')",
+            engine.quote_identifier("id"),
+            engine.quote_identifier("label"),
+        );
+        let steps = verified_steps(engine, &insert, vec![(StepKind::Insert, Vec::new())]);
+        run("SET autocommit = 0");
+        run(&format!(
+            "UPDATE {table} SET label = 'users' WHERE id = 931"
+        ));
+        let outcome = connection.apply_verified(&steps, &CancelToken::default());
+        assert_eq!(
+            outcome,
+            ApplyOutcome::Failed {
+                stage: ApplyStage::Begin,
+                error: crate::db::in_a_transaction(),
+            },
+            "{engine:?}"
+        );
+        run("ROLLBACK");
+        run("SET autocommit = 1");
+        let label = run(&format!("SELECT label FROM {table} WHERE id = 931"));
+        assert_eq!(
+            label.rows[0].get(0),
+            Some("old"),
+            "{engine:?}: nothing committed"
+        );
+        let added = run(&format!("SELECT id FROM {table} WHERE id = 932"));
+        assert!(added.rows.is_empty(), "{engine:?}: the apply wrote nothing");
+        run(&delete);
+    }
+
     /// Drops scratch tables when a test ends, panicking or not.
     struct Scratch<'a>(&'a Connection, &'a [&'a str]);
 
@@ -4275,6 +4360,7 @@ mod tests {
     }
 
     on_both_servers!(
+        live_an_apply_with_autocommit_off_is_refused_and_leaves_the_users_write_open,
         live_a_password_command_signs_in_the_session_and_its_cancel,
         live_reads_run_at_once_take_the_time_of_one,
         live_a_cancel_stops_every_read_run_at_once,

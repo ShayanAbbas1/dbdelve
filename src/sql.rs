@@ -4962,8 +4962,15 @@ impl Leaves {
                 chain,
                 savepoint: None,
             } => self.transaction = Some(*chain),
-            Statement::Set(_)
-            | Statement::Use(_)
+            // Turning MySQL's `autocommit` off, or SQL Server's implicit
+            // transactions on, leaves every later statement inside one.
+            Statement::Set(set) => {
+                self.settings = true;
+                if let Some(open) = transaction_by_setting(&set.to_string()) {
+                    self.transaction = Some(open);
+                }
+            }
+            Statement::Use(_)
             | Statement::LockTables { .. }
             | Statement::Pragma { is_eq: true, .. } => self.settings = true,
             Statement::CreateTable(table) => {
@@ -4982,6 +4989,32 @@ impl Leaves {
             }
             _ => {}
         }
+    }
+}
+
+/// What a `SET` does to the session's transaction, read off its text:
+/// `Some(true)` for MySQL's `autocommit` turned off or SQL Server's
+/// `IMPLICIT_TRANSACTIONS` turned on, which leave the next statement inside a
+/// transaction, and `Some(false)` for `autocommit` turned on, which commits
+/// the one open. `None` for any other `SET`, or one assigning more than this.
+fn transaction_by_setting(set: &str) -> Option<bool> {
+    let spelled: String = set
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '@')
+        .collect::<String>()
+        .to_ascii_uppercase();
+    let setting = spelled.strip_prefix("SET")?;
+    let setting = setting
+        .strip_prefix("SESSION.")
+        .or_else(|| setting.strip_prefix("SESSION"))
+        .or_else(|| setting.strip_prefix("LOCAL."))
+        .or_else(|| setting.strip_prefix("LOCAL"))
+        .unwrap_or(setting);
+    match setting {
+        "AUTOCOMMIT=0" | "AUTOCOMMIT=OFF" | "AUTOCOMMIT=FALSE" => Some(true),
+        "AUTOCOMMIT=1" | "AUTOCOMMIT=ON" | "AUTOCOMMIT=TRUE" => Some(false),
+        "IMPLICIT_TRANSACTIONSON" => Some(true),
+        _ => None,
     }
 }
 
@@ -11178,7 +11211,11 @@ mod tests {
                 &closed,
             ),
             (Engine::Postgres, "SET search_path TO other", &settings),
-            (Engine::MySql, "SET autocommit = 0", &settings),
+            (
+                Engine::MySql,
+                "SET autocommit = 1, transaction_read_only = 0",
+                &settings,
+            ),
             (Engine::MySql, "SET @x = 1", &settings),
             (Engine::MySql, "USE other", &settings),
             (Engine::SqlServer, "SET NOCOUNT ON", &settings),
@@ -11217,6 +11254,39 @@ mod tests {
             (Engine::MongoDb, "db.a.insertOne({ x: 1 })"),
         ] {
             assert_eq!(leaves(engine, statement), Leaves::default(), "{statement}");
+        }
+    }
+
+    /// MySQL's `autocommit` off and SQL Server's implicit transactions on
+    /// leave the session inside a transaction from the next statement on.
+    #[test]
+    fn a_set_that_leaves_every_statement_in_a_transaction_opens_one() {
+        let left = |open| Leaves {
+            transaction: Some(open),
+            settings: true,
+        };
+        for (engine, statement, expected) in [
+            (Engine::MySql, "SET autocommit = 0", left(true)),
+            (Engine::MySql, "set autocommit=OFF", left(true)),
+            (Engine::MySql, "SET SESSION autocommit = 0", left(true)),
+            (Engine::MySql, "SET @@session.autocommit = 0", left(true)),
+            (Engine::MariaDb, "SET autocommit = 0", left(true)),
+            (Engine::MySql, "SET autocommit = 1", left(false)),
+            (
+                Engine::SqlServer,
+                "SET IMPLICIT_TRANSACTIONS ON",
+                left(true),
+            ),
+            (
+                Engine::SqlServer,
+                "SET IMPLICIT_TRANSACTIONS OFF",
+                Leaves {
+                    transaction: None,
+                    settings: true,
+                },
+            ),
+        ] {
+            assert_eq!(leaves(engine, statement), expected, "{statement}");
         }
     }
 

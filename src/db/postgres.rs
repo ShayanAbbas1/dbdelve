@@ -934,6 +934,9 @@ struct Driver {
     connection: Option<Socket>,
     /// The server's notices, as psql prints them, in the order they came.
     notices: Vec<String>,
+    /// Each notice's SQLSTATE, beside `notices`: what the apply reads to
+    /// learn its `BEGIN` was inside a transaction already open.
+    codes: Vec<String>,
 }
 
 impl Driver {
@@ -947,6 +950,7 @@ impl Driver {
             runtime,
             connection,
             notices,
+            codes,
         } = self;
         runtime.block_on(poll_fn(|cx| {
             while let Some(socket) = connection {
@@ -954,6 +958,7 @@ impl Driver {
                     Poll::Pending => break,
                     Poll::Ready(Some(Ok(AsyncMessage::Notice(notice)))) => {
                         notices.push(notice_text(&notice));
+                        codes.push(notice.code().code().to_string());
                     }
                     Poll::Ready(Some(Ok(_))) => {}
                     Poll::Ready(Some(Err(error))) => {
@@ -1144,6 +1149,7 @@ impl Connection {
                 runtime,
                 connection: Some(connection),
                 notices: Vec::new(),
+                codes: Vec::new(),
             },
             _bridged: bridged,
         };
@@ -1379,6 +1385,7 @@ impl Connection {
         } = client;
         let failed = |error: Error| query_error(&error, sql);
         driver.notices.clear();
+        driver.codes.clear();
         let mut messages = Box::pin(
             driver
                 .block_on(inner.simple_query_raw(sql))
@@ -1476,6 +1483,13 @@ impl Connection {
                     result
                 });
             closed.set(client.client.is_closed());
+            // Postgres runs a `BEGIN` inside an open transaction as nothing
+            // but a warning, 25001, so the apply would end the user's with
+            // its own `COMMIT`. Refused with nothing more sent: the `BEGIN`
+            // changed nothing, and the transaction is the user's to end.
+            if sending == Sending::Open && client.driver.codes.iter().any(|code| code == "25001") {
+                return Err(super::in_a_transaction());
+            }
             result
         };
         super::run_verified(

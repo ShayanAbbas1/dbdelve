@@ -200,7 +200,12 @@ impl Connection {
                 ),
             };
         };
-        let mut send = |sql: &str, _: Sending| {
+        let mut send = |sql: &str, sending: Sending| {
+            // A transaction of the user's, open on this connection: the
+            // apply's `BEGIN` would fail inside it and its `ROLLBACK` end it.
+            if sending == Sending::Open && !connection.is_autocommit() {
+                return Err(super::in_a_transaction());
+            }
             ran(&connection, sql, Fetch::default()).map(|(result, _)| result)
         };
         // A SQLite file has no socket to lose, and renders every cell the same
@@ -1749,6 +1754,42 @@ mod tests {
             read_back: None,
             by_key: true,
         }
+    }
+
+    /// A transaction the user opened on the connection, whatever the workspace
+    /// read off their statements, is seen by the apply before it sends its
+    /// own `BEGIN`, and left open: nothing is written and nothing ended.
+    #[test]
+    fn an_apply_inside_the_users_transaction_is_refused_and_leaves_it_open() {
+        use crate::db::{ApplyOutcome, ApplyStage, StepKind};
+
+        let connection = memory(
+            "create table birds (id integer primary key, name text not null); \
+             insert into birds values (1, 'wren');",
+        );
+        connection
+            .query("BEGIN", Fetch::default())
+            .expect("the user's BEGIN");
+        let update = step(
+            StepKind::Update,
+            r#"UPDATE "main"."birds" SET "name" = 'robin' WHERE "id" = '1'"#,
+            "1",
+            &[("id", Some("1")), ("name", Some("wren"))],
+        );
+        assert_eq!(
+            connection.apply_verified(&[update], &|| true),
+            ApplyOutcome::Failed {
+                stage: ApplyStage::Begin,
+                error: crate::db::in_a_transaction(),
+            }
+        );
+        let inner = connection.connection.lock().unwrap();
+        assert!(
+            !inner.is_autocommit(),
+            "the user's transaction is still open"
+        );
+        drop(inner);
+        assert_eq!(name_of(&connection, 1).as_deref(), Some("wren"));
     }
 
     fn name_of(connection: &Connection, id: i64) -> Option<String> {

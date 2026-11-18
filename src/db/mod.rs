@@ -3651,6 +3651,10 @@ pub(crate) enum Drift {
 /// leaves a bracket's or a read's alone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Sending {
+    /// The apply's opening bracket. Before sending it the arm asks its server,
+    /// on the session it holds, whether a transaction is already open there,
+    /// and fails with [`in_a_transaction`] rather than open one inside it.
+    Open,
     Bracket,
     Read,
     Write(StepKind),
@@ -3748,7 +3752,9 @@ pub(crate) fn drift(
 ///
 /// It opens a transaction of its own and every exit before `COMMIT` sends
 /// `ROLLBACK`, so nothing it opened stays half applied. Never inside the
-/// user's: the caller refuses an apply while one is open on the connection.
+/// user's: the caller refuses an apply while one is open on the connection, as
+/// the statements it ran read, and the arm asks the server itself before it
+/// sends the opening bracket ([`Sending::Open`]), under the lock it holds.
 ///
 /// Every statement is gated again here, whoever built the steps: each write by
 /// [`crate::sql::is_generated_write_on`] as the one statement it must be, and
@@ -3828,7 +3834,9 @@ pub(super) fn run_verified(
             error: plain_error("Cancelled before it was sent.".into()),
         };
     }
-    if let Err(error) = send(opening, Sending::Bracket) {
+    // A failed opening sends no `ROLLBACK`: when it failed because a
+    // transaction was already open, that transaction is the user's.
+    if let Err(error) = send(opening, Sending::Open) {
         return ApplyOutcome::Failed {
             stage: ApplyStage::Begin,
             error,
@@ -4316,6 +4324,16 @@ pub(super) fn structure_sql(
     sql
 }
 
+/// What an apply says when the server reports a transaction already open on
+/// the session it would run on: its own `BEGIN` and `COMMIT` would end it.
+pub(super) const IN_A_TRANSACTION: &str =
+    "A transaction is open on this connection; the edits were not applied.";
+
+/// [`IN_A_TRANSACTION`] as the error of an apply's opening bracket.
+pub(super) fn in_a_transaction() -> DbError {
+    plain_error(IN_A_TRANSACTION.into())
+}
+
 pub(super) fn plain_error(message: String) -> DbError {
     DbError {
         message,
@@ -4630,41 +4648,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_cancel_after_the_last_write_rolls_back_rather_than_committing() {
-        let sent = std::cell::RefCell::new(Vec::<String>::new());
-        let mut send = |sql: &str, _: Sending| {
-            sent.borrow_mut().push(sql.to_string());
-            Ok(match sql.starts_with("SELECT") {
-                true => reread(&["id"], &[&[Some("1")]]),
-                false => QueryResult {
-                    rows_affected: Some(1),
-                    ..QueryResult::default()
-                },
-            })
-        };
-        // A Cancel comes once the write has gone out.
-        let proceed = || !sent.borrow().iter().any(|sql| sql.starts_with("UPDATE"));
-        let outcome = run_verified(
-            Engine::Postgres,
-            &[update_step()],
-            &mut send,
-            &proceed,
-            &|_| false,
-            &|_| false,
-        );
-        assert_eq!(
-            outcome,
-            ApplyOutcome::Failed {
-                stage: ApplyStage::Commit,
-                error: plain_error("Cancelled before it was sent.".into()),
-            }
-        );
-        let sent = sent.into_inner();
-        assert_eq!(sent.last().map(String::as_str), Some("ROLLBACK"));
-        assert!(!sent.iter().any(|sql| sql == "COMMIT"), "{sent:?}");
-    }
-
     /// A `DELETE` that counts none is taken as its row already gone only when
     /// the row is named by its key: a row named by every value reads as gone
     /// once an earlier write changed one of them, with the row still there.
@@ -4720,6 +4703,41 @@ mod tests {
             run(true),
             ApplyOutcome::Applied { affected: 0, .. }
         ));
+    }
+
+    #[test]
+    fn a_cancel_after_the_last_write_rolls_back_rather_than_committing() {
+        let sent = std::cell::RefCell::new(Vec::<String>::new());
+        let mut send = |sql: &str, _: Sending| {
+            sent.borrow_mut().push(sql.to_string());
+            Ok(match sql.starts_with("SELECT") {
+                true => reread(&["id"], &[&[Some("1")]]),
+                false => QueryResult {
+                    rows_affected: Some(1),
+                    ..QueryResult::default()
+                },
+            })
+        };
+        // A Cancel comes once the write has gone out.
+        let proceed = || !sent.borrow().iter().any(|sql| sql.starts_with("UPDATE"));
+        let outcome = run_verified(
+            Engine::Postgres,
+            &[update_step()],
+            &mut send,
+            &proceed,
+            &|_| false,
+            &|_| false,
+        );
+        assert_eq!(
+            outcome,
+            ApplyOutcome::Failed {
+                stage: ApplyStage::Commit,
+                error: plain_error("Cancelled before it was sent.".into()),
+            }
+        );
+        let sent = sent.into_inner();
+        assert_eq!(sent.last().map(String::as_str), Some("ROLLBACK"));
+        assert!(!sent.iter().any(|sql| sql == "COMMIT"), "{sent:?}");
     }
 
     #[test]

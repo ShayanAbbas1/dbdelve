@@ -474,7 +474,12 @@ impl Connection {
         // Not `rolled_back`: that reads a `BEGIN` off the statement's text and
         // ends the transaction itself, and `run_verified` owns the rollback.
         // A `ROLLBACK` with no transaction to end is an error it ignores.
-        let mut send = |sql: &str, _: Sending| run(&connection, sql, Fetch::default());
+        let mut send = |sql: &str, sending: Sending| {
+            if sending == Sending::Open && !connection.is_autocommit() {
+                return Err(super::in_a_transaction());
+            }
+            run(&connection, sql, Fetch::default())
+        };
         // A file or memory database has no socket to lose, and renders every
         // cell the same way on both reads, so nothing is skipped and no
         // `COMMIT` error means a lost session.
