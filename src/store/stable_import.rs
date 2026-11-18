@@ -24,10 +24,8 @@ use std::time::{Duration, Instant, SystemTime};
 use serde::Deserialize;
 use time::macros::format_description;
 
-use super::{
-    PROFILES_FILE, data_root, dbdelve_directory, passphrase_service, variant_name, variant_of,
-    write_file,
-};
+use super::secrets::{self, Keychain, Secret, Vault, Vaults};
+use super::{PROFILES_FILE, data_root, dbdelve_directory, variant_name, variant_of, write_file};
 use crate::channel::Channel;
 
 /// The directories a data directory keeps that are the user's, beside its
@@ -760,8 +758,9 @@ pub(crate) fn copy_pending_secrets(
     from: &Services,
     to: &Services,
     keychain: &impl Keychain,
+    vaults: &Vaults,
 ) -> Vec<String> {
-    let failed = copy_secrets(&secrets.connections, from, to, keychain);
+    let failed = copy_secrets(&secrets.connections, from, to, keychain, vaults);
     // Removed while still locked, so no launch takes it for a stopped copy.
     if let Err(error) = fs::remove_file(&secrets.claim) {
         tracing::warn!("the import's passwords are copied but still marked as to copy: {error}");
@@ -769,67 +768,16 @@ pub(crate) fn copy_pending_secrets(
     failed
 }
 
-/// The keychain as an import uses it: one item at a time, by service and
-/// account.
-pub(crate) trait Keychain {
-    /// `None` for an item that isn't there.
-    fn read(&self, service: &str, account: &str) -> Result<Option<String>, String>;
-    fn write(&self, service: &str, account: &str, secret: &str) -> Result<(), String>;
-}
-
-/// Keychain Services, Secret Service or Credential Manager, as `keychain_entry`
-/// reaches them. On macOS each read can raise a prompt, since the item belongs
-/// to an app signed apart from this one: run it off the UI thread.
-pub(crate) struct SystemKeychain;
-
-impl Keychain for SystemKeychain {
-    fn read(&self, service: &str, account: &str) -> Result<Option<String>, String> {
-        match keyring::Entry::new(service, account).and_then(|entry| entry.get_password()) {
-            Ok(secret) => Ok(Some(secret)),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(error) => Err(kind_of(&error).to_string()),
-        }
-    }
-
-    fn write(&self, service: &str, account: &str, secret: &str) -> Result<(), String> {
-        keyring::Entry::new(service, account)
-            .and_then(|entry| entry.set_password(secret))
-            .map_err(|error| kind_of(&error).to_string())
-    }
-}
-
-/// What went wrong, and nothing else: a keyring error's own text can carry
-/// the account, which is named after the connection, and the `Ambiguous` one
-/// the matching items themselves.
-fn kind_of(error: &keyring::Error) -> &'static str {
-    match error {
-        keyring::Error::PlatformFailure(_) => "the keychain failed",
-        keyring::Error::NoStorageAccess(_) => "the keychain could not be opened",
-        keyring::Error::NoEntry => "no saved item",
-        keyring::Error::BadEncoding(_) | keyring::Error::BadDataFormat(..) => {
-            "the saved item could not be read"
-        }
-        keyring::Error::BadStoreFormat(_) => "the keychain could not be read",
-        keyring::Error::TooLong(..) => "a name is too long for the keychain",
-        keyring::Error::Invalid(..) => "the keychain refused the item",
-        keyring::Error::Ambiguous(_) => "more than one saved item matched",
-        _ => "an unknown keychain error",
-    }
-}
-
-/// The keychain services one build files a connection's password and its key
-/// passphrase under.
+/// The keychain services one build files a connection's secrets under.
 #[derive(Clone, Debug)]
 pub(crate) struct Services {
-    password: String,
-    passphrase: String,
+    variant: String,
 }
 
 impl Services {
     fn of(variant: &str) -> Self {
         Self {
-            password: variant.to_string(),
-            passphrase: passphrase_service(variant),
+            variant: variant.to_string(),
         }
     }
 
@@ -842,44 +790,127 @@ impl Services {
     }
 }
 
-/// Copies each connection's password and key passphrase from `from`'s
-/// services to `to`'s, skipping any `from` doesn't have. Returns the names of
-/// the connections with one that could not be copied.
+/// Copies each connection's password and key passphrase from `from` to `to`,
+/// skipping any `from` doesn't have. Returns the names of the connections
+/// with one that could not be copied.
 pub(crate) fn copy_secrets(
     connections: &[Listed],
     from: &Services,
     to: &Services,
     keychain: &impl Keychain,
+    vaults: &Vaults,
 ) -> Vec<String> {
-    let mut failed: Vec<String> = Vec::new();
+    if secrets::ONE_ITEM {
+        copy_into_vault(connections, from, to, keychain, vaults)
+    } else {
+        copy_items(connections, from, to, keychain)
+    }
+}
+
+/// Item to item, as off macOS each secret has one.
+fn copy_items(
+    connections: &[Listed],
+    from: &Services,
+    to: &Services,
+    keychain: &impl Keychain,
+) -> Vec<String> {
+    let mut failed = Failed::default();
     for connection in connections {
-        for (from, to) in [
-            (&from.password, &to.password),
-            (&from.passphrase, &to.passphrase),
-        ] {
+        for kind in Secret::BOTH {
             let copied = keychain
-                .read(from, &connection.id)
+                .read(&kind.item_service(&from.variant), &connection.id)
                 .and_then(|secret| match secret {
-                    Some(secret) => keychain.write(to, &connection.id, &secret),
+                    Some(secret) => {
+                        keychain.write(&kind.item_service(&to.variant), &connection.id, &secret)
+                    }
                     None => Ok(()),
                 });
             if let Err(error) = copied {
-                tracing::warn!("a saved password could not be imported: {error}");
-                let name = connection.name().to_string();
-                if !failed.contains(&name) {
-                    failed.push(name);
+                failed.add(connection, &error);
+            }
+        }
+    }
+    failed.0
+}
+
+/// From `from`'s vault, or for a secret it doesn't hold the item an earlier
+/// stable kept it in, into this build's vault in one write. `from`'s keychain
+/// is only read: what an earlier stable left in items of their own it moves
+/// into its vault itself.
+fn copy_into_vault(
+    connections: &[Listed],
+    from: &Services,
+    to: &Services,
+    keychain: &impl Keychain,
+    vaults: &Vaults,
+) -> Vec<String> {
+    let mut failed = Failed::default();
+    if connections.is_empty() {
+        return failed.0;
+    }
+    let mut found: Vec<(&Listed, Secret, String)> = Vec::new();
+    {
+        // Stable's own lock, so stable moving an item into its vault meanwhile
+        // can't hide it from both reads. Let go before this build's vault is
+        // locked, so only one variant is locked at a time.
+        let stable = vaults
+            .hold(&from.variant)
+            .and_then(|held| Ok((held, Vault::load(keychain, &from.variant)?)));
+        let (_held, stable) = match stable {
+            Ok(stable) => stable,
+            Err(error) => {
+                for connection in connections {
+                    failed.add(connection, &error);
+                }
+                return failed.0;
+            }
+        };
+        for connection in connections {
+            for kind in Secret::BOTH {
+                let secret = match stable.get(&connection.id, kind) {
+                    Some(secret) => Ok(Some(secret.to_string())),
+                    None => keychain.read(&kind.item_service(&from.variant), &connection.id),
+                };
+                match secret {
+                    Ok(Some(secret)) => found.push((connection, kind, secret)),
+                    Ok(None) => {}
+                    Err(error) => failed.add(connection, &error),
                 }
             }
         }
     }
-    failed
+    let writes: Vec<(&str, Secret, &str)> = found
+        .iter()
+        .map(|(connection, kind, secret)| (connection.id.as_str(), *kind, secret.as_str()))
+        .collect();
+    if let Err(error) = vaults.write_all(keychain, &to.variant, &writes) {
+        for (connection, ..) in &found {
+            failed.add(connection, &error);
+        }
+    }
+    failed.0
+}
+
+/// The names of the connections a secret didn't come across for, each once.
+#[derive(Default)]
+struct Failed(Vec<String>);
+
+impl Failed {
+    fn add(&mut self, connection: &Listed, error: &str) {
+        tracing::warn!("a saved password could not be imported: {error}");
+        let name = connection.name().to_string();
+        if !self.0.contains(&name) {
+            self.0.push(name);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
-    use std::collections::HashMap;
+    use std::sync::Arc;
 
+    use super::super::secrets::fake::FakeKeychain;
+    use super::super::secrets::{held, vault_service};
     use super::*;
 
     /// A directory of the test's own under the system's temporary one, gone
@@ -1350,60 +1381,25 @@ mod tests {
         assert!(listed(&scratch.0).is_empty());
     }
 
-    #[derive(Default)]
-    struct FakeKeychain {
-        items: RefCell<HashMap<(String, String), String>>,
-        unreadable: Vec<(String, String)>,
-    }
-
-    impl FakeKeychain {
-        fn with(items: &[(&str, &str, &str)]) -> Self {
-            Self {
-                items: RefCell::new(
-                    items
-                        .iter()
-                        .map(|(service, account, secret)| {
-                            (
-                                (service.to_string(), account.to_string()),
-                                secret.to_string(),
-                            )
-                        })
-                        .collect(),
-                ),
-                unreadable: Vec::new(),
-            }
-        }
-
-        fn get(&self, service: &str, account: &str) -> Option<String> {
-            self.items
-                .borrow()
-                .get(&(service.to_string(), account.to_string()))
-                .cloned()
-        }
-    }
-
-    impl Keychain for FakeKeychain {
-        fn read(&self, service: &str, account: &str) -> Result<Option<String>, String> {
-            let key = (service.to_string(), account.to_string());
-            if self.unreadable.contains(&key) {
-                return Err("User canceled the operation.".into());
-            }
-            Ok(self.items.borrow().get(&key).cloned())
-        }
-
-        fn write(&self, service: &str, account: &str, secret: &str) -> Result<(), String> {
-            self.items.borrow_mut().insert(
-                (service.to_string(), account.to_string()),
-                secret.to_string(),
-            );
-            Ok(())
-        }
-    }
-
     fn connection(id: &str, name: &str) -> Listed {
         Listed {
             id: id.into(),
             name: name.into(),
+        }
+    }
+
+    /// What this build reads back for a connection, wherever this platform
+    /// keeps it.
+    fn imported(
+        keychain: &FakeKeychain,
+        vaults: &Vaults,
+        kind: Secret,
+        id: &str,
+    ) -> Option<String> {
+        if secrets::ONE_ITEM {
+            vaults.read(keychain, "dbdelve-nightly", kind, id).unwrap()
+        } else {
+            keychain.get(&kind.item_service("dbdelve-nightly"), id)
         }
     }
 
@@ -1418,6 +1414,7 @@ mod tests {
             ("dbdelve", "a", "pw-a"),
             ("dbdelve-nightly", "a", "nightly's own"),
         ]);
+        let vaults = Vaults::scratch();
         let alone = || match settle_alone(&lock, &target, now()).unwrap().1 {
             Launch::Settled { secrets, .. } => secrets,
             Launch::Shared { .. } => panic!("no other instance runs"),
@@ -1456,10 +1453,11 @@ mod tests {
             &Services::of("dbdelve"),
             &Services::of("dbdelve-nightly"),
             &keychain,
+            &vaults,
         );
         assert!(failed.is_empty());
         assert_eq!(
-            keychain.get("dbdelve-nightly", "a").as_deref(),
+            imported(&keychain, &vaults, Secret::Password, "a").as_deref(),
             Some("pw-a")
         );
         assert!(alone().is_none(), "copied once");
@@ -1485,14 +1483,14 @@ mod tests {
     }
 
     #[test]
-    fn saved_passwords_and_passphrases_are_copied_to_this_builds_services() {
+    fn off_macos_saved_passwords_and_passphrases_are_copied_item_to_item() {
         let keychain = FakeKeychain::with(&[
             ("dbdelve", "a", "pw-a"),
             ("dbdelve/ssh-passphrase", "a", "pass-a"),
             ("dbdelve", "b", "pw-b"),
             ("dbdelve-dev", "a", "someone else's"),
         ]);
-        let failed = copy_secrets(
+        let failed = copy_items(
             &[
                 connection("a", "A"),
                 connection("b", "B"),
@@ -1524,17 +1522,15 @@ mod tests {
     }
 
     #[test]
-    fn a_password_that_cannot_be_read_names_its_connection_once_and_the_rest_still_copy() {
-        let mut keychain = FakeKeychain::with(&[
+    fn off_macos_a_password_that_cannot_be_read_names_its_connection_once() {
+        let keychain = FakeKeychain::with(&[
             ("dbdelve", "a", "pw-a"),
             ("dbdelve/ssh-passphrase", "a", "pass-a"),
             ("dbdelve", "b", "pw-b"),
         ]);
-        keychain.unreadable = vec![
-            ("dbdelve".into(), "a".into()),
-            ("dbdelve/ssh-passphrase".into(), "a".into()),
-        ];
-        let failed = copy_secrets(
+        keychain.refuse_reads("dbdelve", "a", true);
+        keychain.refuse_reads("dbdelve/ssh-passphrase", "a", true);
+        let failed = copy_items(
             &[connection("a", "Prod"), connection("b", "")],
             &Services::of("dbdelve"),
             &Services::of("dbdelve-nightly"),
@@ -1548,5 +1544,202 @@ mod tests {
             Some("pw-b")
         );
         assert_eq!(connection("b", "").name(), "b");
+    }
+
+    /// Stable's vault holding `a`'s password and `c`'s passphrase.
+    fn stables_vault(keychain: &FakeKeychain) {
+        let stable = Vaults::scratch();
+        stable
+            .write(keychain, "dbdelve", Secret::Password, "a", "pw-a")
+            .unwrap();
+        stable
+            .write(keychain, "dbdelve", Secret::SshPassphrase, "c", "pass-c")
+            .unwrap();
+    }
+
+    #[test]
+    fn on_macos_stables_vault_is_read_first_then_its_items_and_only_read() {
+        let keychain = FakeKeychain::default();
+        stables_vault(&keychain);
+        for (service, account, secret) in [
+            ("dbdelve", "a", "stale"),
+            ("dbdelve/ssh-passphrase", "a", "pass-a"),
+            ("dbdelve", "b", "pw-b"),
+            ("dbdelve-dev", "a", "someone else's"),
+            ("dbdelve-nightly", "a", "nightly's own"),
+        ] {
+            keychain.put(service, account, secret);
+        }
+        let stable_before = keychain.get("dbdelve/secrets", "vault");
+        let vaults = Vaults::scratch();
+
+        let failed = copy_into_vault(
+            &[
+                connection("a", "A"),
+                connection("b", "B"),
+                connection("c", "C"),
+                connection("d", "D"),
+            ],
+            &Services::of("dbdelve"),
+            &Services::of("dbdelve-nightly"),
+            &keychain,
+            &vaults,
+        );
+
+        assert!(failed.is_empty());
+        let here = Vault::load(&keychain, "dbdelve-nightly").unwrap();
+        assert_eq!(here.get("a", Secret::Password), Some("pw-a"));
+        assert_eq!(here.get("a", Secret::SshPassphrase), Some("pass-a"));
+        assert_eq!(here.get("b", Secret::Password), Some("pw-b"));
+        assert_eq!(here.get("c", Secret::SshPassphrase), Some("pass-c"));
+        assert_eq!(here.get("d", Secret::Password), None);
+        assert_eq!(
+            vaults
+                .read(&keychain, "dbdelve-nightly", Secret::Password, "a")
+                .unwrap()
+                .as_deref(),
+            Some("pw-a"),
+            "this process's copy of the vault has them too"
+        );
+        assert_eq!(
+            keychain.get("dbdelve-nightly", "a"),
+            None,
+            "nightly's own item would only shadow the import"
+        );
+
+        assert_eq!(keychain.get("dbdelve/secrets", "vault"), stable_before);
+        assert_eq!(keychain.get("dbdelve", "a").as_deref(), Some("stale"));
+        assert_eq!(keychain.get("dbdelve", "b").as_deref(), Some("pw-b"));
+        assert_eq!(
+            keychain.get("dbdelve/ssh-passphrase", "a").as_deref(),
+            Some("pass-a")
+        );
+    }
+
+    #[test]
+    fn on_macos_a_stable_vault_that_wont_read_names_every_connection() {
+        let keychain = FakeKeychain::with(&[("dbdelve", "b", "pw-b")]);
+        stables_vault(&keychain);
+        keychain.refuse_reads("dbdelve/secrets", "vault", true);
+        let vaults = Vaults::scratch();
+
+        let failed = copy_into_vault(
+            &[connection("a", "Prod"), connection("b", "")],
+            &Services::of("dbdelve"),
+            &Services::of("dbdelve-nightly"),
+            &keychain,
+            &vaults,
+        );
+
+        assert_eq!(failed, ["Prod", "b"]);
+        assert_eq!(keychain.get("dbdelve-nightly/secrets", "vault"), None);
+    }
+
+    #[test]
+    fn on_macos_an_item_that_wont_read_names_its_connection_and_the_rest_still_copy() {
+        let keychain = FakeKeychain::with(&[
+            ("dbdelve", "b", "pw-b"),
+            ("dbdelve/ssh-passphrase", "a", "pass-a"),
+        ]);
+        stables_vault(&keychain);
+        keychain.refuse_reads("dbdelve/ssh-passphrase", "a", true);
+        let vaults = Vaults::scratch();
+
+        let failed = copy_into_vault(
+            &[connection("a", "Prod"), connection("b", "")],
+            &Services::of("dbdelve"),
+            &Services::of("dbdelve-nightly"),
+            &keychain,
+            &vaults,
+        );
+
+        assert_eq!(failed, ["Prod"]);
+        let here = Vault::load(&keychain, "dbdelve-nightly").unwrap();
+        assert_eq!(here.get("a", Secret::Password), Some("pw-a"));
+        assert_eq!(here.get("a", Secret::SshPassphrase), None);
+        assert_eq!(here.get("b", Secret::Password), Some("pw-b"));
+    }
+
+    /// Whether each of `variants`' vault locks is held when the item is next
+    /// read.
+    fn held_when_read(
+        keychain: &FakeKeychain,
+        vaults: &Vaults,
+        item: (&str, &str),
+        variants: [&str; 2],
+    ) -> Arc<Mutex<Vec<bool>>> {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let paths: Vec<PathBuf> = variants
+            .iter()
+            .map(|variant| vaults.lock_path(variant).unwrap())
+            .collect();
+        let into = Arc::clone(&seen);
+        keychain.on_read(
+            item.0,
+            item.1,
+            Box::new(move || *into.lock().unwrap() = paths.iter().map(|path| held(path)).collect()),
+        );
+        seen
+    }
+
+    #[test]
+    fn on_macos_stables_lock_is_held_across_its_reads_and_alone() {
+        let (from, to) = ("dbdelve-import-held", "dbdelve-nightly-import-held");
+        let keychain = FakeKeychain::with(&[(from, "b", "pw-b")]);
+        Vaults::scratch()
+            .write(&keychain, from, Secret::Password, "a", "pw-a")
+            .unwrap();
+        let vaults = Vaults::scratch();
+        let both = [from, to];
+        let at_vault = held_when_read(&keychain, &vaults, (&vault_service(from), "vault"), both);
+        let at_item = held_when_read(&keychain, &vaults, (from, "b"), both);
+        let at_write = held_when_read(&keychain, &vaults, (&vault_service(to), "vault"), both);
+
+        let failed = copy_into_vault(
+            &[connection("a", "A"), connection("b", "B")],
+            &Services::of(from),
+            &Services::of(to),
+            &keychain,
+            &vaults,
+        );
+
+        assert!(failed.is_empty());
+        assert_eq!(*at_vault.lock().unwrap(), [true, false]);
+        assert_eq!(*at_item.lock().unwrap(), [true, false]);
+        assert_eq!(*at_write.lock().unwrap(), [false, true]);
+        let here = Vault::load(&keychain, to).unwrap();
+        assert_eq!(here.get("a", Secret::Password), Some("pw-a"));
+        assert_eq!(here.get("b", Secret::Password), Some("pw-b"));
+    }
+
+    #[test]
+    fn on_macos_no_connections_reads_nothing() {
+        let keychain = FakeKeychain::default();
+        keychain.refuse_reads("dbdelve/secrets", "vault", true);
+        let failed = copy_into_vault(
+            &[],
+            &Services::of("dbdelve"),
+            &Services::of("dbdelve-nightly"),
+            &keychain,
+            &Vaults::scratch(),
+        );
+        assert!(failed.is_empty());
+    }
+
+    #[test]
+    fn on_macos_a_vault_here_that_wont_take_them_names_whatever_was_found() {
+        let keychain = FakeKeychain::with(&[("dbdelve", "b", "pw-b")]);
+        keychain.refuse_writes("dbdelve-nightly/secrets", "vault", true);
+        let vaults = Vaults::scratch();
+
+        let failed = copy_into_vault(
+            &[connection("a", "A"), connection("b", "B")],
+            &Services::of("dbdelve"),
+            &Services::of("dbdelve-nightly"),
+            &keychain,
+            &vaults,
+        );
+
+        assert_eq!(failed, ["B"]);
     }
 }

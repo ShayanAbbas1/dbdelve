@@ -15,7 +15,8 @@ use gpui_component::spinner::Spinner;
 use gpui_component::{IconName, Sizable};
 
 use super::*;
-use crate::store::stable_import::{self, SecretsClaim, Services, Staged, SystemKeychain};
+use crate::store::secrets::{SystemKeychain, VAULTS};
+use crate::store::stable_import::{self, SecretsClaim, Services, Staged};
 
 /// Where an import is, as its dialog shows it.
 pub(crate) enum StableImport {
@@ -362,7 +363,7 @@ impl Workspace {
 fn copy_saved_passwords(secrets: SecretsClaim) -> Vec<String> {
     match Services::stable().and_then(|stable| Ok((stable, Services::this_build()?))) {
         Ok((stable, here)) => {
-            stable_import::copy_pending_secrets(secrets, &stable, &here, &SystemKeychain)
+            stable_import::copy_pending_secrets(secrets, &stable, &here, &SystemKeychain, &VAULTS)
         }
         Err(error) => {
             tracing::warn!("saved passwords could not be imported: {error}");
