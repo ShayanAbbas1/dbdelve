@@ -330,7 +330,7 @@ impl Connection {
         cancel: &CancelToken,
         fetch: Fetch,
     ) -> Result<QueryResult, DbError> {
-        match sql::generated_writes(self.config.speaks, sql) {
+        match sql::plugin_generated_writes(self.config.speaks, sql) {
             Some(statements) => self.write(statements, cancel),
             None => self.query(sql, cancel, fetch),
         }

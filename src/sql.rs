@@ -1231,6 +1231,18 @@ pub fn is_generated_write_on(engine: Engine, statement: &str) -> bool {
 /// `mql::parse`, and each passes `mql::is_generated_write` alone as a
 /// one-statement write. Redis writes no batch of this shape.
 pub(crate) fn generated_writes(engine: Engine, sql: &str) -> Option<Vec<String>> {
+    generated_writes_for(engine, false, sql)
+}
+
+/// [`generated_writes`] for a plugin that speaks `engine`'s dialect. Its grid
+/// writes no reviewed draft and no row named by every value, so the shapes
+/// those switches admit ([`SqlSpec::drafts`], [`SqlSpec::null_terms`]) stay
+/// refused: they belong to the engines whose built-in grid writes them.
+pub(crate) fn plugin_generated_writes(engine: Engine, sql: &str) -> Option<Vec<String>> {
+    generated_writes_for(engine, true, sql)
+}
+
+fn generated_writes_for(engine: Engine, plugin: bool, sql: &str) -> Option<Vec<String>> {
     match engine.syntax() {
         Syntax::Sql => {}
         Syntax::Mongo => return mongo_writes(sql),
@@ -1239,7 +1251,12 @@ pub(crate) fn generated_writes(engine: Engine, sql: &str) -> Option<Vec<String>>
     if is_transaction_bracket(sql) {
         return None;
     }
-    let spec = &engine.spec().sql;
+    let mut own = engine.spec().sql;
+    if plugin {
+        own.drafts = false;
+        own.null_terms = false;
+    }
+    let spec = &own;
     let Cow::Borrowed(text) = as_written(spec, sql)? else {
         return None;
     };
@@ -6825,6 +6842,20 @@ mod tests {
             insert_template(Engine::SqlServer, "dbo", "orders", &columns[..2]),
             None
         );
+    }
+
+    #[test]
+    fn a_plugin_is_not_admitted_the_draft_shapes_its_grid_never_writes() {
+        let draft = "INSERT INTO \"s\".\"t\" (\"a\") VALUES ('1'); \
+                     INSERT INTO \"s\".\"t\" (\"a\") VALUES ('2')";
+        assert!(generated_writes(Engine::Postgres, draft).is_some());
+        assert_eq!(plugin_generated_writes(Engine::Postgres, draft), None);
+        let update = "UPDATE \"s\".\"t\" SET \"a\" = '1' WHERE \"id\" = '2'";
+        let batch = format!("BEGIN;\n{update};\nCOMMIT;");
+        assert!(plugin_generated_writes(Engine::Postgres, &batch).is_some());
+        let null = "DELETE FROM \"s\".\"t\" WHERE \"id\" = '2' AND \"b\" IS NULL";
+        assert!(generated_writes(Engine::Postgres, null).is_some());
+        assert_eq!(plugin_generated_writes(Engine::Postgres, null), None);
     }
 
     #[test]
