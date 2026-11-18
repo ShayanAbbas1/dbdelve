@@ -1100,8 +1100,16 @@ impl Connection {
                 _ => None,
             };
             let sql = paged.as_deref().unwrap_or(sql);
+            // Nothing here reads where the rows came from, so no describe is paid.
             let result = self
-                .run_held(&mut guard, sql, Origin::Generated, Fetch::default(), true)
+                .run_held(
+                    &mut guard,
+                    sql,
+                    Origin::Generated,
+                    Fetch::default(),
+                    true,
+                    false,
+                )
                 .and_then(|(result, _)| kept_transaction(sql, result));
             in_transit.set(guard.as_ref().is_some_and(|session| session.in_transit));
             result
@@ -1138,7 +1146,8 @@ impl Connection {
         cancellable: bool,
     ) -> Result<QueryResult, DbError> {
         let mut guard = self.acquire(cancellable)?;
-        let (mut result, probed) = self.run_held(&mut guard, sql, origin, fetch, cancellable)?;
+        let (mut result, probed) =
+            self.run_held(&mut guard, sql, origin, fetch, cancellable, true)?;
         if !probed.is_empty() {
             drop(guard);
             (result.edit, result.read_only_reason) = self.edit_target(sql, &probed);
@@ -1186,7 +1195,8 @@ impl Connection {
     /// reaching it, and what each does to the session settled: a stopped or
     /// lost session is closed and replaced before this returns. The columns
     /// are those [`Self::edit_target`] asks about, which the caller does once
-    /// it has let go of the lock.
+    /// it has let go of the lock. `describe` is whether they are asked for at
+    /// all: a verified apply never reads them, so it does not pay the trip.
     fn run_held(
         &self,
         guard: &mut Option<Session>,
@@ -1194,6 +1204,7 @@ impl Connection {
         origin: Origin,
         fetch: Fetch,
         cancellable: bool,
+        describe: bool,
     ) -> Result<(QueryResult, Vec<ProbedColumn>), DbError> {
         let session = guard.as_mut().expect("acquired with a session");
 
@@ -1208,7 +1219,7 @@ impl Connection {
         } else {
             None
         };
-        let ran = self.execute(session, sql, origin, fetch);
+        let ran = self.execute(session, sql, origin, fetch, describe);
         // While it still reads as running: a Cancel let in after this would
         // find nothing running and keep itself for the next statement queued.
         drop(held);
@@ -1279,6 +1290,7 @@ impl Connection {
         sql: &str,
         origin: Origin,
         fetch: Fetch,
+        describe: bool,
     ) -> Option<Ran> {
         let mut statement = sql.to_string();
         let mut before = None;
@@ -1433,7 +1445,7 @@ impl Connection {
         let (result, probed) = match result {
             Ok(collected) => {
                 let rows = collected.result;
-                let probed = if collected.sets == 1 && !rows.columns.is_empty() {
+                let probed = if describe && collected.sets == 1 && !rows.columns.is_empty() {
                     describe_columns(session, &statement, &rows.columns, origin)
                 } else {
                     Vec::new()
