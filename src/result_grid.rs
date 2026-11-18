@@ -3386,16 +3386,27 @@ impl ResultGrid {
     /// column of the edit target, under that column's name. What the apply
     /// compares the row's re-read with, so it must not move with the rows if
     /// they are sorted while a review is open.
+    ///
+    /// A document's re-read is the whole document, so on a document store
+    /// every result column is one of its fields and is held under its own
+    /// name, a field no write may name (`$set`, `a.b`, the empty name)
+    /// included: left out, the document would never compare whole.
     pub(crate) fn fetched_cells(&self, row: usize) -> Vec<db::FetchedCell> {
         let Some(edit) = &self.result.edit else {
             return Vec::new();
         };
+        let documents = self.engine.syntax() == db::Syntax::Mongo;
         edit.columns
             .iter()
             .enumerate()
             .filter_map(|(col, name)| {
+                let column = match name {
+                    Some(name) => name.clone(),
+                    None if documents => self.result.columns.get(col)?.name.clone(),
+                    None => return None,
+                };
                 Some(db::FetchedCell {
-                    column: name.clone()?,
+                    column,
                     text: self.cell(row, col).map(str::to_owned),
                     cell_type: self
                         .result
@@ -9356,5 +9367,52 @@ mod tests {
         assert!(!grid.toggle_marks(&[0]), "below Read-write nothing toggles");
         assert!(grid.is_marked(0));
         assert!(!grid.toggle_marks(&[]), "nothing picked changes nothing");
+    }
+
+    /// A document's fields that cannot be written (an operator-like or dotted
+    /// name, the empty name) are still part of it, and the re-read holds them:
+    /// left out of the fetched cells, the document would never compare whole.
+    /// A SQL result's column that is not the target's stays out.
+    #[test]
+    fn a_documents_fetched_cells_hold_the_fields_it_cannot_write() {
+        let result = |engine_columns: Vec<Option<String>>| QueryResult {
+            columns: vec![
+                typed("_id", "int"),
+                typed("$set", "string"),
+                typed("a.b", "string"),
+            ],
+            rows: rows(vec![vec![
+                Some("1".into()),
+                Some("x".into()),
+                Some("y".into()),
+            ]]),
+            cell_types: vec![vec!["int", "string", "string"]],
+            edit: Some(EditTarget {
+                schema: "dbdelve_dev".into(),
+                table: "accounts".into(),
+                columns: engine_columns,
+                keys: vec![0],
+                ..Default::default()
+            }),
+            ..QueryResult::default()
+        };
+        let names = |grid: &ResultGrid| -> Vec<String> {
+            grid.fetched_cells(0)
+                .into_iter()
+                .map(|cell| cell.column)
+                .collect()
+        };
+        let document = ResultGrid::new(
+            result(vec![Some("_id".into()), None, None]),
+            Mode::ReadWrite,
+        )
+        .with_engine(db::Engine::MongoDb);
+        assert_eq!(names(&document), ["_id", "$set", "a.b"]);
+        let table = ResultGrid::new(
+            result(vec![Some("_id".into()), None, None]),
+            Mode::ReadWrite,
+        )
+        .with_engine(db::Engine::Sqlite);
+        assert_eq!(names(&table), ["_id"]);
     }
 }
