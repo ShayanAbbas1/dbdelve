@@ -614,6 +614,10 @@ struct Session {
     /// The user's own `SET ROWCOUNT` is in force, which a capped read's reset
     /// would take with it, so reads are drained instead.
     rowcount: bool,
+    /// The last statement failed in transit, not by the server's word: the
+    /// socket broke, or the server went away. A verified apply's `COMMIT`
+    /// that fails so may have landed.
+    in_transit: bool,
 }
 
 enum Lost {
@@ -918,6 +922,7 @@ impl Connection {
             timeout: self.server.statement_timeout,
             lost: None,
             rowcount: false,
+            in_transit: false,
         })
     }
 
@@ -1051,6 +1056,10 @@ impl Connection {
         if !proceed() {
             return failed(plain_error("Cancelled before it was sent.".into()));
         }
+        // Read off the held session after each statement, for the lost test,
+        // which cannot borrow the guard `send` holds: a `COMMIT` that failed
+        // in transit, not by the server's word, may have landed.
+        let in_transit = std::cell::Cell::new(false);
         let mut send = |sql: &str, sending: Sending| {
             // A statement that reset the session leaves a fresh one, or none
             // when the reconnect failed; only a `ROLLBACK` follows, whose
@@ -1063,8 +1072,11 @@ impl Connection {
             if sending == Sending::Open {
                 outside_transaction(session)?;
             }
-            self.run_held(&mut guard, sql, Origin::Generated, Fetch::default(), true)
-                .and_then(|(result, _)| kept_transaction(sql, result))
+            let result = self
+                .run_held(&mut guard, sql, Origin::Generated, Fetch::default(), true)
+                .and_then(|(result, _)| kept_transaction(sql, result));
+            in_transit.set(guard.as_ref().is_some_and(|session| session.in_transit));
+            result
         };
         // ponytail: a write's count is the outer statement's `@@ROWCOUNT`. An
         // `INSTEAD OF` trigger that writes nothing still counts 1, and an
@@ -1078,7 +1090,7 @@ impl Connection {
             &mut send,
             proceed,
             &|_| false,
-            &lost_session,
+            &|error| lost_session(error) || in_transit.get(),
         )
     }
 
@@ -1300,6 +1312,7 @@ impl Connection {
         // profile's queries, and time spent waiting behind the catalog load is
         // not time the server spent on this statement.
         let started = Instant::now();
+        session.in_transit = false;
         let outcome = session.fetching(&submitted, fetch, origin != Origin::Internal)?;
         let elapsed = started.elapsed();
         if origin == Origin::User
@@ -1328,7 +1341,10 @@ impl Connection {
             Err(error @ tiberius::error::Error::Server(_)) => Err(query_error(&error, sql)),
             // The socket Cancel shut down, rather than anything the server said.
             Err(_) if self.in_flight().stopped => return None,
-            Err(error) => Err(query_error(&error, sql)),
+            Err(error) => {
+                session.in_transit = true;
+                Err(query_error(&error, sql))
+            }
         };
         if capped.is_some() {
             // Taken back whatever the statement did, before anything else is
