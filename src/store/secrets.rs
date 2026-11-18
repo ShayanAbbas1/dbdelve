@@ -271,7 +271,7 @@ impl Vaults {
             .unwrap_or_else(|poison| poison.into_inner())
     }
 
-    fn lock_path(&self, variant: &str) -> Result<PathBuf, String> {
+    pub(crate) fn lock_path(&self, variant: &str) -> Result<PathBuf, String> {
         let directory = match &self.locks {
             Locks::DataRoot => data_root()?.join(LOCK_DIRECTORY),
             #[cfg(test)]

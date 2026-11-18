@@ -848,26 +848,34 @@ fn copy_into_vault(
     if connections.is_empty() {
         return failed.0;
     }
-    let stable = match Vault::load(keychain, &from.variant) {
-        Ok(vault) => vault,
-        Err(error) => {
-            for connection in connections {
-                failed.add(connection, &error);
-            }
-            return failed.0;
-        }
-    };
     let mut found: Vec<(&Listed, Secret, String)> = Vec::new();
-    for connection in connections {
-        for kind in Secret::BOTH {
-            let secret = match stable.get(&connection.id, kind) {
-                Some(secret) => Ok(Some(secret.to_string())),
-                None => keychain.read(&kind.item_service(&from.variant), &connection.id),
-            };
-            match secret {
-                Ok(Some(secret)) => found.push((connection, kind, secret)),
-                Ok(None) => {}
-                Err(error) => failed.add(connection, &error),
+    {
+        // Stable's own lock, so stable moving an item into its vault meanwhile
+        // can't hide it from both reads. Let go before this build's vault is
+        // locked, so only one variant is locked at a time.
+        let stable = vaults
+            .hold(&from.variant)
+            .and_then(|held| Ok((held, Vault::load(keychain, &from.variant)?)));
+        let (_held, stable) = match stable {
+            Ok(stable) => stable,
+            Err(error) => {
+                for connection in connections {
+                    failed.add(connection, &error);
+                }
+                return failed.0;
+            }
+        };
+        for connection in connections {
+            for kind in Secret::BOTH {
+                let secret = match stable.get(&connection.id, kind) {
+                    Some(secret) => Ok(Some(secret.to_string())),
+                    None => keychain.read(&kind.item_service(&from.variant), &connection.id),
+                };
+                match secret {
+                    Ok(Some(secret)) => found.push((connection, kind, secret)),
+                    Ok(None) => {}
+                    Err(error) => failed.add(connection, &error),
+                }
             }
         }
     }
@@ -899,7 +907,10 @@ impl Failed {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::super::secrets::fake::FakeKeychain;
+    use super::super::secrets::{held, vault_service};
     use super::*;
 
     /// A directory of the test's own under the system's temporary one, gone
@@ -1646,6 +1657,58 @@ mod tests {
         let here = Vault::load(&keychain, "dbdelve-nightly").unwrap();
         assert_eq!(here.get("a", Secret::Password), Some("pw-a"));
         assert_eq!(here.get("a", Secret::SshPassphrase), None);
+        assert_eq!(here.get("b", Secret::Password), Some("pw-b"));
+    }
+
+    /// Whether each of `variants`' vault locks is held when the item is next
+    /// read.
+    fn held_when_read(
+        keychain: &FakeKeychain,
+        vaults: &Vaults,
+        item: (&str, &str),
+        variants: [&str; 2],
+    ) -> Arc<Mutex<Vec<bool>>> {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let paths: Vec<PathBuf> = variants
+            .iter()
+            .map(|variant| vaults.lock_path(variant).unwrap())
+            .collect();
+        let into = Arc::clone(&seen);
+        keychain.on_read(
+            item.0,
+            item.1,
+            Box::new(move || *into.lock().unwrap() = paths.iter().map(|path| held(path)).collect()),
+        );
+        seen
+    }
+
+    #[test]
+    fn on_macos_stables_lock_is_held_across_its_reads_and_alone() {
+        let (from, to) = ("dbdelve-import-held", "dbdelve-nightly-import-held");
+        let keychain = FakeKeychain::with(&[(from, "b", "pw-b")]);
+        Vaults::scratch()
+            .write(&keychain, from, Secret::Password, "a", "pw-a")
+            .unwrap();
+        let vaults = Vaults::scratch();
+        let both = [from, to];
+        let at_vault = held_when_read(&keychain, &vaults, (&vault_service(from), "vault"), both);
+        let at_item = held_when_read(&keychain, &vaults, (from, "b"), both);
+        let at_write = held_when_read(&keychain, &vaults, (&vault_service(to), "vault"), both);
+
+        let failed = copy_into_vault(
+            &[connection("a", "A"), connection("b", "B")],
+            &Services::of(from),
+            &Services::of(to),
+            &keychain,
+            &vaults,
+        );
+
+        assert!(failed.is_empty());
+        assert_eq!(*at_vault.lock().unwrap(), [true, false]);
+        assert_eq!(*at_item.lock().unwrap(), [true, false]);
+        assert_eq!(*at_write.lock().unwrap(), [false, true]);
+        let here = Vault::load(&keychain, to).unwrap();
+        assert_eq!(here.get("a", Secret::Password), Some("pw-a"));
         assert_eq!(here.get("b", Secret::Password), Some("pw-b"));
     }
 
