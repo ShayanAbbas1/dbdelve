@@ -114,10 +114,16 @@ mode, always where the user can read it before it runs:
   DuckDB `is_autocommit`, MySQL and MariaDB `@@autocommit` and a `SET
   TRANSACTION` refused with 1568 inside one, SQL Server `@@TRANCOUNT` and
   `@@OPTIONS & 2`, Postgres the 25001 warning its `BEGIN` raises inside one.
-  There is no `FOR UPDATE`: the pinned grammar cannot read it,
-  so the compare catches a change made between the fetch and the apply, not one
-  made in the milliseconds between the re-read and the write, and the count
-  still catches a row that vanished in that window. Targets that do not verify
+  There is no `FOR UPDATE`: the pinned grammar cannot read it.
+  Every re-read runs before any write, so a step's row waits from its re-read
+  through the rest of the re-reads and the writes before its own, many round
+  trips on a long draft. The isolation the apply runs under covers that
+  window: Postgres opens it `REPEATABLE READ` (a write to a row changed since
+  the snapshot fails with 40001), MySQL and MariaDB `SERIALIZABLE` (each
+  re-read holds a shared lock on its rows to the `COMMIT`), SQL Server runs
+  each re-read `REPEATABLE READ` (the same, by lock); SQLite has one writer and
+  DuckDB fails a conflicting write. MongoDB has no transaction, so a document
+  changed between its re-read and its write is overwritten. Targets that do not verify
   keep `Connection::generated`. On MySQL and MariaDB a table whose storage
   engine has no transactions (`information_schema.ENGINES.TRANSACTIONS`, so
   MyISAM, Aria, MEMORY) is not editable at all: the `ROLLBACK` would undo

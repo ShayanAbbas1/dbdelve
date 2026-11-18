@@ -1471,6 +1471,14 @@ impl Connection {
             .map(|cell| cell.column.as_str())
             .collect();
         let mut send = |sql: &str, sending: Sending| {
+            // Under `REPEATABLE READ` every read of the apply sees the one
+            // snapshot its first re-read took, and a write to a row another
+            // transaction changed after it fails with 40001 rather than
+            // overwriting that change.
+            let sql = match sending {
+                Sending::Open => "BEGIN ISOLATION LEVEL REPEATABLE READ",
+                _ => sql,
+            };
             let result = self
                 .ran(&mut client, sql, false, Fetch::default(), None)
                 .map(|(mut result, _)| {

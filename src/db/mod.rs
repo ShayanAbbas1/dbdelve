@@ -3767,11 +3767,18 @@ pub(crate) fn drift(
 ///
 /// Every re-read runs before the first write, so the draft's own cascades and
 /// triggers do not show as drift.
-// ponytail: there is no `FOR UPDATE` on the re-read (the pinned grammar cannot
-// parse it), so the compare sees a change made between the fetch and the
-// apply, not one made in the milliseconds between the re-read and the write.
-// The count still sees a row that vanished in that window; a value changed in
-// it is overwritten. The upgrade is a locking read once the grammar reads it.
+///
+/// That leaves the window between a step's re-read and its write spanning the
+/// rest of the re-reads and the writes before it, many round trips on a long
+/// draft. The arms close it where their server can:
+/// Postgres opens the apply `REPEATABLE READ`, so a write to a row another
+/// transaction changed since the snapshot fails with 40001; MySQL and MariaDB
+/// open it `SERIALIZABLE`, so each re-read holds a shared lock on its rows to
+/// the `COMMIT`; SQL Server runs each re-read `REPEATABLE READ`, which does
+/// the same. SQLite has one writer, and its re-read's lock, or in WAL a write
+/// on a snapshot another has moved past, keeps the window shut; DuckDB fails a
+/// write that conflicts with a commit since its snapshot. There is no `FOR
+/// UPDATE` on the re-read: the pinned grammar cannot parse it.
 pub(super) fn run_verified(
     engine: Engine,
     steps: &[VerifiedStep],

@@ -618,6 +618,9 @@ struct Session {
     /// socket broke, or the server went away. A verified apply's `COMMIT`
     /// that fails so may have landed.
     in_transit: bool,
+    /// A verified apply's read is in flight: it runs under `REPEATABLE READ`,
+    /// so the shared locks it takes are held to the apply's `COMMIT`.
+    repeatable_read: bool,
 }
 
 enum Lost {
@@ -923,6 +926,7 @@ impl Connection {
             lost: None,
             rowcount: false,
             in_transit: false,
+            repeatable_read: false,
         })
     }
 
@@ -1072,6 +1076,11 @@ impl Connection {
             if sending == Sending::Open {
                 outside_transaction(session)?;
             }
+            // A re-read's rows stay locked until the apply ends, so no other
+            // session changes one between its re-read and its write. The level
+            // is set inside the read's own `sp_executesql`, which puts the
+            // session's back when it returns.
+            session.repeatable_read = sending == Sending::Read;
             let result = self
                 .run_held(&mut guard, sql, Origin::Generated, Fetch::default(), true)
                 .and_then(|(result, _)| kept_transaction(sql, result));
@@ -1287,6 +1296,10 @@ impl Connection {
             Origin::Generated if crate::sql::is_transaction_bracket(&statement) => {
                 statement.clone()
             }
+            Origin::Generated if session.repeatable_read => scoped_under(
+                &format!("{SESSION_OPTIONS}SET TRANSACTION ISOLATION LEVEL REPEATABLE READ; "),
+                &statement,
+            ),
             Origin::Generated | Origin::Internal => scoped(&statement),
         };
         // A lone read is stopped at the limit by the server: one row past it
