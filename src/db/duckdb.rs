@@ -439,8 +439,9 @@ impl Connection {
 
     /// Applies `steps` as one verified sequence on this session, under one
     /// acquisition of its lock, so no other statement runs between the
-    /// re-reads and the writes: see [`super::run_verified`]. A count is the `Count` column DuckDB answers a write with, the rows the
-    /// statement matched, and a write-write conflict surfaces at the statement
+    /// re-reads and the writes: see [`super::run_verified`]. A count is the
+    /// `Count` column DuckDB answers a write with, the rows the statement
+    /// matched, and a write-write conflict surfaces at the statement
     /// that met it, so it is a failure at that write. The statement timeout is
     /// armed once for the sequence. `proceed` says no once a Cancel has come.
     ///

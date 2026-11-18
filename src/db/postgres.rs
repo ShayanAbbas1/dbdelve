@@ -1430,8 +1430,9 @@ impl Connection {
 
     /// Applies `steps` as one verified sequence on this session, under one
     /// acquisition of its lock, so no other tab's statement runs between the
-    /// re-reads and the writes: see [`super::run_verified`]. Every statement goes through [`Self::ran`] untyped, so no
-    /// describe runs inside the transaction. A count is the command tag's, the
+    /// re-reads and the writes: see [`super::run_verified`]. Every statement
+    /// goes through [`Self::ran`] untyped, so no describe runs inside the
+    /// transaction. A count is the command tag's, the
     /// rows the statement matched, so a write a `BEFORE` row trigger or a rule
     /// skipped counts none. `proceed` says no once a Cancel has come.
     pub fn apply_verified(
