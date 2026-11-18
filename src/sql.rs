@@ -11299,6 +11299,124 @@ mod tests {
         }
     }
 
+    /// A row named by every value, over hostile names and values, is written
+    /// on each of the six engines that verify as statements the gate admits,
+    /// each read again by a read cut from it that the read gate admits too.
+    #[test]
+    fn a_keyless_rows_writes_with_hostile_names_and_values_pass_the_gates_and_read_back() {
+        let engines = [
+            Engine::Postgres,
+            Engine::MySql,
+            Engine::MariaDb,
+            Engine::Sqlite,
+            Engine::DuckDb,
+            Engine::SqlServer,
+        ];
+        // Each hostile part alone, over an otherwise plain row, so a refusal
+        // names what it refused.
+        let tables = ["birds", "we\"ird", "back`tick", "it's", "dou\"\"bled"];
+        let columns = ["bird", "we\"ird", "back`tick", "it's", "dou\"\"bled", "[b]"];
+        let values = [
+            "wren",
+            "we\"ird",
+            "it's",
+            "x''y",
+            "back`tick",
+            "a\\b",
+            "a\\'b",
+            "N'x'",
+        ];
+        let (mut admitted, mut unread) = (Vec::new(), Vec::new());
+        for engine in engines {
+            let schema = match engine {
+                Engine::Sqlite => "main",
+                Engine::SqlServer => "dbo",
+                _ => "public",
+            };
+            let cases = tables
+                .iter()
+                .map(|table| (*table, "bird", "wren"))
+                .chain(columns.iter().map(|column| ("birds", *column, "wren")))
+                .chain(values.iter().map(|value| ("birds", "bird", *value)));
+            for (table, column, value) in cases {
+                let keys = [(column, value), ("place", "oak")];
+                let delete = delete_row_matching(engine, schema, table, &keys, &["gone"], &[])
+                    .unwrap_or_else(|| panic!("{engine:?}: no DELETE"));
+                let update = update_batch(
+                    engine,
+                    &[PendingRow {
+                        schema: schema.into(),
+                        table: table.into(),
+                        sets: vec![("place".into(), NewValue::Value(value.into()))],
+                        keys: keys
+                            .iter()
+                            .map(|(column, value)| (column.to_string(), value.to_string()))
+                            .collect(),
+                        null_keys: vec!["gone".into()],
+                        ..PendingRow::default()
+                    }],
+                )
+                .unwrap_or_else(|error| panic!("{engine:?}: {error}"));
+                for statement in [delete, update] {
+                    // Refusing is the gate's right: such a table is read-only.
+                    // What it admits must be read again by its own predicate.
+                    if !is_generated_write_on(engine, &statement) {
+                        assert_eq!(row_reread(engine, &statement), None, "{statement}");
+                        continue;
+                    }
+                    admitted.push((engine, table, column, value));
+                    let written = generated_writes(engine, &statement);
+                    let Some([one]) = written.as_deref() else {
+                        panic!("{engine:?}: not one statement: {statement}");
+                    };
+                    // No re-read leaves the draft unreviewed, which fails closed.
+                    let Some(reread) = row_reread(engine, one) else {
+                        unread.push(one.to_string());
+                        continue;
+                    };
+                    assert!(is_generated_select(engine, &reread), "{engine:?}: {reread}");
+                    let predicate = one.trim_end_matches(';').rsplit_once(" WHERE ").unwrap().1;
+                    assert!(
+                        reread.ends_with(&format!(" WHERE {predicate} LIMIT 2")),
+                        "{engine:?}: {reread}"
+                    );
+                    if one.starts_with("UPDATE") {
+                        let read = row_read(engine, one)
+                            .unwrap_or_else(|| panic!("{engine:?}: no read back of {one}"));
+                        assert!(is_generated_select(engine, &read), "{engine:?}: {read}");
+                    }
+                    if matches!(engine, Engine::MySql | Engine::MariaDb) {
+                        assert_eq!(
+                            written_table(engine, one),
+                            Some(vec![schema.to_string(), table.to_string()]),
+                            "{engine:?}: {one}"
+                        );
+                    }
+                }
+            }
+        }
+        // Every hostile value is written, admitted and read back on all six:
+        // a value is quoted, never refused.
+        for engine in engines {
+            for value in values {
+                let both = admitted
+                    .iter()
+                    .filter(|case| **case == (engine, "birds", "bird", value))
+                    .count();
+                assert!(both >= 2, "{engine:?}: {value}");
+            }
+        }
+        // ponytail: the grammar splits a table name holding a doubled quote in
+        // an `UPDATE` (not a `DELETE`), so such a draft has no re-read and is
+        // refused at review. It fails closed; reading the name whole is the fix.
+        assert!(
+            unread
+                .iter()
+                .all(|statement| statement.contains("\"we\"\"ird\"")),
+            "{unread:#?}"
+        );
+    }
+
     /// The table a generated write names is read whole, quoting and all, so
     /// the apply can ask the catalog about the very table it writes.
     #[test]
