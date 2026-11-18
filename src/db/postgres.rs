@@ -514,7 +514,11 @@ SELECT
     -- an older server has no such key rather than no such column: NULL makes
     -- this say 'no', which is right there. 'v' is PostgreSQL 18's virtual column.
     CASE WHEN to_jsonb(attribute) ->> 'attgenerated' IN ('s', 'v') THEN 'yes' ELSE 'no' END
-        AS is_generated
+        AS is_generated,
+    -- Whether a float renders with every digit it needs to read back as
+    -- itself: the default from 12, and not at 0 or less, the default before.
+    CASE WHEN current_setting('extra_float_digits')::int > 0 THEN 'yes' ELSE 'no' END
+        AS floats_round_trip
 FROM pg_catalog.pg_class AS class
 JOIN pg_catalog.pg_namespace AS namespace
     ON namespace.oid = class.relnamespace
@@ -1948,6 +1952,9 @@ struct KeyedTable {
     table: String,
     columns: Vec<TableColumn>,
     key: Vec<i16>,
+    /// The session renders a float with every digit it needs to read back as
+    /// itself (`extra_float_digits` above 0), so its text names its value.
+    floats_round_trip: bool,
 }
 
 struct TableColumn {
@@ -1968,6 +1975,7 @@ fn keyed_table(result: &QueryResult) -> Option<KeyedTable> {
         table: required_cell(result, first, "table_name").ok()?.to_string(),
         columns: Vec::new(),
         key: Vec::new(),
+        floats_round_trip: required_cell(result, first, "floats_round_trip").ok()? == "yes",
     };
 
     for row in &result.rows {
@@ -2078,6 +2086,23 @@ fn resolve_keyless_target(
             None,
             refusal(format!(
                 "{} ({}) cannot be matched by its value",
+                column.name, column.type_name
+            )),
+        );
+    }
+    // At `extra_float_digits` 0 or less a float renders rounded, so its text
+    // misses its row or names another holding the rounded value.
+    if !table.floats_round_trip
+        && let Some(column) = table
+            .columns
+            .iter()
+            .find(|column| matches!(column.type_name.as_str(), "float4" | "float8"))
+    {
+        return (
+            None,
+            refusal(format!(
+                "{} ({}) cannot be matched by its value while extra_float_digits is 0 or \
+                 less",
                 column.name, column.type_name
             )),
         );
@@ -2782,6 +2807,7 @@ mod tests {
                 .filter(|(_, _, in_key)| *in_key)
                 .map(|(attribute, _, _)| *attribute)
                 .collect(),
+            floats_round_trip: true,
         }
     }
 
@@ -4263,7 +4289,38 @@ mod tests {
                 })
                 .collect(),
             key: Vec::new(),
+            floats_round_trip: true,
         }
+    }
+
+    /// At `extra_float_digits` 0 or less, the default before Postgres 12, a
+    /// float renders rounded: `0.30000000000000004` as `0.3`, whose literal
+    /// names a row holding exactly 0.3. A keyless table with a float is then
+    /// not edited by value; one without is.
+    #[test]
+    fn a_rounded_float_rendering_leaves_a_keyless_table_with_a_float_read_only() {
+        let rounded = |columns: &[(i16, &str, &str, bool)]| KeyedTable {
+            floats_round_trip: false,
+            ..keyless(columns)
+        };
+        let (target, reason) = edit_outcome(
+            &probed(&[("text", Some(42), Some(1)), ("float8", Some(42), Some(2))]),
+            &rounded(&[(1, "bird", "text", false), (2, "weight", "float8", false)]),
+        );
+        assert!(target.is_none());
+        assert_eq!(
+            reason.as_deref(),
+            Some(
+                "A table without a primary key is edited by matching every column, and \
+                 weight (float8) cannot be matched by its value while extra_float_digits \
+                 is 0 or less."
+            )
+        );
+        let (target, _) = edit_outcome(
+            &probed(&[("text", Some(42), Some(1)), ("int4", Some(42), Some(2))]),
+            &rounded(&[(1, "bird", "text", false), (2, "seen", "int4", false)]),
+        );
+        assert!(target.is_some(), "no float, nothing rounded");
     }
 
     #[test]

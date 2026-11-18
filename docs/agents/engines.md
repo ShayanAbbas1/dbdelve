@@ -676,7 +676,9 @@ Decided, and not to be re-litigated:
   - Postgres lists `bpchar`, `varchar`, `text`, `int2`, `int4`, `int8`,
     `numeric`, `float4`, `float8`, `bool`, `jsonb`, `money`, `interval`,
     `uuid`, `date`, `time`, `timetz`, `timestamp` and `timestamptz`, by the
-    catalog's `typname`, schema-qualified for a type that is not a built-in.
+    catalog's `typname`, schema-qualified for a type that is not a built-in;
+    `float4` and `float8` only while `extra_float_digits` is above 0 (the
+    default from 12), since below it a float renders rounded.
     Left off: `bytea` (rendered as `\x…` and quoted as that text, which reads
     as those bytes only while `standard_conforming_strings` is on), `json`,
     `xml`, `point` and `polygon` (no `=`
