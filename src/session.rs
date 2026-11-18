@@ -1588,21 +1588,25 @@ impl Session {
     pub(crate) fn grids(&self) -> impl Iterator<Item = &Entity<TableState<ResultGrid>>> {
         self.queries
             .iter()
-            .flat_map(|tab| {
-                std::iter::once(&tab.results)
-                    .chain(tab.lent.iter().map(|(grid, _)| grid))
-                    .chain(
-                        tab.queue
-                            .iter()
-                            .flat_map(|queue| queue.done.iter().map(|finished| &finished.grid)),
-                    )
-            })
+            .flat_map(QueryTab::grids)
             .chain(self.objects.iter().filter_map(|tab| match &tab.body {
                 ObjectBody::Relation { results, .. } => Some(results),
                 ObjectBody::Routine(_)
                 | ObjectBody::Structure { .. }
                 | ObjectBody::Diagram { .. } => None,
             }))
+    }
+
+    /// Every grid `tab` holds: a query tab's queue and lent results as well as
+    /// its own slot, any of which can carry staged edits.
+    pub(crate) fn grids_of(&self, tab: Tab) -> Vec<&Entity<TableState<ResultGrid>>> {
+        match tab {
+            Tab::Query(id) => self
+                .query_tab(id)
+                .map(|tab| tab.grids().collect())
+                .unwrap_or_default(),
+            Tab::Object(_) => self.results(tab).into_iter().collect(),
+        }
     }
 
     /// Where a run's state and rows belong. Returning both together is what
@@ -2729,6 +2733,16 @@ pub(crate) fn runs_at_once(engine: Engine, mode: Mode, statements: &[&str]) -> b
 }
 
 impl QueryTab {
+    fn grids(&self) -> impl Iterator<Item = &Entity<TableState<ResultGrid>>> {
+        std::iter::once(&self.results)
+            .chain(self.lent.iter().map(|(grid, _)| grid))
+            .chain(
+                self.queue
+                    .iter()
+                    .flat_map(|queue| queue.done.iter().map(|finished| &finished.grid)),
+            )
+    }
+
     /// Whether the results pane offers Data and Plan to flip between.
     pub(crate) fn flips_to_plan(&self) -> bool {
         self.plan.as_ref().is_some_and(|plan| !plan.typed)

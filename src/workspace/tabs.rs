@@ -1297,8 +1297,9 @@ impl Workspace {
         self.profile().is_some_and(|profile| {
             profile
                 .session
-                .results(tab)
-                .is_some_and(|results| results.read(cx).delegate().has_pending())
+                .grids_of(tab)
+                .into_iter()
+                .any(|results| results.read(cx).delegate().has_pending())
         })
     }
 
