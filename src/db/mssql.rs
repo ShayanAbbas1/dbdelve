@@ -2303,7 +2303,9 @@ fn table_columns(result: &QueryResult) -> Option<Vec<TableColumn>> {
 /// exercises it. Left off: `xml`, `text`, `ntext` and `image`, which have no `=`
 /// (the server answers a comparison with an error, mid-transaction); `geography`,
 /// `geometry`, `hierarchyid` and `sql_variant`, which this driver cannot read;
-/// `timestamp` (rowversion) and any alias type, never exercised.
+/// `money` and `smallmoney`, which the driver hands over as an `f64`, so two
+/// amounts past about 1e12 render alike and one's literal names the other's
+/// row; `timestamp` (rowversion) and any alias type, never exercised.
 fn is_matchable(data_type: &str) -> bool {
     matches!(
         data_type,
@@ -2315,8 +2317,6 @@ fn is_matchable(data_type: &str) -> bool {
             | "numeric"
             | "real"
             | "float"
-            | "money"
-            | "smallmoney"
             | "bit"
             | "char"
             | "varchar"
@@ -3396,8 +3396,11 @@ mod tests {
             ))
         };
         // The types `=` errors on, the CLR ones the driver cannot read at all,
-        // and rowversion, which no test matched.
+        // the money types the driver reads lossily, and rowversion, which no
+        // test matched.
         for data_type in [
+            "money",
+            "smallmoney",
             "xml",
             "text",
             "ntext",
@@ -3442,8 +3445,6 @@ mod tests {
             "numeric",
             "real",
             "float",
-            "money",
-            "smallmoney",
             "bit",
             "char",
             "varchar",
@@ -6014,8 +6015,6 @@ mod tests {
         ("numeric(5,1)", "3.5"),
         ("real", "0.1"),
         ("float", "0.30000000000000004"),
-        ("money", "1234.5"),
-        ("smallmoney", "-3.25"),
         ("bit", "1"),
         ("char(3)", "'ab'"),
         ("varchar(32)", "'h''e llo, \\ {a: 1}'"),

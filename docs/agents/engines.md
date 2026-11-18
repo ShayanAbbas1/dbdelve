@@ -710,10 +710,12 @@ Decided, and not to be re-litigated:
     the catalog query reports such a column as `json`, so it is left off there
     too. Only a base table qualifies; a view has no rows to write back.
   - SQL Server lists `tinyint`, `smallint`, `int`, `bigint`, `decimal`,
-    `numeric`, `real`, `float`, `money`, `smallmoney`, `bit`, `char`,
-    `varchar`, `nchar`, `nvarchar`, `date`, `time`, `datetime`, `datetime2`,
-    `smalldatetime`, `datetimeoffset`, `uniqueidentifier`, `binary` and
-    `varbinary`, by `TYPE_NAME` of the column's user type. Left off: `xml`,
+    `numeric`, `real`, `float`, `bit`, `char`, `varchar`, `nchar`,
+    `nvarchar`, `date`, `time`, `datetime`, `datetime2`, `smalldatetime`,
+    `datetimeoffset`, `uniqueidentifier`, `binary` and `varbinary`, by
+    `TYPE_NAME` of the column's user type. Left off: `money` and `smallmoney`
+    (the driver hands them over as an `f64`, so two amounts past about 1e12
+    render alike and one's literal names the other's row), `xml`,
     `text`, `ntext` and `image` (no `=`: the server answers the comparison with
     an error, which inside the apply's transaction would be a failed write),
     `geography`, `geometry`, `hierarchyid` and `sql_variant` (the driver
