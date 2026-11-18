@@ -1065,6 +1065,18 @@ impl Connection {
         // in transit, not by the server's word, may have landed.
         let in_transit = std::cell::Cell::new(false);
         let mut send = |sql: &str, sending: Sending| {
+            // A session whose `ROLLBACK` failed is closed and opened again,
+            // which ends whatever the apply left open on it.
+            if sending == Sending::Abandon {
+                let reset = self.stop(
+                    &mut guard,
+                    "The apply's ROLLBACK failed, so its session was closed.".into(),
+                );
+                return match guard.is_some() {
+                    true => Ok(QueryResult::default()),
+                    false => Err(reset),
+                };
+            }
             // A statement that reset the session leaves a fresh one, or none
             // when the reconnect failed; only a `ROLLBACK` follows, whose
             // error the sequence does not report.

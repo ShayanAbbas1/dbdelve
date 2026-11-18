@@ -1477,6 +1477,8 @@ impl Connection {
             // overwriting that change.
             let sql = match sending {
                 Sending::Open => "BEGIN ISOLATION LEVEL REPEATABLE READ",
+                // A closed connection took its transaction with it.
+                Sending::Abandon if client.client.is_closed() => return Ok(QueryResult::default()),
                 _ => sql,
             };
             let result = self

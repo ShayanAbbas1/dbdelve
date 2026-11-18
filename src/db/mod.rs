@@ -3656,6 +3656,10 @@ pub(crate) enum Sending {
     /// and fails with [`in_a_transaction`] rather than open one inside it.
     Open,
     Bracket,
+    /// The apply's `ROLLBACK` failed. The arm makes sure the session is left
+    /// in no transaction of the apply's: it ends one still open, resetting
+    /// the session where it cannot, and answers `Ok` once none is left.
+    Abandon,
     Read,
     Write(StepKind),
 }
@@ -3828,13 +3832,6 @@ pub(super) fn run_verified(
         return refused("The apply could not be verified on this connection.");
     }
 
-    // The error of a rollback is not the apply's to report: the session it
-    // would have ended may be the thing that failed.
-    let roll_back = |send: &mut dyn FnMut(&str, Sending) -> Result<QueryResult, DbError>| {
-        let _ = send("ROLLBACK", Sending::Bracket);
-    };
-    let cancelled = || plain_error("Cancelled before it was sent.".into());
-
     if !proceed() {
         return ApplyOutcome::Failed {
             stage: ApplyStage::Begin,
@@ -3849,6 +3846,31 @@ pub(super) fn run_verified(
             error,
         };
     }
+    // A panic part way, in an arm's `send` or here, would leave the session
+    // inside the apply's transaction, holding its locks until it closes: it is
+    // rolled back first, and the panic then goes on its way.
+    let sequence = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        opened(steps, &mut *send, proceed, skipped, lost)
+    }));
+    match sequence {
+        Ok(outcome) => outcome,
+        Err(panic) => {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| roll_back(send)));
+            std::panic::resume_unwind(panic)
+        }
+    }
+}
+
+/// [`run_verified`] once its transaction is open: the re-reads, the compare,
+/// the writes and `COMMIT`, every exit before it rolling back.
+fn opened(
+    steps: &[VerifiedStep],
+    send: &mut dyn FnMut(&str, Sending) -> Result<QueryResult, DbError>,
+    proceed: &dyn Fn() -> bool,
+    skipped: &dyn Fn(&FetchedCell) -> bool,
+    lost: &dyn Fn(&DbError) -> bool,
+) -> ApplyOutcome {
+    let cancelled = || plain_error("Cancelled before it was sent.".into());
 
     let mut drifted = Vec::new();
     for (index, step) in steps.iter().enumerate() {
@@ -3978,6 +4000,17 @@ pub(super) fn run_verified(
     ApplyOutcome::Applied {
         affected,
         read_back,
+    }
+}
+
+/// Ends the transaction a verified apply opened. Its error is not the apply's
+/// to report: the session it would have ended may be the thing that failed.
+/// When it fails, the arm is asked to make sure the session holds nothing of
+/// the apply's ([`Sending::Abandon`]), resetting it if it must, so a later
+/// `COMMIT` of the user's cannot land the apply's writes.
+fn roll_back(send: &mut dyn FnMut(&str, Sending) -> Result<QueryResult, DbError>) {
+    if send("ROLLBACK", Sending::Bracket).is_err() {
+        let _ = send("ROLLBACK", Sending::Abandon);
     }
 }
 
@@ -4653,6 +4686,66 @@ mod tests {
             read_back: None,
             by_key: true,
         }
+    }
+
+    /// A `ROLLBACK` that fails is followed by the arm's abandon, which ends
+    /// or resets what the apply left open; one that succeeds is not.
+    #[test]
+    fn a_failed_rollback_asks_the_arm_to_abandon_the_transaction() {
+        let run = |rollback_fails: bool| {
+            let mut sent = Vec::new();
+            let mut send = |sql: &str, sending: Sending| {
+                sent.push((sql.to_string(), sending));
+                match sql.split_whitespace().next() {
+                    Some("SELECT") => Ok(reread(&["id"], &[&[Some("2")]])),
+                    Some("ROLLBACK") if rollback_fails && sending == Sending::Bracket => {
+                        Err(plain_error("the connection closed".into()))
+                    }
+                    _ => Ok(QueryResult::default()),
+                }
+            };
+            let outcome = run_verified(
+                Engine::Postgres,
+                &[update_step()],
+                &mut send,
+                &|| true,
+                &|_| false,
+                &|_| false,
+            );
+            assert!(matches!(outcome, ApplyOutcome::Drifted(_)), "{outcome:?}");
+            sent.into_iter()
+                .filter(|(_, sending)| *sending == Sending::Abandon)
+                .count()
+        };
+        assert_eq!(run(true), 1);
+        assert_eq!(run(false), 0);
+    }
+
+    /// A panic part way through the sequence rolls the apply back before it
+    /// goes on unwinding, so the session is not left inside its transaction.
+    #[test]
+    fn a_panic_part_way_rolls_the_apply_back_and_still_panics() {
+        let sent = std::cell::RefCell::new(Vec::<String>::new());
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut send = |sql: &str, _: Sending| {
+                sent.borrow_mut().push(sql.to_string());
+                match sql.split_whitespace().next() {
+                    Some("SELECT") => Ok(reread(&["id"], &[&[Some("1")]])),
+                    Some("UPDATE") => panic!("the driver panicked"),
+                    _ => Ok(QueryResult::default()),
+                }
+            };
+            run_verified(
+                Engine::Postgres,
+                &[update_step()],
+                &mut send,
+                &|| true,
+                &|_| false,
+                &|_| false,
+            )
+        }));
+        assert!(panicked.is_err(), "the panic is not swallowed");
+        assert_eq!(sent.borrow().last().map(String::as_str), Some("ROLLBACK"));
     }
 
     /// A `DELETE` that counts none is taken as its row already gone only when

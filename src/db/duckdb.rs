@@ -478,6 +478,9 @@ impl Connection {
             if sending == Sending::Open && !connection.is_autocommit() {
                 return Err(super::in_a_transaction());
             }
+            if sending == Sending::Abandon && connection.is_autocommit() {
+                return Ok(QueryResult::default());
+            }
             run(&connection, sql, Fetch::default())
         };
         // A file or memory database has no socket to lose, and renders every

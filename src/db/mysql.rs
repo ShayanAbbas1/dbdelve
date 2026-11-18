@@ -849,6 +849,17 @@ impl Connection {
             // A Cancel's `KILL QUERY` that lands on the `COMMIT` answers 1317
             // on a live session, while InnoDB may have committed already: as
             // unknown as a `COMMIT` whose session went.
+            // A session whose `ROLLBACK` failed is gone, which ended the
+            // transaction, or is reset, which ends it and the session's state.
+            if sending == Sending::Abandon {
+                if connection.ping().is_err() || connection.query_drop(sql).is_ok() {
+                    return Ok(QueryResult::default());
+                }
+                return connection
+                    .reset()
+                    .map(|()| QueryResult::default())
+                    .map_err(|error| query_error(&error));
+            }
             if sending == Sending::Bracket && sql == "COMMIT" {
                 return match connection.query_drop(sql) {
                     Ok(()) => Ok(QueryResult::default()),
