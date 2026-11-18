@@ -4105,13 +4105,31 @@ mod tests {
                 engine.quote_identifier("id"),
             )
         };
-        let steps = verified_steps(engine, &write(921), vec![(StepKind::Update, before)]);
-        // The re-read still finds the row, so the write is what counts: it
-        // names a row that is not there.
-        let missing = VerifiedStep {
-            sql: write(929),
-            ..steps[0].clone()
-        };
+        let steps = verified_steps(
+            engine,
+            &write(921),
+            vec![(StepKind::Update, before.clone())],
+        );
+        // Every re-read runs before the first write, so both find the row; the
+        // `DELETE` before the update then takes it, and the update's count of
+        // none is what fails the apply.
+        let delete_first = crate::sql::draft_batch(
+            engine,
+            &[crate::sql::DraftDelete {
+                schema: "dbdelve_dev".into(),
+                table: "conformance".into(),
+                keys: vec![("id".into(), "921".into())],
+                null_keys: Vec::new(),
+                types: vec![("id".into(), "int".into())],
+            }],
+            &[],
+            &[],
+        )
+        .expect("the delete is written");
+        let missing = [
+            verified_steps(engine, &delete_first, vec![(StepKind::Delete, before)]).remove(0),
+            steps[0].clone(),
+        ];
         for locale in ["en_US", "ru_RU", "ja_JP"] {
             run(&format!("SET SESSION lc_messages = '{locale}'"));
             let outcome = connection.apply_verified(&steps, &CancelToken::default());
@@ -4119,12 +4137,11 @@ mod tests {
                 matches!(outcome, ApplyOutcome::Applied { affected: 1, .. }),
                 "{engine:?} in {locale}: {outcome:?}"
             );
-            let outcome =
-                connection.apply_verified(std::slice::from_ref(&missing), &CancelToken::default());
+            let outcome = connection.apply_verified(&missing, &CancelToken::default());
             assert_eq!(
                 outcome,
                 ApplyOutcome::Miscounted {
-                    step: 0,
+                    step: 1,
                     count: Some(0)
                 },
                 "{engine:?} in {locale}"

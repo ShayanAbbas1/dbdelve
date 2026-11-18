@@ -6452,8 +6452,7 @@ mod tests {
     #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
     fn live_each_write_of_a_verified_sequence_is_counted_apart() {
         use crate::db::{
-            ApplyOutcome, CancelToken, FetchedCell, StepKind, VerifiedStep,
-            conformance::verified_steps,
+            ApplyOutcome, CancelToken, FetchedCell, StepKind, conformance::verified_steps,
         };
 
         let connection =
@@ -6507,7 +6506,7 @@ mod tests {
                 table: table.into(),
                 sets: vec![("label".into(), NewValue::Value("changed".into()))],
                 keys: vec![("id".into(), "1".into())],
-                types,
+                types: types.clone(),
                 ..PendingRow::default()
             }],
             &[],
@@ -6531,17 +6530,32 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
-        // The re-read still finds row 1, so the write is what counts: it names
-        // a row that is not there. The `DELETE` before it counted one and a
-        // bracket after it would read none, and the update's count is neither.
-        let update = steps[1].sql.clone();
-        let missing = VerifiedStep {
-            sql: update.replace("= '1'", "= '999'"),
-            ..steps[1].clone()
-        };
-        assert_ne!(missing.sql, update, "{update}");
+        // Every re-read runs before the first write, so both find row 1; the
+        // `DELETE` before the update then takes it, and the update's count of
+        // none is what fails the apply.
+        let delete_one = sql::draft_batch(
+            Engine::SqlServer,
+            &[sql::DraftDelete {
+                schema: "dbo".into(),
+                table: table.into(),
+                keys: vec![("id".into(), "1".into())],
+                null_keys: Vec::new(),
+                types: types.clone(),
+            }],
+            &[],
+            &[],
+        )
+        .expect("the delete is written");
+        let gone_first = verified_steps(
+            Engine::SqlServer,
+            &delete_one,
+            vec![(StepKind::Delete, read(1))],
+        );
         assert_eq!(
-            connection.apply_verified(&[steps[0].clone(), missing], &CancelToken::default()),
+            connection.apply_verified(
+                &[gone_first[0].clone(), steps[1].clone()],
+                &CancelToken::default()
+            ),
             ApplyOutcome::Miscounted {
                 step: 1,
                 count: Some(0)
