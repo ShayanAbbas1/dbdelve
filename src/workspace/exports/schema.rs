@@ -1,6 +1,8 @@
 //! Writing a whole schema to one file of SQL: each table's `CREATE`, then each
 //! table's rows, in an order the file runs back in.
 
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::io::Write;
 
 use super::*;
@@ -425,31 +427,48 @@ pub(super) fn dependency_order(schema: &str, tables: Vec<(String, Vec<ForeignKey
         })
         .collect();
 
-    let mut placed = vec![false; names.len()];
+    // Each cycle taken as one, named by its first member: its members in the
+    // order they came, how many other cycles it points at that are not placed
+    // yet, and the cycles that point at it.
+    let mut members: Vec<Vec<usize>> = vec![Vec::new(); names.len()];
+    for table in 0..names.len() {
+        members[component[table]].push(table);
+    }
+    let mut waiting = vec![0usize; names.len()];
+    let mut pointed_at_by: Vec<Vec<usize>> = vec![Vec::new(); names.len()];
+    for from in (0..names.len()).filter(|&table| component[table] == table) {
+        let mut targets: Vec<usize> = members[from]
+            .iter()
+            .flat_map(|&member| &points_at[member])
+            .map(|&to| component[to])
+            .filter(|&to| to != from)
+            .collect();
+        targets.sort_unstable();
+        targets.dedup();
+        waiting[from] = targets.len();
+        for to in targets {
+            pointed_at_by[to].push(from);
+        }
+    }
+    // The first table, in the order they came, whose cycle points only at
+    // tables already placed or in it, is the first member of the ready cycle
+    // with the lowest name. One is always ready: the cycles, each taken as
+    // one, point at one another in no cycle.
+    let mut ready: BinaryHeap<Reverse<usize>> = (0..names.len())
+        .filter(|&table| component[table] == table && waiting[table] == 0)
+        .map(Reverse)
+        .collect();
     let mut order = Vec::with_capacity(names.len());
-    while order.len() < names.len() {
-        // The first table, in the order they came, whose cycle points only at
-        // tables already placed or in it. One always is: the cycles, each
-        // taken as one, point at one another in no cycle.
-        let ready = (0..names.len())
-            .find(|&table| {
-                !placed[table]
-                    && (0..names.len())
-                        .filter(|&member| component[member] == component[table])
-                        .all(|member| {
-                            points_at[member]
-                                .iter()
-                                .all(|&to| placed[to] || component[to] == component[table])
-                        })
-            })
-            .expect("the cycles, each taken as one, form no cycle");
-        for member in 0..names.len() {
-            if component[member] == component[ready] {
-                placed[member] = true;
-                order.push(names[member].clone());
+    while let Some(Reverse(cycle)) = ready.pop() {
+        order.extend(members[cycle].iter().map(|&member| names[member].clone()));
+        for &from in &pointed_at_by[cycle] {
+            waiting[from] -= 1;
+            if waiting[from] == 0 {
+                ready.push(Reverse(from));
             }
         }
     }
+    debug_assert_eq!(order.len(), names.len(), "the cycles form no cycle");
 
     let cyclic = (0..names.len())
         .filter(|&table| reaches[table][table])
@@ -579,6 +598,32 @@ mod tests {
         let ordered = dependency_order("s", own);
         assert_eq!(ordered.order, names(&["employees"]));
         assert_eq!(ordered.cyclic, names(&["employees"]));
+    }
+
+    #[test]
+    fn a_long_chain_listed_backwards_orders_without_rescanning() {
+        // Each table points at the next, so every table but the last waits:
+        // a planner that looked for the first ready table afresh each round
+        // would take cubic time here.
+        let count = 2_000;
+        let name = |index: usize| format!("t{index:04}");
+        let tables = (0..count)
+            .map(|index| {
+                let keys = match index + 1 < count {
+                    true => vec![key(&name(index + 1))],
+                    false => vec![],
+                };
+                (name(index), keys)
+            })
+            .collect();
+        let started = std::time::Instant::now();
+        let ordered = dependency_order("s", tables);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert_eq!(
+            ordered.order,
+            (0..count).rev().map(name).collect::<Vec<_>>()
+        );
+        assert!(ordered.cyclic.is_empty());
     }
 
     #[test]
