@@ -11,8 +11,8 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::db::{
-    ApplyOutcome, CancelToken, Connection, Drift, Driver, Engine, Fetch, FetchedCell, QueryResult,
-    RelationKind, StepKind, Stopped, Target, VerifiedStep, is_cancel,
+    ApplyOutcome, ApplyStage, CancelToken, Connection, Drift, Driver, Engine, Fetch, FetchedCell,
+    QueryResult, RelationKind, StepKind, Stopped, Target, VerifiedStep, is_cancel,
 };
 use crate::explorer;
 use crate::filter::{self, Operator};
@@ -1438,4 +1438,116 @@ pub(super) fn generated_reads_run(subject: &Subject) {
     )
     .unwrap_or_else(|| panic!("{at}: no ORDER BY spliced into `{page}`"));
     assert_eq!(ids(&run(&sorted)), ["2", "1"], "{at}: {sorted}");
+}
+
+/// A keyless draft over `schema.queue (pos, name)`, holding `(1, 'a')`,
+/// `(2, 'b')` and `(3, 'b')`, that deletes position 1 and then renames the
+/// row read at position 2. Where a trigger closes the gap the delete leaves,
+/// the row read at 3 takes exactly the values the rename names, and the apply
+/// must refuse the draft before it writes anything
+/// ([`super::KEYLESS_AFTER_A_WRITE`]); on the table alone it applies.
+/// `create` builds the table, first, and its trigger in the engine's own
+/// words.
+pub(super) fn keyless_edit_after_a_compacting_delete(
+    connection: &Connection,
+    engine: Engine,
+    schema: &str,
+    create: &[&str],
+) {
+    let table = engine.qualified(schema, "queue");
+    let run = |sql: &str| {
+        connection
+            .query(sql, &CancelToken::default(), Fetch::default())
+            .unwrap_or_else(|error| panic!("{engine:?}: `{sql}` failed: {error}"))
+    };
+    let _ = connection.query(
+        &format!("DROP TABLE {table}"),
+        &CancelToken::default(),
+        Fetch::default(),
+    );
+    for sql in create {
+        run(sql);
+    }
+    run(&format!(
+        "INSERT INTO {table} (pos, name) VALUES (1, 'a'), (2, 'b'), (3, 'b')"
+    ));
+    let (pos, name) = (
+        engine.quote_identifier("pos"),
+        engine.quote_identifier("name"),
+    );
+    let step = |kind, sql: String, at: &str, was: &str| VerifiedStep {
+        reread: Some(
+            sql::row_reread(engine, &sql)
+                .unwrap_or_else(|| panic!("{engine:?}: no re-read of `{sql}`")),
+        ),
+        sql,
+        kind,
+        before: [("pos", at), ("name", was)]
+            .iter()
+            .map(|(column, text)| FetchedCell {
+                column: (*column).into(),
+                text: Some((*text).into()),
+                cell_type: None,
+                column_type: None,
+            })
+            .collect(),
+        read_back: None,
+        by_key: false,
+    };
+    let steps = [
+        step(
+            StepKind::Delete,
+            format!("DELETE FROM {table} WHERE {pos} = '1' AND {name} = 'a'"),
+            "1",
+            "a",
+        ),
+        step(
+            StepKind::Update,
+            format!("UPDATE {table} SET {name} = 'c' WHERE {pos} = '2' AND {name} = 'b'"),
+            "2",
+            "b",
+        ),
+    ];
+
+    let outcome = connection.apply_verified(&steps, &CancelToken::default());
+
+    let left = run(&format!("SELECT pos, name FROM {table} ORDER BY pos"));
+    run(&format!("DROP TABLE {table}"));
+    assert_eq!(
+        outcome,
+        ApplyOutcome::Failed {
+            stage: ApplyStage::Begin,
+            error: super::plain_error(super::KEYLESS_AFTER_A_WRITE.into()),
+        },
+        "{engine:?}"
+    );
+    let left: Vec<_> = left
+        .rows
+        .iter()
+        .map(|row| {
+            format!(
+                "{}:{}",
+                row.get(0).unwrap_or("?"),
+                row.get(1).unwrap_or("?")
+            )
+        })
+        .collect();
+    assert_eq!(
+        left,
+        ["1:a", "2:b", "3:b"],
+        "{engine:?}: nothing was written"
+    );
+
+    // The same draft on the table alone, which nothing rewrites, applies: the
+    // refusal above was the trigger's, not every keyless draft's.
+    run(create[0]);
+    run(&format!(
+        "INSERT INTO {table} (pos, name) VALUES (1, 'a'), (2, 'b'), (3, 'b')"
+    ));
+    let outcome = connection.apply_verified(&steps, &CancelToken::default());
+    run(&format!("DROP TABLE {table}"));
+    assert!(
+        matches!(outcome, ApplyOutcome::Applied { affected: 2, .. }),
+        "{engine:?}: {outcome:?}"
+    );
 }

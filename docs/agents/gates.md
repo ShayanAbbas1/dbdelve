@@ -105,7 +105,19 @@ mode, always where the user can read it before it runs:
   earlier `DELETE` of the draft taking it along would leave, and a statement
   something skipped (a trigger returning without writing) leaves its row there.
   A row named by every value reads as gone once an earlier write changed one of
-  them, so there a `DELETE` counting none is a miscount. While a transaction
+  them, so there a `DELETE` counting none is a miscount. Such a row is proven
+  the one read only at its re-read: a trigger or a cascading foreign key fired
+  by an earlier write of the draft can move another row onto exactly its
+  values, and the write would count that row. So a keyless `UPDATE` or
+  `DELETE` after any earlier write is refused, inside the apply's transaction
+  and before any re-read (`db::rewrites::probe`, `KEYLESS_AFTER_A_WRITE`),
+  when the catalog shows a trigger on its table or on a table written before
+  it (or, on Postgres, a rule), or a foreign key from its table to one written
+  before it with `ON DELETE` or `ON UPDATE` `CASCADE`, `SET NULL` or `SET
+  DEFAULT`. SQLite, Postgres, MySQL, MariaDB and SQL Server read their
+  catalogs; DuckDB has no triggers and its foreign keys never cascade; any
+  other engine refuses. A first step, and a row named by its key, are never
+  asked about, so multi-row keyless drafts on a plain table still apply. While a transaction
   the user opened is open on the connection (`Profile::in_transaction`, which
   counts MySQL's `SET autocommit = 0` and SQL Server's `SET
   IMPLICIT_TRANSACTIONS ON`) a verified apply is refused, at review and at Run

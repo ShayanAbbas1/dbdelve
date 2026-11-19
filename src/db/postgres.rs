@@ -4761,6 +4761,31 @@ mod tests {
 
     #[test]
     #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_a_keyless_edit_after_a_compacting_delete_is_refused() {
+        let connection = live_profile();
+        crate::db::conformance::keyless_edit_after_a_compacting_delete(
+            &connection,
+            Engine::Postgres,
+            "public",
+            &[
+                "CREATE TABLE public.queue (pos integer, name text)",
+                "CREATE OR REPLACE FUNCTION public.queue_compact() RETURNS trigger \
+                 LANGUAGE plpgsql AS $$ BEGIN \
+                 UPDATE public.queue SET pos = pos - 1 WHERE pos > OLD.pos; \
+                 RETURN OLD; END $$",
+                "CREATE TRIGGER compact AFTER DELETE ON public.queue \
+                 FOR EACH ROW EXECUTE FUNCTION public.queue_compact()",
+            ],
+        );
+        let _ = connection.query(
+            "DROP FUNCTION public.queue_compact()",
+            &CancelToken::default(),
+            Fetch::default(),
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
     fn live_an_apply_refused_inside_the_users_transaction_leaves_it_working() {
         let connection = live_profile();
         let table = "verified_inside_user_transaction";

@@ -37,6 +37,7 @@ mod password_command;
 pub(crate) mod plugin;
 mod postgres;
 mod redis;
+mod rewrites;
 mod snowflake;
 mod spec;
 mod sqlite;
@@ -3734,6 +3735,9 @@ pub(crate) enum Sending {
     Abandon,
     Read,
     Write(StepKind),
+    /// A read of the server's catalog the apply asks inside its transaction
+    /// ([`rewrites::probe`]): sent as it is, untyped and unpaged.
+    Catalog,
 }
 
 /// What a verified apply came to.
@@ -3929,7 +3933,7 @@ pub(super) fn run_verified(
     // inside the apply's transaction, holding its locks until it closes: it is
     // rolled back first, and the panic then goes on its way.
     let sequence = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        opened(steps, &mut *send, proceed, skipped, lost)
+        opened(engine, steps, &mut *send, proceed, skipped, lost)
     }));
     match sequence {
         Ok(outcome) => outcome,
@@ -3943,6 +3947,7 @@ pub(super) fn run_verified(
 /// [`run_verified`] once its transaction is open: the re-reads, the compare,
 /// the writes and `COMMIT`, every exit before it rolling back.
 fn opened(
+    engine: Engine,
     steps: &[VerifiedStep],
     send: &mut dyn FnMut(&str, Sending) -> Result<QueryResult, DbError>,
     proceed: &dyn Fn() -> bool,
@@ -3950,6 +3955,14 @@ fn opened(
     lost: &dyn Fn(&DbError) -> bool,
 ) -> ApplyOutcome {
     let cancelled = || plain_error("Cancelled before it was sent.".into());
+
+    if let Some(error) = moved_under(engine, steps, send) {
+        roll_back(send);
+        return ApplyOutcome::Failed {
+            stage: ApplyStage::Begin,
+            error,
+        };
+    }
 
     let mut drifted = Vec::new();
     for (index, step) in steps.iter().enumerate() {
@@ -4081,6 +4094,55 @@ fn opened(
         read_backs,
     }
 }
+
+/// Why the apply is refused before any re-read, when a step names its row by
+/// every value after an earlier write that something on the server could
+/// follow with a rewrite of that row's table ([`rewrites::probe`]): another
+/// row moved onto exactly those values would be counted as the step's one.
+/// A key names the same row however the others move, and a first step writes
+/// before anything else could, so neither is asked about.
+fn moved_under(
+    engine: Engine,
+    steps: &[VerifiedStep],
+    send: &mut dyn FnMut(&str, Sending) -> Result<QueryResult, DbError>,
+) -> Option<DbError> {
+    let refused = || plain_error(KEYLESS_AFTER_A_WRITE.into());
+    for (index, step) in steps.iter().enumerate().skip(1) {
+        if step.by_key || !matches!(step.kind, StepKind::Update | StepKind::Delete) {
+            continue;
+        }
+        let Some(later) = crate::sql::written_table(engine, &step.sql) else {
+            return Some(refused());
+        };
+        let mut earlier: Vec<Vec<String>> = Vec::new();
+        for before in &steps[..index] {
+            let Some(table) = crate::sql::written_table(engine, &before.sql) else {
+                return Some(refused());
+            };
+            if !earlier.contains(&table) {
+                earlier.push(table);
+            }
+        }
+        match rewrites::probe(engine, &later, &earlier) {
+            rewrites::Probe::Never => {}
+            rewrites::Probe::Unknown => return Some(refused()),
+            rewrites::Probe::Ask(read) => match send(&read, Sending::Catalog) {
+                Ok(found) if found.rows.is_empty() => {}
+                Ok(_) => return Some(refused()),
+                Err(error) => return Some(error),
+            },
+        }
+    }
+    None
+}
+
+/// Why a draft that writes a row of a table without a primary key after
+/// another write is refused unsent, where a trigger, a rule or a cascading
+/// foreign key could have moved rows under it.
+pub(crate) const KEYLESS_AFTER_A_WRITE: &str = "Nothing was applied. A row of a table without \
+     a primary key is named by its values, and a trigger or a cascading foreign key fired by an \
+     earlier change of this draft could give another row those values. Apply its changes one \
+     row at a time.";
 
 /// Ends the transaction a verified apply opened. Its error is not the apply's
 /// to report: the session it would have ended may be the thing that failed.

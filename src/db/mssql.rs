@@ -6436,6 +6436,26 @@ mod tests {
 
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_keyless_edit_after_a_compacting_delete_is_refused() {
+        let connection =
+            crate::db::Connection::open(crate::db::ConnectionConfig::SqlServer(live_config()))
+                .expect("connection should open");
+        crate::db::conformance::keyless_edit_after_a_compacting_delete(
+            &connection,
+            Engine::SqlServer,
+            "dbo",
+            &[
+                "CREATE TABLE dbo.queue (pos int, name nvarchar(10))",
+                "CREATE TRIGGER dbo.queue_compact ON dbo.queue AFTER DELETE AS \
+                 BEGIN SET NOCOUNT ON; \
+                 UPDATE dbo.queue SET pos = pos - 1 WHERE pos > (SELECT MIN(pos) FROM deleted); \
+                 END",
+            ],
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
     fn live_a_trigger_that_returns_rows_fails_the_write_it_fired_on() {
         use crate::db::{
             ApplyOutcome, ApplyStage, CancelToken, FetchedCell, StepKind,

@@ -4249,6 +4249,22 @@ mod tests {
         live_a_same_value_update_counts_its_matched_row_in_any_server_language(Engine::MariaDb);
     }
 
+    /// MySQL refuses a trigger that writes its own table, so this one only
+    /// notes the delete: any trigger on a table the draft wrote first refuses
+    /// a later keyless step.
+    fn live_a_keyless_edit_after_a_write_a_trigger_follows_is_refused(engine: Engine) {
+        crate::db::conformance::keyless_edit_after_a_compacting_delete(
+            &live_profile(engine),
+            engine,
+            "dbdelve_dev",
+            &[
+                "CREATE TABLE dbdelve_dev.queue (pos INT, name VARCHAR(10)) ENGINE = InnoDB",
+                "CREATE TRIGGER dbdelve_dev.queue_noted AFTER DELETE ON dbdelve_dev.queue \
+                 FOR EACH ROW SET @dbdelve_deleted = OLD.pos",
+            ],
+        );
+    }
+
     /// A table moved onto an engine with no transactions after its grid loaded
     /// is refused inside the apply's transaction, under its metadata lock, even
     /// for an insert alone; nothing is written and no transaction is left open.
@@ -4744,6 +4760,7 @@ mod tests {
         live_a_join_an_aggregate_or_a_missing_key_is_not_editable,
         live_a_table_without_transactions_is_not_editable,
         live_an_apply_to_a_table_moved_off_innodb_is_refused_and_closed,
+        live_a_keyless_edit_after_a_write_a_trigger_follows_is_refused,
         live_the_foreign_key_fixtures_are_seeded,
         live_a_composite_foreign_key_arrives_as_one_key_per_column_in_key_order,
         live_a_foreign_key_across_databases_names_the_database_it_references,

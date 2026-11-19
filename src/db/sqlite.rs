@@ -1808,6 +1808,138 @@ pub(super) mod tests {
         }
     }
 
+    /// A keyless draft that deletes position 1 and then edits the row read at
+    /// position 2: the delete's trigger closes the gap, which moves the row
+    /// read at position 3 onto exactly the values the edit names, and the edit
+    /// would count that row as its one. Refused before anything is written,
+    /// while the same draft on a table no trigger rewrites applies.
+    #[test]
+    fn a_keyless_edit_after_a_write_a_trigger_follows_is_refused_unwritten() {
+        use crate::db::{ApplyOutcome, ApplyStage, FetchedCell, StepKind, VerifiedStep};
+
+        let keyless = |kind, sql: &str, pos: &str, name: &str| VerifiedStep {
+            reread: crate::sql::row_reread(Engine::Sqlite, sql),
+            sql: sql.into(),
+            kind,
+            before: [("pos", pos), ("name", name)]
+                .iter()
+                .map(|(column, text)| FetchedCell {
+                    column: (*column).into(),
+                    text: Some((*text).into()),
+                    cell_type: None,
+                    column_type: None,
+                })
+                .collect(),
+            read_back: None,
+            by_key: false,
+        };
+        let steps = [
+            keyless(
+                StepKind::Delete,
+                r#"DELETE FROM "main"."queue" WHERE "pos" = '1' AND "name" = 'a'"#,
+                "1",
+                "a",
+            ),
+            keyless(
+                StepKind::Update,
+                r#"UPDATE "main"."queue" SET "name" = 'c' WHERE "pos" = '2' AND "name" = 'b'"#,
+                "2",
+                "b",
+            ),
+        ];
+        assert!(steps.iter().all(|step| step.reread.is_some()));
+        let table = "create table queue (pos integer, name text); \
+                     insert into queue values (1, 'a'), (2, 'b'), (3, 'b');";
+        let rows = |connection: &Connection| {
+            let read = connection
+                .query("select pos, name from queue order by pos", Fetch::default())
+                .unwrap();
+            read.rows
+                .iter()
+                .map(|row| format!("{}:{}", row.get(0).unwrap(), row.get(1).unwrap()))
+                .collect::<Vec<_>>()
+        };
+
+        let compacted = memory(&format!(
+            "{table} create trigger compact after delete on queue \
+             begin update queue set pos = pos - 1 where pos > old.pos; end;"
+        ));
+        assert_eq!(
+            compacted.apply_verified(&steps, &|| true),
+            ApplyOutcome::Failed {
+                stage: ApplyStage::Begin,
+                error: plain_error(crate::db::KEYLESS_AFTER_A_WRITE.into()),
+            }
+        );
+        assert_eq!(
+            rows(&compacted),
+            ["1:a", "2:b", "3:b"],
+            "nothing was written"
+        );
+        assert!(compacted.connection.lock().unwrap().is_autocommit());
+
+        let plain = memory(table);
+        assert!(matches!(
+            plain.apply_verified(&steps, &|| true),
+            ApplyOutcome::Applied { affected: 2, .. }
+        ));
+        assert_eq!(rows(&plain), ["2:c", "3:b"]);
+    }
+
+    /// A foreign key that cascades from a table an earlier step wrote can
+    /// rewrite the keyless table too; one that does nothing cannot.
+    #[test]
+    fn a_keyless_edit_under_a_cascade_from_an_earlier_write_is_refused() {
+        use crate::db::{ApplyOutcome, StepKind, VerifiedStep};
+
+        let insert = VerifiedStep {
+            sql: r#"INSERT INTO "main"."nests" ("id") VALUES ('2')"#.into(),
+            kind: StepKind::Insert,
+            reread: None,
+            before: Vec::new(),
+            read_back: None,
+            by_key: true,
+        };
+        let update = r#"UPDATE "main"."eggs" SET "n" = '5' WHERE "nest" = '1' AND "n" = '1'"#;
+        let edit = VerifiedStep {
+            reread: crate::sql::row_reread(Engine::Sqlite, update),
+            sql: update.into(),
+            kind: StepKind::Update,
+            before: vec![
+                crate::db::FetchedCell {
+                    column: "nest".into(),
+                    text: Some("1".into()),
+                    cell_type: None,
+                    column_type: None,
+                },
+                crate::db::FetchedCell {
+                    column: "n".into(),
+                    text: Some("1".into()),
+                    cell_type: None,
+                    column_type: None,
+                },
+            ],
+            read_back: None,
+            by_key: false,
+        };
+        let steps = [insert, edit];
+        let with = |action: &str| {
+            memory(&format!(
+                "create table nests (id integer primary key); insert into nests values (1); \
+                 create table eggs (nest integer references nests (id) {action}, n integer); \
+                 insert into eggs values (1, 1);"
+            ))
+        };
+        assert!(matches!(
+            with("on delete cascade").apply_verified(&steps, &|| true),
+            ApplyOutcome::Failed { .. }
+        ));
+        assert!(matches!(
+            with("").apply_verified(&steps, &|| true),
+            ApplyOutcome::Applied { affected: 2, .. }
+        ));
+    }
+
     /// A transaction the user opened on the connection, whatever the workspace
     /// read off their statements, is seen by the apply before it sends its
     /// own `BEGIN`, and left open: nothing is written and nothing ended.
