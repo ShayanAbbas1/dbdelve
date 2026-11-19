@@ -116,6 +116,10 @@ pub(crate) struct Profile {
     /// sent before this moved was overtaken on the session by the later
     /// submission and must not undo what it said ([`Self::superseded`]).
     pub(crate) transaction_sends: u64,
+    /// The startup script the live connection ran at its connect, whose
+    /// statements its driver replays on every later session: a script saved
+    /// since applies only from the next connect.
+    pub(crate) connected_script: String,
     /// Whether each of the user's statements commits on its own. Off means
     /// dbdelve keeps a transaction open for them, opening it by writing a
     /// `BEGIN` into the buffer where they can read it -- never onto the wire

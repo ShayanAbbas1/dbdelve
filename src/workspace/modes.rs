@@ -1,7 +1,10 @@
 //! What the mode prompt does when it is answered, and the one place a
 //! connection's mode changes.
 
-use super::{profiles::script_refused, *};
+use super::{
+    profiles::{script_refused, startup_refused},
+    *,
+};
 use crate::session::{PendingRun, Resume};
 use crate::sql::Stop;
 
@@ -18,8 +21,13 @@ impl Workspace {
         // the live connection: the profile reconnects, and that connect fails
         // saying so. A connect under way has no connection to re-gate; its
         // landing checks the script again (`begin_connect`).
-        let regate =
-            mode < profile.mode && profile.connection().is_some() && script_refused(profile, mode);
+        // The live connection replays what it ran at its connect, which a
+        // script saved since (`set_behaviour`) has not replaced, so that is
+        // gated too.
+        let regate = mode < profile.mode
+            && profile.connection().is_some()
+            && (script_refused(profile, mode)
+                || startup_refused(profile, &profile.connected_script, mode));
         let id = profile.id.clone();
         if regate && let Some(running) = self.running_import_into(&id) {
             // `reconnect` declines to interrupt an import, and a mode lowered

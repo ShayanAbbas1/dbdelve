@@ -426,6 +426,7 @@ impl Workspace {
             in_transaction: false,
             transaction_statements: Vec::new(),
             transaction_sends: 0,
+            connected_script: String::new(),
             auto_commit: true,
             session_changed: false,
             catalog: CatalogState::Loading,
@@ -516,6 +517,7 @@ impl Workspace {
             in_transaction: false,
             transaction_statements: Vec::new(),
             transaction_sends: 0,
+            connected_script: String::new(),
             auto_commit: true,
             session_changed: false,
             catalog: CatalogState::Loading,
@@ -2475,6 +2477,7 @@ impl Workspace {
                     }
                     let reported = result.as_ref().ok().and_then(Reported::of);
                     profile.held = result.is_ok();
+                    profile.connected_script = ran_script;
                     profile.state = match result {
                         Ok(connection) => ProfileState::Connected(Box::new(connection)),
                         Err(message) => ProfileState::Failed(message),
@@ -3714,7 +3717,12 @@ fn metadata_reader(session: &Connection, in_transaction: bool) -> Result<Connect
 /// Whether the profile's startup script, which is not blank, is refused under
 /// `mode`: the same gate a connect applies, asked without opening anything.
 pub(super) fn script_refused(profile: &Profile, mode: Mode) -> bool {
-    let script = &profile.behaviour.startup_script;
+    startup_refused(profile, &profile.behaviour.startup_script, mode)
+}
+
+/// [`script_refused`] for `script`, such as the one the live connection ran
+/// at its connect ([`Profile::connected_script`]).
+pub(super) fn startup_refused(profile: &Profile, script: &str, mode: Mode) -> bool {
     !script.trim().is_empty()
         && sql::startup_statements(profile.config.engine(), mode, &profile.confirmed, script)
             .is_err()
