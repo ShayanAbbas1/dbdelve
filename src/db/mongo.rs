@@ -1009,7 +1009,7 @@ impl Connection {
                     None => {
                         let whole = !elsewhere && returns_whole_documents(&sent);
                         let mut result = read_cursor(run, &database, sent, fetch)?.rows()?;
-                        if whole {
+                        if whole && result.read_only_reason.is_none() {
                             result.edit = self.edit_target(collection, &result);
                         }
                         Ok(result)
@@ -2522,6 +2522,11 @@ fn document_drift(before: &[FetchedCell], reread: &QueryResult) -> Option<Drift>
         [_] => {}
         rows => return Some(Drift::Ambiguous(rows.len())),
     }
+    // Its text names another value as well as its own, so equal text proves
+    // nothing. A fetch that held one was never editable.
+    if reread.read_only_reason.as_deref() == Some(AMBIGUOUS) {
+        return Some(Drift::Changed);
+    }
     let row = &reread.rows[0];
     let tags = reread.cell_types.first();
     let position = |name: &str| reread.columns.iter().position(|column| column.name == name);
@@ -2740,6 +2745,7 @@ fn documents(documents: Vec<Document>) -> Result<QueryResult, DbError> {
     let mut rows = Vec::with_capacity(documents.len());
     let mut cell_types = Vec::with_capacity(documents.len());
     let mut bytes = 0;
+    let mut ambiguous = false;
     for document in &documents {
         let mut row = vec![None; names.len()];
         let mut types = vec![MISSING; names.len()];
@@ -2747,6 +2753,7 @@ fn documents(documents: Vec<Document>) -> Result<QueryResult, DbError> {
             let at = positions[name.as_str()];
             row[at] = cell(value);
             types[at] = type_alias(value);
+            ambiguous = ambiguous || !reads_back(value);
         }
         let row = Row::try_from(row)?;
         bytes += row.text_len();
@@ -2767,8 +2774,45 @@ fn documents(documents: Vec<Document>) -> Result<QueryResult, DbError> {
         rows,
         cell_types,
         bytes,
+        read_only_reason: ambiguous.then(|| AMBIGUOUS.to_string()),
         ..QueryResult::default()
     })
+}
+
+/// Why a result holding a value [`reads_back`] refuses is not edited, and why
+/// a re-read holding one is never taken for the row that was read.
+const AMBIGUOUS: &str = "A field holds a document with a field named like an Extended JSON \
+                         type ($numberLong, $date, …), which its text cannot tell from that \
+                         type, so its documents cannot be checked before a write.";
+
+/// Whether a value's cell text reads back as exactly that value, byte for byte.
+/// A document or an array is shown as Extended JSON, where a literal
+/// `{"$numberLong": "7"}` and the long 7 are one text: comparing that text
+/// would take one for the other. A scalar's text is told apart by its type.
+fn reads_back(value: &Bson) -> bool {
+    let shown_as_json = matches!(
+        value,
+        Bson::Document(_)
+            | Bson::Array(_)
+            | Bson::JavaScriptCodeWithScope(_)
+            | Bson::Symbol(_)
+            | Bson::Undefined
+            | Bson::DbPointer(_)
+    );
+    if !shown_as_json {
+        return true;
+    }
+    let bytes = |value: Bson| {
+        let mut bytes = Vec::new();
+        doc! { "v": value }
+            .to_writer(&mut bytes)
+            .ok()
+            .map(|()| bytes)
+    };
+    Bson::try_from(typed_json(value))
+        .ok()
+        .and_then(bytes)
+        .is_some_and(|read| Some(read) == bytes(value.clone()))
 }
 
 /// A column's one type when its values agree, else `mixed`. A null or a
@@ -3744,6 +3788,54 @@ mod tests {
                 column_type: None,
             })
             .collect()
+    }
+
+    /// A nested long and a literal document of one `$numberLong` field show
+    /// one text: a re-read holding either is not taken for a fetch of the
+    /// other, and a fetch holding the literal one is not editable.
+    #[test]
+    fn a_nested_long_and_a_literal_dollar_document_of_one_text_are_told_apart() {
+        let long = documents(vec![doc! { "_id": 1, "n": { "a": Bson::Int64(7) } }]).unwrap();
+        let literal = documents(vec![
+            doc! { "_id": 1, "n": { "a": { "$numberLong": "7" } } },
+        ])
+        .unwrap();
+        assert_eq!(
+            long.rows, literal.rows,
+            "the text alone cannot tell them apart"
+        );
+        assert_eq!(long.cell_types, literal.cell_types);
+        assert_eq!(long.read_only_reason, None);
+        assert_eq!(literal.read_only_reason.as_deref(), Some(AMBIGUOUS));
+
+        let fetched: Vec<FetchedCell> = long
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(at, column)| FetchedCell {
+                column: column.name.clone(),
+                text: long.rows[0].get(at).map(str::to_owned),
+                cell_type: Some(long.cell_types[0][at].into()),
+                column_type: None,
+            })
+            .collect();
+        assert_eq!(document_drift(&fetched, &long), None);
+        assert_eq!(document_drift(&fetched, &literal), Some(Drift::Changed));
+    }
+
+    #[test]
+    fn every_typed_value_a_document_holds_reads_back_from_its_text() {
+        let typed = doc! {
+            "long": Bson::Int64(7),
+            "int": 7,
+            "whole": 2.0,
+            "half": 2.5,
+            "date": DateTime::from_millis(0),
+            "id": ObjectId::from_bytes([1; 12]),
+            "list": [1, Bson::Int64(2), { "x": "y" }],
+        };
+        assert!(reads_back(&Bson::Document(typed)));
+        assert!(!reads_back(&Bson::Document(doc! { "$date": "1970" })));
     }
 
     #[test]
