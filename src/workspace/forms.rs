@@ -1713,7 +1713,7 @@ impl Workspace {
 
     pub(crate) fn render_discard_confirmation(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let t = popup_theme(cx);
-        self.profile()?.session.pending_discard.as_ref()?;
+        let held = self.profile()?.session.pending_discard.as_ref()?.tabs.len();
         let cancel_workspace = cx.entity().downgrade();
         let discard_workspace = cancel_workspace.clone();
 
@@ -1727,7 +1727,10 @@ impl Workspace {
                 .justify_center()
                 .child(
                     dialog(t)
-                        .child(section_label(t, "Close tab"))
+                        .child(section_label(
+                            t,
+                            if held > 1 { "Close tabs" } else { "Close tab" },
+                        ))
                         .child(
                             div()
                                 .text_size(px(layout::chrome(layout::TEXT_SM)))
@@ -1735,10 +1738,15 @@ impl Workspace {
                                 // The edits are held against the fetched rows
                                 // and never written to them, so closing the
                                 // tab is the moment they stop existing.
-                                .child(
-                                    "This tab has cell edits that have not been applied. \
-                                     Closing it discards them.",
-                                ),
+                                .child(match held {
+                                    1 => "This tab has cell edits that have not been applied. \
+                                          Closing it discards them."
+                                        .to_string(),
+                                    held => format!(
+                                        "{held} tabs have cell edits that have not been \
+                                         applied. Closing them discards them."
+                                    ),
+                                }),
                         )
                         .child(
                             div()

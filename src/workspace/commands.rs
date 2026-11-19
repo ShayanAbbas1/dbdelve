@@ -733,6 +733,7 @@ impl Workspace {
                 self.import_rows_from_clipboard(&ImportRowsFromClipboard, window, cx)
             }
             Command::CloseObject(id) => self.ask_before_close(Tab::Object(id), window, cx),
+            Command::CloseAllTabs => self.close_all_tabs(&CloseAllTabs, window, cx),
             Command::SetNull => self.set_null(&SetNull, window, cx),
             Command::SetEmpty => self.set_empty(&SetEmpty, window, cx),
             Command::SetDefault => self.set_default(&SetDefault, window, cx),

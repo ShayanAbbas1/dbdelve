@@ -59,11 +59,11 @@ use gpui_component::{
 };
 
 use actions::{
-    AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseTab, CollapseAllSchemas, CommandPalette,
-    CopyCell, CopyDiagnostics, CopyPlan, CopyResults, CopyRow, CopyRows, CopySelection,
-    CustomRowLimit, CycleMode, DeleteRow, DiscardEdits, Disconnect, EditCell, ExpandAllSchemas,
-    ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen, GoToColumn, HideColumn,
-    ImportConnections, ImportRows, ImportRowsFromClipboard, LimitTarget,
+    AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseAllTabs, CloseTab, CollapseAllSchemas,
+    CommandPalette, CopyCell, CopyDiagnostics, CopyPlan, CopyResults, CopyRow, CopyRows,
+    CopySelection, CustomRowLimit, CycleMode, DeleteRow, DiscardEdits, Disconnect, EditCell,
+    ExpandAllSchemas, ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen, GoToColumn,
+    HideColumn, ImportConnections, ImportRows, ImportRowsFromClipboard, LimitTarget,
     MenuImportRowsFromClipboard, Minimize, MoveTabLeft, MoveTabRight, NewConnection, NewProject,
     NewQuery, NewRow, NextEdit, NextPage, NextProfile, NextResult, NextTab, OpenLogsFolder,
     OpenReference, OpenSettings, PreviousEdit, PreviousPage, PreviousProfile, PreviousResult,
@@ -396,6 +396,7 @@ pub(crate) fn app_menus(imports_rows: bool) -> Vec<Menu> {
                 MenuItem::action("Save Query", SaveQuery),
                 MenuItem::separator(),
                 MenuItem::action("Close Tab", CloseTab),
+                MenuItem::action("Close All Tabs", CloseAllTabs),
                 MenuItem::separator(),
                 MenuItem::action("Disconnect", Disconnect),
             ])
