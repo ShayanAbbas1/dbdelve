@@ -1549,6 +1549,61 @@ impl ConnectionConfig {
         current != *edited
     }
 
+    /// Whether `edited` reaches another server, or another database on it,
+    /// than `self` does: what rows read under `self`, and edits staged on
+    /// them, could name something else under. Only what picks the target
+    /// counts, a tunnel's way in included, since the host it forwards to is
+    /// read from where it lands: a password, a timeout, TLS or the user is
+    /// the same target reached another way. An edit that may move it, a
+    /// service or a plugin's connection string, counts as moving it.
+    pub fn retargets(&self, edited: &Self) -> bool {
+        std::mem::discriminant(self) != std::mem::discriminant(edited)
+            || self.engine() != edited.engine()
+            || self.reaches() != edited.reaches()
+    }
+
+    /// What [`Self::retargets`] compares, one string per part of the target.
+    fn reaches(&self) -> Vec<String> {
+        let tunnel = [
+            self.ssh()
+                .map(|ssh| format!("ssh {}:{:?}", ssh.host, ssh.port)),
+            self.ssm()
+                .map(|ssm| format!("ssm {} {:?} {:?}", ssm.target, ssm.region, ssm.profile)),
+        ];
+        let place: Vec<String> = match self {
+            Self::Postgres(PostgresConfig { server, service }) => vec![
+                server.endpoint(),
+                server.database.clone(),
+                format!("{service:?}"),
+            ],
+            Self::MySql(server)
+            | Self::MariaDb(server)
+            | Self::SqlServer(server)
+            | Self::ClickHouse(server)
+            | Self::Redis(server) => vec![server.endpoint(), server.database.clone()],
+            Self::MongoDb(mongo) => vec![
+                mongo.server.endpoint(),
+                mongo.server.database.clone(),
+                mongo.srv.to_string(),
+                mongo.options.clone(),
+            ],
+            Self::Sqlite { path, .. } | Self::Turso { path, .. } => vec![path.clone()],
+            Self::DuckDb { path, database, .. } => vec![path.clone(), database.clone()],
+            Self::Snowflake(account) => vec![
+                account.account.clone(),
+                format!("{:?}", account.host),
+                account.database.clone(),
+            ],
+            Self::External(external) => {
+                vec![external.plugin.id.to_string(), external.connection.clone()]
+            }
+        };
+        place
+            .into_iter()
+            .chain(tunnel.into_iter().flatten())
+            .collect()
+    }
+
     /// What was being talked to, for an error or a title to name.
     pub fn endpoint(&self) -> String {
         match self {
@@ -5613,6 +5668,85 @@ mod tests {
         assert!(stored.needs_reconnect(&ConnectionConfig::MySql(stored.server().unwrap().clone())));
         assert!(stored.needs_reconnect(&ConnectionConfig::Sqlite {
             path: "/tmp/dbdelve.db".into(),
+            statement_timeout: 0
+        }));
+    }
+
+    #[test]
+    fn an_edit_retargets_only_for_where_it_connects() {
+        let stored = ConnectionConfig::postgres(ServerConfig {
+            host: "db.example.test".into(),
+            port: Some(5432),
+            database: "dbdelve".into(),
+            user: "someone".into(),
+            ..ServerConfig::default()
+        });
+        let edited = |change: fn(&mut ServerConfig)| {
+            let mut server = stored.server().unwrap().clone();
+            change(&mut server);
+            ConnectionConfig::postgres(server)
+        };
+
+        // The same server and database, reached another way.
+        assert!(!stored.retargets(&stored.clone()));
+        assert!(!stored.retargets(&edited(|server| server.password = "typed".into())));
+        assert!(!stored.retargets(&edited(|server| server.statement_timeout = 30)));
+        assert!(!stored.retargets(&edited(|server| server.sslmode = SslMode::Require)));
+        assert!(!stored.retargets(&edited(|server| {
+            server.root_certificate = Some("/etc/ca.pem".into())
+        })));
+        assert!(!stored.retargets(&edited(|server| server.user = "someone_else".into())));
+
+        // Another server, database or way in to them.
+        let mut named = stored.clone();
+        if let ConnectionConfig::Postgres(postgres) = &mut named {
+            postgres.service = Some("harness".into());
+        }
+        assert!(stored.retargets(&named));
+        assert!(stored.retargets(&edited(|server| server.host = "elsewhere".into())));
+        assert!(stored.retargets(&edited(|server| server.port = Some(6432))));
+        assert!(stored.retargets(&edited(|server| server.database = "other".into())));
+        assert!(stored.retargets(&edited(|server| {
+            server.ssh = Some(SshTunnel {
+                host: "bastion".into(),
+                ..SshTunnel::default()
+            })
+        })));
+        assert!(stored.retargets(&edited(|server| {
+            server.ssm = Some(SsmTunnel {
+                target: "i-0123456789abcdef0".into(),
+                profile: None,
+                region: None,
+                aws_cli: None,
+                session_manager_plugin: None,
+                attempt: None,
+            })
+        })));
+        assert!(stored.retargets(&ConnectionConfig::MySql(stored.server().unwrap().clone())));
+
+        let tunnelled = edited(|server| {
+            server.ssh = Some(SshTunnel {
+                host: "bastion".into(),
+                ..SshTunnel::default()
+            })
+        });
+        let other_bastion = |change: fn(&mut SshTunnel)| {
+            let mut config = tunnelled.clone();
+            change(config.ssh_mut().unwrap());
+            config
+        };
+        assert!(tunnelled.retargets(&other_bastion(|ssh| ssh.host = "jump".into())));
+        assert!(tunnelled.retargets(&other_bastion(|ssh| ssh.port = Some(2222))));
+        assert!(!tunnelled.retargets(&other_bastion(|ssh| ssh.user = "admin".into())));
+
+        let file = |path: &str, statement_timeout| ConnectionConfig::Sqlite {
+            path: path.into(),
+            statement_timeout,
+        };
+        assert!(!file("/tmp/a.db", 0).retargets(&file("/tmp/a.db", 30)));
+        assert!(file("/tmp/a.db", 0).retargets(&file("/tmp/b.db", 0)));
+        assert!(file("/tmp/a.db", 0).retargets(&ConnectionConfig::Turso {
+            path: "/tmp/a.db".into(),
             statement_timeout: 0
         }));
     }

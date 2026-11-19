@@ -35,6 +35,40 @@ fn mark_objects_stale(profile: &mut Profile) {
     }
 }
 
+/// Drops what `profile`'s query tabs read from the target it is leaving, with
+/// the prompts, the review and the New row form written from it: rows of the
+/// old target, and an edit staged on them or a row added beside them, would
+/// be applied to the new one. The tabs keep their SQL, which is the user's to
+/// run wherever they like.
+fn forget_what_was_read(profile: &mut Profile, window: &mut Window, cx: &mut Context<Workspace>) {
+    for tab in &mut profile.session.queries {
+        let _ = store::remove_grid(&profile.id, &store::query_grid_key(tab.id));
+        for queued in 0..tab.stored(false).queued_results {
+            let _ = store::remove_grid(&profile.id, &store::queued_grid_key(tab.id, queued));
+        }
+        tab.results = crate::result_grid::new_grid(window, cx);
+        // A cancelled run stays `Running` until its result comes back and
+        // `drop_stale_run` idles it, which keeps a second run off the tab
+        // meanwhile.
+        if !matches!(tab.query, QueryState::Running { .. }) {
+            tab.query = QueryState::Idle;
+        }
+        tab.queue = None;
+        // The slot just replaced is the one a loan would give back.
+        tab.lent = None;
+        tab.queued_results = 0;
+        tab.last_query = None;
+        tab.sent_from = None;
+        tab.ran_from = None;
+        tab.plan = None;
+        tab.showing_plan = false;
+        tab.showing_messages = false;
+    }
+    profile.session.clear_prompts();
+    profile.session.apply_review = None;
+    profile.session.insert_form = None;
+}
+
 /// What `profile` lists in the sidebar under `filter`: its Pinned group and
 /// folders, its saved queries, then the catalog's schemas. Both trees draw
 /// this, so a connection's rows are the same in either.
@@ -969,11 +1003,14 @@ impl Workspace {
         let profile = &mut self.profiles[index];
         // A profile left idle, disconnected or never opened, opens on the
         // edited config whenever it is next picked.
-        let retargeted = profile.config.needs_reconnect(&config);
-        let reconnect = retargeted && !matches!(profile.state, ProfileState::Idle);
+        let retargeted = profile.config.retargets(&config);
+        let reconnect =
+            profile.config.needs_reconnect(&config) && !matches!(profile.state, ProfileState::Idle);
         // Edits staged against the rows the old config reached say nothing
         // about the new one's, where the same key can name another row; kept,
-        // a Row view's next leave would send one there unread.
+        // a Row view's next leave would send one there unread. A config that
+        // reaches the same target another way (a password, a timeout, TLS)
+        // keeps them.
         let grids: Vec<_> = match retargeted {
             true => profile
                 .session
@@ -1029,9 +1066,32 @@ impl Workspace {
                 }
             });
         }
+        if retargeted {
+            // Before the reconnect: the cancel goes out over the old
+            // connection, as `leave_database`'s does.
+            if self.active == Some(index)
+                && let Some(profile) = self.profiles.get(index)
+            {
+                let queries: Vec<u64> = profile.session.queries.iter().map(|tab| tab.id).collect();
+                for id in queries {
+                    self.stop_queue_on(Tab::Query(id), cx);
+                    self.stop_run(Tab::Query(id), cx);
+                }
+            }
+            if let Some(profile) = self.profiles.get_mut(index) {
+                discarded |= profile.session.apply_review.is_some()
+                    || profile.session.insert_form.is_some()
+                    || profile
+                        .session
+                        .queries
+                        .iter()
+                        .any(|tab| tab.results.read(cx).delegate().has_pending());
+                forget_what_was_read(profile, window, cx);
+            }
+        }
         if discarded {
             self.note(
-                "The connection now reaches a different target, so the unapplied edits of its tables were discarded."
+                "The connection now reaches a different target, so the unapplied edits of its tables and queries were discarded."
                     .into(),
                 cx,
             );
@@ -1526,32 +1586,7 @@ impl Workspace {
             let key = store::object_grid_key(&object.schema, &object.name, &object.filter);
             let _ = store::remove_grid(&profile.id, &key);
         }
-        for tab in &mut profile.session.queries {
-            let _ = store::remove_grid(&profile.id, &store::query_grid_key(tab.id));
-            for queued in 0..tab.stored(false).queued_results {
-                let _ = store::remove_grid(&profile.id, &store::queued_grid_key(tab.id, queued));
-            }
-            tab.results = crate::result_grid::new_grid(window, cx);
-            // A cancelled run stays `Running` until its result comes back and
-            // `drop_stale_run` idles it, which keeps a second run off the tab
-            // meanwhile.
-            if !matches!(tab.query, QueryState::Running { .. }) {
-                tab.query = QueryState::Idle;
-            }
-            tab.queue = None;
-            // The slot just replaced is the one a loan would give back.
-            tab.lent = None;
-            tab.queued_results = 0;
-            tab.last_query = None;
-            tab.sent_from = None;
-            tab.ran_from = None;
-            tab.plan = None;
-            tab.showing_plan = false;
-            tab.showing_messages = false;
-        }
-        profile.session.clear_prompts();
-        profile.session.apply_review = None;
-        profile.session.insert_form = None;
+        forget_what_was_read(profile, window, cx);
         profile.databases = Databases::default();
     }
 

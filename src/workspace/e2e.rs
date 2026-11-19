@@ -16405,6 +16405,83 @@ fn a_profile_saved_onto_another_target_discards_its_tables_edits(cx: &mut TestAp
     });
 }
 
+/// A profile saved with only its statement timeout changed reaches the same
+/// file: its tables keep their edits and nothing is said of a new target.
+#[gpui::test]
+fn a_profile_saved_with_a_new_timeout_keeps_its_tables_edits(cx: &mut TestAppContext) {
+    use crate::result_grid::NewValue;
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, BIRDS);
+        let (_, grid) = open_in_row_mode(&workspace, cx);
+        stage(&grid, cx, 0, 1, NewValue::Value("finch".into()));
+        workspace.update_in(cx, |workspace, window, cx| {
+            let profile = workspace.profile_mut().unwrap();
+            let mut config = profile.config.clone();
+            let ConnectionConfig::Sqlite {
+                statement_timeout, ..
+            } = &mut config
+            else {
+                panic!("the profile is SQLite");
+            };
+            *statement_timeout = 30;
+            let (profile_id, name) = (profile.id.clone(), profile.name.clone());
+            workspace.save_profile(&profile_id, name, config, None, window, cx);
+        });
+        settle(cx);
+        assert_eq!(
+            grid.read_with(cx, |table, _| table.delegate().pending_count()),
+            1
+        );
+        assert_eq!(shown_notice(&workspace, cx), None);
+        quit(workspace, cx);
+    });
+}
+
+/// A profile edited to reach another file takes with it what was read from
+/// the old one beside its tables' edits: the review open on them, which would
+/// run its batch on the new target, and a query tab's rows and their draft.
+#[gpui::test]
+fn a_profile_saved_onto_another_target_drops_its_review_and_query_results(cx: &mut TestAppContext) {
+    use crate::result_grid::NewValue;
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, BIRDS);
+        draft_by_default(&workspace, cx);
+        run_in_front(&workspace, cx, "select * from birds");
+        let query_grid = query_tab(&workspace, cx, |tab, _, _| tab.results.clone());
+        stage(&query_grid, cx, 0, 1, NewValue::Value("robin".into()));
+        let id = open_own_table(&workspace, cx, "birds");
+        let grid = relation_grid(&workspace, cx, id);
+        stage(&grid, cx, 0, 1, NewValue::Value("finch".into()));
+        cx.dispatch_action(crate::actions::ApplyEdits);
+        settle(cx);
+        assert!(front_review(&workspace, cx).is_some());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let profile = workspace.profile_mut().unwrap();
+            let mut config = profile.config.clone();
+            let ConnectionConfig::Sqlite { path, .. } = &mut config else {
+                panic!("the profile is SQLite");
+            };
+            path.push_str(".other");
+            let (profile_id, name) = (profile.id.clone(), profile.name.clone());
+            workspace.save_profile(&profile_id, name, config, None, window, cx);
+        });
+        settle(cx);
+        assert_eq!(front_review(&workspace, cx), None, "the review is gone");
+        workspace.read_with(cx, |workspace, cx| {
+            let profile = workspace.profile().unwrap();
+            assert!(profile.session.insert_form.is_none());
+            let query = profile.session.queries.first().expect("a query tab");
+            let grid = query.results.read(cx).delegate();
+            assert_eq!(grid.pending_count(), 0, "the query tab's draft is gone");
+            assert_eq!(grid.fetched_rows(), 0, "and the rows it was made on");
+        });
+        quit(workspace, cx);
+    });
+}
+
 /// Picks an edit mode from the status bar's menu: the button must be drawn,
 /// and the pick is the action its menu rows carry.
 fn pick_edit_mode(
