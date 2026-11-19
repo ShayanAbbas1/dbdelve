@@ -2859,6 +2859,11 @@ impl Workspace {
             // The rows of an ordered apply that was written before it stopped,
             // which the landing takes out of the draft.
             let mut applied = Vec::new();
+            // How many statements an ordered apply wrote before it stopped,
+            // ones no row names among them: a lone step's New Row has no
+            // identity to take out of the draft, and its review would insert
+            // it again.
+            let mut written = 0;
             let mut run = || match (&verification, generated, alongside, binding.as_ref()) {
                 // A reviewed draft, or a Row send, of a target that verifies an
                 // apply: its rows read again and compared inside one
@@ -2886,11 +2891,7 @@ impl Workspace {
                     }
                     unknown = unknown_outcome(&outcome);
                     if ordered {
-                        applied = verify
-                            .identities
-                            .get(..written_before_stop(&outcome))
-                            .map(<[StepRow]>::to_vec)
-                            .unwrap_or_default();
+                        (applied, written) = written_rows_of(&outcome, &verify.identities);
                         // The write landed and only its read failed: it lands
                         // as written, with the read's own failure told by
                         // `land_row`, and not as a refusal that keeps the edits.
@@ -2939,7 +2940,14 @@ impl Workspace {
             // says nothing about the profile's.
             let failed = result.is_err() || matches!(read_back, Some(Err(_)));
             let lost = !alongside && failed && connection.is_lost();
-            (result, lost, read_back, unknown, applied, written_rows)
+            (
+                result,
+                lost,
+                read_back,
+                unknown,
+                (applied, written),
+                written_rows,
+            )
         };
         let number = crate::logging::connection_number(&id);
         // The database to open a session for, when none is open for it.
@@ -3017,7 +3025,7 @@ impl Workspace {
             // Blocks for as long as the server takes, and statements queued
             // behind it on the same session block on its lock, so none of them
             // may hold one of the executor's threads (`spawn_blocking`).
-            let (result, lost, read_back, unknown, applied, written_rows, bound) = match ready {
+            let (result, lost, read_back, unknown, (applied, written), written_rows, bound) = match ready {
                 Ok((connection, bound)) => {
                     let (result, lost, read_back, unknown, applied, written_rows) =
                         spawn_blocking(cx.background_executor(), {
@@ -3027,7 +3035,15 @@ impl Workspace {
                         .await;
                     (result, lost, read_back, unknown, applied, written_rows, bound)
                 }
-                Err(error) => (Err(error), false, None, false, Vec::new(), Vec::new(), None),
+                Err(error) => (
+                    Err(error),
+                    false,
+                    None,
+                    false,
+                    (Vec::new(), 0),
+                    Vec::new(),
+                    None,
+                ),
             };
             // Outcome and duration only. Not even at debug the server's text:
             // some engines quote the statement back in a syntax error.
@@ -3103,7 +3119,7 @@ impl Workspace {
                             // Its review would send the same batch again, so it
                             // goes, and the grid is marked until its rows are
                             // read. One that wrote nothing is left as it was.
-                            let wrote = kept && (result.is_ok() || unknown || !applied.is_empty());
+                            let wrote = kept && (result.is_ok() || unknown || written > 0);
                             if let Some(profile) =
                                 workspace.profiles.iter_mut().find(|profile| profile.id == id)
                             {
@@ -3528,10 +3544,16 @@ impl Workspace {
                                 // is on the server and not to be sent again, so
                                 // it leaves the draft, by what names it: the rows
                                 // may have been sorted since the apply began.
-                                if !applied.is_empty() {
+                                if written > 0 {
                                     part_way = true;
                                     results.update(cx, |table, cx| {
-                                        table.delegate_mut().drop_applied(&applied);
+                                        let grid = table.delegate_mut();
+                                        grid.drop_applied(&applied);
+                                        // A write no row names stays staged
+                                        // as if it had not been sent.
+                                        if applied.len() < written {
+                                            grid.mark_outcome_unknown();
+                                        }
                                         table.refresh(cx);
                                     });
                                 }
@@ -4565,6 +4587,18 @@ fn written_before_stop(outcome: &ApplyOutcome) -> usize {
     }
 }
 
+/// The rows an ordered apply wrote before it stopped, by what names them, and
+/// how many statements it wrote: more than the rows when a step names none, as
+/// a Row send's or a lone New Row's does, which is then still staged.
+fn written_rows_of(outcome: &ApplyOutcome, identities: &[StepRow]) -> (Vec<StepRow>, usize) {
+    let written = written_before_stop(outcome);
+    let rows = identities
+        .get(..written)
+        .map(<[StepRow]>::to_vec)
+        .unwrap_or_default();
+    (rows, written)
+}
+
 /// An ordered target's failed read-back as what it is: every statement up to
 /// and including its step was written, there being no transaction to take them
 /// back, and the read is what failed. The outcome is then that of the writes,
@@ -5016,6 +5050,29 @@ mod tests {
             }),
             None
         );
+    }
+
+    /// A lone New Row whose write concern failed was inserted, though no row
+    /// names it: it counts as written, so its review is dropped rather than
+    /// left to insert it again.
+    #[test]
+    fn a_write_concern_failure_counts_a_step_no_row_names_as_written() {
+        let concern = ApplyOutcome::Failed {
+            stage: db::ApplyStage::Concern(0),
+            error: DbError {
+                message: "waiting for replication timed out".into(),
+                position: None,
+            },
+        };
+        assert_eq!(written_rows_of(&concern, &[]), (Vec::new(), 1));
+        let refused = ApplyOutcome::Failed {
+            stage: db::ApplyStage::Write(0),
+            error: DbError {
+                message: "duplicate key".into(),
+                position: None,
+            },
+        };
+        assert_eq!(written_rows_of(&refused, &[]), (Vec::new(), 0));
     }
 
     #[test]
