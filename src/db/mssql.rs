@@ -151,7 +151,12 @@ ORDER BY s.name, o.name
 /// `TYPE_NAME(p.user_type_id)` is null for an alias type the login has no
 /// permission on, so it falls back to the base system type: an approximation,
 /// but never the null that used to fail the whole tab.
-const TYPE_SQL: &str = "(COALESCE(TYPE_NAME(p.user_type_id), TYPE_NAME(p.system_type_id)) COLLATE DATABASE_DEFAULT + CASE
+///
+/// `{named}` is where DDL puts [`DDL_TYPE_NAME_SQL`] (see [`type_sql`]).
+const TYPE_SQL: &str = "(COALESCE({named}
+    TYPE_NAME(p.user_type_id),
+    TYPE_NAME(p.system_type_id)
+) COLLATE DATABASE_DEFAULT + CASE
     WHEN p.user_type_id <> p.system_type_id THEN N''
     WHEN TYPE_NAME(p.system_type_id) IN ('varchar', 'char', 'varbinary', 'binary')
         THEN N'(' + CASE WHEN p.max_length = -1 THEN N'max'
@@ -165,6 +170,24 @@ const TYPE_SQL: &str = "(COALESCE(TYPE_NAME(p.user_type_id), TYPE_NAME(p.system_
         THEN N'(' + CAST(p.scale AS nvarchar(10)) + N')'
     ELSE N''
 END)";
+
+/// A user-defined type as DDL spells it: quoted and schema-qualified. Its
+/// name is the user's, and DDL is text meant to be run back, where a name
+/// such as `int); DROP TABLE t; --` would otherwise be statements of its own.
+/// Null for a built-in type, which keeps its catalog spelling.
+const DDL_TYPE_NAME_SQL: &str = "(
+        SELECT QUOTENAME(SCHEMA_NAME(t.schema_id), '\"') + N'.' + QUOTENAME(t.name, '\"')
+        FROM sys.types AS t
+        WHERE t.user_type_id = p.user_type_id AND t.is_user_defined = 1
+    ),";
+
+/// [`TYPE_SQL`] for DDL, which quotes a user-defined type, or for display,
+/// which shows its bare name. Display text holds no subquery: a routine's
+/// signature aggregates it, and SQL Server refuses a subquery inside an
+/// aggregate.
+fn type_sql(ddl: bool) -> String {
+    TYPE_SQL.replace("{named}", if ddl { DDL_TYPE_NAME_SQL } else { "" })
+}
 
 // The structure queries name one relation by `{object}`, an `OBJECT_ID` over
 // the quoted name, substituted by `structure_sql`. `{column}` spells a column
@@ -1551,7 +1574,7 @@ impl Connection {
     pub fn routines(&self) -> Result<Catalog, DbError> {
         assemble_catalog(
             QueryResult::default(),
-            self.internal_query(&ROUTINES_SQL.replace("{type}", TYPE_SQL))?,
+            self.internal_query(&ROUTINES_SQL.replace("{type}", &type_sql(false)))?,
         )
     }
 
@@ -1603,7 +1626,7 @@ impl Connection {
             let query = |template: &str| {
                 self.run(
                     &template
-                        .replace("{type}", TYPE_SQL)
+                        .replace("{type}", &type_sql(false))
                         .replace("{schema}", &Engine::SqlServer.quote_literal(schema)),
                     Origin::Internal,
                     Fetch {
@@ -1621,6 +1644,7 @@ impl Connection {
     }
 
     fn structure_for(&self, schema: &str, relation: &str, ddl: bool) -> Result<Structure, DbError> {
+        let types = type_sql(ddl);
         let (column, ddl) = match ddl {
             true => ("QUOTENAME(c.name, '\"')", "1"),
             false => ("c.name", "0"),
@@ -1628,7 +1652,7 @@ impl Connection {
         let query = |template: &str| {
             self.internal_query(&structure_sql(
                 &template
-                    .replace("{type}", TYPE_SQL)
+                    .replace("{type}", &types)
                     .replace("{column}", column)
                     .replace("{ddl}", ddl),
                 schema,

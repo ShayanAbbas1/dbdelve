@@ -1158,6 +1158,59 @@ fn live_an_unchecked_foreign_key_runs_back_as_it_was_on_sql_server() {
     assert_eq!(state(&untrusted).as_deref(), Some("01"), "{sql}");
 }
 
+/// An alias type is named by its owner, and the file is run back: a name
+/// that reads as statements stays one quoted name.
+#[test]
+#[ignore = "needs a live SQL Server: set dbdelve_MSSQL_URL"]
+fn live_an_alias_type_named_like_statements_runs_back_as_one_name_on_sql_server() {
+    let table = Throwaway::new(
+        open("dbdelve_MSSQL_URL"),
+        Engine::SqlServer,
+        "dbo",
+        "alias_typed",
+    );
+    let alias = "[int); SELECT 1 AS \"x]]\"; --]";
+    table.run("DROP TABLE IF EXISTS {table}");
+    table.run(&format!("DROP TYPE IF EXISTS dbo.{alias}"));
+    table.run(&format!("CREATE TYPE dbo.{alias} FROM int NOT NULL"));
+    table.run(&format!(
+        "CREATE TABLE {{table}} (id int PRIMARY KEY, n dbo.{alias})"
+    ));
+    table.run("INSERT INTO {table} VALUES (1, 7)");
+    let before = table.rows();
+
+    let path = table.directory.join("schema.sql");
+    let request = SchemaRequest {
+        tables: vec![table.name.clone()],
+        structure: true,
+        rows: true,
+        partitioned: Vec::new(),
+    };
+    export_schema(
+        &table.connection,
+        "dbo",
+        &request,
+        false,
+        Engine::SqlServer,
+        &path,
+        &ExportProgress::default(),
+    )
+    .expect("the export finishes");
+    let sql = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        sql.contains(r#""n" "dbo"."int); SELECT 1 AS ""x]""; --" NOT NULL"#),
+        "{sql}"
+    );
+
+    table.run("DROP TABLE {table}");
+    let problems = table.replay(&sql);
+    assert!(problems.is_empty(), "{sql}\n{}", problems.join("\n"));
+    let differences = differences(&before, &table.rows(), None);
+    assert!(differences.is_empty(), "{}", differences.join("\n"));
+    table.run("DROP TABLE {table}");
+    table.run(&format!("DROP TYPE dbo.{alias}"));
+}
+
 #[test]
 fn a_rows_only_schema_names_its_missing_and_cyclic_tables_on_duckdb() {
     let file = DuckDbFile::new("schema-rows");
