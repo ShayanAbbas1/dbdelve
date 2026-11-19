@@ -111,6 +111,11 @@ pub(crate) struct Profile {
     /// history file, `profiles.toml` or any log, since it is SQL text that
     /// ends with its session. Emptied with [`Profile::in_transaction`].
     pub(crate) transaction_statements: Vec<String>,
+    /// How many submissions have set [`Self::in_transaction`] as they were
+    /// sent. An end of the transaction is settled only when it lands, so one
+    /// sent before this moved was overtaken on the session by the later
+    /// submission and must not undo what it said ([`Self::superseded`]).
+    pub(crate) transaction_sends: u64,
     /// Whether each of the user's statements commits on its own. Off means
     /// dbdelve keeps a transaction open for them, opening it by writing a
     /// `BEGIN` into the buffer where they can read it -- never onto the wire
@@ -296,6 +301,35 @@ impl Profile {
         if !still_open {
             self.record_sent(sql, Some(false));
             self.in_transaction = false;
+        }
+    }
+
+    /// Whether a submission sent after `sent_at` set the transaction state,
+    /// which an end sent at `sent_at` landing now must leave alone: the
+    /// session ran that submission after the end.
+    pub(crate) fn superseded(&self, sent_at: u64) -> bool {
+        self.transaction_sends != sent_at
+    }
+
+    /// A `COMMIT` or `ROLLBACK` sent with the next transaction's `BEGIN`
+    /// behind it, as Manual's Commit and Roll back send them, has landed, with
+    /// `error` where it failed. [`Profile::in_transaction`] stayed set across
+    /// it, and the record is kept until now: only a pair that ran whole ended
+    /// the transaction it lists, and starts the record again with what
+    /// follows the end. One that failed may have left the transaction it
+    /// lists open (SQLite keeps it on a deferred constraint), so the pair is
+    /// added to the record rather than replacing it, as [`Self::record_sent`]
+    /// does wherever it cannot tell. One sent nothing changed nothing, and a
+    /// `lost` session has no transaction left.
+    pub(crate) fn reopen_landed(&mut self, sql: &str, lost: bool, error: Option<&DbError>) {
+        match error {
+            None => self.record_sent(sql, Some(true)),
+            Some(_) if lost => {
+                self.record_sent(sql, Some(false));
+                self.in_transaction = false;
+            }
+            Some(error) if crate::db::sent_nothing(error) => {}
+            Some(_) => self.transaction_statements.push(sql.to_string()),
         }
     }
 

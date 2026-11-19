@@ -2593,15 +2593,20 @@ impl Workspace {
         {
             let text = explained.as_deref().unwrap_or(&sql);
             let leaves = sql::leaves(engine, text);
-            if leaves.transaction == Some(false) && profile.in_transaction {
+            // An end that opens the next transaction behind it, as Manual's
+            // Commit sends it, keeps the record until it lands too: if its
+            // end fails, the transaction the record lists can still be open.
+            let reopens = leaves.transaction == Some(true) && sql::ends_transaction(engine, text);
+            if (leaves.transaction == Some(false) || reopens) && profile.in_transaction {
                 // Whether it is a lone end, whose failure the engine may say
                 // left the transaction open (SQLite's `SQLITE_BUSY`).
                 let lone = sql::after_last_end(engine, text).is_empty();
-                ending = Some((sql.clone(), lone));
+                ending = Some((sql.clone(), lone, reopens, profile.transaction_sends));
             } else {
                 profile.record_sent(&sql, leaves.transaction);
                 if let Some(open) = leaves.transaction {
                     profile.in_transaction = open;
+                    profile.transaction_sends += 1;
                 }
             }
             profile.session_changed |= leaves.settings;
@@ -3125,8 +3130,17 @@ impl Workspace {
                         // end the block: whether the end really ended anything
                         // is only known now.
                         let ended_ok = result.is_ok();
-                        if let Some((sent, lone)) = &ending {
-                            profile.end_landed(sent, *lone, lost, result.as_ref().err());
+                        // Not once a later submission set the transaction
+                        // state as it went: the session ran it after this
+                        // end, so what it said stands.
+                        if let Some((sent, lone, reopens, sent_at)) = &ending
+                            && (lost || !profile.superseded(*sent_at))
+                        {
+                            let error = result.as_ref().err();
+                            match reopens {
+                                true => profile.reopen_landed(sent, lost, error),
+                                false => profile.end_landed(sent, *lone, lost, error),
+                            }
                         }
                         if profile.session.auto_after_end == Some(tab) {
                             profile.session.auto_after_end = None;
