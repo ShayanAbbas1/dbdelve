@@ -2057,7 +2057,7 @@ impl Connection {
             // set by `setval(…, false)`. Only the sequence itself says where
             // the second stands.
             let set = match optional_cell(&result, row, "last_value") {
-                Some(last) => Some(format!("{last}, true")),
+                Some(last) => Some((last.to_string(), "true".to_string())),
                 None if cell("selectable")? == "true" => {
                     let state = self.internal_query(&format!(
                         "SELECT last_value::text AS last_value, is_called::text AS is_called \
@@ -2067,10 +2067,9 @@ impl Connection {
                         .rows
                         .first()
                         .ok_or_else(|| plain_error(format!("{sequence} has no state to read.")))?;
-                    Some(format!(
-                        "{}, {}",
-                        required_cell(&state, row, "last_value")?,
-                        required_cell(&state, row, "is_called")?
+                    Some((
+                        required_cell(&state, row, "last_value")?.to_string(),
+                        required_cell(&state, row, "is_called")?.to_string(),
                     ))
                 }
                 None => {
@@ -2078,6 +2077,19 @@ impl Connection {
                     None
                 }
             };
+            // The definition and the value are read apart, the value from the
+            // sequence as it stands now: an `ALTER SEQUENCE` and a `setval`
+            // committed in between pair the old bounds with a value only the
+            // new ones allow, which a replay refuses.
+            if let Some((last, _)) = &set {
+                if outside_bounds(last, cell("min_value")?, cell("max_value")?) {
+                    return Err(plain_error(format!(
+                        "{sequence} was changed while it was read: it stands at {last}, \
+                         outside the bounds read with it. Export it again."
+                    )));
+                }
+            }
+            let set = set.map(|(last, called)| format!("{last}, {called}"));
             // A sequence an identity column owns is created by its table, and
             // a `named` one by no table at all.
             let column_of = || -> Result<(String, String), DbError> {
@@ -2588,6 +2600,20 @@ fn schema_sql(template: &str, schema: &str) -> String {
 }
 
 /// A relation name is user data and can contain a quote.
+/// Whether a sequence's `value` lies outside its `minimum` and `maximum`, all
+/// as the server prints them. Text that does not read as a bigint is taken as
+/// inside: the server's, not this check's, to refuse.
+fn outside_bounds(value: &str, minimum: &str, maximum: &str) -> bool {
+    match (
+        value.parse::<i64>(),
+        minimum.parse::<i64>(),
+        maximum.parse::<i64>(),
+    ) {
+        (Ok(value), Ok(minimum), Ok(maximum)) => value < minimum || value > maximum,
+        _ => false,
+    }
+}
+
 fn structure_sql(template: &str, schema: &str, relation: &str) -> String {
     super::structure_sql(super::Engine::Postgres, template, schema, relation)
 }
@@ -3062,6 +3088,15 @@ mod tests {
             ..parts
         };
         assert!(compose_sequence("s", "n", &parts).ends_with(" NO CYCLE;"));
+    }
+
+    #[test]
+    fn a_sequence_value_is_checked_against_the_bounds_read_with_it() {
+        assert!(!outside_bounds("5", "1", "10"));
+        assert!(!outside_bounds("-5", "-9223372036854775808", "-1"));
+        assert!(outside_bounds("50", "1", "10"));
+        assert!(outside_bounds("0", "1", "10"));
+        assert!(!outside_bounds("not a number", "1", "10"));
     }
 
     #[test]
