@@ -976,6 +976,10 @@ pub(crate) struct Session {
     /// read only once that statement lands, because the switch is not
     /// allowed to say Auto over a transaction the server still holds.
     pub(crate) auto_after_end: Option<Tab>,
+    /// The tab Manual's opening `BEGIN` is running in. The switch reads
+    /// Manual from the moment it is sent; should a Cancel drop it unsent, no
+    /// transaction opened and the switch goes back to Auto when it lands.
+    pub(crate) manual_after_begin: Option<Tab>,
     pub(crate) notice: Option<String>,
     /// What a statement's run cost beyond its result (`QueryResult::notice`),
     /// said only while the tab it ran on is in front, under any `notice`.
@@ -1524,6 +1528,7 @@ impl Session {
             resume_after: None,
             auto_commit_prompt: None,
             auto_after_end: None,
+            manual_after_begin: None,
             notice,
             tab_notice: None,
             apply_review: None,

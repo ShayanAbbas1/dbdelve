@@ -1666,6 +1666,7 @@ impl Workspace {
         profile.in_transaction = false;
         profile.transaction_statements.clear();
         profile.session.auto_after_end = None;
+        profile.session.manual_after_begin = None;
         profile.session_changed = false;
         profile.session.clear_prompts();
         mark_objects_stale(profile);
@@ -2235,6 +2236,7 @@ impl Workspace {
         profile.in_transaction = false;
         profile.transaction_statements.clear();
         profile.session.auto_after_end = None;
+        profile.session.manual_after_begin = None;
         // The transaction it was holding died with the session, and silently
         // opening another on a connection the user has just watched drop is
         // the kind of surprise this feature exists to avoid.
