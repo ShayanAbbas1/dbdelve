@@ -4452,7 +4452,11 @@ fn verified_result(
         // An ordered target's failure after its first write is told with what
         // applied (`verified_message`); every other is the driver's own words.
         ApplyOutcome::Failed { stage, error }
-            if !(ordered && matches!(stage, ApplyStage::Write(_))) =>
+            if !(ordered
+                && matches!(
+                    stage,
+                    ApplyStage::Write(_) | ApplyStage::Unanswered(_) | ApplyStage::Concern(_)
+                )) =>
         {
             Err(error)
         }
@@ -4541,25 +4545,49 @@ fn read_back_after_write(outcome: ApplyOutcome) -> (ApplyOutcome, Option<DbError
 /// has left the draft, the sentence for the statement it stopped at, and the
 /// statements after it that were never sent.
 fn stopped_part_way(verify: &Verification, stopped: usize, sentence: String) -> String {
+    told_part_way(verify, (stopped, Some(stopped)), sentence, None)
+}
+
+/// [`stopped_part_way`]'s sentences for `(applied, stopped)`: the first
+/// `applied` statements applied and have left the draft, the one at index
+/// `stopped` is what `sentence` says, and the rest were not sent. A
+/// `stopped` of `None` says nothing of how many applied, for a first write
+/// whose own outcome is not known. `after` closes it.
+fn told_part_way(
+    verify: &Verification,
+    (applied, stopped): (usize, Option<usize>),
+    sentence: String,
+    after: Option<&str>,
+) -> String {
     let total = verify.steps.len();
-    let applied = match stopped {
-        0 => "Nothing was applied.".to_string(),
-        1 => "Statement 1 was applied and has left the draft.".to_string(),
-        written => format!("Statements 1 to {written} were applied and have left the draft."),
-    };
-    let unsent = match total.saturating_sub(stopped + 1) {
-        0 => None,
-        1 => Some(format!("Statement {total} was not sent.")),
-        _ => Some(format!(
-            "Statements {} to {total} were not sent.",
-            stopped + 2
+    let applied = match (applied, stopped) {
+        (0, None) => None,
+        (0, _) => Some("Nothing was applied.".to_string()),
+        (1, _) => Some("Statement 1 was applied and has left the draft.".to_string()),
+        (written, _) => Some(format!(
+            "Statements 1 to {written} were applied and have left the draft."
         )),
     };
-    [Some(applied), Some(sentence), unsent]
+    let last = stopped.unwrap_or(0);
+    let unsent = match total.saturating_sub(last + 1) {
+        0 => None,
+        1 => Some(format!("Statement {total} was not sent.")),
+        _ => Some(format!("Statements {} to {total} were not sent.", last + 2)),
+    };
+    [applied, Some(sentence), unsent, after.map(str::to_string)]
         .into_iter()
         .flatten()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// `message` without trailing space, and the full stop it lacks, if any.
+fn closed(message: &str) -> (&str, &'static str) {
+    let said = message.trim_end();
+    match said.ends_with(['.', '!', '?']) {
+        true => (said, ""),
+        false => (said, "."),
+    }
 }
 
 /// What the review says of a verified apply that wrote nothing, naming the
@@ -4625,11 +4653,7 @@ fn verified_message(
             stage: ApplyStage::Write(step),
             error,
         } if ordered => {
-            let said = error.message.trim_end();
-            let stop = match said.ends_with(['.', '!', '?']) {
-                true => "",
-                false => ".",
-            };
+            let (said, stop) = closed(&error.message);
             return Some(stopped_part_way(
                 verify,
                 *step,
@@ -4638,6 +4662,37 @@ fn verified_message(
                     step + 1,
                     named(*step)
                 ),
+            ));
+        }
+        // Nothing answered for this write, so it is neither among the
+        // statements that applied nor among those never sent.
+        ApplyOutcome::Failed {
+            stage: ApplyStage::Unanswered(step),
+            error,
+        } if ordered => {
+            let (said, stop) = closed(&error.message);
+            return Some(told_part_way(
+                verify,
+                (*step, (*step > 0).then_some(*step)),
+                format!(
+                    "Statement {} ({}) got no answer, so it may have been applied: {said}{stop}",
+                    step + 1,
+                    named(*step)
+                ),
+                Some("Read the rows again to see what the server holds."),
+            ));
+        }
+        // It applied, and has left the draft with the ones before it.
+        ApplyOutcome::Failed {
+            stage: ApplyStage::Concern(step),
+            error,
+        } if ordered => {
+            let (said, stop) = closed(&error.message);
+            return Some(told_part_way(
+                verify,
+                (step + 1, Some(*step)),
+                format!("Statement {} ({}): {said}{stop}", step + 1, named(*step)),
+                None,
             ));
         }
         ApplyOutcome::Unknown(_) => {
@@ -5016,6 +5071,55 @@ mod tests {
                 "Statement 1 was applied and has left the draft. UPDATE 2 (row _id = 2) \
                  affected 2 rows. Statements 3 to 5 were not sent."
             )
+        );
+        // A write nothing answered may have applied: it is said apart from
+        // the writes before it, which applied, and those after, never sent.
+        let unanswered = |step| ApplyOutcome::Failed {
+            stage: db::ApplyStage::Unanswered(step),
+            error: DbError {
+                message: "connection reset by peer".into(),
+                position: None,
+            },
+        };
+        assert_eq!(
+            said(unanswered(2)).as_deref(),
+            Some(
+                "Statements 1 to 2 were applied and have left the draft. Statement 3 \
+                 (added row 1) got no answer, so it may have been applied: connection reset by \
+                 peer. Statements 4 to 5 were not sent. Read the rows again to see what the \
+                 server holds."
+            )
+        );
+        let first = said(unanswered(0)).expect("a first write nothing answered is said");
+        assert_eq!(
+            first,
+            "Statement 1 (row _id = 1) got no answer, so it may have been applied: connection \
+             reset by peer. Statements 2 to 5 were not sent. Read the rows again to see what \
+             the server holds."
+        );
+        assert!(!first.contains("Nothing was applied"), "{first}");
+        // One whose write concern failed applied, and has left the draft.
+        assert_eq!(
+            said(ApplyOutcome::Failed {
+                stage: db::ApplyStage::Concern(1),
+                error: DbError {
+                    message: "The writes applied, but their write concern failed: timed out".into(),
+                    position: None,
+                },
+            })
+            .as_deref(),
+            Some(
+                "Statements 1 to 2 were applied and have left the draft. Statement 2 \
+                 (row _id = 2): The writes applied, but their write concern failed: timed out. \
+                 Statements 3 to 5 were not sent."
+            )
+        );
+        let landed = verified_result(unanswered(2), &verify, true)
+            .expect_err("a write nothing answered is an error");
+        assert!(
+            landed.message.contains("may have been applied"),
+            "{}",
+            landed.message
         );
         // A failure before any write, and a drift, wrote nothing and keep the
         // sentences of a transactional engine.
