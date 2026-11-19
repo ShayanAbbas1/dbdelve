@@ -20728,3 +20728,153 @@ fn a_row_send_by_every_value_shows_what_it_wrote_and_sends_again(cx: &mut TestAp
         quit(workspace, cx);
     });
 }
+
+/// Closing a Row view whose panel text the grid refuses neither sends the row
+/// without it nor closes the tab over it.
+#[gpui::test]
+fn a_close_over_refused_panel_text_sends_nothing_and_keeps_the_tab(cx: &mut TestAppContext) {
+    use crate::result_grid::NewValue;
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            "create table birds (id integer primary key, name text not null, b blob); \
+             insert into birds values (1, 'wren', x'4142'), (2, 'tit', x'4142');",
+        );
+        let (_, grid) = open_in_row_mode(&workspace, cx);
+        focus_grid(&grid, cx);
+        ring_on(&grid, cx, 0, 1);
+        cx.simulate_keystrokes("secondary-k r");
+        settle(cx);
+        press(cx, "secondary-shift-e");
+        stage(&grid, cx, 0, 1, NewValue::Value("robin".into()));
+        let input = row_panel_input(&workspace, cx, 2);
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| input.set_value("0xZZ", window, cx));
+        });
+        settle(cx);
+        let tab = workspace.read_with(cx, |workspace, _| {
+            workspace.profile().unwrap().session.active
+        });
+
+        cx.simulate_keystrokes("secondary-w");
+        settle(cx);
+        assert_eq!(
+            on_disk("select name from birds where id = 1").as_deref(),
+            Some("wren"),
+            "the row was not sent without its panel value"
+        );
+        workspace.read_with(cx, |workspace, _| {
+            let session = &workspace.profile().unwrap().session;
+            assert!(session.strip_tabs().contains(&tab), "the tab stays open");
+        });
+        assert_eq!(pending_of(&grid, cx), 1, "the grid's edit is kept");
+        quit(workspace, cx);
+    });
+}
+
+/// Close All Tabs asks once over every tab holding edits: Cancel keeps them
+/// all, and Discard closes them all.
+#[gpui::test]
+fn close_all_asks_once_over_every_tab_with_edits(cx: &mut TestAppContext) {
+    use crate::result_grid::NewValue;
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, BIRDS);
+        draft_by_default(&workspace, cx);
+        run_in_front(&workspace, cx, "select * from birds");
+        let first = query_tab(&workspace, cx, |tab, _, _| tab.results.clone());
+        stage(&first, cx, 0, 1, NewValue::Value("finch".into()));
+        cx.simulate_keystrokes("secondary-t");
+        settle(cx);
+        run_in_front(&workspace, cx, "select * from birds");
+        let second = query_tab(&workspace, cx, |tab, _, _| tab.results.clone());
+        stage(&second, cx, 0, 1, NewValue::Value("robin".into()));
+        cx.simulate_keystrokes("secondary-t");
+        settle(cx);
+        let strip = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                workspace.profile().unwrap().session.strip_tabs()
+            })
+        };
+
+        cx.simulate_keystrokes("secondary-k w");
+        settle(cx);
+        let held = workspace.read_with(cx, |workspace, _| {
+            let discard = workspace
+                .profile()
+                .unwrap()
+                .session
+                .pending_discard
+                .as_ref()
+                .expect("the edits are asked about");
+            assert_eq!(discard.also.len(), 1, "one question over both tabs");
+            let mut held = discard.also.clone();
+            held.push(discard.tab);
+            held
+        });
+        assert_eq!(strip(cx).len(), 2, "the clean tab has gone");
+
+        workspace.update(cx, |workspace, cx| workspace.cancel_discard_close(cx));
+        settle(cx);
+        assert_eq!(strip(cx).len(), 2, "Cancel keeps both");
+        assert_eq!(pending_of(&first, cx), 1);
+        assert_eq!(pending_of(&second, cx), 1);
+
+        cx.simulate_keystrokes("secondary-k w");
+        settle(cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.confirm_discard_close(window, cx)
+        });
+        settle(cx);
+        let left = strip(cx);
+        assert!(
+            held.iter().all(|tab| !left.contains(tab)),
+            "Discard closes every tab it was asked over"
+        );
+        quit(workspace, cx);
+    });
+}
+
+/// Text typed into a Row view's panel goes with a tab switch, as it did
+/// before Close All Tabs counted it: only a close asks to discard it.
+#[gpui::test]
+fn a_tab_switch_over_typed_panel_text_is_not_asked_about(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            "create table birds (id integer primary key, name text not null); \
+             insert into birds values (1, 'wren'), (2, 'tit');",
+        );
+        let (_, grid) = open_in_row_mode(&workspace, cx);
+        focus_grid(&grid, cx);
+        ring_on(&grid, cx, 0, 1);
+        cx.simulate_keystrokes("secondary-k r");
+        settle(cx);
+        press(cx, "secondary-shift-e");
+        let input = row_panel_input(&workspace, cx, 1);
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| input.set_value("robin", window, cx));
+        });
+        settle(cx);
+        let other = workspace.read_with(cx, |workspace, _| {
+            let session = &workspace.profile().unwrap().session;
+            session
+                .strip_tabs()
+                .into_iter()
+                .find(|tab| *tab != session.active)
+                .expect("another tab")
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.activate_tab(other, window, cx)
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let session = &workspace.profile().unwrap().session;
+            assert!(session.pending_discard.is_none(), "nothing is asked");
+            assert_eq!(session.active, other, "the switch went ahead");
+        });
+        quit(workspace, cx);
+    });
+}

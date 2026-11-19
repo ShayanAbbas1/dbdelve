@@ -2072,7 +2072,7 @@ impl Workspace {
         };
         profile.session.pending_delete = None;
         let holder = profile.session.tab_holding(&name).map(Tab::Query);
-        if let Some(tab) = holder.filter(|tab| self.has_unapplied_edits(*tab, cx)) {
+        if let Some(tab) = holder.filter(|tab| self.would_lose_on_close(*tab, cx)) {
             if let Some(profile) = self.profile_mut() {
                 profile.session.pending_discard = Some(PendingDiscard {
                     tab,

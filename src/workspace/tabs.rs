@@ -493,7 +493,7 @@ impl Workspace {
     /// the frame this runs in. Focus goes back to the front for the reason
     /// `searched` gives.
     fn drop_row_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let inputs = self.stage_row_inputs(cx);
+        let (inputs, _) = self.stage_row_inputs(cx);
         if inputs
             .iter()
             .any(|input| input.focus_handle(cx).is_focused(window))
@@ -504,15 +504,16 @@ impl Workspace {
     }
 
     /// Stage whatever Edit mode's inputs hold that is not staged yet, and hand
-    /// back the inputs. A close needs this before it asks whether a tab is
-    /// clean: the chip's button and the chords take no focus, so no blur comes
-    /// to stage a draft before the tab is gone.
+    /// back the inputs, and whether any input's text was refused. A close needs
+    /// this before it asks whether a tab is clean: the chip's button and the
+    /// chords take no focus, so no blur comes to stage a draft before the tab
+    /// is gone.
     fn stage_row_inputs(
         &mut self,
         cx: &mut Context<Self>,
-    ) -> Vec<Entity<gpui_component::input::TextareaState>> {
+    ) -> (Vec<Entity<gpui_component::input::TextareaState>>, bool) {
         let Some(inputs) = self.row_panel.inputs.as_ref() else {
-            return Vec::new();
+            return (Vec::new(), false);
         };
         let inputs: Vec<_> = inputs
             .fields
@@ -520,10 +521,11 @@ impl Workspace {
             .flatten()
             .map(|field| field.input.clone())
             .collect();
+        let mut refused = false;
         for input in &inputs {
-            self.commit_row_input(input, cx);
+            refused |= !self.commit_row_input(input, cx);
         }
-        inputs
+        (inputs, refused)
     }
 
     /// Edit mode's input on a cell of the grid in front, if one is built.
@@ -1253,7 +1255,11 @@ impl Workspace {
         if self.palette.is_some() {
             return;
         }
-        self.stage_row_inputs(cx);
+        // Text the row panel could not stage stays with its row: closing now
+        // would either lose it or send the row without it.
+        if self.stage_row_inputs(cx).1 {
+            return;
+        }
         let Some(profile) = self.profile() else {
             return;
         };
@@ -1265,9 +1271,21 @@ impl Workspace {
         tabs.sort_by_key(|tab| *tab == active);
         let (dirty, clean): (Vec<Tab>, Vec<Tab>) = tabs
             .into_iter()
-            .partition(|tab| self.has_unapplied_edits(*tab, cx));
+            .partition(|tab| self.would_lose_on_close(*tab, cx));
         for tab in clean {
             self.close_now(tab, window, cx);
+        }
+        // A tab whose edits are being sent stays: closing it would cancel the
+        // send, leaving whether it was written unknown, and discard the rest.
+        let (busy, dirty): (Vec<Tab>, Vec<Tab>) = dirty.into_iter().partition(|tab| {
+            self.profile()
+                .is_some_and(|profile| profile.session.running(*tab))
+        });
+        if !busy.is_empty() {
+            self.note(
+                "A tab whose edits are still being sent was left open.".into(),
+                cx,
+            );
         }
         if dirty.is_empty() {
             return;
@@ -1299,7 +1317,11 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.stage_row_inputs(cx);
+        // Refused text stops the close: the row is neither sent without it
+        // nor discarded with it.
+        if self.stage_row_inputs(cx).1 {
+            return;
+        }
         if !self.held_for_edits(tab, AfterEdits::Close { deleting: None }, cx) {
             self.close_now(tab, window, cx);
         }
@@ -1328,7 +1350,13 @@ impl Workspace {
         then: AfterEdits,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.has_unapplied_edits(tab, cx) {
+        // Text not yet staged is lost only by a close: any other action keeps
+        // the inputs, and the row panel stages its text when it is left.
+        let held = match then {
+            AfterEdits::Close { .. } => self.would_lose_on_close(tab, cx),
+            _ => self.has_unapplied_edits(tab, cx),
+        };
+        if !held {
             return false;
         }
         if let Tab::Object(id) = tab
@@ -1432,17 +1460,29 @@ impl Workspace {
         }
     }
 
+    /// Whether `tab`'s grids hold staged edits nobody has applied.
+    pub(crate) fn has_unapplied_edits(&self, tab: Tab, cx: &App) -> bool {
+        self.profile().is_some_and(|profile| {
+            profile
+                .session
+                .tab_grids(tab)
+                .iter()
+                .any(|grid| grid.read(cx).delegate().has_pending())
+        })
+    }
+
     /// Staged edits, and drafts that never became one: an open cell input,
     /// or a row panel field whose staging was refused. A close would lose
     /// either without a word.
-    pub(crate) fn has_unapplied_edits(&self, tab: Tab, cx: &App) -> bool {
+    pub(crate) fn would_lose_on_close(&self, tab: Tab, cx: &App) -> bool {
         let Some(profile) = self.profile() else {
             return false;
         };
-        let grids = profile.session.tab_grids(tab).into_iter().any(|results| {
-            let grid = results.read(cx).delegate();
-            grid.has_pending() || grid.has_draft(cx)
-        });
+        let drafts = profile
+            .session
+            .tab_grids(tab)
+            .iter()
+            .any(|grid| grid.read(cx).delegate().has_draft(cx));
         let row_draft = self.row_panel.inputs.as_ref().is_some_and(|inputs| {
             inputs.tab == tab
                 && inputs.profile == profile.id
@@ -1452,7 +1492,7 @@ impl Workspace {
                     .flatten()
                     .any(|field| field.input.read(cx).value().as_str() != field.seed.as_str())
         });
-        grids || row_draft
+        self.has_unapplied_edits(tab, cx) || drafts || row_draft
     }
 
     /// Carry out a close that has been decided on.
@@ -1552,6 +1592,15 @@ impl Workspace {
             for tab in &discard.also {
                 profile.session.drop_apply_review_of(*tab);
             }
+        }
+        // The row panel's text goes with the edits: left in its inputs, it
+        // would raise the same question again when the action is carried out.
+        let profile_id = self.profile().map(|profile| profile.id.clone());
+        if self.row_panel.inputs.as_ref().is_some_and(|inputs| {
+            Some(&inputs.profile) == profile_id.as_ref()
+                && (inputs.tab == discard.tab || discard.also.contains(&inputs.tab))
+        }) {
+            self.row_panel.inputs = None;
         }
         for tab in discard.also {
             self.close_now(tab, window, cx);
