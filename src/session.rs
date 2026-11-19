@@ -757,10 +757,12 @@ pub(crate) struct Session {
     /// has no buffer to put SQL in, so the modal is where the statement is on
     /// screen — and nothing runs until Run.
     pub(crate) apply_review: Option<ApplyReview>,
-    /// The tab whose review was closed while its batch was still out. Its grid
-    /// takes no edit until that run lands: the success that clears the draft
-    /// would drop one staged meanwhile unsaid.
-    pub(crate) draft_out: Option<Tab>,
+    /// The tabs whose review was closed while their batch was still out, one
+    /// entry each, cleared by that tab's own landing. Such a grid takes no
+    /// edit until its run lands: the success that clears the draft would drop
+    /// one staged meanwhile unsaid. One per tab, since another tab's review
+    /// can be opened, run and closed while the first is still out.
+    pub(crate) draft_out: Vec<Tab>,
     /// The "Insert" form a preview tab is filling in. Beside `apply_review`
     /// because the two are halves of one flow: the form collects, the review
     /// shows the statement it generated, and only Run sends it.
@@ -1296,7 +1298,7 @@ impl Session {
             notice,
             tab_notice: None,
             apply_review: None,
-            draft_out: None,
+            draft_out: Vec::new(),
             insert_form: None,
             import_rows: None,
             pending_run: None,
@@ -1375,7 +1377,7 @@ impl Session {
     /// Asked of the tab whose grid is being edited, which a blur can make a
     /// tab other than the active one.
     pub(crate) fn may_stage_into(&self, owner: Tab) -> bool {
-        self.draft_out != Some(owner)
+        !self.draft_out.contains(&owner)
             && may_stage_into(
                 self.apply_review.as_ref(),
                 self.import_rows.is_some(),

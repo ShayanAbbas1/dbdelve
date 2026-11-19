@@ -14000,6 +14000,82 @@ fn the_apply_review_does_not_close_while_its_batch_runs(cx: &mut TestAppContext)
     });
 }
 
+/// Two tabs whose reviews were closed while their batches were out each keep
+/// their own grid from taking edits until their own run lands: the second
+/// does not free the first.
+#[gpui::test]
+fn reviews_closed_on_two_tabs_while_out_each_hold_their_own_grid(cx: &mut TestAppContext) {
+    use crate::result_grid::NewValue;
+    use crate::session::Tab;
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            "create table birds (id integer primary key, name text not null); \
+             insert into birds values (1, 'wren'), (2, 'tit'); \
+             create table nests (id integer primary key, name text not null); \
+             insert into nests values (1, 'oak');",
+        );
+        draft_by_default(&workspace, cx);
+        let birds = open_own_table(&workspace, cx, "birds");
+        stage(
+            &relation_grid(&workspace, cx, birds),
+            cx,
+            0,
+            1,
+            NewValue::Value("finch".into()),
+        );
+        let nests = open_own_table(&workspace, cx, "nests");
+        stage(
+            &relation_grid(&workspace, cx, nests),
+            cx,
+            0,
+            1,
+            NewValue::Value("elm".into()),
+        );
+        let may_stage = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext, id| {
+            workspace.read_with(cx, |workspace, _| {
+                workspace
+                    .profile()
+                    .unwrap()
+                    .session
+                    .may_stage_into(Tab::Object(id))
+            })
+        };
+        let run_and_close = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext, id| {
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.activate_tab(Tab::Object(id), window, cx);
+                workspace.apply_edits(&crate::actions::ApplyEdits, window, cx);
+            });
+            assert!(
+                front_review(workspace, cx).is_some(),
+                "{id}: a review is open"
+            );
+            workspace.update(cx, |workspace, cx| workspace.run_apply_review(cx));
+            // The first asks the batch to stop, the second closes the review.
+            workspace.update(cx, |workspace, cx| workspace.close_apply_review(cx));
+            workspace.update(cx, |workspace, cx| workspace.close_apply_review(cx));
+            assert_eq!(front_review(workspace, cx), None, "{id}: the review closed");
+        };
+
+        run_and_close(&workspace, cx, birds);
+        run_and_close(&workspace, cx, nests);
+        assert!(
+            !may_stage(&workspace, cx, birds),
+            "birds' batch is still out"
+        );
+        assert!(
+            !may_stage(&workspace, cx, nests),
+            "nests' batch is still out"
+        );
+
+        settle(cx);
+        assert!(may_stage(&workspace, cx, birds));
+        assert!(may_stage(&workspace, cx, nests));
+        quit(workspace, cx);
+    });
+}
+
 /// A review whose run a reconnect has moved the profile on from closes at
 /// once: that run's landing is dropped, and nothing else would end it.
 #[gpui::test]

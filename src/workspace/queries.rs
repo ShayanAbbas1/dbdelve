@@ -3109,7 +3109,7 @@ impl Workspace {
                     if let Some(profile) =
                         workspace.profiles.iter_mut().find(|profile| profile.id == id)
                     {
-                        profile.session.draft_out.take_if(|out| *out == tab);
+                        profile.session.draft_out.retain(|out| *out != tab);
                     }
                     let (succeeded, produced_grid, plan, rest, notice, landed) = {
                         let Some(profile) = workspace.issued_to(&id, generation) else {

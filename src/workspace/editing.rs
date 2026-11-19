@@ -2799,7 +2799,9 @@ impl Workspace {
                 return true;
             }
             profile.session.apply_review = None;
-            profile.session.draft_out = Some(tab);
+            if !profile.session.draft_out.contains(&tab) {
+                profile.session.draft_out.push(tab);
+            }
             cx.notify();
             return true;
         }
