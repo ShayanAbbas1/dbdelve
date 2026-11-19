@@ -383,6 +383,11 @@ impl Profile {
     /// over them: the connection they were opened from has ended or been
     /// replaced, and a landing issued to it is dropped by its generation.
     ///
+    /// The schema export's dialog goes with them: its tick list and the keys
+    /// it read are the connection's being dropped, and its reads under the old
+    /// generation are dropped when they land, which would leave it reading
+    /// forever. A disconnect, a reconnect and a database switch all come here.
+    ///
     /// ponytail: a session lives as long as its connection and ends with
     /// nothing else, so a server with many databases expanded holds one
     /// session each until it disconnects. The upgrade is to close one when
@@ -390,6 +395,7 @@ impl Profile {
     pub(crate) fn drop_sessions(&mut self) {
         self.bound.clear();
         self.database_catalogs.clear();
+        self.session.schema_export = None;
     }
 
     /// Why an edit under `binding` is not sent, as far as is known before it

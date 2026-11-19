@@ -4218,6 +4218,21 @@ fn a_database_switch_closes_the_schema_export_and_waits_for_a_running_export(
         workspace.update(cx, |workspace, _| {
             workspace.profile_mut().unwrap().session.exporting = None;
         });
+
+        // A disconnect drops the connection the dialog read its keys on.
+        workspace.update(cx, |workspace, cx| {
+            workspace.open_schema_export("main".into(), cx);
+        });
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("schema-export"));
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.disconnect(&Disconnect, window, cx);
+        });
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), None);
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.profiles[0].session.schema_export.is_none());
+        });
         quit(workspace, cx);
     });
 }
