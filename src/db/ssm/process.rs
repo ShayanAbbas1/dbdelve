@@ -287,10 +287,22 @@ mod tests {
         let mut process = Process::spawn(command).unwrap();
         // Exclude re-exec startup from the shutdown budget on loaded CI runners.
         use std::io::BufRead;
-        let mut stdout = io::BufReader::new(process.child.as_mut().unwrap().stdout.take().unwrap());
-        let mut line = String::new();
-        stdout.read_line(&mut line).unwrap();
-        assert_eq!(line.trim(), "ready");
+        let stdout = process.child.as_mut().unwrap().stdout.take().unwrap();
+        let (send, receive) = mpsc::channel();
+        thread::spawn(move || {
+            for line in io::BufReader::new(stdout).lines().take(2) {
+                if send.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        assert_eq!(
+            receive
+                .recv_timeout(Duration::from_secs(30))
+                .expect("CLI did not become ready")
+                .unwrap(),
+            "ready"
+        );
         let deadline = Instant::now() + Duration::from_secs(10);
         while process.running() {
             assert!(
@@ -303,9 +315,13 @@ mod tests {
             process.child.as_mut().unwrap().wait().unwrap().code(),
             Some(7)
         );
-        line.clear();
-        stdout.read_line(&mut line).unwrap();
-        assert_eq!(line.trim(), "DBDELVE_SSM_CHILD_EXITED");
+        assert_eq!(
+            receive
+                .recv_timeout(Duration::from_secs(10))
+                .expect("watchdog did not report CLI exit")
+                .unwrap(),
+            "DBDELVE_SSM_CHILD_EXITED"
+        );
     }
 }
 
