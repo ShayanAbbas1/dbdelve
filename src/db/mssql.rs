@@ -3043,6 +3043,25 @@ mod tests {
         Connection::open(&live_config()).expect("connection should open")
     }
 
+    /// A default-schema lookup that loses its session, as one that times out
+    /// does, hands back a new login rather than the lost session, which
+    /// would fail its first statement without sending it.
+    #[test]
+    #[ignore = "needs a live SQL Server: set dbdelve_MSSQL_URL"]
+    fn live_a_session_the_schema_lookup_lost_is_replaced() {
+        let mut connection = live();
+        let mut session = connection.connect().expect("a second login");
+        session.lost = Some(Lost::TimedOut);
+        let mut session = connection
+            .read_default_schema(session)
+            .expect("the lost session is replaced");
+        assert!(session.lost.is_none());
+        assert_eq!(
+            first_value(&mut session, "SELECT 1").expect("it reaches the server"),
+            Some("1".to_string())
+        );
+    }
+
     #[test]
     fn a_composed_sequence_quotes_names_whatever_they_hold() {
         let parts = SequenceParts {
