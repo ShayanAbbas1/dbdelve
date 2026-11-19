@@ -1791,7 +1791,7 @@ impl Connection {
         if structure.columns.is_empty() {
             return Err(plain_error(format!("{schema} has no relation {relation}.")));
         }
-        let (structure, foreign_keys) = match keys_apart {
+        let (structure, mut foreign_keys) = match keys_apart {
             true => {
                 let (rest, added) =
                     split_foreign_keys(Engine::SqlServer, schema, relation, &structure);
@@ -1799,7 +1799,7 @@ impl Connection {
             }
             false => (structure, Vec::new()),
         };
-        let create = create_table(
+        let mut create = create_table(
             Engine::SqlServer,
             &format!("CREATE TABLE {name}"),
             &structure,
@@ -1812,10 +1812,51 @@ impl Connection {
                 None => index.definition.clone(),
             },
         );
+        if keys_apart {
+            let (before_rows, after_rows) = self.unchecked_checks(schema, relation)?;
+            for statement in before_rows {
+                create.push('\n');
+                create.push_str(&statement);
+            }
+            foreign_keys.extend(after_rows);
+        }
         Ok(ExportDdl {
             create,
             foreign_keys,
         })
+    }
+
+    /// The statements that bring back a table's CHECK constraints that do not
+    /// check its rows: a disabled one, or one enabled without checking the
+    /// rows it already had, which the catalog calls untrusted. Either may
+    /// hold rows it would refuse, so it is disabled right after the table is
+    /// created, and an untrusted one is enabled again after the rows, still
+    /// without checking them. An ordinary CHECK stays in the `CREATE TABLE`.
+    fn unchecked_checks(
+        &self,
+        schema: &str,
+        relation: &str,
+    ) -> Result<(Vec<String>, Vec<String>), DbError> {
+        let unchecked = self.internal_query(&structure_sql(
+            "SELECT c.name AS name, CAST(c.is_disabled AS int) AS disabled
+             FROM sys.check_constraints AS c
+             WHERE c.parent_object_id = {object} AND c.is_not_trusted = 1
+             ORDER BY c.name",
+            schema,
+            relation,
+        ))?;
+        let table = Engine::SqlServer.qualified(schema, relation);
+        let (mut before_rows, mut after_rows) = (Vec::new(), Vec::new());
+        for row in &unchecked.rows {
+            let name = Engine::SqlServer.quote_identifier(required_cell(&unchecked, row, "name")?);
+            before_rows.push(format!("ALTER TABLE {table} NOCHECK CONSTRAINT {name};"));
+            if required_cell(&unchecked, row, "disabled")? != "1" {
+                after_rows.push(format!(
+                    "ALTER TABLE {table} WITH NOCHECK CHECK CONSTRAINT {name};"
+                ));
+            }
+        }
+        Ok((before_rows, after_rows))
     }
 }
 

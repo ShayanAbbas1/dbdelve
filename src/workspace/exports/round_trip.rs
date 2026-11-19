@@ -157,8 +157,9 @@ impl Throwaway {
                 // once before running such a file. Nor `OWNED BY`, which a
                 // schema file ties each sequence to its column with, nor an
                 // identity column's `SET INCREMENT BY …`, nor SQL Server's
-                // `WITH NOCHECK` for a key that does not check its rows: the
-                // file is for whoever runs it back, and DBDelve never runs it.
+                // `WITH NOCHECK` for a key or a CHECK that does not check its
+                // rows: the file is for whoever runs it back, and DBDelve
+                // never runs it.
                 let verdict = sql::classify(self.engine, statement);
                 assert!(
                     statement.contains(" OVERRIDING SYSTEM VALUE ")
@@ -167,6 +168,7 @@ impl Throwaway {
                         || (statement.starts_with("ALTER TABLE ")
                             && statement.contains(" SET INCREMENT BY "))
                         || statement.contains(" WITH NOCHECK ADD CONSTRAINT ")
+                        || statement.contains(" WITH NOCHECK CHECK CONSTRAINT ")
                         || !verdict.destructive.contains(&Destructive::Unreadable),
                     "{:?} cannot read `{statement}`",
                     self.engine
@@ -1394,6 +1396,74 @@ fn live_an_unchecked_foreign_key_runs_back_as_it_was_on_sql_server() {
     }
     assert_eq!(state(&disabled).as_deref(), Some("11"), "{sql}");
     assert_eq!(state(&untrusted).as_deref(), Some("01"), "{sql}");
+}
+
+/// A CHECK that does not check its rows may hold rows it would refuse, and
+/// comes back as unchecked as it was: disabled, or enabled and untrusted.
+#[test]
+#[ignore = "needs the dev SQL Server"]
+fn live_an_unchecked_check_runs_back_as_it_was_on_sql_server() {
+    let table = Throwaway::new(
+        open("dbdelve_MSSQL_URL"),
+        Engine::SqlServer,
+        "dbo",
+        "unchecked_check",
+    );
+    table.run("DROP TABLE IF EXISTS {table}");
+    table.run(
+        "CREATE TABLE {table} (id int PRIMARY KEY, \
+         amount int CONSTRAINT {name}_off CHECK (amount > 0), \
+         size int CONSTRAINT {name}_untrusted CHECK (size < 10), \
+         kept int CONSTRAINT {name}_kept CHECK (kept >= 0))",
+    );
+    table.run("ALTER TABLE {table} NOCHECK CONSTRAINT {name}_off");
+    table.run("ALTER TABLE {table} NOCHECK CONSTRAINT {name}_untrusted");
+    table.run("INSERT INTO {table} VALUES (1, -1, 50, 0), (2, 5, 1, 1)");
+    table.run("ALTER TABLE {table} WITH NOCHECK CHECK CONSTRAINT {name}_untrusted");
+    let states = || {
+        table
+            .run(
+                "SELECT name + ':' + CONCAT(is_disabled, is_not_trusted) FROM sys.check_constraints \
+                 WHERE parent_object_id = OBJECT_ID('{table}') ORDER BY name",
+            )
+            .rows
+            .iter()
+            .filter_map(|row| row.get(0).map(str::to_string))
+            .collect::<Vec<_>>()
+    };
+    let expected = vec![
+        format!("{}_kept:00", table.name),
+        format!("{}_off:11", table.name),
+        format!("{}_untrusted:01", table.name),
+    ];
+    assert_eq!(states(), expected);
+    let before = table.rows();
+
+    let path = table.directory.join("schema.sql");
+    let request = SchemaRequest {
+        tables: vec![table.name.clone()],
+        structure: true,
+        rows: true,
+        partitioned: Vec::new(),
+    };
+    export_schema(
+        &table.connection,
+        "dbo",
+        &request,
+        false,
+        Engine::SqlServer,
+        &path,
+        &ExportProgress::default(),
+    )
+    .expect("the export finishes");
+    let sql = std::fs::read_to_string(&path).unwrap();
+
+    table.run("DROP TABLE {table}");
+    let problems = table.replay(&sql);
+    assert!(problems.is_empty(), "{sql}\n{}", problems.join("\n"));
+    let problems = differences(&before, &table.rows(), None);
+    assert!(problems.is_empty(), "{sql}\n{}", problems.join("\n"));
+    assert_eq!(states(), expected, "{sql}");
 }
 
 /// A key the replication agent's writes skip comes back skipping them.
