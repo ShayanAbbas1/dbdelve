@@ -1891,7 +1891,7 @@ mod tests {
             apply(&connection, &[update("1", "wren")]),
             ApplyOutcome::Applied {
                 affected: 1,
-                read_back: None
+                read_backs: Vec::new()
             }
         );
         assert_eq!(name_of(&connection, 1).as_deref(), Some("robin"));
@@ -1906,7 +1906,7 @@ mod tests {
             apply(&connection, &[delete("1", "wren"), delete("2", "tit")]),
             ApplyOutcome::Applied {
                 affected: 1,
-                read_back: None
+                read_backs: Vec::new()
             }
         );
         assert_eq!(rows_of(&connection), 1);
@@ -1935,7 +1935,7 @@ mod tests {
             apply(&connection, &[insert("4", "owl")]),
             ApplyOutcome::Applied {
                 affected: 1,
-                read_back: None
+                read_backs: Vec::new()
             }
         );
         assert_eq!(
@@ -1965,11 +1965,12 @@ mod tests {
         let named = |outcome: ApplyOutcome| {
             let ApplyOutcome::Applied {
                 affected,
-                read_back: Some(read),
+                mut read_backs,
             } = outcome
             else {
                 panic!("applied with its row read back, not {outcome:?}");
             };
+            let (_, read) = read_backs.pop().expect("its row is read back");
             let name = read.columns.iter().position(|c| c.name == "name").unwrap();
             assert_eq!(read.rows.len(), 1);
             (affected, read.rows[0].get(name).map(str::to_owned))
@@ -2019,7 +2020,7 @@ mod tests {
             connection.apply_verified(&steps("tit"), &|| true),
             ApplyOutcome::Applied {
                 affected: 2,
-                read_back: None
+                read_backs: Vec::new()
             }
         );
         assert_eq!(name_of(&connection, 1), None);

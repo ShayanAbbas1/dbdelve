@@ -632,7 +632,7 @@ impl Connection {
         if steps.is_empty() {
             return ApplyOutcome::Applied {
                 affected: 0,
-                read_back: None,
+                read_backs: Vec::new(),
             };
         }
         let Some(prepared) = steps.iter().map(prepared).collect::<Option<Vec<_>>>() else {
@@ -669,7 +669,7 @@ impl Connection {
             return ApplyOutcome::Drifted(drifted);
         }
 
-        let (mut affected, mut read_back) = (0, None);
+        let (mut affected, mut read_backs) = (0, Vec::new());
         for (index, prepared) in prepared.iter().enumerate() {
             // A Cancel before the write went out sent nothing.
             let run = match Run::start(self, cancel) {
@@ -699,7 +699,7 @@ impl Connection {
             affected += 1;
             if let Some(read) = &prepared.read_back {
                 match send(read) {
-                    Ok(result) => read_back = Some(Box::new(result)),
+                    Ok(result) => read_backs.push((index, result)),
                     Err(error) => {
                         return ApplyOutcome::Failed {
                             stage: ApplyStage::ReadBack(index),
@@ -711,7 +711,7 @@ impl Connection {
         }
         ApplyOutcome::Applied {
             affected,
-            read_back,
+            read_backs,
         }
     }
 
@@ -4743,7 +4743,7 @@ mod tests {
             connection.apply_verified(&[], &cancel),
             ApplyOutcome::Applied {
                 affected: 0,
-                read_back: None
+                read_backs: Vec::new()
             }
         );
 
@@ -4803,8 +4803,11 @@ mod tests {
         match connection.apply_verified(&applying, &cancel) {
             ApplyOutcome::Applied {
                 affected: 2,
-                read_back: Some(shown),
-            } => assert_eq!(shown.rows.len(), 1),
+                read_backs,
+            } => match read_backs.as_slice() {
+                [(1, shown)] => assert_eq!(shown.rows.len(), 1),
+                other => panic!("the update's read-back was expected: {other:?}"),
+            },
             other => panic!("the draft was expected to apply: {other:?}"),
         }
         assert_eq!(name_of(4), (0, None));
@@ -4918,8 +4921,9 @@ mod tests {
         match connection.apply_verified(&[step(manifest())], &cancel) {
             ApplyOutcome::Applied {
                 affected: 1,
-                read_back: Some(shown),
+                mut read_backs,
             } => {
+                let (_, shown) = read_backs.pop().expect("the row is read back");
                 assert_eq!(shown.rows.len(), 1);
                 let at = shown.columns.iter().position(|c| c.name == "name").unwrap();
                 assert_eq!(shown.rows[0].get(at), Some("b"));

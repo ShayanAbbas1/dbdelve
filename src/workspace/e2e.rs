@@ -12324,6 +12324,132 @@ fn an_edit_staged_while_an_apply_is_in_flight_stays_staged(cx: &mut TestAppConte
     });
 }
 
+/// A query tab's kept apply holds what the server stored, not what was
+/// typed: SQLite stores the integer `07` as 7, and the next apply's re-read
+/// of that row is compared with 7, so it is not refused as drift.
+#[gpui::test]
+fn a_kept_apply_holds_the_value_the_server_stored(cx: &mut TestAppContext) {
+    use crate::result_grid::NewValue;
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            "create table birds (id integer primary key, name text not null, n integer); \
+             insert into birds values (1, 'wren', 1), (2, 'tit', 2);",
+        );
+        run_in_front(&workspace, cx, "select * from birds order by id");
+        let grid = query_tab(&workspace, cx, |tab, _, _| tab.results.clone());
+        let stage = |cx: &mut VisualTestContext, row: usize, col: usize, value: NewValue| {
+            grid.update(cx, |grid, _| {
+                assert!(grid.delegate_mut().set_pending(row, col, value))
+            });
+        };
+        stage(cx, 0, 2, NewValue::Value("07".into()));
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.apply_edits(&crate::actions::ApplyEdits, window, cx)
+            })
+        });
+        workspace.update(cx, |workspace, cx| workspace.run_apply_review(cx));
+        // Staged while the batch is out, so the rows are not read again.
+        stage(cx, 1, 1, NewValue::Value("jay".into()));
+        settle(cx);
+        assert_eq!(
+            on_disk("select n from birds where id = 1").as_deref(),
+            Some("7")
+        );
+        assert_eq!(cell_of(&grid, cx, 0, 2).as_deref(), Some("7"));
+
+        stage(cx, 0, 1, NewValue::Value("finch".into()));
+        cx.dispatch_action(crate::actions::ApplyEdits);
+        settle(cx);
+        workspace.update(cx, |workspace, cx| workspace.run_apply_review(cx));
+        settle(cx);
+        assert_eq!(front_review(&workspace, cx), None, "applied, not refused");
+        assert_eq!(
+            on_disk("select name from birds where id = 1").as_deref(),
+            Some("finch")
+        );
+        quit(workspace, cx);
+    });
+}
+
+/// A cell a query tab's kept apply set to DEFAULT holds the default the
+/// server wrote, so putting it back to what it held before is an edit. On
+/// DuckDB: SQLite has no DEFAULT in an UPDATE.
+#[gpui::test]
+fn a_kept_apply_holds_the_default_it_wrote(cx: &mut TestAppContext) {
+    use crate::result_grid::NewValue;
+
+    store::tests::with_home(|| {
+        let directory = store::dbdelve_directory().expect("the test home has a data directory");
+        std::fs::create_dir_all(&directory).expect("the data directory must be creatable");
+        let database = directory.join("e2e.duckdb");
+        ::duckdb::Connection::open(&database)
+            .and_then(|connection| {
+                connection.execute_batch(
+                    "CREATE TABLE birds (id INTEGER PRIMARY KEY, name TEXT NOT NULL, \
+                     note TEXT DEFAULT 'none'); \
+                     INSERT INTO birds VALUES (1, 'wren', NULL), (2, 'tit', NULL);",
+                )
+            })
+            .expect("the schema must apply");
+        std::fs::write(
+            directory.join("profiles.toml"),
+            format!(
+                "active = \"e2e\"\n[settings]\ncheck_for_updates = false\n[[profiles]]\n\
+                 id = \"e2e\"\nname = \"E2E\"\nhost = \"\"\ndatabase = \"\"\nuser = \"\"\n\
+                 engine = \"duckdb\"\npath = {:?}\n",
+                database.display().to_string()
+            ),
+        )
+        .expect("profiles.toml must be writable");
+        let (workspace, cx) = launch(cx);
+        cx.executor().allow_parking();
+        workspace.update(cx, |workspace, cx| {
+            let index = workspace
+                .profiles
+                .iter()
+                .position(|profile| profile.config.engine() == Engine::DuckDb)
+                .expect("the saved DuckDB profile is restored");
+            workspace.activate(index, cx);
+        });
+        cx.run_until_parked();
+        run_in_front(&workspace, cx, "SELECT * FROM birds ORDER BY id");
+        let grid = query_tab(&workspace, cx, |tab, _, _| tab.results.clone());
+        let stage = |cx: &mut VisualTestContext, row: usize, col: usize, value: NewValue| {
+            grid.update(cx, |grid, _| {
+                grid.delegate_mut().set_pending(row, col, value)
+            })
+        };
+        assert!(stage(cx, 0, 2, NewValue::Default));
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.apply_edits(&crate::actions::ApplyEdits, window, cx)
+            })
+        });
+        workspace.update(cx, |workspace, cx| workspace.run_apply_review(cx));
+        // Staged while the batch is out, so the rows are not read again.
+        assert!(stage(cx, 1, 1, NewValue::Value("jay".into())));
+        settle(cx);
+        assert_eq!(front_review(&workspace, cx), None, "the apply ran");
+        assert_eq!(cell_of(&grid, cx, 0, 2).as_deref(), Some("none"));
+
+        // NULL is what the cell held before the apply, not what it holds now.
+        assert!(stage(cx, 0, 2, NewValue::Null), "setting NULL is an edit");
+        cx.dispatch_action(crate::actions::ApplyEdits);
+        settle(cx);
+        workspace.update(cx, |workspace, cx| workspace.run_apply_review(cx));
+        settle(cx);
+        assert_eq!(front_review(&workspace, cx), None);
+        // Nothing is left staged, so the statement ran again.
+        assert_eq!(pending_of(&grid, cx), 0);
+        assert_eq!(cell_of(&grid, cx, 0, 2), None, "the server holds NULL");
+        assert_eq!(cell_of(&grid, cx, 1, 1).as_deref(), Some("jay"));
+        quit(workspace, cx);
+    });
+}
+
 /// The notice the session holds for a tab, whichever tab is in front.
 fn tab_notice(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Option<(Tab, String)> {
     workspace.read_with(cx, |workspace, _| {

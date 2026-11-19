@@ -3730,11 +3730,12 @@ pub(crate) enum Sending {
 pub(crate) enum ApplyOutcome {
     /// Every statement counted the one row it was written for, and the
     /// transaction committed. `affected` is the rows written, all together.
-    /// `read_back` is the last step's read-back, when it had one, boxed so the
-    /// outcomes that carry no rows stay small.
+    /// `read_backs` are the read-backs of the steps that had one, each with
+    /// its step's index, in step order: what the rows hold once written, read
+    /// inside the transaction that wrote them.
     Applied {
         affected: u64,
-        read_back: Option<Box<QueryResult>>,
+        read_backs: Vec<(usize, QueryResult)>,
     },
     /// No write was sent: these steps' rows are not the rows that were read.
     Drifted(Vec<(usize, Drift)>),
@@ -3969,7 +3970,7 @@ fn opened(
         return ApplyOutcome::Drifted(drifted);
     }
 
-    let (mut affected, mut read_back) = (0, None);
+    let (mut affected, mut read_backs) = (0, Vec::new());
     for (index, step) in steps.iter().enumerate() {
         if !proceed() {
             roll_back(send);
@@ -4034,7 +4035,7 @@ fn opened(
                 };
             }
             match send(read, Sending::Read) {
-                Ok(result) => read_back = Some(Box::new(result)),
+                Ok(result) => read_backs.push((index, result)),
                 Err(error) => {
                     roll_back(send);
                     return ApplyOutcome::Failed {
@@ -4066,7 +4067,7 @@ fn opened(
     }
     ApplyOutcome::Applied {
         affected,
-        read_back,
+        read_backs,
     }
 }
 

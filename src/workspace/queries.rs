@@ -2569,6 +2569,21 @@ impl Workspace {
             let grid = results.read(cx).delegate();
             (grid.rows_id(), grid.pending_by_row())
         });
+        // The fetched row each step of the draft updates, by step, for a kept
+        // apply to hold what the server read back for it.
+        let step_rows: Vec<Option<usize>> = match (&sent, &verification) {
+            (Some(_), Some(_)) => results
+                .read(cx)
+                .delegate()
+                .draft_order()
+                .into_iter()
+                .map(|row| match row {
+                    crate::result_grid::DraftRow::Updated(row) => Some(row),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
         // A Row send's one row, the cells it carries and where the ring went
         // as it was left, taken now: the landing clears those cells and no
         // edit staged since, and puts the ring back from `to` after a refusal.
@@ -2838,6 +2853,8 @@ impl Workspace {
             // A verified apply whose `COMMIT` has no answer: the grid is
             // marked when this lands.
             let mut unknown = false;
+            // A draft's rows read back after their writes, by step.
+            let mut written_rows = Vec::new();
             // The rows of an ordered apply that was written before it stopped,
             // which the landing takes out of the draft.
             let mut applied = Vec::new();
@@ -2856,8 +2873,15 @@ impl Workspace {
                         ),
                         None => connection.apply_verified(&verify.steps, &cancel),
                     };
-                    if let ApplyOutcome::Applied { read_back, .. } = &mut outcome {
-                        verified_read = read_back.take().map(|rows| Ok(*rows));
+                    if let ApplyOutcome::Applied { read_backs, .. } = &mut outcome {
+                        let mut read = std::mem::take(read_backs);
+                        match verify.identities.is_empty() {
+                            // A Row send's one step: its row, for `land_row`.
+                            true => verified_read = read.pop().map(|(_, rows)| Ok(rows)),
+                            // A draft's: each row it updated as the server
+                            // now holds it, for a kept apply to hold.
+                            false => written_rows = read,
+                        }
                     }
                     unknown = unknown_outcome(&outcome);
                     if ordered {
@@ -2914,7 +2938,7 @@ impl Workspace {
             // says nothing about the profile's.
             let failed = result.is_err() || matches!(read_back, Some(Err(_)));
             let lost = !alongside && failed && connection.is_lost();
-            (result, lost, read_back, unknown, applied)
+            (result, lost, read_back, unknown, applied, written_rows)
         };
         let number = crate::logging::connection_number(&id);
         // The database to open a session for, when none is open for it.
@@ -2992,17 +3016,17 @@ impl Workspace {
             // Blocks for as long as the server takes, and statements queued
             // behind it on the same session block on its lock, so none of them
             // may hold one of the executor's threads (`spawn_blocking`).
-            let (result, lost, read_back, unknown, applied, bound) = match ready {
+            let (result, lost, read_back, unknown, applied, written_rows, bound) = match ready {
                 Ok((connection, bound)) => {
-                    let (result, lost, read_back, unknown, applied) =
+                    let (result, lost, read_back, unknown, applied, written_rows) =
                         spawn_blocking(cx.background_executor(), {
                             let bound = bound.clone();
                             move || work(connection, bound)
                         })
                         .await;
-                    (result, lost, read_back, unknown, applied, bound)
+                    (result, lost, read_back, unknown, applied, written_rows, bound)
                 }
-                Err(error) => (Err(error), false, None, false, Vec::new(), None),
+                Err(error) => (Err(error), false, None, false, Vec::new(), Vec::new(), None),
             };
             // Outcome and duration only. Not even at debug the server's text:
             // some engines quote the statement back in a syntax error.
@@ -3309,11 +3333,35 @@ impl Workspace {
                                             // unchanged `rows_id`, which holds:
                                             // a sort in memory waits for the
                                             // run (`set_view_sorting`).
+                                            // Each holds what the server read
+                                            // back for it inside the apply, so
+                                            // a value it stored otherwise, or a
+                                            // DEFAULT, is what the next apply's
+                                            // re-read is compared with. One
+                                            // with no read-back holds what was
+                                            // sent.
                                             Tab::Query(_) => {
                                                 if grid.rows_id() == *rows_id {
                                                     for (row, cells) in rows {
                                                         grid.clear_sent(*row, cells);
-                                                        grid.write_sent(*row, cells);
+                                                        let read = written_rows
+                                                            .iter()
+                                                            .find(|(step, _)| {
+                                                                step_rows.get(*step)
+                                                                    == Some(&Some(*row))
+                                                            })
+                                                            .and_then(|(_, read)| {
+                                                                match read.rows.as_slice() {
+                                                                    [one] => Some(one.clone()),
+                                                                    _ => None,
+                                                                }
+                                                            });
+                                                        let placed = read.is_some_and(|read| {
+                                                            grid.replace_row(*row, read)
+                                                        });
+                                                        if !placed {
+                                                            grid.write_sent(*row, cells);
+                                                        }
                                                     }
                                                 }
                                             }
@@ -4533,7 +4581,7 @@ fn read_back_after_write(outcome: ApplyOutcome) -> (ApplyOutcome, Option<DbError
         } => (
             ApplyOutcome::Applied {
                 affected: step as u64 + 1,
-                read_back: None,
+                read_backs: Vec::new(),
             },
             Some(error),
         ),
@@ -4881,7 +4929,7 @@ mod tests {
                 .expect("the added document holds a value"),
         )
         .expect("the draft is written");
-        let verify = super::super::editing::verification(Engine::MongoDb, &grid, &batch)
+        let verify = super::super::editing::verification(Engine::MongoDb, &grid, &batch, false)
             .expect("a collection's draft can be verified");
         let kinds: Vec<_> = verify.steps.iter().map(|step| step.kind).collect();
         assert_eq!(
@@ -4970,7 +5018,7 @@ mod tests {
         assert_eq!(
             said(ApplyOutcome::Applied {
                 affected: 3,
-                read_back: None
+                read_backs: Vec::new()
             }),
             None
         );
@@ -5171,7 +5219,7 @@ mod tests {
             ApplyOutcome::Drifted(vec![(1, Drift::Gone)]),
             ApplyOutcome::Applied {
                 affected: 3,
-                read_back: None,
+                read_backs: Vec::new(),
             },
         ] {
             assert_eq!(written_before_stop(&outcome), 0, "{outcome:?}");
@@ -5192,7 +5240,7 @@ mod tests {
             outcome,
             ApplyOutcome::Applied {
                 affected: 1,
-                read_back: None
+                read_backs: Vec::new()
             }
         );
         assert_eq!(read_failed, Some(error.clone()));

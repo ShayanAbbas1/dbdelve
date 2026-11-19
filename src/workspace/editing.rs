@@ -2536,7 +2536,13 @@ impl Workspace {
                 Tab::Query(_) => target.reviews_query_apply(),
             };
         let verify = if verified {
-            match verification(self.engine(), results.read(cx).delegate(), &batch) {
+            let read_back = matches!(tab, Tab::Query(_));
+            match verification(
+                self.engine(),
+                results.read(cx).delegate(),
+                &batch,
+                read_back,
+            ) {
                 Ok(verify) => Some(verify),
                 Err(message) => {
                     self.note(message, cx);
@@ -2636,7 +2642,7 @@ impl Workspace {
             return;
         }
         let verify = if target.verifies_applies() {
-            match verification(engine, results.read(cx).delegate(), &batch) {
+            match verification(engine, results.read(cx).delegate(), &batch, false) {
                 Ok(verify) => Some(verify),
                 Err(message) => {
                     self.note(message, cx);
@@ -3017,6 +3023,7 @@ pub(super) fn verification(
     engine: Engine,
     grid: &ResultGrid,
     batch: &str,
+    read_back: bool,
 ) -> Result<Verification, String> {
     let statements = sql::generated_writes(engine, batch).ok_or(UNPAIRED)?;
     let order = grid.draft_order();
@@ -3040,12 +3047,18 @@ pub(super) fn verification(
             ),
             (_, None) => return Err(UNPAIRED.into()),
         };
+        // Each updated row read back inside the apply, where `read_back`: a
+        // query tab whose apply keeps its rows holds what the server stored.
+        let read_back = match (read_back, kind) {
+            (true, StepKind::Update) => sql::row_read(engine, &statement),
+            _ => None,
+        };
         steps.push(VerifiedStep {
             sql: statement,
             kind,
             reread,
             before,
-            read_back: None,
+            read_back,
             by_key: !names_rows_by_every_column(grid),
         });
         rows.push(label);

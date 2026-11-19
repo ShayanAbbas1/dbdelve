@@ -2952,8 +2952,9 @@ impl ResultGrid {
     /// edits left, the rows are not read again, and a cell still showing its
     /// old value would compare the next apply's re-read against it, and take
     /// an edit back to that value for no edit at all ([`Self::holds`]).
-    // ponytail: a `DEFAULT` has no value to put here and shows the old one
-    // until the rows are read again; reading the row back is the upgrade.
+    // The fallback for a row the apply could not read back: a `DEFAULT` has
+    // no value to put here and keeps the old one, and a value the server
+    // stores otherwise keeps what was sent, until the rows are read again.
     pub fn write_sent(&mut self, row: usize, sent: &[(usize, NewValue)]) {
         let texts: Vec<(usize, Option<String>)> = sent
             .iter()
