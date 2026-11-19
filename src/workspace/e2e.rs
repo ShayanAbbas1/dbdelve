@@ -12395,6 +12395,19 @@ fn ssm_cleanup_retry_dismiss_reopen_and_confirm_from_shared_state(cx: &mut TestA
         cx.simulate_keystrokes("secondary-shift-p");
         settle(cx);
         cx.simulate_input("Show pending AWS session cleanup");
+        settle(cx);
+        assert_eq!(
+            workspace.read_with(cx, |w, cx| w
+                .palette
+                .as_ref()
+                .unwrap()
+                .read(cx)
+                .matched_labels()
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()),
+            ["Show pending AWS session cleanup"]
+        );
         cx.simulate_keystrokes("enter");
         settle(cx);
         assert!(palette_mode(&workspace, cx).is_none());
@@ -12427,6 +12440,19 @@ fn ssm_cleanup_retry_dismiss_reopen_and_confirm_from_shared_state(cx: &mut TestA
         cx.simulate_keystrokes("secondary-shift-p");
         settle(cx);
         cx.simulate_input("Show pending AWS session cleanup");
+        settle(cx);
+        assert_eq!(
+            workspace.read_with(cx, |w, cx| w
+                .palette
+                .as_ref()
+                .unwrap()
+                .read(cx)
+                .matched_labels()
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()),
+            ["Show pending AWS session cleanup"]
+        );
         cx.simulate_keystrokes("enter");
         settle(cx);
         assert!(

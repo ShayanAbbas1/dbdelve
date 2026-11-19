@@ -583,10 +583,21 @@ fn cleanup_response(bytes: &[u8], session: &str) -> bool {
     value.get("SessionId").and_then(|id| id.as_str()) == Some(session)
 }
 
+// The CLI budget excludes the watchdog's bounded descendant shutdown and pipe drain.
+fn cleanup_deadline(
+    command_deadline: Instant,
+    exited: Option<Instant>,
+) -> (Instant, cleanup::Outcome) {
+    match exited.filter(|at| *at <= command_deadline) {
+        Some(at) => (at + Duration::from_secs(1), cleanup::Outcome::Unconfirmed),
+        None => (command_deadline, cleanup::Outcome::Transient),
+    }
+}
+
 fn run_cleanup(command: Command, session: &str, timeout: Duration) -> cleanup::Outcome {
     use cleanup::Outcome;
     let command_deadline = Instant::now() + timeout;
-    let mut deadline = command_deadline;
+    let mut deadline;
     let exited = Arc::new(Mutex::new(None));
     let Ok(mut process) = process::Process::spawn(command) else {
         return Outcome::Unconfirmed;
@@ -633,19 +644,11 @@ fn run_cleanup(command: Command, session: &str, timeout: Duration) -> cleanup::O
     }
     drop(send);
     let success = loop {
-        // The watchdog reports CLI exit before its descendant shutdown grace period.
-        // Keep that bounded drain separate from the deadline for a running CLI.
-        let finished = exited.lock().unwrap().filter(|at| *at <= command_deadline);
-        if let Some(at) = finished {
-            deadline = at + Duration::from_secs(1);
-        }
+        let (until, timeout_outcome) = cleanup_deadline(command_deadline, *exited.lock().unwrap());
+        deadline = until;
         if Instant::now() >= deadline {
             process.stop();
-            return if finished.is_some() {
-                Outcome::Unconfirmed
-            } else {
-                Outcome::Transient
-            };
+            return timeout_outcome;
         }
         match process.child.as_mut().unwrap().try_wait() {
             Ok(Some(status)) => break status.success(),
@@ -800,24 +803,43 @@ mod tests {
     }
     #[cfg(unix)]
     #[test]
-    fn cleanup_classifies_cli_exit_before_watchdog_shutdown() {
+    fn cleanup_classifies_completed_cli_through_watchdog() {
         for (script, expected) in [
             (
-                "sleep 0.7; echo 'An error occurred (AccessDeniedException) when calling the TerminateSession operation: denied' >&2; exit 1",
+                "echo 'An error occurred (AccessDeniedException) when calling the TerminateSession operation: denied' >&2; exit 1",
                 cleanup::Outcome::PermissionDenied,
             ),
             (
-                "sleep 0.7; printf '{\"SessionId\":\"alice-123\"}'",
+                "printf '{\"SessionId\":\"alice-123\"}'",
                 cleanup::Outcome::Confirmed,
             ),
         ] {
             let mut command = Command::new("/bin/sh");
             command.args(["-c", script]);
             assert_eq!(
-                run_cleanup(command, "alice-123", Duration::from_secs(1)),
+                run_cleanup(command, "alice-123", Duration::from_secs(10)),
                 expected
             );
         }
+    }
+    #[test]
+    fn cleanup_deadline_separates_cli_timeout_from_watchdog_drain() {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        for exited in [None, Some(deadline + Duration::from_millis(1))] {
+            assert_eq!(
+                cleanup_deadline(deadline, exited),
+                (deadline, cleanup::Outcome::Transient)
+            );
+        }
+        let exited = deadline - Duration::from_millis(100);
+        let (drain, outcome) = cleanup_deadline(deadline, Some(exited));
+        assert_eq!(drain, exited + Duration::from_secs(1));
+        assert!(drain > deadline);
+        assert_eq!(outcome, cleanup::Outcome::Unconfirmed);
+        assert_eq!(
+            cleanup_deadline(deadline, Some(deadline)).0,
+            deadline + Duration::from_secs(1)
+        );
     }
     #[test]
     fn cleanup_pins_error_format_with_and_without_plugin() {

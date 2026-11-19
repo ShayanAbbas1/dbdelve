@@ -1520,6 +1520,17 @@ impl Palette {
         self.items.iter().map(|item| item.label.as_str()).collect()
     }
 
+    #[cfg(test)]
+    pub fn matched_labels(&self) -> Vec<&str> {
+        self.rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Item(index) => Some(self.items[*index].label.as_str()),
+                Row::Header(_) => None,
+            })
+            .collect()
+    }
+
     /// Each row's label with the detail drawn beside it.
     #[cfg(test)]
     pub fn labels_with_details(&self) -> Vec<(&str, Option<&str>)> {
