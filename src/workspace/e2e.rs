@@ -13614,24 +13614,70 @@ fn the_apply_review_does_not_close_while_its_batch_runs(cx: &mut TestAppContext)
 
         workspace.update(cx, |workspace, cx| workspace.run_apply_review(cx));
         assert_eq!(state_kind(&workspace, cx), "running");
+        // The review's Cancel and Esc stop the batch first.
         workspace.update(cx, |workspace, cx| workspace.close_apply_review(cx));
         assert!(front_review(&workspace, cx).is_some(), "the review stays");
-        workspace.read_with(cx, |workspace, _| {
-            assert!(
-                !workspace
+        assert!(matches!(
+            front_state(&workspace, cx),
+            QueryState::Running {
+                cancelling: Some(_),
+                ..
+            }
+        ));
+        let may_stage = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                workspace
                     .profile()
                     .unwrap()
                     .session
                     .may_stage_into(crate::session::Tab::Object(id))
-            );
-        });
+            })
+        };
+        assert!(!may_stage(&workspace, cx));
 
+        // Asked again once the cancel is out, they close it. The grid still
+        // takes no edit until the batch lands: a success would drop it unsaid.
+        workspace.update(cx, |workspace, cx| workspace.close_apply_review(cx));
+        assert_eq!(front_review(&workspace, cx), None, "the review closed");
+        assert!(!may_stage(&workspace, cx));
+
+        // Here the batch is under way before the cancel reaches it, so it
+        // lands as written, the draft clears and the grid takes edits again.
         settle(cx);
         assert_eq!(
             on_disk("select name from birds where id = 1").as_deref(),
             Some("finch")
         );
+        assert_eq!(pending_of(&grid, cx), 0);
         assert_eq!(front_review(&workspace, cx), None);
+        assert!(may_stage(&workspace, cx));
+        quit(workspace, cx);
+    });
+}
+
+/// A review whose run a reconnect has moved the profile on from closes at
+/// once: that run's landing is dropped, and nothing else would end it.
+#[gpui::test]
+fn the_apply_review_closes_once_a_reconnect_has_moved_on_from_its_run(cx: &mut TestAppContext) {
+    use crate::result_grid::NewValue;
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, BIRDS);
+        draft_by_default(&workspace, cx);
+        let id = open_own_table(&workspace, cx, "birds");
+        let grid = relation_grid(&workspace, cx, id);
+        stage(&grid, cx, 0, 1, NewValue::Value("finch".into()));
+        cx.dispatch_action(crate::actions::ApplyEdits);
+        settle(cx);
+
+        workspace.update(cx, |workspace, cx| workspace.run_apply_review(cx));
+        workspace.update(cx, |workspace, cx| {
+            let index = workspace.active.expect("a profile is in front");
+            workspace.reconnect(index, cx)
+        });
+        assert_eq!(state_kind(&workspace, cx), "running");
+        workspace.update(cx, |workspace, cx| workspace.close_apply_review(cx));
+        assert_eq!(front_review(&workspace, cx), None, "the review closed");
         quit(workspace, cx);
     });
 }

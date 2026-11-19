@@ -367,6 +367,7 @@ impl Workspace {
                 error: None,
                 edits: false,
                 verify,
+                ran_on: None,
             });
         }
         cx.notify();
@@ -1575,6 +1576,7 @@ impl Workspace {
                 error: None,
                 edits: false,
                 verify,
+                ran_on: None,
             });
         }
         cx.notify();
@@ -2561,6 +2563,7 @@ impl Workspace {
                         error: None,
                         edits: true,
                         verify,
+                        ran_on: None,
                     });
                     cx.notify();
                 }
@@ -2656,6 +2659,7 @@ impl Workspace {
                 error: None,
                 edits: true,
                 verify,
+                ran_on: None,
             });
             cx.notify();
         }
@@ -2732,10 +2736,12 @@ impl Workspace {
             },
         };
         // A second Run starts clean: what the first came to is not this one's.
-        if let Some(profile) = self.profile_mut()
-            && let Some(review) = &mut profile.session.apply_review
-        {
-            review.error = None;
+        if let Some(profile) = self.profile_mut() {
+            let generation = profile.generation;
+            if let Some(review) = &mut profile.session.apply_review {
+                review.error = None;
+                review.ran_on = Some(generation);
+            }
         }
         self.execute_and_then(sql, tab, Some(refresh), false, None, cx);
     }
@@ -2754,12 +2760,35 @@ impl Workspace {
         if !profile.session.apply_review_covers(profile.session.active) {
             return false;
         }
-        // Not while its batch runs: the review holds the grid against staging,
-        // and an edit staged now would be dropped unsaid by the success that
-        // clears the draft. Taken, so Esc goes no further.
+        // While its batch runs, Cancel and Esc stop it first, and close the
+        // review only once a cancel is out or a reconnect has moved the
+        // profile on, whose landing is dropped. The grid then still takes no
+        // edit until the run lands (`Session::draft_out`): a success clears the
+        // draft, and would drop one staged meanwhile unsaid.
         if let Some(review) = &profile.session.apply_review
             && profile.session.running(review.tab)
         {
+            let tab = review.tab;
+            let moved_on = review
+                .ran_on
+                .is_some_and(|ran_on| ran_on != profile.generation);
+            let asked = matches!(
+                profile.session.slot(tab),
+                Some((
+                    QueryState::Running {
+                        cancelling: Some(_),
+                        ..
+                    },
+                    _
+                ))
+            );
+            if !moved_on && !asked {
+                self.cancel_front(cx);
+                return true;
+            }
+            profile.session.apply_review = None;
+            profile.session.draft_out = Some(tab);
+            cx.notify();
             return true;
         }
         let closed = profile.session.apply_review.take().is_some();

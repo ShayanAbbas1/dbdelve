@@ -757,6 +757,10 @@ pub(crate) struct Session {
     /// has no buffer to put SQL in, so the modal is where the statement is on
     /// screen — and nothing runs until Run.
     pub(crate) apply_review: Option<ApplyReview>,
+    /// The tab whose review was closed while its batch was still out. Its grid
+    /// takes no edit until that run lands: the success that clears the draft
+    /// would drop one staged meanwhile unsaid.
+    pub(crate) draft_out: Option<Tab>,
     /// The "Insert" form a preview tab is filling in. Beside `apply_review`
     /// because the two are halves of one flow: the form collects, the review
     /// shows the statement it generated, and only Run sends it.
@@ -824,6 +828,9 @@ pub(crate) struct ApplyReview {
     /// apply (`Target::verifies_applies`). Kept for as long as the review is
     /// open, since a refusal leaves it open and the next Run verifies again.
     pub(crate) verify: Option<Verification>,
+    /// The profile generation its last Run went out on. A reconnect since
+    /// means that run's landing will be dropped, so the review may close.
+    pub(crate) ran_on: Option<u64>,
 }
 
 /// The rows a reviewed draft was written from, as they were fetched: one step
@@ -1289,6 +1296,7 @@ impl Session {
             notice,
             tab_notice: None,
             apply_review: None,
+            draft_out: None,
             insert_form: None,
             import_rows: None,
             pending_run: None,
@@ -1367,11 +1375,12 @@ impl Session {
     /// Asked of the tab whose grid is being edited, which a blur can make a
     /// tab other than the active one.
     pub(crate) fn may_stage_into(&self, owner: Tab) -> bool {
-        may_stage_into(
-            self.apply_review.as_ref(),
-            self.import_rows.is_some(),
-            owner,
-        )
+        self.draft_out != Some(owner)
+            && may_stage_into(
+                self.apply_review.as_ref(),
+                self.import_rows.is_some(),
+                owner,
+            )
     }
 
     pub(crate) fn review_slot(&self, from: Tab, replaces_own: bool) -> ReviewSlot {
@@ -4350,6 +4359,7 @@ mod tests {
             error: None,
             edits: true,
             verify: None,
+            ran_on: None,
         }
     }
 

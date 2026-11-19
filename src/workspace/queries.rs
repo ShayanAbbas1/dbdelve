@@ -129,6 +129,12 @@ impl Workspace {
     /// dies on the thread the driver is running on. Nothing tokio-shaped is
     /// handed to GPUI's executor, which is the thing that panics.
     pub(crate) fn cancel_query(&mut self, _: &CancelQuery, _: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_front(cx);
+    }
+
+    /// What Cancel does to the run of the tab in front, for the action and for
+    /// an apply review's Cancel while its batch runs.
+    pub(crate) fn cancel_front(&mut self, cx: &mut Context<Self>) {
         // The session a bound tab runs on, which is where the statements that
         // are stopped by what the connection holds of them (MongoDB's, and
         // ClickHouse's fallback) are kept.
@@ -3057,6 +3063,13 @@ impl Workspace {
                     // Whether an ordered apply stopped after writing some of the
                     // draft, which is then no longer the draft the review shows.
                     let mut part_way = false;
+                    // A review closed while this run was out held its grid
+                    // against staging until now (`Session::draft_out`).
+                    if let Some(profile) =
+                        workspace.profiles.iter_mut().find(|profile| profile.id == id)
+                    {
+                        profile.session.draft_out.take_if(|out| *out == tab);
+                    }
                     let (succeeded, produced_grid, plan, rest, notice, landed) = {
                         let Some(profile) = workspace.issued_to(&id, generation) else {
                             // An edit a reconnect dropped the landing of may
