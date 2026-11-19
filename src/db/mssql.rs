@@ -1110,7 +1110,8 @@ impl Connection {
                     true,
                     false,
                 )
-                .and_then(|(result, _)| kept_transaction(sql, result));
+                .and_then(|(result, _)| kept_transaction(sql, result))
+                .and_then(|result| counted_alone(sending, result));
             in_transit.set(guard.as_ref().is_some_and(|session| session.in_transit));
             result
         };
@@ -2795,6 +2796,23 @@ fn lost_session(error: &DbError) -> bool {
 /// transaction back with the session: whatever the sequence sends next would
 /// run on its own, so it is an error, not a write. A `COMMIT` that finished
 /// stands whatever came after it.
+/// A write of a verified apply that came back with rows: a trigger's result
+/// set, which `execute` takes as the batch's answer in place of the outer
+/// statement's `@@ROWCOUNT`, so the count would be the trigger's rows. Refused,
+/// which rolls the apply back, rather than read as a count.
+fn counted_alone(sending: Sending, result: QueryResult) -> Result<QueryResult, DbError> {
+    match sending {
+        Sending::Write(_) if !result.columns.is_empty() || !result.rest.is_empty() => {
+            Err(plain_error(
+                "A trigger on the table returned rows, so the rows the edit wrote could not be \
+                 counted. Nothing was saved."
+                    .into(),
+            ))
+        }
+        _ => Ok(result),
+    }
+}
+
 fn kept_transaction(sql: &str, result: QueryResult) -> Result<QueryResult, DbError> {
     match &result.notice {
         Some(notice) if sql != "COMMIT" && notice.contains(RESET) => {
@@ -6390,6 +6408,90 @@ mod tests {
             after_reset(&steps[0].sql, "(1 row affected)").is_ok(),
             "a message the server sent is not a reset"
         );
+    }
+
+    #[test]
+    fn a_write_that_returns_rows_is_refused_rather_than_counted_by_them() {
+        use crate::db::StepKind;
+        let trigger_rows = QueryResult {
+            columns: vec![Column {
+                name: "audited".into(),
+                data_type: None,
+            }],
+            rows: vec![Row::new([Some("1")]).unwrap()],
+            rows_affected: Some(1),
+            ..QueryResult::default()
+        };
+        assert!(counted_alone(Sending::Write(StepKind::Update), trigger_rows.clone()).is_err());
+        assert!(counted_alone(Sending::Read, trigger_rows).is_ok());
+        let counted = QueryResult {
+            rows_affected: Some(1),
+            ..QueryResult::default()
+        };
+        assert_eq!(
+            counted_alone(Sending::Write(StepKind::Update), counted.clone()),
+            Ok(counted)
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_trigger_that_returns_rows_fails_the_write_it_fired_on() {
+        use crate::db::{
+            ApplyOutcome, ApplyStage, CancelToken, FetchedCell, StepKind,
+            conformance::verified_steps,
+        };
+
+        let connection =
+            crate::db::Connection::open(crate::db::ConnectionConfig::SqlServer(live_config()))
+                .expect("connection should open");
+        let table = "verified_trigger_rows";
+        let scratch = ScratchTable(&connection, table);
+        scratch.drop_all();
+        let run = |sql: &str| {
+            connection
+                .query(sql, &CancelToken::default(), Fetch::default())
+                .unwrap_or_else(|error| panic!("`{sql}`: {error}"))
+        };
+        run(&format!(
+            "CREATE TABLE dbo.{table} (id int PRIMARY KEY, label nvarchar(50));
+             INSERT INTO dbo.{table} VALUES (1, N'one')"
+        ));
+        // Matches nothing the update names, and still answers one row.
+        run(&format!(
+            "CREATE TRIGGER dbo.{table}_rows ON dbo.{table} AFTER UPDATE AS \
+             BEGIN SELECT 1 AS audited; END"
+        ));
+        let row = run(&format!("SELECT * FROM dbo.{table} WHERE id = 1"));
+        let before: Vec<FetchedCell> = row
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(index, column)| FetchedCell {
+                column: column.name.clone(),
+                text: row.rows[0].get(index).map(str::to_string),
+                cell_type: None,
+                column_type: column.data_type.clone(),
+            })
+            .collect();
+        let write =
+            format!("UPDATE \"dbo\".\"{table}\" SET \"label\" = N'changed' WHERE \"id\" = '1'");
+        let steps = verified_steps(Engine::SqlServer, &write, vec![(StepKind::Update, before)]);
+
+        let outcome = connection.apply_verified(&steps, &CancelToken::default());
+
+        assert!(
+            matches!(
+                outcome,
+                ApplyOutcome::Failed {
+                    stage: ApplyStage::Write(0),
+                    ..
+                }
+            ),
+            "{outcome:?}"
+        );
+        let label = run(&format!("SELECT label FROM dbo.{table} WHERE id = 1"));
+        assert_eq!(label.rows[0].get(0), Some("one"), "rolled back");
     }
 
     #[test]
