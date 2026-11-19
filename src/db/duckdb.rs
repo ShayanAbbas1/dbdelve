@@ -275,11 +275,15 @@ impl Connection {
         Ok(self)
     }
 
-    /// The startup statements on `connection`, rows discarded.
+    /// The startup statements on `connection`, rows discarded, each under the
+    /// statement timeout armed on `connection`'s own interrupt: a session
+    /// opened beside this one is not the one this one's interrupt stops.
     fn replay(&self, connection: &duckdb::Connection) -> Result<(), DbError> {
-        self.startup
-            .iter()
-            .try_for_each(|statement| connection.execute_batch(statement).map_err(query_error))
+        let interrupt = connection.interrupt_handle();
+        self.startup.iter().try_for_each(|statement| {
+            let _deadline = self.deadline_on(&interrupt, Instant::now());
+            connection.execute_batch(statement).map_err(query_error)
+        })
     }
 
     fn pick(&self) -> std::sync::MutexGuard<'_, Pick> {
@@ -415,8 +419,18 @@ impl Connection {
     /// [`Self::deadline`] for a limit counted from `started`, firing when what
     /// is left of it runs out.
     fn deadline_from(&self, started: Instant) -> Option<Sender<()>> {
+        self.deadline_on(&self.interrupt, started)
+    }
+
+    /// [`Self::deadline_from`] firing `interrupt`, for a session other than
+    /// this one's.
+    fn deadline_on(
+        &self,
+        interrupt: &Arc<InterruptHandle>,
+        started: Instant,
+    ) -> Option<Sender<()>> {
         let left = self.statement_timeout?.saturating_sub(started.elapsed());
-        let interrupt = self.interrupt.clone();
+        let interrupt = Arc::clone(interrupt);
         let (sender, receiver) = channel::<()>();
         std::thread::spawn(move || {
             if receiver.recv_timeout(left) == Err(RecvTimeoutError::Timeout) {
@@ -3675,6 +3689,33 @@ mod tests {
         drop((scripted, apart, other));
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A startup statement that never ends is stopped by the statement
+    /// timeout, on the connection it opens and on every session replaying it.
+    #[test]
+    fn a_statement_timeout_stops_a_runaway_startup_statement() {
+        let started = Instant::now();
+        let error = Connection::open(IN_MEMORY, 1)
+            .unwrap()
+            .with_startup(vec![RUNAWAY.into()])
+            .err()
+            .expect("the timeout stops it");
+        assert_eq!(error.message, INTERRUPTED);
+        assert!(started.elapsed() < Duration::from_secs(10));
+
+        let mut connection = Connection::open(IN_MEMORY, 1).unwrap();
+        connection.startup = vec![RUNAWAY.to_string()].into();
+        let started = Instant::now();
+        let error = connection.alongside().err().expect("the timeout stops it");
+        assert_eq!(error.message, INTERRUPTED);
+        let home = connection.current_database().to_string();
+        let error = connection
+            .on_database(&home)
+            .err()
+            .expect("the timeout stops it");
+        assert_eq!(error.message, INTERRUPTED);
+        assert!(started.elapsed() < Duration::from_secs(20));
     }
 
     #[test]
