@@ -1334,6 +1334,67 @@ fn live_an_unchecked_foreign_key_runs_back_as_it_was_on_sql_server() {
     assert_eq!(state(&untrusted).as_deref(), Some("01"), "{sql}");
 }
 
+/// A key the replication agent's writes skip comes back skipping them.
+#[test]
+#[ignore = "needs the dev SQL Server"]
+fn live_a_not_for_replication_key_runs_back_as_one_on_sql_server() {
+    let parent = Throwaway::new(
+        open("dbdelve_MSSQL_URL"),
+        Engine::SqlServer,
+        "dbo",
+        "replicated_parent",
+    );
+    let child = Throwaway::new(
+        open("dbdelve_MSSQL_URL"),
+        Engine::SqlServer,
+        "dbo",
+        "replicated_child",
+    );
+    child.run("DROP TABLE IF EXISTS {table}");
+    parent.run("DROP TABLE IF EXISTS {table}");
+    parent.run("CREATE TABLE {table} (id int PRIMARY KEY)");
+    parent.run("INSERT INTO {table} VALUES (1)");
+    child.run(&format!(
+        "CREATE TABLE {{table}} (id int PRIMARY KEY, parent_id int \
+         CONSTRAINT {{name}}_fk REFERENCES {} (id) NOT FOR REPLICATION)",
+        parent.named("{table}")
+    ));
+    child.run("INSERT INTO {table} VALUES (1, 1)");
+    let replicated = || {
+        let result = child.run(
+            "SELECT CONCAT(is_not_for_replication, is_disabled) FROM sys.foreign_keys \
+             WHERE name = '{name}_fk'",
+        );
+        result.rows[0].get(0).map(str::to_string)
+    };
+    assert_eq!(replicated().as_deref(), Some("10"));
+
+    let path = parent.directory.join("schema.sql");
+    let request = SchemaRequest {
+        tables: vec![child.name.clone(), parent.name.clone()],
+        structure: true,
+        rows: true,
+        partitioned: Vec::new(),
+    };
+    export_schema(
+        &parent.connection,
+        "dbo",
+        &request,
+        false,
+        Engine::SqlServer,
+        &path,
+        &ExportProgress::default(),
+    )
+    .expect("the export finishes");
+    let sql = std::fs::read_to_string(&path).unwrap();
+
+    child.run("DROP TABLE {table}");
+    parent.run("DROP TABLE {table}");
+    let problems = parent.replay(&sql);
+    assert!(problems.is_empty(), "{sql}\n{}", problems.join("\n"));
+    assert_eq!(replicated().as_deref(), Some("10"), "{sql}");
+}
+
 /// An alias type is named by its owner, and the file is run back: a name
 /// that reads as statements stays one quoted name.
 #[test]

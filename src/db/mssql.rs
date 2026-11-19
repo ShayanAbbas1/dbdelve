@@ -350,6 +350,7 @@ SELECT
         CASE WHEN f.update_referential_action_desc <> 'NO_ACTION'
             THEN CONCAT(N' ON UPDATE ', REPLACE(f.update_referential_action_desc, '_', ' ') COLLATE DATABASE_DEFAULT)
             ELSE N'' END,
+        CASE WHEN f.is_not_for_replication = 1 THEN N' NOT FOR REPLICATION' ELSE N'' END,
         CASE WHEN {ddl} = 0 AND f.is_disabled = 1 THEN N' DISABLED' ELSE N'' END,
         CASE WHEN {ddl} = 0 AND f.is_not_trusted = 1 THEN N' NOT TRUSTED' ELSE N'' END
     )
