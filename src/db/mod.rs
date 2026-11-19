@@ -1555,9 +1555,11 @@ impl ConnectionConfig {
     /// than `self` does: what rows read under `self`, and edits staged on
     /// them, could name something else under. Only what picks the target
     /// counts, a tunnel's way in included, since the host it forwards to is
-    /// read from where it lands: a password, a timeout, TLS or the user is
-    /// the same target reached another way. An edit that may move it, a
-    /// service or a plugin's connection string, counts as moving it.
+    /// read from where it lands: a password, a timeout or TLS is the same
+    /// target reached another way. The user counts, since a blank database
+    /// is the login's default on SQL Server and Postgres, and an unqualified
+    /// name resolves in the user's own default schema. An edit that may move
+    /// it, a service or a plugin's connection string, counts as moving it.
     pub fn retargets(&self, edited: &Self) -> bool {
         std::mem::discriminant(self) != std::mem::discriminant(edited)
             || self.engine() != edited.engine()
@@ -1576,18 +1578,24 @@ impl ConnectionConfig {
             Self::Postgres(PostgresConfig { server, service }) => vec![
                 server.endpoint(),
                 server.database.clone(),
+                server.user.clone(),
                 format!("{service:?}"),
             ],
             Self::MySql(server)
             | Self::MariaDb(server)
             | Self::SqlServer(server)
             | Self::ClickHouse(server)
-            | Self::Redis(server) => vec![server.endpoint(), server.database.clone()],
+            | Self::Redis(server) => vec![
+                server.endpoint(),
+                server.database.clone(),
+                server.user.clone(),
+            ],
             Self::MongoDb(mongo) => vec![
                 mongo.server.endpoint(),
                 mongo.server.database.clone(),
+                mongo.server.user.clone(),
                 mongo.srv.to_string(),
-                mongo.options.clone(),
+                mongo::target_options(&mongo.options),
             ],
             Self::Sqlite { path, .. } | Self::Turso { path, .. } => vec![path.clone()],
             Self::DuckDb { path, database, .. } => vec![path.clone(), database.clone()],
@@ -1595,6 +1603,7 @@ impl ConnectionConfig {
                 account.account.clone(),
                 format!("{:?}", account.host),
                 account.database.clone(),
+                account.user.clone(),
             ],
             Self::External(external) => {
                 vec![external.plugin.id.to_string(), external.connection.clone()]
@@ -5706,9 +5715,9 @@ mod tests {
         assert!(!stored.retargets(&edited(|server| {
             server.root_certificate = Some("/etc/ca.pem".into())
         })));
-        assert!(!stored.retargets(&edited(|server| server.user = "someone_else".into())));
 
         // Another server, database or way in to them.
+        assert!(stored.retargets(&edited(|server| server.user = "someone_else".into())));
         let mut named = stored.clone();
         if let ConnectionConfig::Postgres(postgres) = &mut named {
             postgres.service = Some("harness".into());
@@ -5760,6 +5769,29 @@ mod tests {
             path: "/tmp/a.db".into(),
             statement_timeout: 0
         }));
+    }
+
+    #[test]
+    fn a_mongo_option_retargets_only_when_it_picks_the_servers() {
+        let with = |options: &str| {
+            ConnectionConfig::MongoDb(MongoConfig {
+                server: ServerConfig {
+                    host: "db.example.test".into(),
+                    database: "app".into(),
+                    ..ServerConfig::default()
+                },
+                srv: false,
+                options: options.into(),
+                login_database: None,
+            })
+        };
+        let stored = with("replicaSet=rs0&connectTimeoutMS=1000");
+
+        assert!(!stored.retargets(&with("connectTimeoutMS=5000&replicaSet=rs0")));
+        assert!(!stored.retargets(&with("replicaSet=rs0&appName=report")));
+        assert!(stored.retargets(&with("replicaSet=rs1&connectTimeoutMS=1000")));
+        assert!(stored.retargets(&with("replicaSet=rs0&authSource=admin")));
+        assert!(stored.retargets(&with("replicaSet=rs0&directConnection=true")));
     }
 
     #[test]

@@ -294,6 +294,34 @@ fn connection_string(config: &MongoConfig) -> Result<String, DbError> {
     ))
 }
 
+/// The keys in `options` that pick which servers and database are read,
+/// lowercased, sorted and joined, for `ConnectionConfig::retargets`: a
+/// timeout or an app name reaches the same data, and is left out so that
+/// changing one keeps what was staged against it.
+pub(super) fn target_options(options: &str) -> String {
+    const TARGET: [&str; 5] = [
+        "authsource",
+        "directconnection",
+        "loadbalanced",
+        "replicaset",
+        "srvservicename",
+    ];
+    let mut kept: Vec<String> = options
+        .trim()
+        .trim_start_matches('?')
+        .split('&')
+        .filter_map(|pair| {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            let key = key.trim().to_ascii_lowercase();
+            TARGET
+                .contains(&key.as_str())
+                .then(|| format!("{key}={}", value.trim()))
+        })
+        .collect();
+    kept.sort();
+    kept.join("&")
+}
+
 /// A key in `options` that the profile's own fields decide, named in the
 /// error rather than silently overridden by them.
 fn owned_option(options: &str, tunnelled: bool) -> Option<String> {
