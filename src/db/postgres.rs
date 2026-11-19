@@ -1905,6 +1905,11 @@ impl Connection {
     /// (one shared, or one an unexported table owns) is created and set too,
     /// owned by nothing: its owner is not in the file. One in another schema
     /// is that schema's to bring back.
+    ///
+    /// ponytail: a default naming an exported identity column's sequence is
+    /// refused. The upgrade is pg_dump's: the column's identity added after
+    /// the tables with `ADD GENERATED … (SEQUENCE NAME …)`, ahead of the
+    /// tables whose defaults name it.
     pub fn export_sequences(&self, schema: &str, tables: &[String]) -> Result<Sequences, DbError> {
         let mut sequences = Sequences::default();
         if tables.is_empty() {
@@ -1924,6 +1929,52 @@ impl Connection {
             Engine::Postgres.quote_literal(schema),
             names.join(", ")
         );
+        // An identity column's sequence is created by its table's `CREATE`,
+        // under a name of the server's choosing and only once that table is,
+        // so a default naming it would replay against no such sequence.
+        let borrowed = self.internal_query(&format!(
+            "SELECT table_class.relname || '.' || attribute.attname AS borrower,
+                 sequence_class.relname AS sequence_name,
+                 owner_class.relname || '.' || owner_attribute.attname AS owner
+             FROM pg_catalog.pg_depend AS dependency
+             JOIN pg_catalog.pg_attrdef AS attribute_default
+                 ON attribute_default.oid = dependency.objid
+             JOIN pg_catalog.pg_class AS table_class
+                 ON table_class.oid = attribute_default.adrelid
+             JOIN pg_catalog.pg_namespace AS table_namespace
+                 ON table_namespace.oid = table_class.relnamespace
+             JOIN pg_catalog.pg_attribute AS attribute
+                 ON attribute.attrelid = table_class.oid
+                 AND attribute.attnum = attribute_default.adnum
+             JOIN pg_catalog.pg_class AS sequence_class
+                 ON sequence_class.oid = dependency.refobjid AND sequence_class.relkind = 'S'
+             JOIN pg_catalog.pg_depend AS identity
+                 ON identity.objid = sequence_class.oid AND identity.deptype = 'i'
+                 AND identity.classid = 'pg_catalog.pg_class'::regclass
+                 AND identity.refclassid = 'pg_catalog.pg_class'::regclass
+             JOIN pg_catalog.pg_class AS owner_class ON owner_class.oid = identity.refobjid
+             JOIN pg_catalog.pg_attribute AS owner_attribute
+                 ON owner_attribute.attrelid = owner_class.oid
+                 AND owner_attribute.attnum = identity.refobjsubid
+             WHERE dependency.classid = 'pg_catalog.pg_attrdef'::regclass
+                 AND dependency.refclassid = 'pg_catalog.pg_class'::regclass
+                 AND {tables_sql}
+                 AND owner_class.relnamespace = table_namespace.oid
+                 AND owner_class.relname IN ({})
+             ORDER BY 1",
+            names.join(", ")
+        ))?;
+        if let Some(row) = borrowed.rows.first() {
+            let cell = |name: &str| required_cell(&borrowed, row, name);
+            return Err(plain_error(format!(
+                "the default of {} takes its values from {}, the sequence of the identity \
+                 column {}, which the file cannot name: its table's CREATE makes it under a \
+                 name of its own. Export one of the two tables without the other.",
+                cell("borrower")?,
+                cell("sequence_name")?,
+                cell("owner")?
+            )));
+        }
         let result = self.internal_query(&format!(
             "WITH owned AS (
                  SELECT dependency.objid AS sequence_oid,
