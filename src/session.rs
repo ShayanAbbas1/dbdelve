@@ -139,6 +139,11 @@ pub(crate) struct Profile {
     pub(crate) reread_after_load: bool,
     /// What the server listed the last time Select Database asked.
     pub(crate) databases: Databases,
+    /// How many listings of [`Self::databases`] have been started. One lands
+    /// only if none started after it ([`Self::start_listing`]): a later one
+    /// was asked under the filter as it is now, and an earlier one may have
+    /// been asked under one since changed.
+    pub(crate) listings: u64,
     /// The server's logins and roles, read for the connections tree's Users
     /// and roles row and its tab.
     pub(crate) roles: RolesState,
@@ -404,6 +409,18 @@ impl Profile {
 
     /// The include lists as they apply to this connection now, owned so a
     /// read on a background thread can narrow its answer with them.
+    /// Starts a listing of the databases, returning what [`Self::latest_listing`]
+    /// asks of its answer.
+    pub(crate) fn start_listing(&mut self) -> u64 {
+        self.listings += 1;
+        self.listings
+    }
+
+    /// Whether the listing `started` is the latest one started.
+    pub(crate) fn latest_listing(&self, started: u64) -> bool {
+        self.listings == started
+    }
+
     pub(crate) fn shown(&self) -> Shown {
         self.include.resolve(
             self.config.target().levels(),
