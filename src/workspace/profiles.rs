@@ -360,6 +360,7 @@ impl Workspace {
         );
         let takes_script = config.target().takes_startup_script();
         let keeps_alive = config.target().keeps_alive();
+        let closes_idle = !config.lives_with_its_connection();
         self.profiles.push(Profile {
             id: stored.id,
             name: stored.name,
@@ -404,10 +405,11 @@ impl Workspace {
                 }),
                 // Every engine can be left idle; a 0 is the form's way of
                 // saying off, and a file can say it too. Past the ceiling the
-                // deadline would never be reached, so that is off as well.
+                // deadline would never be reached, so that is off as well, as
+                // it is for a database that would close with its connection.
                 idle_timeout: stored
                     .idle_timeout_minutes
-                    .filter(|minutes| (1..=MAX_IDLE_TIMEOUT).contains(minutes)),
+                    .filter(|minutes| closes_idle && (1..=MAX_IDLE_TIMEOUT).contains(minutes)),
             },
             keep_alive_task: None,
             last_activity: cx.background_executor().now(),

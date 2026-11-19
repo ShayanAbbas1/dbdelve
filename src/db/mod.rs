@@ -1755,6 +1755,13 @@ impl ConnectionConfig {
             .collect()
     }
 
+    /// Whether the database lives only as long as the connection holds it, as
+    /// a DuckDB in memory does: closing the connection for being idle would
+    /// throw away every table in it.
+    pub fn lives_with_its_connection(&self) -> bool {
+        matches!(self, Self::DuckDb { path, .. } if path == DUCKDB_IN_MEMORY)
+    }
+
     /// What was being talked to, for an error or a title to name.
     pub fn endpoint(&self) -> String {
         match self {

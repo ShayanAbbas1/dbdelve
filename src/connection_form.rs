@@ -730,7 +730,15 @@ impl ConnectionForm {
                 false => String::new(),
             },
             keep_alive: typed_keep_alive(self.target(), &self.keep_alive.read(cx).value())?,
-            idle_timeout: typed_idle_timeout(&self.idle_timeout.read(cx).value())?,
+            // Not kept for a DuckDB in memory, whose tables close with it.
+            idle_timeout: typed_idle_timeout(&self.idle_timeout.read(cx).value())?.filter(|_| {
+                !(self.driver == Driver::BuiltIn
+                    && self.engine == Engine::DuckDb
+                    && matches!(
+                        self.path.read(cx).value().trim(),
+                        "" | crate::db::DUCKDB_IN_MEMORY
+                    ))
+            }),
         })
     }
 

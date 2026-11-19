@@ -250,10 +250,12 @@ impl Workspace {
     }
 }
 
-/// How long the profile may sit unused before it closes; `None` is never.
+/// How long the profile may sit unused before it closes; `None` is never,
+/// as it is for a database that would go with its connection.
 fn idle_timeout(profile: &Profile) -> Option<Duration> {
     profile
         .behaviour
         .idle_timeout
+        .filter(|_| !profile.config.lives_with_its_connection())
         .map(|minutes| Duration::from_secs(u64::from(minutes) * 60))
 }

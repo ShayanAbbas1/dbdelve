@@ -27968,6 +27968,59 @@ fn idle_orders(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestCo
     (workspace, cx)
 }
 
+/// A DuckDB in memory holds its tables only as long as its connection, so
+/// it is never closed for being idle, whether the timeout was saved in the
+/// file or typed in the form; a DuckDB file keeps it.
+#[gpui::test]
+fn a_database_in_memory_is_never_closed_for_being_idle(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        crate::IGNORE_ENVIRONMENT.set(true);
+        let file = store::dbdelve_directory()
+            .expect("the test home has a data directory")
+            .join("kept.duckdb");
+        let (workspace, cx) = launch_with_profiles(
+            cx,
+            &format!(
+                "[[profiles]]\nid = \"memory\"\nname = \"Memory\"\nhost = \"\"\n\
+                 database = \"\"\nuser = \"\"\nengine = \"duckdb\"\npath = \":memory:\"\n\
+                 idle_timeout_minutes = 1\n{}",
+                duckdb_profile("file", "File", &file, "idle_timeout_minutes = 1"),
+            ),
+        );
+        let timeout = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext, id: &str| {
+            workspace.read_with(cx, |workspace, _| {
+                workspace
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.id == id)
+                    .expect("the profile is listed")
+                    .behaviour
+                    .idle_timeout
+            })
+        };
+        assert_eq!(timeout(&workspace, cx, "memory"), None, "restored off");
+        assert_eq!(timeout(&workspace, cx, "file"), Some(1));
+
+        connect_profile(&workspace, cx, "memory");
+        assert_eq!(state_of(&workspace, cx, "memory"), "connected");
+        assert!(!idle_armed(&workspace, cx, "memory"));
+        save_idle_timeout(&workspace, cx, "memory", "5");
+        assert_eq!(
+            timeout(&workspace, cx, "memory"),
+            None,
+            "the form keeps it off"
+        );
+        assert!(!idle_armed(&workspace, cx, "memory"));
+
+        connect_profile(&workspace, cx, "file");
+        assert!(
+            idle_armed(&workspace, cx, "file"),
+            "a file closes as before"
+        );
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn an_idle_profile_is_closed_with_its_tabs_kept(cx: &mut TestAppContext) {
     use std::time::Duration;
