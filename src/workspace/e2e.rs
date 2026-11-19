@@ -24812,6 +24812,53 @@ fn lowering_the_mode_below_the_script_the_connection_ran_reconnects(cx: &mut Tes
     });
 }
 
+/// The reconnect a lowered mode needs would drop an open transaction, which
+/// the server rolls back: the mode stays until the user ends it.
+#[gpui::test]
+fn the_mode_is_not_lowered_below_the_script_inside_a_transaction(cx: &mut TestAppContext) {
+    use crate::sql::Mode;
+    store::tests::with_home(|| {
+        crate::IGNORE_ENVIRONMENT.set(true);
+        let (workspace, cx) = launch_connections(
+            cx,
+            "CREATE TABLE t (id INTEGER);",
+            "",
+            &sqlite_profile(
+                "e2e",
+                "E2E",
+                "mode = \"full\"\nstartup_script = \"PRAGMA cache_size = 4000\"",
+            ),
+        );
+        connect_profile(&workspace, cx, "e2e");
+        run_in_front(&workspace, cx, "BEGIN");
+        run_in_front(&workspace, cx, "INSERT INTO t VALUES (1)");
+        let before = generation_of(&workspace, cx, "e2e");
+        workspace.update(cx, |workspace, cx| workspace.set_mode(Mode::ReadWrite, cx));
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the profile stays in front");
+            assert_eq!(profile.mode, Mode::Full, "the mode was not lowered");
+            assert_eq!(profile.generation, before, "nothing reconnected");
+            assert!(profile.in_transaction);
+            let notice = profile.session.notice.as_deref().unwrap_or_default();
+            assert!(notice.contains("transaction"), "{notice}");
+        });
+        run_in_front(&workspace, cx, "ROLLBACK");
+        workspace.update(cx, |workspace, cx| workspace.set_mode(Mode::ReadWrite, cx));
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().unwrap();
+            assert_eq!(
+                profile.mode,
+                Mode::ReadWrite,
+                "with none open it goes ahead"
+            );
+            assert!(profile.generation > before);
+        });
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn lowering_the_mode_to_one_the_script_passes_keeps_the_session(cx: &mut TestAppContext) {
     use crate::sql::Mode;
