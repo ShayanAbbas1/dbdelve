@@ -178,13 +178,27 @@ impl GraphCancel {
     }
 }
 
+/// What a statement a Cancel reached before it held its connection fails
+/// with: it was dropped unsent, so the server never saw it.
+pub(crate) const CANCELLED_UNSENT: &str = "Cancelled before it was sent.";
+
+/// Whether `error` says the statement never reached the server: a Cancel
+/// dropped it before its turn ([`CANCELLED_UNSENT`]), or the binding put back
+/// ahead of it failed ([`unplaced`]). What it would have changed on the
+/// session, a transaction's end among it, did not happen.
+pub(crate) fn sent_nothing(error: &DbError) -> bool {
+    error.message == CANCELLED_UNSENT || error.message.starts_with(UNPLACED)
+}
+
+const UNPLACED: &str = "The statement was not sent:";
+
 /// An error from putting a bound tab's database and schema back, which is
 /// dbdelve's own call and not the user's statement: no byte of their text is
 /// where it points, and it says nothing was sent.
 fn unplaced(error: DbError) -> DbError {
     DbError {
         message: format!(
-            "The statement was not sent: its tab's database and schema could not be set again. {}",
+            "{UNPLACED} its tab's database and schema could not be set again. {}",
             error.message
         ),
         position: None,
@@ -3543,7 +3557,7 @@ impl<'a> Fetch<'a> {
     fn hold(&self) -> Result<LetGo<'a>, DbError> {
         match self.held.is_none_or(|held| held()) {
             true => Ok(LetGo(self.let_go)),
-            false => Err(plain_error("Cancelled before it was sent.".into())),
+            false => Err(plain_error(CANCELLED_UNSENT.into())),
         }
     }
 }

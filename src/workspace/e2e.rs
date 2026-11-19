@@ -25770,3 +25770,51 @@ fn a_relation_export_from_a_row_of_a_database_the_connection_left_is_refused(
         quit(workspace, cx);
     });
 }
+
+#[gpui::test]
+fn an_end_of_the_transaction_dropped_unsent_leaves_it_open(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        run_in_front(&workspace, cx, "BEGIN");
+        run_in_front(&workspace, cx, "INSERT INTO t VALUES (1)");
+        let listed = recorded_statements(&workspace, cx);
+        let unsent = crate::db::DbError {
+            message: crate::db::CANCELLED_UNSENT.into(),
+            position: None,
+        };
+        workspace.update(cx, |workspace, _| {
+            let profile = workspace.profile_mut().expect("a profile is in front");
+            profile.end_landed("ROLLBACK", true, false, Some(&unsent));
+        });
+        assert!(
+            transaction_state(&workspace, cx).1,
+            "a ROLLBACK the server never saw ended nothing"
+        );
+        assert_eq!(recorded_statements(&workspace, cx), listed);
+
+        // One the server refused, on an engine that says the transaction is
+        // gone then, ended it; so did one whose session was lost.
+        let refused = crate::db::DbError {
+            message: "cannot rollback - no transaction is active".into(),
+            position: None,
+        };
+        workspace.update(cx, |workspace, _| {
+            let profile = workspace.profile_mut().expect("a profile is in front");
+            profile.end_landed("ROLLBACK", true, false, Some(&refused));
+            assert!(!profile.in_transaction && profile.transaction_statements.is_empty());
+            profile.in_transaction = true;
+            profile.end_landed("ROLLBACK", true, true, Some(&unsent));
+            assert!(!profile.in_transaction, "a lost session keeps nothing");
+        });
+
+        // The real thing: the transaction the BEGIN opened is still open on
+        // the session, and once a ROLLBACK lands it is gone.
+        workspace.update(cx, |workspace, _| {
+            workspace.profile_mut().unwrap().in_transaction = true;
+        });
+        run_in_front(&workspace, cx, "ROLLBACK");
+        assert!(!transaction_state(&workspace, cx).1);
+        assert!(recorded_statements(&workspace, cx).is_empty());
+        quit(workspace, cx);
+    });
+}
