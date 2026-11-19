@@ -275,6 +275,24 @@ generation, so cancellation, failure, and reconnect cannot discard the result.
 Background cleanup waits up to one second for a late stdout session ID, ending
 early on stdout EOF; local teardown does not wait for that drain. A session
 whose ID never arrives still produces an uncertainty notice.
-The window keeps unconfirmed results separately from other notices;
-profile and region are configured settings, not verified identity. No result
-is persisted, and the local watchdog never waits for the remote request.
+An app-global coordinator retains unresolved results after notification dismissal
+and after the originating window closes. Typed outcomes distinguish authentication,
+permission, transient network/service failures, missing IDs, confirmation, and an
+unknown fallback. Only bounded, recognized CLI diagnostics classify failures;
+raw output is neither displayed nor logged. Success requires a matching SessionId
+in a successful JSON response.
+
+Transient failures get three retries after 2, 5, and 15 seconds; each command has
+the same three-second budget. Authentication, permission, and unknown failures
+pause. Manual Retry starts a new bounded cycle, coalescing duplicate requests.
+Stop retrying wakes a scheduled wait; an in-flight command may finish, with
+confirmation taking precedence over the stop. Missing IDs cannot be retried.
+The immutable original CLI/profile/region selection is reused with the normal
+CLI credential provider chain, without storing or exporting credentials.
+
+Dismiss hides the notice but does not stop retries or remove pending cleanup.
+A pending entry and palette command reopen dismissed records. All windows share
+this app-lifetime state. Profile and region are configured settings, not verified
+identity; changes to external AWS configuration can affect later attempts. No
+result is persisted across app exit, separate app processes do not coordinate,
+and neither local teardown nor app exit waits for remote cleanup.

@@ -375,6 +375,7 @@ pub enum Command {
     SwitchConnection,
     /// Close the connection in front and go to the welcome surface.
     Disconnect,
+    ShowSsmCleanup,
     /// Put the palette back up over what can be done to this connection.
     ConnectionActions(usize),
     /// Fold or unfold a project's connections in the Connections scope. The
@@ -3508,6 +3509,14 @@ fn starting_items(workspace: &Workspace) -> Vec<Item> {
             "Import from DBDelve…",
             icon::PLUS,
             Command::ImportFromStable,
+            CONNECTION,
+        ));
+    }
+    if workspace.pending_cleanup_count() > 0 {
+        items.push(command(
+            "Show pending AWS session cleanup",
+            icon::REFRESH,
+            Command::ShowSsmCleanup,
             CONNECTION,
         ));
     }

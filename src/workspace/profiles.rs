@@ -852,19 +852,19 @@ impl Workspace {
     pub(super) fn observe_ssm_cleanup(
         &mut self,
         attempt: &crate::db::ConnectAttempt,
+        mut config: Option<crate::db::ssm::SsmTunnel>,
         cx: &mut Context<Self>,
     ) {
-        let cleanup = attempt.observe_cleanup();
-        cx.spawn(async move |workspace, cx| {
-            if let Ok(result) = cleanup.await
-                && !result.accepted
-            {
-                workspace
-                    .update(cx, |workspace, cx| {
-                        workspace.cleanup_notices.push(result);
-                        cx.notify();
-                    })
-                    .ok();
+        let result = attempt.observe_cleanup();
+        // Setup may fail before a Tunnel exists. Do not retain the sender we await.
+        if let Some(config) = &mut config {
+            config.attempt = None;
+        }
+        let cleanup = self.cleanup.clone();
+        // Delivery and retry ownership survive the originating window and form.
+        cx.spawn(async move |_, _| {
+            if let Ok(result) = result.await {
+                cleanup.add(result, config);
             }
         })
         .detach();
@@ -902,7 +902,7 @@ impl Workspace {
         let attempt = crate::db::ConnectAttempt::default();
         config.set_connect_attempt(attempt.clone());
         let guard = attempt.guard();
-        let cleanup = config.ssm().map(|_| attempt.clone());
+        let cleanup = config.ssm().map(|config| (attempt.clone(), config.clone()));
         let engine = config.target().label();
         let probe = spawn_blocking(cx.background_executor(), move || {
             let started = std::time::Instant::now();
@@ -963,8 +963,8 @@ impl Workspace {
             });
         });
         form.test = Some(ConnectionTest::Running(task, guard));
-        if let Some(attempt) = cleanup {
-            self.observe_ssm_cleanup(&attempt, cx);
+        if let Some((attempt, config)) = cleanup {
+            self.observe_ssm_cleanup(&attempt, Some(config), cx);
         }
         cx.notify();
     }
@@ -1924,7 +1924,7 @@ impl Workspace {
         config.set_connect_attempt(attempt.clone());
         let mode = profile.mode;
         if config.ssm().is_some() {
-            self.observe_ssm_cleanup(&attempt, cx);
+            self.observe_ssm_cleanup(&attempt, config.ssm().cloned(), cx);
         }
         // The sidebar draws the tree whenever there are saved queries, so the
         // old catalog's rows have to leave it with the catalog.

@@ -14,6 +14,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+pub(crate) mod cleanup;
 pub(crate) mod dependencies;
 mod process;
 pub use process::helper;
@@ -35,7 +36,7 @@ struct CleanupState {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CleanupResult {
-    pub accepted: bool,
+    pub outcome: cleanup::Outcome,
     pub session: Option<String>,
     pub profile: Option<String>,
     pub region: Option<String>,
@@ -78,6 +79,11 @@ impl ConnectAttempt {
             .map(|_| ())
             .map_err(|_| plain_error("Connection cancelled.".into()))
     }
+    #[cfg(test)]
+    pub(crate) fn owner_count(&self) -> usize {
+        Arc::strong_count(&self.0)
+    }
+
     pub fn observe_cleanup(&self) -> tokio::sync::oneshot::Receiver<CleanupResult> {
         let (send, receive) = tokio::sync::oneshot::channel();
         let mut cleanup = self.0.cleanup.lock().unwrap_or_else(|p| p.into_inner());
@@ -572,10 +578,11 @@ fn cleanup_response(bytes: &[u8], session: &str) -> bool {
     value.get("SessionId").and_then(|id| id.as_str()) == Some(session)
 }
 
-fn run_cleanup(command: Command, session: &str, timeout: Duration) -> bool {
+fn run_cleanup(command: Command, session: &str, timeout: Duration) -> cleanup::Outcome {
+    use cleanup::Outcome;
     let deadline = Instant::now() + timeout;
     let Ok(mut process) = process::Process::spawn(command) else {
-        return false;
+        return Outcome::Unconfirmed;
     };
     let child = process.child.as_mut().expect("cleanup child");
     let (send, receive) = std::sync::mpsc::channel();
@@ -601,38 +608,53 @@ fn run_cleanup(command: Command, session: &str, timeout: Duration) -> bool {
         });
     }
     drop(send);
-    let status = loop {
+    let success = loop {
         if Instant::now() >= deadline {
             process.stop();
-            return false;
+            return Outcome::Transient;
         }
         match process.child.as_mut().unwrap().try_wait() {
             Ok(Some(status)) => break status.success(),
-            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
-            _ => {
-                process.stop();
-                return false;
-            }
+            Ok(None) => thread::sleep(Duration::from_millis(20)),
+            Err(_) => return Outcome::Unconfirmed,
         }
     };
-    if !status {
-        return false;
-    }
-    let mut accepted = false;
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
     for _ in 0..2 {
-        let Ok((stdout, Ok(bytes))) =
-            receive.recv_timeout(deadline.saturating_duration_since(Instant::now()))
-        else {
-            return false;
-        };
-        if bytes.len() > 16 * 1024 {
-            return false;
-        }
-        if stdout {
-            accepted = cleanup_response(&bytes, session);
+        match receive.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok((is_stdout, Ok(bytes))) => {
+                if is_stdout {
+                    stdout = bytes;
+                } else {
+                    stderr = bytes;
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return Outcome::Transient,
+            _ => return Outcome::Unconfirmed,
         }
     }
-    accepted
+    cleanup::classify(success, &stdout, &stderr, session)
+}
+
+fn terminate(config: &SsmTunnel, session: &str) -> cleanup::Outcome {
+    let mut args = vec![
+        "ssm".into(),
+        "terminate-session".into(),
+        "--session-id".into(),
+        session.into(),
+        "--output".into(),
+        "json".into(),
+    ];
+    for (flag, value) in [("--profile", &config.profile), ("--region", &config.region)] {
+        if let Some(value) = value {
+            args.push(flag.into());
+            args.push(value.clone());
+        }
+    }
+    cleanup_command(config, &args).map_or(cleanup::Outcome::Unconfirmed, |command| {
+        run_cleanup(command, session, Duration::from_secs(3))
+    })
 }
 
 impl Drop for Tunnel {
@@ -645,30 +667,14 @@ impl Drop for Tunnel {
         let config = self.config.clone();
         thread::spawn(move || {
             let session = cleanup_session(&output, Duration::from_secs(1));
-            let accepted = if let Some(session) = &session {
-                let mut args = vec![
-                    "ssm".into(),
-                    "terminate-session".into(),
-                    "--session-id".into(),
-                    session.clone(),
-                    "--output".into(),
-                    "json".into(),
-                ];
-                for (flag, value) in [("--profile", &config.profile), ("--region", &config.region)]
-                {
-                    if let Some(value) = value {
-                        args.push(flag.into());
-                        args.push(value.clone());
-                    }
-                }
-                cleanup_command(&config, &args)
-                    .is_ok_and(|command| run_cleanup(command, session, Duration::from_secs(3)))
-            } else {
-                false
-            };
+            let outcome = session
+                .as_deref()
+                .map_or(cleanup::Outcome::MissingId, |session| {
+                    terminate(&config, session)
+                });
             if let Some(attempt) = &config.attempt {
                 attempt.report_cleanup(CleanupResult {
-                    accepted,
+                    outcome,
                     session,
                     profile: config.profile.clone(),
                     region: config.region.clone(),
@@ -724,10 +730,10 @@ mod tests {
 
     #[test]
     fn cleanup_completed_before_subscription_is_delivered() {
-        for accepted in [false, true] {
+        for outcome in [cleanup::Outcome::Unconfirmed, cleanup::Outcome::Confirmed] {
             let attempt = ConnectAttempt::default();
             let result = CleanupResult {
-                accepted,
+                outcome,
                 session: Some("test-session".into()),
                 profile: Some("test-profile".into()),
                 region: Some("test-region".into()),
@@ -742,17 +748,22 @@ mod tests {
     fn cleanup_process_confirms_only_successful_matching_response() {
         let mut good = Command::new("/bin/sh");
         good.args(["-c", "printf '{\"SessionId\":\"alice-123\"}'"]);
-        assert!(run_cleanup(good, "alice-123", Duration::from_secs(3)));
+        assert_eq!(
+            run_cleanup(good, "alice-123", Duration::from_secs(3)),
+            cleanup::Outcome::Confirmed
+        );
         let mut failure = Command::new("/bin/sh");
         failure.args(["-c", "printf '{\"SessionId\":\"alice-123\"}'; exit 1"]);
-        assert!(!run_cleanup(failure, "alice-123", Duration::from_secs(3)));
+        assert_ne!(
+            run_cleanup(failure, "alice-123", Duration::from_secs(3)),
+            cleanup::Outcome::Confirmed
+        );
         let mut hanging = Command::new("/bin/sh");
         hanging.args(["-c", "sleep 60"]);
-        assert!(!run_cleanup(
-            hanging,
-            "alice-123",
-            Duration::from_millis(100)
-        ));
+        assert_eq!(
+            run_cleanup(hanging, "alice-123", Duration::from_millis(100)),
+            cleanup::Outcome::Transient
+        );
     }
     #[test]
     fn cleanup_accepts_only_matching_json_response() {
@@ -781,7 +792,10 @@ mod tests {
             ..config()
         };
         let command = cleanup_command(&config, &[]).unwrap();
-        assert!(run_cleanup(command, "alice-123", Duration::from_secs(3)));
+        assert_eq!(
+            run_cleanup(command, "alice-123", Duration::from_secs(3)),
+            cleanup::Outcome::Confirmed
+        );
         std::fs::remove_dir_all(directory).unwrap();
     }
     #[test]
@@ -1080,7 +1094,7 @@ mod lifecycle_tests {
             .unwrap()
             .line("Starting session with SessionId: late-session", true);
         let result = cleanup_result(receiver);
-        assert!(result.accepted);
+        assert_eq!(result.outcome, cleanup::Outcome::Confirmed);
         assert_eq!(result.session.as_deref(), Some("late-session"));
     }
 
@@ -1099,7 +1113,11 @@ mod lifecycle_tests {
         ));
         drop(last);
         let result = cleanup_result(receiver);
-        assert!(!result.accepted, "fake CLI returns no JSON");
+        assert_eq!(
+            result.outcome,
+            cleanup::Outcome::Unconfirmed,
+            "fake CLI returns no JSON"
+        );
         assert!(result.session.is_some());
     }
     fn cleanup_result(
@@ -1139,7 +1157,7 @@ mod lifecycle_tests {
         assert_eq!(
             cleanup_result(receiver),
             CleanupResult {
-                accepted: true,
+                outcome: cleanup::Outcome::Confirmed,
                 session: Some("test-session".into()),
                 profile: Some("test-profile".into()),
                 region: Some("test-region".into()),
@@ -1180,7 +1198,10 @@ mod lifecycle_tests {
             ),
             "remote termination should still be waiting after the local listener closes"
         );
-        assert!(!cleanup_result(receiver).accepted);
+        assert_ne!(
+            cleanup_result(receiver).outcome,
+            cleanup::Outcome::Confirmed
+        );
     }
 
     #[test]
@@ -1199,7 +1220,7 @@ mod lifecycle_tests {
             .is_err()
         );
         let result = cleanup_result(receiver);
-        assert!(!result.accepted);
+        assert_ne!(result.outcome, cleanup::Outcome::Confirmed);
         assert!(result.session.is_none());
     }
 
