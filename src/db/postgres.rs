@@ -2081,13 +2081,13 @@ impl Connection {
             // sequence as it stands now: an `ALTER SEQUENCE` and a `setval`
             // committed in between pair the old bounds with a value only the
             // new ones allow, which a replay refuses.
-            if let Some((last, _)) = &set {
-                if outside_bounds(last, cell("min_value")?, cell("max_value")?) {
-                    return Err(plain_error(format!(
-                        "{sequence} was changed while it was read: it stands at {last}, \
-                         outside the bounds read with it. Export it again."
-                    )));
-                }
+            if let Some((last, _)) = &set
+                && outside_bounds(last, cell("min_value")?, cell("max_value")?)
+            {
+                return Err(plain_error(format!(
+                    "{sequence} was changed while it was read: it stands at {last}, \
+                     outside the bounds read with it. Export it again."
+                )));
             }
             let set = set.map(|(last, called)| format!("{last}, {called}"));
             // A sequence an identity column owns is created by its table, and
