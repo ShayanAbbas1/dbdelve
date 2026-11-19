@@ -323,7 +323,7 @@ impl Workspace {
                 };
                 match written {
                     (path, format, Ok(())) => {
-                        let message = exported(rows, format, &path);
+                        let message = exported(Some(rows), format, &path);
                         profile.session.notice = Some(message.clone());
                         workspace.clear_notice_later(id, generation, message, cx);
                     }
@@ -449,6 +449,7 @@ impl Workspace {
             routed,
             path,
             format,
+            true,
             move |connection, read_only, path, progress| {
                 export_every_row(
                     connection, &refetch, &target, read_only, engine, path, progress,
@@ -460,8 +461,10 @@ impl Workspace {
 
     /// Run `work` on a thread of its own against the connection `routed`
     /// resolves to, counting in the status bar while it writes to `path` and
-    /// saying what it ended in, `format` being what the notice names.
-    /// Whatever could refuse it has been asked already.
+    /// saying what it ended in, `format` being what the notice names and
+    /// `rows` whether it counts the rows it wrote, which an export of the
+    /// structure alone has none of. Whatever could refuse it has been asked
+    /// already.
     #[allow(clippy::too_many_arguments)]
     fn run_export(
         &mut self,
@@ -470,6 +473,7 @@ impl Workspace {
         routed: Routed,
         path: PathBuf,
         format: FileAs,
+        rows: bool,
         work: impl FnOnce(&Connection, bool, &Path, &ExportProgress) -> Result<usize, Ended>
         + Send
         + 'static,
@@ -554,8 +558,8 @@ impl Workspace {
                     return;
                 };
                 match ended {
-                    Ok(rows) => {
-                        let message = exported(rows, format, &path);
+                    Ok(written) => {
+                        let message = exported(rows.then_some(written), format, &path);
                         profile.session.notice = Some(message.clone());
                         workspace.clear_notice_later(id, generation, message, cx);
                     }
@@ -841,11 +845,19 @@ fn log_export(format: FileAs, ended: Result<usize, &Ended>) {
     }
 }
 
-fn exported(rows: usize, format: FileAs, path: &Path) -> String {
+/// What a finished export says it wrote: its rows, or, where it wrote none
+/// by design (`rows` is `None`), the structure it wrote instead.
+fn exported(rows: Option<usize>, format: FileAs, path: &Path) -> String {
+    let what = match rows {
+        Some(rows) => format!(
+            "{} {}",
+            group_thousands(rows as u64),
+            if rows == 1 { "row" } else { "rows" }
+        ),
+        None => "the structure".to_string(),
+    };
     format!(
-        "Exported {} {} as {} to {}.",
-        group_thousands(rows as u64),
-        if rows == 1 { "row" } else { "rows" },
+        "Exported {what} as {} to {}.",
         format.extension().to_uppercase(),
         path.display()
     )
@@ -1242,6 +1254,19 @@ mod tests {
     use super::*;
     use crate::db::ConnectionConfig;
     use crate::export::Format;
+
+    #[test]
+    fn an_export_of_the_structure_alone_counts_no_rows() {
+        let path = Path::new("schema.sql");
+        assert_eq!(
+            exported(Some(1_234), FileAs::Inserts, path),
+            "Exported 1,234 rows as SQL to schema.sql."
+        );
+        assert_eq!(
+            exported(None, FileAs::Inserts, path),
+            "Exported the structure as SQL to schema.sql."
+        );
+    }
 
     #[test]
     fn export_sql_is_offered_only_for_sql_engines() {

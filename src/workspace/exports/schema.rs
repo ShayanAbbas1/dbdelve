@@ -51,6 +51,7 @@ impl Workspace {
             routed,
             path,
             FileAs::Inserts,
+            request.rows,
             move |connection, read_only, path, progress| {
                 export_schema(
                     connection, &schema, &request, read_only, engine, path, progress,
