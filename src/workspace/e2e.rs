@@ -12919,6 +12919,32 @@ fn new_query_in_complex_mode_opens_an_unbound_tab_on_the_profiles_own_session(
     });
 }
 
+/// Commit ends the profile's own transaction, so it is sent from a tab of
+/// the profile's own session even when a tab bound elsewhere is in front.
+#[gpui::test]
+fn commit_from_a_bound_tab_ends_the_profiles_own_transaction(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = duckdb_with_other_attached(cx);
+        run_in_front(&workspace, cx, "BEGIN");
+        assert_eq!(profile_flags(&workspace, cx), (true, false));
+        new_query_here(&workspace, cx, Some("other"), None);
+        cx.dispatch_action(crate::actions::CommitTransaction);
+        settle(cx);
+        assert_eq!(
+            front_binding(&workspace, cx),
+            None,
+            "the COMMIT went to a tab of the profile's own session"
+        );
+        assert_eq!(last_statement(&buffer(&workspace, cx)), "COMMIT");
+        assert_eq!(
+            profile_flags(&workspace, cx),
+            (false, false),
+            "the profile's transaction ended"
+        );
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn a_session_a_bound_run_opened_is_kept_and_its_database_reads_over_it(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
