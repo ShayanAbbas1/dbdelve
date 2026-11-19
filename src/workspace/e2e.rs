@@ -25742,3 +25742,31 @@ fn an_idle_deadline_leaves_a_lost_connection_failed(cx: &mut TestAppContext) {
         quit(workspace, cx);
     });
 }
+
+#[gpui::test]
+fn a_relation_export_from_a_row_of_a_database_the_connection_left_is_refused(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        // As a row listed under `db_a` asks once a switch to another has
+        // landed under its open menu.
+        workspace.update(cx, |workspace, cx| {
+            workspace.export_relation(
+                crate::export::FileAs::Rows(crate::export::Format::Csv),
+                Some("db_a".into()),
+                "main".into(),
+                "orders".into(),
+                cx,
+            );
+        });
+        settle(cx);
+        let notice = shown_notice(&workspace, cx).expect("the refusal is said");
+        assert!(notice.contains("db_a"), "{notice}");
+        workspace.read_with(cx, |workspace, _| {
+            let session = &workspace.profile().expect("a profile is in front").session;
+            assert!(session.exporting.is_none(), "nothing is exported");
+        });
+        quit(workspace, cx);
+    });
+}

@@ -3907,17 +3907,18 @@ pub(super) fn explorer_menu(
     // tree hands over its own.
     let (export_workspace, export_names, export_profile) = (
         workspace.clone(),
-        (schema.clone(), relation.clone()),
+        (row.database.clone(), schema.clone(), relation.clone()),
         row.profile.clone(),
     );
     let exports = PopupMenu::build(window, cx, move |submenu, _, _| {
         let export = |label: &'static str, format: FileAs| {
             let (workspace, profile) = (export_workspace.clone(), export_profile.clone());
-            let (schema, relation) = export_names.clone();
+            let (database, schema, relation) = export_names.clone();
             PopupMenuItem::new(label).on_click(move |_, _, cx| {
-                let (schema, relation) = (schema.clone(), relation.clone());
+                let (database, schema, relation) =
+                    (database.clone(), schema.clone(), relation.clone());
                 on_profile(&workspace, &profile, cx, |workspace, cx| {
-                    workspace.export_relation(format, schema, relation, cx);
+                    workspace.export_relation(format, database, schema, relation, cx);
                 });
             })
         };
