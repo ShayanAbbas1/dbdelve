@@ -1195,6 +1195,63 @@ fn live_a_sequence_no_exported_table_owns_is_created_on_postgres() {
     assert_eq!(next.rows[0].get(1), Some("42"), "{sql}");
 }
 
+/// No file writes an inheritance yet, so a table in one is refused rather
+/// than written as a table on its own, or a parent with its children's rows.
+#[test]
+#[ignore = "needs the dev Postgres"]
+fn live_a_table_in_an_inheritance_is_refused_on_postgres() {
+    let schema: &'static str =
+        Box::leak(format!("dbdelve_export_family_{}", std::process::id()).into_boxed_str());
+    // Dropped child first, as declared last.
+    let parent = Throwaway::new(postgres(), Engine::Postgres, "public", "inherited");
+    let child = Throwaway::new(postgres(), Engine::Postgres, "public", "inheriting");
+    parent.run("CREATE TABLE {table} (id int)");
+    child.run(&format!(
+        "CREATE TABLE {{table}} () INHERITS ({})",
+        parent.named("{table}")
+    ));
+    // A partition whose parent is in another schema is not a partition of
+    // this schema's, so it is offered as a table.
+    let mut partition = Throwaway::new(postgres(), Engine::Postgres, "public", "partition");
+    partition.run(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"));
+    partition.run(&format!("CREATE SCHEMA \"{schema}\""));
+    partition.drop_after(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"));
+    partition.run(&format!(
+        "CREATE TABLE \"{schema}\".events (id int) PARTITION BY RANGE (id)"
+    ));
+    partition.run(&format!(
+        "CREATE TABLE {{table}} PARTITION OF \"{schema}\".events FOR VALUES FROM (0) TO (10)"
+    ));
+
+    let export = |table: &Throwaway| {
+        let request = SchemaRequest {
+            tables: vec![table.name.clone()],
+            structure: true,
+            rows: true,
+            partitioned: Vec::new(),
+        };
+        export_schema(
+            &table.connection,
+            "public",
+            &request,
+            false,
+            Engine::Postgres,
+            &table.directory.join("schema.sql"),
+            &ExportProgress::default(),
+        )
+    };
+    let refused = |table: &Throwaway, expected: &str| match export(table) {
+        Err(Ended::Failed(message)) => {
+            assert!(message.contains(&table.name), "{message}");
+            assert!(message.contains(expected), "{message}");
+        }
+        other => panic!("{other:?}"),
+    };
+    refused(&child, &format!("it inherits from public.{}", parent.name));
+    refused(&parent, &format!("public.{} inherit from it", child.name));
+    refused(&partition, &format!("it inherits from {schema}.events"));
+}
+
 /// A key that does not check its rows holds an orphan the file has to carry,
 /// and comes back as unchecked as it was: disabled, or enabled and untrusted.
 #[test]

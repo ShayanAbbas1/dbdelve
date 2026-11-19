@@ -1850,7 +1850,50 @@ impl Connection {
     }
 
     /// A table's DDL with its foreign keys left to statements of their own.
+    ///
+    /// A table in an inheritance is refused: its DDL writes no `INHERITS` or
+    /// `PARTITION OF`, so a child would come back on its own, and a parent's
+    /// rows are read without `ONLY`, so they hold every child's too, which a
+    /// file holding the children as well writes twice. The partitions of a
+    /// partitioned table in the schema never reach here; a partition whose
+    /// parent is in another schema, and old-style inheritance, do.
+    ///
+    /// ponytail: refused rather than written. The upgrade is `INHERITS` (or
+    /// `PARTITION OF … FOR VALUES` from `relpartbound`) in the DDL and `ONLY`
+    /// on a parent's rows.
     pub fn export_ddl(&self, schema: &str, relation: &str) -> Result<ExportDdl, DbError> {
+        let name = Engine::Postgres.qualified(schema, relation);
+        let family = self.internal_query(&format!(
+            "SELECT
+                 (SELECT pg_catalog.string_agg(
+                      parent_namespace.nspname || '.' || parent.relname, ', '
+                      ORDER BY parent_namespace.nspname, parent.relname)
+                  FROM pg_catalog.pg_inherits AS inheritance
+                  JOIN pg_catalog.pg_class AS parent ON parent.oid = inheritance.inhparent
+                  JOIN pg_catalog.pg_namespace AS parent_namespace
+                      ON parent_namespace.oid = parent.relnamespace
+                  WHERE inheritance.inhrelid = {0}::regclass) AS parents,
+                 (SELECT pg_catalog.string_agg(
+                      child_namespace.nspname || '.' || child.relname, ', '
+                      ORDER BY child_namespace.nspname, child.relname)
+                  FROM pg_catalog.pg_inherits AS inheritance
+                  JOIN pg_catalog.pg_class AS child ON child.oid = inheritance.inhrelid
+                  JOIN pg_catalog.pg_namespace AS child_namespace
+                      ON child_namespace.oid = child.relnamespace
+                  WHERE inheritance.inhparent = {0}::regclass) AS children",
+            Engine::Postgres.quote_literal(&name)
+        ))?;
+        let row = family.rows.first().cloned().unwrap_or_default();
+        if let Some(parents) = optional_cell(&family, &row, "parents") {
+            return Err(plain_error(format!(
+                "it inherits from {parents}, which an export does not write yet."
+            )));
+        }
+        if let Some(children) = optional_cell(&family, &row, "children") {
+            return Err(plain_error(format!(
+                "{children} inherit from it, which an export does not write yet."
+            )));
+        }
         self.render_ddl(schema, relation, RelationKind::Table, true)
     }
 
