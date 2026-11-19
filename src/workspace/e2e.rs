@@ -20193,8 +20193,9 @@ fn an_apply_whose_outcome_is_unknown_is_refused_until_the_rows_are_read_again(
         let id = open_own_table(&workspace, cx, "birds");
         let grid = relation_grid(&workspace, cx, id);
 
-        // The SQLite arm never answers `Unknown`, so the test enters where the
-        // landing does: the grid is marked, with the draft staged on it.
+        // Entered where the landing leaves it: the grid is marked, with the
+        // draft staged on it (the landing itself is driven by
+        // `an_apply_whose_commit_goes_unanswered_marks_the_grid_and_is_not_sent_again`).
         stage(&grid, cx, 0, 1, NewValue::Value("finch".into()));
         grid.update(cx, |table, _| table.delegate_mut().mark_outcome_unknown());
 
@@ -20235,6 +20236,79 @@ fn an_apply_whose_outcome_is_unknown_is_refused_until_the_rows_are_read_again(
         assert_eq!(
             front_review(&workspace, cx),
             Some(("Apply edits", true, None))
+        );
+        quit(workspace, cx);
+    });
+}
+
+/// An apply whose `COMMIT` lands and then goes unanswered, driven through the
+/// real landing: the grid is marked, the review says nothing is known, and
+/// neither its Run nor a new Apply sends the draft a second time.
+#[gpui::test]
+fn an_apply_whose_commit_goes_unanswered_marks_the_grid_and_is_not_sent_again(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, BIRDS);
+        draft_by_default(&workspace, cx);
+        let id = open_own_table(&workspace, cx, "birds");
+        let grid = relation_grid(&workspace, cx, id);
+        // Only the name is typed: the id is the server's, so a second INSERT
+        // would add a second row.
+        cx.dispatch_action(crate::actions::NewRow);
+        settle(cx);
+        stage(
+            &grid,
+            cx,
+            2,
+            1,
+            crate::result_grid::NewValue::Value("robin".into()),
+        );
+        cx.dispatch_action(crate::actions::ApplyEdits);
+        settle(cx);
+
+        crate::db::SQLITE_COMMIT_ANSWER_LOST.set(true);
+        workspace.update(cx, |workspace, cx| workspace.run_apply_review(cx));
+        settle(cx);
+        assert!(
+            !crate::db::SQLITE_COMMIT_ANSWER_LOST.get(),
+            "the COMMIT was sent"
+        );
+        assert_eq!(
+            on_disk("select count(*) from birds where name = 'robin'").as_deref(),
+            Some("1"),
+            "the COMMIT landed"
+        );
+        assert!(grid.read_with(cx, |table, _| table.delegate().outcome_unknown()));
+        assert_eq!(
+            front_review(&workspace, cx),
+            Some((
+                "Apply draft",
+                true,
+                Some(
+                    "The connection was lost during COMMIT; whether the changes were applied \
+                     is not known."
+                        .to_string()
+                )
+            ))
+        );
+
+        workspace.update(cx, |workspace, cx| workspace.run_apply_review(cx));
+        settle(cx);
+        assert_eq!(
+            front_review(&workspace, cx)
+                .and_then(|(_, _, error)| error)
+                .as_deref(),
+            Some(OUTCOME_UNKNOWN_REFUSAL)
+        );
+        workspace.update(cx, |workspace, cx| workspace.close_apply_review(cx));
+        cx.dispatch_action(crate::actions::ApplyEdits);
+        settle(cx);
+        assert_eq!(front_review(&workspace, cx), None, "no review opens");
+        assert_eq!(
+            on_disk("select count(*) from birds where name = 'robin'").as_deref(),
+            Some("1"),
+            "inserted once"
         );
         quit(workspace, cx);
     });

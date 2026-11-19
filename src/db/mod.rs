@@ -61,6 +61,8 @@ pub use password_command::{PasswordCommand, loggable_error};
 pub use plugin::Plugin;
 #[cfg(test)]
 pub(crate) use snowflake::mock as snowflake_mock;
+#[cfg(test)]
+pub(crate) use sqlite::tests::COMMIT_ANSWER_LOST as SQLITE_COMMIT_ANSWER_LOST;
 pub use ssh::askpass;
 
 pub use mongo::MongoConfig;

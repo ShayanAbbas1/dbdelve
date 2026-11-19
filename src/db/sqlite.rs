@@ -209,18 +209,27 @@ impl Connection {
             if sending == Sending::Abandon && connection.is_autocommit() {
                 return Ok(QueryResult::default());
             }
-            ran(&connection, sql, Fetch::default()).map(|(result, _)| result)
+            let answer = ran(&connection, sql, Fetch::default()).map(|(result, _)| result);
+            #[cfg(test)]
+            if sending == Sending::Bracket
+                && sql == "COMMIT"
+                && answer.is_ok()
+                && tests::COMMIT_ANSWER_LOST.take()
+            {
+                return Err(plain_error(tests::LOST_ANSWER.into()));
+            }
+            answer
         };
         // A SQLite file has no socket to lose, and renders every cell the same
         // way on both reads, so nothing is skipped and no `COMMIT` error means
-        // a lost session.
+        // a lost session, but for the one a test stages.
         super::run_verified(
             Engine::Sqlite,
             steps,
             &mut send,
             proceed,
             &|_| false,
-            &|_| false,
+            &answer_lost,
         )
     }
 
@@ -1719,10 +1728,35 @@ pub(super) mod graph_fixture {
     }
 }
 
+/// Whether a verified apply's `COMMIT` error means the session went before it
+/// answered. Never on a file, but for the one a test stages
+/// (`tests::COMMIT_ANSWER_LOST`), so an unknown outcome can be driven through
+/// the workspace's landing.
+fn answer_lost(error: &DbError) -> bool {
+    #[cfg(test)]
+    return error.message == tests::LOST_ANSWER;
+    #[cfg(not(test))]
+    {
+        let _ = error;
+        false
+    }
+}
+
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::db::{ColumnDefinition, RelationKind};
+
+    thread_local! {
+        /// Set, the next verified apply's `COMMIT` on this thread commits and
+        /// then answers as a connection lost before its answer would:
+        /// whether the draft landed is then not known to the workspace.
+        pub(crate) static COMMIT_ANSWER_LOST: std::cell::Cell<bool> =
+            const { std::cell::Cell::new(false) };
+    }
+
+    /// What that `COMMIT` answers.
+    pub(super) const LOST_ANSWER: &str = "The connection was lost.";
 
     /// A connection over a database built in memory. Needs nothing external, so
     /// unlike the `live_` tests below these run everywhere.
