@@ -597,7 +597,6 @@ fn cleanup_deadline(
 fn run_cleanup(command: Command, session: &str, timeout: Duration) -> cleanup::Outcome {
     use cleanup::Outcome;
     let command_deadline = Instant::now() + timeout;
-    let mut deadline;
     let exited = Arc::new(Mutex::new(None));
     let Ok(mut process) = process::Process::spawn(command) else {
         return Outcome::Unconfirmed;
@@ -643,15 +642,15 @@ fn run_cleanup(command: Command, session: &str, timeout: Duration) -> cleanup::O
         });
     }
     drop(send);
-    let success = loop {
-        let (until, timeout_outcome) = cleanup_deadline(command_deadline, *exited.lock().unwrap());
-        deadline = until;
+    let (success, deadline) = loop {
+        let (deadline, timeout_outcome) =
+            cleanup_deadline(command_deadline, *exited.lock().unwrap());
         if Instant::now() >= deadline {
             process.stop();
             return timeout_outcome;
         }
         match process.child.as_mut().unwrap().try_wait() {
-            Ok(Some(status)) => break status.success(),
+            Ok(Some(status)) => break (status.success(), deadline),
             Ok(None) => thread::sleep(Duration::from_millis(20)),
             Err(_) => return Outcome::Unconfirmed,
         }

@@ -5644,6 +5644,17 @@ fn palette_labels(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> 
     })
 }
 
+fn assert_palette_matches(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    expected: &[&str],
+) {
+    workspace.read_with(cx, |workspace, cx| {
+        let palette = workspace.palette.as_ref().expect("the palette is up");
+        assert_eq!(palette.read(cx).matched_labels(), expected);
+    });
+}
+
 fn buffers_of(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Vec<String> {
     workspace.read_with(cx, |workspace, cx| {
         workspace.profiles[0]
@@ -12404,18 +12415,7 @@ fn ssm_cleanup_retry_dismiss_reopen_and_confirm_from_shared_state(cx: &mut TestA
         assert!(palette_mode(&workspace, cx).is_some(), "palette opened");
         cx.simulate_input("Show pending AWS session cleanup");
         settle(cx);
-        assert_eq!(
-            workspace.read_with(cx, |w, cx| w
-                .palette
-                .as_ref()
-                .unwrap()
-                .read(cx)
-                .matched_labels()
-                .into_iter()
-                .map(str::to_owned)
-                .collect::<Vec<_>>()),
-            ["Show pending AWS session cleanup"]
-        );
+        assert_palette_matches(&workspace, cx, &["Show pending AWS session cleanup"]);
         cx.simulate_keystrokes("enter");
         settle(cx);
         assert!(palette_mode(&workspace, cx).is_none());
@@ -12450,18 +12450,7 @@ fn ssm_cleanup_retry_dismiss_reopen_and_confirm_from_shared_state(cx: &mut TestA
         assert!(palette_mode(&workspace, cx).is_some(), "palette opened");
         cx.simulate_input("Show pending AWS session cleanup");
         settle(cx);
-        assert_eq!(
-            workspace.read_with(cx, |w, cx| w
-                .palette
-                .as_ref()
-                .unwrap()
-                .read(cx)
-                .matched_labels()
-                .into_iter()
-                .map(str::to_owned)
-                .collect::<Vec<_>>()),
-            ["Show pending AWS session cleanup"]
-        );
+        assert_palette_matches(&workspace, cx, &["Show pending AWS session cleanup"]);
         cx.simulate_keystrokes("enter");
         settle(cx);
         assert!(
@@ -12513,18 +12502,7 @@ fn ssm_cleanup_reopens_from_the_keyboard_during_row_import(cx: &mut TestAppConte
         settle(cx);
         cx.simulate_input("Show pending AWS session cleanup");
         settle(cx);
-        assert_eq!(
-            workspace.read_with(cx, |w, cx| w
-                .palette
-                .as_ref()
-                .unwrap()
-                .read(cx)
-                .matched_labels()
-                .into_iter()
-                .map(str::to_owned)
-                .collect::<Vec<_>>()),
-            ["Show pending AWS session cleanup"]
-        );
+        assert_palette_matches(&workspace, cx, &["Show pending AWS session cleanup"]);
         cx.simulate_keystrokes("enter");
         settle(cx);
         assert!(palette_mode(&workspace, cx).is_none());
