@@ -875,7 +875,16 @@ impl Connection {
                 return match connection.query_drop(sql) {
                     Ok(()) => Ok(QueryResult::default()),
                     Err(error) => {
-                        gone.set(interrupted(&error) || connection.ping().is_err());
+                        let interrupted = interrupted(&error);
+                        // A kill that came before the `COMMIT` ran leaves the
+                        // apply's transaction open on the live session, its
+                        // writes for the user's next `COMMIT` to land. Whether
+                        // it landed stays unknown; what it left open does not
+                        // stay.
+                        if interrupted && connection.query_drop("ROLLBACK").is_err() {
+                            let _ = connection.reset();
+                        }
+                        gone.set(interrupted || connection.ping().is_err());
                         Err(query_error(&error))
                     }
                 };
