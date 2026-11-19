@@ -3688,6 +3688,12 @@ pub(crate) enum ApplyStage {
     Confirm(usize),
     ReadBack(usize),
     Commit,
+    /// MongoDB: write `step` was sent and nothing came back to say whether it
+    /// applied: the connection failed, or a Cancel or the statement timeout
+    /// stopped it on its way.
+    Unanswered(usize),
+    /// MongoDB: write `step` applied, and its write concern failed.
+    Concern(usize),
 }
 
 /// How a row differs from the row as it was fetched.
@@ -3746,19 +3752,21 @@ pub(crate) enum ApplyOutcome {
     /// trigger's own writes never raise a count.
     ///
     /// MongoDB has no transaction to roll back. There, a `Miscounted` and a
-    /// `Failed` at [`ApplyStage::Write`] or [`ApplyStage::ReadBack`] mean the
-    /// steps before `step` (or, at a read-back, up to and including it) were
-    /// applied and none after it was sent; `Drifted` and a `Failed` at
-    /// [`ApplyStage::Begin`] or [`ApplyStage::Reread`] wrote nothing. It never
-    /// answers `Unknown`: there is no `COMMIT` to lose.
+    /// `Failed` at [`ApplyStage::Write`], [`ApplyStage::Unanswered`],
+    /// [`ApplyStage::Concern`] or [`ApplyStage::ReadBack`] mean the steps
+    /// before `step` (or, at a write concern or a read-back, up to and including
+    /// it) were applied and none after it was sent; `Drifted` and a `Failed`
+    /// at [`ApplyStage::Begin`] or [`ApplyStage::Reread`] wrote nothing. It
+    /// never answers `Unknown`: there is no `COMMIT` to lose.
     Miscounted { step: usize, count: Option<u64> },
     /// The server refused something before `COMMIT`, or the apply refused to
     /// send: nothing the apply opened stayed applied.
     ///
     /// On MongoDB, which has no transaction to roll back, that is not so:
-    /// see [`ApplyOutcome::Miscounted`]. And a write that failed there may
-    /// itself have reached the server, so the workspace takes its outcome as
-    /// unknown until the rows are read again.
+    /// see [`ApplyOutcome::Miscounted`]. A write the server answered with a
+    /// refusal there ([`ApplyStage::Write`]) applied nothing; one nothing
+    /// answered ([`ApplyStage::Unanswered`]) may have, so the workspace takes
+    /// its outcome as unknown until the rows are read again.
     Failed { stage: ApplyStage, error: DbError },
     /// `COMMIT` was sent and its answer did not come back: whether it landed
     /// is not known.

@@ -2859,7 +2859,7 @@ impl Workspace {
                     if let ApplyOutcome::Applied { read_back, .. } = &mut outcome {
                         verified_read = read_back.take().map(|rows| Ok(*rows));
                     }
-                    unknown = unknown_outcome(&outcome, ordered);
+                    unknown = unknown_outcome(&outcome);
                     if ordered {
                         applied = verify
                             .identities
@@ -4476,18 +4476,20 @@ fn keeps_draft(target: Target, verified: bool) -> bool {
 
 /// Whether nobody can know what `outcome` left on the server: a `COMMIT` with
 /// no answer, or on an ordered target, which has no transaction to undo it, a
-/// write that failed, which may have reached the server before its answer was
-/// lost. Kept in the draft, that write would otherwise go again on the next
-/// Apply, and an insert with no `_id` of its own would land twice.
-fn unknown_outcome(outcome: &ApplyOutcome, ordered: bool) -> bool {
-    match outcome {
-        ApplyOutcome::Unknown(_) => true,
-        ApplyOutcome::Failed {
-            stage: ApplyStage::Write(_),
-            ..
-        } => ordered,
-        _ => false,
-    }
+/// write nothing answered, which may have reached the server before its
+/// answer was lost (`ApplyStage::Unanswered`). Kept in the draft, that write
+/// would otherwise go again on the next Apply, and an insert with no `_id` of
+/// its own would land twice. A write the server refused applied nothing, and
+/// its draft may be applied again once corrected.
+fn unknown_outcome(outcome: &ApplyOutcome) -> bool {
+    matches!(
+        outcome,
+        ApplyOutcome::Unknown(_)
+            | ApplyOutcome::Failed {
+                stage: ApplyStage::Unanswered(_),
+                ..
+            }
+    )
 }
 
 /// How many statements of an ordered apply were written when it stopped, the
@@ -4496,16 +4498,18 @@ fn unknown_outcome(outcome: &ApplyOutcome, ordered: bool) -> bool {
 /// before the first write wrote nothing.
 ///
 /// A read-back that failed follows its step's write, so that step counts too:
-/// only a Row send's step carries one, and the draft's own steps never do.
+/// only a Row send's step carries one, and the draft's own steps never do. So
+/// does a write whose write concern failed, which applied. One nothing
+/// answered is not counted: whether it applied is not known.
 fn written_before_stop(outcome: &ApplyOutcome) -> usize {
     match outcome {
         ApplyOutcome::Miscounted { step, .. }
         | ApplyOutcome::Failed {
-            stage: ApplyStage::Write(step),
+            stage: ApplyStage::Write(step) | ApplyStage::Unanswered(step),
             ..
         } => *step,
         ApplyOutcome::Failed {
-            stage: ApplyStage::ReadBack(step),
+            stage: ApplyStage::ReadBack(step) | ApplyStage::Concern(step),
             ..
         } => step + 1,
         _ => 0,
@@ -5115,7 +5119,7 @@ mod tests {
     }
 
     #[test]
-    fn an_ordered_write_that_failed_leaves_the_outcome_unknown() {
+    fn only_an_ordered_write_nothing_answered_leaves_the_outcome_unknown() {
         let error = DbError {
             message: "connection reset by peer".into(),
             position: None,
@@ -5124,10 +5128,19 @@ mod tests {
             stage,
             error: error.clone(),
         };
-        assert!(unknown_outcome(&failed_at(ApplyStage::Write(1)), true));
-        assert!(!unknown_outcome(&failed_at(ApplyStage::Write(1)), false));
-        assert!(!unknown_outcome(&failed_at(ApplyStage::Reread(0)), true));
-        assert!(unknown_outcome(&ApplyOutcome::Unknown(error), false));
+        // A write the server answered with a refusal applied nothing, and one
+        // whose write concern failed applied: both are known.
+        assert!(!unknown_outcome(&failed_at(ApplyStage::Write(1))));
+        assert!(!unknown_outcome(&failed_at(ApplyStage::Concern(1))));
+        assert!(!unknown_outcome(&failed_at(ApplyStage::Reread(0))));
+        // One nothing answered may have applied.
+        assert!(unknown_outcome(&failed_at(ApplyStage::Unanswered(1))));
+        assert_eq!(
+            written_before_stop(&failed_at(ApplyStage::Unanswered(1))),
+            1
+        );
+        assert_eq!(written_before_stop(&failed_at(ApplyStage::Concern(1))), 2);
+        assert!(unknown_outcome(&ApplyOutcome::Unknown(error)));
     }
 
     /// A MongoDB batch has no transaction: one a query tab appended to its

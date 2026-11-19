@@ -609,6 +609,11 @@ impl Connection {
     ///
     /// What the outcome says about how far it got is on [`ApplyOutcome`]: here
     /// the steps before the one named were applied, and none after it was sent.
+    /// A write that failed is told by what answered it: a refusal the server
+    /// sent ([`ApplyStage::Write`]) applied nothing, a write concern error
+    /// ([`ApplyStage::Concern`]) follows a write that applied, and a failure
+    /// nothing answered, the connection's or a Cancel's or the timeout's on its
+    /// way, is [`ApplyStage::Unanswered`]: it may have applied.
     /// `proceed` is not asked: each statement registers its own run in
     /// `cancel` ([`Run::start`]), so a Cancel between two of them stops the
     /// sequence there.
@@ -666,13 +671,26 @@ impl Connection {
 
         let (mut affected, mut read_back) = (0, None);
         for (index, prepared) in prepared.iter().enumerate() {
-            let count = match send(&prepared.write) {
-                Ok(result) => result.rows_affected,
+            // A Cancel before the write went out sent nothing.
+            let run = match Run::start(self, cancel) {
+                Ok(run) => run,
                 Err(error) => {
                     return ApplyOutcome::Failed {
                         stage: ApplyStage::Write(index),
                         error,
                     };
+                }
+            };
+            ANSWERED.set(None);
+            let count = match self.statement(&prepared.write, run, Fetch::default()) {
+                Ok(result) => result.rows_affected,
+                Err(error) => {
+                    let stage = match ANSWERED.take() {
+                        Some(Answered::Refused) => ApplyStage::Write(index),
+                        Some(Answered::Applied) => ApplyStage::Concern(index),
+                        None => ApplyStage::Unanswered(index),
+                    };
+                    return ApplyOutcome::Failed { stage, error };
                 }
             };
             if count != Some(1) {
@@ -1981,7 +1999,10 @@ impl<'a> Run<'a> {
                 };
                 tokio::select! {
                     outcome = operation(session).into_future() => {
-                        Some(outcome.map_err(|error| plain_error(error.kind.to_string())))
+                        Some(outcome.map_err(|error| {
+                            ANSWERED.set(refusal(&error));
+                            plain_error(error.kind.to_string())
+                        }))
                     }
                     Ok(()) = stopped => Some(Err(plain_error("Cancelled.".into()))),
                     () = bound => None,
@@ -2116,6 +2137,15 @@ pub(super) const APPLIED: &str = " The statement's other writes applied: ";
 /// reply alone says nothing.
 fn write(run: Run, database: &Database, sent: Document) -> Result<Document, DbError> {
     let written = command(run, database, sent)?;
+    write_reply(written).map_err(|(answered, error)| {
+        ANSWERED.set(answered);
+        error
+    })
+}
+
+/// [`write`]'s reading of a write command's reply, with what the reply says
+/// of whether the failed write applied ([`ANSWERED`]).
+fn write_reply(written: Document) -> Result<Document, (Option<Answered>, DbError)> {
     if let Some(error) = written
         .get_array("writeErrors")
         .ok()
@@ -2123,18 +2153,66 @@ fn write(run: Run, database: &Database, sent: Document) -> Result<Document, DbEr
         .and_then(Bson::as_document)
     {
         let message = error.get_str("errmsg").unwrap_or("A write failed.");
-        return Err(plain_error(match number(written.get("n")) {
-            0 => message.to_string(),
-            n => format!("{message}{APPLIED}{n}."),
-        }));
+        let answered = match error.get_i32("code") {
+            Ok(code) if unsettled(code) => None,
+            _ => Some(Answered::Refused),
+        };
+        return Err((
+            answered,
+            plain_error(match number(written.get("n")) {
+                0 => message.to_string(),
+                n => format!("{message}{APPLIED}{n}."),
+            }),
+        ));
     }
     if let Ok(error) = written.get_document("writeConcernError") {
-        return Err(plain_error(format!(
-            "The writes applied, but their write concern failed: {}",
-            error.get_str("errmsg").unwrap_or_default()
-        )));
+        return Err((
+            Some(Answered::Applied),
+            plain_error(format!(
+                "The writes applied, but their write concern failed: {}",
+                error.get_str("errmsg").unwrap_or_default()
+            )),
+        ));
     }
     Ok(written)
+}
+
+/// What a failed statement's answer said of whether its write applied, for a
+/// verified apply to tell a refusal from a write nothing answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Answered {
+    /// The server refused it: nothing of it applied.
+    Refused,
+    /// It applied, and something after it failed: its write concern.
+    Applied,
+}
+
+thread_local! {
+    /// What the last failed statement on this thread was answered with, set
+    /// where the reply is read ([`write`], [`Run::execute`]) and taken by
+    /// [`Connection::apply_verified`] after each write. Per thread because a
+    /// statement is driven on the thread that sends it (`block_on`), and one
+    /// apply's writes go out one after another on one thread.
+    static ANSWERED: std::cell::Cell<Option<Answered>> = const { std::cell::Cell::new(None) };
+}
+
+/// A command the server failed with an answer, which is a refusal unless its
+/// code says the operation was stopped part way ([`unsettled`]). Anything
+/// else (the socket, the pool, a server that could not be picked) is `None`:
+/// nothing answered for the write.
+fn refusal(error: &Error) -> Option<Answered> {
+    match &*error.kind {
+        ErrorKind::Command(failed) if !unsettled(failed.code) => Some(Answered::Refused),
+        _ => None,
+    }
+}
+
+/// Codes a server stops an operation already under way with, which say
+/// nothing of whether a write in it applied: interrupted (by a Cancel's
+/// `killOp` among others), out of time, or a server stepping down or
+/// shutting down under it.
+fn unsettled(code: i32) -> bool {
+    matches!(code, 50 | 91 | 189 | 262 | 11600 | 11601 | 11602)
 }
 
 /// `show collections` and `getCollectionNames()`: every name, sorted, the
@@ -3552,6 +3630,62 @@ mod tests {
         assert_eq!(document.keys().next().map(String::as_str), Some("_id"));
         assert_eq!(document.get("_id"), Some(&id));
         assert_eq!(with_id(doc! { "a": 1, "_id": 7 }).0, Bson::Int32(7));
+    }
+
+    /// A verified apply keeps a draft whose write the server refused, to be
+    /// applied again once corrected, and takes one nothing answered as
+    /// unknown: only the reply tells the two apart.
+    #[test]
+    fn a_failed_write_is_told_by_what_answered_it() {
+        let refused = write_reply(doc! {
+            "n": 0,
+            "writeErrors": [{ "index": 0, "code": 11000, "errmsg": "E11000 duplicate key" }],
+        })
+        .expect_err("a write error fails the write");
+        assert_eq!(refused.0, Some(Answered::Refused));
+        assert_eq!(refused.1.message, "E11000 duplicate key");
+        let validator = write_reply(doc! {
+            "n": 0,
+            "writeErrors": [{ "index": 0, "code": 121, "errmsg": "Document failed validation" }],
+        })
+        .expect_err("a validator's refusal fails the write");
+        assert_eq!(validator.0, Some(Answered::Refused));
+        // Stopped part way by a Cancel's killOp: the reply cannot say.
+        let interrupted = write_reply(doc! {
+            "n": 0,
+            "writeErrors": [{ "index": 0, "code": 11601, "errmsg": "operation was interrupted" }],
+        })
+        .expect_err("an interrupted write fails");
+        assert_eq!(interrupted.0, None);
+        let concern = write_reply(doc! {
+            "n": 1,
+            "writeConcernError": { "code": 64, "errmsg": "waiting for replication timed out" },
+        })
+        .expect_err("a write concern error fails the statement");
+        assert_eq!(concern.0, Some(Answered::Applied));
+        assert!(write_reply(doc! { "n": 1 }).is_ok());
+
+        let command = |code: i32| {
+            let failed: mongodb::error::CommandError = mongodb::bson::from_document(
+                doc! { "code": code, "codeName": "X", "errmsg": "no" },
+            )
+            .expect("a command error deserializes");
+            Error::from(ErrorKind::Command(failed))
+        };
+        assert_eq!(
+            refusal(&command(13)),
+            Some(Answered::Refused),
+            "unauthorized"
+        );
+        assert_eq!(refusal(&command(50)), None, "out of time part way");
+        assert_eq!(refusal(&command(11601)), None, "interrupted");
+        assert_eq!(
+            refusal(&Error::from(std::io::Error::from(
+                std::io::ErrorKind::ConnectionReset
+            ))),
+            None,
+            "the socket answered nothing"
+        );
     }
 
     /// `fields` as the one document a re-read of `_id` returns: each field's
