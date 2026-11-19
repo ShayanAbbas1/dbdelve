@@ -1307,14 +1307,27 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Staged edits, and drafts that never became one: an open cell input,
+    /// or a row panel field whose staging was refused. A close would lose
+    /// either without a word.
     pub(crate) fn has_unapplied_edits(&self, tab: Tab, cx: &App) -> bool {
-        self.profile().is_some_and(|profile| {
-            profile
-                .session
-                .grids_of(tab)
-                .into_iter()
-                .any(|results| results.read(cx).delegate().has_pending())
-        })
+        let Some(profile) = self.profile() else {
+            return false;
+        };
+        let grids = profile.session.grids_of(tab).into_iter().any(|results| {
+            let grid = results.read(cx).delegate();
+            grid.has_pending() || grid.has_draft(cx)
+        });
+        let row_draft = self.row_panel.inputs.as_ref().is_some_and(|inputs| {
+            inputs.tab == tab
+                && inputs.profile == profile.id
+                && inputs
+                    .fields
+                    .iter()
+                    .flatten()
+                    .any(|field| field.input.read(cx).value().as_str() != field.seed.as_str())
+        });
+        grids || row_draft
     }
 
     /// Carry out a close that has been decided on.
