@@ -8545,6 +8545,14 @@ fn an_approval_for_a_profile_hidden_in_another_window_is_not_run(cx: &mut TestAp
 fn an_approved_write_touches_no_tab_grid_buffer_or_history(cx: &mut TestAppContext) {
     use crate::{agent::Status, session::ProfileState};
 
+    // A `PG*` connection from the environment, as CI's live-test job sets,
+    // would be in front instead of `Secret`.
+    if ["PGHOST", "PGPORT", "PGDATABASE", "PGUSER"]
+        .iter()
+        .any(|name| std::env::var_os(name).is_some())
+    {
+        return;
+    }
     store::tests::with_home(|| {
         // `Secret`, the first profile, is connected at launch: the user's own
         // session on the file the agent writes.
