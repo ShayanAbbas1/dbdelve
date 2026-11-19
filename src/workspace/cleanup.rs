@@ -30,15 +30,8 @@ impl Workspace {
         self.refocus_front();
         cx.notify();
     }
-    fn dismiss_cleanup_notice(
-        &mut self,
-        _: &gpui::ClickEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(record) = self.cleanup.records().iter().find(|r| !r.dismissed) {
-            self.cleanup.dismiss(record.id);
-        }
+    fn dismiss_cleanup_notice(&mut self, id: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.cleanup.dismiss(id);
         self.focus.focus(window, cx);
         self.refocus_front();
         cx.notify();
@@ -53,7 +46,11 @@ impl Workspace {
             .iter()
             .filter(|r| r.phase != Phase::Confirmed)
             .count();
-        let Some(record) = records.iter().find(|r| !r.dismissed) else {
+        let Some(record) = records
+            .iter()
+            .filter(|r| !r.dismissed)
+            .min_by_key(|r| r.phase == Phase::Confirmed)
+        else {
             return (pending > 0).then(|| {
                 div()
                     .flex()
@@ -134,7 +131,7 @@ impl Workspace {
                     .on_click(cx.listener(move |workspace, _, _, cx| { workspace.cleanup.stop(id); cx.notify(); })))
                 .child(cleanup_button("cleanup-dismiss", "Dismiss", true, t)
                     .debug_selector(|| "cleanup-dismiss-0".into())
-                    .on_click(cx.listener(Self::dismiss_cleanup_notice)))
+                    .on_click(cx.listener(move |workspace, _, window, cx| workspace.dismiss_cleanup_notice(id, window, cx))))
                 .when(remaining > 0, |row| row.child(format!("{remaining} more"))))
             .child("Dismiss hides this notice; pending cleanup stays available while DBDelve is open."))
     }

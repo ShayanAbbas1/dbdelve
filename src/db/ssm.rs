@@ -283,15 +283,20 @@ fn command(config: &SsmTunnel, args: &[String]) -> Result<Command, DbError> {
 // Keep the established command environment when possible, but cleanup does
 // not require the Session Manager plugin itself.
 fn cleanup_command(config: &SsmTunnel, args: &[String]) -> Result<Command, DbError> {
-    if let Ok(command) = command(config, args) {
-        return Ok(command);
-    }
-    let aws = executable(config.aws_cli.as_deref(), "aws")?;
-    let mut command = Command::new(aws);
-    command
-        .args(args)
-        .env("AWS_PAGER", "")
-        .env("AWS_CLI_AUTO_PROMPT", "off");
+    let mut command = match command(config, args) {
+        Ok(command) => command,
+        Err(_) => {
+            let aws = executable(config.aws_cli.as_deref(), "aws")?;
+            let mut command = Command::new(aws);
+            command
+                .args(args)
+                .env("AWS_PAGER", "")
+                .env("AWS_CLI_AUTO_PROMPT", "off");
+            command
+        }
+    };
+    // --output controls stdout, not errors. Older CLIs ignore this environment setting.
+    command.env("AWS_CLI_ERROR_FORMAT", "legacy");
     Ok(command)
 }
 
@@ -580,7 +585,9 @@ fn cleanup_response(bytes: &[u8], session: &str) -> bool {
 
 fn run_cleanup(command: Command, session: &str, timeout: Duration) -> cleanup::Outcome {
     use cleanup::Outcome;
-    let deadline = Instant::now() + timeout;
+    let command_deadline = Instant::now() + timeout;
+    let mut deadline = command_deadline;
+    let exited = Arc::new(Mutex::new(None));
     let Ok(mut process) = process::Process::spawn(command) else {
         return Outcome::Unconfirmed;
     };
@@ -597,21 +604,48 @@ fn run_cleanup(command: Command, session: &str, timeout: Duration) -> cleanup::O
         ),
     ] {
         let send = send.clone();
+        let exited = exited.clone();
         thread::spawn(move || {
             let mut bytes = Vec::new();
-            let result = pipe
-                .by_ref()
-                .take(16 * 1024 + 1)
-                .read_to_end(&mut bytes)
-                .and_then(|_| std::io::copy(&mut pipe, &mut std::io::sink()));
-            let _ = send.send((stdout, result.map(|_| bytes)));
+            let mut buffer = [0u8; 1024];
+            let result = loop {
+                match pipe.read(&mut buffer) {
+                    Ok(0) => break Ok(bytes),
+                    Ok(count) => {
+                        let keep = count.min((16 * 1024 + 1usize).saturating_sub(bytes.len()));
+                        bytes.extend_from_slice(&buffer[..keep]);
+                        if stdout {
+                            let mut exited = exited.lock().unwrap();
+                            let marker = b"DBDELVE_SSM_CHILD_EXITED";
+                            if exited.is_none()
+                                && bytes.windows(marker.len()).any(|part| part == marker)
+                            {
+                                *exited = Some(Instant::now());
+                            }
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => break Err(error),
+                }
+            };
+            let _ = send.send((stdout, result));
         });
     }
     drop(send);
     let success = loop {
+        // The watchdog reports CLI exit before its descendant shutdown grace period.
+        // Keep that bounded drain separate from the deadline for a running CLI.
+        let finished = exited.lock().unwrap().filter(|at| *at <= command_deadline);
+        if let Some(at) = finished {
+            deadline = at + Duration::from_secs(1);
+        }
         if Instant::now() >= deadline {
             process.stop();
-            return Outcome::Transient;
+            return if finished.is_some() {
+                Outcome::Unconfirmed
+            } else {
+                Outcome::Transient
+            };
         }
         match process.child.as_mut().unwrap().try_wait() {
             Ok(Some(status)) => break status.success(),
@@ -630,7 +664,6 @@ fn run_cleanup(command: Command, session: &str, timeout: Duration) -> cleanup::O
                     stderr = bytes;
                 }
             }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return Outcome::Transient,
             _ => return Outcome::Unconfirmed,
         }
     }
@@ -764,6 +797,49 @@ mod tests {
             run_cleanup(hanging, "alice-123", Duration::from_millis(100)),
             cleanup::Outcome::Transient
         );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_classifies_cli_exit_before_watchdog_shutdown() {
+        for (script, expected) in [
+            (
+                "sleep 0.7; echo 'An error occurred (AccessDeniedException) when calling the TerminateSession operation: denied' >&2; exit 1",
+                cleanup::Outcome::PermissionDenied,
+            ),
+            (
+                "sleep 0.7; printf '{\"SessionId\":\"alice-123\"}'",
+                cleanup::Outcome::Confirmed,
+            ),
+        ] {
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", script]);
+            assert_eq!(
+                run_cleanup(command, "alice-123", Duration::from_secs(1)),
+                expected
+            );
+        }
+    }
+    #[test]
+    fn cleanup_pins_error_format_with_and_without_plugin() {
+        let executable = std::env::current_exe().unwrap();
+        for plugin in [
+            executable.clone(),
+            executable.with_extension("missing-plugin"),
+        ] {
+            let config = SsmTunnel {
+                aws_cli: Some(executable.clone()),
+                session_manager_plugin: Some(plugin),
+                ..config()
+            };
+            let command = cleanup_command(&config, &[]).unwrap();
+            assert_eq!(
+                command
+                    .get_envs()
+                    .find(|(key, _)| *key == "AWS_CLI_ERROR_FORMAT")
+                    .and_then(|(_, value)| value),
+                Some(std::ffi::OsStr::new("legacy"))
+            );
+        }
     }
     #[test]
     fn cleanup_accepts_only_matching_json_response() {
@@ -1220,7 +1296,7 @@ mod lifecycle_tests {
             .is_err()
         );
         let result = cleanup_result(receiver);
-        assert_ne!(result.outcome, cleanup::Outcome::Confirmed);
+        assert_eq!(result.outcome, cleanup::Outcome::MissingId);
         assert!(result.session.is_none());
     }
 

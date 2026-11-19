@@ -12392,8 +12392,12 @@ fn ssm_cleanup_retry_dismiss_reopen_and_confirm_from_shared_state(cx: &mut TestA
             pending.size.width < gpui::px(400.),
             "pending entry should be compact"
         );
-        run_command(&workspace, cx, Command::ShowSsmCleanup);
+        cx.simulate_keystrokes("secondary-shift-p");
         settle(cx);
+        cx.simulate_input("Show pending AWS session cleanup");
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        assert!(palette_mode(&workspace, cx).is_none());
         assert!(!manager.records()[0].dismissed);
         let retry = cx.debug_bounds("cleanup-retry").unwrap();
         cx.simulate_click(retry.center(), gpui::Modifiers::default());
@@ -12409,6 +12413,33 @@ fn ssm_cleanup_retry_dismiss_reopen_and_confirm_from_shared_state(cx: &mut TestA
         cx.simulate_click(retry.center(), gpui::Modifiers::default());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(workspace.read_with(cx, |w, _| w.pending_cleanup_count()), 0);
+        manager.add(
+            CleanupResult {
+                outcome: Outcome::PermissionDenied,
+                session: Some("pending-session".into()),
+                profile: Some("pending".into()),
+                region: None,
+            },
+            None,
+        );
+        manager.dismiss(1);
+        settle(cx);
+        cx.simulate_keystrokes("secondary-shift-p");
+        settle(cx);
+        cx.simulate_input("Show pending AWS session cleanup");
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        assert!(
+            cx.debug_bounds("cleanup-profile: Configured profile: pending")
+                .is_some(),
+            "pending work takes precedence over the earlier confirmation"
+        );
+        cx.simulate_keystrokes("secondary-shift-p");
+        settle(cx);
+        assert!(
+            palette_mode(&workspace, cx).is_some(),
+            "keyboard dispatch remains available"
+        );
         quit(workspace, cx);
     });
 }
@@ -12509,6 +12540,60 @@ fn ssm_cleanup_observer_does_not_keep_early_failed_attempt_alive(cx: &mut TestAp
         drop(attempt);
         settle(cx);
         assert_eq!(workspace.read_with(cx, |w, _| w.pending_cleanup_count()), 0);
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn ssm_cleanup_stale_dismiss_does_not_hide_the_next_record(cx: &mut TestAppContext) {
+    use crate::db::ssm::{CleanupResult, cleanup::Outcome};
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch(cx);
+        let manager = workspace.read_with(cx, |w, _| w.cleanup.clone());
+        for session in ["a", "b"] {
+            manager.add(
+                CleanupResult {
+                    outcome: Outcome::Unconfirmed,
+                    session: Some(session.into()),
+                    profile: None,
+                    region: None,
+                },
+                None,
+            );
+        }
+        settle(cx);
+        let dismiss = cx.debug_bounds("cleanup-dismiss-0").unwrap();
+        // Another window dismissed A, but this window still displays its old button.
+        cx.update(|window, cx| {
+            use gpui::InputEvent;
+            manager.dismiss(0);
+            // Dispatch against the rendered frame before processing the shared-state
+            // notification, exactly the stale-window interval under test.
+            window.dispatch_event(
+                gpui::MouseDownEvent {
+                    position: dismiss.center(),
+                    modifiers: gpui::Modifiers::default(),
+                    button: gpui::MouseButton::Left,
+                    click_count: 1,
+                    first_mouse: false,
+                }
+                .to_platform_input(),
+                cx,
+            );
+            window.dispatch_event(
+                gpui::MouseUpEvent {
+                    position: dismiss.center(),
+                    modifiers: gpui::Modifiers::default(),
+                    button: gpui::MouseButton::Left,
+                    click_count: 1,
+                }
+                .to_platform_input(),
+                cx,
+            );
+        });
+        settle(cx);
+        assert!(manager.records()[0].dismissed);
+        assert!(!manager.records()[1].dismissed);
         quit(workspace, cx);
     });
 }

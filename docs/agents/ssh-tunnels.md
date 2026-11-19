@@ -283,7 +283,8 @@ raw output is neither displayed nor logged. Success requires a matching SessionI
 in a successful JSON response.
 
 Transient failures get three retries after 2, 5, and 15 seconds; each command has
-the same three-second budget. Authentication, permission, and unknown failures
+a three-second CLI budget, followed by at most one second to drain a watchdog
+that already reported CLI exit. Authentication, permission, and unknown failures
 pause. Manual Retry starts a new bounded cycle, coalescing duplicate requests.
 Stop retrying wakes a scheduled wait; an in-flight command may finish, with
 confirmation taking precedence over the stop. Missing IDs cannot be retried.

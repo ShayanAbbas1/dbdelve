@@ -100,9 +100,17 @@ DBDelve shows the observed session ID, if available, and the configured profile
 and region in a notice. Copy the ID to locate the session in the AWS
 Session Manager console and choose the correct account and region before ending
 it. These settings do not verify which account or region was used. The notice is
-not saved, so a crash or app exit can prevent it appearing. No automatic retry
-is made; AWS idle timeout can close the channel without explicitly terminating
-the session or immediately removing it from the active list.
+not saved, so a crash or app exit can prevent it appearing.
+
+Transient network or service failures with a session ID and configuration get up
+to three automatic retries while DBDelve remains open. Authentication, permission,
+and unknown failures pause; fix the cause and choose **Retry** to start a fresh
+bounded cycle. **Stop retrying** cancels future attempts, but an in-flight request
+may still complete. **Dismiss** only hides the notice: cleanup continues, and the
+pending entry or **Show pending AWS session cleanup** palette command reopens it.
+Missing session IDs require checking AWS manually. AWS idle timeout can close the
+channel without explicitly terminating the session or immediately removing it
+from the active list.
 
 **Downgrading:** SSM profiles are saved with a non-string engine guard
 (`[profiles.engine.ssm]`) as well as their tunnel settings. Older releases

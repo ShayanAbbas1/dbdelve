@@ -24,9 +24,23 @@ pub(super) fn classify(success: bool, stdout: &[u8], stderr: &[u8], session: &st
         return Outcome::Unconfirmed;
     };
     let error = error.trim();
+    let error = error
+        .strip_prefix("aws: [ERROR]:")
+        .map_or(error, str::trim_start);
     if let Some(rest) = error.strip_prefix("An error occurred (")
-        && let Some((code, _)) = rest.split_once(") when calling the TerminateSession operation:")
+        && let Some((code, suffix)) =
+            rest.split_once(") when calling the TerminateSession operation")
     {
+        let header_matches = suffix.starts_with(':')
+            || suffix
+                .strip_prefix(" (reached max retries: ")
+                .and_then(|rest| rest.split_once("):"))
+                .is_some_and(|(count, _)| {
+                    !count.is_empty() && count.bytes().all(|b| b.is_ascii_digit())
+                });
+        if !header_matches {
+            return Outcome::Unconfirmed;
+        }
         return match code {
             "ExpiredToken"
             | "ExpiredTokenException"
@@ -352,6 +366,52 @@ mod tests {
             ("arbitrary authentication timeout", Outcome::Unconfirmed),
         ] {
             assert_eq!(classify(false, b"", diagnostic.as_bytes(), "s-1"), expected);
+        }
+    }
+    #[test]
+    fn cleanup_accepts_cli_prefix_and_numeric_retry_suffix_only() {
+        for prefix in ["", "aws: [ERROR]: "] {
+            for suffix in [
+                "",
+                " (reached max retries: 1)",
+                " (reached max retries: 12)",
+            ] {
+                for (code, expected) in [
+                    ("ExpiredTokenException", Outcome::AuthenticationRequired),
+                    ("AccessDeniedException", Outcome::PermissionDenied),
+                    ("InternalServerError", Outcome::Transient),
+                    ("UnknownError", Outcome::Unconfirmed),
+                ] {
+                    let error = format!(
+                        "{prefix}An error occurred ({code}) when calling the TerminateSession operation{suffix}: private details"
+                    );
+                    assert_eq!(
+                        classify(false, b"", error.as_bytes(), "s-1"),
+                        expected,
+                        "{prefix}/{code}/{suffix}"
+                    );
+                }
+            }
+            let error = format!("{prefix}Could not connect to the endpoint URL: private endpoint");
+            assert_eq!(
+                classify(false, b"", error.as_bytes(), "s-1"),
+                Outcome::Transient
+            );
+        }
+        for header in [
+            "StartSession operation:",
+            "TerminateSession operation (reached max retries: ):",
+            "TerminateSession operation (reached max retries: many):",
+            "TerminateSession operation (reached max retries: -1):",
+            "TerminateSession operation extra:",
+        ] {
+            let error = format!(
+                "aws: [ERROR]: An error occurred (InternalServerError) when calling the {header} private details"
+            );
+            assert_eq!(
+                classify(false, b"", error.as_bytes(), "s-1"),
+                Outcome::Unconfirmed
+            );
         }
     }
     #[test]
