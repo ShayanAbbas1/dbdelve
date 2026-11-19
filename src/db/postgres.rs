@@ -515,10 +515,10 @@ SELECT
     -- this say 'no', which is right there. 'v' is PostgreSQL 18's virtual column.
     CASE WHEN to_jsonb(attribute) ->> 'attgenerated' IN ('s', 'v') THEN 'yes' ELSE 'no' END
         AS is_generated,
-    -- Whether a float renders with every digit it needs to read back as
-    -- itself: the default from 12, and not at 0 or less, the default before.
-    CASE WHEN current_setting('extra_float_digits')::int > 0 THEN 'yes' ELSE 'no' END
-        AS floats_round_trip
+    -- What decides whether a float renders with every digit it needs to read
+    -- back as itself (`floats_round_trip`).
+    current_setting('extra_float_digits') AS extra_float_digits,
+    current_setting('server_version_num') AS server_version_num
 FROM pg_catalog.pg_class AS class
 JOIN pg_catalog.pg_namespace AS namespace
     ON namespace.oid = class.relnamespace
@@ -1983,7 +1983,7 @@ struct KeyedTable {
     columns: Vec<TableColumn>,
     key: Vec<i16>,
     /// The session renders a float with every digit it needs to read back as
-    /// itself (`extra_float_digits` above 0), so its text names its value.
+    /// itself ([`floats_round_trip`]), so its text names its value.
     floats_round_trip: bool,
 }
 
@@ -1996,6 +1996,17 @@ struct TableColumn {
     generated: bool,
 }
 
+/// Whether a session renders every float with the digits it needs to read
+/// back as itself. From 12 any `extra_float_digits` above 0 picks the shortest
+/// exact form. Before, it only adds digits, and below 3 a `float4` or a
+/// `float8` can still print the same text as a value beside it.
+fn floats_round_trip(extra_float_digits: i32, server_version_num: i32) -> bool {
+    match server_version_num >= 120_000 {
+        true => extra_float_digits > 0,
+        false => extra_float_digits >= 3,
+    }
+}
+
 fn keyed_table(result: &QueryResult) -> Option<KeyedTable> {
     let first = result.rows.first()?;
     let mut keyed = KeyedTable {
@@ -2005,7 +2016,16 @@ fn keyed_table(result: &QueryResult) -> Option<KeyedTable> {
         table: required_cell(result, first, "table_name").ok()?.to_string(),
         columns: Vec::new(),
         key: Vec::new(),
-        floats_round_trip: required_cell(result, first, "floats_round_trip").ok()? == "yes",
+        floats_round_trip: floats_round_trip(
+            required_cell(result, first, "extra_float_digits")
+                .ok()?
+                .parse()
+                .ok()?,
+            required_cell(result, first, "server_version_num")
+                .ok()?
+                .parse()
+                .ok()?,
+        ),
     };
 
     for row in &result.rows {
@@ -2120,7 +2140,7 @@ fn resolve_keyless_target(
             )),
         );
     }
-    // At `extra_float_digits` 0 or less a float renders rounded, so its text
+    // At too low an `extra_float_digits` a float renders rounded, so its text
     // misses its row or names another holding the rounded value.
     if !table.floats_round_trip
         && let Some(column) = table
@@ -2131,8 +2151,8 @@ fn resolve_keyless_target(
         return (
             None,
             refusal(format!(
-                "{} ({}) cannot be matched by its value while extra_float_digits is 0 or \
-                 less",
+                "{} ({}) cannot be matched by its value while extra_float_digits is too \
+                 low to print it exactly",
                 column.name, column.type_name
             )),
         );
@@ -4343,7 +4363,7 @@ mod tests {
             Some(
                 "A table without a primary key is edited by matching every column, and \
                  weight (float8) cannot be matched by its value while extra_float_digits \
-                 is 0 or less."
+                 is too low to print it exactly."
             )
         );
         let (target, _) = edit_outcome(
@@ -4351,6 +4371,18 @@ mod tests {
             &rounded(&[(1, "bird", "text", false), (2, "seen", "int4", false)]),
         );
         assert!(target.is_some(), "no float, nothing rounded");
+    }
+
+    /// Before 12, `extra_float_digits` 1 or 2 still prints a `float4` or a
+    /// `float8` short of the digits it needs; only 3 is exact there.
+    #[test]
+    fn a_float_matches_by_its_text_before_12_only_at_three_extra_digits() {
+        assert!(floats_round_trip(1, 120_000));
+        assert!(!floats_round_trip(0, 170_000));
+        assert!(!floats_round_trip(0, 110_022));
+        assert!(!floats_round_trip(1, 110_022));
+        assert!(!floats_round_trip(2, 110_022));
+        assert!(floats_round_trip(3, 110_022));
     }
 
     #[test]
@@ -4729,38 +4761,6 @@ mod tests {
 
     #[test]
     #[ignore = "requires a local Postgres server configured through PG*"]
-    fn live_a_spatial_cell_rendered_after_the_fetch_is_compared_as_rendered() {
-        let connection = live_profile();
-        let table = "verified_spatial_cell";
-        let scratch = ScratchTable(&connection, table);
-        scratch.drop_all();
-        connection
-            .query(
-                &format!(
-                    "CREATE TABLE {table} (id integer PRIMARY KEY, label text, geom geometry);
-                     INSERT INTO {table} VALUES (1, 'a', ST_GeomFromText('POINT(1 2)'))"
-                ),
-                &CancelToken::default(),
-                Fetch::default(),
-            )
-            .expect("the scratch table is built");
-        let draft = |label: &str| {
-            crate::sql::draft_batch(
-                Engine::Postgres,
-                &[],
-                &[crate::result_grid::PendingRow {
-                    schema: "public".into(),
-                    table: table.into(),
-                    sets: vec![(
-                        "label".into(),
-                        crate::result_grid::NewValue::Value(label.to_string().into()),
-                    )],
-                    keys: vec![("id".into(), "1".into())],
-                    types: typed(&[("id", "int4"), ("label", "text"), ("geom", "geometry")]),
-                    ..crate::result_grid::PendingRow::default()
-                }],
-    #[test]
-    #[ignore = "requires a local Postgres server configured through PG*"]
     fn live_an_apply_refused_inside_the_users_transaction_leaves_it_working() {
         let connection = live_profile();
         let table = "verified_inside_user_transaction";
@@ -4820,6 +4820,38 @@ mod tests {
         run("ROLLBACK");
     }
 
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_a_spatial_cell_rendered_after_the_fetch_is_compared_as_rendered() {
+        let connection = live_profile();
+        let table = "verified_spatial_cell";
+        let scratch = ScratchTable(&connection, table);
+        scratch.drop_all();
+        connection
+            .query(
+                &format!(
+                    "CREATE TABLE {table} (id integer PRIMARY KEY, label text, geom geometry);
+                     INSERT INTO {table} VALUES (1, 'a', ST_GeomFromText('POINT(1 2)'))"
+                ),
+                &CancelToken::default(),
+                Fetch::default(),
+            )
+            .expect("the scratch table is built");
+        let draft = |label: &str| {
+            crate::sql::draft_batch(
+                Engine::Postgres,
+                &[],
+                &[crate::result_grid::PendingRow {
+                    schema: "public".into(),
+                    table: table.into(),
+                    sets: vec![(
+                        "label".into(),
+                        crate::result_grid::NewValue::Value(label.to_string().into()),
+                    )],
+                    keys: vec![("id".into(), "1".into())],
+                    types: typed(&[("id", "int4"), ("label", "text"), ("geom", "geometry")]),
+                    ..crate::result_grid::PendingRow::default()
+                }],
                 &[],
             )
             .expect("the draft is written")

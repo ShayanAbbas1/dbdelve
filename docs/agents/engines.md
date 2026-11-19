@@ -678,7 +678,8 @@ Decided, and not to be re-litigated:
     `uuid`, `date`, `time`, `timetz`, `timestamp` and `timestamptz`, by the
     catalog's `typname`, schema-qualified for a type that is not a built-in;
     `float4` and `float8` only while `extra_float_digits` is above 0 (the
-    default from 12), since below it a float renders rounded.
+    default from 12), or at 3 before 12, where 1 and 2 only add digits, since
+    below it a float renders rounded.
     Left off: `bytea` (rendered as `\x…` and quoted as that text, which reads
     as those bytes only while `standard_conforming_strings` is on), `json`,
     `xml`, `point` and `polygon` (no `=`
