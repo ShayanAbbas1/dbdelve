@@ -23962,6 +23962,90 @@ fn auto_from_manual_asks_to_commit_or_roll_back_and_lists_the_transactions_state
     });
 }
 
+/// Manual's Commit sends its `COMMIT` with the next `BEGIN` behind it. When
+/// the `COMMIT` fails and the transaction stays open, as SQLite keeps one a
+/// deferred foreign key fails, the record still lists the work it holds.
+#[gpui::test]
+fn a_failed_commit_sent_with_the_next_begin_keeps_the_transactions_record(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        crate::IGNORE_ENVIRONMENT.set(true);
+        let (workspace, cx) = launch_connections(
+            cx,
+            "create table p (id integer primary key); \
+             create table c (p integer references p (id) deferrable initially deferred);",
+            "",
+            &sqlite_profile(
+                "e2e",
+                "E2E",
+                "mode = \"full\"\nstartup_script = \"PRAGMA foreign_keys = 1\"",
+            ),
+        );
+        connect_profile(&workspace, cx, "e2e");
+        manual_with_open_transaction(&workspace, cx, "INSERT INTO c VALUES (1)");
+        let listed = recorded_statements(&workspace, cx);
+        assert_eq!(listed, ["BEGIN", "INSERT INTO c VALUES (1)"]);
+
+        cx.dispatch_action(crate::actions::CommitTransaction);
+        settle(cx);
+        query_tab(&workspace, cx, |tab, _, _| match &tab.query {
+            QueryState::Failed(error) => {
+                assert!(error.message.contains("FOREIGN KEY"), "{}", error.message)
+            }
+            _ => panic!("the COMMIT should fail"),
+        });
+        let recorded = recorded_statements(&workspace, cx);
+        assert_eq!(
+            recorded[..2],
+            listed[..],
+            "the statements still to be committed are listed: {recorded:?}"
+        );
+        assert!(transaction_state(&workspace, cx).1, "still open");
+
+        // Once the work is put right, the pair lands and the record starts
+        // again after its end.
+        run_in_front(&workspace, cx, "INSERT INTO p VALUES (1)");
+        cx.dispatch_action(crate::actions::CommitTransaction);
+        settle(cx);
+        assert_eq!(recorded_statements(&workspace, cx), ["BEGIN;"]);
+        quit(workspace, cx);
+    });
+}
+
+/// A `COMMIT` sent from one tab and a `BEGIN` sent from another before the
+/// first was answered run on the session in that order, so the transaction
+/// the `BEGIN` opened is still open once both land.
+#[gpui::test]
+fn an_earlier_commit_landing_late_leaves_a_later_begins_transaction_open(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        run_in_front(&workspace, cx, "BEGIN");
+        run_in_front(&workspace, cx, "INSERT INTO t VALUES (1)");
+        // Sent without waiting on the answer, as two tabs' Runs are.
+        let send = |cx: &mut VisualTestContext, sql: &str| {
+            workspace.update(cx, |workspace, cx| {
+                let tab = workspace.profile().unwrap().session.active;
+                workspace.execute_sql(sql.into(), tab, cx);
+                assert!(workspace.profile().unwrap().session.running(tab));
+            });
+        };
+        send(cx, "COMMIT");
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.new_query(&crate::actions::NewQuery, window, cx);
+            });
+        });
+        send(cx, "BEGIN");
+        settle(cx);
+        assert!(
+            transaction_state(&workspace, cx).1,
+            "the BEGIN ran after the COMMIT, so a transaction is open"
+        );
+        run_in_front(&workspace, cx, "ROLLBACK");
+        assert!(!transaction_state(&workspace, cx).1);
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn the_auto_prompt_leaves_auto_off_when_its_commit_is_not_sent(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
