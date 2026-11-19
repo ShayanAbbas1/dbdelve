@@ -45,7 +45,7 @@ source: src/sql_snapshots.rs
 
 [mongodb] "db.getCollection(\"accounts\").insertOne({\"a\": 1}); db.getCollection(\"accounts\").insertOne({\"a\": 2})"
   |db.getCollection("accounts").insertOne({"a": 1}); db.getCollection("accounts").insertOne({"a": 2})|
-  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false
 
 [mongodb] "db.getCollection(\"accounts\").updateOne({_id: 1}, {$set: {\"a\": 1}}); db.getCollection(\"accounts\").deleteMany({})"
   |db.getCollection("accounts").updateOne({_id: 1}, {$set: {"a": 1}}); db.getCollection("accounts").deleteMany({})|

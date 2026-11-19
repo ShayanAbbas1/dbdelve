@@ -8,7 +8,9 @@ use super::*;
 use super::sidebar::new_query_binding;
 use crate::db::{ColumnDefinition, Structure};
 use crate::explorer::Pin;
-use crate::session::{Binding, BoundSession, Explained, Finished, Queue, Routed, TabKey};
+use crate::session::{
+    AfterEdits, Binding, BoundSession, Explained, Finished, Queue, Routed, TabKey,
+};
 use crate::sidebar::{
     NodeAction, NodeKind, SelectedNode, SelectionAction, schema_row_is_a_database,
 };
@@ -96,7 +98,9 @@ impl Workspace {
         let (schema, name, kind) = (opened.schema().to_string(), opened.name(), opened.kind());
         let row_limit = self.settings.row_limit;
         let engine = self.engine();
+        let target = self.target();
         let sorting = Sorting::new(self.settings.client_sort).on(engine);
+        let edit_mode = self.settings.edit_mode.on(target);
         let structure = matches!(opened, OpenedObject::Structure { .. });
         let profile = self.profile_mut()?;
         let existing = matching_tab(
@@ -182,6 +186,7 @@ impl Workspace {
                     query: QueryState::Idle,
                     sort: Vec::new(),
                     sorting,
+                    edit_mode,
                     filter,
                     filters,
                     next_join: Conjunction::default(),
@@ -271,6 +276,12 @@ impl Workspace {
         if !stale && matches!(query, QueryState::Failed(_)) && !sent {
             return;
         }
+        // The rows on screen carry edits nobody has applied. A visit is not a
+        // request to replace them, so the tab stays owed its reload, and asks
+        // nothing: the next refresh the user asks for is the one that asks.
+        if self.has_unapplied_edits(Tab::Object(id), cx) {
+            return;
+        }
 
         self.load_structure(id, schema, relation, cx);
         self.requery_relation(id, |_, _, _, _| true, cx);
@@ -291,6 +302,45 @@ impl Workspace {
         change: impl FnOnce(&mut String, &mut Vec<SortKey>, &mut Option<usize>, &mut usize) -> bool,
         cx: &mut Context<Self>,
     ) {
+        // `change` is asked of copies, and the tab takes them only once the
+        // action may run: a guard after the change would leave a cancelled tab
+        // claiming a page, sort or limit it is not showing.
+        let Some((mut new_filter, mut new_sort, mut new_limit, mut new_offset)) =
+            self.profile().and_then(|profile| {
+                let tab = profile.session.objects.iter().find(|tab| tab.id == id)?;
+                match &tab.body {
+                    ObjectBody::Relation {
+                        filter,
+                        sort,
+                        limit,
+                        offset,
+                        ..
+                    } => Some((filter.clone(), sort.clone(), *limit, *offset)),
+                    ObjectBody::Routine(_)
+                    | ObjectBody::Structure { .. }
+                    | ObjectBody::Diagram { .. } => None,
+                }
+            })
+        else {
+            return;
+        };
+        if !change(
+            &mut new_filter,
+            &mut new_sort,
+            &mut new_limit,
+            &mut new_offset,
+        ) {
+            return;
+        }
+        let held = AfterEdits::Requery {
+            filter: new_filter.clone(),
+            sort: new_sort.clone(),
+            limit: new_limit,
+            offset: new_offset,
+        };
+        if self.held_for_edits(Tab::Object(id), held, cx) {
+            return;
+        }
         let engine = self.engine();
         let Some(profile) = self.profile_mut() else {
             return;
@@ -316,9 +366,10 @@ impl Workspace {
         else {
             return;
         };
-        if !change(filter, sort, limit, offset) {
-            return;
-        }
+        *filter = new_filter;
+        *sort = new_sort;
+        *limit = new_limit;
+        *offset = new_offset;
         // Bars this engine refuses reach here only from a tab restored under
         // another one, whose filter is still that engine's (`restored_filter`):
         // the tab stays as it was and says why, as `apply_filter` leaves it.
@@ -1390,7 +1441,8 @@ impl Workspace {
                     // land last, so both sides mark.
                     workspace.mark_columns(id, cx);
                     // The page `requery_relation` held back for this key.
-                    if waited && pages_by_key {
+                    if waited && pages_by_key && !workspace.has_unapplied_edits(Tab::Object(id), cx)
+                    {
                         workspace.requery_relation(id, |_, _, _, _| true, cx);
                     }
                 })
@@ -1511,6 +1563,7 @@ impl Workspace {
         let schema = tab.schema.clone();
         let not_nullable = columns_not_nullable(&structure.columns);
         let has_default = columns_with_defaults(engine, &structure.columns);
+        let generated = columns_generated(engine, &structure.columns);
         let results = results.clone();
         results.update(cx, |table, cx| {
             let grid = table.delegate_mut();
@@ -1519,6 +1572,7 @@ impl Workspace {
             grid.mark_primary_key(&primary_key);
             grid.mark_opened(engine.opened_column());
             grid.mark_columns(&not_nullable, &has_default);
+            grid.mark_generated(&generated);
             cx.notify();
         });
     }
@@ -2209,14 +2263,22 @@ impl Workspace {
         let Some(snapshot) = store::read_grid(&profile_id, &key) else {
             return;
         };
-        let Some((results, mode)) = self
-            .profile()
-            .and_then(|profile| Some((profile.session.results(tab)?.clone(), profile.mode)))
-        else {
+        let Some((results, mode, row_washes)) = self.profile().and_then(|profile| {
+            Some((
+                profile.session.results(tab)?.clone(),
+                profile.mode,
+                // A restored table starts from the default mode, and its grid
+                // takes edits once the stale rows are confirmed.
+                profile.session.edit_mode(tab) != crate::session::EditMode::Classic,
+            ))
+        }) else {
             return;
         };
         let engine = self.engine();
         show_snapshot(&results, &snapshot, mode, self.target(), cx);
+        results.update(cx, |table, _| {
+            table.delegate_mut().set_row_washes(row_washes)
+        });
         // The snapshot holds the rows already in this order. Sorted again so
         // the headers take a click, which a restored grid's do not.
         let sorting = Sorting::restored(snapshot.client_sort.as_deref()).on(engine);
@@ -2361,6 +2423,20 @@ impl Workspace {
     }
 
     pub(crate) fn activate_tab(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
+        // Before anything is written: a Row view's edited row is saved and the
+        // tab comes forward once it has landed (`AfterEdits::Activate`). A
+        // Draft view is not asked, its draft stays with its tab. A tab just
+        // closed holds no edits and mode, so `front_after_close` passes.
+        let front = self.profile().map(|profile| profile.session.active);
+        if let Some(front) = front
+            && front != tab
+            && self
+                .profile()
+                .is_some_and(|profile| profile.session.edit_mode(front) == EditMode::Row)
+            && self.held_for_edits(front, AfterEdits::Activate(tab), cx)
+        {
+            return;
+        }
         if let Some(profile) = self.profile_mut() {
             profile.session.active = tab;
             profile.session.clear_prompts();
@@ -2709,6 +2785,17 @@ fn refuse(query: &mut QueryState, refusal: &str) -> Option<String> {
         }
         _ => Some(refusal.into()),
     }
+}
+
+/// The columns the server fills itself and refuses a value for
+/// ([`Engine::generates`]): on an added row of a draft they take no value,
+/// where a `GENERATED BY DEFAULT` identity does.
+fn columns_generated(engine: Engine, columns: &[ColumnDefinition]) -> Vec<String> {
+    columns
+        .iter()
+        .filter(|column| engine.generates(column))
+        .map(|column| column.name.clone())
+        .collect()
 }
 
 fn loaded(result: Result<Structure, DbError>) -> StructureState {

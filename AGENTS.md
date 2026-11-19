@@ -27,24 +27,39 @@ require it, stop and raise it instead.
    says when a result was capped. A `LIMIT` is written only into
    DBDelve-generated preview queries.
 
-   DBDelve _does_ write SQL when the user asks it to, and only then, always
-   where the user can read it: on a view the server sorts, a header sort
+   DBDelve _does_ write SQL when the user asks it to, and only then; outside
+   Row mode, always where the user can read it before it runs: on a view the
+   server sorts, a header sort
    splices its `ORDER BY` into the buffer (one sorted in memory reorders its
-   rows and writes nothing); grid edits are appended to the buffer (`sql::appended_statement`),
-   or shown in a review dialog on an object tab, which has no buffer, and on
-   a query tab of an engine whose rows are named by every value, or of a
-   plugin, whose writes must run behind their guard
-   (`Target::reviews_query_edits`); Import
+   rows and writes nothing); grid edits on a query tab are appended to the buffer
+   (`sql::appended_statement`) only where the target does not review them
+   (`Target::reviews_query_apply`), which includes MongoDB: its object-tab apply
+   is verified, but a query tab's batch goes to the buffer and runs as typed,
+   unverified; elsewhere, and always on an
+   object tab, which has no buffer, they are shown in a review dialog: on a
+   query tab of an engine whose rows are named by every value, or of a plugin,
+   whose writes must run behind their guard, and on one of an SQL engine whose
+   apply is verified, which a copy in the buffer would run without; Import
    Rows shows every statement before any runs; Explain prefixes a copy, never
    the buffer; Format Query rewrites on command only, at the token level
    (`sqlformat`, or `mql::format` on MongoDB), never an AST round-trip, which
-   drops every comment the user wrote.
+   drops every comment the user wrote. Row mode is the one exception: on a
+   relation tab whose view the user has put in Row mode, a row's `UPDATE` is
+   sent when the user leaves the row, presses Save, or takes an action that
+   saves it first, with no buffer and no dialog, and nothing else sends it (a
+   read after a send never sends another row). That send is the user's own
+   act; it still passes `sql::is_generated_write_on` and the connection-mode
+   check as it is sent, is written to the query history, and the last one is
+   shown in the status line. Classic, the default, and Draft send nothing
+   unread.
 
    It never writes `DROP` or `TRUNCATE` into a buffer or onto the wire. It
    writes `DELETE` only as the explicit deletion of one named row, by primary
-   key (on an engine without unique keys, by all of the row's values as read, and
-   only when exactly one row matches), shown before it runs (`sql::delete_row`).
-   The explorer's Copy DROP and Copy TRUNCATE put text on the clipboard and
+   key (on a table with no primary key, by all of the row's values as read, a
+   NULL as `IS NULL`, and only when exactly one row matches), shown before it
+   runs (`sql::delete_row`),
+   or as one `DELETE` per row the user marked in a reviewed draft, each naming
+   that row's key. The explorer's Copy DROP and Copy TRUNCATE put text on the clipboard and
    nothing else. It never writes into a statement it cannot parse whole: `sql::with_order_by` refuses rather
    than guessing at a clause boundary, because a corrupted statement is worse
    than an unsorted grid.
@@ -62,14 +77,20 @@ require it, stop and raise it instead.
 
    A cell is editable only when DBDelve can name its row by primary key; when
    it cannot, the grid stays read-only and says why, and never guesses at a
-   predicate. A table without a primary key can be inserted into and not
-   edited, deliberately. An engine without unique keys is the one exception: a
-   row is named by all of its values as read, and a write runs only when exactly
-   one row matches, checked by an exactly-one-row `COUNT(*)` with the identical
-   predicate before each write. **Multi-row deletion is not admitted.** When it is
-   wanted, the path is one `DELETE` per row, each naming its own key, inside
-   the `BEGIN`/`COMMIT` multi-row edits use, never one predicate covering
-   several.
+   predicate. The one exception is a table with no primary key, on Postgres,
+   MySQL, MariaDB, SQLite, DuckDB, SQL Server and ClickHouse: a row is named by
+   all of its values as read, a NULL as `IS NULL`, and a write runs only when
+   exactly one row matches (on the six, the re-read and the count inside the
+   apply's transaction; on ClickHouse, an exactly-one-row `COUNT(*)` with the
+   identical predicate before each write). A column that cannot be matched by
+   equality leaves the grid read-only and says why; it is never left out of the
+   `WHERE`, and no unique key, rowid or subset of the columns stands in for the
+   rest. **Multi-row deletion by predicate is not admitted.**
+   A reviewed draft may carry one `DELETE` per marked row, each naming its own
+   key and table, checked against the parse tree (`sql::draft_deletes_match`)
+   and counted against the marks, inside the `BEGIN`/`COMMIT` multi-row edits
+   use (MongoDB has no transaction: its draft runs one statement at a time, in
+   order, and stops at the first failure), never one predicate covering several.
 
 3. **No environment-specific behaviour.** No vendor binary names in error
    strings, no assumption that a loopback host means plaintext, no hardcoded

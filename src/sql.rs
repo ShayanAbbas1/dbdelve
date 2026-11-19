@@ -690,10 +690,11 @@ pub fn delete_row(
 
 /// One row's `DELETE`: every column in `keys` matched, and nothing else.
 ///
-/// One row per statement. Multi-row deletion is cut, and the upgrade path when
-/// it is wanted is the `BEGIN`/`COMMIT` bracketing multi-row edits already use
-/// on the engines that commit each statement alone — one `DELETE` per row, each
-/// naming its own key, never one statement with a predicate covering several.
+/// One row per statement. Multi-row deletion by predicate is cut: deleting
+/// several rows is one `DELETE` per row, each naming its own key, in a reviewed
+/// draft ([`draft_batch`]) inside the `BEGIN`/`COMMIT` multi-row edits use on
+/// the engines that commit each statement alone, never one statement with a
+/// predicate covering several.
 ///
 /// `None` on an empty key list. A `DELETE` with no `WHERE` empties the table, so
 /// it must not be possible to produce one: a caller that has lost the row's key
@@ -785,8 +786,9 @@ fn sql_match(spec: &EngineSpec, row: Match, types: &[(String, String)]) -> Optio
 }
 
 /// Whether `sql` is a statement dbdelve could have written: one or more `UPDATE`s,
-/// a single `INSERT` of literals, a single `DELETE` naming one row, or a lone
-/// transaction bracket, and nothing else at all.
+/// a single `INSERT` of literals, a single `DELETE` naming one row, a draft of
+/// several of those (one-row `INSERT`s and `DELETE`s among them, see
+/// [`draft_sequence`]), or a lone transaction bracket, and nothing else at all.
 ///
 /// The one gate every dbdelve-generated statement passes before anything runs,
 /// and the code half of hard rule 1 — dbdelve never writes a `DROP` or a
@@ -794,6 +796,10 @@ fn sql_match(spec: &EngineSpec, row: Match, types: &[(String, String)]) -> Optio
 /// conjunction of equalities over distinct, unqualified columns. A whitelist,
 /// because a blocklist of keywords is only a list of the spellings someone
 /// thought of.
+///
+/// A draft's `DELETE`s are each one named row, and the draft is reviewed in full
+/// before it runs: hard rule 1 admits a `DELETE` only as the deletion of one
+/// named row, however many a reviewed draft holds.
 ///
 /// The delete's shape is read out of the parse tree rather than trusted because
 /// `delete_row` produced it. A gate that trusts its caller is a comment, and the
@@ -821,6 +827,8 @@ pub fn is_generated_write(sql: &str) -> bool {
 const STRICTEST: SqlSpec = SqlSpec {
     backslash_escapes: true,
     identifier_quote: IdentifierQuote::Backtick,
+    // The draft arm's own checks, read as strictly as the rest.
+    drafts: true,
     ..SqlSpec::ANSI
 };
 
@@ -862,6 +870,19 @@ pub(crate) fn generated_write(spec: &SqlSpec, sql: &str) -> bool {
         return delete_key_columns(spec, sql).is_some();
     }
 
+    // A reviewed draft: several statements of the three kinds the grid writes,
+    // holding at least one that a batch of updates does not, on a spec whose
+    // grid writes one.
+    if spec.drafts
+        && kinds.len() > 1
+        && kinds
+            .iter()
+            .all(|kind| matches!(*kind, "update" | "insert" | "delete"))
+        && kinds.iter().any(|kind| *kind != "update")
+    {
+        return draft_sequence(spec, root, &statements, &kinds, sql);
+    }
+
     // A row named by every value is written only through a predicate the
     // exactly-one guard can count, so each update must be that shape too.
     let updates = !kinds.is_empty()
@@ -871,14 +892,68 @@ pub(crate) fn generated_write(spec: &SqlSpec, sql: &str) -> bool {
             false => literal_sets(spec, *statement, sql),
         });
 
-    // One insert alone, or a batch of updates. A batch of inserts is a shape
-    // nothing generates, so admitting it would widen the gate for nobody.
-    // A comment anywhere refuses either: MySQL runs `/*! … */` as SQL, and
-    // the grammar hides one inside a name or between tokens the shape checks
-    // read only by kind, beside a set value or in a predicate never read.
+    // One insert alone, or a batch of updates. Several inserts are a draft's
+    // and were read by the arm above. A comment anywhere refuses either: MySQL
+    // runs `/*! … */` as SQL, and the grammar hides one inside a name or
+    // between tokens the shape checks read only by kind, beside a set value or
+    // in a predicate never read.
     ((kinds == ["insert"] && literal_insert(statements[0], sql)) || updates)
         && !commented(root, sql)
         && !deletes_anything(root)
+}
+
+/// Whether a submission of several `UPDATE`s, `INSERT`s and `DELETE`s is a
+/// draft dbdelve could have written: every statement one row, and no `DELETE`
+/// anywhere but in a statement of its own.
+///
+/// Each top-level statement is read from the tree: an `INSERT` is one row of
+/// literals with no tail, and a `DELETE` is [`one_row_delete`] over a
+/// conjunction of equalities. The count of `delete` nodes, and of `DELETE`
+/// keywords, in the whole tree must equal the count of those statements, so one
+/// hidden in a CTE beside an `UPDATE` finds no statement to account for it. No
+/// comment is admitted anywhere (MySQL runs `/*! … */` as SQL), and not on a
+/// spec that names a row by every value, whose one-row guard a sequence cannot
+/// carry.
+///
+/// Reads a `DELETE`'s shape and never its key or table, as the lone `DELETE`
+/// does: those are [`draft_deletes_match`]'s to answer.
+fn draft_sequence(
+    spec: &SqlSpec,
+    root: Node,
+    statements: &[Node],
+    kinds: &[&str],
+    sql: &str,
+) -> bool {
+    if spec.row_terms || commented(root, sql) {
+        return false;
+    }
+    let one_row = |statement: &Node, kind: &&str| match *kind {
+        // As the `UPDATE` arm of a batch reads one on a spec that names rows
+        // by key (see `updates` in `generated_write`): every set value a
+        // literal dbdelve writes, and the predicate not read.
+        "update" => literal_sets(spec, *statement, sql),
+        "insert" => one_row_literal_insert(*statement, sql),
+        _ => one_row_delete(*statement)
+            .is_some_and(|(_, predicate)| row_columns(spec, predicate, sql).is_some()),
+    };
+    let deletes = kinds.iter().filter(|kind| **kind == "delete").count();
+    // Both node kinds, as `deletes_anything` read them: the `delete` node and
+    // the keyword inside it, which a spelling of `DELETE` the grammar wraps
+    // otherwise would still carry.
+    statements.iter().zip(kinds).all(|(s, k)| one_row(s, k))
+        && ["delete", "keyword_delete"]
+            .iter()
+            .all(|kind| count_kind(root, kind) == deletes)
+}
+
+/// How many nodes of `kind` the tree holds, at any depth.
+fn count_kind(node: Node, kind: &str) -> usize {
+    let mut cursor = node.walk();
+    usize::from(node.kind() == kind)
+        + node
+            .children(&mut cursor)
+            .map(|child| count_kind(child, kind))
+            .sum::<usize>()
 }
 
 /// `sql` as the write gate reads it: unchanged, except on ClickHouse, where
@@ -970,17 +1045,56 @@ pub(crate) fn is_transaction_bracket(sql: &str) -> bool {
 /// and `ON DUPLICATE KEY UPDATE a = VALUES(a)` are real clauses nothing
 /// generates.
 fn literal_insert(statement: Node, sql: &str) -> bool {
-    // `RETURNING` hangs beside the insert, not under it.
-    let Some(insert) = statement
+    literal_insert_shape(statement, sql).is_some()
+}
+
+/// [`literal_insert`] for a draft's `INSERT`: one row, and nothing after it.
+/// A row-skipping tail is Import Rows' clause and a second row is its chunk,
+/// and neither is something the grid writes.
+fn one_row_literal_insert(statement: Node, sql: &str) -> bool {
+    literal_insert_shape(statement, sql)
+        == Some(InsertShape {
+            rows: 1,
+            tail: false,
+        })
+}
+
+/// What [`literal_insert`] admitted: how many rows of literals the statement
+/// holds and whether a row-skipping tail follows them.
+#[derive(PartialEq, Eq)]
+struct InsertShape {
+    rows: usize,
+    tail: bool,
+}
+
+/// The table `INSERT INTO <t> …` names, read as [`literal_insert_shape`] reads it.
+fn insert_target(statement: Node) -> Option<Node> {
+    let insert = statement
         .named_child(0)
-        .filter(|_| statement.named_child_count() == 1)
-    else {
-        return false;
-    };
+        .filter(|node| node.kind() == "insert")?;
+    let mut cursor = insert.walk();
+    let children: Vec<_> = insert.named_children(&mut cursor).collect();
+    match children.as_slice() {
+        [keyword, into, target, ..]
+            if keyword.kind() == "keyword_insert"
+                && into.kind() == "keyword_into"
+                && target.kind() == "object_reference" =>
+        {
+            Some(*target)
+        }
+        _ => None,
+    }
+}
+
+fn literal_insert_shape(statement: Node, sql: &str) -> Option<InsertShape> {
+    // `RETURNING` hangs beside the insert, not under it.
+    let insert = statement
+        .named_child(0)
+        .filter(|_| statement.named_child_count() == 1)?;
     let mut cursor = insert.walk();
     let children: Vec<_> = insert.named_children(&mut cursor).collect();
     let [keyword, into, target, columns, values, rest @ ..] = children.as_slice() else {
-        return false;
+        return None;
     };
     let kinds = [keyword, into, target, columns, values].map(|node| node.kind());
     if kinds
@@ -993,7 +1107,7 @@ fn literal_insert(statement: Node, sql: &str) -> bool {
         ]
         || !plain_columns(*columns, sql)
     {
-        return false;
+        return None;
     }
 
     let rows = rest.iter().take_while(|node| node.kind() == "list").count();
@@ -1006,13 +1120,8 @@ fn literal_insert(statement: Node, sql: &str) -> bool {
                 .iter()
                 .all(|value| literal_value(*value, sql) || null_literal(*value, sql))
     });
-    let Some(last) = rows.last() else {
-        return false;
-    };
-    let Some(text) = sql.get(last.end_byte()..insert.end_byte()) else {
-        return false;
-    };
-    let text = text.trim();
+    let last = rows.last()?;
+    let text = sql.get(last.end_byte()..insert.end_byte())?.trim();
     let tail_kinds: Vec<_> = tail.iter().map(|node| node.kind()).collect();
     let skip = match tail_kinds.as_slice() {
         [] => text.is_empty(),
@@ -1032,7 +1141,10 @@ fn literal_insert(statement: Node, sql: &str) -> bool {
             .is_some_and(|column| text == format!("ON DUPLICATE KEY UPDATE {column} = {column}")),
         _ => false,
     };
-    literal_rows && skip
+    (literal_rows && skip).then_some(InsertShape {
+        rows: rows.len(),
+        tail: !tail.is_empty(),
+    })
 }
 
 /// A column list whose every entry is a plain or quoted name. A `"…"` name is a
@@ -1065,7 +1177,7 @@ fn updates_itself<'sql>(assignments: Node, sql: &'sql str) -> Option<&'sql str> 
     (assignment.named_child_count() == 2
         && [left, right]
             .iter()
-            .all(|side| side.kind() == "field" && column_name(*side, sql).is_some())
+            .all(|side| side.kind() == "field" && field_name(*side, sql).is_some())
         && sql.get(right.byte_range()) == Some(text))
     .then_some(text)
 }
@@ -1115,11 +1227,36 @@ pub fn is_generated_write_on(engine: Engine, statement: &str) -> bool {
 ///
 /// Cut from the tree the gate reads, since the grammar holds `BEGIN; …;
 /// COMMIT` as one statement a splitter of the buffer would never separate.
+/// For MongoDB, which has no bracket, the statements are the spans of
+/// `mql::parse`, and each passes `mql::is_generated_write` alone as a
+/// one-statement write. Redis writes no batch of this shape.
 pub(crate) fn generated_writes(engine: Engine, sql: &str) -> Option<Vec<String>> {
-    if engine.syntax() != Syntax::Sql || is_transaction_bracket(sql) {
+    generated_writes_for(engine, false, sql)
+}
+
+/// [`generated_writes`] for a plugin that speaks `engine`'s dialect. Its grid
+/// writes no reviewed draft and no row named by every value, so the shapes
+/// those switches admit ([`SqlSpec::drafts`], [`SqlSpec::null_terms`]) stay
+/// refused: they belong to the engines whose built-in grid writes them.
+pub(crate) fn plugin_generated_writes(engine: Engine, sql: &str) -> Option<Vec<String>> {
+    generated_writes_for(engine, true, sql)
+}
+
+fn generated_writes_for(engine: Engine, plugin: bool, sql: &str) -> Option<Vec<String>> {
+    match engine.syntax() {
+        Syntax::Sql => {}
+        Syntax::Mongo => return mongo_writes(sql),
+        Syntax::Redis => return None,
+    }
+    if is_transaction_bracket(sql) {
         return None;
     }
-    let spec = &engine.spec().sql;
+    let mut own = engine.spec().sql;
+    if plugin {
+        own.drafts = false;
+        own.null_terms = false;
+    }
+    let spec = &own;
     let Cow::Borrowed(text) = as_written(spec, sql)? else {
         return None;
     };
@@ -1140,6 +1277,23 @@ pub(crate) fn generated_writes(engine: Engine, sql: &str) -> Option<Vec<String>>
         .then_some(statements)
 }
 
+/// [`generated_writes`] for MongoDB: refused where the gate refuses, and
+/// otherwise each statement's own text from the parse, without its `;`.
+fn mongo_writes(text: &str) -> Option<Vec<String>> {
+    if !crate::mql::is_generated_write(text) {
+        return None;
+    }
+    let statements: Vec<String> = crate::mql::parse(text)
+        .ok()?
+        .iter()
+        .map(|statement| text.get(statement.span.clone()).map(str::to_owned))
+        .collect::<Option<_>>()?;
+    statements
+        .iter()
+        .all(|statement| crate::mql::is_generated_write(statement))
+        .then_some(statements)
+}
+
 /// [`delete_matches_key`] for the engine the statement is bound for.
 pub fn delete_matches_key_on(engine: Engine, statement: &str, keys: &[&str]) -> bool {
     match engine.syntax() {
@@ -1147,6 +1301,80 @@ pub fn delete_matches_key_on(engine: Engine, statement: &str, keys: &[&str]) -> 
         Syntax::Redis => crate::redis_cmd::edit::delete_matches_key(statement, keys),
         Syntax::Sql => delete_key_matches(&engine.spec().sql, statement, keys),
     }
+}
+
+/// How many `DELETE`s `batch` holds, when every one of them names exactly
+/// `keys` on `schema.table`, every `UPDATE` does too, and every `INSERT` is
+/// into `schema.table`: the readout [`is_generated_write_on`] cannot give,
+/// because no key or table reaches it. The caller compares the count with the
+/// rows the user marked.
+///
+/// A reviewed draft needs both answers. The gate reads a statement's shape and
+/// admits any one-row `WHERE` on any table, and an `UPDATE`'s set values but
+/// not its `WHERE`; this reads which columns and which table, so a statement
+/// on another table, an `UPDATE` with no `WHERE`, or one by half a composite
+/// key, is `None` here though the gate admitted it. Like
+/// [`delete_matches_key_on`] it is a readout and admits nothing.
+///
+/// Kinds are read from the same parse tree the gate reads, never from the
+/// caller's word: a statement is a `DELETE` when the tree says so, and an
+/// `UPDATE` whose `WHERE` names the key is not counted. `Some(0)` for a batch
+/// with no `DELETE`. `None` on any `DELETE` that does not match, on anything
+/// the gate's parse refuses (an empty text included), and on Redis, which
+/// writes no draft of this shape. MongoDB's is read by
+/// [`crate::mql::draft_deletes_match`], whose collection is `table`.
+// ponytail: only a top-level `DELETE` is counted. One hidden elsewhere in the
+// tree is not found here, because the gate's whole-tree count of `delete` nodes
+// refuses it first, and a caller runs both.
+pub fn draft_deletes_match(
+    engine: Engine,
+    batch: &str,
+    keys: &[&str],
+    schema: &str,
+    table: &str,
+) -> Option<usize> {
+    match engine.syntax() {
+        Syntax::Sql => {}
+        Syntax::Mongo => return crate::mql::draft_deletes_match(batch, keys, table),
+        Syntax::Redis => return None,
+    }
+    let spec = engine.spec();
+    let sql = as_written(&spec.sql, batch)?;
+    let tree = parse_gated(&sql, &spec.sql)?;
+    let root = tree.root_node();
+    let relation = spec.qualified(schema, table);
+    let mut deletes = 0;
+    let statements = generated_statements(&root)?;
+    if statements.is_empty() {
+        return None;
+    }
+    let names_key = |predicate: Node| {
+        row_columns(&spec.sql, predicate, &sql).is_some_and(|columns| {
+            columns.len() == keys.len() && keys.iter().all(|key| columns.iter().any(|c| c == key))
+        })
+    };
+    for statement in statements {
+        if statement.kind() != "statement" {
+            return None;
+        }
+        let (target, keyed) = match statement.named_child(0).map(|node| node.kind()) {
+            Some("delete") => {
+                let (target, predicate) = one_row_delete(statement)?;
+                deletes += 1;
+                (target, names_key(predicate))
+            }
+            Some("update") => {
+                let (target, _, filter) = update_parts(statement)?;
+                (target, names_key(predicate_of(filter)?))
+            }
+            Some("insert") => (insert_target(statement)?, true),
+            _ => return None,
+        };
+        if !keyed || sql.get(target.byte_range()) != Some(relation.as_str()) {
+            return None;
+        }
+    }
+    Some(deletes)
 }
 
 /// `SELECT COUNT(*) FROM <t> WHERE <p>` for one generated `UPDATE`, `DELETE`
@@ -1180,6 +1408,204 @@ pub fn row_guard(engine: Engine, statement: &str) -> Option<String> {
         text.get(predicate.byte_range())?
     );
     is_generated_select(engine, &guard).then_some(guard)
+}
+
+/// `SELECT * FROM <t> WHERE <p>` for one generated `UPDATE`: the read that
+/// brings back the row it wrote, so the grid shows what the server now holds
+/// and not what was typed (a column's affinity, a default, a trigger).
+///
+/// `<t>` and `<p>` are cut from the tree the write gate reads, never from the
+/// generator's word, and only from a statement the gate admits whose predicate
+/// is a conjunction of one-row terms. A key column is never assigned, so on a
+/// row named by its key `<p>` is the update's own. A row named by every value
+/// is found again only by the values it now holds: each term of a column the
+/// `SET` assigns is replaced by that assignment's literal (`IS NULL` for a
+/// NULL), and a column assigned anything else that the predicate names -- a
+/// `DEFAULT` -- has no known value, so there is no read. `None` for anything
+/// else too -- more than one statement, a statement that is not an `UPDATE` --
+/// and for a read [`is_generated_select`] does not admit: a caller that gets
+/// no read sends nothing.
+///
+/// ClickHouse's `ALTER TABLE … UPDATE` is read as the update it is, so it has a
+/// read too; no Row send is made there (`Target::row_edits`). MongoDB's is the
+/// `find` of the `_id` ([`crate::mql::browse::row_reread`]); Redis has none.
+pub(crate) fn row_read(engine: Engine, statement: &str) -> Option<String> {
+    match engine.syntax() {
+        Syntax::Sql => {}
+        // An `updateOne` never changes `_id`, so the read by the `_id` the write
+        // names finds the document it wrote.
+        Syntax::Mongo => return crate::mql::browse::row_reread(statement),
+        Syntax::Redis => return None,
+    }
+    let spec = &engine.spec().sql;
+    if is_transaction_bracket(statement) || !generated_write(spec, statement) {
+        return None;
+    }
+    let text = as_written(spec, statement)?;
+    let tree = parse_gated(&text, spec)?;
+    let [one] = only_statement(&tree.root_node())?;
+    let (table, assignments, filter) = update_parts(one)?;
+    let predicate = predicate_of(filter)?;
+    row_columns(spec, predicate, &text)?;
+    let read = format!(
+        "SELECT * FROM {} WHERE {}",
+        text.get(table.byte_range())?,
+        held_predicate(spec, predicate, &assignments, &text)?
+    );
+    is_generated_select(engine, &read).then_some(read)
+}
+
+/// `predicate`'s text with each term of a column `assignments` set naming the
+/// value that column now holds, or `None` where it holds none the statement
+/// spells: an assignment that is neither a literal nor `NULL`.
+fn held_predicate(
+    spec: &SqlSpec,
+    predicate: Node,
+    assignments: &[Node],
+    sql: &str,
+) -> Option<String> {
+    let mut set = Vec::new();
+    for assignment in assignments {
+        let mut cursor = assignment.walk();
+        let sides: Vec<_> = assignment.children(&mut cursor).collect();
+        let [left, _, right] = sides.as_slice() else {
+            return None;
+        };
+        let held = if literal_value(*right, sql) {
+            Some(format!(" = {}", sql.get(right.byte_range())?))
+        } else if null_literal(*right, sql) {
+            Some(" IS NULL".to_owned())
+        } else {
+            None
+        };
+        // An assignment's target is an `identifier` where a predicate's column
+        // is a `field` or a `literal`, so it is unquoted from its own text.
+        let target = sql.get(left.byte_range())?;
+        let column = match target.chars().next()? {
+            quote @ ('"' | '`') => unquote(target, quote),
+            _ => target.to_owned(),
+        };
+        set.push((column, held));
+    }
+
+    let mut terms = Vec::new();
+    conjuncts(predicate, &mut terms);
+    let (start, end) = (predicate.start_byte(), predicate.end_byte());
+    let (mut text, mut at) = (String::new(), start);
+    for term in terms {
+        let mut named = Vec::new();
+        if !equality_columns(spec, term, sql, &mut named) {
+            return None;
+        }
+        let Some((_, held)) = set.iter().find(|(column, _)| named.contains(column)) else {
+            continue;
+        };
+        let mut cursor = term.walk();
+        let left = term.children(&mut cursor).next()?;
+        text.push_str(sql.get(at..left.end_byte())?);
+        text.push_str(held.as_deref()?);
+        at = term.end_byte();
+    }
+    text.push_str(sql.get(at..end)?);
+    Some(text)
+}
+
+/// The terms of a conjunction, in the order they are written.
+fn conjuncts<'tree>(node: Node<'tree>, terms: &mut Vec<Node<'tree>>) {
+    let mut cursor = node.walk();
+    let children: Vec<_> = node.children(&mut cursor).collect();
+    match children.as_slice() {
+        [left, operator, right]
+            if node.kind() == "binary_expression" && operator.kind() == "keyword_and" =>
+        {
+            conjuncts(*left, terms);
+            conjuncts(*right, terms);
+        }
+        _ => terms.push(node),
+    }
+}
+
+/// The table one generated `INSERT`, `UPDATE` or `DELETE` writes, one entry
+/// per dotted part of its name with the quoting taken off, as `engine`'s
+/// dialect reads it. `None` for anything else, or for more than one table.
+pub(crate) fn written_table(engine: Engine, statement: &str) -> Option<Vec<String>> {
+    use sqlparser::ast::FromTable;
+
+    let dialect = dialect(engine)?;
+    let mut statements = SqlParser::parse_sql(dialect.as_ref(), statement).ok()?;
+    let one = statements.pop().filter(|_| statements.is_empty())?;
+    let relation = |factor: &TableFactor| match factor {
+        TableFactor::Table { name, .. } => Some(name.clone()),
+        _ => None,
+    };
+    let name: ObjectName = match &one {
+        Statement::Insert(Insert {
+            table: TableObject::TableName(name),
+            ..
+        }) => name.clone(),
+        Statement::Update(Update { table, .. }) if table.joins.is_empty() => {
+            relation(&table.relation)?
+        }
+        Statement::Delete(Delete { tables, from, .. }) if tables.is_empty() => {
+            let (FromTable::WithFromKeyword(from) | FromTable::WithoutKeyword(from)) = from;
+            match from.as_slice() {
+                [only] if only.joins.is_empty() => relation(&only.relation)?,
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    name.0
+        .iter()
+        .map(|part| part.as_ident().map(|ident| ident.value.clone()))
+        .collect()
+}
+
+/// `SELECT * FROM <t> WHERE <p> LIMIT 2` for one generated `UPDATE` or one-row
+/// `DELETE`: the read of the row it writes, taken inside the apply's
+/// transaction before any write so the row can be compared with the one the
+/// user read, and bounded at the two rows that prove it ambiguous.
+///
+/// Cut as [`row_read`] is, from the tree the write gate reads and never from
+/// the generator's word, and returned only when [`is_generated_select`] admits
+/// it. Unlike [`row_guard`], an `UPDATE`'s assignments are not inspected: a
+/// `DEFAULT` among them is no reason to leave the row unread. `None` for an
+/// `INSERT`, which has no row to read, for a bracket, for more than one
+/// statement, for a `DELETE` or `UPDATE` whose `WHERE` is not a conjunction of
+/// one-row terms, and for Redis: a caller that gets no read sends
+/// nothing, so a draft whose write has no re-read is not reviewed. MongoDB's is
+/// the `find` of the `_id` the write names ([`crate::mql::browse::row_reread`]);
+/// Redis has none.
+pub(crate) fn row_reread(engine: Engine, statement: &str) -> Option<String> {
+    match engine.syntax() {
+        Syntax::Sql => {}
+        Syntax::Mongo => return crate::mql::browse::row_reread(statement),
+        Syntax::Redis => return None,
+    }
+    let spec = &engine.spec().sql;
+    if is_transaction_bracket(statement) || !generated_write(spec, statement) {
+        return None;
+    }
+    let text = as_written(spec, statement)?;
+    let tree = parse_gated(&text, spec)?;
+    let [one] = only_statement(&tree.root_node())?;
+    let (table, predicate) = one_row_delete(one)
+        .or_else(|| {
+            let (table, _, filter) = update_parts(one)?;
+            Some((table, predicate_of(filter)?))
+        })
+        .filter(|(_, predicate)| row_columns(spec, *predicate, &text).is_some())?;
+    // Two rows already prove the predicate names more than one, so no more
+    // are read: a table holding a million copies of the row is not loaded
+    // whole before the apply refuses it.
+    let (table, predicate) = (
+        text.get(table.byte_range())?,
+        text.get(predicate.byte_range())?,
+    );
+    // SQL Server's is re-spelled by its arm after the gate, as a preview is
+    // (`paged`): the grammar reads `LIMIT`, and none of T-SQL's paging.
+    let read = format!("SELECT * FROM {table} WHERE {predicate} LIMIT 2");
+    is_generated_select(engine, &read).then_some(read)
 }
 
 /// Whether `sql` is a `SELECT` dbdelve could have written: exactly one root
@@ -1371,7 +1797,8 @@ fn deletes_anything(node: tree_sitter::Node) -> bool {
 /// tree, and so all arrive here as `None`.
 ///
 /// On an engine that names a row by every value (`row_terms`), a term may also
-/// be `toString(<column>) = '…'` or `<column> IS NULL` ([`equality_columns`]).
+/// be `toString(<column>) = '…'` or `<column> IS NULL`, and under `null_terms`
+/// `<column> IS NULL` alone ([`equality_columns`]).
 ///
 /// `sql` is as [`as_written`] gives it.
 fn delete_key_columns(spec: &SqlSpec, sql: &str) -> Option<Vec<String>> {
@@ -1418,14 +1845,12 @@ fn one_row_delete(statement: Node) -> Option<(Node, Node)> {
     Some((*relation, predicate_of(*filter)?))
 }
 
-/// The table and the predicate of `UPDATE <t> SET <c> = <v>, … WHERE <p>`
-/// where each `<v>` is a literal or `NULL` and no column is set twice, and
-/// nothing else in `statement`: no alias, `FROM`, `RETURNING` or expression.
-fn one_row_update<'tree>(
-    spec: &SqlSpec,
+/// The table, the assignments and the `where` node of `UPDATE <t> SET … WHERE …`
+/// and nothing else in `statement`: no alias, `FROM` or `RETURNING`. What the
+/// assignments hold, and what the `where` holds, are the callers' to read.
+fn update_parts<'tree>(
     statement: Node<'tree>,
-    sql: &str,
-) -> Option<(Node<'tree>, Node<'tree>)> {
+) -> Option<(Node<'tree>, Vec<Node<'tree>>, Node<'tree>)> {
     let mut cursor = statement.walk();
     let parts: Vec<_> = statement.named_children(&mut cursor).collect();
     let [update] = parts.as_slice() else {
@@ -1453,9 +1878,20 @@ fn one_row_update<'tree>(
     {
         return None;
     }
+    Some((*table, assignments.to_vec(), *filter))
+}
 
+/// The table and the predicate of `UPDATE <t> SET <c> = <v>, … WHERE <p>`
+/// where each `<v>` is a literal or `NULL` and no column is set twice, and
+/// nothing else in `statement`: no alias, `FROM`, `RETURNING` or expression.
+fn one_row_update<'tree>(
+    spec: &SqlSpec,
+    statement: Node<'tree>,
+    sql: &str,
+) -> Option<(Node<'tree>, Node<'tree>)> {
+    let (table, assignments, filter) = update_parts(statement)?;
     let mut columns = Vec::new();
-    for assignment in assignments {
+    for assignment in &assignments {
         let mut cursor = assignment.walk();
         let sides: Vec<_> = assignment.children(&mut cursor).collect();
         let [left, equals, right] = sides.as_slice() else {
@@ -1467,12 +1903,12 @@ fn one_row_update<'tree>(
         {
             return None;
         }
-        columns.push(column_name(*left, sql)?);
+        columns.push(column_name(spec, *left, sql)?);
     }
     distinct(&columns)?;
-    let predicate = predicate_of(*filter)?;
+    let predicate = predicate_of(filter)?;
     row_columns(spec, predicate, sql)?;
-    Some((*table, predicate))
+    Some((table, predicate))
 }
 
 /// The predicate of a `where` node holding nothing but `WHERE <p>`.
@@ -1511,9 +1947,10 @@ fn distinct(columns: &[String]) -> Option<()> {
 ///
 /// Under `row_terms`, two more terms name a column: `toString(<column>) = '…'`
 /// (the server's own text of a value no literal matches exactly, a float or a
-/// `DateTime64`) and `<column> IS NULL`. Nothing else: not `IS NOT NULL`, not a
-/// second argument to `toString` (a time zone changes its text), not any
-/// other function.
+/// `DateTime64`) and `<column> IS NULL`; under `null_terms` the second alone,
+/// which is how a row with a NULL cell is named by every value. Nothing else:
+/// not `IS NOT NULL`, not a second argument to `toString` (a time zone changes
+/// its text), not any other function.
 fn equality_columns(
     spec: &SqlSpec,
     node: tree_sitter::Node,
@@ -1535,10 +1972,12 @@ fn equality_columns(
                 && equality_columns(spec, *right, sql, columns);
         }
         "=" if literal_value(*right, sql) => match left.kind() {
-            "invocation" if spec.row_terms && quoted(*right, sql) => stringified(*left, sql),
-            _ => column_name(*left, sql),
+            "invocation" if spec.row_terms && quoted(*right, sql) => stringified(spec, *left, sql),
+            _ => column_name(spec, *left, sql),
         },
-        "keyword_is" if spec.row_terms && null_literal(*right, sql) => column_name(*left, sql),
+        "keyword_is" if (spec.row_terms || spec.null_terms) && null_literal(*right, sql) => {
+            column_name(spec, *left, sql)
+        }
         _ => None,
     };
     match column {
@@ -1553,7 +1992,7 @@ fn equality_columns(
 /// The column of `toString(<column>)`, spelled exactly so: one argument, a
 /// bare or quoted unqualified column, the function's own name unquoted and
 /// unqualified.
-fn stringified(invocation: Node, sql: &str) -> Option<String> {
+fn stringified(spec: &SqlSpec, invocation: Node, sql: &str) -> Option<String> {
     let mut cursor = invocation.walk();
     let parts: Vec<_> = invocation.children(&mut cursor).collect();
     let [function, open, argument, close] = parts.as_slice() else {
@@ -1570,7 +2009,7 @@ fn stringified(invocation: Node, sql: &str) -> Option<String> {
     {
         return None;
     }
-    column_name(*value, sql)
+    column_name(spec, *value, sql)
 }
 
 fn null_literal(node: Node, sql: &str) -> bool {
@@ -1747,22 +2186,32 @@ fn escaped_quote(text: &str, quotes: &[u8]) -> bool {
 /// kind from `'id'`, so the quote character is what tells them apart. That
 /// matters because Postgres and SQLite quote identifiers with `"`, which is
 /// what `delete_row` writes on both.
-fn column_name(node: tree_sitter::Node, sql: &str) -> Option<String> {
+/// The column `node` names: a bare or backticked name, or a `"…"` one, which
+/// this grammar reads as a `literal`, except on a spec where `"…"` is a string
+/// ([`SqlSpec::double_quoted_strings`]), whose `WHERE "id" = 'id'` holds on
+/// every row.
+fn column_name(spec: &SqlSpec, node: tree_sitter::Node, sql: &str) -> Option<String> {
     let text = sql.get(node.byte_range())?;
     match node.kind() {
-        // `t.id` puts an `object_reference` under the field beside the
-        // identifier. A qualified column is not one this reads.
-        "field" => {
-            let mut cursor = node.walk();
-            let named: Vec<_> = node.named_children(&mut cursor).collect();
-            let [identifier] = named.as_slice() else {
-                return None;
-            };
-            (identifier.kind() == "identifier").then(|| unquote(text, '`'))
+        "field" => field_name(node, sql),
+        "literal" if text.starts_with('"') && !spec.double_quoted_strings => {
+            Some(unquote(text, '"'))
         }
-        "literal" if text.starts_with('"') => Some(unquote(text, '"')),
         _ => None,
     }
+}
+
+/// [`column_name`] of a `field`: a bare or backticked name.
+fn field_name(node: tree_sitter::Node, sql: &str) -> Option<String> {
+    let text = sql.get(node.byte_range())?;
+    // `t.id` puts an `object_reference` under the field beside the
+    // identifier. A qualified column is not one this reads.
+    let mut cursor = node.walk();
+    let named: Vec<_> = node.named_children(&mut cursor).collect();
+    let [identifier] = named.as_slice() else {
+        return None;
+    };
+    (node.kind() == "field" && identifier.kind() == "identifier").then(|| unquote(text, '`'))
 }
 
 fn unquote(text: &str, quote: char) -> String {
@@ -2369,23 +2818,39 @@ pub(crate) fn update_batch(engine: Engine, rows: &[PendingRow]) -> Result<String
 
 pub(crate) fn sql_update_batch(spec: &EngineSpec, rows: &[PendingRow]) -> Result<String, String> {
     if rows.is_empty() {
-        return Err("There are no edits to apply.".into());
+        return Err(NO_EDITS.into());
     }
+    let statements = update_statements(spec, rows).ok_or(NO_KEY)?;
+    Ok(bracketed(spec, statements.join("\n"), statements.len()))
+}
 
-    fn borrowed(pairs: &[(String, String)]) -> Vec<(&str, &str)> {
-        pairs
-            .iter()
-            .map(|(column, value)| (column.as_str(), value.as_str()))
-            .collect()
-    }
-    fn borrowed_sets(pairs: &[(String, NewValue)]) -> Vec<(&str, NewValue)> {
-        pairs
-            .iter()
-            .map(|(column, value)| (column.as_str(), value.clone()))
-            .collect()
-    }
-    let statements: Option<Vec<String>> = rows
+const NO_EDITS: &str = "There are no edits to apply.";
+const NO_KEY: &str = "dbdelve cannot name an edited row by its primary key.";
+
+fn borrowed(pairs: &[(String, String)]) -> Vec<(&str, &str)> {
+    pairs
         .iter()
+        .map(|(column, value)| (column.as_str(), value.as_str()))
+        .collect()
+}
+
+fn borrowed_sets(pairs: &[(String, NewValue)]) -> Vec<(&str, NewValue)> {
+    pairs
+        .iter()
+        .map(|(column, value)| (column.as_str(), value.clone()))
+        .collect()
+}
+
+fn borrowed_names(names: &[String]) -> Vec<&str> {
+    names.iter().map(String::as_str).collect()
+}
+
+/// Each row's `UPDATE`, or `None` when any row cannot be named by its key.
+///
+/// Terminated, not separated: the last statement carries its semicolon too, so
+/// appending to a buffer cannot fuse it onto whatever the user writes next.
+fn update_statements(spec: &EngineSpec, rows: &[PendingRow]) -> Option<Vec<String>> {
+    rows.iter()
         .map(|row| {
             sql_update_statement(
                 spec,
@@ -2394,26 +2859,117 @@ pub(crate) fn sql_update_batch(spec: &EngineSpec, rows: &[PendingRow]) -> Result
                 &borrowed_sets(&row.sets),
                 Match {
                     keys: &borrowed(&row.keys),
-                    nulls: &row.null_keys.iter().map(String::as_str).collect::<Vec<_>>(),
+                    nulls: &borrowed_names(&row.null_keys),
                 },
                 row.update,
                 &row.types,
             )
-            // Terminated, not separated: the last statement carries its
-            // semicolon too, so appending to a buffer cannot fuse it onto
-            // whatever the user writes next.
             .map(|statement| format!("{statement};"))
         })
-        .collect();
+        .collect()
+}
 
-    let batch = statements
-        .ok_or("dbdelve cannot name an edited row by its primary key.")?
-        .join("\n");
-    let bracket = spec.sql.transaction_opening().filter(|_| rows.len() > 1);
-    Ok(match bracket {
+/// `batch` inside the engine's own transaction words, when it holds more than
+/// one statement. Postgres has no words: one submission is already atomic
+/// there.
+fn bracketed(spec: &EngineSpec, batch: String, statements: usize) -> String {
+    let opening = spec.sql.transaction_opening().filter(|_| statements > 1);
+    match opening {
         Some(start) => format!("{start};\n{batch}\nCOMMIT;"),
         None => batch,
-    })
+    }
+}
+
+/// A marked row, named by the key it was fetched with: what the grid hands over
+/// for a draft's `DELETE`. `null_keys` are the columns of a row named by every
+/// value that read NULL, as on [`PendingRow`].
+pub(crate) struct DraftDelete {
+    pub schema: String,
+    pub table: String,
+    pub keys: Vec<(String, String)>,
+    pub null_keys: Vec<String>,
+    pub types: Vec<(String, String)>,
+}
+
+/// An added row's touched cells, which is every column its `INSERT` names: an
+/// untouched column is left out, so the server's default applies to it. `None`
+/// is `NULL`.
+pub(crate) struct DraftInsert {
+    pub schema: String,
+    pub table: String,
+    pub columns: Vec<(String, Option<String>)>,
+    pub types: Vec<(String, String)>,
+}
+
+/// A draft's `DELETE`s, `UPDATE`s and `INSERT`s as one string, in that order,
+/// each group in the order given.
+///
+/// Brackets as [`update_batch`] has them, from the engine's own words: more
+/// than one statement. Postgres writes none.
+///
+/// An error when the draft is empty, and when any row cannot be written, so a
+/// draft is never sent shorter than it was made. MongoDB's is written by
+/// [`crate::mql::draft_batch`], which has no bracket. A draft that adds or deletes rows is not written for Redis,
+/// which never offers one.
+///
+/// The text is not trusted for being written here: the apply passes it through
+/// [`is_generated_write_on`] and [`draft_deletes_match`] before it is shown.
+// ponytail: the order is fixed, deletes then updates then inserts, and not
+// dependency-sorted. A parent marked above its child under an immediate
+// foreign key, an existing row re-pointed at a new parent, and a two-row unique
+// swap fail with the server's own error; the bracket rolls the batch back and
+// the draft is kept. The upgrade is ordering by the relation's keys.
+pub(crate) fn draft_batch(
+    engine: Engine,
+    deletes: &[DraftDelete],
+    updates: &[PendingRow],
+    inserts: &[DraftInsert],
+) -> Result<String, String> {
+    match engine.syntax() {
+        Syntax::Sql => sql_draft_batch(engine.spec(), deletes, updates, inserts),
+        Syntax::Mongo => crate::mql::draft_batch(deletes, updates, inserts),
+        Syntax::Redis => {
+            Err("A draft that adds or deletes rows is not written for this engine.".into())
+        }
+    }
+}
+
+/// [`draft_batch`] for a spec of its own, which `src/sql_snapshots` writes.
+pub(crate) fn sql_draft_batch(
+    spec: &EngineSpec,
+    deletes: &[DraftDelete],
+    updates: &[PendingRow],
+    inserts: &[DraftInsert],
+) -> Result<String, String> {
+    if deletes.is_empty() && updates.is_empty() && inserts.is_empty() {
+        return Err(NO_EDITS.into());
+    }
+    let mut statements = Vec::new();
+    for row in deletes {
+        let statement = sql_delete_row(
+            spec,
+            &row.schema,
+            &row.table,
+            Match {
+                keys: &borrowed(&row.keys),
+                nulls: &borrowed_names(&row.null_keys),
+            },
+            &row.types,
+        )
+        .ok_or(NO_KEY)?;
+        statements.push(format!("{statement};"));
+    }
+    statements.extend(update_statements(spec, updates).ok_or(NO_KEY)?);
+    for row in inserts {
+        let columns: Vec<(&str, Option<&str>)> = row
+            .columns
+            .iter()
+            .map(|(column, value)| (column.as_str(), value.as_deref()))
+            .collect();
+        let statement = sql_insert_row(spec, &row.schema, &row.table, &columns, &row.types)?;
+        statements.push(format!("{statement};"));
+    }
+    Ok(bracketed(spec, statements.join("\n"), statements.len()))
 }
 
 /// One row's `UPDATE`: every column in `sets` assigned, every column in `keys`
@@ -4525,8 +5081,15 @@ impl Leaves {
                 chain,
                 savepoint: None,
             } => self.transaction = Some(*chain),
-            Statement::Set(_)
-            | Statement::Use(_)
+            // Turning MySQL's `autocommit` off, or SQL Server's implicit
+            // transactions on, leaves every later statement inside one.
+            Statement::Set(set) => {
+                self.settings = true;
+                if let Some(open) = transaction_by_setting(&set.to_string()) {
+                    self.transaction = Some(open);
+                }
+            }
+            Statement::Use(_)
             | Statement::LockTables { .. }
             | Statement::Pragma { is_eq: true, .. } => self.settings = true,
             Statement::CreateTable(table) => {
@@ -4545,6 +5108,32 @@ impl Leaves {
             }
             _ => {}
         }
+    }
+}
+
+/// What a `SET` does to the session's transaction, read off its text:
+/// `Some(true)` for MySQL's `autocommit` turned off or SQL Server's
+/// `IMPLICIT_TRANSACTIONS` turned on, which leave the next statement inside a
+/// transaction, and `Some(false)` for `autocommit` turned on, which commits
+/// the one open. `None` for any other `SET`, or one assigning more than this.
+fn transaction_by_setting(set: &str) -> Option<bool> {
+    let spelled: String = set
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '@')
+        .collect::<String>()
+        .to_ascii_uppercase();
+    let setting = spelled.strip_prefix("SET")?;
+    let setting = setting
+        .strip_prefix("SESSION.")
+        .or_else(|| setting.strip_prefix("SESSION"))
+        .or_else(|| setting.strip_prefix("LOCAL."))
+        .or_else(|| setting.strip_prefix("LOCAL"))
+        .unwrap_or(setting);
+    match setting {
+        "AUTOCOMMIT=0" | "AUTOCOMMIT=OFF" | "AUTOCOMMIT=FALSE" => Some(true),
+        "AUTOCOMMIT=1" | "AUTOCOMMIT=ON" | "AUTOCOMMIT=TRUE" => Some(false),
+        "IMPLICIT_TRANSACTIONSON" => Some(true),
+        _ => None,
     }
 }
 
@@ -6395,6 +6984,20 @@ mod tests {
     }
 
     #[test]
+    fn a_plugin_is_not_admitted_the_draft_shapes_its_grid_never_writes() {
+        let draft = "INSERT INTO \"s\".\"t\" (\"a\") VALUES ('1'); \
+                     INSERT INTO \"s\".\"t\" (\"a\") VALUES ('2')";
+        assert!(generated_writes(Engine::Postgres, draft).is_some());
+        assert_eq!(plugin_generated_writes(Engine::Postgres, draft), None);
+        let update = "UPDATE \"s\".\"t\" SET \"a\" = '1' WHERE \"id\" = '2'";
+        let batch = format!("BEGIN;\n{update};\nCOMMIT;");
+        assert!(plugin_generated_writes(Engine::Postgres, &batch).is_some());
+        let null = "DELETE FROM \"s\".\"t\" WHERE \"id\" = '2' AND \"b\" IS NULL";
+        assert!(generated_writes(Engine::Postgres, null).is_some());
+        assert_eq!(plugin_generated_writes(Engine::Postgres, null), None);
+    }
+
+    #[test]
     fn a_gated_batch_splits_into_its_writes_without_the_bracket() {
         let update = "UPDATE \"s\".\"t\" SET \"a\" = '1' WHERE \"id\" = '2'";
         assert_eq!(
@@ -6445,16 +7048,19 @@ mod tests {
 
     #[test]
     fn the_gate_refuses_an_insert_carrying_something_else() {
-        // One insert, alone. A batch of them is a shape nothing generates, and
-        // a `DELETE` riding along in a CTE is the shape an injected value takes.
+        // One insert, alone, or one row each in a reviewed draft. A `DELETE`
+        // riding along in a CTE is the shape an injected value takes.
         for sql in [
             "INSERT INTO t (a) VALUES ('1'); DROP TABLE t",
             "INSERT INTO t (a) VALUES ('1'); TRUNCATE t",
             "WITH x AS (DELETE FROM t RETURNING *) INSERT INTO u (a) VALUES ('1')",
-            "INSERT INTO t (a) VALUES ('1'); INSERT INTO t (a) VALUES ('2')",
+            "INSERT INTO t (a) VALUES ('1'), ('2'); INSERT INTO t (a) VALUES ('3')",
+            "INSERT INTO t (a) VALUES ('1') ON CONFLICT DO NOTHING; INSERT INTO t (a) VALUES ('2')",
         ] {
             assert!(!is_generated_write(sql), "{sql} passed the gate");
         }
+        let draft = "INSERT INTO t (a) VALUES ('1'); INSERT INTO t (a) VALUES ('2')";
+        assert!(is_generated_write(draft), "{draft} was refused");
     }
 
     #[test]
@@ -7264,15 +7870,23 @@ mod tests {
             "WITH x AS (SELECT 1) DELETE FROM t WHERE id = '1'",
             "DELETE FROM t WHERE id = '1' LIMIT 1",
             "DELETE FROM t WHERE id = '1' RETURNING *",
-            "DELETE FROM t WHERE id = '1'; DELETE FROM t WHERE id = '2'",
             "DELETE FROM t WHERE id = '1'; DROP TABLE t",
-            "UPDATE t SET a = '1' WHERE id = '2'; DELETE FROM t WHERE id = '3'",
+            "DELETE FROM t WHERE id = '1'; DELETE FROM t WHERE id = '2' OR id = '3'",
+            "UPDATE t SET a = '1' WHERE id = '2'; DELETE FROM t",
             r#"DELETE FROM t WHERE "id" = "other""#,
             "DELETE FROM t WHERE t.id = '1'",
             "WITH x AS (DROP TABLE u) DELETE FROM t WHERE id = '1'",
             "WITH x AS (DROP TABLE u) UPDATE t SET a = '1' WHERE id = '2'",
         ] {
             assert!(!is_generated_write(sql), "{sql:?} passed the gate");
+        }
+        // Each of several is one named row, which is what a reviewed draft
+        // holds: one `DELETE` per marked row, never one predicate over several.
+        for sql in [
+            "DELETE FROM t WHERE id = '1'; DELETE FROM t WHERE id = '2'",
+            "UPDATE t SET a = '1' WHERE id = '2'; DELETE FROM t WHERE id = '3'",
+        ] {
+            assert!(is_generated_write(sql), "{sql:?} was refused");
         }
     }
 
@@ -7305,19 +7919,40 @@ mod tests {
 
     #[test]
     fn only_an_engine_naming_rows_by_every_value_reads_the_row_terms() {
-        let terms = [
+        // `IS NULL` names a NULL cell on ClickHouse and on the six engines whose
+        // drafts are verified; `toString` and `ALTER TABLE … UPDATE` are
+        // ClickHouse's alone.
+        let null_term = "DELETE FROM t WHERE c IS NULL";
+        let clickhouse_only = [
             "DELETE FROM t WHERE toString(c) = '1.5'",
-            "DELETE FROM t WHERE c IS NULL",
             "ALTER TABLE t UPDATE a = '1' WHERE b = '2' SETTINGS mutations_sync = 2",
         ];
+        let six = [
+            Engine::Postgres,
+            Engine::MySql,
+            Engine::MariaDb,
+            Engine::Sqlite,
+            Engine::DuckDb,
+            Engine::SqlServer,
+        ];
         for engine in Engine::ALL {
-            for sql in terms {
+            assert_eq!(
+                is_generated_write_on(engine, null_term),
+                engine == Engine::ClickHouse || six.contains(&engine),
+                "{engine:?} {null_term}"
+            );
+            for sql in clickhouse_only {
                 assert_eq!(
                     is_generated_write_on(engine, sql),
                     engine == Engine::ClickHouse,
                     "{engine:?} {sql}"
                 );
             }
+            // Never `IS NOT NULL`: it names no value.
+            assert!(
+                !is_generated_write_on(engine, "DELETE FROM t WHERE c IS NOT NULL"),
+                "{engine:?}"
+            );
         }
     }
 
@@ -7361,6 +7996,377 @@ mod tests {
         assert_eq!(row_guard(Engine::MongoDb, "db.t.deleteOne({_id: 1})"), None);
     }
 
+    #[test]
+    fn a_row_read_after_an_update_names_the_row_by_the_values_it_now_holds() {
+        use crate::db::Target;
+
+        let engines: Vec<_> = Engine::ALL
+            .into_iter()
+            .filter(|engine| Target::built_in(*engine).row_edits() && engine.spec().sql.null_terms)
+            .collect();
+        assert_eq!(engines.len(), 6, "{engines:?}");
+        for engine in engines {
+            let q = engine.spec().qualified("public", "accounts");
+            let (id, bird, place) = (
+                engine.quote_identifier("id"),
+                engine.quote_identifier("bird"),
+                engine.quote_identifier("place"),
+            );
+            let read = |update: String| row_read(engine, &update);
+            let select = |predicate: &str| Some(format!("SELECT * FROM {q} WHERE {predicate}"));
+
+            // A key column is never assigned, so a keyed read is what it was.
+            assert_eq!(
+                read(format!("UPDATE {q} SET {bird} = 'x' WHERE {id} = '7'")),
+                select(&format!("{id} = '7'")),
+                "{engine:?}"
+            );
+            // A column the `SET` assigns is read by the value it now holds.
+            assert_eq!(
+                read(format!(
+                    "UPDATE {q} SET {bird} = 'finch' WHERE {bird} = 'wren' AND {place} IS NULL"
+                )),
+                select(&format!("{bird} = 'finch' AND {place} IS NULL")),
+                "{engine:?}"
+            );
+            assert_eq!(
+                read(format!(
+                    "UPDATE {q} SET {place} = NULL WHERE {bird} = 'wren' AND {place} = 'oak'"
+                )),
+                select(&format!("{bird} = 'wren' AND {place} IS NULL")),
+                "{engine:?}"
+            );
+            assert_eq!(
+                read(format!(
+                    "UPDATE {q} SET {place} = 'elm', {bird} = NULL \
+                     WHERE {place} IS NULL AND {bird} = 'wren'"
+                )),
+                select(&format!("{place} = 'elm' AND {bird} IS NULL")),
+                "{engine:?}"
+            );
+            // A column set to DEFAULT has no value to name the row by, when the
+            // predicate names it; when it does not, the predicate stands.
+            assert_eq!(
+                read(format!(
+                    "UPDATE {q} SET {place} = DEFAULT WHERE {bird} = 'wren' AND {place} IS NULL"
+                )),
+                None,
+                "{engine:?}"
+            );
+            assert_eq!(
+                read(format!("UPDATE {q} SET {place} = DEFAULT WHERE {id} = '7'")),
+                select(&format!("{id} = '7'")),
+                "{engine:?}"
+            );
+            for text in [
+                format!(
+                    "UPDATE {q} SET {bird} = 'finch' WHERE {bird} = 'wren' AND {place} IS NULL"
+                ),
+                format!("UPDATE {q} SET {place} = NULL WHERE {bird} = 'wren' AND {place} = 'oak'"),
+            ] {
+                let read = row_read(engine, &text).expect("a read");
+                assert!(is_generated_select(engine, &read), "{engine:?} {read}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_row_read_is_cut_from_the_gated_update() {
+        use crate::db::Target;
+
+        let engines: Vec<_> = Engine::ALL
+            .into_iter()
+            .filter(|engine| Target::built_in(*engine).row_edits())
+            .collect();
+        assert!(engines.len() > 1, "{engines:?}");
+        for engine in engines {
+            for sets in [
+                vec![("name", set("wren")), ("note", set("it's"))],
+                vec![("name", set("wren")), ("note", NewValue::Default)],
+                vec![("name", NewValue::Null), ("note", set("x"))],
+            ] {
+                for keys in [vec![("id", "7")], vec![("id", "7"), ("rev", "2")]] {
+                    let row = pending_row(&sets, &keys);
+                    let update = update_batch(engine, std::slice::from_ref(&row)).unwrap();
+                    let predicate = update
+                        .trim_end_matches(';')
+                        .rsplit_once(" WHERE ")
+                        .unwrap()
+                        .1
+                        .to_string();
+                    let table = engine.spec().qualified("public", "accounts");
+                    let read = row_read(engine, &update)
+                        .unwrap_or_else(|| panic!("{engine:?} read nothing of {update}"));
+                    assert_eq!(
+                        read,
+                        format!("SELECT * FROM {table} WHERE {predicate}"),
+                        "{engine:?}"
+                    );
+                    assert!(is_generated_select(engine, &read), "{engine:?} {read}");
+                }
+            }
+        }
+
+        let engine = Engine::Postgres;
+        let one = pending_row(&[("name", set("a"))], &[("id", "1")]);
+        let two = pending_row(&[("name", set("b"))], &[("id", "2")]);
+        let batch = update_batch(engine, &[one, two]).unwrap();
+        let delete = delete_row(engine, "public", "accounts", &[("id", "1")], &[]).unwrap();
+        let insert = insert_row(engine, "public", "accounts", &[("name", Some("a"))], &[]).unwrap();
+        for refused in [
+            batch.as_str(),
+            delete.as_str(),
+            insert.as_str(),
+            "UPDATE t SET a = a + 1 WHERE id = 1",
+            "UPDATE t SET a = '1' WHERE id > '7'",
+            "SELECT * FROM t WHERE id = '7'",
+            "BEGIN",
+        ] {
+            assert_eq!(row_read(engine, refused), None, "{refused}");
+        }
+    }
+
+    #[test]
+    fn a_mongo_row_send_is_read_back_by_its_id() {
+        let oid = "ObjectId('65a4f1c0ffffffffffffff03')";
+        let row = PendingRow {
+            table: "accounts".into(),
+            sets: vec![("name".into(), set("Ada"))],
+            keys: vec![("_id".into(), oid.into())],
+            types: vec![
+                ("_id".into(), "objectId".into()),
+                ("name".into(), "string".into()),
+            ],
+            ..Default::default()
+        };
+        let update = update_batch(Engine::MongoDb, std::slice::from_ref(&row)).unwrap();
+        let read = row_read(Engine::MongoDb, &update).expect("a read");
+        assert_eq!(Some(read.clone()), crate::mql::browse::row_reread(&update));
+        assert!(is_generated_select(Engine::MongoDb, &read), "{read}");
+        assert!(read.contains("65a4f1c0ffffffffffffff03"), "{read}");
+
+        let insert = insert_row(
+            Engine::MongoDb,
+            "dbdelve_dev",
+            "accounts",
+            &[("name", Some("Cy"))],
+            &[("name".to_string(), "string".to_string())],
+        )
+        .unwrap();
+        assert_eq!(row_read(Engine::MongoDb, &insert), None, "{insert}");
+        // A batch of two documents is read one statement at a time.
+        let other = PendingRow {
+            table: "accounts".into(),
+            sets: vec![("name".into(), set("Bo"))],
+            keys: vec![("_id".into(), "ObjectId('65a4f1c0ffffffffffffff04')".into())],
+            types: vec![("_id".into(), "objectId".into())],
+            ..PendingRow::default()
+        };
+        let two = update_batch(Engine::MongoDb, &[row, other]).unwrap();
+        assert_eq!(row_read(Engine::MongoDb, &two), None, "{two}");
+    }
+
+    #[test]
+    fn a_row_reread_is_cut_from_the_gated_update_or_delete_and_refuses_anything_else() {
+        use crate::db::Target;
+
+        let engines: Vec<_> = Engine::ALL
+            .into_iter()
+            .filter(|engine| Target::built_in(*engine).row_edits())
+            .collect();
+        assert!(engines.len() > 1, "{engines:?}");
+        for engine in engines {
+            let table = engine.spec().qualified("public", "accounts");
+            for keys in [vec![("id", "7")], vec![("id", "7"), ("rev", "2")]] {
+                let row = pending_row(&[("name", set("wren")), ("note", NewValue::Default)], &keys);
+                let update = update_batch(engine, std::slice::from_ref(&row)).unwrap();
+                let delete = delete_row(engine, "public", "accounts", &keys, &[]).unwrap();
+                for statement in [update, delete] {
+                    let predicate = statement
+                        .trim_end_matches(';')
+                        .rsplit_once(" WHERE ")
+                        .unwrap()
+                        .1
+                        .to_string();
+                    let reread = row_reread(engine, &statement)
+                        .unwrap_or_else(|| panic!("{engine:?} read nothing of {statement}"));
+                    assert_eq!(
+                        reread,
+                        format!("SELECT * FROM {table} WHERE {predicate} LIMIT 2"),
+                        "{engine:?}: two rows already prove it names more than one"
+                    );
+                    assert!(is_generated_select(engine, &reread), "{engine:?} {reread}");
+                    // The apply sends a draft's statements one at a time, so
+                    // the unbracketed text of one is its own single statement.
+                    assert_eq!(
+                        generated_writes(engine, &statement),
+                        Some(vec![statement.trim_end_matches(';').to_string()]),
+                        "{engine:?}"
+                    );
+                }
+            }
+        }
+
+        let engine = Engine::Postgres;
+        let one = pending_row(&[("name", set("a"))], &[("id", "1")]);
+        let two = pending_row(&[("name", set("b"))], &[("id", "2")]);
+        let batch = update_batch(engine, &[one, two]).unwrap();
+        let insert = insert_row(engine, "public", "accounts", &[("name", Some("a"))], &[]).unwrap();
+        for refused in [
+            batch.as_str(),
+            insert.as_str(),
+            "BEGIN",
+            "COMMIT",
+            "DELETE FROM t",
+            "DELETE FROM t WHERE id > '7'",
+            "UPDATE t SET a = a + 1 WHERE id = 1",
+            "SELECT * FROM t WHERE id = '7'",
+        ] {
+            assert_eq!(row_reread(engine, refused), None, "{refused}");
+        }
+        // Two statements of a bracketed batch are two rows, never one read.
+        let bracketed = update_batch(
+            Engine::Sqlite,
+            &[
+                pending_row(&[("name", set("a"))], &[("id", "1")]),
+                pending_row(&[("name", set("b"))], &[("id", "2")]),
+            ],
+        )
+        .unwrap();
+        assert_eq!(row_reread(Engine::Sqlite, &bracketed), None, "{bracketed}");
+        assert_eq!(row_reread(Engine::Redis, "DEL k"), None);
+    }
+
+    #[test]
+    fn a_mongo_draft_is_written_key_checked_and_reread_through_the_sql_entry_points() {
+        let oid = |n: u8| format!("ObjectId('65a4f1c0ffffffffffffff{n:02x}')");
+        let delete = |n: u8| DraftDelete {
+            schema: "dbdelve_dev".into(),
+            table: "accounts".into(),
+            keys: vec![("_id".into(), oid(n))],
+            null_keys: Vec::new(),
+            types: vec![("_id".into(), "objectId".into())],
+        };
+        let deletes = [delete(1), delete(2)];
+        let updates = [PendingRow {
+            table: "accounts".into(),
+            sets: vec![("name".into(), set("Ada"))],
+            keys: vec![("_id".into(), oid(3))],
+            types: vec![
+                ("_id".into(), "objectId".into()),
+                ("name".into(), "string".into()),
+            ],
+            ..Default::default()
+        }];
+        let inserts = [DraftInsert {
+            schema: "dbdelve_dev".into(),
+            table: "accounts".into(),
+            columns: vec![("name".into(), Some("Cy".into()))],
+            types: vec![("name".into(), "string".into())],
+        }];
+
+        assert_eq!(
+            draft_batch(Engine::MongoDb, &deletes, &updates, &inserts),
+            crate::mql::draft_batch(&deletes, &updates, &inserts),
+        );
+        let batch = draft_batch(Engine::MongoDb, &deletes, &updates, &inserts)
+            .expect("a mongo draft is written");
+        assert!(is_generated_write_on(Engine::MongoDb, &batch), "{batch}");
+        assert_eq!(
+            draft_deletes_match(Engine::MongoDb, &batch, &["_id"], "dbdelve_dev", "accounts"),
+            Some(2)
+        );
+        assert_eq!(
+            draft_deletes_match(Engine::MongoDb, &batch, &["_id"], "dbdelve_dev", "other"),
+            None,
+            "a delete of another collection is not the marked documents'"
+        );
+
+        let statements = generated_writes(Engine::MongoDb, &batch).expect("a draft splits");
+        assert_eq!(statements.len(), 4, "{statements:?}");
+        for (statement, method) in
+            statements
+                .iter()
+                .zip(["deleteOne", "deleteOne", "updateOne", "insertOne"])
+        {
+            assert!(statement.contains(method), "{statement}");
+            assert!(!statement.ends_with(';'), "{statement}");
+            assert!(
+                is_generated_write_on(Engine::MongoDb, statement),
+                "{statement}"
+            );
+        }
+        for (statement, wanted) in statements.iter().zip([true, true, true, false]) {
+            assert_eq!(
+                row_reread(Engine::MongoDb, statement),
+                crate::mql::browse::row_reread(statement)
+            );
+            assert_eq!(
+                row_reread(Engine::MongoDb, statement).is_some(),
+                wanted,
+                "{statement}"
+            );
+        }
+        for refused in [
+            "db.getCollection(\"accounts\").deleteMany({})",
+            "db.getCollection(\"accounts\").find({})",
+            "db.getCollection(\"accounts\").deleteOne({_id: 1});\ndb.dropDatabase();",
+            "SELECT 1",
+            "",
+        ] {
+            assert_eq!(
+                generated_writes(Engine::MongoDb, refused),
+                None,
+                "{refused}"
+            );
+        }
+
+        // Redis writes no draft of this shape.
+        assert!(draft_batch(Engine::Redis, &deletes, &updates, &inserts).is_err());
+        assert_eq!(
+            draft_deletes_match(Engine::Redis, &batch, &["_id"], "d", "accounts"),
+            None
+        );
+        assert_eq!(row_reread(Engine::Redis, &statements[0]), None);
+        assert_eq!(generated_writes(Engine::Redis, &statements[0]), None);
+    }
+
+    /// `"id"` is a string on MySQL and MariaDB, so `WHERE "id" = 'id'` holds on
+    /// every row there; ClickHouse quotes with backticks too but reads it as a
+    /// name, as Postgres does.
+    #[test]
+    fn a_double_quoted_name_is_a_string_on_mysql_and_mariadb_only() {
+        for (engine, name) in [
+            (Engine::MySql, false),
+            (Engine::MariaDb, false),
+            (Engine::Postgres, true),
+            (Engine::ClickHouse, true),
+        ] {
+            let q = engine.qualified("s", "t");
+            let delete = format!("DELETE FROM {q} WHERE \"id\" = 'id'");
+            assert_eq!(
+                is_generated_write_on(engine, &delete),
+                name,
+                "{engine:?}: {delete}"
+            );
+            assert_eq!(
+                delete_matches_key_on(engine, &delete, &["id"]),
+                name,
+                "{engine:?}: {delete}"
+            );
+            if engine != Engine::ClickHouse {
+                let id = engine.quote_identifier("id");
+                let insert = format!("INSERT INTO {q} ({id}) VALUES ('9')");
+                let draft = format!("{delete};\n{insert};");
+                assert_eq!(
+                    draft_deletes_match(engine, &draft, &["id"], "s", "t").is_some(),
+                    name,
+                    "{engine:?}: {draft}"
+                );
+            }
+        }
+    }
+
     fn set(value: &str) -> NewValue {
         NewValue::Value(value.into())
     }
@@ -7384,6 +8390,386 @@ mod tests {
             held: Vec::new(),
             ..Default::default()
         }
+    }
+
+    fn draft_row_edit_engines() -> Vec<Engine> {
+        use crate::db::Target;
+
+        let engines: Vec<_> = Engine::ALL
+            .into_iter()
+            .filter(|engine| Target::built_in(*engine).row_edits())
+            .collect();
+        assert!(engines.len() > 1, "{engines:?}");
+        engines
+    }
+
+    #[test]
+    fn a_draft_refuses_a_hidden_delete_a_second_insert_row_and_a_comment_between_statements() {
+        for engine in draft_row_edit_engines() {
+            let q = engine.qualified("public", "accounts");
+            let id = engine.quote_identifier("id");
+            let name = engine.quote_identifier("Name");
+            let upd = format!("UPDATE {q} SET {name} = 'x' WHERE {id} = '8'");
+            let del = format!("DELETE FROM {q} WHERE {id} = '7'");
+            let ins = format!("INSERT INTO {q} ({id}) VALUES ('9')");
+            let cte_delete = format!("WITH d AS (DELETE FROM {q} WHERE {id} = '8' RETURNING *)");
+            let cases: Vec<(&str, Vec<String>)> = vec![
+                (
+                    "a CTE delete beside an update",
+                    vec![upd.clone(), format!("{cte_delete} SELECT 1")],
+                ),
+                (
+                    "an update carrying a CTE delete, beside an insert",
+                    vec![
+                        format!("{cte_delete} UPDATE {q} SET {name} = 'x' WHERE {id} = '8'"),
+                        ins.clone(),
+                    ],
+                ),
+                (
+                    "an update carrying a CTE delete, beside an update",
+                    vec![
+                        format!("{cte_delete} UPDATE {q} SET {name} = 'x' WHERE {id} = '8'"),
+                        upd.clone(),
+                    ],
+                ),
+                (
+                    "a delete beside a two-row insert",
+                    vec![del.clone(), format!("{ins}, ('10')")],
+                ),
+                (
+                    "a delete beside an insert from a select",
+                    vec![del.clone(), format!("INSERT INTO {q} SELECT * FROM {q}")],
+                ),
+                (
+                    "a delete beside an insert returning",
+                    vec![del.clone(), format!("{ins} RETURNING *")],
+                ),
+                (
+                    "a comment line between a delete and an insert",
+                    vec![del.clone(), "-- note".into(), ins.clone()],
+                ),
+                (
+                    "an executable comment between a delete and an insert",
+                    vec![del.clone(), "/*! SELECT 1 */".into(), ins.clone()],
+                ),
+                (
+                    "a delete matching more than its row, beside an insert",
+                    vec![format!("{del} OR 1 = 1"), ins.clone()],
+                ),
+                (
+                    "a delete with no where, beside an insert",
+                    vec![format!("DELETE FROM {q}"), ins.clone()],
+                ),
+            ];
+            for (case, statements) in &cases {
+                let body = statements
+                    .iter()
+                    .map(|statement| match statement.starts_with("--") {
+                        true => statement.clone(),
+                        false => format!("{statement};"),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                for text in [body.clone(), format!("BEGIN;\n{body}\nCOMMIT;")] {
+                    assert!(
+                        !is_generated_write_on(engine, &text),
+                        "{engine:?} admitted {case}: {text}"
+                    );
+                }
+            }
+            let unclosed = format!("BEGIN;\n{del};\n{ins};");
+            assert!(
+                !is_generated_write_on(engine, &unclosed),
+                "{engine:?} admitted a bracket never closed: {unclosed}"
+            );
+        }
+    }
+
+    fn draft_delete(id: &str) -> DraftDelete {
+        DraftDelete {
+            schema: "public".into(),
+            table: "accounts".into(),
+            keys: vec![("id".into(), id.into())],
+            null_keys: Vec::new(),
+            types: Vec::new(),
+        }
+    }
+
+    fn draft_insert(id: &str, name: Option<&str>) -> DraftInsert {
+        DraftInsert {
+            schema: "public".into(),
+            table: "accounts".into(),
+            columns: vec![
+                ("id".into(), Some(id.into())),
+                ("Name".into(), name.map(Into::into)),
+            ],
+            types: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_mixed_draft_is_admitted_with_or_without_its_brackets_on_every_row_edit_engine() {
+        for engine in draft_row_edit_engines() {
+            let shapes = [
+                (
+                    "delete, update, insert",
+                    vec![draft_delete("7")],
+                    vec![pending_row(&[("Name", set("x"))], &[("id", "8")])],
+                    vec![draft_insert("9", None)],
+                ),
+                (
+                    "delete, delete",
+                    vec![draft_delete("7"), draft_delete("8")],
+                    vec![],
+                    vec![],
+                ),
+                (
+                    "insert, insert",
+                    vec![],
+                    vec![],
+                    vec![draft_insert("9", None), draft_insert("10", Some("y"))],
+                ),
+                (
+                    "update, insert",
+                    vec![],
+                    vec![pending_row(&[("Name", set("x"))], &[("id", "8")])],
+                    vec![draft_insert("9", None)],
+                ),
+                (
+                    "delete, insert",
+                    vec![draft_delete("7")],
+                    vec![],
+                    vec![draft_insert("9", None)],
+                ),
+                (
+                    "delete, update",
+                    vec![draft_delete("7")],
+                    vec![pending_row(&[("Name", set("x"))], &[("id", "8")])],
+                    vec![],
+                ),
+            ];
+            for (shape, deletes, updates, inserts) in &shapes {
+                let batch = draft_batch(engine, deletes, updates, inserts)
+                    .unwrap_or_else(|error| panic!("{engine:?} {shape}: {error}"));
+                assert!(
+                    is_generated_write_on(engine, &batch),
+                    "{engine:?} refused {shape}: {batch}"
+                );
+                match engine.transaction_start() {
+                    Some(word) => {
+                        assert!(batch.starts_with(&format!("{word};\n")), "{batch}");
+                        assert!(batch.ends_with("\nCOMMIT;"), "{batch}");
+                    }
+                    None => assert!(
+                        !batch.contains("BEGIN") && !batch.contains("COMMIT"),
+                        "{engine:?} {shape}: {batch}"
+                    ),
+                }
+            }
+        }
+
+        // ClickHouse names a row by every value, which a sequence cannot count.
+        let engine = Engine::ClickHouse;
+        let typed = DraftDelete {
+            types: vec![("id".into(), "Int32".into())],
+            ..draft_delete("7")
+        };
+        let batch = draft_batch(
+            engine,
+            std::slice::from_ref(&typed),
+            &[],
+            &[draft_insert("9", None)],
+        )
+        .unwrap();
+        assert!(!is_generated_write_on(engine, &batch), "{batch}");
+    }
+
+    #[test]
+    fn a_draft_sets_bytes_in_the_engines_literal_and_no_value_a_lone_update_refuses() {
+        for engine in draft_row_edit_engines() {
+            let Some(literal) = engine.binary_literal(b"hi") else {
+                continue;
+            };
+            let batch = draft_batch(
+                engine,
+                &[draft_delete("7")],
+                &[pending_row(
+                    &[("Name", NewValue::Bytes(b"hi".to_vec()))],
+                    &[("id", "8")],
+                )],
+                &[],
+            )
+            .unwrap_or_else(|error| panic!("{engine:?}: {error}"));
+            assert!(batch.contains(&literal), "{engine:?}: {batch}");
+            assert!(is_generated_write_on(engine, &batch), "{engine:?}: {batch}");
+
+            let q = engine.qualified("public", "accounts");
+            let id = engine.quote_identifier("id");
+            let name = engine.quote_identifier("Name");
+            let del = format!("DELETE FROM {q} WHERE {id} = '7';");
+            for value in ["now()", "'a' || 'b'", "(SELECT 1)", "'x' /*! , 1 */"] {
+                let draft = format!("{del}\nUPDATE {q} SET {name} = {value} WHERE {id} = '8';");
+                assert!(
+                    !is_generated_write_on(engine, &draft),
+                    "{engine:?} admitted {value}: {draft}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_write_setting_bytes_is_cut_into_steps_and_re_read_as_any_other() {
+        for engine in draft_row_edit_engines() {
+            if engine.binary_literal(b"hi").is_none() {
+                continue;
+            }
+            let update = pending_row(&[("Name", NewValue::Bytes(b"hi".to_vec()))], &[("id", "8")]);
+            let lone = update_batch(engine, std::slice::from_ref(&update))
+                .unwrap_or_else(|error| panic!("{engine:?}: {error}"));
+            let draft = draft_batch(engine, &[draft_delete("7")], &[update], &[])
+                .unwrap_or_else(|error| panic!("{engine:?}: {error}"));
+            for (batch, steps) in [(lone, 1), (draft, 2)] {
+                let statements = generated_writes(engine, &batch)
+                    .unwrap_or_else(|| panic!("{engine:?}: not cut: {batch}"));
+                assert_eq!(statements.len(), steps, "{engine:?}: {batch}");
+                for statement in &statements {
+                    assert!(
+                        row_reread(engine, statement).is_some(),
+                        "{engine:?}: no re-read of {statement}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_draft_batch_keeps_its_statements_recoverable_in_delete_update_insert_order() {
+        for engine in draft_row_edit_engines() {
+            let updates = [
+                pending_row(&[("Name", set("a"))], &[("id", "8")]),
+                pending_row(&[("Name", set("b"))], &[("id", "4")]),
+            ];
+            let batch = draft_batch(
+                engine,
+                &[draft_delete("5"), draft_delete("2")],
+                &updates,
+                &[draft_insert("11", Some("k")), draft_insert("10", None)],
+            )
+            .unwrap();
+            let statements = generated_writes(engine, &batch)
+                .unwrap_or_else(|| panic!("{engine:?} recovered nothing of {batch}"));
+            let delete = |id| delete_row(engine, "public", "accounts", &[("id", id)], &[]).unwrap();
+            let insert = |id, name: Option<&str>| {
+                insert_row(
+                    engine,
+                    "public",
+                    "accounts",
+                    &[("id", Some(id)), ("Name", name)],
+                    &[],
+                )
+                .unwrap()
+            };
+            let update = |row: &PendingRow| {
+                update_batch(engine, std::slice::from_ref(row))
+                    .unwrap()
+                    .trim_end_matches(';')
+                    .to_string()
+            };
+            assert_eq!(
+                statements,
+                [
+                    delete("5"),
+                    delete("2"),
+                    update(&updates[0]),
+                    update(&updates[1]),
+                    insert("11", Some("k")),
+                    insert("10", None),
+                ],
+                "{engine:?}: {batch}"
+            );
+            for statement in &statements {
+                assert!(
+                    is_generated_write_on(engine, statement),
+                    "{engine:?} refused alone: {statement}"
+                );
+            }
+
+            // One statement is never bracketed, whichever kind it is.
+            for one in [
+                draft_batch(engine, &[draft_delete("5")], &[], &[]),
+                draft_batch(engine, &[], &updates[..1], &[]),
+                draft_batch(engine, &[], &[], &[draft_insert("11", None)]),
+            ] {
+                let one = one.unwrap();
+                assert!(
+                    !one.contains("BEGIN") && !one.contains("COMMIT") && one.ends_with(';'),
+                    "{engine:?}: {one}"
+                );
+            }
+            assert_eq!(
+                draft_batch(engine, &[], &[], &[]),
+                Err("There are no edits to apply.".to_string()),
+                "{engine:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_key_check_of_a_draft_reads_kinds_and_table_from_the_tree() {
+        for engine in [Engine::Sqlite, Engine::Postgres, Engine::SqlServer] {
+            let update = pending_row(&[("Name", set("x"))], &[("id", "8")]);
+            let batch =
+                |deletes: &[DraftDelete], updates: &[PendingRow], inserts: &[DraftInsert]| {
+                    draft_batch(engine, deletes, updates, inserts).unwrap()
+                };
+            let key = |keys: &[&str], batch: &str| {
+                draft_deletes_match(engine, batch, keys, "public", "accounts")
+            };
+
+            let two = batch(
+                &[draft_delete("1"), draft_delete("2")],
+                std::slice::from_ref(&update),
+                &[draft_insert("9", None)],
+            );
+            assert_eq!(key(&["id"], &two), Some(2), "{engine:?}: {two}");
+            assert_eq!(key(&["Region", "id"], &two), None, "half a key: {two}");
+            assert_eq!(key(&["Region"], &two), None, "{two}");
+
+            let elsewhere = DraftDelete {
+                table: "other".into(),
+                ..draft_delete("3")
+            };
+            let other = batch(&[draft_delete("1"), elsewhere], &[], &[]);
+            assert_eq!(key(&["id"], &other), None, "{engine:?}: {other}");
+
+            let none = batch(
+                &[],
+                std::slice::from_ref(&update),
+                &[draft_insert("9", None)],
+            );
+            assert_eq!(key(&["id"], &none), Some(0), "{engine:?}: {none}");
+            assert_eq!(key(&["id"], "DELETE FROM WHERE (((;"), None);
+            assert_eq!(key(&["id"], ""), None);
+            // A delete whose predicate is not a one-row key is no delete to count.
+            let (table, id) = (
+                engine.qualified("public", "accounts"),
+                engine.quote_identifier("id"),
+            );
+            let wide = format!(
+                "DELETE FROM {table} WHERE {id} = '1';\nDELETE FROM {table} WHERE {id} = '1' OR 1 = 1;"
+            );
+            assert_eq!(key(&["id"], &wide), None, "{engine:?}: {wide}");
+        }
+        assert_eq!(
+            draft_deletes_match(
+                Engine::Redis,
+                "db.t.deleteOne({_id: 1})",
+                &["_id"],
+                "d",
+                "t"
+            ),
+            None
+        );
     }
 
     #[test]
@@ -10037,7 +11423,11 @@ mod tests {
                 &closed,
             ),
             (Engine::Postgres, "SET search_path TO other", &settings),
-            (Engine::MySql, "SET autocommit = 0", &settings),
+            (
+                Engine::MySql,
+                "SET autocommit = 1, transaction_read_only = 0",
+                &settings,
+            ),
             (Engine::MySql, "SET @x = 1", &settings),
             (Engine::MySql, "USE other", &settings),
             (Engine::SqlServer, "SET NOCOUNT ON", &settings),
@@ -10076,6 +11466,188 @@ mod tests {
             (Engine::MongoDb, "db.a.insertOne({ x: 1 })"),
         ] {
             assert_eq!(leaves(engine, statement), Leaves::default(), "{statement}");
+        }
+    }
+
+    /// A row named by every value, over hostile names and values, is written
+    /// on each of the six engines that verify as statements the gate admits,
+    /// each read again by a read cut from it that the read gate admits too.
+    #[test]
+    fn a_keyless_rows_writes_with_hostile_names_and_values_pass_the_gates_and_read_back() {
+        let engines = [
+            Engine::Postgres,
+            Engine::MySql,
+            Engine::MariaDb,
+            Engine::Sqlite,
+            Engine::DuckDb,
+            Engine::SqlServer,
+        ];
+        // Each hostile part alone, over an otherwise plain row, so a refusal
+        // names what it refused.
+        let tables = ["birds", "we\"ird", "back`tick", "it's", "dou\"\"bled"];
+        let columns = ["bird", "we\"ird", "back`tick", "it's", "dou\"\"bled", "[b]"];
+        let values = [
+            "wren",
+            "we\"ird",
+            "it's",
+            "x''y",
+            "back`tick",
+            "a\\b",
+            "a\\'b",
+            "N'x'",
+        ];
+        let (mut admitted, mut unread) = (Vec::new(), Vec::new());
+        for engine in engines {
+            let schema = match engine {
+                Engine::Sqlite => "main",
+                Engine::SqlServer => "dbo",
+                _ => "public",
+            };
+            let cases = tables
+                .iter()
+                .map(|table| (*table, "bird", "wren"))
+                .chain(columns.iter().map(|column| ("birds", *column, "wren")))
+                .chain(values.iter().map(|value| ("birds", "bird", *value)));
+            for (table, column, value) in cases {
+                let keys = [(column, value), ("place", "oak")];
+                let delete = delete_row_matching(engine, schema, table, &keys, &["gone"], &[])
+                    .unwrap_or_else(|| panic!("{engine:?}: no DELETE"));
+                let update = update_batch(
+                    engine,
+                    &[PendingRow {
+                        schema: schema.into(),
+                        table: table.into(),
+                        sets: vec![("place".into(), NewValue::Value(value.into()))],
+                        keys: keys
+                            .iter()
+                            .map(|(column, value)| (column.to_string(), value.to_string()))
+                            .collect(),
+                        null_keys: vec!["gone".into()],
+                        ..PendingRow::default()
+                    }],
+                )
+                .unwrap_or_else(|error| panic!("{engine:?}: {error}"));
+                for statement in [delete, update] {
+                    // Refusing is the gate's right: such a table is read-only.
+                    // What it admits must be read again by its own predicate.
+                    if !is_generated_write_on(engine, &statement) {
+                        assert_eq!(row_reread(engine, &statement), None, "{statement}");
+                        continue;
+                    }
+                    admitted.push((engine, table, column, value));
+                    let written = generated_writes(engine, &statement);
+                    let Some([one]) = written.as_deref() else {
+                        panic!("{engine:?}: not one statement: {statement}");
+                    };
+                    // No re-read leaves the draft unreviewed, which fails closed.
+                    let Some(reread) = row_reread(engine, one) else {
+                        unread.push(one.to_string());
+                        continue;
+                    };
+                    assert!(is_generated_select(engine, &reread), "{engine:?}: {reread}");
+                    let predicate = one.trim_end_matches(';').rsplit_once(" WHERE ").unwrap().1;
+                    assert!(
+                        reread.ends_with(&format!(" WHERE {predicate} LIMIT 2")),
+                        "{engine:?}: {reread}"
+                    );
+                    if one.starts_with("UPDATE") {
+                        let read = row_read(engine, one)
+                            .unwrap_or_else(|| panic!("{engine:?}: no read back of {one}"));
+                        assert!(is_generated_select(engine, &read), "{engine:?}: {read}");
+                    }
+                    if matches!(engine, Engine::MySql | Engine::MariaDb) {
+                        assert_eq!(
+                            written_table(engine, one),
+                            Some(vec![schema.to_string(), table.to_string()]),
+                            "{engine:?}: {one}"
+                        );
+                    }
+                }
+            }
+        }
+        // Every hostile value is written, admitted and read back on all six:
+        // a value is quoted, never refused.
+        for engine in engines {
+            for value in values {
+                let both = admitted
+                    .iter()
+                    .filter(|case| **case == (engine, "birds", "bird", value))
+                    .count();
+                assert!(both >= 2, "{engine:?}: {value}");
+            }
+        }
+        // ponytail: the grammar splits a table name holding a doubled quote in
+        // an `UPDATE` (not a `DELETE`), so such a draft has no re-read and is
+        // refused at review. It fails closed; reading the name whole is the fix.
+        assert!(
+            unread
+                .iter()
+                .all(|statement| statement.contains("\"we\"\"ird\"")),
+            "{unread:#?}"
+        );
+    }
+
+    /// The table a generated write names is read whole, quoting and all, so
+    /// the apply can ask the catalog about the very table it writes.
+    #[test]
+    fn a_generated_writes_table_is_read_off_its_parse() {
+        let names = |engine: Engine, statement: &str| written_table(engine, statement);
+        let parts = |parts: &[&str]| Some(parts.iter().map(|part| part.to_string()).collect());
+        assert_eq!(
+            names(
+                Engine::MySql,
+                "UPDATE `dev`.`we``ird` SET `a` = 'it\\'s' WHERE `id` = '1'"
+            ),
+            parts(&["dev", "we`ird"])
+        );
+        assert_eq!(
+            names(Engine::MariaDb, "DELETE FROM `dev`.`t` WHERE `id` = '1'"),
+            parts(&["dev", "t"])
+        );
+        assert_eq!(
+            names(Engine::MySql, "INSERT INTO `dev`.`t` (`id`) VALUES ('1')"),
+            parts(&["dev", "t"])
+        );
+        assert_eq!(names(Engine::MySql, "SELECT * FROM `dev`.`t`"), None);
+        assert_eq!(
+            names(
+                Engine::MySql,
+                "DELETE FROM `a` WHERE 1; DELETE FROM `b` WHERE 1"
+            ),
+            None
+        );
+    }
+
+    /// MySQL's `autocommit` off and SQL Server's implicit transactions on
+    /// leave the session inside a transaction from the next statement on.
+    #[test]
+    fn a_set_that_leaves_every_statement_in_a_transaction_opens_one() {
+        let left = |open| Leaves {
+            transaction: Some(open),
+            settings: true,
+        };
+        for (engine, statement, expected) in [
+            (Engine::MySql, "SET autocommit = 0", left(true)),
+            (Engine::MySql, "set autocommit=OFF", left(true)),
+            (Engine::MySql, "SET SESSION autocommit = 0", left(true)),
+            (Engine::MySql, "SET @@session.autocommit = 0", left(true)),
+            (Engine::MariaDb, "SET autocommit = 0", left(true)),
+            (Engine::MySql, "SET autocommit = 1", left(false)),
+            (
+                Engine::SqlServer,
+                "SET IMPLICIT_TRANSACTIONS ON",
+                left(true),
+            ),
+            (
+                Engine::SqlServer,
+                "SET IMPLICIT_TRANSACTIONS OFF",
+                Leaves {
+                    transaction: None,
+                    settings: true,
+                },
+            ),
+        ] {
+            assert_eq!(leaves(engine, statement), expected, "{statement}");
         }
     }
 

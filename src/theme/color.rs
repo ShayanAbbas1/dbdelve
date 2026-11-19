@@ -163,6 +163,13 @@ impl Srgb {
             + 0.0722 * gamma_decode(self.b)
     }
 
+    /// How far `other` is from `self`: Euclidean, in 0-255 levels. The metric
+    /// every "stands off" floor in the theme tests is set in.
+    pub fn distance(self, other: Self) -> f32 {
+        let level = |a: f32, b: f32| ((a - b) * 255.0).powi(2);
+        (level(self.r, other.r) + level(self.g, other.g) + level(self.b, other.b)).sqrt()
+    }
+
     /// Composite `self` over `backdrop` at `alpha`, in gamma-encoded space.
     ///
     /// Blending in gamma space is not physically correct, but it is what every

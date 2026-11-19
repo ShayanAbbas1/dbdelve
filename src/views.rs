@@ -39,7 +39,7 @@ use crate::{
         AcceptCompletion, AddFilter, CancelQuery, CopyCell, CopySelection, CustomRowLimit,
         ExplainQuery, FormatQuery, ImportRows, ImportRowsFromClipboard, LimitTarget, NewQuery,
         NewRow, NextPage, PreviousPage, RemoveFilter, RunQuery, SaveQuery, SetDefaultRowLimit,
-        SetFilterColumn, SetFilterOperator, SetFilterRaw, SetQueryLimit, SetRowLimit,
+        SetEditMode, SetFilterColumn, SetFilterOperator, SetFilterRaw, SetQueryLimit, SetRowLimit,
         ToggleComment, ToggleFilterJoin, ToggleNextJoin, ToggleResults, ToggleRowPanel,
     },
     db,
@@ -53,8 +53,8 @@ use crate::{
     result_grid::{NewValue, ResultGrid},
     scroller::{SmoothScrollable, scroll_to, smooth, smooth_for, smooth_scoped},
     session::{
-        Explained, ObjectBody, ObjectTab, Profile, ProfileState, QueryState, QueryTab, Said,
-        Session, StructureState, Tab, insert_left_out, query_label, result_pane_is_expanded,
+        EditMode, Explained, ObjectBody, ObjectTab, Profile, ProfileState, QueryState, QueryTab,
+        Said, Session, StructureState, Tab, insert_left_out, query_label, result_pane_is_expanded,
     },
     sidebar::ViewMode,
     sql::Mode,
@@ -152,7 +152,7 @@ pub struct RowInput {
     /// [`ResultGrid::binary_seed_key`] as `seed` was made: a binary cell's
     /// seed is decoded again only when it changes, and a draft typed in one
     /// form is never read in another.
-    pub binary: Option<(Option<result_grid::BinaryForm>, Option<NewValue>)>,
+    pub binary: Option<(Option<result_grid::BinaryForm>, Option<NewValue>, u64)>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1660,6 +1660,7 @@ fn render_results(
                 .on_action(cx.listener(Workspace::set_default))
                 .on_action(cx.listener(Workspace::request_write_mode))
                 .on_action(cx.listener(Workspace::refuse_edit))
+                .on_action(cx.listener(Workspace::step_past_edge))
                 .on_action(cx.listener(Workspace::delete_row))
                 .on_action(cx.listener(Workspace::follow_foreign_key))
                 .on_action(cx.listener(Workspace::open_reference))
@@ -2124,7 +2125,8 @@ fn render_row_inspector(
             .collect();
         (
             row_ix,
-            delegate.rows_count(cx),
+            // Rows of the result: an added row is no part of the count.
+            delegate.fetched_rows(),
             delegate.fields(row_ix),
             delegate.active(),
             delegate.row_editable(row_ix),
@@ -2241,11 +2243,16 @@ fn render_row_inspector(
                         div()
                             .text_size(px(layout::chrome(layout::TEXT_SM)))
                             .text_color(t.text_muted)
-                            .child(format!(
-                                "Row {} of {}",
-                                group_thousands(row_ix as u64 + 1),
-                                group_thousands(rows as u64)
-                            )),
+                            // A row added in the grid is past the rows the
+                            // result has, and "3 of 2" would read as a bug.
+                            .child(match row_ix < rows {
+                                true => format!(
+                                    "Row {} of {}",
+                                    group_thousands(row_ix as u64 + 1),
+                                    group_thousands(rows as u64)
+                                ),
+                                false => "New row".to_string(),
+                            }),
                     )
                     .child(
                         div()
@@ -2840,7 +2847,7 @@ fn relation_preview(session: &Session) -> Option<(Option<usize>, usize, bool)> {
     })
 }
 
-/// A run in flight, centred in the status bar in place of the pager: how long
+/// A run in flight, in the status bar in place of the pager: how long
 /// it has taken, the rows that have streamed in so far, and the way to stop it.
 pub(crate) fn render_running(
     query: &QueryState,
@@ -2859,7 +2866,7 @@ pub(crate) fn render_running(
     let (rows, streaming, filled) = results.map_or((0, false, None), |results| {
         let grid = results.read(cx).delegate();
         (
-            grid.rows_count(cx),
+            grid.fetched_rows(),
             grid.streamed_set().is_some(),
             grid.filled(),
         )
@@ -2916,7 +2923,7 @@ pub(crate) fn render_running(
     )
 }
 
-/// The preview's row limit and pager, centred in the status bar: what the
+/// The preview's row limit and pager, in the status bar: what the
 /// relation's rows were asked for, and the way to the ones after them. `None`
 /// where there are no rows to page.
 pub(crate) fn render_paging(
@@ -2996,6 +3003,7 @@ pub(crate) fn render_paging(
                             Control::Compact,
                             t,
                         )
+                        .debug_selector(|| "next-page".into())
                         .tooltip("Next page")
                         .on_click(move |_, window, cx| {
                             window.dispatch_action(Box::new(NextPage), cx);
@@ -3122,6 +3130,72 @@ pub(crate) fn chip_context(profile: &Profile, tab: Tab, complex: bool) -> Option
         (true, Some(binding)) => Some(format!("{} \u{b7} {binding}", profile.name)),
         (true, None) => Some(profile.name.clone()),
         (false, binding) => binding,
+    }
+}
+
+/// The edit mode of the view in front, where there is a choice of one: `None`
+/// on anything but a relation's rows, and on a target whose relations are not
+/// edited. The status bar's menu and the palette's rows for it.
+pub(crate) fn view_edit_mode(profile: &Profile) -> Option<EditMode> {
+    let session = &profile.session;
+    // The target is asked, never the engine. Every target whose relations are
+    // edited has Classic and Draft to choose between; which offer Row is
+    // `EditMode::offered`'s to say.
+    (relation_preview(session).is_some() && profile.config.target().edits_relations())
+        .then(|| session.edit_mode(session.active))
+}
+
+/// How the view in front sends its edits: Classic and Draft hold them for a
+/// review, Row sends a row's own `UPDATE`.
+pub(crate) fn render_edit_mode(
+    profile: &Profile,
+    cx: &mut Context<Workspace>,
+) -> Option<AnyElement> {
+    let t = *theme(cx);
+    let target = profile.config.target();
+    view_edit_mode(profile).map(|mode| {
+        div()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap(px(layout::SPACE_XS))
+            .child(
+                div()
+                    .text_size(px(layout::chrome(layout::TEXT_SM)))
+                    .text_color(t.text_faint)
+                    .child("Edit"),
+            )
+            // One menu rather than a chip per mode: three chips cost the bar
+            // the room its other controls need on a narrow window.
+            .child(
+                div().debug_selector(|| "edit-mode".into()).child(
+                    button("edit-mode", mode.label(), Tone::Quiet, Control::Compact, t)
+                        .child(
+                            icon(icon::CHEVRON_DOWN)
+                                .size(px(layout::chrome(layout::ICON_SIZE)))
+                                .text_color(t.text_faint),
+                        )
+                        .dropdown_menu(move |menu, _, _| {
+                            EditMode::offered(target).fold(menu, |menu, choice| {
+                                menu.menu_with_check(
+                                    choice.label(),
+                                    choice == mode,
+                                    Box::new(SetEditMode { mode: choice }),
+                                )
+                            })
+                        }),
+                ),
+            )
+            .into_any_element()
+    })
+}
+
+/// What the button over staged edits says it does: a Row view saves the row,
+/// a Classic or Draft view applies the edits through the review.
+pub(crate) fn apply_label(mode: Option<EditMode>) -> &'static str {
+    match mode {
+        Some(EditMode::Row) => "Save row",
+        _ => "Apply edits",
     }
 }
 
@@ -3934,6 +4008,14 @@ mod tests {
     use lsp_types::CompletionItem;
 
     use super::*;
+
+    #[test]
+    fn the_button_over_staged_edits_names_what_it_does_in_each_mode() {
+        assert_eq!(apply_label(Some(EditMode::Row)), "Save row");
+        assert_eq!(apply_label(Some(EditMode::Draft)), "Apply edits");
+        assert_eq!(apply_label(Some(EditMode::Classic)), "Apply edits");
+        assert_eq!(apply_label(None), "Apply edits");
+    }
 
     struct CompletionEditors {
         query: Entity<EditorState>,
