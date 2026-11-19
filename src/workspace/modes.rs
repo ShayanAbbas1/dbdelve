@@ -29,6 +29,16 @@ impl Workspace {
             && (script_refused(profile, mode)
                 || startup_refused(profile, &profile.connected_script, mode));
         let id = profile.id.clone();
+        if regate && profile.any_transaction_open() {
+            // The reconnect would drop the sessions, and the server would
+            // roll back work the user chose neither to commit nor to discard.
+            self.note(
+                "The mode was not changed: a transaction is open and the startup script needs the higher mode. Commit or roll it back first."
+                    .into(),
+                cx,
+            );
+            return;
+        }
         if regate && let Some(running) = self.running_import_into(&id) {
             // `reconnect` declines to interrupt an import, and a mode lowered
             // without it would show less than the open sessions ran under.
