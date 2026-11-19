@@ -93,7 +93,7 @@ impl ConnectAttempt {
         if let Some(send) = cleanup.sender.take() {
             let _ = send.send(result);
         } else {
-            // Startup can fail before Disconnect installs the observer.
+            // Preserve delivery even when cleanup beats observer registration.
             cleanup.result = Some(result);
         }
     }
@@ -295,6 +295,7 @@ struct Output {
     session: Option<String>,
     last_diagnostic: Option<String>,
     closed: bool,
+    stdout_done: bool,
 }
 impl Output {
     fn line(&mut self, line: &str, stdout: bool) {
@@ -433,7 +434,25 @@ fn drain(reader: impl Read + Send + 'static, output: Arc<Mutex<Output>>, stdout:
                 .unwrap_or_else(|p| p.into_inner())
                 .line(&String::from_utf8_lossy(&line), stdout);
         }
+        if stdout {
+            output.lock().unwrap_or_else(|p| p.into_inner()).stdout_done = true;
+        }
     });
+}
+
+// Only the background cleanup waits: closing the local tunnel never waits on
+// output readers, including a descendant that keeps stdout open indefinitely.
+fn cleanup_session(output: &Mutex<Output>, timeout: Duration) -> Option<String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        {
+            let output = output.lock().unwrap_or_else(|p| p.into_inner());
+            if output.session.is_some() || output.stdout_done || Instant::now() >= deadline {
+                return output.session.clone();
+            }
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 pub(super) struct Tunnel {
@@ -622,14 +641,10 @@ impl Drop for Tunnel {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .stop();
-        let session = self
-            .output
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .session
-            .clone();
+        let output = self.output.clone();
         let config = self.config.clone();
         thread::spawn(move || {
+            let session = cleanup_session(&output, Duration::from_secs(1));
             let accepted = if let Some(session) = &session {
                 let mut args = vec![
                     "ssm".into(),
@@ -672,6 +687,41 @@ mod tests {
             ..Default::default()
         }
     }
+    #[test]
+    fn cleanup_waits_for_late_stdout_but_not_indefinitely() {
+        let output = Arc::new(Mutex::new(Output::default()));
+        let pending = output.clone();
+        let reader = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(30));
+            drain(
+                std::io::Cursor::new(b"Starting session with SessionId: late-session"),
+                pending,
+                true,
+            );
+        });
+        assert_eq!(
+            cleanup_session(&output, Duration::from_secs(2)).as_deref(),
+            Some("late-session")
+        );
+        reader.join().unwrap();
+
+        let unread = Mutex::new(Output::default());
+        assert_eq!(cleanup_session(&unread, Duration::from_millis(20)), None);
+    }
+
+    #[test]
+    fn cleanup_returns_on_stdout_eof_before_timeout() {
+        let output = Arc::new(Mutex::new(Output::default()));
+        drain(std::io::empty(), output.clone(), true);
+        let timeout = Duration::from_secs(2);
+        let started = Instant::now();
+        assert_eq!(cleanup_session(&output, timeout), None);
+        assert!(
+            started.elapsed() < timeout,
+            "EOF must end the wait, not the deadline"
+        );
+    }
+
     #[test]
     fn cleanup_completed_before_subscription_is_delivered() {
         for accepted in [false, true] {
@@ -1007,6 +1057,33 @@ mod lifecycle_tests {
             thread::sleep(Duration::from_millis(20));
         }
     }
+    #[test]
+    fn cleanup_recovers_session_id_parsed_after_drop() {
+        let mut fixture = Fixture::new("ready");
+        let attempt = ConnectAttempt::default();
+        fixture.config.attempt = Some(attempt.clone());
+        let mut tunnel = fixture.open();
+        // Hold the reader's result until after Drop, as when stdout is buffered
+        // but its drain thread has not yet been scheduled.
+        let output = Arc::new(Mutex::new(Output::default()));
+        tunnel.output = output.clone();
+        fs::write(
+            fixture.config.aws_cli.as_ref().unwrap(),
+            "#!/bin/sh\nprintf '{\"SessionId\":\"late-session\"}'\n",
+        )
+        .unwrap();
+        let receiver = attempt.observe_cleanup();
+        drop(tunnel);
+        // Reaching here before providing output proves local Drop did not wait.
+        output
+            .lock()
+            .unwrap()
+            .line("Starting session with SessionId: late-session", true);
+        let result = cleanup_result(receiver);
+        assert!(result.accepted);
+        assert_eq!(result.session.as_deref(), Some("late-session"));
+    }
+
     #[test]
     fn cleanup_result_waits_for_last_tunnel_owner() {
         let mut fixture = Fixture::new("ready");

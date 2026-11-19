@@ -2871,6 +2871,10 @@ pub(crate) fn spawn_blocking<T: Send + 'static>(
     // thread and fails a test woken from any other, so the end-to-end tests
     // get the work inline, as one blocking task at a time.
     if executor.is_test() {
+        #[cfg(test)]
+        if e2e::THREADED_BLOCKING.get() {
+            return e2e::threaded_work(executor, work);
+        }
         return executor.spawn(async move { work() });
     }
     executor.spawn(blocking::unblock(work))

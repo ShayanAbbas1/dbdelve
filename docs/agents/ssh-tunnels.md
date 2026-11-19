@@ -269,9 +269,12 @@ Remote termination is best effort with its own three-second budget; local
 teardown never waits for AWS.
 
 SSM cleanup reports a bounded one-time termination result through the runtime
-connection attempt when an explicitly disconnected tunnel is finally dropped.
-Disconnect subscribes before cancelling an in-flight connection too, so a
-session whose ID has not arrived still produces an uncertainty notice.
+connection attempt when its tunnel is finally dropped. The workspace subscribes
+for each SSM connect and form test, independently of the form and profile
+generation, so cancellation, failure, and reconnect cannot discard the result.
+Background cleanup waits up to one second for a late stdout session ID, ending
+early on stdout EOF; local teardown does not wait for that drain. A session
+whose ID never arrives still produces an uncertainty notice.
 The window keeps unconfirmed results separately from other notices;
 profile and region are configured settings, not verified identity. No result
 is persisted, and the local watchdog never waits for the remote request.

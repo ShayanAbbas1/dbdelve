@@ -94,7 +94,8 @@ Job Object. Local cleanup is independent of a bounded, best-effort remote
 remote session visible until AWS expires it. A dropped tunnel never falls
 back to a direct database connection or replays a query.
 
-If AWS does not confirm the termination request after an explicit disconnect,
+If AWS does not confirm termination after a connection test, failed or cancelled
+connection, reconnect, or disconnect,
 DBDelve shows the observed session ID, if available, and the configured profile
 and region in a notice. Copy the ID to locate the session in the AWS
 Session Manager console and choose the correct account and region before ending
