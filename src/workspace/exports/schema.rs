@@ -261,7 +261,9 @@ fn read_tables(
     schema: &str,
     tables: &[String],
 ) -> Result<(Vec<Table>, Sequences), String> {
-    let own = connection.apart().map_err(|error| error.to_string())?;
+    let own = connection
+        .apart_unpathed()
+        .map_err(|error| error.to_string())?;
     let read = tables
         .iter()
         .map(|name| {

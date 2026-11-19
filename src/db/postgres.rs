@@ -1250,6 +1250,18 @@ impl Connection {
         })
     }
 
+    /// [`Self::alongside`] with an empty `search_path`, for reading text meant
+    /// to run on another session. The catalog's functions (`format_type`,
+    /// `pg_get_expr`, `pg_get_constraintdef`, `pg_get_indexdef`) name a schema
+    /// only where the path does not reach it, and the path here would start
+    /// with the profile's schema; empty, every name they write is qualified,
+    /// as pg_dump reads them.
+    pub fn alongside_unpathed(&self) -> Result<Self, DbError> {
+        let own = self.alongside()?;
+        own.internal_query("SELECT pg_catalog.set_config('search_path', '', false)")?;
+        Ok(own)
+    }
+
     /// A session on `database`, for the (connection, database) pair: a new
     /// connection from this one's live server config -- its resolved password
     /// and its route -- with the database replaced and no schema picked, which

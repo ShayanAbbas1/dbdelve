@@ -966,6 +966,70 @@ fn live_a_schema_exported_as_sql_runs_back_on_postgres() {
     assert_a_schema_runs_back(postgres(), Engine::Postgres, "public");
 }
 
+/// The export's session has the profile's schema first on its path, and
+/// Postgres names a schema only where the path does not reach it. The file
+/// runs back on a session whose path the schema is not on.
+#[test]
+#[ignore = "needs the dev Postgres"]
+fn live_a_schema_on_the_path_is_named_throughout_on_postgres() {
+    let schema: &'static str =
+        Box::leak(format!("dbdelve_export_path_{}", std::process::id()).into_boxed_str());
+    let exporting = postgres();
+    let mut parent = Throwaway::new(exporting.clone(), Engine::Postgres, schema, "parent");
+    let child = Throwaway::new(exporting.clone(), Engine::Postgres, schema, "child");
+    parent.run("DROP SCHEMA IF EXISTS {schema} CASCADE");
+    parent.run("CREATE SCHEMA {schema}");
+    parent.drop_after("DROP SCHEMA IF EXISTS {schema} CASCADE");
+    exporting.set_schema(Some(schema));
+    parent.run("CREATE TYPE {schema}.mood AS ENUM ('calm', 'cross')");
+    parent.run("CREATE TABLE {table} (id int PRIMARY KEY)");
+    parent.run("INSERT INTO {table} VALUES (1)");
+    child.run(&format!(
+        "CREATE TABLE {{table}} (id serial PRIMARY KEY, \
+         parent_id int REFERENCES {} (id), mood {schema}.mood)",
+        parent.named("{table}")
+    ));
+    child.run("CREATE INDEX ON {table} (parent_id)");
+    child.run("INSERT INTO {table} (parent_id, mood) VALUES (1, 'calm'), (1, 'cross')");
+    let befores = [parent.rows(), child.rows()];
+
+    let path = parent.directory.join("schema.sql");
+    let request = SchemaRequest {
+        tables: vec![child.name.clone(), parent.name.clone()],
+        structure: true,
+        rows: true,
+        partitioned: Vec::new(),
+    };
+    export_schema(
+        &exporting,
+        schema,
+        &request,
+        false,
+        Engine::Postgres,
+        &path,
+        &ExportProgress::default(),
+    )
+    .expect("the export finishes");
+    let sql = std::fs::read_to_string(&path).unwrap();
+
+    child.run("DROP TABLE {table}");
+    parent.run("DROP TABLE {table}");
+    // A session of its own, on the server's default path; the enum, which
+    // the export does not write, is still there.
+    let replaying = Throwaway::new(postgres(), Engine::Postgres, schema, "replay");
+    let path_now = replaying.run("SHOW search_path");
+    assert!(
+        !path_now.rows[0].get(0).unwrap_or_default().contains(schema),
+        "{path_now:?}"
+    );
+    let problems = replaying.replay(&sql);
+    assert!(problems.is_empty(), "{sql}\n{}", problems.join("\n"));
+    for (table, before) in [&parent, &child].iter().zip(&befores) {
+        let problems = differences(before, &table.rows(), None);
+        assert!(problems.is_empty(), "{sql}\n{}", problems.join("\n"));
+    }
+}
+
 #[test]
 #[ignore = "needs the dev MySQL"]
 fn live_a_schema_exported_as_sql_runs_back_on_mysql() {

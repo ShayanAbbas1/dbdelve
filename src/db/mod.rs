@@ -2063,6 +2063,18 @@ impl Connection {
         }
     }
 
+    /// [`Self::apart`] for reading what a file will run elsewhere: on Postgres
+    /// its `search_path` is empty, so the catalog's text names every schema
+    /// ([`postgres::Connection::alongside_unpathed`]). Every other
+    /// engine's DDL names its objects as written, whatever the session's
+    /// schema.
+    pub fn apart_unpathed(&self) -> Result<Self, DbError> {
+        match self {
+            Self::Postgres(connection) => connection.alongside_unpathed().map(Self::Postgres),
+            _ => self.apart(),
+        }
+    }
+
     /// A session for the (connection, `database`) pair, which the connections
     /// tree reads that database's catalog over and a tab bound to it will run
     /// on. Built from this live connection -- its resolved password and its
