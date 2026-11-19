@@ -3059,19 +3059,52 @@ impl Workspace {
                     let mut part_way = false;
                     let (succeeded, produced_grid, plan, rest, notice, landed) = {
                         let Some(profile) = workspace.issued_to(&id, generation) else {
-                            // A Row send a reconnect dropped still ends: its
-                            // row is no longer out, and the action it carried
-                            // goes back as a refused send's does.
-                            if row_sent.is_some()
-                                && let Some(profile) =
-                                    workspace.profiles.iter_mut().find(|profile| profile.id == id)
+                            // An edit a reconnect dropped the landing of may
+                            // have written: it succeeded, its `COMMIT` went
+                            // unanswered, or an ordered apply wrote part of it.
+                            // Its review would send the same batch again, so it
+                            // goes, and the grid is marked until its rows are
+                            // read. One that wrote nothing is left as it was.
+                            let wrote = kept && (result.is_ok() || unknown || !applied.is_empty());
+                            if let Some(profile) =
+                                workspace.profiles.iter_mut().find(|profile| profile.id == id)
                             {
-                                if let Some(results) = profile.session.results(tab) {
-                                    results.update(cx, |table, _| {
-                                        table.delegate_mut().end_send(false)
+                                if wrote {
+                                    profile.session.drop_apply_review_of(tab);
+                                    if row_sent.is_none() {
+                                        profile.session.tab_notice =
+                                            Some((tab, Self::LANDING_DROPPED.into()));
+                                    }
+                                }
+                                // A Row send a reconnect dropped still ends:
+                                // its row is no longer out, and the action it
+                                // carried goes back as a refused send's does.
+                                if let Some(results) = profile.session.results(tab)
+                                    && (wrote || row_sent.is_some())
+                                {
+                                    results.update(cx, |table, cx| {
+                                        let grid = table.delegate_mut();
+                                        if row_sent.is_some() {
+                                            grid.end_send(wrote);
+                                        }
+                                        if wrote {
+                                            grid.drop_applied(&applied);
+                                            grid.mark_outcome_unknown();
+                                            if let Some((row, rows_id, _, _)) = &row_sent
+                                                && grid.rows_id() == *rows_id
+                                            {
+                                                grid.set_send_failure(
+                                                    *row,
+                                                    Self::LANDING_DROPPED.into(),
+                                                );
+                                            }
+                                        }
+                                        table.refresh(cx);
                                     });
                                 }
-                                if let Some(then) = row_then {
+                                if row_sent.is_some()
+                                    && let Some(then) = row_then
+                                {
                                     profile.session.put_back(tab, then);
                                 }
                             }
@@ -3759,6 +3792,12 @@ impl Workspace {
 
     /// Said after the server refused a Row send, after what it said.
     const ROW_KEPT: &str = "The row keeps its edits; Esc puts it back as it was read.";
+
+    /// Said where an edit's landing a reconnect dropped would have been: what
+    /// it wrote is not on screen, so nothing more is sent from the grid until
+    /// its rows are read again.
+    const LANDING_DROPPED: &str = "The connection was refreshed before this edit's answer came \
+                                   back. Read the rows again to see what the server holds.";
 
     /// Said after a Row send that left the relation owed a read, over a tab
     /// that still holds another row's edits.

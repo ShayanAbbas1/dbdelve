@@ -13665,6 +13665,77 @@ fn a_row_send_dropped_by_a_reconnect_is_no_longer_out(cx: &mut TestAppContext) {
             None,
             "the dropped send ended"
         );
+        // It wrote, and nothing on screen says so: the row is marked and the
+        // grid sends nothing more until its rows are read again.
+        assert_eq!(
+            on_disk("select name from birds where id = 1").as_deref(),
+            Some("robin")
+        );
+        grid.read_with(cx, |table, _| {
+            let grid = table.delegate();
+            assert!(grid.outcome_unknown());
+            assert_eq!(
+                grid.send_failure(),
+                Some((
+                    0,
+                    "The connection was refreshed before this edit's answer came back. Read the \
+                     rows again to see what the server holds."
+                ))
+            );
+        });
+        quit(workspace, cx);
+    });
+}
+
+/// A reconnect drops the landing of a review's run that wrote its draft. The
+/// review goes and the grid is marked, so a second Run cannot send the
+/// `INSERT` again.
+#[gpui::test]
+fn a_reviews_run_dropped_by_a_reconnect_is_not_sent_again(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, BIRDS);
+        draft_by_default(&workspace, cx);
+        let id = open_own_table(&workspace, cx, "birds");
+        let grid = relation_grid(&workspace, cx, id);
+        // Only the name is typed: the id is the server's, so a second INSERT
+        // would add a second row.
+        cx.dispatch_action(crate::actions::NewRow);
+        settle(cx);
+        stage(
+            &grid,
+            cx,
+            2,
+            1,
+            crate::result_grid::NewValue::Value("robin".into()),
+        );
+        cx.dispatch_action(crate::actions::ApplyEdits);
+        settle(cx);
+        assert_eq!(
+            front_review(&workspace, cx),
+            Some(("Apply draft", true, None))
+        );
+
+        workspace.update(cx, |workspace, cx| workspace.run_apply_review(cx));
+        assert_eq!(state_kind(&workspace, cx), "running");
+        workspace.update(cx, |workspace, cx| {
+            let index = workspace.active.expect("a profile is in front");
+            workspace.reconnect(index, cx)
+        });
+        settle(cx);
+        assert_eq!(
+            on_disk("select count(*) from birds where name = 'robin'").as_deref(),
+            Some("1")
+        );
+        assert_eq!(front_review(&workspace, cx), None, "the review is gone");
+
+        workspace.update(cx, |workspace, cx| workspace.run_apply_review(cx));
+        cx.dispatch_action(crate::actions::ApplyEdits);
+        settle(cx);
+        assert_eq!(
+            on_disk("select count(*) from birds where name = 'robin'").as_deref(),
+            Some("1"),
+            "inserted once"
+        );
         quit(workspace, cx);
     });
 }
