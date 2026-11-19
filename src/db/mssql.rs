@@ -945,9 +945,7 @@ impl Connection {
         };
         // Session options last on a login are the script's: a login holds them
         // until the connection drops, so replaying here covers every one.
-        self.startup
-            .iter()
-            .try_for_each(|statement| ask(&mut session, statement).map(|_| ()))?;
+        run_startup(&mut session, &self.startup, &self.server.database)?;
         Ok(session)
     }
 
@@ -961,9 +959,7 @@ impl Connection {
                 )
             })?;
             if let Some(session) = session.as_mut() {
-                statements
-                    .iter()
-                    .try_for_each(|statement| ask(session, statement).map(|_| ()))?;
+                run_startup(session, &statements, &self.server.database)?;
             }
         }
         self.startup = statements.into();
@@ -2759,6 +2755,32 @@ fn sets_rowcount(sql: &str) -> Option<bool> {
             window[0].eq_ignore_ascii_case("set") && window[1].eq_ignore_ascii_case("rowcount")
         })
         .map(|window| window[2].parse::<u64>() != Ok(0))
+}
+
+/// The startup `statements` on `session`, the first error stopping the rest,
+/// kept as a user's own run is: a `SET ROWCOUNT` they leave in force is
+/// theirs, so no read caps over it, and a script that leaves the session on
+/// another database than `database` is moved back and refused
+/// ([`held_to_database`]), since the explorer and every statement dbdelve
+/// writes name `database`'s objects.
+fn run_startup(
+    session: &mut Session,
+    statements: &[String],
+    database: &str,
+) -> Result<(), DbError> {
+    for statement in statements {
+        ask(session, statement)?;
+        if let Some(set) = sets_rowcount(statement) {
+            session.rowcount = set;
+        }
+    }
+    match statements.iter().any(|statement| mentions_use(statement)) {
+        true => held_to_database(session, database).map_err(|error| DbError {
+            message: format!("The startup script was refused. {}", error.message),
+            position: None,
+        }),
+        false => Ok(()),
+    }
 }
 
 fn ask(session: &mut Session, statement: &str) -> Result<Collected, DbError> {
@@ -5388,6 +5410,51 @@ mod tests {
             .unwrap();
         let stopped = connection.query(read, stoppable(10)).unwrap();
         assert_eq!(stopped.stopped, Some(Stopped::AtLimit));
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_startup_rowcount_is_the_users_own_and_kept() {
+        let connection = live()
+            .with_startup(vec!["SET ROWCOUNT 20".into()])
+            .expect("the script runs");
+        let read = "SELECT name FROM sys.all_columns";
+        let drained = connection.query(read, stoppable(10)).unwrap();
+        assert_eq!(drained.stopped, None);
+        assert_eq!(drained.capped_from, Some(20));
+        let kept = connection.query(read, Fetch::default()).unwrap();
+        assert_eq!(kept.rows.len(), 20, "no capped read reset it");
+        let database = connection.current_database().to_string();
+        let other = connection.on_database(&database).expect("a session opens");
+        let kept = other.query(read, stoppable(10)).unwrap();
+        assert_eq!(kept.capped_from, Some(20), "a replay keeps it too");
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_startup_script_that_leaves_the_database_is_refused() {
+        let connection = live();
+        let database = connection.current_database().to_string();
+        let error = live()
+            .with_startup(vec!["USE master".into()])
+            .err()
+            .expect("the script is refused");
+        assert!(
+            error.message.contains("startup script"),
+            "{}",
+            error.message
+        );
+        // One that comes back where it started is its own business.
+        let scripted = connection
+            .with_startup(vec![
+                "USE master".into(),
+                format!("USE [{}]", database.replace(']', "]]")),
+            ])
+            .expect("the script runs");
+        let here = scripted
+            .query("SELECT DB_NAME()", Fetch::default())
+            .unwrap();
+        assert_eq!(here.rows[0].get(0), Some(database.as_str()));
     }
 
     #[test]
