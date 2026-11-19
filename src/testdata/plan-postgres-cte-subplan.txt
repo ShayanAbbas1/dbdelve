@@ -1,0 +1,57 @@
+Sort  (cost=5778639.25..5778639.75 rows=200 width=56) (actual time=2881.550..2882.064 rows=6 loops=1)
+  Sort Key: (sum(b.amount)) DESC
+  Sort Method: quicksort  Memory: 25kB
+  Buffers: shared hit=560 read=499446, temp read=37941 written=13663
+  CTE big
+    ->  Seq Scan on events events_1  (cost=0.00..262500.00 rows=951878 width=28) (actual time=714.032..1206.998 rows=949990 loops=1)
+          Filter: (amount > '50'::numeric)
+          Rows Removed by Filter: 50010
+          Buffers: shared hit=293 read=249707
+  ->  GroupAggregate  (cost=280500.55..5516131.61 rows=200 width=56) (actual time=2554.673..2881.368 rows=6 loops=1)
+        Group Key: b.account_id
+        Buffers: shared hit=557 read=499446, temp read=37941 written=13663
+        ->  Sort  (cost=280500.55..280571.94 rows=28556 width=24) (actual time=2467.842..2531.610 rows=949990 loops=1)
+              Sort Key: b.account_id
+              Sort Method: external merge  Disk: 23248kB
+              Buffers: shared hit=557 read=499446, temp read=8715 written=13662
+              ->  Hash Join  (cost=256210.00..277799.19 rows=28556 width=24) (actual time=1494.475..2259.504 rows=949990 loops=1)
+                    Hash Cond: (b.account_id = events.account_id)
+                    Buffers: shared hit=554 read=499446, temp written=4870
+                    ->  CTE Scan on big b  (cost=0.00..19037.56 rows=951878 width=24) (actual time=714.494..1374.168 rows=949990 loops=1)
+                          Buffers: shared hit=293 read=249707, temp written=4870
+                    ->  Hash  (cost=256209.93..256209.93 rows=6 width=8) (actual time=779.346..779.805 rows=6 loops=1)
+                          Buckets: 1024  Batches: 1  Memory Usage: 9kB
+                          Buffers: shared hit=261 read=249739
+                          ->  Unique  (cost=256209.81..256209.87 rows=6 width=8) (actual time=779.138..779.615 rows=6 loops=1)
+                                Buffers: shared hit=261 read=249739
+                                ->  Sort  (cost=256209.81..256209.84 rows=12 width=8) (actual time=779.098..779.539 rows=18 loops=1)
+                                      Sort Key: events.account_id
+                                      Sort Method: quicksort  Memory: 25kB
+                                      Buffers: shared hit=261 read=249739
+                                      ->  Gather  (cost=256208.33..256209.59 rows=12 width=8) (actual time=579.398..778.888 rows=18 loops=1)
+                                            Workers Planned: 2
+                                            Workers Launched: 2
+                                            Buffers: shared hit=261 read=249739
+                                            ->  HashAggregate  (cost=255208.33..255208.39 rows=6 width=8) (actual time=602.962..603.229 rows=6 loops=3)
+                                                  Group Key: events.account_id
+                                                  Batches: 1  Memory Usage: 24kB
+                                                  Buffers: shared hit=261 read=249739
+                                                  Worker 0:  Batches: 1  Memory Usage: 24kB
+                                                  Worker 1:  Batches: 1  Memory Usage: 24kB
+                                                  ->  Parallel Seq Scan on events  (cost=0.00..254166.67 rows=416667 width=8) (actual time=0.355..163.527 rows=333333 loops=3)
+                                                        Buffers: shared hit=261 read=249739
+        SubPlan 2
+          ->  Aggregate  (cost=26176.71..26176.72 rows=1 width=8) (actual time=47.372..47.372 rows=1 loops=6)
+                Buffers: temp read=29226 written=1
+                ->  CTE Scan on big x  (cost=0.00..26176.65 rows=24 width=0) (actual time=0.055..47.249 rows=1632 loops=6)
+                      Filter: ((account_id = b.account_id) AND ((id % '97'::bigint) = 0))
+                      Rows Removed by Filter: 948358
+                      Buffers: temp read=29226 written=1
+Planning:
+  Buffers: shared hit=109
+Planning Time: 17.148 ms
+JIT:
+  Functions: 48
+  Options: Inlining true, Optimization true, Expressions true, Deforming true
+  Timing: Generation 23.682 ms, Inlining 188.779 ms, Optimization 877.960 ms, Emission 869.259 ms, Total 1959.680 ms
+Execution Time: 3021.394 ms

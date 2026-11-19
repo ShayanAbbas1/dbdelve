@@ -1,0 +1,93 @@
+---
+source: src/sql_snapshots.rs
+---
+[postgres] Plan of read: EXPLAIN SELECT a FROM t => |ro=run rw=run full=run|
+[postgres] Plan of update: EXPLAIN UPDATE t SET a = 1 WHERE id = 1 => |ro=run rw=run full=run|
+[postgres] Plan of delete: EXPLAIN DELETE FROM t WHERE id = 1 => |ro=run rw=run full=run|
+[postgres] Plan of writable cte: EXPLAIN WITH d AS (DELETE FROM t WHERE id = 1 RETURNING id) SELECT id FROM d => |ro=run rw=run full=run|
+[postgres] Analyze of read: EXPLAIN ANALYZE SELECT a FROM t => |ro=run rw=run full=run|
+[postgres] Analyze of update: EXPLAIN ANALYZE UPDATE t SET a = 1 WHERE id = 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[postgres] Analyze of delete: EXPLAIN ANALYZE DELETE FROM t WHERE id = 1 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[postgres] Analyze of writable cte: EXPLAIN ANALYZE WITH d AS (DELETE FROM t WHERE id = 1 RETURNING id) SELECT id FROM d => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mysql] Plan of read: EXPLAIN SELECT a FROM t => |ro=run rw=run full=run|
+[mysql] Plan of update: EXPLAIN UPDATE t SET a = 1 WHERE id = 1 => |ro=run rw=run full=run|
+[mysql] Plan of delete: EXPLAIN DELETE FROM t WHERE id = 1 => |ro=run rw=run full=run|
+[mysql] Plan of writable cte: EXPLAIN WITH d AS (DELETE FROM t WHERE id = 1 RETURNING id) SELECT id FROM d => |ro=run rw=run full=run|
+[mysql] Analyze of read: EXPLAIN ANALYZE SELECT a FROM t => |ro=run rw=run full=run|
+[mysql] Analyze of update: EXPLAIN ANALYZE UPDATE t SET a = 1 WHERE id = 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mysql] Analyze of delete: EXPLAIN ANALYZE DELETE FROM t WHERE id = 1 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mysql] Analyze of writable cte: EXPLAIN ANALYZE WITH d AS (DELETE FROM t WHERE id = 1 RETURNING id) SELECT id FROM d => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mariadb] Plan of read: EXPLAIN SELECT a FROM t => |ro=run rw=run full=run|
+[mariadb] Plan of update: EXPLAIN UPDATE t SET a = 1 WHERE id = 1 => |ro=run rw=run full=run|
+[mariadb] Plan of delete: EXPLAIN DELETE FROM t WHERE id = 1 => |ro=run rw=run full=run|
+[mariadb] Plan of writable cte: EXPLAIN WITH d AS (DELETE FROM t WHERE id = 1 RETURNING id) SELECT id FROM d => |ro=run rw=run full=run|
+[mariadb] Analyze of read: ANALYZE SELECT a FROM t => |ro=run rw=run full=run|
+[mariadb] Analyze of update: ANALYZE UPDATE t SET a = 1 WHERE id = 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mariadb] Analyze of delete: ANALYZE DELETE FROM t WHERE id = 1 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mariadb] Analyze of writable cte: ANALYZE WITH d AS (DELETE FROM t WHERE id = 1 RETURNING id) SELECT id FROM d => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[sqlite] Plan of read: EXPLAIN QUERY PLAN SELECT a FROM t => |ro=run rw=run full=run|
+[sqlite] Plan of update: EXPLAIN QUERY PLAN UPDATE t SET a = 1 WHERE id = 1 => |ro=run rw=run full=run|
+[sqlite] Plan of delete: EXPLAIN QUERY PLAN DELETE FROM t WHERE id = 1 => |ro=run rw=run full=run|
+[sqlite] Plan of writable cte: EXPLAIN QUERY PLAN WITH d AS (DELETE FROM t WHERE id = 1 RETURNING id) SELECT id FROM d => |ro=run rw=run full=run|
+[sqlite] Analyze of read => (none)
+[sqlite] Analyze of update => (none)
+[sqlite] Analyze of delete => (none)
+[sqlite] Analyze of writable cte => (none)
+[turso] Plan of read => (none)
+[turso] Plan of update => (none)
+[turso] Plan of delete => (none)
+[turso] Plan of writable cte => (none)
+[turso] Analyze of read => (none)
+[turso] Analyze of update => (none)
+[turso] Analyze of delete => (none)
+[turso] Analyze of writable cte => (none)
+[duckdb] Plan of read => (none)
+[duckdb] Plan of update => (none)
+[duckdb] Plan of delete => (none)
+[duckdb] Plan of writable cte => (none)
+[duckdb] Analyze of read => (none)
+[duckdb] Analyze of update => (none)
+[duckdb] Analyze of delete => (none)
+[duckdb] Analyze of writable cte => (none)
+[snowflake] Plan of read => (none)
+[snowflake] Plan of update => (none)
+[snowflake] Plan of delete => (none)
+[snowflake] Plan of writable cte => (none)
+[snowflake] Analyze of read => (none)
+[snowflake] Analyze of update => (none)
+[snowflake] Analyze of delete => (none)
+[snowflake] Analyze of writable cte => (none)
+[clickhouse] Plan of read: EXPLAIN SELECT a FROM t => |ro=run rw=run full=run|
+[clickhouse] Plan of update: EXPLAIN UPDATE t SET a = 1 WHERE id = 1 => |ro=run rw=run full=run|
+[clickhouse] Plan of delete: EXPLAIN DELETE FROM t WHERE id = 1 => |ro=run rw=run full=run|
+[clickhouse] Plan of writable cte: EXPLAIN WITH d AS (DELETE FROM t WHERE id = 1 RETURNING id) SELECT id FROM d => |ro=run rw=run full=run|
+[clickhouse] Analyze of read => (none)
+[clickhouse] Analyze of update => (none)
+[clickhouse] Analyze of delete => (none)
+[clickhouse] Analyze of writable cte => (none)
+[mssql] Plan of read => (none)
+[mssql] Plan of update => (none)
+[mssql] Plan of delete => (none)
+[mssql] Plan of writable cte => (none)
+[mssql] Analyze of read => (none)
+[mssql] Analyze of update => (none)
+[mssql] Analyze of delete => (none)
+[mssql] Analyze of writable cte => (none)
+[mongodb] Plan of read: db.c.find({a: 1}).explain("queryPlanner") => |ro=run rw=run full=run|
+[mongodb] Plan of update: db.c.updateOne({a: 1}, {$set: {a: 2}}).explain("queryPlanner") => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mongodb] Plan of delete: db.c.deleteMany({a: 1}).explain("queryPlanner") => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mongodb] Plan of merge aggregate: db.c.aggregate([{$match: {a: 1}}, {$merge: {into: "x"}}]).explain("queryPlanner") => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mongodb] Plan of where find: db.c.find({$where: "this.a > 1"}).explain("queryPlanner") => |ro=refuse(Script) rw=refuse(Script) full=refuse(Script)|
+[mongodb] Analyze of read: db.c.find({a: 1}).explain("executionStats") => |ro=run rw=run full=run|
+[mongodb] Analyze of update: db.c.updateOne({a: 1}, {$set: {a: 2}}).explain("executionStats") => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mongodb] Analyze of delete: db.c.deleteMany({a: 1}).explain("executionStats") => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mongodb] Analyze of merge aggregate: db.c.aggregate([{$match: {a: 1}}, {$merge: {into: "x"}}]).explain("executionStats") => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mongodb] Analyze of where find: db.c.find({$where: "this.a > 1"}).explain("executionStats") => |ro=refuse(Script) rw=refuse(Script) full=refuse(Script)|
+[generic] Plan of read => (none)
+[generic] Plan of update => (none)
+[generic] Plan of delete => (none)
+[generic] Plan of writable cte => (none)
+[generic] Analyze of read => (none)
+[generic] Analyze of update => (none)
+[generic] Analyze of delete => (none)
+[generic] Analyze of writable cte => (none)

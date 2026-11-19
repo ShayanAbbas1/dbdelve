@@ -15,6 +15,7 @@ legacy Postgres(
             ssh: None,
             ssm: None,
             schema: None,
+            read_only: false,
         },
         service: None,
     },
@@ -53,6 +54,7 @@ pg Postgres(
             schema: Some(
                 "billing",
             ),
+            read_only: false,
         },
         service: None,
     },
@@ -72,6 +74,7 @@ alias Postgres(
             ssh: None,
             ssm: None,
             schema: None,
+            read_only: false,
         },
         service: Some(
             "reports",
@@ -94,6 +97,7 @@ mysql MySql(
         ssh: None,
         ssm: None,
         schema: None,
+        read_only: false,
     },
 )
 maria MariaDb(
@@ -112,6 +116,7 @@ maria MariaDb(
         ssh: None,
         ssm: None,
         schema: None,
+        read_only: false,
     },
 )
 lite Sqlite {
@@ -169,6 +174,7 @@ mssql SqlServer(
         schema: Some(
             "dbo",
         ),
+        read_only: false,
     },
 )
 mongo MongoDb(
@@ -186,6 +192,7 @@ mongo MongoDb(
             ssh: None,
             ssm: None,
             schema: None,
+            read_only: false,
         },
         srv: true,
         options: "retryWrites=true&w=majority",
@@ -210,6 +217,7 @@ redis Redis(
         ssh: None,
         ssm: None,
         schema: None,
+        read_only: false,
     },
 )
 clk ClickHouse(
@@ -239,5 +247,6 @@ clk ClickHouse(
         ),
         ssm: None,
         schema: None,
+        read_only: false,
     },
 )

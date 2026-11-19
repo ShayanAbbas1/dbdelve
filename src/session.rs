@@ -35,7 +35,7 @@ use crate::{
         ExplainMode, Levels, QueryResult, Relation, RelationKind, Routine, Row, Structure, Syntax,
         Target,
     },
-    explain::{self, Plan},
+    explain::{self, Plan, analysis::Analysis},
     explorer::{
         ExplorerLeaf, Member, ObjectKind, ObjectRef, Pin, Shortcut, ShortcutDatabase, Shortcuts,
     },
@@ -65,6 +65,10 @@ pub(crate) struct Profile {
     pub(crate) config: ConnectionConfig,
     pub(crate) color: Option<ConnectionColor>,
     pub(crate) mode: Mode,
+    /// Whether an agent may reach this connection. Off for every profile that
+    /// exists before its owner says otherwise. Read from `profiles.toml` only
+    /// at load, and written only by `Workspace::set_agent_visible`.
+    pub(crate) agent_visible: bool,
     pub(crate) confirmed: Vec<Destructive>,
     /// Whether this connection has silenced the prompt before editing rows
     /// restored from an earlier session. Stored as [`STALE_ROWS`] among
@@ -84,6 +88,12 @@ pub(crate) struct Profile {
     /// queue's reads would not see. Read off what was sent, not asked of the
     /// server; cleared by a `COMMIT` or `ROLLBACK`, and on connect.
     pub(crate) in_transaction: bool,
+    /// Whether each of the user's statements commits on its own. Off means
+    /// dbdelve keeps a transaction open for them, opening it by writing a
+    /// `BEGIN` into the buffer where they can read it -- never onto the wire
+    /// unseen (`AGENTS.md` hard rule 1). Per connection, and off again on
+    /// connect, because the transaction it was holding died with the session.
+    pub(crate) auto_commit: bool,
     /// Whether they have changed the session in a way that lasts as long as
     /// it does -- a `SET`, `USE` or temporary table. Cleared on connect.
     pub(crate) session_changed: bool,
@@ -548,6 +558,7 @@ impl Profile {
             next_query_id: Some(self.session.next_query_id),
             color: self.color.map(|color| color.slug().to_string()),
             mode: Some(self.mode.slug().to_string()),
+            agent_visible: self.agent_visible,
             confirmed: self
                 .confirmed
                 .iter()
@@ -2627,6 +2638,10 @@ pub(crate) struct QueryTab {
 #[derive(Debug, PartialEq)]
 pub(crate) struct Explained {
     pub(crate) plan: Plan,
+    /// What `plan` means, derived once where the plan landed (or was restored)
+    /// and only read from then on: the plan view draws from it, and the compact
+    /// form prints from the same field.
+    pub(crate) analysis: Analysis,
     pub(crate) mode: ExplainMode,
     /// The statement that was explained. Held because it is not necessarily
     /// what the buffer says any more -- the user is free to keep typing, and a
@@ -2645,6 +2660,27 @@ pub(crate) struct Explained {
 }
 
 impl Explained {
+    /// A plan an `engine` printed, read once into its [`Analysis`].
+    pub(crate) fn new(
+        engine: Engine,
+        plan: Plan,
+        mode: ExplainMode,
+        sql: String,
+        typed: bool,
+        columns: Vec<String>,
+        rows: Vec<Row>,
+    ) -> Self {
+        Self {
+            analysis: Analysis::new(&plan, engine),
+            plan,
+            mode,
+            sql,
+            typed,
+            columns,
+            rows,
+        }
+    }
+
     pub(crate) fn stored(&self, showing: bool) -> store::StoredPlan {
         store::StoredPlan {
             mode: self.mode,
@@ -2662,21 +2698,23 @@ impl Explained {
     }
 
     /// The plan a snapshot was written beside, parsed again from the rows it
-    /// came from, and whether it was the one on screen.
-    pub(crate) fn restored(grid: &store::StoredGrid) -> Option<(Self, bool)> {
+    /// came from, and whether it was the one on screen. The engine comes from
+    /// the profile the snapshot is restored into, never from the snapshot.
+    pub(crate) fn restored(grid: &store::StoredGrid, engine: Engine) -> Option<(Self, bool)> {
         let stored = grid.plan.as_ref()?;
         let (columns, rows) = match stored.typed {
             true => (&grid.columns, &grid.rows),
             false => (&stored.columns, &stored.rows),
         };
-        let explained = Self {
-            plan: explain::parse(columns, rows),
-            mode: stored.mode,
-            sql: stored.sql.clone(),
-            typed: stored.typed,
-            columns: stored.columns.clone(),
-            rows: stored.rows.clone(),
-        };
+        let explained = Self::new(
+            engine,
+            explain::parse(columns, rows),
+            stored.mode,
+            stored.sql.clone(),
+            stored.typed,
+            stored.columns.clone(),
+            stored.rows.clone(),
+        );
         Some((explained, stored.showing))
     }
 }
@@ -4625,14 +4663,15 @@ mod tests {
         };
         let typed = (
             grid(plan_columns(), lines()),
-            Explained {
-                plan: explain::parse(&plan_columns(), &lines()),
-                mode: ExplainMode::Analyze,
-                sql: "EXPLAIN ANALYZE SELECT 1".into(),
-                typed: true,
-                columns: Vec::new(),
-                rows: Vec::new(),
-            },
+            Explained::new(
+                Engine::Postgres,
+                explain::parse(&plan_columns(), &lines()),
+                ExplainMode::Analyze,
+                "EXPLAIN ANALYZE SELECT 1".into(),
+                true,
+                Vec::new(),
+                Vec::new(),
+            ),
             true,
         );
         // The command's rows are its own: the grid still holds the last run's.
@@ -4641,14 +4680,15 @@ mod tests {
                 vec!["id".into()],
                 crate::db::rows(vec![vec![Some("1".into())]]),
             ),
-            Explained {
-                plan: explain::parse(&plan_columns(), &lines()),
-                mode: ExplainMode::Plan,
-                sql: "SELECT 1".into(),
-                typed: false,
-                columns: plan_columns(),
-                rows: lines(),
-            },
+            Explained::new(
+                Engine::Postgres,
+                explain::parse(&plan_columns(), &lines()),
+                ExplainMode::Plan,
+                "SELECT 1".into(),
+                false,
+                plan_columns(),
+                lines(),
+            ),
             false,
         );
 
@@ -4660,7 +4700,10 @@ mod tests {
             let text = serde_json::to_string(&snapshot).unwrap();
             let read: store::StoredGrid = serde_json::from_str(&text).unwrap();
             assert!(!explained.plan.nodes.is_empty());
-            assert_eq!(Explained::restored(&read), Some((explained, showing)));
+            assert_eq!(
+                Explained::restored(&read, Engine::Postgres),
+                Some((explained, showing))
+            );
         }
     }
 

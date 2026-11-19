@@ -118,6 +118,15 @@ is part of. The same holds for tiberius's tokio-rustls 0.24, inside the runtime
 `mssql.rs` owns. Nothing tokio-shaped reaches GPUI's executor. Adding a tokio
 future anywhere DBDelve spawns one still panics.
 
+`rmcp` (`=3.7.0`; `server` and `transport-io` only, no `macros`, `cfg(unix)`) is
+the MCP server of the `dbdelve mcp` shim process and of nothing else. That
+process owns a current-thread tokio runtime of its own and is the one place
+that names `rmcp` or tokio's sockets, in `src/agent/shim.rs`. The window never
+sees MCP framing: it speaks the newline-delimited frames of
+`src/agent/wire.rs` over std sockets, one connection per call. What would
+overturn `rmcp`: losing a long-held `tools/call`, losing the per-request
+cancel, or pulling in `aws-lc-rs`.
+
 
 **`deny.toml` is checked by `.github/workflows/deny.yml`** on any change to the
 manifests: bans, licenses and sources. Its license list is the permissive

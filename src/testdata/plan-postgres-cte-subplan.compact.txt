@@ -1,0 +1,56 @@
+truncated: none
+plan: engine=postgres analyzed=yes basis=measured time_unit="measured (ms)" cost_unit="planner cost, arbitrary units" total=2882.064ms execution="3021.394 ms" planning="17.148 ms" outside_nodes=139.33ms conditions=verbatim
+findings:
+  n13 misestimate under x68 est=144 act=9792 CTE Scan on big x
+  n0 misestimate over x33 est=200 act=6 Sort
+  n2 misestimate over x33 est=200 act=6 GroupAggregate
+  n3 misestimate under x33 est=28556 act=949990 Sort
+  n4 misestimate under x33 est=28556 act=949990 Hash Join
+tree:
+  n0 Sort self=0.696ms 0.0% est=200 act=6 loops=1
+    | Sort Key: (sum(b.amount)) DESC
+    | Sort Method: quicksort  Memory: 25kB
+    | Buffers: shared hit=560 read=499446, temp read=37941 written=13663
+    n1 [CTE big] Seq Scan on events events_1 self=1206.998ms 41.8% est=951878 act=949990 loops=1
+      | Filter: (amount > '50'::numeric)
+      | Rows Removed by Filter: 50010  [total 50010 over 1 loops]
+      | Buffers: shared hit=293 read=249707
+    n2 GroupAggregate self=65.526ms 2.2% est=200 act=6 loops=1
+      | Group Key: b.account_id
+      | Buffers: shared hit=557 read=499446, temp read=37941 written=13663
+      n3 Sort self=272.106ms 9.4% est=28556 act=949990 loops=1
+        | Sort Key: b.account_id
+        | Sort Method: external merge  Disk: 23248kB
+        | Buffers: shared hit=557 read=499446, temp read=8715 written=13662
+        n4 Hash Join self=105.531ms 3.6% est=28556 act=949990 loops=1
+          | Hash Cond: (b.account_id = events.account_id)
+          | Buffers: shared hit=554 read=499446, temp written=4870
+          n5 CTE Scan on big b self=167.17ms 5.8% est=951878 act=949990 loops=1
+            | Buffers: shared hit=293 read=249707, temp written=4870
+          n6 Hash self=0.19ms 0.0% est=6 act=6 loops=1
+            | Buckets: 1024  Batches: 1  Memory Usage: 9kB
+            | Buffers: shared hit=261 read=249739
+            n7 Unique self=0.076ms 0.0% est=6 act=6 loops=1
+              | Buffers: shared hit=261 read=249739
+              n8 Sort self=0.651ms 0.0% est=12 act=18 loops=1
+                | Sort Key: events.account_id
+                | Sort Method: quicksort  Memory: 25kB
+                | Buffers: shared hit=261 read=249739
+                n9 Gather self=175.659ms 6.0% est=12 act=18 loops=1 parallel=2workers
+                  | Workers Planned: 2
+                  | Workers Launched: 2
+                  | Buffers: shared hit=261 read=249739
+                  n10 HashAggregate self=439.702ms 15.2% est=18 act=18 (x 3 loops) loops=3 parallel=2workers
+                    | Group Key: events.account_id
+                    | Batches: 1  Memory Usage: 24kB
+                    | Buffers: shared hit=261 read=249739
+                    | Worker 0:  Batches: 1  Memory Usage: 24kB
+                    | Worker 1:  Batches: 1  Memory Usage: 24kB
+                    n11 Parallel Seq Scan on events self=163.527ms 5.6% est=1250001 act=999999 (x 3 loops) loops=3 parallel=2workers
+                      | Buffers: shared hit=261 read=249739
+      n12 [SubPlan 2] Aggregate self=0.738ms 0.0% est=6 act=6 (x 6 loops) loops=6
+        | Buffers: temp read=29226 written=1
+        n13 CTE Scan on big x self=283.494ms 9.8% est=144 act=9792 (x 6 loops) loops=6
+          | Filter: ((account_id = b.account_id) AND ((id % '97'::bigint) = 0))
+          | Rows Removed by Filter: 948358  [total 5690148 over 6 loops]  [fact: removed >= 1000 and more than kept, per loop]
+          | Buffers: temp read=29226 written=1

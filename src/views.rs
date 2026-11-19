@@ -31,20 +31,25 @@ use gpui_component::{
     resizable::{ResizableState, h_resizable, resizable_panel, v_resizable},
     spinner::Spinner,
     table::{DataTable, TableDelegate, TableState},
+    tooltip::Tooltip,
 };
 
 use crate::{
     InsertForm, TabKey, Workspace,
     actions::{
-        AcceptCompletion, AddFilter, CancelQuery, CopyCell, CopySelection, CustomRowLimit,
-        ExplainQuery, FormatQuery, ImportRows, ImportRowsFromClipboard, LimitTarget, NewQuery,
-        NewRow, NextPage, PreviousPage, RemoveFilter, RunQuery, SaveQuery, SetDefaultRowLimit,
-        SetEditMode, SetFilterColumn, SetFilterOperator, SetFilterRaw, SetQueryLimit, SetRowLimit,
-        ToggleComment, ToggleFilterJoin, ToggleNextJoin, ToggleResults, ToggleRowPanel,
+        AcceptCompletion, AddFilter, CancelQuery, CommitTransaction, CopyCell, CopySelection,
+        CustomRowLimit, ExplainQuery, FormatQuery, ImportRows, ImportRowsFromClipboard,
+        LimitTarget, NewQuery, NewRow, NextPage, PreviousPage, RemoveFilter, RollbackTransaction,
+        RunQuery, SaveQuery, SetDefaultRowLimit, SetEditMode, SetFilterColumn, SetFilterOperator,
+        SetFilterRaw, SetQueryLimit, SetRowLimit, ToggleAutoCommit, ToggleComment,
+        ToggleFilterJoin, ToggleNextJoin, ToggleResults, ToggleRowPanel,
     },
     db,
     db::{Engine, ExplainMode, RoutineKind, Target},
-    explain::{self, LabelPart},
+    explain::{
+        self, LabelPart,
+        analysis::{Basis, Direction, Misestimate, Tier, percent_text},
+    },
     explorer::ROW_LIMITS,
     filter::{Conjunction, FilterRow, Operator},
     icons::{icon, saved_query_icon},
@@ -446,23 +451,15 @@ fn render_plan(
     let code = fonts(cx).editor.clone();
     let syntax = cx.theme().highlight_theme.clone();
     let Explained {
-        plan, mode, sql, ..
+        plan,
+        analysis,
+        mode,
+        sql,
+        ..
     } = explained;
-    // What every bar is a share of. A plan with no timings draws none, and the
-    // guard against zero is what keeps a 0ms plan from dividing by it.
-    let total = plan.total_ms.filter(|total| *total > 0.0);
-    // The slowest node earns the one warm colour in the pane. Scanning for it
-    // is the reason most people open a plan at all.
-    let slowest = total.and_then(|_| {
-        plan.nodes
-            .iter()
-            .enumerate()
-            .filter_map(|(index, node)| node.self_ms.map(|ms| (index, ms)))
-            .filter(|(_, ms)| *ms > 0.0)
-            .max_by(|a, b| a.1.total_cmp(&b.1))
-            .map(|(index, _)| index)
-    });
-
+    // What every bar is a share of. A plan with nothing to weigh its nodes by
+    // has no total, so it draws none.
+    let total = analysis.total;
     let metric = |label: &'static str, value: String, tone: gpui::Hsla| {
         div()
             .flex()
@@ -472,11 +469,7 @@ fn render_plan(
     };
 
     let rows = plan.nodes.iter().enumerate().map(|(index, node)| {
-        let hottest = slowest == Some(index);
-        let share = match (node.self_ms, total) {
-            (Some(ms), Some(total)) => (ms / total).clamp(0.0, 1.0),
-            _ => 0.0,
-        };
+        let drawn = &analysis.nodes[index];
 
         div()
             .flex()
@@ -485,34 +478,45 @@ fn render_plan(
             .px(px(layout::SPACE_SM))
             .py(px(layout::SPACE_XS))
             .rounded(px(layout::RADIUS_CONTROL))
-            .when(hottest, |row| row.bg(t.element_hover))
             // The bar column is fixed and leads the row, so every bar starts at
-            // the same x and the longest one is found by looking down an edge
-            // rather than by reading. It is drawn only where the plan carried
-            // timings at all -- SQLite reports none, and an empty track on every
-            // row of its plans is a column of nothing to read past.
+            // the same x and the heaviest one is found by looking down an edge
+            // rather than by reading. It is drawn only where the plan has
+            // something to weigh its nodes by -- SQLite reports nothing, and an
+            // empty track on every row of its plans is a column of nothing to
+            // read past. The percentage is printed beside the bar because a
+            // colour alone is not something every reader can tell apart.
             .children(total.map(|_| {
+                let tone = drawn.tier.map(|tier| tier_colour(tier, &t));
                 div()
-                    .w(px(72.))
-                    .min_w(px(72.))
+                    .flex()
+                    .items_center()
+                    .gap(px(layout::SPACE_XS))
                     .flex_shrink_0()
-                    .pt(px(4.))
+                    .pt(px(1.))
                     .child(
                         div()
-                            .w_full()
+                            .w(px(64.))
+                            .min_w(px(64.))
                             .h(px(6.))
                             .rounded(px(3.))
                             .bg(t.element_active)
-                            .child(
+                            .children(drawn.share.zip(tone).map(|(share, tone)| {
                                 div()
                                     .h_full()
                                     .rounded(px(3.))
                                     .w(gpui::relative(share as f32))
-                                    .bg(match hottest {
-                                        true => t.danger,
-                                        false => t.accent,
-                                    }),
-                            ),
+                                    .bg(tone)
+                            })),
+                    )
+                    .child(
+                        div()
+                            .w(px(46.))
+                            .min_w(px(46.))
+                            .flex()
+                            .justify_end()
+                            .text_size(px(layout::chrome(layout::TEXT_XS)))
+                            .text_color(t.text_muted)
+                            .children(drawn.share.map(|share| div().child(percent_text(share)))),
                     )
             }))
             .child(
@@ -526,13 +530,18 @@ fn render_plan(
                     // drawn rules: a rule per level is a lot of ink for a depth
                     // that is usually three.
                     .pl(px(node.depth as f32 * 14.))
+                    // The `CTE big` / `SubPlan 2` line that opens this subtree,
+                    // kept above the node it introduced.
+                    .children(node.heading.as_ref().map(|heading| {
+                        div()
+                            .text_size(px(layout::chrome(layout::TEXT_XS)))
+                            .text_color(t.text_faint)
+                            .child(heading.clone())
+                    }))
                     .child(
                         div()
                             .font_weight(FontWeight::MEDIUM)
-                            .text_color(match hottest {
-                                true => t.danger,
-                                false => t.text,
-                            })
+                            .text_color(t.text)
                             .child(plan_label(&node.label, &t)),
                     )
                     .children(node.detail.iter().map(|line| {
@@ -563,11 +572,27 @@ fn render_plan(
                                     t.success.into(),
                                 )
                             }))
-                            .children(plan.misestimate(index).map(|factor| {
-                                div().text_color(t.danger).child(format!(
-                                    "×{} misestimate",
-                                    group_thousands(factor.round() as u64)
-                                ))
+                            .children(drawn.parallel.filter(|parallel| parallel.gathers).map(
+                                |parallel| {
+                                    plan_chip(
+                                        plan_id("plan-parallel", scope, index),
+                                        format!("parallel ×{} workers", parallel.workers),
+                                        t.text_muted.into(),
+                                        parallel_tooltip(parallel.workers),
+                                    )
+                                },
+                            ))
+                            .children(drawn.misestimate.map(|miss| {
+                                plan_chip(
+                                    plan_id("plan-miss", scope, index),
+                                    misestimate_text(&miss),
+                                    tier_colour(miss.tier, &t),
+                                    misestimate_tooltip(
+                                        &miss,
+                                        node.estimated.map(|estimated| estimated.rows),
+                                        node.actual.map(|actual| actual.rows),
+                                    ),
+                                )
                             }))
                             .children(node.estimated.map(|estimated| {
                                 metric(
@@ -575,13 +600,18 @@ fn render_plan(
                                     format!(
                                         "cost {:.2} · {} rows",
                                         estimated.total_cost,
-                                        group_thousands(estimated.rows)
+                                        round_count(estimated.rows)
                                     ),
                                     t.syntax_number.into(),
                                 )
                             }))
-                            .children(node.self_ms.filter(|_| total.is_some()).map(|ms| {
-                                metric("self", format!("{ms:.3} ms"), t.text_muted.into())
+                            .children(drawn.value.map(|value| match analysis.basis {
+                                Basis::Measured => {
+                                    metric("self", format!("{value:.3} ms"), t.text_muted.into())
+                                }
+                                _ => {
+                                    metric("self", format!("cost {value:.2}"), t.text_muted.into())
+                                }
                             })),
                     ),
             )
@@ -619,6 +649,14 @@ fn render_plan(
                         .font_weight(FontWeight::MEDIUM)
                         .child(mode.label()),
                 )
+                // What the figures below are: which engine printed them, and
+                // whether they are measurements, the planner's cost or neither.
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_color(t.text_muted)
+                        .child(analysis.label.clone()),
+                )
                 .child(
                     div()
                         .flex_1()
@@ -627,14 +665,46 @@ fn render_plan(
                         .text_color(t.text_muted)
                         .child(one_line(sql)),
                 )
-                .children(plan.summary.iter().map(|(label, value)| {
+                // Time the server measured that no node carries, so that bars
+                // summing to less than the statement's own time are explained
+                // rather than looking like a mistake. Both figures are set
+                // together, and zipping them needs no unwrap.
+                .children(
+                    analysis
+                        .outside_nodes_ms
+                        .zip(analysis.execution_ms)
+                        .map(|(outside, execution)| {
+                            plan_chip(
+                                plan_id("plan-outside", scope, 0),
+                                format!("not in any node {outside:.1} ms"),
+                                t.text_muted.into(),
+                                format!(
+                                    "Execution Time was {execution:.3} ms; the nodes' times add up to {:.3} ms",
+                                    execution - outside
+                                ),
+                            )
+                            .flex_shrink_0()
+                        }),
+                )
+                .children(plan.summary.iter().enumerate().map(|(index, (label, value))| {
+                    // A `JIT` or `Planning` line can run to a paragraph, and the
+                    // header is one line. The whole value is a hover away.
+                    let clipped = clip_summary(value);
+                    let shown = clipped.clone().unwrap_or_else(|| value.clone());
                     div()
+                        .id(plan_id("plan-summary", scope, index))
                         .flex_shrink_0()
                         .flex()
                         .gap(px(layout::SPACE_XS))
                         .text_size(px(layout::chrome(layout::TEXT_XS)))
                         .child(div().text_color(t.text_faint).child(label.clone()))
-                        .child(div().text_color(t.text).child(value.clone()))
+                        .child(div().text_color(t.text).child(shown))
+                        .when(clipped.is_some(), |entry| {
+                            let whole = format!("{label} {value}");
+                            entry.tooltip(move |window, cx| {
+                                Tooltip::new(whole.clone()).build(window, cx)
+                            })
+                        })
                 }))
                 .child(match plan_copied {
                     true => div()
@@ -685,6 +755,97 @@ fn render_plan(
                 .children(rows),
         )
         .into_any_element()
+}
+
+/// The colour a tier is drawn in: one hue ramp from the quiet text colour up to
+/// the danger colour, so that the order reads in every theme. The two middle
+/// steps are the danger colour thinned over the plane the pane sits on.
+fn tier_colour(tier: Tier, t: &Theme) -> Hsla {
+    match tier {
+        Tier::Quiet => t.text_faint.into(),
+        Tier::Warm => t.danger.over(t.bg, 0.40).into(),
+        Tier::Hot => t.danger.over(t.bg, 0.70).into(),
+        Tier::Danger => t.danger.into(),
+    }
+}
+
+/// What the parallel chip says about its workers. The count is read from the
+/// server's plan text, so it can be as large as a `u32`, and the leader is
+/// added without overflowing it.
+fn parallel_tooltip(workers: u32) -> String {
+    format!(
+        "Times below are per-worker averages over {} participants: {workers} workers and the leader",
+        u64::from(workers) + 1,
+    )
+}
+
+/// An id for an element of the plan pane that carries a tooltip, from the tab
+/// it is in and the node or entry it belongs to.
+fn plan_id(kind: &'static str, scope: &str, index: usize) -> gpui::ElementId {
+    gpui::ElementId::from((
+        gpui::ElementId::from(kind),
+        SharedString::from(format!("{scope}-{index}")),
+    ))
+}
+
+/// A short tinted label with a sentence behind it. The sentence is a tooltip
+/// because the label is the thing read at a glance and the explanation is what
+/// is wanted once, the first time.
+fn plan_chip(id: gpui::ElementId, text: String, tone: Hsla, tooltip: String) -> Stateful<Div> {
+    div()
+        .id(id)
+        .px(px(layout::SPACE_XS))
+        .rounded(px(layout::RADIUS_CONTROL))
+        .text_color(tone)
+        .bg(tone.opacity(0.12))
+        .child(text)
+        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+}
+
+/// How much of a summary value the header draws before it clips.
+const SUMMARY_LIMIT: usize = 40;
+
+/// A summary value cut to [`SUMMARY_LIMIT`] characters and an ellipsis, or
+/// `None` when it already fits and nothing is dropped.
+fn clip_summary(value: &str) -> Option<String> {
+    let (at, _) = value.char_indices().nth(SUMMARY_LIMIT)?;
+    Some(format!("{}…", &value[..at]))
+}
+
+/// `↓ ×340` when the planner expected fewer rows than it got, `↑ ×12` when it
+/// expected more. The factor is floored, because rounding would print a figure
+/// the chip's colour disagrees with: 99.6 would read `×100`, which is Hot, on a
+/// Warm chip. The one band flooring cannot fix is just above 1000, which is
+/// Danger and would print `×1,000`, a Hot figure, so there the next whole
+/// number is printed. The tier is read from the misestimate rather than derived
+/// from the factor, so the text and the colour come from one field.
+fn misestimate_text(miss: &Misestimate) -> String {
+    let arrow = match miss.direction {
+        Direction::Under => "↓",
+        Direction::Over => "↑",
+    };
+    let mut whole = miss.factor.floor() as u64;
+    if whole == 1000 && miss.tier == Tier::Danger {
+        whole = 1001;
+    }
+    format!("{arrow} ×{}", group_thousands(whole))
+}
+
+/// What a misestimate chip says in words, since an arrow is a direction and not
+/// a sentence.
+fn misestimate_tooltip(miss: &Misestimate, estimated: Option<f64>, actual: Option<f64>) -> String {
+    let which = match miss.direction {
+        Direction::Under => "fewer",
+        Direction::Over => "more",
+    };
+    match estimated.zip(actual) {
+        Some((estimated, actual)) => format!(
+            "planner expected {which} rows: estimated {}, got {} per loop",
+            round_count(estimated),
+            round_count(actual)
+        ),
+        None => format!("planner expected {which} rows"),
+    }
 }
 
 /// A plan line, bounded. The server will happily print every output column of a
@@ -3199,6 +3360,87 @@ pub(crate) fn apply_label(mode: Option<EditMode>) -> &'static str {
     }
 }
 
+/// Transaction control: whether each statement commits on its own, and the
+/// way to end one that is open.
+///
+/// Only where the engine has a transaction for the user to drive, and only on
+/// a live connection: every control here writes a statement into the buffer
+/// and runs it, and with nothing connected there is nothing to run it on.
+pub(crate) fn render_transaction(
+    profile: &Profile,
+    cx: &mut Context<Workspace>,
+) -> Option<AnyElement> {
+    if profile.config.engine().begins_transaction().is_none() || profile.connection().is_none() {
+        return None;
+    }
+    let t = *theme(cx);
+    let (auto_commit, open) = (profile.auto_commit, profile.in_transaction);
+    let mut control = div()
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .gap(px(layout::SPACE_XS))
+        .child(
+            div()
+                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                .text_color(t.text_faint)
+                .child("Tx"),
+        )
+        .children([(true, "Auto"), (false, "Manual")].map(|(choice, label)| {
+            choice_chip(
+                ("auto-commit", choice as usize),
+                label,
+                choice == auto_commit,
+                cx,
+                move |workspace, window, cx| {
+                    // One action that flips, two chips that name a side:
+                    // clicking the one already lit would flip it away from
+                    // what it says. Read now rather than at render, since a
+                    // run since then may have changed it.
+                    let current = workspace.profile().map(|profile| profile.auto_commit);
+                    if current.is_some_and(|current| current != choice) {
+                        workspace.toggle_auto_commit(&ToggleAutoCommit, window, cx);
+                    }
+                },
+            )
+        }));
+    if open {
+        control = control
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .whitespace_nowrap()
+                    .text_color(t.text_muted)
+                    .child("open"),
+            )
+            .child(
+                button(
+                    "commit-transaction",
+                    "Commit",
+                    Tone::Quiet,
+                    Control::Compact,
+                    t,
+                )
+                .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| {
+                    workspace.commit_transaction(&CommitTransaction, window, cx);
+                })),
+            )
+            .child(
+                button(
+                    "rollback-transaction",
+                    "Roll back",
+                    Tone::Quiet,
+                    Control::Compact,
+                    t,
+                )
+                .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| {
+                    workspace.rollback_transaction(&RollbackTransaction, window, cx);
+                })),
+            );
+    }
+    Some(control.into_any_element())
+}
+
 /// The tab strip. It sits directly above the tab's surface and starts where the
 /// editor's text does, so a tab labels the surface under it rather than the
 /// window: the active one is lifted to the editor's tone, the rest are names
@@ -4017,6 +4259,16 @@ mod tests {
         assert_eq!(apply_label(None), "Apply edits");
     }
 
+    #[test]
+    fn a_parallel_chip_for_the_largest_worker_count_counts_the_leader_without_overflow() {
+        assert_eq!(
+            parallel_tooltip(u32::MAX),
+            "Times below are per-worker averages over 4294967296 participants: \
+             4294967295 workers and the leader"
+        );
+        assert!(parallel_tooltip(2).contains("over 3 participants: 2 workers"));
+    }
+
     struct CompletionEditors {
         query: Entity<EditorState>,
         filters: [Entity<EditorState>; 2],
@@ -4160,5 +4412,74 @@ mod tests {
             assert_eq!(editor.read(cx).value(), "customer_name");
             assert_eq!(submissions.get(), 1);
         });
+    }
+
+    fn missed(direction: Direction, factor: f64) -> Misestimate {
+        Misestimate {
+            factor,
+            direction,
+            tier: Tier::of_misestimate(factor).expect("a factor of ten or more has a tier"),
+        }
+    }
+
+    #[test]
+    fn a_misestimate_reads_as_an_arrow_and_a_grouped_factor() {
+        for (direction, factor, text) in [
+            (Direction::Under, 340.0, "↓ ×340"),
+            (Direction::Over, 12.0, "↑ ×12"),
+            (Direction::Under, 1234.4, "↓ ×1,234"),
+            (Direction::Over, 10.0, "↑ ×10"),
+            // Warm: the band a rounding helper printed as `×100`.
+            (Direction::Under, 99.6, "↓ ×99"),
+            (Direction::Under, 99.99, "↓ ×99"),
+            (Direction::Under, 100.0, "↓ ×100"),
+            // Hot through exactly 1000, Danger only above it.
+            (Direction::Over, 1000.0, "↑ ×1,000"),
+            (Direction::Under, 1000.3, "↓ ×1,001"),
+            (Direction::Under, 1000.49, "↓ ×1,001"),
+        ] {
+            assert_eq!(
+                misestimate_text(&missed(direction, factor)),
+                text,
+                "{factor}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_printed_factor_never_crosses_its_tier_boundary() {
+        let above_a_thousand = f64::from_bits(1000.0f64.to_bits() + 1);
+        let sweep = (1000..=200_000).map(|i| i as f64 / 100.0);
+        for factor in sweep.chain([above_a_thousand]) {
+            let miss = missed(Direction::Under, factor);
+            let digits: String = misestimate_text(&miss)
+                .chars()
+                .filter(char::is_ascii_digit)
+                .collect();
+            let printed: u64 = digits.parse().expect("the chip prints a whole number");
+            assert_eq!(
+                Tier::of_misestimate(printed as f64),
+                Some(miss.tier),
+                "{factor} printed as {printed}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_long_summary_value_is_clipped_to_forty_characters_and_a_short_one_is_not() {
+        let long = "Functions: 12 · Options: Inlining false, Optimization false, Expressions true";
+        let clipped = clip_summary(long).expect("longer than forty characters");
+        assert_eq!(clipped.chars().count(), 41);
+        assert!(clipped.ends_with('…'));
+        assert!(long.starts_with(&clipped[..clipped.len() - '…'.len_utf8()]));
+
+        let exactly_forty = "x".repeat(40);
+        assert_eq!(clip_summary(&exactly_forty), None);
+        assert_eq!(clip_summary("0.123 ms"), None);
+        // Multi-byte characters are counted, not their bytes.
+        assert_eq!(
+            clip_summary(&"é".repeat(41)),
+            Some(format!("{}…", "é".repeat(40)))
+        );
     }
 }

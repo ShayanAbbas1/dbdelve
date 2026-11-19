@@ -1,0 +1,1233 @@
+---
+source: src/sql_snapshots.rs
+---
+[postgres] plain select: SELECT a FROM t => |ro=run rw=run full=run|
+[postgres] scalar function: SELECT lower(a) FROM t => |ro=run rw=run full=run|
+[postgres] user-defined function: SELECT my_udf(a) FROM t => |ro=run rw=approve(ReadOnly) full=approve(ReadOnly)|
+[postgres] deny-listed call: SELECT set_config() => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[postgres] insert: INSERT INTO t (a) VALUES (1) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[postgres] update: UPDATE t SET a = 1 WHERE id = 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[postgres] update without where: UPDATE t SET a = 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[postgres] create table: CREATE TABLE u (a INT) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[postgres] create view: CREATE VIEW v AS SELECT a FROM t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[postgres] create schema: CREATE SCHEMA s => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[postgres] create index: CREATE INDEX i ON t (a) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[postgres] create index if not exists: CREATE INDEX IF NOT EXISTS i ON t (a) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[postgres] create index concurrently: CREATE INDEX CONCURRENTLY i ON t (a) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[postgres] comment: COMMENT ON TABLE t IS 'x' => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[postgres] analyze: ANALYZE t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[postgres] vacuum: VACUUM t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[postgres] add column: ALTER TABLE t ADD COLUMN b INT => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[postgres] filtered delete: DELETE FROM t WHERE id = 1 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[postgres] unfiltered delete: DELETE FROM t => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[postgres] drop: DROP TABLE t => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[postgres] drop, lower case: drop table t => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[postgres] drop, mixed case: DrOp TaBlE t => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[postgres] truncate: TRUNCATE TABLE t => |ro=refuse(Truncate) rw=refuse(Truncate) full=refuse(Truncate)|
+[postgres] truncate, lower case: truncate t => |ro=refuse(Truncate) rw=refuse(Truncate) full=refuse(Truncate)|
+[postgres] grant: GRANT SELECT ON t TO u => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[postgres] call: CALL p() => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[postgres] copy to a file: COPY t TO '/tmp/x.csv' => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[postgres] show tables: SHOW TABLES => |ro=run rw=run full=run|
+[postgres] describe: DESCRIBE t => |ro=run rw=run full=run|
+[postgres] plain explain: EXPLAIN SELECT a FROM t => |ro=run rw=run full=run|
+[postgres] delete in a cte: WITH d AS (DELETE FROM t WHERE id = 1 RETURNING *) SELECT * FROM d => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[postgres] delete after a cte: WITH s AS (SELECT 1) DELETE FROM t WHERE id IN (SELECT * FROM s) => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[postgres] plain explain of a delete: EXPLAIN DELETE FROM t WHERE id = 1 => |ro=run rw=run full=run|
+[postgres] explain analyze of a delete: EXPLAIN ANALYZE DELETE FROM t WHERE id = 1 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[postgres] explain with analyze on, of a delete: EXPLAIN (ANALYZE TRUE) DELETE FROM t WHERE id = 1 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[postgres] explain analyze of an update: EXPLAIN ANALYZE UPDATE t SET a = 1 WHERE id = 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[postgres] explain analyze of a select: EXPLAIN ANALYZE SELECT a FROM t => |ro=run rw=run full=run|
+[postgres] analyze of a delete: ANALYZE DELETE FROM t WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[postgres] delete in an if: IF 1 = 1 DELETE FROM t WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[postgres] delete in an else: IF 1 = 1 SELECT 1 ELSE DELETE FROM t WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[postgres] delete in a block: BEGIN DELETE FROM t WHERE id = 1; END => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[postgres] delete as a mutation: ALTER TABLE t DELETE WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[postgres] update as a mutation: ALTER TABLE t UPDATE a = 1 WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[postgres] drop a column: ALTER TABLE t DROP COLUMN b => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[postgres] rename a table: ALTER TABLE t RENAME TO u => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[postgres] change a column type: ALTER TABLE t ALTER COLUMN a TYPE TEXT => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[postgres] drop a column, lower case: alter table t drop column b => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[postgres] add a column and drop one: ALTER TABLE t ADD COLUMN b INT, DROP COLUMN c => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[postgres] alter with no operation: ALTER TABLE t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[postgres] drop with no object: DROP TABLE => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[postgres] a second statement in an executable comment: SELECT 1 /*M!100100 ; SELECT 2 */ => |ro=run rw=run full=run|
+[postgres] a delete as a second statement in an executable comment: SELECT 1 /*M!100100 ; DELETE FROM t WHERE id = 1 */ => |ro=run rw=run full=run|
+[postgres] a delete wholly in an executable comment: /*M!100100 DELETE FROM t WHERE id = 1 */ => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[postgres] a transaction block: BEGIN; DELETE FROM t WHERE id = 1; COMMIT => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[postgres] merge that deletes: MERGE INTO t USING u ON t.id = u.id WHEN MATCHED THEN DELETE => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[postgres] create or replace table: CREATE OR REPLACE TABLE t (a INT) => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[postgres] insert overwrite: INSERT OVERWRITE TABLE t SELECT * FROM u => |ro=refuse(Truncate) rw=refuse(Truncate) full=refuse(Truncate)|
+[postgres] select into a table: SELECT * INTO u FROM t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[postgres] copy to the client: COPY t TO STDOUT => |ro=run rw=run full=run|
+[postgres] prepare: PREPARE p AS SELECT 1 => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[postgres] execute: EXECUTE p => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[postgres] deallocate: DEALLOCATE p => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[postgres] do block: DO $$ BEGIN DELETE FROM t; END $$ => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[postgres] load data: LOAD DATA INFILE 'x.csv' INTO TABLE t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[postgres] select into outfile: SELECT a INTO OUTFILE '/tmp/x' FROM t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[postgres] select into outfile at the end: SELECT a FROM t INTO OUTFILE '/tmp/x' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[postgres] declare a cursor: DECLARE c CURSOR FOR SELECT 1 => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[postgres] fetch from a cursor: FETCH NEXT FROM c => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[postgres] listen: LISTEN c => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[postgres] notify: NOTIFY c => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[postgres] lock a table: LOCK TABLE t => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[postgres] refresh a materialized view: REFRESH MATERIALIZED VIEW v => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[postgres] reindex: REINDEX TABLE t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[postgres] cluster: CLUSTER t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[postgres] create a function: CREATE FUNCTION f() RETURNS INT AS 'SELECT 1' LANGUAGE SQL => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[postgres] create a trigger: CREATE TRIGGER g AFTER INSERT ON t FOR EACH ROW EXECUTE FUNCTION f() => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[postgres] create an extension: CREATE EXTENSION x => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[postgres] attach a database: ATTACH 'x.db' AS x => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[postgres] install an extension: INSTALL httpfs => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[postgres] load an extension: LOAD httpfs => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[postgres] export a database: EXPORT DATABASE '/tmp/x' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[postgres] optimize a table: OPTIMIZE TABLE t FINAL => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[postgres] kill a session: KILL 1 => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[postgres] xa transaction: XA START 'x' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[postgres] begin: BEGIN => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[postgres] start a read-write transaction: START TRANSACTION READ WRITE => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[postgres] commit: COMMIT => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[postgres] rollback: ROLLBACK => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[postgres] set the search path: SET search_path = other => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[postgres] set a role: SET ROLE other => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[postgres] set the session transaction: SET SESSION TRANSACTION READ WRITE => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[postgres] set a variable: SET x = 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[postgres] set a server-wide setting: SET GLOBAL max_connections = 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[postgres] use a database: USE other => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[postgres] create a temporary table: CREATE TEMPORARY TABLE u (a INT) => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[postgres] create a temporary view: CREATE TEMP VIEW v AS SELECT 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[postgres] create or replace a temporary view: CREATE OR REPLACE TEMP VIEW v AS SELECT 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[postgres] select into a temporary table under a union: SELECT * INTO TEMP u FROM t UNION ALL SELECT * FROM w => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[postgres] assign a user variable: SELECT @x := 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[postgres] select into a user variable: SELECT 1 INTO @x => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[postgres] savepoint: SAVEPOINT a => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[postgres] release a savepoint: RELEASE SAVEPOINT a => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[postgres] roll back to a savepoint: ROLLBACK TO SAVEPOINT a => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[postgres] read a sequence's current value: SELECT currval('s') => |ro=run rw=run full=run|
+[postgres] read the last insert id: SELECT last_insert_id() => |ro=run rw=approve(ReadOnly) full=approve(ReadOnly)|
+[postgres] named argument: SELECT make_interval(days := 10) => |ro=run rw=run full=run|
+[postgres] replace into: REPLACE INTO t (a) VALUES (1) => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[postgres] insert or replace: INSERT OR REPLACE INTO t (a) VALUES (1) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[postgres] select for update: SELECT a FROM t FOR UPDATE => |ro=run rw=run full=run|
+[postgres] insert on conflict: INSERT INTO t (a) VALUES (1) ON CONFLICT DO NOTHING => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[postgres] pragma read: PRAGMA table_info(t) => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[postgres] empty:  => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[postgres] whitespace only:     => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[postgres] line comment only: -- nothing => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[postgres] block comment only: /* x */ => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[postgres] two reads: SELECT 1; SELECT 2 => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[postgres] two drops: DROP TABLE a; DROP TABLE b => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[postgres] read then garbage: SELECT 1; garbage => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[postgres] a typo: selec 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[postgres] read, then a line comment: SELECT 1; -- c => |ro=run rw=run full=run|
+[postgres] line comment, then a read: -- c\u{a}SELECT 1 => |ro=run rw=run full=run|
+[postgres] block comment, then a read: /* c */ SELECT 1 => |ro=run rw=run full=run|
+[postgres] read, then a hash comment: SELECT 1 # c => |ro=run rw=run full=run|
+[mysql] plain select: SELECT a FROM t => |ro=run rw=run full=run|
+[mysql] scalar function: SELECT lower(a) FROM t => |ro=run rw=run full=run|
+[mysql] user-defined function: SELECT my_udf(a) FROM t => |ro=run rw=approve(ReadOnly) full=approve(ReadOnly)|
+[mysql] deny-listed call: SELECT get_lock() => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mysql] insert: INSERT INTO t (a) VALUES (1) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mysql] update: UPDATE t SET a = 1 WHERE id = 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mysql] update without where: UPDATE t SET a = 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mysql] create table: CREATE TABLE u (a INT) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mysql] create view: CREATE VIEW v AS SELECT a FROM t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mysql] create schema: CREATE SCHEMA s => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mysql] create index: CREATE INDEX i ON t (a) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mysql] create index if not exists: CREATE INDEX IF NOT EXISTS i ON t (a) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mysql] create index concurrently: CREATE INDEX CONCURRENTLY i ON t (a) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mysql] comment: COMMENT ON TABLE t IS 'x' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mysql] analyze: ANALYZE t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mysql] vacuum: VACUUM t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mysql] add column: ALTER TABLE t ADD COLUMN b INT => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mysql] filtered delete: DELETE FROM t WHERE id = 1 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mysql] unfiltered delete: DELETE FROM t => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mysql] drop: DROP TABLE t => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[mysql] drop, lower case: drop table t => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[mysql] drop, mixed case: DrOp TaBlE t => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[mysql] truncate: TRUNCATE TABLE t => |ro=refuse(Truncate) rw=refuse(Truncate) full=refuse(Truncate)|
+[mysql] truncate, lower case: truncate t => |ro=refuse(Truncate) rw=refuse(Truncate) full=refuse(Truncate)|
+[mysql] grant: GRANT SELECT ON t TO u => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mysql] call: CALL p() => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mysql] copy to a file: COPY t TO '/tmp/x.csv' => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mysql] show tables: SHOW TABLES => |ro=run rw=run full=run|
+[mysql] describe: DESCRIBE t => |ro=run rw=run full=run|
+[mysql] plain explain: EXPLAIN SELECT a FROM t => |ro=run rw=run full=run|
+[mysql] delete in a cte: WITH d AS (DELETE FROM t WHERE id = 1 RETURNING *) SELECT * FROM d => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mysql] delete after a cte: WITH s AS (SELECT 1) DELETE FROM t WHERE id IN (SELECT * FROM s) => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mysql] plain explain of a delete: EXPLAIN DELETE FROM t WHERE id = 1 => |ro=run rw=run full=run|
+[mysql] explain analyze of a delete: EXPLAIN ANALYZE DELETE FROM t WHERE id = 1 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mysql] explain with analyze on, of a delete: EXPLAIN (ANALYZE TRUE) DELETE FROM t WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mysql] explain analyze of an update: EXPLAIN ANALYZE UPDATE t SET a = 1 WHERE id = 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mysql] explain analyze of a select: EXPLAIN ANALYZE SELECT a FROM t => |ro=run rw=run full=run|
+[mysql] analyze of a delete: ANALYZE DELETE FROM t WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mysql] delete in an if: IF 1 = 1 DELETE FROM t WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mysql] delete in an else: IF 1 = 1 SELECT 1 ELSE DELETE FROM t WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mysql] delete in a block: BEGIN DELETE FROM t WHERE id = 1; END => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mysql] delete as a mutation: ALTER TABLE t DELETE WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mysql] update as a mutation: ALTER TABLE t UPDATE a = 1 WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mysql] drop a column: ALTER TABLE t DROP COLUMN b => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[mysql] rename a table: ALTER TABLE t RENAME TO u => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[mysql] change a column type: ALTER TABLE t ALTER COLUMN a TYPE TEXT => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[mysql] drop a column, lower case: alter table t drop column b => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[mysql] add a column and drop one: ALTER TABLE t ADD COLUMN b INT, DROP COLUMN c => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[mysql] alter with no operation: ALTER TABLE t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mysql] drop with no object: DROP TABLE => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mysql] a second statement in an executable comment: SELECT 1 /*M!100100 ; SELECT 2 */ => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mysql] a delete as a second statement in an executable comment: SELECT 1 /*M!100100 ; DELETE FROM t WHERE id = 1 */ => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mysql] a delete wholly in an executable comment: /*M!100100 DELETE FROM t WHERE id = 1 */ => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mysql] a transaction block: BEGIN; DELETE FROM t WHERE id = 1; COMMIT => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[mysql] merge that deletes: MERGE INTO t USING u ON t.id = u.id WHEN MATCHED THEN DELETE => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mysql] create or replace table: CREATE OR REPLACE TABLE t (a INT) => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[mysql] insert overwrite: INSERT OVERWRITE TABLE t SELECT * FROM u => |ro=refuse(Truncate) rw=refuse(Truncate) full=refuse(Truncate)|
+[mysql] select into a table: SELECT * INTO u FROM t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mysql] copy to the client: COPY t TO STDOUT => |ro=run rw=run full=run|
+[mysql] prepare: PREPARE p AS SELECT 1 => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mysql] execute: EXECUTE p => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mysql] deallocate: DEALLOCATE p => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mysql] do block: DO $$ BEGIN DELETE FROM t; END $$ => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mysql] load data: LOAD DATA INFILE 'x.csv' INTO TABLE t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mysql] select into outfile: SELECT a INTO OUTFILE '/tmp/x' FROM t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mysql] select into outfile at the end: SELECT a FROM t INTO OUTFILE '/tmp/x' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mysql] declare a cursor: DECLARE c CURSOR FOR SELECT 1 => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mysql] fetch from a cursor: FETCH NEXT FROM c => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mysql] listen: LISTEN c => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mysql] notify: NOTIFY c => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mysql] lock a table: LOCK TABLE t => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mysql] refresh a materialized view: REFRESH MATERIALIZED VIEW v => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mysql] reindex: REINDEX TABLE t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mysql] cluster: CLUSTER t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mysql] create a function: CREATE FUNCTION f() RETURNS INT AS 'SELECT 1' LANGUAGE SQL => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mysql] create a trigger: CREATE TRIGGER g AFTER INSERT ON t FOR EACH ROW EXECUTE FUNCTION f() => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mysql] create an extension: CREATE EXTENSION x => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mysql] attach a database: ATTACH 'x.db' AS x => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mysql] install an extension: INSTALL httpfs => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mysql] load an extension: LOAD httpfs => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mysql] export a database: EXPORT DATABASE '/tmp/x' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mysql] optimize a table: OPTIMIZE TABLE t FINAL => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mysql] kill a session: KILL 1 => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mysql] xa transaction: XA START 'x' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mysql] begin: BEGIN => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mysql] start a read-write transaction: START TRANSACTION READ WRITE => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mysql] commit: COMMIT => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mysql] rollback: ROLLBACK => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mysql] set the search path: SET search_path = other => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mysql] set a role: SET ROLE other => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mysql] set the session transaction: SET SESSION TRANSACTION READ WRITE => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mysql] set a variable: SET x = 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mysql] set a server-wide setting: SET GLOBAL max_connections = 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mysql] use a database: USE other => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mysql] create a temporary table: CREATE TEMPORARY TABLE u (a INT) => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mysql] create a temporary view: CREATE TEMP VIEW v AS SELECT 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mysql] create or replace a temporary view: CREATE OR REPLACE TEMP VIEW v AS SELECT 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mysql] select into a temporary table under a union: SELECT * INTO TEMP u FROM t UNION ALL SELECT * FROM w => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mysql] assign a user variable: SELECT @x := 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mysql] select into a user variable: SELECT 1 INTO @x => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mysql] savepoint: SAVEPOINT a => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mysql] release a savepoint: RELEASE SAVEPOINT a => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mysql] roll back to a savepoint: ROLLBACK TO SAVEPOINT a => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mysql] read a sequence's current value: SELECT currval('s') => |ro=run rw=approve(ReadOnly) full=approve(ReadOnly)|
+[mysql] read the last insert id: SELECT last_insert_id() => |ro=run rw=run full=run|
+[mysql] named argument: SELECT make_interval(days := 10) => |ro=run rw=approve(ReadOnly) full=approve(ReadOnly)|
+[mysql] replace into: REPLACE INTO t (a) VALUES (1) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mysql] insert or replace: INSERT OR REPLACE INTO t (a) VALUES (1) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mysql] select for update: SELECT a FROM t FOR UPDATE => |ro=run rw=run full=run|
+[mysql] insert on conflict: INSERT INTO t (a) VALUES (1) ON CONFLICT DO NOTHING => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mysql] pragma read: PRAGMA table_info(t) => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mysql] empty:  => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[mysql] whitespace only:     => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[mysql] line comment only: -- nothing => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[mysql] block comment only: /* x */ => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[mysql] two reads: SELECT 1; SELECT 2 => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[mysql] two drops: DROP TABLE a; DROP TABLE b => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[mysql] read then garbage: SELECT 1; garbage => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mysql] a typo: selec 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mysql] read, then a line comment: SELECT 1; -- c => |ro=run rw=run full=run|
+[mysql] line comment, then a read: -- c\u{a}SELECT 1 => |ro=run rw=run full=run|
+[mysql] block comment, then a read: /* c */ SELECT 1 => |ro=run rw=run full=run|
+[mysql] read, then a hash comment: SELECT 1 # c => |ro=run rw=run full=run|
+[mariadb] plain select: SELECT a FROM t => |ro=run rw=run full=run|
+[mariadb] scalar function: SELECT lower(a) FROM t => |ro=run rw=run full=run|
+[mariadb] user-defined function: SELECT my_udf(a) FROM t => |ro=run rw=approve(ReadOnly) full=approve(ReadOnly)|
+[mariadb] deny-listed call: SELECT get_lock() => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mariadb] insert: INSERT INTO t (a) VALUES (1) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mariadb] update: UPDATE t SET a = 1 WHERE id = 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mariadb] update without where: UPDATE t SET a = 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mariadb] create table: CREATE TABLE u (a INT) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mariadb] create view: CREATE VIEW v AS SELECT a FROM t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mariadb] create schema: CREATE SCHEMA s => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mariadb] create index: CREATE INDEX i ON t (a) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mariadb] create index if not exists: CREATE INDEX IF NOT EXISTS i ON t (a) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mariadb] create index concurrently: CREATE INDEX CONCURRENTLY i ON t (a) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mariadb] comment: COMMENT ON TABLE t IS 'x' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mariadb] analyze: ANALYZE t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mariadb] vacuum: VACUUM t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mariadb] add column: ALTER TABLE t ADD COLUMN b INT => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mariadb] filtered delete: DELETE FROM t WHERE id = 1 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mariadb] unfiltered delete: DELETE FROM t => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mariadb] drop: DROP TABLE t => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[mariadb] drop, lower case: drop table t => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[mariadb] drop, mixed case: DrOp TaBlE t => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[mariadb] truncate: TRUNCATE TABLE t => |ro=refuse(Truncate) rw=refuse(Truncate) full=refuse(Truncate)|
+[mariadb] truncate, lower case: truncate t => |ro=refuse(Truncate) rw=refuse(Truncate) full=refuse(Truncate)|
+[mariadb] grant: GRANT SELECT ON t TO u => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mariadb] call: CALL p() => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mariadb] copy to a file: COPY t TO '/tmp/x.csv' => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mariadb] show tables: SHOW TABLES => |ro=run rw=run full=run|
+[mariadb] describe: DESCRIBE t => |ro=run rw=run full=run|
+[mariadb] plain explain: EXPLAIN SELECT a FROM t => |ro=run rw=run full=run|
+[mariadb] delete in a cte: WITH d AS (DELETE FROM t WHERE id = 1 RETURNING *) SELECT * FROM d => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mariadb] delete after a cte: WITH s AS (SELECT 1) DELETE FROM t WHERE id IN (SELECT * FROM s) => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mariadb] plain explain of a delete: EXPLAIN DELETE FROM t WHERE id = 1 => |ro=run rw=run full=run|
+[mariadb] explain analyze of a delete: EXPLAIN ANALYZE DELETE FROM t WHERE id = 1 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mariadb] explain with analyze on, of a delete: EXPLAIN (ANALYZE TRUE) DELETE FROM t WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mariadb] explain analyze of an update: EXPLAIN ANALYZE UPDATE t SET a = 1 WHERE id = 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mariadb] explain analyze of a select: EXPLAIN ANALYZE SELECT a FROM t => |ro=run rw=run full=run|
+[mariadb] analyze of a delete: ANALYZE DELETE FROM t WHERE id = 1 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mariadb] delete in an if: IF 1 = 1 DELETE FROM t WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mariadb] delete in an else: IF 1 = 1 SELECT 1 ELSE DELETE FROM t WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mariadb] delete in a block: BEGIN DELETE FROM t WHERE id = 1; END => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mariadb] delete as a mutation: ALTER TABLE t DELETE WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mariadb] update as a mutation: ALTER TABLE t UPDATE a = 1 WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mariadb] drop a column: ALTER TABLE t DROP COLUMN b => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[mariadb] rename a table: ALTER TABLE t RENAME TO u => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[mariadb] change a column type: ALTER TABLE t ALTER COLUMN a TYPE TEXT => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[mariadb] drop a column, lower case: alter table t drop column b => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[mariadb] add a column and drop one: ALTER TABLE t ADD COLUMN b INT, DROP COLUMN c => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[mariadb] alter with no operation: ALTER TABLE t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mariadb] drop with no object: DROP TABLE => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mariadb] a second statement in an executable comment: SELECT 1 /*M!100100 ; SELECT 2 */ => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[mariadb] a delete as a second statement in an executable comment: SELECT 1 /*M!100100 ; DELETE FROM t WHERE id = 1 */ => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[mariadb] a delete wholly in an executable comment: /*M!100100 DELETE FROM t WHERE id = 1 */ => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mariadb] a transaction block: BEGIN; DELETE FROM t WHERE id = 1; COMMIT => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[mariadb] merge that deletes: MERGE INTO t USING u ON t.id = u.id WHEN MATCHED THEN DELETE => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mariadb] create or replace table: CREATE OR REPLACE TABLE t (a INT) => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[mariadb] insert overwrite: INSERT OVERWRITE TABLE t SELECT * FROM u => |ro=refuse(Truncate) rw=refuse(Truncate) full=refuse(Truncate)|
+[mariadb] select into a table: SELECT * INTO u FROM t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mariadb] copy to the client: COPY t TO STDOUT => |ro=run rw=run full=run|
+[mariadb] prepare: PREPARE p AS SELECT 1 => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mariadb] execute: EXECUTE p => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mariadb] deallocate: DEALLOCATE p => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mariadb] do block: DO $$ BEGIN DELETE FROM t; END $$ => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mariadb] load data: LOAD DATA INFILE 'x.csv' INTO TABLE t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mariadb] select into outfile: SELECT a INTO OUTFILE '/tmp/x' FROM t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mariadb] select into outfile at the end: SELECT a FROM t INTO OUTFILE '/tmp/x' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mariadb] declare a cursor: DECLARE c CURSOR FOR SELECT 1 => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mariadb] fetch from a cursor: FETCH NEXT FROM c => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mariadb] listen: LISTEN c => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mariadb] notify: NOTIFY c => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mariadb] lock a table: LOCK TABLE t => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mariadb] refresh a materialized view: REFRESH MATERIALIZED VIEW v => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mariadb] reindex: REINDEX TABLE t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mariadb] cluster: CLUSTER t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mariadb] create a function: CREATE FUNCTION f() RETURNS INT AS 'SELECT 1' LANGUAGE SQL => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mariadb] create a trigger: CREATE TRIGGER g AFTER INSERT ON t FOR EACH ROW EXECUTE FUNCTION f() => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mariadb] create an extension: CREATE EXTENSION x => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mariadb] attach a database: ATTACH 'x.db' AS x => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mariadb] install an extension: INSTALL httpfs => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mariadb] load an extension: LOAD httpfs => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mariadb] export a database: EXPORT DATABASE '/tmp/x' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mariadb] optimize a table: OPTIMIZE TABLE t FINAL => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mariadb] kill a session: KILL 1 => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mariadb] xa transaction: XA START 'x' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mariadb] begin: BEGIN => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mariadb] start a read-write transaction: START TRANSACTION READ WRITE => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mariadb] commit: COMMIT => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mariadb] rollback: ROLLBACK => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mariadb] set the search path: SET search_path = other => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mariadb] set a role: SET ROLE other => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mariadb] set the session transaction: SET SESSION TRANSACTION READ WRITE => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mariadb] set a variable: SET x = 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mariadb] set a server-wide setting: SET GLOBAL max_connections = 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mariadb] use a database: USE other => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mariadb] create a temporary table: CREATE TEMPORARY TABLE u (a INT) => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mariadb] create a temporary view: CREATE TEMP VIEW v AS SELECT 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mariadb] create or replace a temporary view: CREATE OR REPLACE TEMP VIEW v AS SELECT 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mariadb] select into a temporary table under a union: SELECT * INTO TEMP u FROM t UNION ALL SELECT * FROM w => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mariadb] assign a user variable: SELECT @x := 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mariadb] select into a user variable: SELECT 1 INTO @x => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mariadb] savepoint: SAVEPOINT a => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mariadb] release a savepoint: RELEASE SAVEPOINT a => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mariadb] roll back to a savepoint: ROLLBACK TO SAVEPOINT a => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mariadb] read a sequence's current value: SELECT currval('s') => |ro=run rw=approve(ReadOnly) full=approve(ReadOnly)|
+[mariadb] read the last insert id: SELECT last_insert_id() => |ro=run rw=run full=run|
+[mariadb] named argument: SELECT make_interval(days := 10) => |ro=run rw=approve(ReadOnly) full=approve(ReadOnly)|
+[mariadb] replace into: REPLACE INTO t (a) VALUES (1) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mariadb] insert or replace: INSERT OR REPLACE INTO t (a) VALUES (1) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mariadb] select for update: SELECT a FROM t FOR UPDATE => |ro=run rw=run full=run|
+[mariadb] insert on conflict: INSERT INTO t (a) VALUES (1) ON CONFLICT DO NOTHING => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mariadb] pragma read: PRAGMA table_info(t) => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mariadb] empty:  => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[mariadb] whitespace only:     => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[mariadb] line comment only: -- nothing => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[mariadb] block comment only: /* x */ => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[mariadb] two reads: SELECT 1; SELECT 2 => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[mariadb] two drops: DROP TABLE a; DROP TABLE b => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[mariadb] read then garbage: SELECT 1; garbage => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mariadb] a typo: selec 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mariadb] read, then a line comment: SELECT 1; -- c => |ro=run rw=run full=run|
+[mariadb] line comment, then a read: -- c\u{a}SELECT 1 => |ro=run rw=run full=run|
+[mariadb] block comment, then a read: /* c */ SELECT 1 => |ro=run rw=run full=run|
+[mariadb] read, then a hash comment: SELECT 1 # c => |ro=run rw=run full=run|
+[sqlite] plain select: SELECT a FROM t => |ro=run rw=run full=run|
+[sqlite] scalar function: SELECT lower(a) FROM t => |ro=run rw=run full=run|
+[sqlite] user-defined function: SELECT my_udf(a) FROM t => |ro=run rw=approve(ReadOnly) full=approve(ReadOnly)|
+[sqlite] deny-listed call: SELECT load_extension() => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[sqlite] insert: INSERT INTO t (a) VALUES (1) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[sqlite] update: UPDATE t SET a = 1 WHERE id = 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[sqlite] update without where: UPDATE t SET a = 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[sqlite] create table: CREATE TABLE u (a INT) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[sqlite] create view: CREATE VIEW v AS SELECT a FROM t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[sqlite] create schema: CREATE SCHEMA s => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[sqlite] create index: CREATE INDEX i ON t (a) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[sqlite] create index if not exists: CREATE INDEX IF NOT EXISTS i ON t (a) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[sqlite] create index concurrently: CREATE INDEX CONCURRENTLY i ON t (a) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[sqlite] comment: COMMENT ON TABLE t IS 'x' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[sqlite] analyze: ANALYZE t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[sqlite] vacuum: VACUUM t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[sqlite] add column: ALTER TABLE t ADD COLUMN b INT => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[sqlite] filtered delete: DELETE FROM t WHERE id = 1 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[sqlite] unfiltered delete: DELETE FROM t => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[sqlite] drop: DROP TABLE t => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[sqlite] drop, lower case: drop table t => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[sqlite] drop, mixed case: DrOp TaBlE t => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[sqlite] truncate: TRUNCATE TABLE t => |ro=refuse(Truncate) rw=refuse(Truncate) full=refuse(Truncate)|
+[sqlite] truncate, lower case: truncate t => |ro=refuse(Truncate) rw=refuse(Truncate) full=refuse(Truncate)|
+[sqlite] grant: GRANT SELECT ON t TO u => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[sqlite] call: CALL p() => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[sqlite] copy to a file: COPY t TO '/tmp/x.csv' => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[sqlite] show tables: SHOW TABLES => |ro=run rw=run full=run|
+[sqlite] describe: DESCRIBE t => |ro=run rw=run full=run|
+[sqlite] plain explain: EXPLAIN SELECT a FROM t => |ro=run rw=run full=run|
+[sqlite] delete in a cte: WITH d AS (DELETE FROM t WHERE id = 1 RETURNING *) SELECT * FROM d => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[sqlite] delete after a cte: WITH s AS (SELECT 1) DELETE FROM t WHERE id IN (SELECT * FROM s) => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[sqlite] plain explain of a delete: EXPLAIN DELETE FROM t WHERE id = 1 => |ro=run rw=run full=run|
+[sqlite] explain analyze of a delete: EXPLAIN ANALYZE DELETE FROM t WHERE id = 1 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[sqlite] explain with analyze on, of a delete: EXPLAIN (ANALYZE TRUE) DELETE FROM t WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[sqlite] explain analyze of an update: EXPLAIN ANALYZE UPDATE t SET a = 1 WHERE id = 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[sqlite] explain analyze of a select: EXPLAIN ANALYZE SELECT a FROM t => |ro=run rw=run full=run|
+[sqlite] analyze of a delete: ANALYZE DELETE FROM t WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[sqlite] delete in an if: IF 1 = 1 DELETE FROM t WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[sqlite] delete in an else: IF 1 = 1 SELECT 1 ELSE DELETE FROM t WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[sqlite] delete in a block: BEGIN DELETE FROM t WHERE id = 1; END => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[sqlite] delete as a mutation: ALTER TABLE t DELETE WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[sqlite] update as a mutation: ALTER TABLE t UPDATE a = 1 WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[sqlite] drop a column: ALTER TABLE t DROP COLUMN b => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[sqlite] rename a table: ALTER TABLE t RENAME TO u => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[sqlite] change a column type: ALTER TABLE t ALTER COLUMN a TYPE TEXT => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[sqlite] drop a column, lower case: alter table t drop column b => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[sqlite] add a column and drop one: ALTER TABLE t ADD COLUMN b INT, DROP COLUMN c => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[sqlite] alter with no operation: ALTER TABLE t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[sqlite] drop with no object: DROP TABLE => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[sqlite] a second statement in an executable comment: SELECT 1 /*M!100100 ; SELECT 2 */ => |ro=run rw=run full=run|
+[sqlite] a delete as a second statement in an executable comment: SELECT 1 /*M!100100 ; DELETE FROM t WHERE id = 1 */ => |ro=run rw=run full=run|
+[sqlite] a delete wholly in an executable comment: /*M!100100 DELETE FROM t WHERE id = 1 */ => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[sqlite] a transaction block: BEGIN; DELETE FROM t WHERE id = 1; COMMIT => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[sqlite] merge that deletes: MERGE INTO t USING u ON t.id = u.id WHEN MATCHED THEN DELETE => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[sqlite] create or replace table: CREATE OR REPLACE TABLE t (a INT) => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[sqlite] insert overwrite: INSERT OVERWRITE TABLE t SELECT * FROM u => |ro=refuse(Truncate) rw=refuse(Truncate) full=refuse(Truncate)|
+[sqlite] select into a table: SELECT * INTO u FROM t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[sqlite] copy to the client: COPY t TO STDOUT => |ro=run rw=run full=run|
+[sqlite] prepare: PREPARE p AS SELECT 1 => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[sqlite] execute: EXECUTE p => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[sqlite] deallocate: DEALLOCATE p => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[sqlite] do block: DO $$ BEGIN DELETE FROM t; END $$ => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[sqlite] load data: LOAD DATA INFILE 'x.csv' INTO TABLE t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[sqlite] select into outfile: SELECT a INTO OUTFILE '/tmp/x' FROM t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[sqlite] select into outfile at the end: SELECT a FROM t INTO OUTFILE '/tmp/x' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[sqlite] declare a cursor: DECLARE c CURSOR FOR SELECT 1 => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[sqlite] fetch from a cursor: FETCH NEXT FROM c => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[sqlite] listen: LISTEN c => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[sqlite] notify: NOTIFY c => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[sqlite] lock a table: LOCK TABLE t => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[sqlite] refresh a materialized view: REFRESH MATERIALIZED VIEW v => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[sqlite] reindex: REINDEX TABLE t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[sqlite] cluster: CLUSTER t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[sqlite] create a function: CREATE FUNCTION f() RETURNS INT AS 'SELECT 1' LANGUAGE SQL => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[sqlite] create a trigger: CREATE TRIGGER g AFTER INSERT ON t FOR EACH ROW EXECUTE FUNCTION f() => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[sqlite] create an extension: CREATE EXTENSION x => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[sqlite] attach a database: ATTACH 'x.db' AS x => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[sqlite] install an extension: INSTALL httpfs => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[sqlite] load an extension: LOAD httpfs => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[sqlite] export a database: EXPORT DATABASE '/tmp/x' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[sqlite] optimize a table: OPTIMIZE TABLE t FINAL => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[sqlite] kill a session: KILL 1 => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[sqlite] xa transaction: XA START 'x' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[sqlite] begin: BEGIN => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[sqlite] start a read-write transaction: START TRANSACTION READ WRITE => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[sqlite] commit: COMMIT => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[sqlite] rollback: ROLLBACK => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[sqlite] set the search path: SET search_path = other => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[sqlite] set a role: SET ROLE other => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[sqlite] set the session transaction: SET SESSION TRANSACTION READ WRITE => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[sqlite] set a variable: SET x = 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[sqlite] set a server-wide setting: SET GLOBAL max_connections = 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[sqlite] use a database: USE other => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[sqlite] create a temporary table: CREATE TEMPORARY TABLE u (a INT) => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[sqlite] create a temporary view: CREATE TEMP VIEW v AS SELECT 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[sqlite] create or replace a temporary view: CREATE OR REPLACE TEMP VIEW v AS SELECT 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[sqlite] select into a temporary table under a union: SELECT * INTO TEMP u FROM t UNION ALL SELECT * FROM w => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[sqlite] assign a user variable: SELECT @x := 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[sqlite] select into a user variable: SELECT 1 INTO @x => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[sqlite] savepoint: SAVEPOINT a => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[sqlite] release a savepoint: RELEASE SAVEPOINT a => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[sqlite] roll back to a savepoint: ROLLBACK TO SAVEPOINT a => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[sqlite] read a sequence's current value: SELECT currval('s') => |ro=run rw=approve(ReadOnly) full=approve(ReadOnly)|
+[sqlite] read the last insert id: SELECT last_insert_id() => |ro=run rw=approve(ReadOnly) full=approve(ReadOnly)|
+[sqlite] named argument: SELECT make_interval(days := 10) => |ro=run rw=approve(ReadOnly) full=approve(ReadOnly)|
+[sqlite] replace into: REPLACE INTO t (a) VALUES (1) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[sqlite] insert or replace: INSERT OR REPLACE INTO t (a) VALUES (1) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[sqlite] select for update: SELECT a FROM t FOR UPDATE => |ro=run rw=run full=run|
+[sqlite] insert on conflict: INSERT INTO t (a) VALUES (1) ON CONFLICT DO NOTHING => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[sqlite] pragma read: PRAGMA table_info(t) => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[sqlite] empty:  => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[sqlite] whitespace only:     => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[sqlite] line comment only: -- nothing => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[sqlite] block comment only: /* x */ => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[sqlite] two reads: SELECT 1; SELECT 2 => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[sqlite] two drops: DROP TABLE a; DROP TABLE b => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[sqlite] read then garbage: SELECT 1; garbage => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[sqlite] a typo: selec 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[sqlite] read, then a line comment: SELECT 1; -- c => |ro=run rw=run full=run|
+[sqlite] line comment, then a read: -- c\u{a}SELECT 1 => |ro=run rw=run full=run|
+[sqlite] block comment, then a read: /* c */ SELECT 1 => |ro=run rw=run full=run|
+[sqlite] read, then a hash comment: SELECT 1 # c => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[turso] plain select: SELECT a FROM t => |ro=run rw=run full=run|
+[turso] scalar function: SELECT lower(a) FROM t => |ro=run rw=run full=run|
+[turso] user-defined function: SELECT my_udf(a) FROM t => |ro=run rw=approve(ReadOnly) full=approve(ReadOnly)|
+[turso] deny-listed call: SELECT load_extension() => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[turso] insert: INSERT INTO t (a) VALUES (1) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[turso] update: UPDATE t SET a = 1 WHERE id = 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[turso] update without where: UPDATE t SET a = 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[turso] create table: CREATE TABLE u (a INT) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[turso] create view: CREATE VIEW v AS SELECT a FROM t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[turso] create schema: CREATE SCHEMA s => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[turso] create index: CREATE INDEX i ON t (a) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[turso] create index if not exists: CREATE INDEX IF NOT EXISTS i ON t (a) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[turso] create index concurrently: CREATE INDEX CONCURRENTLY i ON t (a) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[turso] comment: COMMENT ON TABLE t IS 'x' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[turso] analyze: ANALYZE t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[turso] vacuum: VACUUM t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[turso] add column: ALTER TABLE t ADD COLUMN b INT => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[turso] filtered delete: DELETE FROM t WHERE id = 1 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[turso] unfiltered delete: DELETE FROM t => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[turso] drop: DROP TABLE t => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[turso] drop, lower case: drop table t => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[turso] drop, mixed case: DrOp TaBlE t => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[turso] truncate: TRUNCATE TABLE t => |ro=refuse(Truncate) rw=refuse(Truncate) full=refuse(Truncate)|
+[turso] truncate, lower case: truncate t => |ro=refuse(Truncate) rw=refuse(Truncate) full=refuse(Truncate)|
+[turso] grant: GRANT SELECT ON t TO u => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[turso] call: CALL p() => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[turso] copy to a file: COPY t TO '/tmp/x.csv' => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[turso] show tables: SHOW TABLES => |ro=run rw=run full=run|
+[turso] describe: DESCRIBE t => |ro=run rw=run full=run|
+[turso] plain explain: EXPLAIN SELECT a FROM t => |ro=run rw=run full=run|
+[turso] delete in a cte: WITH d AS (DELETE FROM t WHERE id = 1 RETURNING *) SELECT * FROM d => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[turso] delete after a cte: WITH s AS (SELECT 1) DELETE FROM t WHERE id IN (SELECT * FROM s) => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[turso] plain explain of a delete: EXPLAIN DELETE FROM t WHERE id = 1 => |ro=run rw=run full=run|
+[turso] explain analyze of a delete: EXPLAIN ANALYZE DELETE FROM t WHERE id = 1 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[turso] explain with analyze on, of a delete: EXPLAIN (ANALYZE TRUE) DELETE FROM t WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[turso] explain analyze of an update: EXPLAIN ANALYZE UPDATE t SET a = 1 WHERE id = 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[turso] explain analyze of a select: EXPLAIN ANALYZE SELECT a FROM t => |ro=run rw=run full=run|
+[turso] analyze of a delete: ANALYZE DELETE FROM t WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[turso] delete in an if: IF 1 = 1 DELETE FROM t WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[turso] delete in an else: IF 1 = 1 SELECT 1 ELSE DELETE FROM t WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[turso] delete in a block: BEGIN DELETE FROM t WHERE id = 1; END => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[turso] delete as a mutation: ALTER TABLE t DELETE WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[turso] update as a mutation: ALTER TABLE t UPDATE a = 1 WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[turso] drop a column: ALTER TABLE t DROP COLUMN b => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[turso] rename a table: ALTER TABLE t RENAME TO u => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[turso] change a column type: ALTER TABLE t ALTER COLUMN a TYPE TEXT => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[turso] drop a column, lower case: alter table t drop column b => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[turso] add a column and drop one: ALTER TABLE t ADD COLUMN b INT, DROP COLUMN c => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[turso] alter with no operation: ALTER TABLE t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[turso] drop with no object: DROP TABLE => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[turso] a second statement in an executable comment: SELECT 1 /*M!100100 ; SELECT 2 */ => |ro=run rw=run full=run|
+[turso] a delete as a second statement in an executable comment: SELECT 1 /*M!100100 ; DELETE FROM t WHERE id = 1 */ => |ro=run rw=run full=run|
+[turso] a delete wholly in an executable comment: /*M!100100 DELETE FROM t WHERE id = 1 */ => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[turso] a transaction block: BEGIN; DELETE FROM t WHERE id = 1; COMMIT => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[turso] merge that deletes: MERGE INTO t USING u ON t.id = u.id WHEN MATCHED THEN DELETE => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[turso] create or replace table: CREATE OR REPLACE TABLE t (a INT) => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[turso] insert overwrite: INSERT OVERWRITE TABLE t SELECT * FROM u => |ro=refuse(Truncate) rw=refuse(Truncate) full=refuse(Truncate)|
+[turso] select into a table: SELECT * INTO u FROM t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[turso] copy to the client: COPY t TO STDOUT => |ro=run rw=run full=run|
+[turso] prepare: PREPARE p AS SELECT 1 => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[turso] execute: EXECUTE p => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[turso] deallocate: DEALLOCATE p => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[turso] do block: DO $$ BEGIN DELETE FROM t; END $$ => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[turso] load data: LOAD DATA INFILE 'x.csv' INTO TABLE t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[turso] select into outfile: SELECT a INTO OUTFILE '/tmp/x' FROM t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[turso] select into outfile at the end: SELECT a FROM t INTO OUTFILE '/tmp/x' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[turso] declare a cursor: DECLARE c CURSOR FOR SELECT 1 => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[turso] fetch from a cursor: FETCH NEXT FROM c => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[turso] listen: LISTEN c => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[turso] notify: NOTIFY c => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[turso] lock a table: LOCK TABLE t => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[turso] refresh a materialized view: REFRESH MATERIALIZED VIEW v => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[turso] reindex: REINDEX TABLE t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[turso] cluster: CLUSTER t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[turso] create a function: CREATE FUNCTION f() RETURNS INT AS 'SELECT 1' LANGUAGE SQL => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[turso] create a trigger: CREATE TRIGGER g AFTER INSERT ON t FOR EACH ROW EXECUTE FUNCTION f() => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[turso] create an extension: CREATE EXTENSION x => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[turso] attach a database: ATTACH 'x.db' AS x => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[turso] install an extension: INSTALL httpfs => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[turso] load an extension: LOAD httpfs => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[turso] export a database: EXPORT DATABASE '/tmp/x' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[turso] optimize a table: OPTIMIZE TABLE t FINAL => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[turso] kill a session: KILL 1 => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[turso] xa transaction: XA START 'x' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[turso] begin: BEGIN => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[turso] start a read-write transaction: START TRANSACTION READ WRITE => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[turso] commit: COMMIT => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[turso] rollback: ROLLBACK => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[turso] set the search path: SET search_path = other => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[turso] set a role: SET ROLE other => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[turso] set the session transaction: SET SESSION TRANSACTION READ WRITE => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[turso] set a variable: SET x = 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[turso] set a server-wide setting: SET GLOBAL max_connections = 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[turso] use a database: USE other => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[turso] create a temporary table: CREATE TEMPORARY TABLE u (a INT) => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[turso] create a temporary view: CREATE TEMP VIEW v AS SELECT 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[turso] create or replace a temporary view: CREATE OR REPLACE TEMP VIEW v AS SELECT 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[turso] select into a temporary table under a union: SELECT * INTO TEMP u FROM t UNION ALL SELECT * FROM w => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[turso] assign a user variable: SELECT @x := 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[turso] select into a user variable: SELECT 1 INTO @x => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[turso] savepoint: SAVEPOINT a => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[turso] release a savepoint: RELEASE SAVEPOINT a => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[turso] roll back to a savepoint: ROLLBACK TO SAVEPOINT a => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[turso] read a sequence's current value: SELECT currval('s') => |ro=run rw=approve(ReadOnly) full=approve(ReadOnly)|
+[turso] read the last insert id: SELECT last_insert_id() => |ro=run rw=approve(ReadOnly) full=approve(ReadOnly)|
+[turso] named argument: SELECT make_interval(days := 10) => |ro=run rw=approve(ReadOnly) full=approve(ReadOnly)|
+[turso] replace into: REPLACE INTO t (a) VALUES (1) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[turso] insert or replace: INSERT OR REPLACE INTO t (a) VALUES (1) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[turso] select for update: SELECT a FROM t FOR UPDATE => |ro=run rw=run full=run|
+[turso] insert on conflict: INSERT INTO t (a) VALUES (1) ON CONFLICT DO NOTHING => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[turso] pragma read: PRAGMA table_info(t) => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[turso] empty:  => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[turso] whitespace only:     => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[turso] line comment only: -- nothing => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[turso] block comment only: /* x */ => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[turso] two reads: SELECT 1; SELECT 2 => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[turso] two drops: DROP TABLE a; DROP TABLE b => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[turso] read then garbage: SELECT 1; garbage => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[turso] a typo: selec 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[turso] read, then a line comment: SELECT 1; -- c => |ro=run rw=run full=run|
+[turso] line comment, then a read: -- c\u{a}SELECT 1 => |ro=run rw=run full=run|
+[turso] block comment, then a read: /* c */ SELECT 1 => |ro=run rw=run full=run|
+[turso] read, then a hash comment: SELECT 1 # c => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[duckdb] plain select: SELECT a FROM t => |ro=run rw=run full=run|
+[duckdb] scalar function: SELECT lower(a) FROM t => |ro=run rw=run full=run|
+[duckdb] user-defined function: SELECT my_udf(a) FROM t => |ro=run rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] deny-listed call: SELECT nextval() => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[duckdb] insert: INSERT INTO t (a) VALUES (1) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[duckdb] update: UPDATE t SET a = 1 WHERE id = 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[duckdb] update without where: UPDATE t SET a = 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[duckdb] create table: CREATE TABLE u (a INT) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[duckdb] create view: CREATE VIEW v AS SELECT a FROM t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[duckdb] create schema: CREATE SCHEMA s => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[duckdb] create index: CREATE INDEX i ON t (a) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[duckdb] create index if not exists: CREATE INDEX IF NOT EXISTS i ON t (a) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[duckdb] create index concurrently: CREATE INDEX CONCURRENTLY i ON t (a) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[duckdb] comment: COMMENT ON TABLE t IS 'x' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[duckdb] analyze: ANALYZE t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[duckdb] vacuum: VACUUM t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[duckdb] add column: ALTER TABLE t ADD COLUMN b INT => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[duckdb] filtered delete: DELETE FROM t WHERE id = 1 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[duckdb] unfiltered delete: DELETE FROM t => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[duckdb] drop: DROP TABLE t => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[duckdb] drop, lower case: drop table t => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[duckdb] drop, mixed case: DrOp TaBlE t => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[duckdb] truncate: TRUNCATE TABLE t => |ro=refuse(Truncate) rw=refuse(Truncate) full=refuse(Truncate)|
+[duckdb] truncate, lower case: truncate t => |ro=refuse(Truncate) rw=refuse(Truncate) full=refuse(Truncate)|
+[duckdb] grant: GRANT SELECT ON t TO u => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[duckdb] call: CALL p() => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[duckdb] copy to a file: COPY t TO '/tmp/x.csv' => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[duckdb] show tables: SHOW TABLES => |ro=run rw=run full=run|
+[duckdb] describe: DESCRIBE t => |ro=run rw=run full=run|
+[duckdb] plain explain: EXPLAIN SELECT a FROM t => |ro=run rw=run full=run|
+[duckdb] delete in a cte: WITH d AS (DELETE FROM t WHERE id = 1 RETURNING *) SELECT * FROM d => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[duckdb] delete after a cte: WITH s AS (SELECT 1) DELETE FROM t WHERE id IN (SELECT * FROM s) => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[duckdb] plain explain of a delete: EXPLAIN DELETE FROM t WHERE id = 1 => |ro=run rw=run full=run|
+[duckdb] explain analyze of a delete: EXPLAIN ANALYZE DELETE FROM t WHERE id = 1 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[duckdb] explain with analyze on, of a delete: EXPLAIN (ANALYZE TRUE) DELETE FROM t WHERE id = 1 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[duckdb] explain analyze of an update: EXPLAIN ANALYZE UPDATE t SET a = 1 WHERE id = 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[duckdb] explain analyze of a select: EXPLAIN ANALYZE SELECT a FROM t => |ro=run rw=run full=run|
+[duckdb] analyze of a delete: ANALYZE DELETE FROM t WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[duckdb] delete in an if: IF 1 = 1 DELETE FROM t WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[duckdb] delete in an else: IF 1 = 1 SELECT 1 ELSE DELETE FROM t WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[duckdb] delete in a block: BEGIN DELETE FROM t WHERE id = 1; END => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[duckdb] delete as a mutation: ALTER TABLE t DELETE WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[duckdb] update as a mutation: ALTER TABLE t UPDATE a = 1 WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[duckdb] drop a column: ALTER TABLE t DROP COLUMN b => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[duckdb] rename a table: ALTER TABLE t RENAME TO u => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[duckdb] change a column type: ALTER TABLE t ALTER COLUMN a TYPE TEXT => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[duckdb] drop a column, lower case: alter table t drop column b => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[duckdb] add a column and drop one: ALTER TABLE t ADD COLUMN b INT, DROP COLUMN c => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[duckdb] alter with no operation: ALTER TABLE t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[duckdb] drop with no object: DROP TABLE => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[duckdb] a second statement in an executable comment: SELECT 1 /*M!100100 ; SELECT 2 */ => |ro=run rw=run full=run|
+[duckdb] a delete as a second statement in an executable comment: SELECT 1 /*M!100100 ; DELETE FROM t WHERE id = 1 */ => |ro=run rw=run full=run|
+[duckdb] a delete wholly in an executable comment: /*M!100100 DELETE FROM t WHERE id = 1 */ => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[duckdb] a transaction block: BEGIN; DELETE FROM t WHERE id = 1; COMMIT => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[duckdb] merge that deletes: MERGE INTO t USING u ON t.id = u.id WHEN MATCHED THEN DELETE => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[duckdb] create or replace table: CREATE OR REPLACE TABLE t (a INT) => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[duckdb] insert overwrite: INSERT OVERWRITE TABLE t SELECT * FROM u => |ro=refuse(Truncate) rw=refuse(Truncate) full=refuse(Truncate)|
+[duckdb] select into a table: SELECT * INTO u FROM t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[duckdb] copy to the client: COPY t TO STDOUT => |ro=run rw=run full=run|
+[duckdb] prepare: PREPARE p AS SELECT 1 => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[duckdb] execute: EXECUTE p => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[duckdb] deallocate: DEALLOCATE p => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[duckdb] do block: DO $$ BEGIN DELETE FROM t; END $$ => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[duckdb] load data: LOAD DATA INFILE 'x.csv' INTO TABLE t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[duckdb] select into outfile: SELECT a INTO OUTFILE '/tmp/x' FROM t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[duckdb] select into outfile at the end: SELECT a FROM t INTO OUTFILE '/tmp/x' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[duckdb] declare a cursor: DECLARE c CURSOR FOR SELECT 1 => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[duckdb] fetch from a cursor: FETCH NEXT FROM c => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[duckdb] listen: LISTEN c => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[duckdb] notify: NOTIFY c => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[duckdb] lock a table: LOCK TABLE t => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[duckdb] refresh a materialized view: REFRESH MATERIALIZED VIEW v => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[duckdb] reindex: REINDEX TABLE t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[duckdb] cluster: CLUSTER t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[duckdb] create a function: CREATE FUNCTION f() RETURNS INT AS 'SELECT 1' LANGUAGE SQL => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[duckdb] create a trigger: CREATE TRIGGER g AFTER INSERT ON t FOR EACH ROW EXECUTE FUNCTION f() => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[duckdb] create an extension: CREATE EXTENSION x => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[duckdb] attach a database: ATTACH 'x.db' AS x => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[duckdb] install an extension: INSTALL httpfs => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[duckdb] load an extension: LOAD httpfs => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[duckdb] export a database: EXPORT DATABASE '/tmp/x' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[duckdb] optimize a table: OPTIMIZE TABLE t FINAL => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[duckdb] kill a session: KILL 1 => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[duckdb] xa transaction: XA START 'x' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[duckdb] begin: BEGIN => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[duckdb] start a read-write transaction: START TRANSACTION READ WRITE => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[duckdb] commit: COMMIT => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[duckdb] rollback: ROLLBACK => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[duckdb] set the search path: SET search_path = other => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[duckdb] set a role: SET ROLE other => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[duckdb] set the session transaction: SET SESSION TRANSACTION READ WRITE => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[duckdb] set a variable: SET x = 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[duckdb] set a server-wide setting: SET GLOBAL max_connections = 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[duckdb] use a database: USE other => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[duckdb] create a temporary table: CREATE TEMPORARY TABLE u (a INT) => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[duckdb] create a temporary view: CREATE TEMP VIEW v AS SELECT 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[duckdb] create or replace a temporary view: CREATE OR REPLACE TEMP VIEW v AS SELECT 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[duckdb] select into a temporary table under a union: SELECT * INTO TEMP u FROM t UNION ALL SELECT * FROM w => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[duckdb] assign a user variable: SELECT @x := 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[duckdb] select into a user variable: SELECT 1 INTO @x => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[duckdb] savepoint: SAVEPOINT a => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[duckdb] release a savepoint: RELEASE SAVEPOINT a => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[duckdb] roll back to a savepoint: ROLLBACK TO SAVEPOINT a => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[duckdb] read a sequence's current value: SELECT currval('s') => |ro=run rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] read the last insert id: SELECT last_insert_id() => |ro=run rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] named argument: SELECT make_interval(days := 10) => |ro=run rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] replace into: REPLACE INTO t (a) VALUES (1) => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[duckdb] insert or replace: INSERT OR REPLACE INTO t (a) VALUES (1) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[duckdb] select for update: SELECT a FROM t FOR UPDATE => |ro=run rw=run full=run|
+[duckdb] insert on conflict: INSERT INTO t (a) VALUES (1) ON CONFLICT DO NOTHING => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[duckdb] pragma read: PRAGMA table_info(t) => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[duckdb] empty:  => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[duckdb] whitespace only:     => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[duckdb] line comment only: -- nothing => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[duckdb] block comment only: /* x */ => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[duckdb] two reads: SELECT 1; SELECT 2 => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[duckdb] two drops: DROP TABLE a; DROP TABLE b => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[duckdb] read then garbage: SELECT 1; garbage => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[duckdb] a typo: selec 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[duckdb] read, then a line comment: SELECT 1; -- c => |ro=run rw=run full=run|
+[duckdb] line comment, then a read: -- c\u{a}SELECT 1 => |ro=run rw=run full=run|
+[duckdb] block comment, then a read: /* c */ SELECT 1 => |ro=run rw=run full=run|
+[duckdb] read, then a hash comment: SELECT 1 # c => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[snowflake] plain select: SELECT a FROM t => |ro=run rw=run full=run|
+[snowflake] scalar function: SELECT lower(a) FROM t => |ro=run rw=run full=run|
+[snowflake] user-defined function: SELECT my_udf(a) FROM t => |ro=run rw=approve(ReadOnly) full=approve(ReadOnly)|
+[snowflake] deny-listed call: SELECT system$cancel_all_queries() => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[snowflake] insert: INSERT INTO t (a) VALUES (1) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[snowflake] update: UPDATE t SET a = 1 WHERE id = 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[snowflake] update without where: UPDATE t SET a = 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[snowflake] create table: CREATE TABLE u (a INT) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[snowflake] create view: CREATE VIEW v AS SELECT a FROM t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[snowflake] create schema: CREATE SCHEMA s => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[snowflake] create index: CREATE INDEX i ON t (a) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[snowflake] create index if not exists: CREATE INDEX IF NOT EXISTS i ON t (a) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[snowflake] create index concurrently: CREATE INDEX CONCURRENTLY i ON t (a) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[snowflake] comment: COMMENT ON TABLE t IS 'x' => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[snowflake] analyze: ANALYZE t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[snowflake] vacuum: VACUUM t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[snowflake] add column: ALTER TABLE t ADD COLUMN b INT => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[snowflake] filtered delete: DELETE FROM t WHERE id = 1 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[snowflake] unfiltered delete: DELETE FROM t => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[snowflake] drop: DROP TABLE t => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[snowflake] drop, lower case: drop table t => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[snowflake] drop, mixed case: DrOp TaBlE t => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[snowflake] truncate: TRUNCATE TABLE t => |ro=refuse(Truncate) rw=refuse(Truncate) full=refuse(Truncate)|
+[snowflake] truncate, lower case: truncate t => |ro=refuse(Truncate) rw=refuse(Truncate) full=refuse(Truncate)|
+[snowflake] grant: GRANT SELECT ON t TO u => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[snowflake] call: CALL p() => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[snowflake] copy to a file: COPY t TO '/tmp/x.csv' => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[snowflake] show tables: SHOW TABLES => |ro=run rw=run full=run|
+[snowflake] describe: DESCRIBE t => |ro=run rw=run full=run|
+[snowflake] plain explain: EXPLAIN SELECT a FROM t => |ro=run rw=run full=run|
+[snowflake] delete in a cte: WITH d AS (DELETE FROM t WHERE id = 1 RETURNING *) SELECT * FROM d => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[snowflake] delete after a cte: WITH s AS (SELECT 1) DELETE FROM t WHERE id IN (SELECT * FROM s) => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[snowflake] plain explain of a delete: EXPLAIN DELETE FROM t WHERE id = 1 => |ro=run rw=run full=run|
+[snowflake] explain analyze of a delete: EXPLAIN ANALYZE DELETE FROM t WHERE id = 1 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[snowflake] explain with analyze on, of a delete: EXPLAIN (ANALYZE TRUE) DELETE FROM t WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[snowflake] explain analyze of an update: EXPLAIN ANALYZE UPDATE t SET a = 1 WHERE id = 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[snowflake] explain analyze of a select: EXPLAIN ANALYZE SELECT a FROM t => |ro=run rw=run full=run|
+[snowflake] analyze of a delete: ANALYZE DELETE FROM t WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[snowflake] delete in an if: IF 1 = 1 DELETE FROM t WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[snowflake] delete in an else: IF 1 = 1 SELECT 1 ELSE DELETE FROM t WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[snowflake] delete in a block: BEGIN DELETE FROM t WHERE id = 1; END => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[snowflake] delete as a mutation: ALTER TABLE t DELETE WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[snowflake] update as a mutation: ALTER TABLE t UPDATE a = 1 WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[snowflake] drop a column: ALTER TABLE t DROP COLUMN b => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[snowflake] rename a table: ALTER TABLE t RENAME TO u => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[snowflake] change a column type: ALTER TABLE t ALTER COLUMN a TYPE TEXT => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[snowflake] drop a column, lower case: alter table t drop column b => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[snowflake] add a column and drop one: ALTER TABLE t ADD COLUMN b INT, DROP COLUMN c => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[snowflake] alter with no operation: ALTER TABLE t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[snowflake] drop with no object: DROP TABLE => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[snowflake] a second statement in an executable comment: SELECT 1 /*M!100100 ; SELECT 2 */ => |ro=run rw=run full=run|
+[snowflake] a delete as a second statement in an executable comment: SELECT 1 /*M!100100 ; DELETE FROM t WHERE id = 1 */ => |ro=run rw=run full=run|
+[snowflake] a delete wholly in an executable comment: /*M!100100 DELETE FROM t WHERE id = 1 */ => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[snowflake] a transaction block: BEGIN; DELETE FROM t WHERE id = 1; COMMIT => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[snowflake] merge that deletes: MERGE INTO t USING u ON t.id = u.id WHEN MATCHED THEN DELETE => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[snowflake] create or replace table: CREATE OR REPLACE TABLE t (a INT) => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[snowflake] insert overwrite: INSERT OVERWRITE TABLE t SELECT * FROM u => |ro=refuse(Truncate) rw=refuse(Truncate) full=refuse(Truncate)|
+[snowflake] select into a table: SELECT * INTO u FROM t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[snowflake] copy to the client: COPY t TO STDOUT => |ro=run rw=run full=run|
+[snowflake] prepare: PREPARE p AS SELECT 1 => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[snowflake] execute: EXECUTE p => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[snowflake] deallocate: DEALLOCATE p => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[snowflake] do block: DO $$ BEGIN DELETE FROM t; END $$ => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[snowflake] load data: LOAD DATA INFILE 'x.csv' INTO TABLE t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[snowflake] select into outfile: SELECT a INTO OUTFILE '/tmp/x' FROM t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[snowflake] select into outfile at the end: SELECT a FROM t INTO OUTFILE '/tmp/x' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[snowflake] declare a cursor: DECLARE c CURSOR FOR SELECT 1 => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[snowflake] fetch from a cursor: FETCH NEXT FROM c => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[snowflake] listen: LISTEN c => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[snowflake] notify: NOTIFY c => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[snowflake] lock a table: LOCK TABLE t => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[snowflake] refresh a materialized view: REFRESH MATERIALIZED VIEW v => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[snowflake] reindex: REINDEX TABLE t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[snowflake] cluster: CLUSTER t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[snowflake] create a function: CREATE FUNCTION f() RETURNS INT AS 'SELECT 1' LANGUAGE SQL => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[snowflake] create a trigger: CREATE TRIGGER g AFTER INSERT ON t FOR EACH ROW EXECUTE FUNCTION f() => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[snowflake] create an extension: CREATE EXTENSION x => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[snowflake] attach a database: ATTACH 'x.db' AS x => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[snowflake] install an extension: INSTALL httpfs => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[snowflake] load an extension: LOAD httpfs => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[snowflake] export a database: EXPORT DATABASE '/tmp/x' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[snowflake] optimize a table: OPTIMIZE TABLE t FINAL => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[snowflake] kill a session: KILL 1 => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[snowflake] xa transaction: XA START 'x' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[snowflake] begin: BEGIN => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[snowflake] start a read-write transaction: START TRANSACTION READ WRITE => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[snowflake] commit: COMMIT => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[snowflake] rollback: ROLLBACK => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[snowflake] set the search path: SET search_path = other => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[snowflake] set a role: SET ROLE other => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[snowflake] set the session transaction: SET SESSION TRANSACTION READ WRITE => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[snowflake] set a variable: SET x = 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[snowflake] set a server-wide setting: SET GLOBAL max_connections = 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[snowflake] use a database: USE other => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[snowflake] create a temporary table: CREATE TEMPORARY TABLE u (a INT) => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[snowflake] create a temporary view: CREATE TEMP VIEW v AS SELECT 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[snowflake] create or replace a temporary view: CREATE OR REPLACE TEMP VIEW v AS SELECT 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[snowflake] select into a temporary table under a union: SELECT * INTO TEMP u FROM t UNION ALL SELECT * FROM w => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[snowflake] assign a user variable: SELECT @x := 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[snowflake] select into a user variable: SELECT 1 INTO @x => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[snowflake] savepoint: SAVEPOINT a => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[snowflake] release a savepoint: RELEASE SAVEPOINT a => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[snowflake] roll back to a savepoint: ROLLBACK TO SAVEPOINT a => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[snowflake] read a sequence's current value: SELECT currval('s') => |ro=run rw=approve(ReadOnly) full=approve(ReadOnly)|
+[snowflake] read the last insert id: SELECT last_insert_id() => |ro=run rw=approve(ReadOnly) full=approve(ReadOnly)|
+[snowflake] named argument: SELECT make_interval(days := 10) => |ro=run rw=approve(ReadOnly) full=approve(ReadOnly)|
+[snowflake] replace into: REPLACE INTO t (a) VALUES (1) => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[snowflake] insert or replace: INSERT OR REPLACE INTO t (a) VALUES (1) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[snowflake] select for update: SELECT a FROM t FOR UPDATE => |ro=run rw=run full=run|
+[snowflake] insert on conflict: INSERT INTO t (a) VALUES (1) ON CONFLICT DO NOTHING => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[snowflake] pragma read: PRAGMA table_info(t) => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[snowflake] empty:  => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[snowflake] whitespace only:     => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[snowflake] line comment only: -- nothing => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[snowflake] block comment only: /* x */ => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[snowflake] two reads: SELECT 1; SELECT 2 => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[snowflake] two drops: DROP TABLE a; DROP TABLE b => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[snowflake] read then garbage: SELECT 1; garbage => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[snowflake] a typo: selec 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[snowflake] read, then a line comment: SELECT 1; -- c => |ro=run rw=run full=run|
+[snowflake] line comment, then a read: -- c\u{a}SELECT 1 => |ro=run rw=run full=run|
+[snowflake] block comment, then a read: /* c */ SELECT 1 => |ro=run rw=run full=run|
+[snowflake] read, then a hash comment: SELECT 1 # c => |ro=run rw=run full=run|
+[clickhouse] plain select: SELECT a FROM t => |ro=run rw=run full=run|
+[clickhouse] scalar function: SELECT lower(a) FROM t => |ro=run rw=run full=run|
+[clickhouse] user-defined function: SELECT my_udf(a) FROM t => |ro=run rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] deny-listed call => (none)
+[clickhouse] insert: INSERT INTO t (a) VALUES (1) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[clickhouse] update: UPDATE t SET a = 1 WHERE id = 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[clickhouse] update without where: UPDATE t SET a = 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[clickhouse] create table: CREATE TABLE u (a INT) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[clickhouse] create view: CREATE VIEW v AS SELECT a FROM t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[clickhouse] create schema: CREATE SCHEMA s => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[clickhouse] create index: CREATE INDEX i ON t (a) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[clickhouse] create index if not exists: CREATE INDEX IF NOT EXISTS i ON t (a) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[clickhouse] create index concurrently: CREATE INDEX CONCURRENTLY i ON t (a) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[clickhouse] comment: COMMENT ON TABLE t IS 'x' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[clickhouse] analyze: ANALYZE t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[clickhouse] vacuum: VACUUM t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[clickhouse] add column: ALTER TABLE t ADD COLUMN b INT => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[clickhouse] filtered delete: DELETE FROM t WHERE id = 1 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[clickhouse] unfiltered delete: DELETE FROM t => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[clickhouse] drop: DROP TABLE t => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[clickhouse] drop, lower case: drop table t => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[clickhouse] drop, mixed case: DrOp TaBlE t => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[clickhouse] truncate: TRUNCATE TABLE t => |ro=refuse(Truncate) rw=refuse(Truncate) full=refuse(Truncate)|
+[clickhouse] truncate, lower case: truncate t => |ro=refuse(Truncate) rw=refuse(Truncate) full=refuse(Truncate)|
+[clickhouse] grant: GRANT SELECT ON t TO u => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[clickhouse] call: CALL p() => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[clickhouse] copy to a file: COPY t TO '/tmp/x.csv' => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[clickhouse] show tables: SHOW TABLES => |ro=run rw=run full=run|
+[clickhouse] describe: DESCRIBE t => |ro=run rw=run full=run|
+[clickhouse] plain explain: EXPLAIN SELECT a FROM t => |ro=run rw=run full=run|
+[clickhouse] delete in a cte: WITH d AS (DELETE FROM t WHERE id = 1 RETURNING *) SELECT * FROM d => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[clickhouse] delete after a cte: WITH s AS (SELECT 1) DELETE FROM t WHERE id IN (SELECT * FROM s) => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[clickhouse] plain explain of a delete: EXPLAIN DELETE FROM t WHERE id = 1 => |ro=run rw=run full=run|
+[clickhouse] explain analyze of a delete: EXPLAIN ANALYZE DELETE FROM t WHERE id = 1 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[clickhouse] explain with analyze on, of a delete: EXPLAIN (ANALYZE TRUE) DELETE FROM t WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[clickhouse] explain analyze of an update: EXPLAIN ANALYZE UPDATE t SET a = 1 WHERE id = 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[clickhouse] explain analyze of a select: EXPLAIN ANALYZE SELECT a FROM t => |ro=run rw=run full=run|
+[clickhouse] analyze of a delete: ANALYZE DELETE FROM t WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[clickhouse] delete in an if: IF 1 = 1 DELETE FROM t WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[clickhouse] delete in an else: IF 1 = 1 SELECT 1 ELSE DELETE FROM t WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[clickhouse] delete in a block: BEGIN DELETE FROM t WHERE id = 1; END => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[clickhouse] delete as a mutation: ALTER TABLE t DELETE WHERE id = 1 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[clickhouse] update as a mutation: ALTER TABLE t UPDATE a = 1 WHERE id = 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[clickhouse] drop a column: ALTER TABLE t DROP COLUMN b => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[clickhouse] rename a table: ALTER TABLE t RENAME TO u => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[clickhouse] change a column type: ALTER TABLE t ALTER COLUMN a TYPE TEXT => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[clickhouse] drop a column, lower case: alter table t drop column b => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[clickhouse] add a column and drop one: ALTER TABLE t ADD COLUMN b INT, DROP COLUMN c => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[clickhouse] alter with no operation: ALTER TABLE t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[clickhouse] drop with no object: DROP TABLE => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[clickhouse] a second statement in an executable comment: SELECT 1 /*M!100100 ; SELECT 2 */ => |ro=run rw=run full=run|
+[clickhouse] a delete as a second statement in an executable comment: SELECT 1 /*M!100100 ; DELETE FROM t WHERE id = 1 */ => |ro=run rw=run full=run|
+[clickhouse] a delete wholly in an executable comment: /*M!100100 DELETE FROM t WHERE id = 1 */ => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[clickhouse] a transaction block: BEGIN; DELETE FROM t WHERE id = 1; COMMIT => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[clickhouse] merge that deletes: MERGE INTO t USING u ON t.id = u.id WHEN MATCHED THEN DELETE => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[clickhouse] create or replace table: CREATE OR REPLACE TABLE t (a INT) => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[clickhouse] insert overwrite: INSERT OVERWRITE TABLE t SELECT * FROM u => |ro=refuse(Truncate) rw=refuse(Truncate) full=refuse(Truncate)|
+[clickhouse] select into a table: SELECT * INTO u FROM t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[clickhouse] copy to the client: COPY t TO STDOUT => |ro=run rw=run full=run|
+[clickhouse] prepare: PREPARE p AS SELECT 1 => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[clickhouse] execute: EXECUTE p => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[clickhouse] deallocate: DEALLOCATE p => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[clickhouse] do block: DO $$ BEGIN DELETE FROM t; END $$ => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[clickhouse] load data: LOAD DATA INFILE 'x.csv' INTO TABLE t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[clickhouse] select into outfile: SELECT a INTO OUTFILE '/tmp/x' FROM t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[clickhouse] select into outfile at the end: SELECT a FROM t INTO OUTFILE '/tmp/x' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[clickhouse] declare a cursor: DECLARE c CURSOR FOR SELECT 1 => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[clickhouse] fetch from a cursor: FETCH NEXT FROM c => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[clickhouse] listen: LISTEN c => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[clickhouse] notify: NOTIFY c => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[clickhouse] lock a table: LOCK TABLE t => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[clickhouse] refresh a materialized view: REFRESH MATERIALIZED VIEW v => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[clickhouse] reindex: REINDEX TABLE t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[clickhouse] cluster: CLUSTER t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[clickhouse] create a function: CREATE FUNCTION f() RETURNS INT AS 'SELECT 1' LANGUAGE SQL => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[clickhouse] create a trigger: CREATE TRIGGER g AFTER INSERT ON t FOR EACH ROW EXECUTE FUNCTION f() => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[clickhouse] create an extension: CREATE EXTENSION x => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[clickhouse] attach a database: ATTACH 'x.db' AS x => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[clickhouse] install an extension: INSTALL httpfs => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[clickhouse] load an extension: LOAD httpfs => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[clickhouse] export a database: EXPORT DATABASE '/tmp/x' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[clickhouse] optimize a table: OPTIMIZE TABLE t FINAL => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[clickhouse] kill a session: KILL 1 => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[clickhouse] xa transaction: XA START 'x' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[clickhouse] begin: BEGIN => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[clickhouse] start a read-write transaction: START TRANSACTION READ WRITE => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[clickhouse] commit: COMMIT => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[clickhouse] rollback: ROLLBACK => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[clickhouse] set the search path: SET search_path = other => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[clickhouse] set a role: SET ROLE other => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[clickhouse] set the session transaction: SET SESSION TRANSACTION READ WRITE => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[clickhouse] set a variable: SET x = 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[clickhouse] set a server-wide setting: SET GLOBAL max_connections = 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[clickhouse] use a database: USE other => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[clickhouse] create a temporary table: CREATE TEMPORARY TABLE u (a INT) => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[clickhouse] create a temporary view: CREATE TEMP VIEW v AS SELECT 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[clickhouse] create or replace a temporary view: CREATE OR REPLACE TEMP VIEW v AS SELECT 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[clickhouse] select into a temporary table under a union: SELECT * INTO TEMP u FROM t UNION ALL SELECT * FROM w => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[clickhouse] assign a user variable: SELECT @x := 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[clickhouse] select into a user variable: SELECT 1 INTO @x => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[clickhouse] savepoint: SAVEPOINT a => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[clickhouse] release a savepoint: RELEASE SAVEPOINT a => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[clickhouse] roll back to a savepoint: ROLLBACK TO SAVEPOINT a => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[clickhouse] read a sequence's current value: SELECT currval('s') => |ro=run rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] read the last insert id: SELECT last_insert_id() => |ro=run rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] named argument: SELECT make_interval(days := 10) => |ro=run rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] replace into: REPLACE INTO t (a) VALUES (1) => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[clickhouse] insert or replace: INSERT OR REPLACE INTO t (a) VALUES (1) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[clickhouse] select for update: SELECT a FROM t FOR UPDATE => |ro=run rw=run full=run|
+[clickhouse] insert on conflict: INSERT INTO t (a) VALUES (1) ON CONFLICT DO NOTHING => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[clickhouse] pragma read: PRAGMA table_info(t) => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[clickhouse] empty:  => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[clickhouse] whitespace only:     => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[clickhouse] line comment only: -- nothing => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[clickhouse] block comment only: /* x */ => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[clickhouse] two reads: SELECT 1; SELECT 2 => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[clickhouse] two drops: DROP TABLE a; DROP TABLE b => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[clickhouse] read then garbage: SELECT 1; garbage => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[clickhouse] a typo: selec 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[clickhouse] read, then a line comment: SELECT 1; -- c => |ro=run rw=run full=run|
+[clickhouse] line comment, then a read: -- c\u{a}SELECT 1 => |ro=run rw=run full=run|
+[clickhouse] block comment, then a read: /* c */ SELECT 1 => |ro=run rw=run full=run|
+[clickhouse] read, then a hash comment: SELECT 1 # c => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mssql] plain select: SELECT a FROM t => |ro=run rw=run full=run|
+[mssql] scalar function: SELECT lower(a) FROM t => |ro=run rw=run full=run|
+[mssql] user-defined function: SELECT my_udf(a) FROM t => |ro=run rw=approve(ReadOnly) full=approve(ReadOnly)|
+[mssql] deny-listed call: SELECT openquery() => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mssql] insert: INSERT INTO t (a) VALUES (1) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mssql] update: UPDATE t SET a = 1 WHERE id = 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mssql] update without where: UPDATE t SET a = 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mssql] create table: CREATE TABLE u (a INT) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mssql] create view: CREATE VIEW v AS SELECT a FROM t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mssql] create schema: CREATE SCHEMA s => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mssql] create index: CREATE INDEX i ON t (a) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mssql] create index if not exists: CREATE INDEX IF NOT EXISTS i ON t (a) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mssql] create index concurrently: CREATE INDEX CONCURRENTLY i ON t (a) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mssql] comment: COMMENT ON TABLE t IS 'x' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mssql] analyze: ANALYZE t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mssql] vacuum: VACUUM t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mssql] add column: ALTER TABLE t ADD COLUMN b INT => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mssql] filtered delete: DELETE FROM t WHERE id = 1 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mssql] unfiltered delete: DELETE FROM t => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mssql] drop: DROP TABLE t => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[mssql] drop, lower case: drop table t => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[mssql] drop, mixed case: DrOp TaBlE t => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[mssql] truncate: TRUNCATE TABLE t => |ro=refuse(Truncate) rw=refuse(Truncate) full=refuse(Truncate)|
+[mssql] truncate, lower case: truncate t => |ro=refuse(Truncate) rw=refuse(Truncate) full=refuse(Truncate)|
+[mssql] grant: GRANT SELECT ON t TO u => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mssql] call: CALL p() => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mssql] copy to a file: COPY t TO '/tmp/x.csv' => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mssql] show tables: SHOW TABLES => |ro=run rw=run full=run|
+[mssql] describe: DESCRIBE t => |ro=run rw=run full=run|
+[mssql] plain explain: EXPLAIN SELECT a FROM t => |ro=run rw=run full=run|
+[mssql] delete in a cte: WITH d AS (DELETE FROM t WHERE id = 1 RETURNING *) SELECT * FROM d => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mssql] delete after a cte: WITH s AS (SELECT 1) DELETE FROM t WHERE id IN (SELECT * FROM s) => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mssql] plain explain of a delete: EXPLAIN DELETE FROM t WHERE id = 1 => |ro=run rw=run full=run|
+[mssql] explain analyze of a delete: EXPLAIN ANALYZE DELETE FROM t WHERE id = 1 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mssql] explain with analyze on, of a delete: EXPLAIN (ANALYZE TRUE) DELETE FROM t WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mssql] explain analyze of an update: EXPLAIN ANALYZE UPDATE t SET a = 1 WHERE id = 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mssql] explain analyze of a select: EXPLAIN ANALYZE SELECT a FROM t => |ro=run rw=run full=run|
+[mssql] analyze of a delete: ANALYZE DELETE FROM t WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mssql] delete in an if: IF 1 = 1 DELETE FROM t WHERE id = 1 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mssql] delete in an else: IF 1 = 1 SELECT 1 ELSE DELETE FROM t WHERE id = 1 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mssql] delete in a block: BEGIN DELETE FROM t WHERE id = 1; END => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mssql] delete as a mutation: ALTER TABLE t DELETE WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mssql] update as a mutation: ALTER TABLE t UPDATE a = 1 WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mssql] drop a column: ALTER TABLE t DROP COLUMN b => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[mssql] rename a table: ALTER TABLE t RENAME TO u => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[mssql] change a column type: ALTER TABLE t ALTER COLUMN a TYPE TEXT => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[mssql] drop a column, lower case: alter table t drop column b => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[mssql] add a column and drop one: ALTER TABLE t ADD COLUMN b INT, DROP COLUMN c => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[mssql] alter with no operation: ALTER TABLE t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mssql] drop with no object: DROP TABLE => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mssql] a second statement in an executable comment: SELECT 1 /*M!100100 ; SELECT 2 */ => |ro=run rw=run full=run|
+[mssql] a delete as a second statement in an executable comment: SELECT 1 /*M!100100 ; DELETE FROM t WHERE id = 1 */ => |ro=run rw=run full=run|
+[mssql] a delete wholly in an executable comment: /*M!100100 DELETE FROM t WHERE id = 1 */ => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[mssql] a transaction block: BEGIN; DELETE FROM t WHERE id = 1; COMMIT => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[mssql] merge that deletes: MERGE INTO t USING u ON t.id = u.id WHEN MATCHED THEN DELETE => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mssql] create or replace table: CREATE OR REPLACE TABLE t (a INT) => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[mssql] insert overwrite: INSERT OVERWRITE TABLE t SELECT * FROM u => |ro=refuse(Truncate) rw=refuse(Truncate) full=refuse(Truncate)|
+[mssql] select into a table: SELECT * INTO u FROM t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mssql] copy to the client: COPY t TO STDOUT => |ro=run rw=run full=run|
+[mssql] prepare: PREPARE p AS SELECT 1 => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mssql] execute: EXECUTE p => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mssql] deallocate: DEALLOCATE p => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mssql] do block: DO $$ BEGIN DELETE FROM t; END $$ => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mssql] load data: LOAD DATA INFILE 'x.csv' INTO TABLE t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mssql] select into outfile: SELECT a INTO OUTFILE '/tmp/x' FROM t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mssql] select into outfile at the end: SELECT a FROM t INTO OUTFILE '/tmp/x' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mssql] declare a cursor: DECLARE c CURSOR FOR SELECT 1 => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mssql] fetch from a cursor: FETCH NEXT FROM c => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mssql] listen: LISTEN c => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mssql] notify: NOTIFY c => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mssql] lock a table: LOCK TABLE t => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mssql] refresh a materialized view: REFRESH MATERIALIZED VIEW v => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mssql] reindex: REINDEX TABLE t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mssql] cluster: CLUSTER t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mssql] create a function: CREATE FUNCTION f() RETURNS INT AS 'SELECT 1' LANGUAGE SQL => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mssql] create a trigger: CREATE TRIGGER g AFTER INSERT ON t FOR EACH ROW EXECUTE FUNCTION f() => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mssql] create an extension: CREATE EXTENSION x => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mssql] attach a database: ATTACH 'x.db' AS x => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mssql] install an extension: INSTALL httpfs => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mssql] load an extension: LOAD httpfs => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mssql] export a database: EXPORT DATABASE '/tmp/x' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mssql] optimize a table: OPTIMIZE TABLE t FINAL => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mssql] kill a session: KILL 1 => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[mssql] xa transaction: XA START 'x' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mssql] begin: BEGIN => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mssql] start a read-write transaction: START TRANSACTION READ WRITE => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mssql] commit: COMMIT => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mssql] rollback: ROLLBACK => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mssql] set the search path: SET search_path = other => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mssql] set a role: SET ROLE other => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mssql] set the session transaction: SET SESSION TRANSACTION READ WRITE => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mssql] set a variable: SET x = 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mssql] set a server-wide setting: SET GLOBAL max_connections = 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mssql] use a database: USE other => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mssql] create a temporary table: CREATE TEMPORARY TABLE u (a INT) => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mssql] create a temporary view: CREATE TEMP VIEW v AS SELECT 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mssql] create or replace a temporary view: CREATE OR REPLACE TEMP VIEW v AS SELECT 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mssql] select into a temporary table under a union: SELECT * INTO TEMP u FROM t UNION ALL SELECT * FROM w => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mssql] assign a user variable: SELECT @x := 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mssql] select into a user variable: SELECT 1 INTO @x => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mssql] savepoint: SAVEPOINT a => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mssql] release a savepoint: RELEASE SAVEPOINT a => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mssql] roll back to a savepoint: ROLLBACK TO SAVEPOINT a => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[mssql] read a sequence's current value: SELECT currval('s') => |ro=run rw=approve(ReadOnly) full=approve(ReadOnly)|
+[mssql] read the last insert id: SELECT last_insert_id() => |ro=run rw=approve(ReadOnly) full=approve(ReadOnly)|
+[mssql] named argument: SELECT make_interval(days := 10) => |ro=run rw=approve(ReadOnly) full=approve(ReadOnly)|
+[mssql] replace into: REPLACE INTO t (a) VALUES (1) => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mssql] insert or replace: INSERT OR REPLACE INTO t (a) VALUES (1) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mssql] select for update: SELECT a FROM t FOR UPDATE => |ro=run rw=run full=run|
+[mssql] insert on conflict: INSERT INTO t (a) VALUES (1) ON CONFLICT DO NOTHING => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mssql] pragma read: PRAGMA table_info(t) => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mssql] empty:  => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[mssql] whitespace only:     => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[mssql] line comment only: -- nothing => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[mssql] block comment only: /* x */ => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[mssql] two reads: SELECT 1; SELECT 2 => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[mssql] two drops: DROP TABLE a; DROP TABLE b => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[mssql] read then garbage: SELECT 1; garbage => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mssql] a typo: selec 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mssql] read, then a line comment: SELECT 1; -- c => |ro=run rw=run full=run|
+[mssql] line comment, then a read: -- c\u{a}SELECT 1 => |ro=run rw=run full=run|
+[mssql] block comment, then a read: /* c */ SELECT 1 => |ro=run rw=run full=run|
+[mssql] read, then a hash comment: SELECT 1 # c => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[generic] plain select: SELECT a FROM t => |ro=run rw=run full=run|
+[generic] scalar function: SELECT lower(a) FROM t => |ro=run rw=run full=run|
+[generic] user-defined function: SELECT my_udf(a) FROM t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[generic] deny-listed call => (none)
+[generic] insert: INSERT INTO t (a) VALUES (1) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[generic] update: UPDATE t SET a = 1 WHERE id = 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[generic] update without where: UPDATE t SET a = 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[generic] create table: CREATE TABLE u (a INT) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[generic] create view: CREATE VIEW v AS SELECT a FROM t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[generic] create schema: CREATE SCHEMA s => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[generic] create index: CREATE INDEX i ON t (a) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[generic] create index if not exists: CREATE INDEX IF NOT EXISTS i ON t (a) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[generic] create index concurrently: CREATE INDEX CONCURRENTLY i ON t (a) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[generic] comment: COMMENT ON TABLE t IS 'x' => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[generic] analyze: ANALYZE t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[generic] vacuum: VACUUM t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[generic] add column: ALTER TABLE t ADD COLUMN b INT => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[generic] filtered delete: DELETE FROM t WHERE id = 1 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[generic] unfiltered delete: DELETE FROM t => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[generic] drop: DROP TABLE t => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[generic] drop, lower case: drop table t => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[generic] drop, mixed case: DrOp TaBlE t => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[generic] truncate: TRUNCATE TABLE t => |ro=refuse(Truncate) rw=refuse(Truncate) full=refuse(Truncate)|
+[generic] truncate, lower case: truncate t => |ro=refuse(Truncate) rw=refuse(Truncate) full=refuse(Truncate)|
+[generic] grant: GRANT SELECT ON t TO u => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[generic] call: CALL p() => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[generic] copy to a file: COPY t TO '/tmp/x.csv' => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[generic] show tables: SHOW TABLES => |ro=run rw=run full=run|
+[generic] describe: DESCRIBE t => |ro=run rw=run full=run|
+[generic] plain explain: EXPLAIN SELECT a FROM t => |ro=run rw=run full=run|
+[generic] delete in a cte: WITH d AS (DELETE FROM t WHERE id = 1 RETURNING *) SELECT * FROM d => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[generic] delete after a cte: WITH s AS (SELECT 1) DELETE FROM t WHERE id IN (SELECT * FROM s) => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[generic] plain explain of a delete: EXPLAIN DELETE FROM t WHERE id = 1 => |ro=run rw=run full=run|
+[generic] explain analyze of a delete: EXPLAIN ANALYZE DELETE FROM t WHERE id = 1 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[generic] explain with analyze on, of a delete: EXPLAIN (ANALYZE TRUE) DELETE FROM t WHERE id = 1 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[generic] explain analyze of an update: EXPLAIN ANALYZE UPDATE t SET a = 1 WHERE id = 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[generic] explain analyze of a select: EXPLAIN ANALYZE SELECT a FROM t => |ro=run rw=run full=run|
+[generic] analyze of a delete: ANALYZE DELETE FROM t WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[generic] delete in an if: IF 1 = 1 DELETE FROM t WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[generic] delete in an else: IF 1 = 1 SELECT 1 ELSE DELETE FROM t WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[generic] delete in a block: BEGIN DELETE FROM t WHERE id = 1; END => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[generic] delete as a mutation: ALTER TABLE t DELETE WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[generic] update as a mutation: ALTER TABLE t UPDATE a = 1 WHERE id = 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[generic] drop a column: ALTER TABLE t DROP COLUMN b => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[generic] rename a table: ALTER TABLE t RENAME TO u => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[generic] change a column type: ALTER TABLE t ALTER COLUMN a TYPE TEXT => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[generic] drop a column, lower case: alter table t drop column b => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[generic] add a column and drop one: ALTER TABLE t ADD COLUMN b INT, DROP COLUMN c => |ro=refuse(Alter) rw=refuse(Alter) full=refuse(Alter)|
+[generic] alter with no operation: ALTER TABLE t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[generic] drop with no object: DROP TABLE => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[generic] a second statement in an executable comment: SELECT 1 /*M!100100 ; SELECT 2 */ => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[generic] a delete as a second statement in an executable comment: SELECT 1 /*M!100100 ; DELETE FROM t WHERE id = 1 */ => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[generic] a delete wholly in an executable comment: /*M!100100 DELETE FROM t WHERE id = 1 */ => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[generic] a transaction block: BEGIN; DELETE FROM t WHERE id = 1; COMMIT => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[generic] merge that deletes: MERGE INTO t USING u ON t.id = u.id WHEN MATCHED THEN DELETE => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[generic] create or replace table: CREATE OR REPLACE TABLE t (a INT) => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[generic] insert overwrite: INSERT OVERWRITE TABLE t SELECT * FROM u => |ro=refuse(Truncate) rw=refuse(Truncate) full=refuse(Truncate)|
+[generic] select into a table: SELECT * INTO u FROM t => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[generic] copy to the client: COPY t TO STDOUT => |ro=run rw=run full=run|
+[generic] prepare: PREPARE p AS SELECT 1 => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[generic] execute: EXECUTE p => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[generic] deallocate: DEALLOCATE p => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[generic] do block: DO $$ BEGIN DELETE FROM t; END $$ => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[generic] load data: LOAD DATA INFILE 'x.csv' INTO TABLE t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[generic] select into outfile: SELECT a INTO OUTFILE '/tmp/x' FROM t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[generic] select into outfile at the end: SELECT a FROM t INTO OUTFILE '/tmp/x' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[generic] declare a cursor: DECLARE c CURSOR FOR SELECT 1 => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[generic] fetch from a cursor: FETCH NEXT FROM c => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[generic] listen: LISTEN c => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[generic] notify: NOTIFY c => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[generic] lock a table: LOCK TABLE t => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[generic] refresh a materialized view: REFRESH MATERIALIZED VIEW v => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[generic] reindex: REINDEX TABLE t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[generic] cluster: CLUSTER t => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[generic] create a function: CREATE FUNCTION f() RETURNS INT AS 'SELECT 1' LANGUAGE SQL => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[generic] create a trigger: CREATE TRIGGER g AFTER INSERT ON t FOR EACH ROW EXECUTE FUNCTION f() => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[generic] create an extension: CREATE EXTENSION x => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[generic] attach a database: ATTACH 'x.db' AS x => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[generic] install an extension: INSTALL httpfs => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[generic] load an extension: LOAD httpfs => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[generic] export a database: EXPORT DATABASE '/tmp/x' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[generic] optimize a table: OPTIMIZE TABLE t FINAL => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[generic] kill a session: KILL 1 => |ro=refuse(NeedsFull) rw=refuse(NeedsFull) full=refuse(NeedsFull)|
+[generic] xa transaction: XA START 'x' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[generic] begin: BEGIN => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[generic] start a read-write transaction: START TRANSACTION READ WRITE => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[generic] commit: COMMIT => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[generic] rollback: ROLLBACK => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[generic] set the search path: SET search_path = other => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[generic] set a role: SET ROLE other => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[generic] set the session transaction: SET SESSION TRANSACTION READ WRITE => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[generic] set a variable: SET x = 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[generic] set a server-wide setting: SET GLOBAL max_connections = 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[generic] use a database: USE other => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[generic] create a temporary table: CREATE TEMPORARY TABLE u (a INT) => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[generic] create a temporary view: CREATE TEMP VIEW v AS SELECT 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[generic] create or replace a temporary view: CREATE OR REPLACE TEMP VIEW v AS SELECT 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[generic] select into a temporary table under a union: SELECT * INTO TEMP u FROM t UNION ALL SELECT * FROM w => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[generic] assign a user variable: SELECT @x := 1 => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[generic] select into a user variable: SELECT 1 INTO @x => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[generic] savepoint: SAVEPOINT a => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[generic] release a savepoint: RELEASE SAVEPOINT a => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[generic] roll back to a savepoint: ROLLBACK TO SAVEPOINT a => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[generic] read a sequence's current value: SELECT currval('s') => |ro=run rw=run full=run|
+[generic] read the last insert id: SELECT last_insert_id() => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[generic] named argument: SELECT make_interval(days := 10) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[generic] replace into: REPLACE INTO t (a) VALUES (1) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[generic] insert or replace: INSERT OR REPLACE INTO t (a) VALUES (1) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[generic] select for update: SELECT a FROM t FOR UPDATE => |ro=run rw=run full=run|
+[generic] insert on conflict: INSERT INTO t (a) VALUES (1) ON CONFLICT DO NOTHING => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[generic] pragma read: PRAGMA table_info(t) => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[generic] empty:  => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[generic] whitespace only:     => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[generic] line comment only: -- nothing => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[generic] block comment only: /* x */ => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[generic] two reads: SELECT 1; SELECT 2 => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[generic] two drops: DROP TABLE a; DROP TABLE b => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[generic] read then garbage: SELECT 1; garbage => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[generic] a typo: selec 1 => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[generic] read, then a line comment: SELECT 1; -- c => |ro=run rw=run full=run|
+[generic] line comment, then a read: -- c\u{a}SELECT 1 => |ro=run rw=run full=run|
+[generic] block comment, then a read: /* c */ SELECT 1 => |ro=run rw=run full=run|
+[generic] read, then a hash comment: SELECT 1 # c => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
