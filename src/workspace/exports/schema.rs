@@ -286,7 +286,7 @@ fn read_tables(
 /// break would end the comment and run the rest as SQL, so it reads as a space.
 ///
 /// ponytail: the tables are read one at a time, not from one snapshot, and
-/// only tables and the sequences their columns own are written. A snapshot
+/// only tables and the sequences their columns use are written. A snapshot
 /// (one read-only transaction on a session of its own) and views are each a
 /// follow-up; routines and triggers would come after them.
 fn header(schema: &str, request: &SchemaRequest, ordered: &Ordered, sequences: bool) -> String {
@@ -310,9 +310,9 @@ fn header(schema: &str, request: &SchemaRequest, ordered: &Ordered, sequences: b
     // Without the structure a sequence is only set, so it has to be there already.
     let written = match (sequences, request.structure) {
         (false, _) => "Only tables are written",
-        (true, true) => "Only tables and the sequences their columns own are written",
+        (true, true) => "Only tables and the sequences their columns use are written",
         (true, false) => {
-            "Only tables are written, and the sequences their columns own are set, not created"
+            "Only tables are written, and the sequences their columns use are set, not created"
         }
     };
     let partitioned = match request.partitioned.as_slice() {
@@ -738,7 +738,7 @@ mod tests {
             header("s", &request(false, true), &ordered, true),
             "-- Schema \"s\" exported by DBDelve: 3 tables, rows only.\n\
              -- Each table was read on its own, not from one snapshot.\n\
-             -- Only tables are written, and the sequences their columns own are set, not created: views, routines, triggers and every other object are left out.\n\
+             -- Only tables are written, and the sequences their columns use are set, not created: views, routines, triggers and every other object are left out.\n\
              -- Referenced but not exported: customers, gone.\n\
              -- These tables reference each other, so their rows may not run back in this order: a, b.\n\n"
         );
@@ -754,7 +754,7 @@ mod tests {
              -- Only tables are written: views, routines, triggers and every other object are left out.\n\n"
         );
         assert!(header("s", &request(true, true), &plain, true).contains(
-            "-- Only tables and the sequences their columns own are written: views, routines, \
+            "-- Only tables and the sequences their columns use are written: views, routines, \
                  triggers and every other object are left out.\n"
         ));
     }

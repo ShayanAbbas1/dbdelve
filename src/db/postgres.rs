@@ -1858,9 +1858,10 @@ impl Connection {
     /// them back: created before the tables whose defaults name them, set
     /// where they stood after the rows are in.
     ///
-    /// ponytail: a sequence a default names without owning
-    /// (`DEFAULT nextval('shared')`) is not written; `pg_attrdef` is where it
-    /// would be found.
+    /// A sequence of the schema their defaults name that none of them owns
+    /// (one shared, or one an unexported table owns) is created and set too,
+    /// owned by nothing: its owner is not in the file. One in another schema
+    /// is that schema's to bring back.
     pub fn export_sequences(&self, schema: &str, tables: &[String]) -> Result<Sequences, DbError> {
         let mut sequences = Sequences::default();
         if tables.is_empty() {
@@ -1872,12 +1873,60 @@ impl Connection {
             .collect();
         // Not `pg_sequences`, which reads where every sequence in the database
         // stands, so one dropped by another session meanwhile fails the read.
+        // `owned` is each sequence a column of `tables` owns, as `serial` or
+        // as an identity; `named` is each other sequence of the schema their
+        // defaults name.
+        let tables_sql = format!(
+            "table_namespace.nspname = {} AND table_class.relname IN ({})",
+            Engine::Postgres.quote_literal(schema),
+            names.join(", ")
+        );
         let result = self.internal_query(&format!(
-            "SELECT sequence_namespace.nspname AS sequence_schema,
+            "WITH owned AS (
+                 SELECT dependency.objid AS sequence_oid,
+                     table_class.relname AS table_name,
+                     attribute.attname AS column_name,
+                     attribute.attnum AS position,
+                     dependency.deptype::text AS owner_kind
+                 FROM pg_catalog.pg_depend AS dependency
+                 JOIN pg_catalog.pg_class AS table_class
+                     ON table_class.oid = dependency.refobjid
+                 JOIN pg_catalog.pg_namespace AS table_namespace
+                     ON table_namespace.oid = table_class.relnamespace
+                 JOIN pg_catalog.pg_attribute AS attribute
+                     ON attribute.attrelid = table_class.oid
+                     AND attribute.attnum = dependency.refobjsubid
+                 WHERE dependency.classid = 'pg_catalog.pg_class'::regclass
+                     AND dependency.refclassid = 'pg_catalog.pg_class'::regclass
+                     AND dependency.deptype IN ('a', 'i')
+                     AND {tables_sql}
+             ), named AS (
+                 SELECT DISTINCT dependency.refobjid AS sequence_oid,
+                     NULL::name AS table_name,
+                     NULL::name AS column_name,
+                     NULL::int2 AS position,
+                     'n' AS owner_kind
+                 FROM pg_catalog.pg_depend AS dependency
+                 JOIN pg_catalog.pg_attrdef AS attribute_default
+                     ON attribute_default.oid = dependency.objid
+                 JOIN pg_catalog.pg_class AS table_class
+                     ON table_class.oid = attribute_default.adrelid
+                 JOIN pg_catalog.pg_namespace AS table_namespace
+                     ON table_namespace.oid = table_class.relnamespace
+                 WHERE dependency.classid = 'pg_catalog.pg_attrdef'::regclass
+                     AND dependency.refclassid = 'pg_catalog.pg_class'::regclass
+                     AND {tables_sql}
+                     AND dependency.refobjid NOT IN (SELECT sequence_oid FROM owned)
+                     AND dependency.refobjid IN (
+                         SELECT oid FROM pg_catalog.pg_class
+                         WHERE relnamespace = table_namespace.oid
+                     )
+             )
+             SELECT sequence_namespace.nspname AS sequence_schema,
                  sequence_class.relname AS sequence_name,
-                 table_class.relname AS table_name,
-                 attribute.attname AS column_name,
-                 dependency.deptype::text AS owner_kind,
+                 wanted.table_name,
+                 wanted.column_name,
+                 wanted.owner_kind,
                  pg_catalog.format_type(sequence.seqtypid, NULL) AS data_type,
                  sequence.seqstart::text AS start_value,
                  sequence.seqmin::text AS min_value,
@@ -1891,37 +1940,24 @@ impl Connection {
                  access.readable::text AS readable,
                  pg_catalog.has_sequence_privilege(sequence_class.oid, 'SELECT')::text
                      AS selectable
-             FROM pg_catalog.pg_depend AS dependency
+             FROM (SELECT * FROM owned UNION ALL SELECT * FROM named) AS wanted
              JOIN pg_catalog.pg_class AS sequence_class
-                 ON sequence_class.oid = dependency.objid AND sequence_class.relkind = 'S'
+                 ON sequence_class.oid = wanted.sequence_oid AND sequence_class.relkind = 'S'
              JOIN pg_catalog.pg_namespace AS sequence_namespace
                  ON sequence_namespace.oid = sequence_class.relnamespace
-             JOIN pg_catalog.pg_class AS table_class ON table_class.oid = dependency.refobjid
-             JOIN pg_catalog.pg_namespace AS table_namespace
-                 ON table_namespace.oid = table_class.relnamespace
-             JOIN pg_catalog.pg_attribute AS attribute
-                 ON attribute.attrelid = table_class.oid AND attribute.attnum = dependency.refobjsubid
              JOIN pg_catalog.pg_sequence AS sequence ON sequence.seqrelid = sequence_class.oid
              CROSS JOIN LATERAL (
                  SELECT pg_catalog.has_sequence_privilege(sequence_class.oid, 'SELECT, USAGE')
                      AS readable
              ) AS access
-             WHERE dependency.classid = 'pg_catalog.pg_class'::regclass
-                 AND dependency.refclassid = 'pg_catalog.pg_class'::regclass
-                 AND dependency.deptype IN ('a', 'i')
-                 AND table_namespace.nspname = {}
-                 AND table_class.relname IN ({})
-             ORDER BY table_class.relname, attribute.attnum",
-            Engine::Postgres.quote_literal(schema),
-            names.join(", ")
+             ORDER BY wanted.table_name NULLS LAST, wanted.position,
+                 sequence_namespace.nspname, sequence_class.relname"
         ))?;
         for row in &result.rows {
             let cell = |name: &str| required_cell(&result, row, name);
             let sequence =
                 Engine::Postgres.qualified(cell("sequence_schema")?, cell("sequence_name")?);
-            let table = Engine::Postgres.qualified(schema, cell("table_name")?);
-            let column = Engine::Postgres.quote_identifier(cell("column_name")?);
-            let owned = cell("owner_kind")? == "a";
+            let kind = cell("owner_kind")?;
             // `last_value` is NULL for a role that may not read the sequence,
             // and for one whose next value is not yet taken: never used, or
             // set by `setval(…, false)`. Only the sequence itself says where
@@ -1948,7 +1984,15 @@ impl Connection {
                     None
                 }
             };
-            if owned {
+            // A sequence an identity column owns is created by its table, and
+            // a `named` one by no table at all.
+            let column_of = || -> Result<(String, String), DbError> {
+                Ok((
+                    Engine::Postgres.qualified(schema, cell("table_name")?),
+                    Engine::Postgres.quote_identifier(cell("column_name")?),
+                ))
+            };
+            if kind != "i" {
                 sequences.before_tables.push(format!(
                     "CREATE SEQUENCE {sequence} AS {} INCREMENT BY {} MINVALUE {} MAXVALUE {} \
                      START WITH {} CACHE {} {};",
@@ -1964,9 +2008,12 @@ impl Connection {
                         "NO CYCLE"
                     },
                 ));
-                sequences.owned_by.push(format!(
-                    "ALTER SEQUENCE {sequence} OWNED BY {table}.{column};"
-                ));
+                if kind == "a" {
+                    let (table, column) = column_of()?;
+                    sequences.owned_by.push(format!(
+                        "ALTER SEQUENCE {sequence} OWNED BY {table}.{column};"
+                    ));
+                }
                 if let Some(set) = set {
                     sequences.values.push(format!(
                         "SELECT pg_catalog.setval({}, {set});",
@@ -1974,6 +2021,7 @@ impl Connection {
                     ));
                 }
             } else {
+                let (table, column) = column_of()?;
                 let start = cell("start_value")?;
                 // The table's `GENERATED … AS IDENTITY` names none of its
                 // sequence's options, so the column is given them as they were.

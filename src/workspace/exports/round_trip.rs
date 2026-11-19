@@ -1125,7 +1125,7 @@ fn live_a_schema_with_sequences_runs_back_on_postgres() {
     .expect("the export finishes");
     let sql = std::fs::read_to_string(&path).unwrap();
     assert!(
-        sql.contains("Only tables and the sequences their columns own are written"),
+        sql.contains("Only tables and the sequences their columns use are written"),
         "{sql}"
     );
 
@@ -1138,6 +1138,61 @@ fn live_a_schema_with_sequences_runs_back_on_postgres() {
         let next = table.run("INSERT INTO {table} (body) VALUES ('next') RETURNING id");
         assert_eq!(next.rows[0].get(0), Some(expected), "{sql}");
     }
+}
+
+/// A default may name a sequence no exported table owns: one an unticked
+/// table owns, or one owned by nothing. The file creates it all the same, and
+/// sets it where it stood.
+#[test]
+#[ignore = "needs the dev Postgres"]
+fn live_a_sequence_no_exported_table_owns_is_created_on_postgres() {
+    let mut owner = Throwaway::new(postgres(), Engine::Postgres, "public", "seq_owner");
+    owner.drop_after("DROP SEQUENCE IF EXISTS \"{schema}\".\"{name}_id_seq\"");
+    let mut user = Throwaway::new(postgres(), Engine::Postgres, "public", "seq_user");
+    user.drop_after("DROP SEQUENCE IF EXISTS \"{schema}\".\"{name}_shared\"");
+    owner.run("CREATE TABLE {table} (id serial PRIMARY KEY)");
+    user.run("CREATE SEQUENCE \"{schema}\".\"{name}_shared\" START WITH 40");
+    user.run(&format!(
+        "CREATE TABLE {{table}} (\
+         id integer DEFAULT nextval('\"{0}_id_seq\"') PRIMARY KEY, \
+         other integer DEFAULT nextval('\"{{name}}_shared\"'))",
+        owner.name
+    ));
+    user.run("INSERT INTO {table} DEFAULT VALUES");
+    user.run("INSERT INTO {table} DEFAULT VALUES");
+    let before = user.rows();
+
+    let path = user.directory.join("schema.sql");
+    let request = SchemaRequest {
+        tables: vec![user.name.clone()],
+        structure: true,
+        rows: true,
+        partitioned: Vec::new(),
+    };
+    export_schema(
+        &user.connection,
+        "public",
+        &request,
+        false,
+        Engine::Postgres,
+        &path,
+        &ExportProgress::default(),
+    )
+    .expect("the export finishes");
+    let sql = std::fs::read_to_string(&path).unwrap();
+    assert!(!sql.contains(" OWNED BY "), "{sql}");
+
+    // Into a database where neither the owner nor the shared sequence is.
+    user.run("DROP TABLE {table}");
+    owner.run("DROP TABLE {table}");
+    user.run("DROP SEQUENCE \"{schema}\".\"{name}_shared\"");
+    let problems = user.replay(&sql);
+    assert!(problems.is_empty(), "{sql}\n{}", problems.join("\n"));
+    let problems = differences(&before, &user.rows(), None);
+    assert!(problems.is_empty(), "{sql}\n{}", problems.join("\n"));
+    let next = user.run("INSERT INTO {table} DEFAULT VALUES RETURNING id, other");
+    assert_eq!(next.rows[0].get(0), Some("3"), "{sql}");
+    assert_eq!(next.rows[0].get(1), Some("42"), "{sql}");
 }
 
 /// A key that does not check its rows holds an orphan the file has to carry,
