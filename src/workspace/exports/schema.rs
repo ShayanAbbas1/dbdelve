@@ -110,7 +110,9 @@ pub(super) fn export_schema(
     );
     // On a thread of its own, as `knowing_the_table` is: a read behind a
     // schema lock must not hold a Cancel up.
-    let (read, sequences) =
+    // `own` is the export's session for what it reads of the catalog, apart
+    // from the one a query tab's transaction may be open on.
+    let (read, sequences, own) =
         unless_cancelled(progress, move || read_tables(&asking, &named, &names))?
             .ok_or_else(|| refused("the read of its tables stopped.".into()))?
             .map_err(refused)?;
@@ -207,7 +209,7 @@ pub(super) fn export_schema(
         if request.rows && !sequences.values.is_empty() {
             // Read again now the rows are, so a row another session added
             // meanwhile is behind where the file sets its sequence.
-            let again = connection
+            let again = own
                 .export_sequences(schema, &request.tables)
                 .map_err(|error| refused(format!("could not read its sequences: {error}")))?;
             if let Some(reason) = sequence_refusal(request, &again) {
@@ -263,7 +265,7 @@ fn read_tables(
     connection: &Connection,
     schema: &str,
     tables: &[String],
-) -> Result<(Vec<Table>, Sequences), String> {
+) -> Result<(Vec<Table>, Sequences, Connection), String> {
     let own = connection
         .apart_unpathed()
         .map_err(|error| error.to_string())?;
@@ -281,7 +283,7 @@ fn read_tables(
     let sequences = own
         .export_sequences(schema, tables)
         .map_err(|error| format!("could not read its sequences: {error}"))?;
-    Ok((read, sequences))
+    Ok((read, sequences, own))
 }
 
 /// What the file says of itself, every line a comment. A name holding a line
