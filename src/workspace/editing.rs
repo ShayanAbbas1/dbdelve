@@ -2513,8 +2513,12 @@ impl Workspace {
         // Nothing partial runs: a batch missing one of its rows is not the
         // change the user made.
         // Inside the user's open transaction the edit joins it, as a single
-        // row's does, rather than bracketing itself and ending it.
-        let joining = self.profile().is_some_and(|profile| profile.in_transaction);
+        // row's does, rather than bracketing itself and ending it: the one on
+        // the session the edit runs on, which for a bound tab is not the
+        // profile's own.
+        let joining = self
+            .profile()
+            .is_some_and(|profile| profile.transaction_open_for(tab));
         let written = match joining {
             true => sql::update_batch_joining(self.engine(), &pending),
             false => update_batch(self.engine(), &pending),

@@ -13543,6 +13543,57 @@ fn answer_in_the_first_query_tab(
     answered
 }
 
+/// A batch from a tab bound to another database runs on that database's
+/// session: the transaction open on the profile's own is not one it joins,
+/// so it brackets itself as it would with none open.
+#[gpui::test]
+fn a_bound_tabs_batch_brackets_itself_beside_the_profiles_transaction(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_duckdb_seeded(
+            cx,
+            "",
+            "mode = \"full\"",
+            "CREATE TABLE t (name TEXT, id INTEGER PRIMARY KEY);",
+            "CREATE TABLE t (name TEXT, id INTEGER PRIMARY KEY); \
+             INSERT INTO t VALUES ('a', 1), ('b', 2);",
+        );
+        let at =
+            connections_row(&workspace, cx, &connection_row("e2e")).expect("the connection shows");
+        click_connections_row(cx, at);
+        attach_other(&workspace, cx);
+        run_in_front(&workspace, cx, "BEGIN");
+        assert_eq!(profile_flags(&workspace, cx), (true, false));
+        new_query_here(&workspace, cx, Some("other"), None);
+        run_in_front(&workspace, cx, "SELECT name, id FROM t ORDER BY id");
+        let grid = workspace.read_with(cx, |workspace, _| {
+            workspace
+                .profile()
+                .unwrap()
+                .session
+                .active_results()
+                .expect("the query tab shows its rows")
+                .clone()
+        });
+        grid.update(cx, |grid, _| {
+            for row in 0..2 {
+                assert!(grid.delegate_mut().set_pending(
+                    row,
+                    0,
+                    crate::result_grid::NewValue::Value("edited".into())
+                ));
+            }
+        });
+        cx.dispatch_action(crate::actions::ApplyEdits);
+        settle(cx);
+        let sql = front_review_sql(&workspace, cx).expect("the batch is shown before it runs");
+        assert!(
+            sql.trim_start().starts_with("BEGIN"),
+            "the bound session has no transaction to join: {sql}"
+        );
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn an_edit_on_another_databases_table_is_written_there(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
