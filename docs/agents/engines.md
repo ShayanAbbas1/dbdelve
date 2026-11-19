@@ -703,8 +703,9 @@ Decided, and not to be re-litigated:
     `smallint`, `mediumint`, `int`, `bigint`, `decimal`, `double`, `char`,
     `varchar`, `tinytext`, `text`, `mediumtext`, `longtext`, `date`, `time`,
     `datetime`, `timestamp`, `year`, `enum` and `set`; `timestamp` only while
-    `@@session.time_zone` is `UTC` or a fixed offset, since in the hour a
-    daylight-saving change repeats two instants render alike. Left off: `float` and
+    `@@session.time_zone` is `UTC` or a fixed offset, or `SYSTEM` on a server
+    whose `@@system_time_zone` is `UTC`, since in the hour a daylight-saving
+    change repeats two instants render alike. Left off: `float` and
     `json`, because an `=` against their own rendered text matches nothing (a
     `FLOAT` is held as a single and compared as a double, a JSON value is never
     equal to a string), so a row that is there would read as gone; the byte

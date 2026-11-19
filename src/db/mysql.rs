@@ -375,9 +375,8 @@ SELECT c.COLUMN_NAME AS column_name,
        {data_type} AS data_type,
        IF(c.EXTRA LIKE '%VIRTUAL GENERATED%' OR c.EXTRA LIKE '%STORED GENERATED%',
           'yes', 'no') AS is_generated,
-       IF(@@session.time_zone IN ('UTC', '+00:00')
-          OR @@session.time_zone REGEXP '^[+-][0-9][0-9]:[0-9][0-9]$',
-          'yes', 'no') AS fixed_time_zone
+       @@session.time_zone AS session_time_zone,
+       @@system_time_zone AS system_time_zone
 FROM information_schema.COLUMNS AS c
 JOIN information_schema.TABLES AS t
   ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME
@@ -1586,6 +1585,25 @@ struct TableColumn {
     zoned: bool,
 }
 
+/// Whether a session renders a `timestamp` under a zone with no daylight
+/// saving: UTC or a fixed offset, or `SYSTEM`, the default on both servers,
+/// where the server's own zone is UTC. Any other system zone is refused: its
+/// name is the abbreviation in force at startup, and `GMT` is London's winter.
+fn fixed_time_zone(session: &str, system: &str) -> bool {
+    let offset = |zone: &str| {
+        let bytes = zone.as_bytes();
+        bytes.len() == 6
+            && matches!(bytes[0], b'+' | b'-')
+            && bytes[1..3].iter().all(u8::is_ascii_digit)
+            && bytes[3] == b':'
+            && bytes[4..].iter().all(u8::is_ascii_digit)
+    };
+    match session {
+        "SYSTEM" => system == "UTC",
+        zone => zone == "UTC" || offset(zone),
+    }
+}
+
 /// The table's columns in order, or `None` where the catalog said none (a view,
 /// or a table that is not there) or an answer was malformed.
 fn table_columns(result: &QueryResult) -> Option<Vec<TableColumn>> {
@@ -1597,7 +1615,10 @@ fn table_columns(result: &QueryResult) -> Option<Vec<TableColumn>> {
             Some(TableColumn {
                 name: required_cell(result, row, "column_name").ok()?.to_string(),
                 zoned: data_type == "timestamp"
-                    && required_cell(result, row, "fixed_time_zone").ok()? != "yes",
+                    && !fixed_time_zone(
+                        required_cell(result, row, "session_time_zone").ok()?,
+                        required_cell(result, row, "system_time_zone").ok()?,
+                    ),
                 data_type,
                 generated: required_cell(result, row, "is_generated").ok()? == "yes",
             })
@@ -2375,12 +2396,13 @@ mod tests {
     /// such a table is read-only unless the zone is a fixed offset.
     #[test]
     fn a_timestamp_under_a_zone_with_daylight_saving_is_not_matched_by_its_value() {
-        let catalog = |fixed: &str| QueryResult {
+        let catalog = |session: &str| QueryResult {
             columns: [
                 "column_name",
                 "data_type",
                 "is_generated",
-                "fixed_time_zone",
+                "session_time_zone",
+                "system_time_zone",
             ]
             .map(|name| Column {
                 name: name.into(),
@@ -2388,22 +2410,34 @@ mod tests {
             })
             .into(),
             rows: vec![
-                crate::db::Row::new([Some("bird"), Some("varchar"), Some("no"), Some(fixed)])
-                    .unwrap(),
-                crate::db::Row::new([Some("at"), Some("timestamp"), Some("no"), Some(fixed)])
-                    .unwrap(),
+                crate::db::Row::new([
+                    Some("bird"),
+                    Some("varchar"),
+                    Some("no"),
+                    Some(session),
+                    Some("CET"),
+                ])
+                .unwrap(),
+                crate::db::Row::new([
+                    Some("at"),
+                    Some("timestamp"),
+                    Some("no"),
+                    Some(session),
+                    Some("CET"),
+                ])
+                .unwrap(),
             ],
             ..QueryResult::default()
         };
-        let resolve = |fixed: &str| {
-            let columns = table_columns(&catalog(fixed)).expect("two columns");
+        let resolve = |session: &str| {
+            let columns = table_columns(&catalog(session)).expect("two columns");
             let probed = probed(&[
                 (Some("sightings"), Some("bird")),
                 (Some("sightings"), Some("at")),
             ]);
             resolve_keyless_target(&probed, "dbdelve_dev", "sightings", &columns)
         };
-        let (target, reason) = resolve("no");
+        let (target, reason) = resolve("SYSTEM");
         assert!(target.is_none());
         assert_eq!(
             reason.as_deref(),
@@ -2413,8 +2447,22 @@ mod tests {
                  is not a fixed offset."
             )
         );
-        let (target, reason) = resolve("yes");
+        let (target, reason) = resolve("+05:30");
         assert!(target.is_some(), "{reason:?}");
+    }
+
+    /// `SYSTEM` is the default zone on both servers, and a server running on
+    /// UTC renders every instant by one text.
+    #[test]
+    fn a_system_session_zone_is_fixed_only_where_the_server_runs_on_utc() {
+        assert!(fixed_time_zone("SYSTEM", "UTC"));
+        assert!(!fixed_time_zone("SYSTEM", "GMT"));
+        assert!(!fixed_time_zone("SYSTEM", "CET"));
+        assert!(fixed_time_zone("UTC", "CET"));
+        assert!(fixed_time_zone("+00:00", "CET"));
+        assert!(fixed_time_zone("-03:30", "CET"));
+        assert!(!fixed_time_zone("Europe/Paris", "UTC"));
+        assert!(!fixed_time_zone("+5:30", "UTC"));
     }
 
     /// A result over `sightings` carrying these columns, in this order.
