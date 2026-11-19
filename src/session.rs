@@ -269,6 +269,36 @@ impl Profile {
     /// `None` appends only while one is open. Called before [`Profile::in_transaction`] is
     /// updated for the same submission, because it reads whether a
     /// transaction was open before it.
+    /// A statement `sql` that ends the open transaction has landed, with
+    /// `error` where it failed. Until now the transaction was still read as
+    /// open. It ended unless the statement never reached the server
+    /// ([`crate::db::sent_nothing`]: a Cancel dropped it unsent), or it is a
+    /// `lone` end the engine says leaves the transaction open when it fails;
+    /// a guess there would keep a flag no COMMIT could clear, or offer a Roll
+    /// Back for work the server had already rolled back. A `lost` session has
+    /// no transaction left to keep.
+    pub(crate) fn end_landed(
+        &mut self,
+        sql: &str,
+        lone: bool,
+        lost: bool,
+        error: Option<&DbError>,
+    ) {
+        let still_open = !lost
+            && error.is_some_and(|error| {
+                crate::db::sent_nothing(error)
+                    || (lone
+                        && self
+                            .config
+                            .engine()
+                            .failed_end_keeps_transaction(&error.message))
+            });
+        if !still_open {
+            self.record_sent(sql, Some(false));
+            self.in_transaction = false;
+        }
+    }
+
     pub(crate) fn record_sent(&mut self, sql: &str, transaction: Option<bool>) {
         match transaction {
             Some(false) => self.transaction_statements.clear(),

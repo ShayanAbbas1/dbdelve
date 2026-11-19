@@ -149,9 +149,9 @@ impl Workspace {
     /// Auto over a transaction that is still open is wrong for as long as it
     /// takes to lose a row, the mirror of the reason Manual opens its `BEGIN`
     /// at once, and a `COMMIT` can fail and leave the transaction open.
-    /// `in_transaction` is marked as the statement is sent, so it is already
-    /// false here when the run started; still true means a statement is
-    /// running in that tab, or the connection is gone.
+    /// The end is read off the tab: running now and not before means the
+    /// statement went to the run. `in_transaction` is marked only once it
+    /// lands (`Profile::end_landed`), since a Cancel can still drop it unsent.
     pub(crate) fn end_transaction_for_auto(
         &mut self,
         verb: &str,
@@ -165,6 +165,12 @@ impl Workspace {
         if !asked {
             return;
         }
+        let running = |workspace: &Self| {
+            workspace
+                .profile()
+                .is_some_and(|profile| profile.session.running(profile.session.active))
+        };
+        let was_running = running(self);
         // Not `in_transaction` alone: it is also false when the transaction
         // ended between the dialog being drawn and the click, and arming
         // `auto_after_end` then would turn Auto on at the tab's next success.
@@ -172,10 +178,11 @@ impl Workspace {
         if !self.end_transaction(verb, false, window, cx) {
             return;
         }
+        let sent = !was_running && running(self);
         let Some(profile) = self.profile_mut() else {
             return;
         };
-        if profile.in_transaction {
+        if !sent {
             self.note(
                 format!("The {verb} was not sent, so auto-commit is still off."),
                 cx,

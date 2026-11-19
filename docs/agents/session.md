@@ -334,9 +334,10 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   is off unless the profile sets `keep_alive_seconds` (10 to 3600; the form refuses
   outside it and a stored value outside it restores as off), so a
   profile that never asked arms nothing. A round pings every session in
-  `Profile::sessions_to_hold` through `spawn_blocking`, each by `try_lock`, so a
-  session a statement holds is skipped and never waited on; it is skipped whole
-  while `in_transaction` or any `bound_transactions` entry holds; and a failed
+  `Profile::sessions_to_ping` (its own and each one open for another database)
+  through `spawn_blocking`, each by `try_lock`, so a session a statement holds
+  is skipped and never waited on; it is skipped whole while
+  `Profile::any_transaction_open` holds; and a failed
   ping stops the keep-alive until the next connect without a word, the lost
   session being found on its next use. Only engines with `EngineSpec.keeps_alive`
   are pinged (Postgres, MySQL, MariaDB, SQL Server, Redis); each ping is
@@ -511,7 +512,9 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   no `$out` or `$merge`. And only while `Profile::in_turn` is `None`: what the
   user's statements left on the session (`sql::leaves`) -- a transaction
   still open (`in_transaction`, opened by `BEGIN`, ended by `COMMIT` or
-  `ROLLBACK`, read off what was sent rather than asked of the server), or a
+  `ROLLBACK`, read off what was sent rather than asked of the server; an end
+  is marked only once it lands, and not at all when a Cancel dropped it
+  unsent, `Profile::end_landed`), or a
   `SET`, `USE`, temporary table or one of those session calls
   (`session_changed`, until the next connect)
   -- which a fresh connection would not see. A read, a `SHOW`, an `EXPLAIN`,

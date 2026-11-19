@@ -2579,12 +2579,12 @@ impl Workspace {
         // thing besides a catalog read that keeps an idle timeout away.
         self.mark_activity(&id, cx);
         // Marked on the way out, like the history: a statement that failed
-        // part way may still have opened a transaction.
-        // What a lone COMMIT or ROLLBACK cleared, kept to put back when it
-        // fails where the engine keeps the transaction (SQLite's
-        // `SQLITE_BUSY`): it is read off what was sent, not off what the
-        // server did.
-        let mut ended = None;
+        // part way may still have opened a transaction. One that ends the open
+        // transaction is marked once it lands instead (`Profile::end_landed`),
+        // as `Bound::leave` marks a bound session's: a Cancel can drop it
+        // unsent, and until then a role change or an edit is still refused
+        // inside the transaction it may not have ended.
+        let mut ending = None;
         // Not a bound tab's: what it leaves is left on the session of its
         // database, which is not the profile's own.
         if !generated
@@ -2593,15 +2593,16 @@ impl Workspace {
         {
             let text = explained.as_deref().unwrap_or(&sql);
             let leaves = sql::leaves(engine, text);
-            if leaves.transaction == Some(false)
-                && profile.in_transaction
-                && sql::after_last_end(engine, text).is_empty()
-            {
-                ended = Some(std::mem::take(&mut profile.transaction_statements));
-            }
-            profile.record_sent(&sql, leaves.transaction);
-            if let Some(open) = leaves.transaction {
-                profile.in_transaction = open;
+            if leaves.transaction == Some(false) && profile.in_transaction {
+                // Whether it is a lone end, whose failure the engine may say
+                // left the transaction open (SQLite's `SQLITE_BUSY`).
+                let lone = sql::after_last_end(engine, text).is_empty();
+                ending = Some((sql.clone(), lone));
+            } else {
+                profile.record_sent(&sql, leaves.transaction);
+                if let Some(open) = leaves.transaction {
+                    profile.in_transaction = open;
+                }
             }
             profile.session_changed |= leaves.settings;
         }
@@ -3124,18 +3125,8 @@ impl Workspace {
                         // end the block: whether the end really ended anything
                         // is only known now.
                         let ended_ok = result.is_ok();
-                        // Put back only where the engine says the failed end
-                        // left the transaction open; a guess would keep a
-                        // flag no COMMIT could clear, or offer a Roll Back
-                        // for work the server had already rolled back.
-                        if let Some(statements) = ended
-                            && !lost
-                            && result.as_ref().err().is_some_and(|error| {
-                                engine.failed_end_keeps_transaction(&error.message)
-                            })
-                        {
-                            profile.in_transaction = true;
-                            profile.transaction_statements = statements;
+                        if let Some((sent, lone)) = &ending {
+                            profile.end_landed(sent, *lone, lost, result.as_ref().err());
                         }
                         if profile.session.auto_after_end == Some(tab) {
                             profile.session.auto_after_end = None;
