@@ -908,12 +908,23 @@ impl Connection {
                     ),
                     false => error,
                 })?;
-            // Only where a list of schemas opens, so not worth failing a login over.
-            connection.default_schema =
-                first_value(&mut session, "SELECT SCHEMA_NAME()").unwrap_or_default();
+            let session = connection.read_default_schema(session)?;
             *connection.session.lock().expect("unshared until returned") = Some(session);
             Ok(connection)
         })
+    }
+
+    /// Read the login's default schema over `session`, which is only where a
+    /// list of schemas opens and so not worth failing a login over. A read
+    /// that times out marks the session lost, though, and a lost session
+    /// stored as open fails its first statement without sending it, so that
+    /// one is replaced by a new login.
+    fn read_default_schema(&mut self, mut session: Session) -> Result<Session, DbError> {
+        self.default_schema = first_value(&mut session, "SELECT SCHEMA_NAME()").unwrap_or_default();
+        match session.lost {
+            Some(_) => self.connect(),
+            None => Ok(session),
+        }
     }
 
     fn connect(&self) -> Result<Session, DbError> {
@@ -1005,8 +1016,7 @@ impl Connection {
         // The server's spelling, as `open` asks for it: a restore after a
         // `USE` and a reconnect then name it as the server does.
         connection.server.database = current_database(&mut session)?;
-        connection.default_schema =
-            first_value(&mut session, "SELECT SCHEMA_NAME()").unwrap_or_default();
+        let session = connection.read_default_schema(session)?;
         *connection.session.lock().expect("unshared until returned") = Some(session);
         Ok(connection)
     }
