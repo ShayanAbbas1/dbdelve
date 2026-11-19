@@ -209,9 +209,14 @@ pub(super) fn export_schema(
         if rereads_sequences(request, &sequences) {
             // Read again now the rows are, so a row another session added
             // meanwhile is behind where the file sets its sequence.
-            let again = own
-                .export_sequences(schema, &request.tables)
-                .map_err(|error| refused(format!("could not read its sequences: {error}")))?;
+            // On a thread of its own, as the first read is: a sequence another
+            // session holds in an open `ALTER SEQUENCE` keeps this read waiting,
+            // and a Cancel must not.
+            let (asking, named, names) = (own.clone(), schema.to_string(), request.tables.clone());
+            let again =
+                unless_cancelled(progress, move || asking.export_sequences(&named, &names))?
+                    .ok_or_else(|| refused("the read of its sequences stopped.".into()))?
+                    .map_err(|error| refused(format!("could not read its sequences: {error}")))?;
             if let Some(reason) = sequence_refusal(request, &again).or_else(|| {
                 (request.structure && redefined(&sequences, &again)).then(|| {
                     "its sequences were changed while it was written, so the file would \
