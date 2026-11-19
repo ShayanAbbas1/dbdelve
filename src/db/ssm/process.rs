@@ -283,17 +283,29 @@ mod tests {
     #[test]
     fn watchdog_reports_cli_exit_even_if_descendant_holds_output() {
         let mut command = Command::new("/bin/sh");
-        command.args(["-c", "sleep 60 & exit 7"]);
+        command.args(["-c", "sleep 60 & echo ready; exit 7"]);
         let mut process = Process::spawn(command).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(3);
+        // Exclude re-exec startup from the shutdown budget on loaded CI runners.
+        use std::io::BufRead;
+        let mut stdout = io::BufReader::new(process.child.as_mut().unwrap().stdout.take().unwrap());
+        let mut line = String::new();
+        stdout.read_line(&mut line).unwrap();
+        assert_eq!(line.trim(), "ready");
+        let deadline = Instant::now() + Duration::from_secs(10);
         while process.running() {
-            assert!(Instant::now() < deadline);
+            assert!(
+                Instant::now() < deadline,
+                "watchdog waited on the 60-second descendant"
+            );
             thread::sleep(Duration::from_millis(20));
         }
         assert_eq!(
             process.child.as_mut().unwrap().wait().unwrap().code(),
             Some(7)
         );
+        line.clear();
+        stdout.read_line(&mut line).unwrap();
+        assert_eq!(line.trim(), "DBDELVE_SSM_CHILD_EXITED");
     }
 }
 
