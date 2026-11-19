@@ -152,12 +152,14 @@ ORDER BY s.name, o.name
 /// permission on, so it falls back to the base system type: an approximation,
 /// but never the null that used to fail the whole tab.
 ///
-/// `{named}` is where DDL puts [`DDL_TYPE_NAME_SQL`] (see [`type_sql`]).
+/// `{named}` is where DDL puts [`DDL_TYPE_NAME_SQL`], and `{resolved}` where
+/// it asks that an alias's name be known before it leaves the length out
+/// (see [`type_sql`]).
 const TYPE_SQL: &str = "(COALESCE({named}
     TYPE_NAME(p.user_type_id),
     TYPE_NAME(p.system_type_id)
 ) COLLATE DATABASE_DEFAULT + CASE
-    WHEN p.user_type_id <> p.system_type_id THEN N''
+    WHEN p.user_type_id <> p.system_type_id{resolved} THEN N''
     WHEN TYPE_NAME(p.system_type_id) IN ('varchar', 'char', 'varbinary', 'binary')
         THEN N'(' + CASE WHEN p.max_length = -1 THEN N'max'
             ELSE CAST(p.max_length AS nvarchar(10)) END + N')'
@@ -185,8 +187,17 @@ const DDL_TYPE_NAME_SQL: &str = "(
 /// which shows its bare name. Display text holds no subquery: a routine's
 /// signature aggregates it, and SQL Server refuses a subquery inside an
 /// aggregate.
+///
+/// An alias the login may not see falls back to its base type. Shown, the
+/// bare base name is enough; in DDL it is written with its length, since a
+/// bare `nvarchar` declares `nvarchar(1)` and the rows would not fit.
 fn type_sql(ddl: bool) -> String {
-    TYPE_SQL.replace("{named}", if ddl { DDL_TYPE_NAME_SQL } else { "" })
+    match ddl {
+        true => TYPE_SQL
+            .replace("{named}", DDL_TYPE_NAME_SQL)
+            .replace("{resolved}", " AND TYPE_NAME(p.user_type_id) IS NOT NULL"),
+        false => TYPE_SQL.replace("{named}", "").replace("{resolved}", ""),
+    }
 }
 
 // The structure queries name one relation by `{object}`, an `OBJECT_ID` over
@@ -4563,9 +4574,14 @@ mod tests {
             .query("EXECUTE AS USER = 'fix_cat_lowpriv'", Fetch::default())
             .expect("impersonation should start");
         let structure = connection.structure("dbo", "fix_cat_people");
+        let ddl = connection.ddl("dbo", "fix_cat_people", RelationKind::Table);
         connection
             .query("REVERT", Fetch::default())
             .expect("impersonation should end");
+        // Written to be run, the base type keeps its length: a bare `nvarchar`
+        // would declare one character.
+        let ddl = ddl.expect("the DDL should load despite the withheld permissions");
+        assert!(ddl.contains("\"email\" nvarchar(50)"), "{ddl}");
         let structure = structure.expect("structure should load despite the withheld permissions");
 
         let email = structure
