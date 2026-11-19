@@ -1472,12 +1472,38 @@ impl Connection {
             .map(|cell| cell.column.as_str())
             .collect();
         let mut send = |sql: &str, sending: Sending| {
-            // Under `REPEATABLE READ` every read of the apply sees the one
-            // snapshot its first re-read took, and a write to a row another
-            // transaction changed after it fails with 40001 rather than
-            // overwriting that change.
+            if sending == Sending::Open {
+                // A plain `BEGIN` first: inside the user's own transaction
+                // Postgres runs it as nothing but a warning, 25001, where
+                // `BEGIN ISOLATION LEVEL` would fail once that transaction had
+                // read anything, and abort it with its pending work.
+                let begun = self.ran(&mut client, "BEGIN", false, Fetch::default(), None);
+                closed.set(client.client.is_closed());
+                begun?;
+                // Refused with nothing more sent: the `BEGIN` changed nothing,
+                // and the transaction is the user's to end.
+                if client.driver.codes.iter().any(|code| code == "25001") {
+                    return Err(super::in_a_transaction());
+                }
+                // Under `REPEATABLE READ` every read of the apply sees the one
+                // snapshot its first re-read took, and a write to a row
+                // another transaction changed after it fails with 40001 rather
+                // than overwriting that change. The transaction is the
+                // apply's own now, so a failure here ends it.
+                let set = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ";
+                return match self.ran(&mut client, set, false, Fetch::default(), None) {
+                    Ok((result, _)) => Ok(result),
+                    Err(error) => {
+                        if !client.client.is_closed() {
+                            let _ =
+                                self.ran(&mut client, "ROLLBACK", false, Fetch::default(), None);
+                        }
+                        closed.set(client.client.is_closed());
+                        Err(error)
+                    }
+                };
+            }
             let sql = match sending {
-                Sending::Open => "BEGIN ISOLATION LEVEL REPEATABLE READ",
                 // A closed connection took its transaction with it.
                 Sending::Abandon if client.client.is_closed() => return Ok(QueryResult::default()),
                 _ => sql,
@@ -1498,13 +1524,6 @@ impl Connection {
                     result
                 });
             closed.set(client.client.is_closed());
-            // Postgres runs a `BEGIN` inside an open transaction as nothing
-            // but a warning, 25001, so the apply would end the user's with
-            // its own `COMMIT`. Refused with nothing more sent: the `BEGIN`
-            // changed nothing, and the transaction is the user's to end.
-            if sending == Sending::Open && client.driver.codes.iter().any(|code| code == "25001") {
-                return Err(super::in_a_transaction());
-            }
             result
         };
         super::run_verified(
@@ -4740,6 +4759,67 @@ mod tests {
                     types: typed(&[("id", "int4"), ("label", "text"), ("geom", "geometry")]),
                     ..crate::result_grid::PendingRow::default()
                 }],
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_an_apply_refused_inside_the_users_transaction_leaves_it_working() {
+        let connection = live_profile();
+        let table = "verified_inside_user_transaction";
+        let scratch = ScratchTable(&connection, table);
+        scratch.drop_all();
+        let run = |sql: &str| {
+            connection
+                .query(sql, &CancelToken::default(), Fetch::default())
+                .unwrap_or_else(|error| panic!("`{sql}`: {error}"))
+        };
+        run(&format!(
+            "CREATE TABLE {table} (id integer PRIMARY KEY, label text);
+             INSERT INTO {table} VALUES (1, 'one')"
+        ));
+        let batch = crate::sql::draft_batch(
+            Engine::Postgres,
+            &[],
+            &[crate::result_grid::PendingRow {
+                schema: "public".into(),
+                table: table.into(),
+                sets: vec![(
+                    "label".into(),
+                    crate::result_grid::NewValue::Value("changed".into()),
+                )],
+                keys: vec![("id".into(), "1".into())],
+                types: typed(&[("id", "int4"), ("label", "text")]),
+                ..crate::result_grid::PendingRow::default()
+            }],
+            &[],
+        )
+        .expect("the draft is written");
+        let steps = crate::db::conformance::verified_steps(
+            Engine::Postgres,
+            &batch,
+            vec![(
+                StepKind::Update,
+                read_cells(&connection, &format!("SELECT * FROM {table} WHERE id = 1")),
+            )],
+        );
+        let super::super::Connection::Postgres(session) = &connection else {
+            unreachable!("live_profile opens Postgres");
+        };
+
+        // A transaction that has read already cannot change its isolation
+        // level: an apply that asked for one would abort the user's work.
+        run("BEGIN");
+        run(&format!("INSERT INTO {table} VALUES (2, 'two')"));
+        assert!(matches!(
+            session.apply_verified(&steps, &|| true),
+            ApplyOutcome::Failed {
+                stage: crate::db::ApplyStage::Begin,
+                ..
+            }
+        ));
+        let counted = run(&format!("SELECT count(*) FROM {table}"));
+        assert_eq!(counted.rows[0].get(0), Some("2"));
+        run("ROLLBACK");
+    }
+
                 &[],
             )
             .expect("the draft is written")
