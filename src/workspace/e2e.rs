@@ -2193,6 +2193,45 @@ fn attach_other(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
     settle(cx);
 }
 
+/// A listing overtaken by one started after it, which may have been asked
+/// under another filter, never lands: only the latest one's answer is shown.
+#[gpui::test]
+fn a_database_listing_overtaken_by_a_later_one_is_dropped(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = duckdb_with_other_attached(cx);
+        let names = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                workspace.profile().unwrap().databases.names.clone()
+            })
+        };
+        assert!(names(&workspace, cx).iter().any(|name| name == "other"));
+        workspace.update(cx, |workspace, cx| {
+            let profile = workspace.profile_mut().unwrap();
+            profile.databases = crate::db::Databases::default();
+            let (id, generation) = (profile.id.clone(), profile.generation);
+            workspace.list_databases(&id, generation, cx);
+            // A later listing started before this one lands.
+            workspace.profile_mut().unwrap().start_listing();
+        });
+        settle(cx);
+        assert!(
+            names(&workspace, cx).is_empty(),
+            "the overtaken answer was dropped"
+        );
+        workspace.update(cx, |workspace, cx| {
+            let profile = workspace.profile().unwrap();
+            let (id, generation) = (profile.id.clone(), profile.generation);
+            workspace.list_databases(&id, generation, cx);
+        });
+        settle(cx);
+        assert!(
+            names(&workspace, cx).iter().any(|name| name == "other"),
+            "the latest one's answer lands"
+        );
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn select_database_lists_a_new_database_in_the_connections_tree(cx: &mut TestAppContext) {
     store::tests::with_home(|| {

@@ -427,6 +427,7 @@ impl Workspace {
             transaction_statements: Vec::new(),
             transaction_sends: 0,
             connected_script: String::new(),
+            listings: 0,
             auto_commit: true,
             session_changed: false,
             catalog: CatalogState::Loading,
@@ -518,6 +519,7 @@ impl Workspace {
             transaction_statements: Vec::new(),
             transaction_sends: 0,
             connected_script: String::new(),
+            listings: 0,
             auto_commit: true,
             session_changed: false,
             catalog: CatalogState::Loading,
@@ -1574,6 +1576,9 @@ impl Workspace {
         };
         let (id, generation) = (profile.id.clone(), profile.generation);
         let shown = profile.shown();
+        let Some(listing) = self.profile_mut().map(Profile::start_listing) else {
+            return;
+        };
         let fetch = spawn_blocking(cx.background_executor(), move || {
             connection.databases(target.engine, &shown)
         });
@@ -1583,6 +1588,11 @@ impl Workspace {
                 let Some(profile) = workspace.issued_to(&id, generation) else {
                     return;
                 };
+                // Overtaken by a listing started since, perhaps under another
+                // filter: that one's answer is the one to show.
+                if !profile.latest_listing(listing) {
+                    return;
+                }
                 match result {
                     Ok(databases) => profile.databases = databases,
                     Err(error) => {
@@ -2610,6 +2620,7 @@ impl Workspace {
         // A refresh lists them again, and inside the user's transaction a
         // failed read would fail it on Postgres, as `refresh_schema` says.
         let shown = profile.shown();
+        let started = profile.start_listing();
         let listing = spawn_blocking(cx.background_executor(), move || {
             metadata_reader(&connection, in_transaction)
                 .and_then(|reader| reader.databases(engine, &shown))
@@ -2621,6 +2632,11 @@ impl Workspace {
                 let Some(profile) = workspace.issued_to(&id, generation) else {
                     return;
                 };
+                // Overtaken by a listing started since, perhaps under another
+                // filter: that one's answer is the one to show.
+                if !profile.latest_listing(started) {
+                    return;
+                }
                 match result {
                     Ok(databases) => profile.databases = databases,
                     Err(error) => profile.session.notice = Some(error.message),
