@@ -12355,6 +12355,8 @@ fn ssm_cleanup_retry_dismiss_reopen_and_confirm_from_shared_state(cx: &mut TestA
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+    // This fixture needs the welcome surface, independent of the runner's PG* settings.
+    crate::IGNORE_ENVIRONMENT.set(true);
     store::tests::with_home(|| {
         let calls = Arc::new(AtomicUsize::new(0));
         let count = calls.clone();
@@ -12369,6 +12371,9 @@ fn ssm_cleanup_retry_dismiss_reopen_and_confirm_from_shared_state(cx: &mut TestA
         );
         cx.update(|cx| cx.set_global(super::cleanup::SharedCleanup(manager.clone())));
         let (workspace, cx) = launch(cx);
+        workspace.read_with(cx, |w, _| {
+            assert!(w.form.is_none() && w.profiles.is_empty(), "welcome fixture");
+        });
         manager.add(
             CleanupResult {
                 outcome: Outcome::AuthenticationRequired,
@@ -12385,6 +12390,8 @@ fn ssm_cleanup_retry_dismiss_reopen_and_confirm_from_shared_state(cx: &mut TestA
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         let dismiss = cx.debug_bounds("cleanup-dismiss-0").unwrap();
         cx.simulate_click(dismiss.center(), gpui::Modifiers::default());
+        // Rebuild the dispatch path after focus returns from the dismissed button.
+        cx.update(|window, cx| window.draw(cx).clear(cx));
         settle(cx);
         assert!(manager.records()[0].dismissed);
         let pending = cx.debug_bounds("cleanup-pending").unwrap();
@@ -12394,6 +12401,7 @@ fn ssm_cleanup_retry_dismiss_reopen_and_confirm_from_shared_state(cx: &mut TestA
         );
         cx.simulate_keystrokes("secondary-shift-p");
         settle(cx);
+        assert!(palette_mode(&workspace, cx).is_some(), "palette opened");
         cx.simulate_input("Show pending AWS session cleanup");
         settle(cx);
         assert_eq!(
@@ -12439,6 +12447,7 @@ fn ssm_cleanup_retry_dismiss_reopen_and_confirm_from_shared_state(cx: &mut TestA
         settle(cx);
         cx.simulate_keystrokes("secondary-shift-p");
         settle(cx);
+        assert!(palette_mode(&workspace, cx).is_some(), "palette opened");
         cx.simulate_input("Show pending AWS session cleanup");
         settle(cx);
         assert_eq!(
@@ -12466,6 +12475,61 @@ fn ssm_cleanup_retry_dismiss_reopen_and_confirm_from_shared_state(cx: &mut TestA
             palette_mode(&workspace, cx).is_some(),
             "keyboard dispatch remains available"
         );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn ssm_cleanup_reopens_from_the_keyboard_during_row_import(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        let file = store::dbdelve_directory().unwrap().join("birds.csv");
+        std::fs::write(&file, "name\nwren\n").unwrap();
+        workspace.update_in(cx, |w, window, cx| {
+            w.cleanup.add(
+                crate::db::ssm::CleanupResult {
+                    outcome: crate::db::ssm::cleanup::Outcome::MissingId,
+                    session: None,
+                    profile: None,
+                    region: None,
+                },
+                None,
+            );
+            w.cleanup.dismiss(0);
+            let profile = w.profile().unwrap().id.clone();
+            w.open_import_file(
+                profile,
+                None,
+                "main".into(),
+                "birds".into(),
+                file,
+                window,
+                cx,
+            );
+        });
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("import-rows"));
+        cx.simulate_keystrokes("secondary-shift-p");
+        settle(cx);
+        cx.simulate_input("Show pending AWS session cleanup");
+        settle(cx);
+        assert_eq!(
+            workspace.read_with(cx, |w, cx| w
+                .palette
+                .as_ref()
+                .unwrap()
+                .read(cx)
+                .matched_labels()
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()),
+            ["Show pending AWS session cleanup"]
+        );
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        assert!(palette_mode(&workspace, cx).is_none());
+        workspace.read_with(cx, |w, _| assert!(!w.cleanup.records()[0].dismissed));
+        assert_eq!(front_dialog(&workspace, cx), Some("import-rows"));
         quit(workspace, cx);
     });
 }

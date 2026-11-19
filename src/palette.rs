@@ -4681,6 +4681,7 @@ fn beside_import(command: &Command) -> bool {
             | Command::SelectTheme
             | Command::PickFont(_)
             | Command::OpenSettings
+            | Command::ShowSsmCleanup
             | Command::ToggleSidebar
             | Command::CollapseAllSchemas
             | Command::ExpandAllSchemas
