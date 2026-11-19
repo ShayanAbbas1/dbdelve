@@ -20666,12 +20666,24 @@ fn a_row_whose_panel_text_is_refused_is_not_sent_without_it(cx: &mut TestAppCont
         settle(cx);
 
         ring_on(&grid, cx, 1, 1);
+        settle(cx);
         assert_eq!(
             on_disk("select name from birds where id = 1").as_deref(),
             Some("wren"),
             "the row was not sent without its panel value"
         );
         assert_eq!(pending_of(&grid, cx), 1, "the grid's edit is kept");
+        assert_eq!(
+            grid.read_with(cx, |table, _| table.delegate().active().map(|(row, _)| row)),
+            Some(0),
+            "the ring is back on the row"
+        );
+        let kept = row_panel_input(&workspace, cx, 2);
+        assert_eq!(
+            cx.update(|_, cx| kept.read(cx).value()).as_ref(),
+            "0xZZ",
+            "the refused text is still there to fix"
+        );
         quit(workspace, cx);
     });
 }

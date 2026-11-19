@@ -2329,11 +2329,17 @@ impl Workspace {
             Some((row, fields)) => {
                 // Every input is staged, then a refused one keeps the row
                 // from going without it, as a refused grid input does above.
+                // The ring goes back to the row too: the panel follows the
+                // selection, and would put its inputs away, the refused text
+                // with them, on the next render.
                 let mut refused = false;
                 for input in &fields {
                     refused |= !self.commit_row_input(input, cx);
                 }
                 if refused {
+                    if grid.update(cx, |table, cx| result_grid::snap_back(table, row, cx)) {
+                        self.refocus_front();
+                    }
                     return;
                 }
                 left.or(Some(row))
